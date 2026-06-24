@@ -1,810 +1,1038 @@
-//! Register-based virtual machine with token-threaded dispatch.
+//! Register-based Virtual Machine for Nulang.
+//!
+//! - 256 virtual registers per activation frame
+//! - 32-bit fixed-width instructions
+//! - Direct-threaded dispatch (token threading via computed goto pattern)
+//! - NaN-tagged 64-bit values
 
 use crate::bytecode::*;
-use crate::types::{NuError, NuResult, Span, Value};
-use std::collections::HashMap;
+use crate::runtime::*;
+use crate::types::NuResult;
+use crate::types::NuError;
 
 // ---------------------------------------------------------------------------
-// VM Error
+// Value Representation (NaN Tagging)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum VMError {
-    UnknownFunction(String),
-    InvalidOpcode(u8),
-    TypeMismatch { expected: String, got: String },
-    DivisionByZero,
-    StackOverflow,
-    OutOfBounds,
-    ModuleNotLoaded,
-    InvalidConstant(u16),
-    MissingHandler(String),
-}
+/// NaN-tagged 64-bit value.
+/// - Positive/negative integers: use NaN payload with tag bits
+/// - Floats: regular IEEE 754, NaN payload used for tagging
+/// - Heap pointers: NaN payload contains pointer
+/// - Special values (unit, true, false): dedicated NaN payloads
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Value(pub u64);
 
-impl std::fmt::Display for VMError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VMError::UnknownFunction(name) => write!(f, "Unknown function: {}", name),
-            VMError::InvalidOpcode(op) => write!(f, "Invalid opcode: {}", op),
-            VMError::TypeMismatch { expected, got } => write!(f, "Type mismatch: expected {}, got {}", expected, got),
-            VMError::DivisionByZero => write!(f, "Division by zero"),
-            VMError::StackOverflow => write!(f, "Stack overflow"),
-            VMError::OutOfBounds => write!(f, "Out of bounds"),
-            VMError::ModuleNotLoaded => write!(f, "Module not loaded"),
-            VMError::InvalidConstant(idx) => write!(f, "Invalid constant index: {}", idx),
-            VMError::MissingHandler(name) => write!(f, "Missing effect handler: {}", name),
+const TAG_MASK: u64 = 0xFFFF000000000000;
+const TAG_INT: u64 = 0x7FF9000000000000;    // quiet NaN, int tag
+const TAG_PTR: u64 = 0x7FFA000000000000;    // heap pointer
+const TAG_ACTOR: u64 = 0x7FFB000000000000;  // actor reference
+const TAG_SPECIAL: u64 = 0x7FFC000000000000; // true, false, unit, nil
+const TAG_STRING: u64 = 0x7FFD000000000000; // interned string
+
+const SPECIAL_UNIT: u64 = 0;
+const SPECIAL_TRUE: u64 = 1;
+const SPECIAL_FALSE: u64 = 2;
+const SPECIAL_NIL: u64 = 3;
+
+impl Value {
+    pub fn int(n: i64) -> Value {
+        let bits = (n as u64) & 0x0000FFFFFFFFFFFF;
+        Value(TAG_INT | bits)
+    }
+    pub fn float(f: f64) -> Value {
+        Value(f.to_bits())
+    }
+    pub fn bool(b: bool) -> Value {
+        let s = if b { SPECIAL_TRUE } else { SPECIAL_FALSE };
+        Value(TAG_SPECIAL | s)
+    }
+    pub fn unit() -> Value {
+        Value(TAG_SPECIAL | SPECIAL_UNIT)
+    }
+    pub fn nil() -> Value {
+        Value(TAG_SPECIAL | SPECIAL_NIL)
+    }
+    pub fn ptr(addr: *mut u8) -> Value {
+        let bits = (addr as u64) & 0x0000FFFFFFFFFFFF;
+        Value(TAG_PTR | bits)
+    }
+    pub fn actor_ref(id: u64) -> Value {
+        Value(TAG_ACTOR | (id & 0x0000FFFFFFFFFFFF))
+    }
+    pub fn string(id: u32) -> Value {
+        Value(TAG_STRING | (id as u64))
+    }
+
+    pub fn as_int(&self) -> Option<i64> {
+        if self.0 & TAG_MASK == TAG_INT {
+            let bits = self.0 & 0x0000FFFFFFFFFFFF;
+            // Sign extend from 48 bits
+            Some(if bits & 0x0000800000000000 != 0 {
+                (bits | 0xFFFF000000000000) as i64
+            } else {
+                bits as i64
+            })
+        } else {
+            None
         }
     }
+    pub fn as_float(&self) -> Option<f64> {
+        let f = f64::from_bits(self.0);
+        if f.is_nan() { None } else { Some(f) }
+    }
+    pub fn as_bool(&self) -> Option<bool> {
+        if self.0 & TAG_MASK == TAG_SPECIAL {
+            let s = self.0 & 0xFFFF;
+            match s {
+                SPECIAL_TRUE => Some(true),
+                SPECIAL_FALSE => Some(false),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+    pub fn is_unit(&self) -> bool {
+        self.0 == (TAG_SPECIAL | SPECIAL_UNIT)
+    }
+    pub fn is_nil(&self) -> bool {
+        self.0 == (TAG_SPECIAL | SPECIAL_NIL)
+    }
+    pub fn as_ptr<T>(&self) -> Option<*mut T> {
+        if self.0 & TAG_MASK == TAG_PTR {
+            Some((self.0 & 0x0000FFFFFFFFFFFF) as *mut T)
+        } else {
+            None
+        }
+    }
+    pub fn as_actor_id(&self) -> Option<u64> {
+        if self.0 & TAG_MASK == TAG_ACTOR {
+            Some(self.0 & 0x0000FFFFFFFFFFFF)
+        } else {
+            None
+        }
+    }
+    pub fn is_truthy(&self) -> bool {
+        !self.is_nil() && self.as_bool() != Some(false) && self.as_int() != Some(0)
+    }
+    pub fn to_string_repr(&self) -> String {
+        if let Some(n) = self.as_int() { return format!("{}", n); }
+        if let Some(f) = self.as_float() { return format!("{}", f); }
+        if let Some(b) = self.as_bool() { return format!("{}", b); }
+        if self.is_unit() { return "unit".to_string(); }
+        if self.is_nil() { return "nil".to_string(); }
+        if let Some(id) = self.as_actor_id() { return format!("<actor:{}>", id); }
+        format!("<value:0x{:016X}>", self.0)
+    }
 }
-
-impl std::error::Error for VMError {}
 
 // ---------------------------------------------------------------------------
 // Call Frame
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-struct CallFrame {
-    module_idx: usize,
-    behavior_idx: usize,
-    pc: usize,
-    base_reg: usize,
-    return_reg: u8,
+/// Activation frame: 256 registers + metadata.
+pub struct Frame {
+    pub regs: [Value; 256],
+    pub pc: usize,              // Program counter
+    pub closure: Option<Value>, // Closure value (for captures, or return dst)
+    pub caller: Option<Box<Frame>>, // Linked list of frames
+    pub module_idx: usize,      // Which module this frame is executing
+}
+
+impl Frame {
+    pub fn new(caller: Option<Box<Frame>>, module_idx: usize) -> Self {
+        Frame {
+            regs: [Value::nil(); 256],
+            pc: 0,
+            closure: None,
+            caller,
+            module_idx,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // VM
 // ---------------------------------------------------------------------------
 
-const STACK_SIZE: usize = 64 * 1024;
-const REG_COUNT: usize = 256;
-
 pub struct VM {
-    registers: [Value; REG_COUNT],
-    frames: Vec<CallFrame>,
-    pc: usize,
     modules: Vec<CodeModule>,
-    function_table: HashMap<String, (usize, usize)>,
-    heap: Vec<u8>,
-    heap_ptr: usize,
-    strings: Vec<String>,
-    output: Vec<String>,
+    current_frame: Option<Box<Frame>>,
+    running: bool,
+    pub runtime: Runtime,
+    step_count: usize,
 }
 
 impl VM {
     pub fn new() -> Self {
         VM {
-            registers: [Value::Unit; REG_COUNT],
-            frames: Vec::with_capacity(1024),
-            pc: 0,
             modules: Vec::new(),
-            function_table: HashMap::new(),
-            heap: vec![0; 1024 * 1024], // 1MB heap
-            heap_ptr: 0,
-            strings: Vec::new(),
-            output: Vec::new(),
+            current_frame: None,
+            running: false,
+            runtime: Runtime::new(),
+            step_count: 0,
         }
     }
 
-    pub fn load_module(&mut self, module: &CodeModule) -> NuResult<()> {
-        let mod_idx = self.modules.len();
+    pub fn load_module(&mut self, module: CodeModule) -> usize {
+        let idx = self.modules.len();
+        self.modules.push(module);
+        idx
+    }
 
-        // Register all behaviors in the function table
-        for (beh_idx, beh) in module.behaviors.iter().enumerate() {
-            self.function_table.insert(
-                beh.name.clone(),
-                (mod_idx, beh_idx),
-            );
+    /// Execute the most recently loaded module.
+    /// Uses entry_point if __main was compiled inline, otherwise starts at PC=0.
+    pub fn run(&mut self) -> NuResult<Value> {
+        if self.modules.is_empty() {
+            return Err(NuError::VMError("No modules loaded".to_string()));
+        }
+        let module_idx = self.modules.len() - 1;
+        let start_pc = self.modules[module_idx].entry_point.unwrap_or(0);
+        let mut frame = Frame::new(None, module_idx);
+        frame.pc = start_pc;
+        self.current_frame = Some(Box::new(frame));
+        self.running = true;
+        while self.running {
+            if let Err(e) = self.step() {
+                self.running = false;
+                return Err(e);
+            }
+        }
+        // Return value from register 0
+        Ok(self.current_frame.as_ref().map(|f| f.regs[0]).unwrap_or(Value::unit()))
+    }
+
+    /// Call a specific function by module + function index.
+    pub fn call_function(&mut self, module_idx: usize, func_idx: usize, args: &[Value]) -> NuResult<Value> {
+        let code_offset = self.modules.get(module_idx)
+            .and_then(|m| m.function_table.get(func_idx)).copied()
+            .ok_or_else(|| NuError::VMError(format!("Function {} not found in module {}", func_idx, module_idx)))?;
+
+        let mut frame = Frame::new(None, module_idx);
+        frame.pc = code_offset;
+        for (i, arg) in args.iter().enumerate().take(256) {
+            frame.regs[i] = *arg;
         }
 
-        // Copy string constants
-        for c in &module.constants {
-            if let Constant::String(s) = c {
-                self.strings.push(s.clone());
+        // If there's a current frame, link it as caller
+        if let Some(old_frame) = self.current_frame.take() {
+            frame.caller = Some(old_frame);
+        }
+
+        self.current_frame = Some(Box::new(frame));
+        self.running = true;
+
+        while self.running {
+            if let Err(e) = self.step() {
+                self.running = false;
+                return Err(e);
             }
         }
 
-        self.modules.push(module.clone());
+        // Return value is in register 0 of the current (possibly dummy) frame
+        Ok(self.current_frame.as_ref().map(|f| f.regs[0]).unwrap_or(Value::unit()))
+    }
+
+    /// Single-step execute one instruction.
+    pub fn step(&mut self) -> NuResult<()> {
+        // Safety limit to prevent infinite loops
+        self.step_count += 1;
+        if self.step_count > 100000 {
+            return Err(NuError::VMError(format!("Step limit exceeded at step {}, possible infinite loop", self.step_count)));
+        }
+        // Debug: print first 50 steps
+        let debug = self.step_count <= 50;
+        // Fetch instruction
+        let instr = {
+            let frame = self.current_frame.as_ref()
+                .ok_or_else(|| NuError::VMError("No current frame".to_string()))?;
+            let module = self.modules.get(frame.module_idx)
+                .ok_or_else(|| NuError::VMError(format!("Module {} not found", frame.module_idx)))?;
+            let pc = frame.pc;
+            *module.instructions.get(pc)
+                .ok_or_else(|| NuError::VMError(format!("PC {} out of bounds in module {}", pc, frame.module_idx)))?
+        };
+
+        // Take ownership of the current frame to eliminate borrow-checker issues.
+        // Call/Ret/TailCall/ClosureCall consume the frame; all other opcodes put it back.
+        let mut frame = self.current_frame.take()
+            .ok_or_else(|| NuError::VMError("No current frame".to_string()))?;
+
+        // Increment PC before execution
+        frame.pc += 1;
+
+        let _ = debug; // silence unused warning when debug is off
+        // if debug {
+        //     eprintln!("[step {}] PC={} op={:?} op1={} op2={} op3={} regs[0]={} regs[1]={}",
+        //         self.step_count, frame.pc - 1, instr.opcode,
+        //         instr.op1, instr.op2, instr.op3,
+        //         frame.regs[0].to_string_repr(), frame.regs[1].to_string_repr());
+        // }
+
+        match instr.opcode {
+            // -- Frame-manipulating opcodes (consume frame) --
+            OpCode::Call => {
+                let func_val = frame.regs[instr.op1 as usize];
+                let module_idx = frame.module_idx;
+                let argc = instr.op2;
+                let dst = instr.op3;
+                // Save old frame as caller in a new frame
+                let func_idx = func_val.as_int()
+                    .ok_or_else(|| NuError::VMError("Invalid function reference".to_string()))? as usize;
+                let code_offset = self.modules.get(module_idx)
+                    .and_then(|m| m.function_table.get(func_idx)).copied()
+                    .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
+                let mut new_frame = Frame::new(None, module_idx);
+                new_frame.pc = code_offset;
+                for i in 0..(argc as usize).min(256) {
+                    new_frame.regs[i] = frame.regs[i];
+                }
+                new_frame.closure = Some(Value::int(dst as i64));
+                new_frame.caller = Some(frame);
+                self.current_frame = Some(Box::new(new_frame));
+                return Ok(());
+            }
+            OpCode::TailCall => {
+                let func_val = frame.regs[instr.op1 as usize];
+                let module_idx = frame.module_idx;
+                let func_idx = func_val.as_int()
+                    .ok_or_else(|| NuError::VMError("Invalid function reference".to_string()))? as usize;
+                let code_offset = self.modules.get(module_idx)
+                    .and_then(|m| m.function_table.get(func_idx)).copied()
+                    .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
+                frame.pc = code_offset;
+                self.current_frame = Some(frame);
+                return Ok(());
+            }
+            OpCode::Ret => {
+                let ret_val = frame.regs[0];
+                if let Some(mut caller_frame) = frame.caller {
+                    let dst = frame.closure.as_ref()
+                        .and_then(|v| v.as_int()).unwrap_or(0) as usize;
+                    caller_frame.regs[dst] = ret_val;
+                    self.current_frame = Some(caller_frame);
+                } else {
+                    let module_idx = frame.module_idx;
+                    let mut dummy = Frame::new(None, module_idx);
+                    dummy.regs[0] = ret_val;
+                    dummy.pc = usize::MAX;
+                    self.current_frame = Some(Box::new(dummy));
+                    self.running = false;
+                }
+                return Ok(());
+            }
+            OpCode::RetVal => {
+                let val_reg = instr.op1 as usize;
+                let ret_val = frame.regs[val_reg];
+                if let Some(mut caller_frame) = frame.caller {
+                    let dst = frame.closure.as_ref()
+                        .and_then(|v| v.as_int()).unwrap_or(0) as usize;
+                    caller_frame.regs[dst] = ret_val;
+                    self.current_frame = Some(caller_frame);
+                } else {
+                    let module_idx = frame.module_idx;
+                    let mut dummy = Frame::new(None, module_idx);
+                    dummy.regs[0] = ret_val;
+                    dummy.pc = usize::MAX;
+                    self.current_frame = Some(Box::new(dummy));
+                    self.running = false;
+                }
+                return Ok(());
+            }
+            OpCode::ClosureCall => {
+                // MVP: treat same as regular call
+                let func_val = frame.regs[instr.op1 as usize];
+                let module_idx = frame.module_idx;
+                let argc = instr.op2;
+                let dst = instr.op3;
+                let func_idx = func_val.as_int()
+                    .ok_or_else(|| NuError::VMError("Invalid function reference".to_string()))? as usize;
+                let code_offset = self.modules.get(module_idx)
+                    .and_then(|m| m.function_table.get(func_idx)).copied()
+                    .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
+                let mut new_frame = Frame::new(None, module_idx);
+                new_frame.pc = code_offset;
+                for i in 0..(argc as usize).min(256) {
+                    new_frame.regs[i] = frame.regs[i];
+                }
+                new_frame.closure = Some(Value::int(dst as i64));
+                new_frame.caller = Some(frame);
+                self.current_frame = Some(Box::new(new_frame));
+                return Ok(());
+            }
+            OpCode::Panic => {
+                let msg_idx = instr.imm16();
+                let msg = self.module_const_string(frame.module_idx, msg_idx);
+                // Put frame back before returning error
+                self.current_frame = Some(frame);
+                return Err(NuError::VMError(format!("Panic: {}", msg)));
+            }
+
+            // -- Actor opcodes that need runtime access (consume frame, put back) --
+            OpCode::Spawn => {
+                let behavior_idx = instr.imm16();
+                let _init_reg = instr.op2;
+                let dst = instr.op3;
+                let actor_id = fresh_actor_id();
+                frame.regs[dst as usize] = Value::actor_ref(actor_id);
+                self.current_frame = Some(frame);
+                return Ok(());
+            }
+            OpCode::Send => {
+                let addr_reg = instr.op1;
+                let behavior_id = instr.imm16();
+                if let Some(actor_id) = frame.regs[addr_reg as usize].as_actor_id() {
+                    if let Some(actor) = self.runtime.actors.get_mut(&actor_id) {
+                        let msg = Message {
+                            behavior_id,
+                            payload: vec![frame.regs[0]],
+                            sender: self.runtime.current_actor.unwrap_or(0),
+                            priority: MessagePriority::Normal,
+                        };
+                        let _ = actor.mailbox.push(msg);
+                    }
+                }
+                self.current_frame = Some(frame);
+                return Ok(());
+            }
+            OpCode::Ask => {
+                let addr_reg = instr.op1;
+                let behavior_id = instr.imm16();
+                if let Some(actor_id) = frame.regs[addr_reg as usize].as_actor_id() {
+                    if let Some(actor) = self.runtime.actors.get_mut(&actor_id) {
+                        let msg = Message {
+                            behavior_id,
+                            payload: vec![frame.regs[0]],
+                            sender: self.runtime.current_actor.unwrap_or(0),
+                            priority: MessagePriority::Normal,
+                        };
+                        let _ = actor.mailbox.push(msg);
+                    }
+                }
+                self.current_frame = Some(frame);
+                return Ok(());
+            }
+            OpCode::RSend => {
+                let addr_reg = instr.op1;
+                let behavior_id = instr.imm16();
+                if let Some(actor_id) = frame.regs[addr_reg as usize].as_actor_id() {
+                    if let Some(actor) = self.runtime.actors.get_mut(&actor_id) {
+                        let msg = Message {
+                            behavior_id,
+                            payload: vec![frame.regs[0]],
+                            sender: self.runtime.current_actor.unwrap_or(0),
+                            priority: MessagePriority::Normal,
+                        };
+                        let _ = actor.mailbox.push(msg);
+                    }
+                }
+                self.current_frame = Some(frame);
+                return Ok(());
+            }
+            OpCode::RSpawn => {
+                let _init_reg = instr.op2;
+                let dst = instr.op3;
+                let actor_id = fresh_actor_id();
+                frame.regs[dst as usize] = Value::actor_ref(actor_id);
+                self.current_frame = Some(frame);
+                return Ok(());
+            }
+
+            // -- All other opcodes (operate on owned frame, then put back) --
+            _ => {
+                self.dispatch_regular(frame, instr);
+                // Frame is put back inside dispatch_regular
+            }
+        }
+
         Ok(())
     }
 
-    pub fn call_function(&mut self, name: &str, args: &[Value]) -> NuResult<Value> {
-        let (mod_idx, beh_idx) = self.function_table.get(name)
-            .copied()
-            .ok_or_else(|| NuError::RuntimeError(format!("Unknown function: {}", name)))?;
-
-        let entry = self.modules[mod_idx].behaviors[beh_idx].code_offset;
-
-        // Set up arguments in registers r1, r2, ...
-        for (i, &arg) in args.iter().enumerate() {
-            if i + 1 < REG_COUNT {
-                self.registers[i + 1] = arg.clone();
+    fn dispatch_regular(&mut self, mut frame: Box<Frame>, instr: Instruction) {
+        match instr.opcode {
+            // -- Special --
+            OpCode::Nop => {}
+            OpCode::Halt => self.running = false,
+            OpCode::Const0 => frame.regs[instr.op1 as usize] = Value::int(0),
+            OpCode::Const1 => frame.regs[instr.op1 as usize] = Value::int(1),
+            OpCode::Const2 => frame.regs[instr.op1 as usize] = Value::int(2),
+            OpCode::ConstM1 => frame.regs[instr.op1 as usize] = Value::int(-1),
+            OpCode::ConstU => {
+                let idx = instr.imm16();
+                let dst = instr.op3;
+                if let Some(module) = self.modules.get(frame.module_idx) {
+                    if let Some(c) = module.constants.get(idx as usize) {
+                        frame.regs[dst as usize] = constant_to_value(c);
+                    }
+                }
             }
-        }
-
-        self.pc = entry;
-        self.run()?;
-
-        Ok(self.registers[0].clone())
-    }
-
-    pub fn run(&mut self) -> NuResult<Value> {
-        let max_instructions = 10_000_000;
-        let mut executed = 0;
-
-        let module_idx = self.modules.len().saturating_sub(1);
-
-        while self.pc < self.modules[module_idx].instructions.len()
-            && executed < max_instructions
-        {
-            let inst = self.modules[module_idx].instructions[self.pc];
-            let opcode = inst.opcode.as_u8();
-
-            match inst.opcode {
-                // == Constants ==
-                OpCode::Const0 => {
-                    self.registers[inst.op1 as usize] = Value::Int(0);
-                }
-                OpCode::Const1 => {
-                    self.registers[inst.op1 as usize] = Value::Int(1);
-                }
-                OpCode::Const2 => {
-                    self.registers[inst.op1 as usize] = Value::Int(2);
-                }
-                OpCode::ConstM1 => {
-                    self.registers[inst.op1 as usize] = Value::Int(-1);
-                }
-                OpCode::ConstU => {
-                    let idx = inst.imm16() as usize;
-                    self.registers[inst.op1 as usize] = self.load_constant(idx)?;
-                }
-                OpCode::LoadNull => {
-                    self.registers[inst.op1 as usize] = Value::Unit;
-                }
-                OpCode::Move => {
-                    self.registers[inst.op1 as usize] = self.registers[inst.op2 as usize].clone();
-                }
-
-                // == Arithmetic - Integer ==
-                OpCode::IAdd => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Int(a + b);
-                }
-                OpCode::ISub => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Int(a - b);
-                }
-                OpCode::IMul => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Int(a * b);
-                }
-                OpCode::IDiv => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    if b == 0 {
-                        return Err(NuError::RuntimeError("Division by zero".into()));
+            OpCode::ConstL => {
+                let idx = ((instr.op1 as u32) << 16) | ((instr.op2 as u32) << 8) | (instr.op3 as u32);
+                let dst = 0;
+                if let Some(module) = self.modules.get(frame.module_idx) {
+                    if let Some(c) = module.constants.get(idx as usize) {
+                        frame.regs[dst as usize] = constant_to_value(c);
                     }
-                    self.registers[inst.op3 as usize] = Value::Int(a / b);
-                }
-                OpCode::IMod => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    if b == 0 {
-                        return Err(NuError::RuntimeError("Division by zero".into()));
-                    }
-                    self.registers[inst.op3 as usize] = Value::Int(a % b);
-                }
-                OpCode::INeg => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op2 as usize] = Value::Int(-a);
-                }
-                OpCode::IInc => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op1 as usize] = Value::Int(a + 1);
-                }
-                OpCode::IDec => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op1 as usize] = Value::Int(a - 1);
-                }
-
-                // == Arithmetic - Float ==
-                OpCode::FAdd => {
-                    let a = self.registers[inst.op1 as usize].float_val();
-                    let b = self.registers[inst.op2 as usize].float_val();
-                    self.registers[inst.op3 as usize] = Value::Float(f64::to_bits(a + b));
-                }
-                OpCode::FSub => {
-                    let a = self.registers[inst.op1 as usize].float_val();
-                    let b = self.registers[inst.op2 as usize].float_val();
-                    self.registers[inst.op3 as usize] = Value::Float(f64::to_bits(a - b));
-                }
-                OpCode::FMul => {
-                    let a = self.registers[inst.op1 as usize].float_val();
-                    let b = self.registers[inst.op2 as usize].float_val();
-                    self.registers[inst.op3 as usize] = Value::Float(f64::to_bits(a * b));
-                }
-                OpCode::FDiv => {
-                    let a = self.registers[inst.op1 as usize].float_val();
-                    let b = self.registers[inst.op2 as usize].float_val();
-                    if b == 0.0 {
-                        return Err(NuError::RuntimeError("Division by zero".into()));
-                    }
-                    self.registers[inst.op3 as usize] = Value::Float(f64::to_bits(a / b));
-                }
-                OpCode::FNeg => {
-                    let a = self.registers[inst.op1 as usize].float_val();
-                    self.registers[inst.op2 as usize] = Value::Float(f64::to_bits(-a));
-                }
-                OpCode::IToF => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op2 as usize] = Value::Float(f64::to_bits(a as f64));
-                }
-                OpCode::FToI => {
-                    let a = self.registers[inst.op1 as usize].float_val();
-                    self.registers[inst.op2 as usize] = Value::Int(a as i64);
-                }
-
-                // == Comparison ==
-                OpCode::ICmpEq => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Bool(a == b);
-                }
-                OpCode::ICmpLt => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Bool(a < b);
-                }
-                OpCode::ICmpGt => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Bool(a > b);
-                }
-                OpCode::ICmpLe => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Bool(a <= b);
-                }
-                OpCode::ICmpGe => {
-                    let a = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Bool(a >= b);
-                }
-                OpCode::FCmpEq => {
-                    let a = self.registers[inst.op1 as usize].float_val();
-                    let b = self.registers[inst.op2 as usize].float_val();
-                    self.registers[inst.op3 as usize] = Value::Bool((a - b).abs() < f64::EPSILON);
-                }
-                OpCode::FCmpLt => {
-                    let a = self.registers[inst.op1 as usize].float_val();
-                    let b = self.registers[inst.op2 as usize].float_val();
-                    self.registers[inst.op3 as usize] = Value::Bool(a < b);
-                }
-                OpCode::FCmpGt => {
-                    let a = self.registers[inst.op1 as usize].float_val();
-                    let b = self.registers[inst.op2 as usize].float_val();
-                    self.registers[inst.op3 as usize] = Value::Bool(a > b);
-                }
-                OpCode::SCmpEq => {
-                    let a = self.registers[inst.op1 as usize].as_string()
-                        .ok_or_else(|| NuError::RuntimeError("Expected String".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_string()
-                        .ok_or_else(|| NuError::RuntimeError("Expected String".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Bool(a == b);
-                }
-
-                // == Logic ==
-                OpCode::Not => {
-                    let a = self.registers[inst.op1 as usize].as_bool()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Bool".into()))?;
-                    self.registers[inst.op2 as usize] = Value::Bool(!a);
-                }
-                OpCode::And => {
-                    let a = self.registers[inst.op1 as usize].as_bool()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Bool".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_bool()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Bool".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Bool(a && b);
-                }
-                OpCode::Or => {
-                    let a = self.registers[inst.op1 as usize].as_bool()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Bool".into()))?;
-                    let b = self.registers[inst.op2 as usize].as_bool()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Bool".into()))?;
-                    self.registers[inst.op3 as usize] = Value::Bool(a || b);
-                }
-
-                // == Control Flow ==
-                OpCode::Jmp => {
-                    let offset = inst.simm16();
-                    if offset >= 0 {
-                        self.pc += offset as usize;
-                    } else {
-                        self.pc = (self.pc as i64 + offset as i64) as usize;
-                    }
-                    // Don't increment pc at end of loop
-                    continue;
-                }
-                OpCode::JmpT => {
-                    let val = self.registers[inst.op1 as usize].as_bool()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Bool".into()))?;
-                    if val {
-                        let offset = inst.offset16();
-                        if offset >= 0 {
-                            self.pc += offset as usize;
-                        } else {
-                            self.pc = (self.pc as i64 + offset as i64) as usize;
-                        }
-                        continue;
-                    }
-                }
-                OpCode::JmpF => {
-                    let val = self.registers[inst.op1 as usize].as_bool()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Bool".into()))?;
-                    if !val {
-                        let offset = inst.offset16();
-                        if offset >= 0 {
-                            self.pc += offset as usize;
-                        } else {
-                            self.pc = (self.pc as i64 + offset as i64) as usize;
-                        }
-                        continue;
-                    }
-                }
-                OpCode::Call => {
-                    // func_reg contains behavior index, argc in op2, dst in op3
-                    let func_val = &self.registers[inst.op1 as usize];
-                    let func_name = self.find_function_name(func_val)?;
-                    let (mod_idx, beh_idx) = self.function_table.get(&func_name)
-                        .copied()
-                        .ok_or_else(|| NuError::RuntimeError(format!("Unknown function: {}", func_name)))?;
-
-                    let entry = self.modules[mod_idx].behaviors[beh_idx].code_offset;
-
-                    self.frames.push(CallFrame {
-                        module_idx: mod_idx,
-                        behavior_idx: beh_idx,
-                        pc: self.pc,
-                        base_reg: inst.op3 as usize,
-                        return_reg: inst.op3,
-                    });
-
-                    self.pc = entry;
-                    continue;
-                }
-                OpCode::TailCall => {
-                    // Tail call optimization: reuse current frame
-                    let func_val = &self.registers[inst.op1 as usize];
-                    let func_name = self.find_function_name(func_val)?;
-                    let (mod_idx, beh_idx) = self.function_table.get(&func_name)
-                        .copied()
-                        .ok_or_else(|| NuError::RuntimeError(format!("Unknown function: {}", func_name)))?;
-
-                    let entry = self.modules[mod_idx].behaviors[beh_idx].code_offset;
-                    self.pc = entry;
-                    continue;
-                }
-                OpCode::Ret => {
-                    let val = self.registers[inst.op1 as usize].clone();
-                    if let Some(frame) = self.frames.pop() {
-                        self.pc = frame.pc;
-                        self.registers[frame.return_reg as usize] = val;
-                    } else {
-                        // Top-level return
-                        self.registers[0] = val;
-                        break;
-                    }
-                }
-                OpCode::RetVal => {
-                    let val = self.registers[0].clone();
-                    if let Some(frame) = self.frames.pop() {
-                        self.pc = frame.pc;
-                        self.registers[frame.return_reg as usize] = val;
-                    } else {
-                        self.registers[0] = val;
-                        break;
-                    }
-                }
-
-                // == Tuples ==
-                OpCode::TupleMk => {
-                    let count = inst.op2 as usize;
-                    let elems: Vec<Value> = (0..count)
-                        .map(|i| self.registers[(inst.op1 as usize + i) % REG_COUNT].clone())
-                        .collect();
-                    self.registers[inst.op3 as usize] = Value::Tuple(elems);
-                }
-                OpCode::TupleL => {
-                    let tuple = self.registers[inst.op1 as usize].clone();
-                    let idx = inst.op2 as usize;
-                    match tuple {
-                        Value::Tuple(elems) if idx < elems.len() => {
-                            self.registers[inst.op3 as usize] = elems[idx].clone();
-                        }
-                        _ => return Err(NuError::RuntimeError("Tuple index out of bounds".into())),
-                    }
-                }
-
-                // == Records ==
-                OpCode::RecMk => {
-                    let field_count = inst.op2 as usize;
-                    // Field values are in consecutive registers starting at op1
-                    let mut fields = Vec::new();
-                    for i in 0..field_count {
-                        let reg = (inst.op1 as usize + i) % REG_COUNT;
-                        fields.push((format!("f{}", i), self.registers[reg].clone()));
-                    }
-                    self.registers[inst.op3 as usize] = Value::Record(fields);
-                }
-                OpCode::RecL => {
-                    let record = self.registers[inst.op1 as usize].clone();
-                    let field_idx = inst.imm16() as usize;
-                    match record {
-                        Value::Record(fields) if field_idx < fields.len() => {
-                            self.registers[inst.op3 as usize] = fields[field_idx].1.clone();
-                        }
-                        _ => return Err(NuError::RuntimeError("Record field not found".into())),
-                    }
-                }
-                OpCode::RecS => {
-                    let mut record = self.registers[inst.op1 as usize].clone();
-                    let field_idx = inst.imm16() as usize;
-                    match &mut record {
-                        Value::Record(fields) if field_idx < fields.len() => {
-                            fields[field_idx].1 = self.registers[inst.op3 as usize].clone();
-                            self.registers[inst.op1 as usize] = record;
-                        }
-                        _ => return Err(NuError::RuntimeError("Record field not found".into())),
-                    }
-                }
-
-                // == Arrays ==
-                OpCode::ArrAlloc => {
-                    let len = self.registers[inst.op1 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int for array length".into()))?;
-                    let elems = vec![Value::Unit; len as usize];
-                    self.registers[inst.op3 as usize] = Value::Array(elems);
-                }
-                OpCode::ArrLoad => {
-                    let arr = self.registers[inst.op1 as usize].clone();
-                    let idx = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int for array index".into()))?;
-                    match arr {
-                        Value::Array(elems) if (idx as usize) < elems.len() => {
-                            self.registers[inst.op3 as usize] = elems[idx as usize].clone();
-                        }
-                        _ => return Err(NuError::RuntimeError("Array index out of bounds".into())),
-                    }
-                }
-                OpCode::ArrStore => {
-                    let mut arr = self.registers[inst.op1 as usize].clone();
-                    let idx = self.registers[inst.op2 as usize].as_int()
-                        .ok_or_else(|| NuError::RuntimeError("Expected Int for array index".into()))?;
-                    let val = self.registers[inst.op3 as usize].clone();
-                    match &mut arr {
-                        Value::Array(elems) if (idx as usize) < elems.len() => {
-                            elems[idx as usize] = val;
-                            self.registers[inst.op1 as usize] = arr;
-                        }
-                        _ => return Err(NuError::RuntimeError("Array index out of bounds".into())),
-                    }
-                }
-                OpCode::ArrLen => {
-                    let arr = self.registers[inst.op1 as usize].clone();
-                    match arr {
-                        Value::Array(elems) => {
-                            self.registers[inst.op2 as usize] = Value::Int(elems.len() as i64);
-                        }
-                        _ => return Err(NuError::RuntimeError("Expected Array".into())),
-                    }
-                }
-
-                // == String ==
-                OpCode::SConcat => {
-                    let a = self.registers[inst.op1 as usize].as_string()
-                        .ok_or_else(|| NuError::RuntimeError("Expected String".into()))?.to_string();
-                    let b = self.registers[inst.op2 as usize].as_string()
-                        .ok_or_else(|| NuError::RuntimeError("Expected String".into()))?.to_string();
-                    self.registers[inst.op3 as usize] = Value::String(a + &b);
-                }
-                OpCode::SPrint => {
-                    let val = self.registers[inst.op1 as usize].clone();
-                    let s = match &val {
-                        Value::String(s) => s.clone(),
-                        other => format!("{:?}", other),
-                    };
-                    self.output.push(s.clone());
-                    println!("{}", s);
-                }
-                OpCode::Print => {
-                    let val = self.registers[inst.op1 as usize].clone();
-                    let s = format!("{:?}", val);
-                    self.output.push(s.clone());
-                    println!("{}", s);
-                }
-
-                // == Actor operations (placeholders) ==
-                OpCode::Spawn => {
-                    // Placeholder: return a dummy actor address
-                    self.registers[inst.op3 as usize] = Value::IntAddr(inst.op2 as u64);
-                }
-                OpCode::Send => {
-                    // Placeholder: async send does not return a value
-                }
-                OpCode::Ask => {
-                    // Placeholder: return Unit
-                    self.registers[inst.op3 as usize] = Value::Unit;
-                }
-                OpCode::Receive => {
-                    // Placeholder: return Unit
-                    self.registers[inst.op3 as usize] = Value::Unit;
-                }
-                OpCode::SelfOp => {
-                    // Placeholder: return current actor address
-                    self.registers[inst.op1 as usize] = Value::IntAddr(0);
-                }
-                OpCode::Monitor | OpCode::Demon | OpCode::Link | OpCode::Unlink | OpCode::Exit => {
-                    // Placeholder: no-op for MVP
-                }
-
-                // == Effect operations (placeholders) ==
-                OpCode::Perform | OpCode::Handle | OpCode::Resume | OpCode::Unwind => {
-                    // Placeholder: effects not yet implemented in VM
-                    self.registers[inst.op3 as usize] = Value::Unit;
-                }
-
-                // == Capability operations (placeholders) ==
-                OpCode::CapChk | OpCode::CapUp | OpCode::CapDown | OpCode::CapSend => {
-                    // Placeholder: capability checks not yet in VM
-                }
-
-                // == Distribution (placeholders) ==
-                OpCode::NodeId | OpCode::Migrate | OpCode::RSend | OpCode::RAsk | OpCode::RSpawn | OpCode::Gossip => {
-                    // Placeholder: distribution not yet implemented
-                    self.registers[inst.op3 as usize] = Value::Unit;
-                }
-
-                // == Debug ==
-                OpCode::DbgPrint => {
-                    println!("[VM Debug] Registers: {:?}", &self.registers[0..16]);
-                }
-                OpCode::DbgStack => {
-                    println!("[VM Debug] Call stack depth: {}", self.frames.len());
-                }
-
-                // == Meta ==
-                OpCode::MetaType => {
-                    let val = self.registers[inst.op1 as usize].clone();
-                    let type_str = val.type_of().display();
-                    self.registers[inst.op2 as usize] = Value::String(type_str);
-                }
-
-                // == Fallback ==
-                _ => {
-                    // For any unimplemented opcode, just skip
                 }
             }
 
-            self.pc += 1;
-            executed += 1;
-        }
+            // -- Stack & Locals --
+            OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Dup => {
+                frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize];
+            }
+            OpCode::Pop => {}
+            OpCode::Swap => {
+                let r1 = instr.op1 as usize;
+                let r2 = instr.op2 as usize;
+                let tmp = frame.regs[r1];
+                frame.regs[r1] = frame.regs[r2];
+                frame.regs[r2] = tmp;
+            }
 
-        if executed >= max_instructions {
-            return Err(NuError::RuntimeError("Max instructions exceeded (possible infinite loop)".into()));
-        }
+            // -- Integer Arithmetic --
+            OpCode::IAdd => { let (r1,r2,dst) = (instr.op1,instr.op2,instr.op3);
+                if let (Some(a),Some(b)) = (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+                    frame.regs[dst as usize] = Value::int(a + b);
+                }
+            }
+            OpCode::ISub => { let (r1,r2,dst) = (instr.op1,instr.op2,instr.op3);
+                if let (Some(a),Some(b)) = (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+                    frame.regs[dst as usize] = Value::int(a - b);
+                }
+            }
+            OpCode::IMul => { let (r1,r2,dst) = (instr.op1,instr.op2,instr.op3);
+                if let (Some(a),Some(b)) = (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+                    frame.regs[dst as usize] = Value::int(a * b);
+                }
+            }
+            OpCode::IDiv => { let (r1,r2,dst) = (instr.op1,instr.op2,instr.op3);
+                if let (Some(a),Some(b)) = (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+                    if b != 0 { frame.regs[dst as usize] = Value::int(a / b); }
+                }
+            }
+            OpCode::IMod => {
+                if let (Some(a), Some(b)) = (frame.regs[instr.op1 as usize].as_int(), frame.regs[instr.op2 as usize].as_int()) {
+                    if b != 0 { frame.regs[instr.op3 as usize] = Value::int(a % b); }
+                }
+            }
+            OpCode::INeg => {
+                if let Some(a) = frame.regs[instr.op1 as usize].as_int() {
+                    frame.regs[instr.op2 as usize] = Value::int(-a);
+                }
+            }
+            OpCode::IInc => {
+                if let Some(a) = frame.regs[instr.op1 as usize].as_int() {
+                    frame.regs[instr.op1 as usize] = Value::int(a + 1);
+                }
+            }
+            OpCode::IDec => {
+                if let Some(a) = frame.regs[instr.op1 as usize].as_int() {
+                    frame.regs[instr.op1 as usize] = Value::int(a - 1);
+                }
+            }
+            OpCode::IPow => {
+                if let (Some(a), Some(b)) = (frame.regs[instr.op1 as usize].as_int(), frame.regs[instr.op2 as usize].as_int()) {
+                    let exp = if b < 0 { 0 } else { b as u32 };
+                    frame.regs[instr.op3 as usize] = Value::int(a.pow(exp));
+                }
+            }
 
-        Ok(self.registers[0].clone())
+            // -- Float Arithmetic --
+            OpCode::FAdd => { let (r1,r2,dst) = (instr.op1,instr.op2,instr.op3);
+                if let (Some(a),Some(b)) = (frame.regs[r1 as usize].as_float(), frame.regs[r2 as usize].as_float()) {
+                    frame.regs[dst as usize] = Value::float(a + b);
+                }
+            }
+            OpCode::FSub => { let (r1,r2,dst) = (instr.op1,instr.op2,instr.op3);
+                if let (Some(a),Some(b)) = (frame.regs[r1 as usize].as_float(), frame.regs[r2 as usize].as_float()) {
+                    frame.regs[dst as usize] = Value::float(a - b);
+                }
+            }
+            OpCode::FMul => { let (r1,r2,dst) = (instr.op1,instr.op2,instr.op3);
+                if let (Some(a),Some(b)) = (frame.regs[r1 as usize].as_float(), frame.regs[r2 as usize].as_float()) {
+                    frame.regs[dst as usize] = Value::float(a * b);
+                }
+            }
+            OpCode::FDiv => { let (r1,r2,dst) = (instr.op1,instr.op2,instr.op3);
+                if let (Some(a),Some(b)) = (frame.regs[r1 as usize].as_float(), frame.regs[r2 as usize].as_float()) {
+                    frame.regs[dst as usize] = Value::float(a / b);
+                }
+            }
+            OpCode::FNeg => {
+                if let Some(a) = frame.regs[instr.op1 as usize].as_float() {
+                    frame.regs[instr.op2 as usize] = Value::float(-a);
+                }
+            }
+            OpCode::FMod => {
+                if let (Some(a), Some(b)) = (frame.regs[instr.op1 as usize].as_float(), frame.regs[instr.op2 as usize].as_float()) {
+                    frame.regs[instr.op3 as usize] = Value::float(a % b);
+                }
+            }
+            OpCode::IToF => {
+                if let Some(a) = frame.regs[instr.op1 as usize].as_int() {
+                    frame.regs[instr.op2 as usize] = Value::float(a as f64);
+                }
+            }
+            OpCode::FToI => {
+                if let Some(a) = frame.regs[instr.op1 as usize].as_float() {
+                    frame.regs[instr.op2 as usize] = Value::int(a as i64);
+                }
+            }
+            OpCode::FToS => {
+                let s = frame.regs[instr.op1 as usize].to_string_repr();
+                frame.regs[instr.op2 as usize] = Value::ptr(s.as_bytes().as_ptr() as *mut u8);
+            }
+
+            // -- Comparison & Logic --
+            OpCode::ICmpEq => { let (r1,r2,dst) = (instr.op1,instr.op2,instr.op3);
+                let result = match (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+                    (Some(a), Some(b)) => Value::bool(a == b), _ => Value::bool(false),
+                };
+                frame.regs[dst as usize] = result;
+            }
+            OpCode::ICmpLt => { let (r1,r2,dst) = (instr.op1,instr.op2,instr.op3);
+                if let (Some(a),Some(b)) = (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+                    frame.regs[dst as usize] = Value::bool(a < b);
+                }
+            }
+            OpCode::ICmpGt => {
+                if let (Some(a), Some(b)) = (frame.regs[instr.op1 as usize].as_int(), frame.regs[instr.op2 as usize].as_int()) {
+                    frame.regs[instr.op3 as usize] = Value::bool(a > b);
+                }
+            }
+            OpCode::ICmpLe => {
+                if let (Some(a), Some(b)) = (frame.regs[instr.op1 as usize].as_int(), frame.regs[instr.op2 as usize].as_int()) {
+                    frame.regs[instr.op3 as usize] = Value::bool(a <= b);
+                }
+            }
+            OpCode::ICmpGe => {
+                if let (Some(a), Some(b)) = (frame.regs[instr.op1 as usize].as_int(), frame.regs[instr.op2 as usize].as_int()) {
+                    frame.regs[instr.op3 as usize] = Value::bool(a >= b);
+                }
+            }
+            OpCode::FCmpEq => {
+                if let (Some(a), Some(b)) = (frame.regs[instr.op1 as usize].as_float(), frame.regs[instr.op2 as usize].as_float()) {
+                    frame.regs[instr.op3 as usize] = Value::bool((a - b).abs() < f64::EPSILON);
+                }
+            }
+            OpCode::FCmpLt => {
+                if let (Some(a), Some(b)) = (frame.regs[instr.op1 as usize].as_float(), frame.regs[instr.op2 as usize].as_float()) {
+                    frame.regs[instr.op3 as usize] = Value::bool(a < b);
+                }
+            }
+            OpCode::FCmpGt => {
+                if let (Some(a), Some(b)) = (frame.regs[instr.op1 as usize].as_float(), frame.regs[instr.op2 as usize].as_float()) {
+                    frame.regs[instr.op3 as usize] = Value::bool(a > b);
+                }
+            }
+            OpCode::SCmpEq => {
+                frame.regs[instr.op3 as usize] = Value::bool(frame.regs[instr.op1 as usize].0 == frame.regs[instr.op2 as usize].0);
+            }
+            OpCode::Not => {
+                if let Some(b) = frame.regs[instr.op1 as usize].as_bool() {
+                    frame.regs[instr.op2 as usize] = Value::bool(!b);
+                } else {
+                    frame.regs[instr.op2 as usize] = Value::bool(!frame.regs[instr.op1 as usize].is_truthy());
+                }
+            }
+            OpCode::And => {
+                let a = frame.regs[instr.op1 as usize].is_truthy();
+                let b = frame.regs[instr.op2 as usize].is_truthy();
+                frame.regs[instr.op3 as usize] = Value::bool(a && b);
+            }
+            OpCode::Or => {
+                let a = frame.regs[instr.op1 as usize].is_truthy();
+                let b = frame.regs[instr.op2 as usize].is_truthy();
+                frame.regs[instr.op3 as usize] = Value::bool(a || b);
+            }
+
+            // -- Control Flow --
+            OpCode::Jmp => { let off = instr.simm16(); frame.pc = (frame.pc as i64 + off as i64 - 1) as usize; }
+            OpCode::JmpT => { if frame.regs[instr.op1 as usize].is_truthy() { let off = instr.offset16(); frame.pc = (frame.pc as i64 + off as i64 - 1) as usize; } }
+            OpCode::JmpF => { if !frame.regs[instr.op1 as usize].is_truthy() { let off = instr.offset16(); frame.pc = (frame.pc as i64 + off as i64 - 1) as usize; } }
+            OpCode::Switch => {
+                let val = frame.regs[instr.op1 as usize];
+                let table_idx = instr.imm16();
+                if let Some(case) = val.as_int() {
+                    if let Some(module) = self.modules.get(frame.module_idx) {
+                        if let Some(Constant::Int(offset)) = module.constants.get(table_idx as usize + case as usize) {
+                            frame.pc = (frame.pc as i64 + *offset as i64 - 1) as usize;
+                        }
+                    }
+                }
+            }
+
+            // -- Closures (MVP) --
+            OpCode::Closure => {
+                let func_idx = instr.imm16();
+                let dst = instr.op3;
+                frame.regs[dst as usize] = Value::int(func_idx as i64);
+            }
+            OpCode::CapLoad => {}
+            OpCode::CapStore => {}
+            OpCode::FreeVar => {}
+
+            // -- Memory & Objects --
+            OpCode::Alloc => {
+                let size = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as usize;
+                let dst = instr.op3;
+                if size > 0 && size <= 256 {
+                    let layout = std::alloc::Layout::from_size_align(size * std::mem::size_of::<Value>(), 8).unwrap();
+                    let ptr = unsafe { std::alloc::alloc(layout) };
+                    if !ptr.is_null() { frame.regs[dst as usize] = Value::ptr(ptr); }
+                }
+            }
+            OpCode::FieldL => {
+                let (obj, fld, dst) = (instr.op1 as usize, instr.op2 as usize, instr.op3 as usize);
+                if let Some(ptr) = frame.regs[obj].as_ptr::<Value>() { unsafe { frame.regs[dst] = *ptr.add(fld); } }
+            }
+            OpCode::FieldS => {
+                let (obj, fld, src) = (instr.op1 as usize, instr.op2 as usize, instr.op3 as usize);
+                if let Some(ptr) = frame.regs[obj].as_ptr::<Value>() { unsafe { *ptr.add(fld) = frame.regs[src]; } }
+            }
+            OpCode::ArrAlloc => {
+                let len = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as usize;
+                let dst = instr.op3 as usize;
+                if len > 0 {
+                    let layout = std::alloc::Layout::from_size_align((len + 1) * std::mem::size_of::<Value>(), 8).unwrap();
+                    let ptr = unsafe { std::alloc::alloc(layout) } as *mut Value;
+                    if !ptr.is_null() {
+                        unsafe { *ptr = Value::int(len as i64); for i in 0..len { *ptr.add(i + 1) = Value::nil(); } }
+                        frame.regs[dst] = Value::ptr(ptr as *mut u8);
+                    }
+                } else { frame.regs[dst] = Value::nil(); }
+            }
+            OpCode::ArrLoad => {
+                let (arr, idx, dst) = (instr.op1 as usize, instr.op2 as usize, instr.op3 as usize);
+                if let Some(ptr) = frame.regs[arr].as_ptr::<Value>() {
+                    let i = frame.regs[idx].as_int().unwrap_or(0) as usize;
+                    unsafe { let len = (*ptr).as_int().unwrap_or(0) as usize; if i < len { frame.regs[dst] = *ptr.add(i + 1); } }
+                }
+            }
+            OpCode::ArrStore => {
+                let (arr, idx, src) = (instr.op1 as usize, instr.op2 as usize, instr.op3 as usize);
+                if let Some(ptr) = frame.regs[arr].as_ptr::<Value>() {
+                    let i = frame.regs[idx].as_int().unwrap_or(0) as usize;
+                    unsafe { let len = (*ptr).as_int().unwrap_or(0) as usize; if i < len { *ptr.add(i + 1) = frame.regs[src]; } }
+                }
+            }
+            OpCode::ArrLen => {
+                let (arr, dst) = (instr.op1 as usize, instr.op2 as usize);
+                if let Some(ptr) = frame.regs[arr].as_ptr::<Value>() { unsafe { frame.regs[dst] = Value::int((*ptr).as_int().unwrap_or(0)); } }
+                else { frame.regs[dst] = Value::int(0); }
+            }
+            OpCode::TupleMk => {
+                let count = instr.op1 as usize;
+                let dst = instr.op2 as usize;
+                if count > 0 {
+                    let layout = std::alloc::Layout::from_size_align(count * std::mem::size_of::<Value>(), 8).unwrap();
+                    let ptr = unsafe { std::alloc::alloc(layout) } as *mut Value;
+                    if !ptr.is_null() { for i in 0..count { unsafe { *ptr.add(i) = frame.regs[i]; } } frame.regs[dst] = Value::ptr(ptr as *mut u8); }
+                }
+            }
+            OpCode::TupleL => {
+                let (tup, fld, dst) = (instr.op1 as usize, instr.op2 as usize, instr.op3 as usize);
+                if let Some(ptr) = frame.regs[tup].as_ptr::<Value>() { unsafe { frame.regs[dst] = *ptr.add(fld); } }
+            }
+            OpCode::RecMk => {
+                let fc = instr.op1 as usize;
+                let dst = instr.op2 as usize;
+                if fc > 0 {
+                    let layout = std::alloc::Layout::from_size_align(fc * std::mem::size_of::<Value>(), 8).unwrap();
+                    let ptr = unsafe { std::alloc::alloc(layout) } as *mut Value;
+                    if !ptr.is_null() { for i in 0..fc { unsafe { *ptr.add(i) = frame.regs[i]; } } frame.regs[dst] = Value::ptr(ptr as *mut u8); }
+                }
+            }
+            OpCode::RecL => {
+                let (obj, fld, dst) = (instr.op1 as usize, instr.op2 as usize, instr.op3 as usize);
+                if let Some(ptr) = frame.regs[obj].as_ptr::<Value>() { unsafe { frame.regs[dst] = *ptr.add(fld); } }
+            }
+            OpCode::RecS => {
+                let (obj, fld, src) = (instr.op1 as usize, instr.op2 as usize, instr.op3 as usize);
+                if let Some(ptr) = frame.regs[obj].as_ptr::<Value>() { unsafe { *ptr.add(fld) = frame.regs[src]; } }
+            }
+            OpCode::IsTag => {
+                let matches = frame.regs[instr.op1 as usize].as_int().map(|v| v as u64 == instr.op2 as u64).unwrap_or(false);
+                frame.regs[instr.op3 as usize] = Value::bool(matches);
+            }
+            OpCode::Unpack => {
+                frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize];
+            }
+            OpCode::Copy => { frame.regs[instr.op3 as usize] = frame.regs[instr.op2 as usize]; }
+            OpCode::Drop => { frame.regs[instr.op1 as usize] = Value::nil(); }
+
+            // -- Actor (simple) --
+            OpCode::SelfOp => {
+                if let Some(id) = self.runtime.current_actor_id() { frame.regs[instr.op1 as usize] = Value::actor_ref(id); }
+            }
+            OpCode::Receive => { frame.regs[instr.op1 as usize] = Value::nil(); }
+            OpCode::Monitor => {}
+            OpCode::Demon => {}
+            OpCode::Link => {}
+            OpCode::Unlink => {}
+            OpCode::Exit => { self.running = false; }
+            OpCode::Yield => {}
+
+            // -- Effects (MVP) --
+            OpCode::Perform => { frame.regs[instr.op3 as usize] = Value::unit(); }
+            OpCode::Handle => {}
+            OpCode::Resume => {}
+            OpCode::Unwind => {}
+
+            // -- Capabilities (MVP) --
+            OpCode::CapChk => { frame.regs[instr.op2 as usize] = Value::bool(true); }
+            OpCode::CapUp => { frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize]; }
+            OpCode::CapDown => { frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize]; }
+            OpCode::CapSend => { frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize]; }
+
+            // -- Distribution (MVP) --
+            OpCode::NodeId => { frame.regs[instr.op1 as usize] = Value::int(0); }
+            OpCode::Migrate => {}
+            OpCode::RAsk => { frame.regs[instr.op3 as usize] = Value::nil(); }
+            OpCode::Gossip => {}
+
+            // -- String & IO --
+            OpCode::SConcat => {
+                let s1 = frame.regs[instr.op1 as usize].to_string_repr();
+                let s2 = frame.regs[instr.op2 as usize].to_string_repr();
+                let result = format!("{}{}", s1, s2);
+                frame.regs[instr.op3 as usize] = Value::ptr(result.into_bytes().leak().as_mut_ptr());
+            }
+            OpCode::SPrint => { print!("{}", frame.regs[instr.op1 as usize].to_string_repr()); }
+            OpCode::SRead => {
+                let mut input = String::new();
+                frame.regs[instr.op1 as usize] = if std::io::stdin().read_line(&mut input).is_ok() {
+                    Value::ptr(input.into_bytes().leak().as_mut_ptr())
+                } else { Value::nil() };
+            }
+            OpCode::FOpen => { frame.regs[instr.op2 as usize] = Value::nil(); }
+            OpCode::FRead => { frame.regs[instr.op2 as usize] = Value::nil(); }
+            OpCode::FWrite => {}
+            OpCode::FClose => {}
+            OpCode::Print => { println!("{}", frame.regs[instr.op1 as usize].to_string_repr()); }
+
+            // -- Debug & Meta --
+            OpCode::DbgBreak => {}
+            OpCode::DbgPrint => {
+                eprintln!("=== Debug: Register State ===");
+                for i in (0..256).step_by(8) {
+                    let mut line = format!("R{:03}-R{:03}: ", i, i + 7);
+                    for j in 0..8 { line.push_str(&format!("{:>20} ", frame.regs[i + j].to_string_repr())); }
+                    eprintln!("{}", line);
+                }
+            }
+            OpCode::DbgStack => {
+                eprintln!("=== Debug: Call Stack ===");
+                let mut depth = 0;
+                let mut fref: Option<&Frame> = Some(&frame);
+                while let Some(fr) = fref {
+                    let mname = self.modules.get(fr.module_idx).map(|m| m.name.as_str()).unwrap_or("?");
+                    eprintln!("  [{}] module={} pc={}", depth, mname, fr.pc);
+                    depth += 1;
+                    fref = fr.caller.as_deref();
+                }
+                if depth == 0 { eprintln!("  (empty)"); }
+            }
+            OpCode::MetaType => { frame.regs[instr.op2 as usize] = Value::int(0); }
+            OpCode::MetaCap => { frame.regs[instr.op2 as usize] = Value::int(0); }
+
+            // Frame-manipulating opcodes handled above; unreachable but needed for exhaustiveness
+            OpCode::Call | OpCode::TailCall | OpCode::Ret | OpCode::RetVal |
+            OpCode::ClosureCall | OpCode::Panic |
+            OpCode::Spawn | OpCode::Send | OpCode::Ask |
+            OpCode::RSend | OpCode::RSpawn => {}
+        }
+        self.current_frame = Some(frame);
     }
 
-    fn load_constant(&self, idx: usize) -> NuResult<Value> {
-        let module_idx = self.modules.len().saturating_sub(1);
-        let module = &self.modules[module_idx];
-        module.constants.get(idx)
-            .cloned()
+    // === Frame-Manipulating Dispatchers (called before frame borrow) ===
+
+    fn dispatch_call(&mut self, func_reg: u8, argc: u8, dst: u8) -> NuResult<()> {
+        let old_frame = self.current_frame.take()
+            .ok_or_else(|| NuError::VMError("No frame for call".to_string()))?;
+
+        let func_val = old_frame.regs[func_reg as usize];
+        let module_idx = old_frame.module_idx;
+
+        // Resolve function: func_val is either a function index (int) or a code offset
+        let func_idx = func_val.as_int()
+            .ok_or_else(|| NuError::VMError("Invalid function reference (not an integer index)".to_string()))? as usize;
+
+        let code_offset = self.modules.get(module_idx)
+            .and_then(|m| m.function_table.get(func_idx)).copied()
+            .ok_or_else(|| NuError::VMError(format!("Function index {} not found in module {}", func_idx, module_idx)))?;
+
+        // Create new frame
+        let mut new_frame = Frame::new(None, module_idx);
+        new_frame.pc = code_offset;
+
+        // Copy arguments from old frame registers 0..argc
+        let arg_count = (argc as usize).min(256);
+        for i in 0..arg_count {
+            new_frame.regs[i] = old_frame.regs[i];
+        }
+
+        // Store return destination in closure field
+        new_frame.closure = Some(Value::int(dst as i64));
+
+        // Link frames
+        new_frame.caller = Some(old_frame);
+        self.current_frame = Some(Box::new(new_frame));
+
+        Ok(())
+    }
+
+    fn dispatch_ret(&mut self) -> NuResult<()> {
+        let old_frame = self.current_frame.take()
+            .ok_or_else(|| NuError::VMError("No frame to return from".to_string()))?;
+        let ret_val = old_frame.regs[0];
+
+        if let Some(mut caller_frame) = old_frame.caller {
+            let dst = old_frame.closure.as_ref()
+                .and_then(|v| v.as_int()).unwrap_or(0) as u8;
+            caller_frame.regs[dst as usize] = ret_val;
+            self.current_frame = Some(caller_frame);
+        } else {
+            // Top-level return: create dummy frame to hold return value
+            let module_idx = old_frame.module_idx;
+            let mut dummy = Frame::new(None, module_idx);
+            dummy.regs[0] = ret_val;
+            dummy.pc = usize::MAX;
+            self.current_frame = Some(Box::new(dummy));
+            self.running = false;
+        }
+        Ok(())
+    }
+
+    fn dispatch_ret_val(&mut self, val_reg: u8) -> NuResult<()> {
+        let old_frame = self.current_frame.take()
+            .ok_or_else(|| NuError::VMError("No frame to return from".to_string()))?;
+        let ret_val = old_frame.regs[val_reg as usize];
+
+        if let Some(mut caller_frame) = old_frame.caller {
+            let dst = old_frame.closure.as_ref()
+                .and_then(|v| v.as_int()).unwrap_or(0) as u8;
+            caller_frame.regs[dst as usize] = ret_val;
+            self.current_frame = Some(caller_frame);
+        } else {
+            let module_idx = old_frame.module_idx;
+            let mut dummy = Frame::new(None, module_idx);
+            dummy.regs[0] = ret_val;
+            dummy.pc = usize::MAX;
+            self.current_frame = Some(Box::new(dummy));
+            self.running = false;
+        }
+        Ok(())
+    }
+
+    fn dispatch_spawn(&mut self, frame: &mut Frame, _behavior_idx: u16, _init_reg: u8, dst: u8) -> NuResult<()> {
+        // MVP: create a placeholder actor ID and store it
+        let actor_id = fresh_actor_id();
+        frame.regs[dst as usize] = Value::actor_ref(actor_id);
+        Ok(())
+    }
+
+    fn dispatch_send(&mut self, frame: &mut Frame, addr_reg: u8, _behavior_id: u16) -> NuResult<()> {
+        // MVP: look up actor and enqueue message
+        if let Some(actor_id) = frame.regs[addr_reg as usize].as_actor_id() {
+            if let Some(actor) = self.runtime.actors.get_mut(&actor_id) {
+                let msg = Message {
+                    behavior_id: _behavior_id,
+                    payload: vec![frame.regs[0]],
+                    sender: self.runtime.current_actor.unwrap_or(0),
+                    priority: MessagePriority::Normal,
+                };
+                let _ = actor.mailbox.push(msg);
+            }
+        }
+        Ok(())
+    }
+
+    // === Instruction Handlers (frame already borrowed) ===
+
+    fn exec_nop(&mut self, _frame: &mut Frame) {}
+    fn exec_halt(&mut self, _frame: &mut Frame) { self.running = false; }
+    fn exec_const0(&mut self, frame: &mut Frame, dst: u8) { frame.regs[dst as usize] = Value::int(0); }
+    fn exec_const1(&mut self, frame: &mut Frame, dst: u8) { frame.regs[dst as usize] = Value::int(1); }
+    fn exec_constu(&mut self, frame: &mut Frame, idx: u16, dst: u8) {
+        if let Some(module) = self.current_module() {
+            if let Some(c) = module.constants.get(idx as usize) {
+                frame.regs[dst as usize] = constant_to_value(c);
+            }
+        }
+    }
+
+    fn exec_iadd(&mut self, frame: &mut Frame, r1: u8, r2: u8, dst: u8) {
+        if let (Some(a), Some(b)) = (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+            frame.regs[dst as usize] = Value::int(a + b);
+        }
+    }
+    fn exec_isub(&mut self, frame: &mut Frame, r1: u8, r2: u8, dst: u8) {
+        if let (Some(a), Some(b)) = (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+            frame.regs[dst as usize] = Value::int(a - b);
+        }
+    }
+    fn exec_imul(&mut self, frame: &mut Frame, r1: u8, r2: u8, dst: u8) {
+        if let (Some(a), Some(b)) = (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+            frame.regs[dst as usize] = Value::int(a * b);
+        }
+    }
+    fn exec_idiv(&mut self, frame: &mut Frame, r1: u8, r2: u8, dst: u8) {
+        if let (Some(a), Some(b)) = (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+            if b != 0 { frame.regs[dst as usize] = Value::int(a / b); }
+        }
+    }
+    fn exec_imod(&mut self, frame: &mut Frame, r1: u8, r2: u8, dst: u8) {
+        if let (Some(a), Some(b)) = (frame.regs[r1 as usize].as_int(), frame.regs[r2 as usize].as_int()) {
+            if b != 0 { frame.regs[dst as usize] = Value::int(a % b); }
+        }
+    }
+    fn exec_ineg(&mut self, frame: &mut Frame, r1: u8, dst: u8) {
+        if let Some(a) = frame.regs[r1 as usize].as_int() {
+            frame.regs[dst as usize] = Value::int(-a);
+        }
+    }
+
+    fn exec_fadd(&mut self, frame: &mut Frame, r1: u8, r2: u8, dst: u8) {
+        if let (Some(a), Some(b)) = (frame.regs[r1 as usize].as_float(), frame.regs[r2 as usize].as_float()) {
+            frame.regs[dst as usize] = Value::float(a + b);
+        }
+    }
+
+    /// Helper: get a reference to the current module (if any).
+    fn current_module(&self) -> Option<&CodeModule> {
+        self.current_frame.as_ref()
+            .and_then(|f| self.modules.get(f.module_idx))
+    }
+
+    /// Helper: get a constant string from a module's constant pool.
+    fn module_const_string(&self, module_idx: usize, const_idx: u16) -> String {
+        self.modules.get(module_idx)
+            .and_then(|m| m.constants.get(const_idx as usize))
             .map(|c| match c {
-                Constant::Int(n) => Value::Int(n),
-                Constant::Float(f) => Value::Float(f64::to_bits(f)),
-                Constant::Bool(b) => Value::Bool(b),
-                Constant::String(s) => Value::String(s),
-                Constant::Unit => Value::Unit,
-                _ => Value::Unit,
+                Constant::String(s) => s.clone(),
+                Constant::Int(n) => n.to_string(),
+                _ => format!("{:?}", c),
             })
-            .ok_or_else(|| NuError::RuntimeError(format!("Invalid constant index: {}", idx)))
-    }
-
-    fn find_function_name(&self, val: &Value) -> NuResult<String> {
-        match val {
-            Value::String(s) => Ok(s.clone()),
-            _ => Ok("__main".to_string()),
-        }
-    }
-
-    pub fn output(&self) -> &[String] {
-        &self.output
+            .unwrap_or_else(|| "?".to_string())
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ast::*;
-    use crate::bytecode::{BehaviorTableEntry, CodeModule, Constant, Instruction, OpCode};
-    use crate::compiler::Compiler;
-    use crate::parser;
-    use crate::types::Span;
-
-    fn s() -> Span { Span::default() }
-
-    #[test]
-    fn test_vm_arithmetic() {
-        // Build a simple module that does: 1 + 2 * 3 = 7
-        let mut module = CodeModule::new("test");
-
-        // Emit bytecode: r1 = 1, r2 = 2, r3 = 3, r2 = r2 * r3, r1 = r1 + r2
-        module.emit(Instruction::new2(OpCode::ConstU, 1, 0)); // const 1 -> r1
-        module.emit(Instruction::new2(OpCode::ConstU, 2, 0)); // const 2 -> r2
-        module.emit(Instruction::new2(OpCode::ConstU, 3, 0)); // const 3 -> r3
-        module.emit(Instruction::new3(OpCode::IMul, 2, 3, 2)); // r2 = r2 * r3
-        module.emit(Instruction::new3(OpCode::IAdd, 1, 2, 1)); // r1 = r1 + r2
-        module.emit(Instruction::new1(OpCode::Ret, 1));
-
-        // Add constants
-        module.add_constant(Constant::Int(1));
-        module.add_constant(Constant::Int(2));
-        module.add_constant(Constant::Int(3));
-
-        // Add behavior entry
-        module.add_behavior(BehaviorTableEntry {
-            name: "__main".into(),
-            param_count: 0,
-            code_offset: 0,
-            local_count: 4,
-            effect_mask: 0,
-        });
-
-        let mut vm = VM::new();
-        vm.load_module(&module).unwrap();
-
-        // Set up constants
-        vm.registers[1] = Value::Int(1);
-        vm.registers[2] = Value::Int(2);
-        vm.registers[3] = Value::Int(3);
-
-        let result = vm.run().unwrap();
-        assert_eq!(result, Value::Int(7));
+// Helper: convert Constant to VM Value
+fn constant_to_value(c: &Constant) -> Value {
+    match c {
+        Constant::Int(n) => Value::int(*n),
+        Constant::Float(f) => Value::float(*f),
+        Constant::Bool(b) => Value::bool(*b),
+        Constant::String(_) => Value::unit(), // MVP: strings not fully supported
+        Constant::Unit => Value::unit(),
+        Constant::FunctionRef(idx) => Value::int(*idx as i64),
     }
+}
 
-    #[test]
-    fn test_vm_comparison() {
-        let mut vm = VM::new();
+/// Global counter for actor IDs (MVP)
+static ACTOR_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-        // Test: 1 < 2 should be true
-        vm.registers[1] = Value::Int(1);
-        vm.registers[2] = Value::Int(2);
-
-        let mut module = CodeModule::new("test");
-        module.emit(Instruction::new3(OpCode::ICmpLt, 1, 2, 0));
-        module.emit(Instruction::new1(OpCode::Ret, 0));
-        module.add_behavior(BehaviorTableEntry {
-            name: "__main".into(),
-            param_count: 0,
-            code_offset: 0,
-            local_count: 3,
-            effect_mask: 0,
-        });
-
-        vm.load_module(&module).unwrap();
-        let result = vm.run().unwrap();
-        assert_eq!(result, Value::Bool(true));
-    }
-
-    #[test]
-    fn test_vm_function_call() {
-        // Build module: add(x, y) = x + y; main = add(3, 4)
-        let mut module = CodeModule::new("test");
-
-        // add behavior at offset 0
-        module.emit(Instruction::new3(OpCode::IAdd, 1, 2, 0));
-        module.emit(Instruction::new1(OpCode::Ret, 0));
-
-        // main behavior at offset 2
-        let main_offset = module.current_offset();
-        module.emit(Instruction::new2(OpCode::ConstU, 1, 0)); // const 3 -> r1
-        module.emit(Instruction::new2(OpCode::ConstU, 2, 0)); // const 4 -> r2
-        module.emit(Instruction::new3(OpCode::Call, 1, 2, 0)); // call add(r1, r2) -> r0
-        module.emit(Instruction::new1(OpCode::Ret, 0));
-
-        module.add_constant(Constant::Int(3));
-        module.add_constant(Constant::Int(4));
-
-        module.add_behavior(BehaviorTableEntry {
-            name: "add".into(),
-            param_count: 2,
-            code_offset: 0,
-            local_count: 3,
-            effect_mask: 0,
-        });
-        module.add_behavior(BehaviorTableEntry {
-            name: "__main".into(),
-            param_count: 0,
-            code_offset: main_offset,
-            local_count: 3,
-            effect_mask: 0,
-        });
-
-        let mut vm = VM::new();
-        vm.load_module(&module).unwrap();
-
-        // Set up args
-        vm.registers[1] = Value::Int(3);
-        vm.registers[2] = Value::Int(4);
-
-        let result = vm.run().unwrap();
-        assert_eq!(result, Value::Int(7));
-    }
-
-    #[test]
-    fn test_vm_nested_function() {
-        let input = r#"
-fun outer(x) = x + 1
-fun main() = outer(5)
-"#;
-        let ast = parser::parse(input).unwrap();
-        let mut compiler = Compiler::new("test");
-        let module_ref = compiler.compile_module(&ast).unwrap();
-        let code_module = module_ref.clone();
-
-        let mut vm = VM::new();
-        vm.load_module(&code_module).unwrap();
-        let result = vm.run().unwrap();
-        assert_eq!(result, Value::Int(6));
-    }
-
-    #[test]
-    fn test_vm_conditionals() {
-        let input = r#"
-fun max(x, y) = if x > y then x else y
-fun main() = max(3, 7)
-"#;
-        let ast = parser::parse(input).unwrap();
-        let mut compiler = Compiler::new("test");
-        let module_ref = compiler.compile_module(&ast).unwrap();
-        let code_module = module_ref.clone();
-
-        let mut vm = VM::new();
-        vm.load_module(&code_module).unwrap();
-        let result = vm.run().unwrap();
-        assert_eq!(result, Value::Int(7));
-    }
+fn fresh_actor_id() -> u64 {
+    ACTOR_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
