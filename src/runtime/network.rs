@@ -40,6 +40,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 // ---------------------------------------------------------------------------
 
 use super::MessagePriority;
+use super::crdt_manager::CrdtOp;
 use crate::vm::Value;
 
 // ---------------------------------------------------------------------------
@@ -72,6 +73,7 @@ const TYPE_HEARTBEAT: u8 = 1;
 const TYPE_ACK: u8 = 2;
 const TYPE_SPAWN_REQUEST: u8 = 3;
 const TYPE_SPAWN_RESPONSE: u8 = 4;
+const TYPE_CRDT_SYNC: u8 = 5;
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -137,6 +139,11 @@ pub enum Packet {
         actor_id: u64,
         success: bool,
     },
+
+    /// CRDT synchronization packet.
+    CrdtSync {
+        ops: Vec<CrdtOp>,
+    },
 }
 
 impl Packet {
@@ -191,6 +198,7 @@ impl Packet {
             TYPE_ACK => Self::read_ack(payload)?,
             TYPE_SPAWN_REQUEST => Self::read_spawn_request(payload)?,
             TYPE_SPAWN_RESPONSE => Self::read_spawn_response(payload)?,
+            TYPE_CRDT_SYNC => Self::read_crdt_sync(payload)?,
             _ => return None,
         };
 
@@ -208,6 +216,7 @@ impl Packet {
             Packet::Ack { .. } => TYPE_ACK,
             Packet::SpawnRequest { .. } => TYPE_SPAWN_REQUEST,
             Packet::SpawnResponse { .. } => TYPE_SPAWN_RESPONSE,
+            Packet::CrdtSync { .. } => TYPE_CRDT_SYNC,
         }
     }
 
@@ -259,6 +268,12 @@ impl Packet {
                 buf.extend_from_slice(&request_id.to_be_bytes());
                 buf.extend_from_slice(&actor_id.to_be_bytes());
                 buf.push(if *success { 1 } else { 0 });
+            }
+            Packet::CrdtSync { ops } => {
+                buf.extend_from_slice(&(ops.len() as u32).to_be_bytes());
+                for op in ops {
+                    buf.extend_from_slice(&op.to_bytes());
+                }
             }
         }
     }
@@ -352,6 +367,37 @@ impl Packet {
             actor_id,
             success,
         })
+    }
+
+    fn read_crdt_sync(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 4 {
+            return None;
+        }
+        let count = read_u32(payload, 0)? as usize;
+        let mut offset = 4usize;
+        let mut ops = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            if offset >= payload.len() {
+                return None;
+            }
+            // Each CrdtOp: [id:u64][type:u8][len:u32][payload]
+            if offset + 13 > payload.len() {
+                return None;
+            }
+            // Parse id + type + len manually to compute op byte length
+            let op_payload_len = u32::from_be_bytes([
+                payload[offset + 9], payload[offset + 10],
+                payload[offset + 11], payload[offset + 12],
+            ]) as usize;
+            let total_op_len = 13 + op_payload_len;
+            if offset + total_op_len > payload.len() {
+                return None;
+            }
+            let op = CrdtOp::from_bytes(&payload[offset..offset + total_op_len])?;
+            offset += total_op_len;
+            ops.push(op);
+        }
+        Some(Packet::CrdtSync { ops })
     }
 }
 

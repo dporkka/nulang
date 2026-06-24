@@ -16,6 +16,9 @@ mod supervisor;
 mod cluster;
 mod network;
 mod distributed;
+mod crdt;
+mod crdt_reg;
+mod crdt_manager;
 
 #[cfg(test)]
 mod tests;
@@ -30,6 +33,9 @@ pub use orca_cycle::*;
 pub use cluster::*;
 pub use distributed::*;
 pub use network::*;
+pub use crdt::*;
+pub use crdt_reg::*;
+pub use crdt_manager::*;
 
 use crate::vm::Value;
 // Note: OrcaCoordinator, OrcaGc, ForeignRefOp, and CycleDetector are
@@ -65,6 +71,9 @@ pub struct Runtime {
     pub resolver: Option<AddressResolver>,        // Address resolver for distributed routing
     pub node_id: Option<cluster::NodeId>,          // This node's ID (None for local-only mode)
     pub distributed_enabled: bool,                // Flag to enable/disable distributed mode
+
+    // CRDT manager (v0.6)
+    pub crdt_manager: Option<CrdtManager>,        // CRDT manager (None if not initialized)
 }
 
 impl Runtime {
@@ -84,6 +93,9 @@ impl Runtime {
             resolver: None,
             node_id: None,
             distributed_enabled: false,
+
+            // CRDT manager (disabled by default)
+            crdt_manager: None,
         }
     }
 
@@ -756,6 +768,9 @@ impl Runtime {
         self.node_id = Some(node_id);
         self.distributed_enabled = true;
 
+        // Initialize the CRDT manager with this node's ID
+        self.crdt_manager = Some(CrdtManager::new(node_id.0));
+
         Ok(())
     }
 
@@ -890,6 +905,37 @@ impl Runtime {
                 ClusterAction::SendGossip { targets: _ } => {
                     // In MVP, gossip is piggybacked on heartbeats.
                     // Future versions will send explicit gossip packets here.
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // CRDT Synchronization (v0.6)
+    // ========================================================================
+
+    /// Sync all local CRDTs to remote nodes.
+    ///
+    /// Generates sync operations from the CRDT manager and sends them
+    /// as CrdtSync packets to all connected nodes.
+    pub fn sync_crdts(&mut self) {
+        if !self.distributed_enabled {
+            return;
+        }
+        let ops = match &mut self.crdt_manager {
+            Some(m) => m.generate_sync_ops(),
+            None => return,
+        };
+        if ops.is_empty() {
+            return;
+        }
+        let packet = Packet::CrdtSync { ops };
+        // Send to all connected nodes
+        if let Some(cluster) = &self.cluster {
+            for member in cluster.healthy_members() {
+                if let Some(transport) = &mut self.transport {
+                    let net_node_id = network::NodeId(member.node_id.0);
+                    transport.send(net_node_id, member.address, packet.clone());
                 }
             }
         }
