@@ -44,320 +44,353 @@ fn apply_subst(ty: &Type, subst: &Substitution) -> Type {
             }
             Type::Var(*v)
         }
+        Type::Primitive(_) => ty.clone(),
         Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| apply_subst(t, subst)).collect()),
         Type::Record(fs) => Type::Record(
             fs.iter()
-                .map(|(n, t)| (n.clone(), apply_subst(t, subst)))
+                .map(|(name, t)| (name.clone(), apply_subst(t, subst)))
                 .collect(),
         ),
         Type::Variant(vs) => Type::Variant(
             vs.iter()
-                .map(|(n, ts)| (n.clone(), ts.iter().map(|t| apply_subst(t, subst)).collect()))
+                .map(|(name, t)| (name.clone(), t.as_ref().map(|t| apply_subst(t, subst))))
                 .collect(),
         ),
         Type::Array(t) => Type::Array(Box::new(apply_subst(t, subst))),
-        Type::Ref(t, cap) => Type::Ref(Box::new(apply_subst(t, subst)), *cap),
-        Type::Arrow(params, ret, eff) => Type::Arrow(
-            params.iter().map(|p| apply_subst(p, subst)).collect(),
-            Box::new(apply_subst(ret, subst)),
-            eff.clone(),
-        ),
-        Type::App(name, args) => Type::App(
-            Box::new(apply_subst(name, subst)),
-            args.iter().map(|a| apply_subst(a, subst)).collect(),
-        ),
-        Type::Scheme(vs, t) => {
-            // Remove bindings for variables bound by this scheme
+        Type::Function {
+            param,
+            ret,
+            effect,
+            cap,
+        } => Type::Function {
+            param: Box::new(apply_subst(param, subst)),
+            ret: Box::new(apply_subst(ret, subst)),
+            effect: effect.clone(),
+            cap: *cap,
+        },
+        Type::Actor { state, behavior } => Type::Actor {
+            state: Box::new(apply_subst(state, subst)),
+            behavior: Box::new(apply_subst(behavior, subst)),
+        },
+        Type::Agent {
+            state,
+            policy,
+            memory,
+            tools,
+        } => Type::Agent {
+            state: Box::new(apply_subst(state, subst)),
+            policy: Box::new(apply_subst(policy, subst)),
+            memory: Box::new(apply_subst(memory, subst)),
+            tools: Box::new(apply_subst(tools, subst)),
+        },
+        Type::App { constructor, args } => Type::App {
+            constructor: Box::new(apply_subst(constructor, subst)),
+            args: args.iter().map(|a| apply_subst(a, subst)).collect(),
+        },
+        Type::Reference { cap, inner } => Type::Reference {
+            cap: *cap,
+            inner: Box::new(apply_subst(inner, subst)),
+        },
+        Type::Scheme { vars, body } => {
+            // Remove substitutions for bound variables
             let filtered: Substitution = subst
                 .iter()
-                .filter(|(v, _)| !vs.contains(v))
+                .filter(|(v, _)| !vars.contains(v))
                 .cloned()
                 .collect();
-            Type::Scheme(vs.clone(), Box::new(apply_subst(t, &filtered)))
+            Type::Scheme {
+                vars: vars.clone(),
+                body: Box::new(apply_subst(body, &filtered)),
+            }
         }
-        // Primitive types, Named types unchanged
-        other => other.clone(),
     }
 }
 
-/// Compose two substitutions: first apply s2, then s1.
-/// Result: s1 ∘ s2 (apply s2 first, then s1)
-fn compose_subst(s1: &Substitution, s2: &Substitution) -> Substitution {
-    let mut result: Substitution = s2
+/// Apply a substitution to a type context, returning the updated context.
+/// Since TypeContext stores types at binding time and we always create fresh
+/// contexts via `extend` / `clone`, substitutions are effectively applied by
+/// binding already-substituted types. This function is a placeholder for
+/// contexts where we need to pass through a substitution.
+#[allow(unused_variables)]
+fn apply_subst_to_ctx(ctx: &TypeContext, _subst: &Substitution) -> TypeContext {
+    ctx.clone()
+}
+
+/// Compose two substitutions: s2 after s1.
+/// Result: first apply s1, then apply s2 to the result.
+/// Formally: (s2 ∘ s1)(t) = s2(s1(t))
+fn compose_subst(s2: &Substitution, s1: &Substitution) -> Substitution {
+    // Apply s2 to all types in s1
+    let mut s1_substituted: Substitution = s1
         .iter()
-        .map(|(v, t)| (*v, apply_subst(t, s1)))
+        .map(|(v, t)| (*v, apply_subst(t, s2)))
         .collect();
-    // Add s1 entries for variables not in s2
-    for (v, t) in s1 {
-        if !s2.iter().any(|(v2, _)| v2 == v) {
-            result.push((*v, t.clone()));
+    // Add s2 entries that don't conflict with s1
+    let s1_vars: HashSet<TypeVar> = s1.iter().map(|(v, _)| *v).collect();
+    for (v, t) in s2 {
+        if !s1_vars.contains(v) {
+            s1_substituted.push((*v, t.clone()));
         }
     }
-    result
+    s1_substituted
 }
 
 // ---------------------------------------------------------------------------
-// Free Variables
+// Unification (Most General Unifier)
 // ---------------------------------------------------------------------------
 
-/// Get free type variables in a type.
-fn free_vars(ty: &Type) -> HashSet<TypeVar> {
-    let mut set = HashSet::new();
-    collect_free_vars(ty, &mut set);
-    set
-}
-
-fn collect_free_vars(ty: &Type, set: &mut HashSet<TypeVar>) {
-    match ty {
-        Type::Var(v) => {
-            set.insert(*v);
+/// Check if two effect rows are compatible (can be unified).
+/// For closed rows, they must have exactly the same effects.
+/// For open rows, we check that the fixed effects are compatible.
+fn effect_row_compatible(e1: &EffectRow, e2: &EffectRow) -> bool {
+    match (e1, e2) {
+        (EffectRow::Closed(a), EffectRow::Closed(b)) => {
+            let mut a_sorted = a.clone();
+            let mut b_sorted = b.clone();
+            a_sorted.sort_by(|x, y| format!("{:?}", x).cmp(&format!("{:?}", y)));
+            b_sorted.sort_by(|x, y| format!("{:?}", x).cmp(&format!("{:?}", y)));
+            a_sorted == b_sorted
         }
-        Type::Tuple(ts) => {
-            for t in ts {
-                collect_free_vars(t, set);
-            }
+        (EffectRow::Open(a, _), EffectRow::Closed(b))
+        | (EffectRow::Closed(b), EffectRow::Open(a, _)) => b.iter().all(|e| a.contains(e)),
+        (EffectRow::Open(a, _), EffectRow::Open(b, _)) => {
+            // Both open: compatible if they share the same fixed effects
+            // (full row unification would require more sophisticated handling)
+            a.iter().all(|e| b.contains(e)) || b.iter().all(|e| a.contains(e))
         }
-        Type::Record(fs) => {
-            for (_, t) in fs {
-                collect_free_vars(t, set);
-            }
-        }
-        Type::Variant(vs) => {
-            for (_, ts) in vs {
-                for t in ts {
-                    collect_free_vars(t, set);
-                }
-            }
-        }
-        Type::Array(t) => collect_free_vars(t, set),
-        Type::Ref(t, _) => collect_free_vars(t, set),
-        Type::Arrow(params, ret, _) => {
-            for p in params {
-                collect_free_vars(p, set);
-            }
-            collect_free_vars(ret, set);
-        }
-        Type::App(name, args) => {
-            collect_free_vars(name, set);
-            for a in args {
-                collect_free_vars(a, set);
-            }
-        }
-        Type::Scheme(vs, t) => {
-            collect_free_vars(t, set);
-            for v in vs {
-                set.remove(v);
-            }
-        }
-        _ => {}
     }
 }
-
-/// Get free type variables in a context.
-fn free_vars_ctx(ctx: &TypeContext) -> HashSet<TypeVar> {
-    let mut set = HashSet::new();
-    for (_, ty) in &ctx.bindings {
-        set.extend(free_vars(ty));
-    }
-    set
-}
-
-// ---------------------------------------------------------------------------
-// Generalization & Instantiation
-// ---------------------------------------------------------------------------
-
-/// Generalize a type into a scheme: abstract over variables not free in the context.
-fn generalize(ctx: &TypeContext, ty: &Type) -> Type {
-    let ctx_fv = free_vars_ctx(ctx);
-    let ty_fv = free_vars(ty);
-    let gen_vars: Vec<TypeVar> = ty_fv.difference(&ctx_fv).cloned().collect();
-    if gen_vars.is_empty() {
-        ty.clone()
-    } else {
-        Type::Scheme(gen_vars, Box::new(ty.clone()))
-    }
-}
-
-/// Instantiate a scheme: replace bound variables with fresh ones.
-fn instantiate(ty: &Type) -> Type {
-    match ty {
-        Type::Scheme(vs, t) => {
-            let subst: Substitution = vs.iter().map(|v| (*v, Type::Var(TypeVar::fresh()))).collect();
-            apply_subst(t, &subst)
-        }
-        other => other.clone(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Most General Unifier
-// ---------------------------------------------------------------------------
 
 /// Compute the most general unifier of two types.
-/// Returns a substitution that makes the two types equal.
-fn mgu(t1: &Type, t2: &Type, span: &Span) -> NuResult<Substitution> {
-    use Type::*;
+/// Returns a substitution `s` such that `apply_subst(t1, s) == apply_subst(t2, s)`.
+fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
+    // Handle the case where both types are the same reference
+    if t1 == t2 {
+        return Ok(vec![]);
+    }
 
     match (t1, t2) {
-        // Same primitive types
-        (Int, Int)
-        | (Float, Float)
-        | (Bool, Bool)
-        | (String, String)
-        | (Unit, Unit)
-        | (Never, Never)
-        | (Address, Address) => Ok(vec![]),
+        // Identical primitives unify trivially
+        (Type::Primitive(a), Type::Primitive(b)) if a == b => Ok(vec![]),
 
-        // Variable unification
-        (Var(v), t) | (t, Var(v)) => var_bind(*v, t, span),
+        // Type variable unification
+        (Type::Var(v), t) | (t, Type::Var(v)) => var_subst(*v, t, span),
+
+        // Functions: unify parameters, returns, effects, and capabilities
+        (
+            Type::Function {
+                param: p1,
+                ret: r1,
+                effect: e1,
+                cap: c1,
+            },
+            Type::Function {
+                param: p2,
+                ret: r2,
+                effect: e2,
+                cap: c2,
+            },
+        ) => {
+            if c1 != c2 {
+                return Err(NuError::TypeError {
+                    msg: format!(
+                        "Cannot unify functions with different capabilities: {:?} vs {:?}",
+                        c1, c2
+                    ),
+                    span,
+                });
+            }
+            // Check effect row compatibility
+            if !effect_row_compatible(e1, e2) {
+                return Err(NuError::TypeError {
+                    msg: format!(
+                        "Cannot unify functions with incompatible effects: {:?} vs {:?}",
+                        e1, e2
+                    ),
+                    span,
+                });
+            }
+            let s1 = mgu(p1, p2, span)?;
+            let s2 = mgu(&apply_subst(r1, &s1), &apply_subst(r2, &s1), span)?;
+            Ok(compose_subst(&s2, &s1))
+        }
 
         // Tuples
-        (Tuple(ts1), Tuple(ts2)) => {
+        (Type::Tuple(ts1), Type::Tuple(ts2)) => {
             if ts1.len() != ts2.len() {
                 return Err(NuError::TypeError {
-                    message: format!(
-                        "Tuple size mismatch: {} vs {}",
+                    msg: format!(
+                        "Cannot unify tuples of different lengths: {} vs {}",
                         ts1.len(),
                         ts2.len()
                     ),
-                    span: span.clone(),
+                    span,
                 });
             }
-            let mut subst = vec![];
-            for (a, b) in ts1.iter().zip(ts2.iter()) {
-                let s = mgu(&apply_subst(a, &subst), &apply_subst(b, &subst), span)?;
-                subst = compose_subst(&s, &subst);
-            }
-            Ok(subst)
+            unify_many(ts1, ts2, span)
         }
 
         // Records
-        (Record(fs1), Record(fs2)) => {
-            let mut subst = vec![];
-            for (name1, ty1) in fs1 {
-                match fs2.iter().find(|(n, _)| n == name1) {
-                    Some((_, ty2)) => {
-                        let s = mgu(&apply_subst(ty1, &subst), &apply_subst(ty2, &subst), span)?;
-                        subst = compose_subst(&s, &subst);
-                    }
-                    None => {
-                        return Err(NuError::TypeError {
-                            message: format!("Record missing field: {}", name1),
-                            span: span.clone(),
-                        });
-                    }
-                }
+        (Type::Record(fs1), Type::Record(fs2)) => {
+            if fs1.len() != fs2.len() {
+                return Err(NuError::TypeError {
+                    msg: format!(
+                        "Cannot unify records with different field counts: {} vs {}",
+                        fs1.len(),
+                        fs2.len()
+                    ),
+                    span,
+                });
             }
-            // Check that fs2 doesn't have extra fields
-            for (name2, _) in fs2 {
-                if !fs1.iter().any(|(n, _)| n == name2) {
+            // Sort by field name and unify corresponding fields
+            let mut sorted1 = fs1.clone();
+            let mut sorted2 = fs2.clone();
+            sorted1.sort_by(|(a, _), (b, _)| a.cmp(b));
+            sorted2.sort_by(|(a, _), (b, _)| a.cmp(b));
+            let mut subst = vec![];
+            for ((n1, t1f), (n2, t2f)) in sorted1.iter().zip(sorted2.iter()) {
+                if n1 != n2 {
                     return Err(NuError::TypeError {
-                        message: format!("Record has extra field: {}", name2),
-                        span: span.clone(),
+                        msg: format!(
+                            "Cannot unify records with different field names: '{}' vs '{}'",
+                            n1, n2
+                        ),
+                        span,
                     });
                 }
+                let s = mgu(&apply_subst(t1f, &subst), &apply_subst(t2f, &subst), span)?;
+                subst = compose_subst(&s, &subst);
             }
             Ok(subst)
         }
 
         // Arrays
-        (Array(t1), Array(t2)) => mgu(t1, t2, span),
+        (Type::Array(t1_inner), Type::Array(t2_inner)) => mgu(t1_inner, t2_inner, span),
 
-        // References with capabilities
-        (Ref(ty1, cap1), Ref(ty2, cap2)) => {
-            if cap1 != cap2 {
-                return Err(NuError::TypeError {
-                    message: format!("Capability mismatch: {:?} vs {:?}", cap1, cap2),
-                    span: span.clone(),
-                });
-            }
-            mgu(ty1, ty2, span)
+        // Actors
+        (
+            Type::Actor {
+                state: s1,
+                behavior: b1,
+            },
+            Type::Actor {
+                state: s2,
+                behavior: b2,
+            },
+        ) => {
+            let s_state = mgu(s1, s2, span)?;
+            let s_beh = mgu(&apply_subst(b1, &s_state), &apply_subst(b2, &s_state), span)?;
+            Ok(compose_subst(&s_beh, &s_state))
         }
 
-        // Functions
-        (Arrow(params1, ret1, eff1), Arrow(params2, ret2, eff2)) => {
-            if params1.len() != params2.len() {
-                return Err(NuError::TypeError {
-                    message: format!(
-                        "Function arity mismatch: {} vs {}",
-                        params1.len(),
-                        params2.len()
-                    ),
-                    span: span.clone(),
-                });
-            }
-            let mut subst = vec![];
-            for (a, b) in params1.iter().zip(params2.iter()) {
-                let s = mgu(&apply_subst(a, &subst), &apply_subst(b, &subst), span)?;
-                subst = compose_subst(&s, &subst);
-            }
-            let s = mgu(
-                &apply_subst(ret1, &subst),
-                &apply_subst(ret2, &subst),
-                span,
-            )?;
-            subst = compose_subst(&s, &subst);
-
-            // Effect rows must be compatible
-            if !effect_row_compatible(eff1, eff2) {
-                return Err(NuError::TypeError {
-                    message: format!(
-                        "Effect row mismatch: {} vs {}",
-                        eff1.display(),
-                        eff2.display()
-                    ),
-                    span: span.clone(),
-                });
-            }
-
-            Ok(subst)
+        // Agents
+        (
+            Type::Agent {
+                state: s1,
+                policy: p1,
+                memory: m1,
+                tools: t1,
+            },
+            Type::Agent {
+                state: s2,
+                policy: p2,
+                memory: m2,
+                tools: t2,
+            },
+        ) => {
+            let s_state = mgu(s1, s2, span)?;
+            let subst = compose_subst(&s_state, &vec![]);
+            let s_policy = mgu(&apply_subst(p1, &subst), &apply_subst(p2, &subst), span)?;
+            let subst = compose_subst(&s_policy, &subst);
+            let s_mem = mgu(&apply_subst(m1, &subst), &apply_subst(m2, &subst), span)?;
+            let subst = compose_subst(&s_mem, &subst);
+            let s_tools = mgu(&apply_subst(t1, &subst), &apply_subst(t2, &subst), span)?;
+            Ok(compose_subst(&s_tools, &subst))
         }
 
-        // Named type equality
-        (Named(n1), Named(n2)) if n1 == n2 => Ok(vec![]),
-
-        // Generic application
-        (App(name1, args1), App(name2, args2)) => {
-            let mut subst = mgu(name1, name2, span)?;
-            if args1.len() != args2.len() {
+        // Reference types
+        (Type::Reference { cap: c1, inner: i1 }, Type::Reference { cap: c2, inner: i2 }) => {
+            if c1 != c2 {
                 return Err(NuError::TypeError {
-                    message: format!(
-                        "Type application arity mismatch: {} vs {}",
-                        args1.len(),
-                        args2.len()
+                    msg: format!(
+                        "Cannot unify references with different capabilities: {:?} vs {:?}",
+                        c1, c2
                     ),
-                    span: span.clone(),
+                    span,
                 });
             }
-            for (a, b) in args1.iter().zip(args2.iter()) {
-                let s = mgu(&apply_subst(a, &subst), &apply_subst(b, &subst), span)?;
-                subst = compose_subst(&s, &subst);
-            }
-            Ok(subst)
+            mgu(i1, i2, span)
         }
 
-        // Type mismatch
+        // Generic type application
+        (Type::App { constructor: c1, args: a1 }, Type::App { constructor: c2, args: a2 }) => {
+            let s1 = mgu(c1, c2, span)?;
+            let applied1: Vec<Type> = a1.iter().map(|t| apply_subst(t, &s1)).collect();
+            let applied2: Vec<Type> = a2.iter().map(|t| apply_subst(t, &s1)).collect();
+            let s2 = unify_many_app(&applied1, &applied2, span)?;
+            Ok(compose_subst(&s2, &s1))
+        }
+
+        // Anything else is a unification error
         _ => Err(NuError::TypeError {
-            message: format!("Type mismatch: {} vs {}", t1.display(), t2.display()),
-            span: span.clone(),
+            msg: format!("Cannot unify {:?} with {:?}", t1, t2),
+            span,
         }),
     }
 }
 
-/// Bind a type variable to a type, performing the occurs check.
-fn var_bind(v: TypeVar, ty: &Type, span: &Span) -> NuResult<Substitution> {
-    match ty {
-        Type::Var(v2) if *v2 == v => Ok(vec![]), // Trivial binding
+/// Unify a list of type variable / type pairs (common sub-structures).
+fn unify_many_app(types1: &[Type], types2: &[Type], span: Span) -> NuResult<Substitution> {
+    if types1.len() != types2.len() {
+        return Err(NuError::TypeError {
+            msg: format!(
+                "Cannot unify type lists of different lengths: {} vs {}",
+                types1.len(),
+                types2.len()
+            ),
+            span,
+        });
+    }
+    let mut subst = vec![];
+    for (t1, t2) in types1.iter().zip(types2.iter()) {
+        let s = mgu(&apply_subst(t1, &subst), &apply_subst(t2, &subst), span)?;
+        subst = compose_subst(&s, &subst);
+    }
+    Ok(subst)
+}
+
+/// Unify two lists of types pairwise.
+fn unify_many(types1: &[Type], types2: &[Type], span: Span) -> NuResult<Substitution> {
+    if types1.len() != types2.len() {
+        return Err(NuError::TypeError {
+            msg: format!(
+                "Cannot unify lists of different lengths: {} vs {}",
+                types1.len(),
+                types2.len()
+            ),
+            span,
+        });
+    }
+    let mut subst = vec![];
+    for (t1, t2) in types1.iter().zip(types2.iter()) {
+        let s = mgu(&apply_subst(t1, &subst), &apply_subst(t2, &subst), span)?;
+        subst = compose_subst(&s, &subst);
+    }
+    Ok(subst)
+}
+
+/// Create a substitution for a single type variable, with occurs check.
+fn var_subst(v: TypeVar, t: &Type, span: Span) -> NuResult<Substitution> {
+    match t {
+        Type::Var(v2) if *v2 == v => Ok(vec![]), // t = t
         t => {
-            // Occurs check
-            if free_vars(t).contains(&v) {
+            if occurs_in(v, t) {
                 return Err(NuError::TypeError {
-                    message: format!(
-                        "Occurs check failed: {} occurs in {}",
-                        Type::Var(v).display(),
-                        t.display()
+                    msg: format!(
+                        "Occurs check failed: type variable {:?} occurs in {:?}",
+                        v, t
                     ),
-                    span: span.clone(),
+                    span,
                 });
             }
             Ok(vec![(v, t.clone())])
@@ -365,1235 +398,2139 @@ fn var_bind(v: TypeVar, ty: &Type, span: &Span) -> NuResult<Substitution> {
     }
 }
 
-/// Check if two effect rows are compatible.
-fn effect_row_compatible(eff1: &EffectRow, eff2: &EffectRow) -> bool {
-    match (eff1, eff2) {
-        (EffectRow::Closed(e1), EffectRow::Closed(e2)) => {
-            e1.len() == e2.len() && e1.iter().all(|e| e2.contains(e))
+/// Check if a type variable occurs within a type (occurs check).
+fn occurs_in(v: TypeVar, t: &Type) -> bool {
+    match t {
+        Type::Var(v2) => *v2 == v,
+        Type::Primitive(_) => false,
+        Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t)),
+        Type::Record(fs) => fs.iter().any(|(_, t)| occurs_in(v, t)),
+        Type::Variant(vs) => vs.iter().any(|(_, t)| t.as_ref().map_or(false, |t| occurs_in(v, t))),
+        Type::Array(t) => occurs_in(v, t),
+        Type::Function { param, ret, .. } => occurs_in(v, param) || occurs_in(v, ret),
+        Type::Actor { state, behavior } => occurs_in(v, state) || occurs_in(v, behavior),
+        Type::Agent {
+            state,
+            policy,
+            memory,
+            tools,
+        } => {
+            occurs_in(v, state)
+                || occurs_in(v, policy)
+                || occurs_in(v, memory)
+                || occurs_in(v, tools)
         }
-        (EffectRow::Closed(e), EffectRow::Open(o, _))
-        | (EffectRow::Open(o, _), EffectRow::Closed(e)) => {
-            e.iter().all(|eff| o.contains(eff))
+        Type::App { constructor, args } => {
+            occurs_in(v, constructor) || args.iter().any(|a| occurs_in(v, a))
         }
-        (EffectRow::Open(_, _), EffectRow::Open(_, _)) => {
-            // Open rows are compatible (free variable absorbs differences)
-            true
-        }
+        Type::Reference { inner, .. } => occurs_in(v, inner),
+        Type::Scheme { vars, body } => !vars.contains(&v) && occurs_in(v, body),
     }
 }
 
 // ---------------------------------------------------------------------------
-// Type Checker
+// Instantiation
 // ---------------------------------------------------------------------------
 
+/// Instantiate a scheme by replacing all bound type variables with fresh ones.
+fn instantiate(ty: &Type) -> Type {
+    match ty {
+        Type::Scheme { vars, body } => {
+            let subst: Substitution = vars.iter().map(|v| (*v, Type::Var(TypeVar::fresh()))).collect();
+            apply_subst(body, &subst)
+        }
+        _ => ty.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TypeChecker
+// ---------------------------------------------------------------------------
+
+/// Hindley-Milner type checker implementing Algorithm W.
+///
+/// Maintains a counter for fresh type variables and tracks context free variables
+/// for proper generalization.
 pub struct TypeChecker {
-    errors: Vec<NuError>,
+    /// Free type variables present in the initial context (to avoid over-generalization)
+    ctx_free_vars: HashSet<TypeVar>,
 }
 
 impl TypeChecker {
+    /// Create a new type checker with an empty context.
     pub fn new() -> Self {
-        TypeChecker { errors: vec![] }
+        TypeChecker {
+            ctx_free_vars: HashSet::new(),
+        }
     }
 
-    /// Type-check a module: infer types for all declarations.
-    pub fn check_module(&mut self, module: &Module) -> NuResult<Type> {
-        let mut ctx = TypeContext::empty();
-        let mut last_type = Type::Unit;
-
+    /// Type-check an entire module, returning the type of the last declaration.
+    pub fn check_module(&mut self, module: &AstModule) -> NuResult<Type> {
+        let mut ctx = TypeContext::new();
+        let mut last_type = Type::unit();
         for decl in &module.decls {
-            match self.infer_decl(&mut ctx, decl) {
-                Ok(ty) => last_type = ty,
-                Err(e) => self.errors.push(e),
-            }
+            let (s, ty) = self.infer_decl(&ctx, decl)?;
+            ctx = apply_subst_to_ctx(&ctx, &s);
+            last_type = ty;
         }
-
-        if !self.errors.is_empty() {
-            return Err(self.errors.remove(0));
-        }
-
         Ok(last_type)
     }
 
-    /// Infer the type of a declaration and update the context.
-    fn infer_decl(&mut self, ctx: &mut TypeContext, decl: &Decl) -> NuResult<Type> {
+    /// Infer the type of a declaration.
+    fn infer_decl(&mut self, ctx: &TypeContext, decl: &Decl) -> NuResult<(Substitution, Type)> {
         match decl {
-            Decl::Fun { name, params, ret_type, body, .. } => {
+            Decl::Function {
+                name,
+                params,
+                ret_type,
+                body,
+                span,
+                ..
+            } => {
                 // Create fresh type variables for parameters
-                let param_types: Vec<Type> = params
-                    .iter()
-                    .map(|(_, ty)| {
-                        ty.clone()
-                            .unwrap_or_else(|| Type::Var(TypeVar::fresh()))
-                    })
-                    .collect();
-
-                // Add function parameters to context
-                let mut body_ctx = ctx.clone();
-                for ((param_name, _), param_ty) in params.iter().zip(&param_types) {
-                    body_ctx = body_ctx.extend(param_name.clone(), param_ty.clone());
+                let mut param_types = vec![];
+                let mut new_ctx = ctx.clone();
+                for (param_name, param_ty) in params {
+                    let pty = match param_ty {
+                        Some(t) => t.clone(),
+                        None => Type::Var(TypeVar::fresh()),
+                    };
+                    new_ctx.bind(param_name.clone(), pty.clone(), Capability::Ref);
+                    param_types.push(pty);
                 }
 
                 // Infer body type
-                let body_subst = self.infer_expr(&mut body_ctx, body)?;
-                let body_type = apply_subst(&body_ctx.get_type(body).unwrap_or(Type::Unit), &body_subst);
+                let (s1, body_ty) = self.infer_expr(&new_ctx, body)?;
 
-                // If return type annotation exists, unify
-                let final_ret = if let Some(ann) = ret_type {
-                    let _ = mgu(&body_type, ann, &body.span())?;
-                    ann.clone()
+                // Unify with declared return type if present
+                let s2 = match ret_type {
+                    Some(rt) => {
+                        let body_subst = apply_subst(&body_ty, &s1);
+                        let rt_subst = apply_subst(rt, &s1);
+                        mgu(&body_subst, &rt_subst, *span)?
+                    }
+                    None => vec![],
+                };
+                let s_combined = compose_subst(&s2, &s1);
+
+                // Build function type
+                let param_ty = if param_types.len() == 1 {
+                    apply_subst(&param_types[0], &s_combined)
                 } else {
-                    body_type
+                    Type::Tuple(param_types.iter().map(|t| apply_subst(t, &s_combined)).collect())
+                };
+                let ret_ty = apply_subst(&body_ty, &s_combined);
+                let func_ty = Type::Function {
+                    param: Box::new(param_ty),
+                    ret: Box::new(ret_ty),
+                    effect: EffectRow::empty(),
+                    cap: Capability::Ref,
                 };
 
-                // Function type
-                let fun_type = Type::Arrow(param_types, Box::new(final_ret), Box::new(EffectRow::pure()));
-
                 // Generalize and add to context
-                let gen_type = generalize(ctx, &fun_type);
-                ctx.bindings.push((name.clone(), gen_type));
+                let gen_ty = self.do_generalize(ctx, &apply_subst(&func_ty, &s_combined));
+                let mut final_ctx = ctx.clone();
+                final_ctx.bind(name.clone(), gen_ty, Capability::Ref);
 
-                Ok(fun_type)
+                Ok((s_combined, func_ty))
             }
-
-            Decl::Actor { def, .. } => {
-                // Type-check actor definition
-                let actor_type = Type::Named(def.name.clone());
-                ctx.bindings.push((def.name.clone(), actor_type.clone()));
-
-                // Check each behavior
-                for behavior in &def.behaviors {
-                    let mut behavior_ctx = ctx.clone();
-                    let param_types: Vec<Type> = behavior
-                        .params
-                        .iter()
-                        .map(|(_, ty)| ty.clone())
-                        .collect();
-                    for ((name, _), ty) in behavior.params.iter().zip(&param_types) {
-                        behavior_ctx = behavior_ctx.extend(name.clone(), ty.clone());
-                    }
-                    let _ = self.infer_expr(&mut behavior_ctx, &behavior.body)?;
-                }
-
-                Ok(actor_type)
+            Decl::TypeAlias { .. } => Ok((vec![], Type::unit())),
+            Decl::RecordType { .. } => Ok((vec![], Type::unit())),
+            Decl::VariantType { .. } => Ok((vec![], Type::unit())),
+            Decl::EffectDecl { .. } => Ok((vec![], Type::unit())),
+            Decl::Actor { name, behaviors, span, .. } => {
+                self.infer_actor_decl(ctx, name, behaviors, *span)
             }
-
-            Decl::Agent { def, .. } => {
-                let agent_type = Type::Named(def.name.clone());
-                ctx.bindings.push((def.name.clone(), agent_type.clone()));
-
-                for behavior in &def.behaviors {
-                    let mut behavior_ctx = ctx.clone();
-                    for (name, ty) in &behavior.params {
-                        behavior_ctx = behavior_ctx.extend(name.clone(), ty.clone());
-                    }
-                    let _ = self.infer_expr(&mut behavior_ctx, &behavior.body)?;
-                }
-
-                Ok(agent_type)
+            Decl::Agent { name, behaviors, span, .. } => {
+                self.infer_agent_decl(ctx, name, behaviors, *span)
             }
-
-            Decl::TypeAlias { name, body, .. } => {
-                ctx.bindings.push((name.clone(), body.clone()));
-                Ok(body.clone())
-            }
-
-            Decl::Module { name, decls, .. } => {
-                // Create a nested context
-                let mut mod_ctx = ctx.clone();
-                let mut last_ty = Type::Unit;
+            Decl::Module { decls, .. } => {
+                let mut ctx = ctx.clone();
+                let mut last = Type::unit();
+                let mut all_subst = vec![];
                 for d in decls {
-                    last_ty = self.infer_decl(&mut mod_ctx, d)?;
+                    let (s, ty) = self.infer_decl(&ctx, d)?;
+                    ctx = apply_subst_to_ctx(&ctx, &s);
+                    all_subst = compose_subst(&s, &all_subst);
+                    last = ty;
                 }
-                // Export module name
-                ctx.bindings.push((name.clone(), Type::Named(name.clone())));
-                Ok(last_ty)
+                Ok((all_subst, last))
             }
-
-            Decl::Import { .. } => {
-                // TODO: resolve imports
-                Ok(Type::Unit)
-            }
+            Decl::Import { .. } => Ok((vec![], Type::unit())),
         }
     }
 
-    /// Infer the type of an expression, returning a substitution.
-    pub fn infer_expr(&mut self, ctx: &mut TypeContext, expr: &Expr) -> NuResult<Substitution> {
+    /// Infer the type of an expression (Algorithm W).
+    /// Returns (substitution, inferred_type).
+    pub fn infer_expr(&mut self, ctx: &TypeContext, expr: &Expr) -> NuResult<(Substitution, Type)> {
         match expr {
-            Expr::Literal(lit, _) => self.infer_literal(lit),
-            Expr::Var(name, span) => self.infer_var(ctx, name, span),
-            Expr::Lambda { params, body, .. } => self.infer_lambda(ctx, params, body),
-            Expr::App { func, args, span } => self.infer_app(ctx, func, args, span),
-            Expr::Let { name, value, body, .. } => self.infer_let(ctx, name, value, body),
-            Expr::LetRec { name, params, value, body, .. } => {
-                self.infer_letrec(ctx, name, params, value, body)
+            // Literals: exact primitive type
+            Expr::Literal(lit, span) => self.infer_literal(lit, *span),
+
+            // Variables: look up in context, instantiate scheme
+            Expr::Var(name, span) => self.infer_var(ctx, name, *span),
+
+            // Lambda: introduce fresh type vars for params, infer body
+            Expr::Lambda {
+                params,
+                body,
+                effect,
+                span,
+            } => self.infer_lambda(ctx, params, body, effect.as_ref(), *span),
+
+            // Application: infer function, infer arg, unify, return result
+            Expr::App { func, args, span } => self.infer_app(ctx, func, args, *span),
+
+            // Let binding: infer value, generalize, extend context, infer body
+            Expr::Let {
+                name,
+                value,
+                body,
+                span,
+            } => self.infer_let(ctx, name, value, body, *span),
+
+            // Let-rec: recursive binding
+            Expr::LetRec {
+                name,
+                params,
+                value,
+                body,
+                span,
+            } => self.infer_letrec(ctx, name, params, value, body, *span),
+
+            // If: condition must be Bool, branches must match
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+                span,
+            } => self.infer_if(ctx, cond, then_branch, else_branch.as_ref(), *span),
+
+            // Binary operators: type-specific rules
+            Expr::Binary { op, left, right, span } => self.infer_binary(ctx, *op, left, right, *span),
+
+            // Unary operators
+            Expr::Unary { op, expr, span } => self.infer_unary(ctx, *op, expr, *span),
+
+            // Tuple: infer each element
+            Expr::Tuple(exprs, span) => self.infer_tuple(ctx, exprs, *span),
+
+            // Record literal: infer each field
+            Expr::Record(fields, span) => self.infer_record(ctx, fields, *span),
+
+            // Field access: look up field in record type
+            Expr::FieldAccess { expr, field, span } => self.infer_field_access(ctx, expr, field, *span),
+
+            // Array literal
+            Expr::Array(elems, span) => self.infer_array(ctx, elems, *span),
+
+            // Array index
+            Expr::Index { arr, idx, span } => self.infer_index(ctx, arr, idx, *span),
+
+            // Pattern matching
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } => self.infer_match(ctx, scrutinee, arms, *span),
+
+            // Block: sequence of expressions
+            Expr::Block { exprs, span } => self.infer_block(ctx, exprs, *span),
+
+            // Spawn actor
+            Expr::Spawn {
+                actor_type,
+                init: _,
+                span,
+            } => self.infer_spawn(ctx, actor_type, *span),
+
+            // Send message
+            Expr::Send {
+                actor,
+                behavior,
+                args,
+                span,
+            } => self.infer_send(ctx, actor, behavior, args, *span),
+
+            // Ask request
+            Expr::Ask {
+                actor,
+                behavior: _,
+                args: _,
+                span,
+            } => self.infer_ask(ctx, actor, *span),
+
+            // Receive
+            Expr::Receive { .. } => {
+                let ret_ty = Type::Var(TypeVar::fresh());
+                Ok((vec![], ret_ty))
             }
-            Expr::If { cond, then_branch, else_branch, span } => {
-                self.infer_if(ctx, cond, then_branch, else_branch.as_deref(), span)
+
+            // Self reference
+            Expr::SelfRef(_) => Ok((vec![], Type::Var(TypeVar::fresh()))),
+
+            // Perform effect
+            Expr::Perform { effect, op: _, args, span } => {
+                self.infer_perform(ctx, effect, args, *span)
             }
-            Expr::Binary { op, left, right, span } => self.infer_binary(ctx, op, left, right, span),
-            Expr::Unary { op, expr, span } => self.infer_unary(ctx, op, expr, span),
-            Expr::Tuple(elems, span) => self.infer_tuple(ctx, elems, span),
-            Expr::Record(fields, span) => self.infer_record(ctx, fields, span),
-            Expr::FieldAccess { expr, field, span } => self.infer_field_access(ctx, expr, field, span),
-            Expr::Array(elems, span) => self.infer_array(ctx, elems, span),
-            Expr::Index { arr, idx, span } => self.infer_index(ctx, arr, idx, span),
-            Expr::Match { scrutinee, arms, span } => self.infer_match(ctx, scrutinee, arms, span),
-            Expr::Block { exprs, .. } => self.infer_block(ctx, exprs),
-            Expr::Spawn { .. } => Ok(vec![]), // Returns actor reference (Address)
-            Expr::Send { .. } => Ok(vec![]),  // Returns Unit
-            Expr::Ask { .. } => Ok(vec![]),   // Returns the reply type (fresh var)
-            Expr::Receive { .. } => Ok(vec![]), // Returns fresh var
-            Expr::SelfRef(_) => Ok(vec![]),   // Returns Address
-            Expr::Perform { .. } => Ok(vec![]), // Returns fresh var
-            Expr::Handle { body, .. } => self.infer_expr(ctx, body),
-            Expr::Migrate { .. } => Ok(vec![]), // Returns Unit
-            Expr::CapAnnotate { expr, .. } => self.infer_expr(ctx, expr),
-            Expr::TypeAnnotate { expr, ty, .. } => {
-                let subst = self.infer_expr(ctx, expr)?;
-                // TODO: unify inferred type with annotation
-                Ok(subst)
+
+            // Handle effect
+            Expr::Handle {
+                body,
+                handlers: _,
+                span,
+            } => self.infer_handle(ctx, body, *span),
+
+            // Migrate actor
+            Expr::Migrate { actor, node: _, span } => {
+                let (s1, actor_ty) = self.infer_expr(ctx, actor)?;
+                // Actor must be an actor type
+                match &actor_ty {
+                    Type::Actor { .. } => Ok((s1, actor_ty)),
+                    _ => {
+                        let actor_var = TypeVar::fresh();
+                        let s2 = mgu(
+                            &apply_subst(&actor_ty, &s1),
+                            &Type::Actor {
+                                state: Box::new(Type::Var(actor_var)),
+                                behavior: Box::new(Type::Var(TypeVar::fresh())),
+                            },
+                            *span,
+                        )?;
+                        let actor_subst = apply_subst(&actor_ty, &compose_subst(&s2, &s1));
+                        Ok((compose_subst(&s2, &s1), actor_subst))
+                    }
+                }
             }
-            Expr::Pipe { left, right, .. } => self.infer_pipe(ctx, left, right),
-            Expr::Try { body, .. } => self.infer_expr(ctx, body),
-            Expr::Await { expr, .. } => self.infer_expr(ctx, expr),
-            Expr::Assign { target, value, span } => self.infer_assign(ctx, target, value, span),
-            Expr::ActorDef(def, _) => {
-                ctx.bindings.push((def.name.clone(), Type::Named(def.name.clone())));
-                Ok(vec![])
+
+            // Capability annotation
+            Expr::CapAnnotate { expr, cap, span } => {
+                let (s, ty) = self.infer_expr(ctx, expr)?;
+                // Wrap in reference type with the given capability
+                let ref_ty = Type::Reference {
+                    cap: *cap,
+                    inner: Box::new(apply_subst(&ty, &s)),
+                };
+                Ok((s, ref_ty))
             }
-            Expr::AgentDef(def, _) => {
-                ctx.bindings.push((def.name.clone(), Type::Named(def.name.clone())));
-                Ok(vec![])
+
+            // Type annotation
+            Expr::TypeAnnotate { expr, ty, span } => {
+                let (s1, inferred) = self.infer_expr(ctx, expr)?;
+                let s2 = mgu(&apply_subst(&inferred, &s1), ty, *span)?;
+                Ok((compose_subst(&s2, &s1), apply_subst(ty, &compose_subst(&s2, &s1))))
+            }
+
+            // Pipe operator: x |> f  ===  f(x)
+            Expr::Pipe { left, right, span } => {
+                let (s1, left_ty) = self.infer_expr(ctx, left)?;
+                let ctx1 = apply_subst_to_ctx(ctx, &s1);
+                let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
+                // right should be a function taking left's type
+                let result_var = Type::Var(TypeVar::fresh());
+                let expected = Type::Function {
+                    param: Box::new(apply_subst(&left_ty, &compose_subst(&s2, &s1))),
+                    ret: Box::new(result_var.clone()),
+                    effect: EffectRow::empty(),
+                    cap: Capability::Ref,
+                };
+                let s3 = mgu(&apply_subst(&right_ty, &s2), &expected, *span)?;
+                let final_subst = compose_subst(&s3, &compose_subst(&s2, &s1));
+                Ok((final_subst.clone(), apply_subst(&result_var, &final_subst)))
+            }
+
+            // For comprehension
+            Expr::For {
+                var,
+                iterable,
+                body,
+                span,
+            } => self.infer_for(ctx, var, iterable, body, *span),
+
+            // Return
+            Expr::Return(expr, _span) => {
+                if let Some(e) = expr {
+                    self.infer_expr(ctx, e)
+                } else {
+                    Ok((vec![], Type::unit()))
+                }
+            }
+
+            // Break
+            Expr::Break(_) => {
+                let fresh = Type::Var(TypeVar::fresh());
+                Ok((vec![], fresh))
+            }
+
+            // Assignment: target must be a reference
+            Expr::Assign { target, value, span } => {
+                let (s1, target_ty) = self.infer_expr(ctx, target)?;
+                let ctx1 = apply_subst_to_ctx(ctx, &s1);
+                let (s2, value_ty) = self.infer_expr(&ctx1, value)?;
+                // Unify target (should be a reference) with value
+                let s3 = mgu(
+                    &apply_subst(&target_ty, &compose_subst(&s2, &s1)),
+                    &Type::Reference {
+                        cap: Capability::Ref,
+                        inner: Box::new(apply_subst(&value_ty, &s2)),
+                    },
+                    *span,
+                )?;
+                let final_subst = compose_subst(&s3, &compose_subst(&s2, &s1));
+                Ok((final_subst, Type::unit()))
             }
         }
     }
 
-    // -- Literal inference --
+    // -----------------------------------------------------------------------
+    // Inference helpers for each expression form
+    // -----------------------------------------------------------------------
 
-    fn infer_literal(&mut self, lit: &Literal) -> NuResult<Substitution> {
-        match lit {
-            Literal::Int(_) => Ok(vec![(TypeVar::fresh(), Type::Int)]),
-            Literal::Float(_) => Ok(vec![(TypeVar::fresh(), Type::Float)]),
-            Literal::Bool(_) => Ok(vec![(TypeVar::fresh(), Type::Bool)]),
-            Literal::String(_) => Ok(vec![(TypeVar::fresh(), Type::String)]),
-            Literal::Unit => Ok(vec![(TypeVar::fresh(), Type::Unit)]),
-        }
+    /// Infer the type of a literal.
+    fn infer_literal(&mut self, lit: &Literal, span: Span) -> NuResult<(Substitution, Type)> {
+        let ty = match lit {
+            Literal::Int(_) => Type::int(),
+            Literal::Float(_) => Type::float(),
+            Literal::String(_) => Type::string(),
+            Literal::Bool(_) => Type::bool(),
+            Literal::Unit => Type::unit(),
+        };
+        Ok((vec![], ty))
     }
 
-    // -- Variable inference --
-
-    fn infer_var(&mut self, ctx: &TypeContext, name: &str, _span: &Span) -> NuResult<Substitution> {
+    /// Infer the type of a variable reference.
+    fn infer_var(&mut self, ctx: &TypeContext, name: &str, span: Span) -> NuResult<(Substitution, Type)> {
         match ctx.lookup(name) {
-            Some(scheme) => {
-                let inst = instantiate(scheme);
-                // The substitution maps a fresh variable to the instantiated type
-                Ok(vec![(TypeVar::fresh(), inst)])
+            Some((ty, _cap)) => {
+                let instantiated = instantiate(ty);
+                Ok((vec![], instantiated))
             }
             None => Err(NuError::TypeError {
-                message: format!("Unbound variable: {}", name),
-                span: _span.clone(),
+                msg: format!("Unbound variable: '{}'", name),
+                span,
             }),
         }
     }
 
-    // -- Lambda inference --
-
+    /// Infer the type of a lambda expression.
     fn infer_lambda(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         params: &[(String, Option<Type>)],
         body: &Expr,
-    ) -> NuResult<Substitution> {
-        let param_types: Vec<Type> = params
-            .iter()
-            .map(|(_, ty)| ty.clone().unwrap_or_else(|| Type::Var(TypeVar::fresh())))
-            .collect();
-
-        let mut body_ctx = ctx.clone();
-        for ((name, _), ty) in params.iter().zip(&param_types) {
-            body_ctx = body_ctx.extend(name.clone(), ty.clone());
+        effect: Option<&EffectRow>,
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        let mut new_ctx = ctx.clone();
+        let mut param_types = vec![];
+        for (param_name, param_ty) in params {
+            let pty = match param_ty {
+                Some(t) => t.clone(),
+                None => Type::Var(TypeVar::fresh()),
+            };
+            new_ctx.bind(param_name.clone(), pty.clone(), Capability::Ref);
+            param_types.push(pty);
         }
 
-        let body_subst = self.infer_expr(&mut body_ctx, body)?;
-        let body_type = apply_subst(
-            &body_ctx.get_type(body).unwrap_or(Type::Unit),
-            &body_subst,
-        );
+        let (s, ret_ty) = self.infer_expr(&new_ctx, body)?;
 
-        let fun_type = Type::Arrow(
-            param_types,
-            Box::new(body_type),
-            Box::new(EffectRow::pure()),
-        );
+        let param_ty = if param_types.len() == 1 {
+            apply_subst(&param_types[0], &s)
+        } else {
+            Type::Tuple(param_types.iter().map(|t| apply_subst(t, &s)).collect())
+        };
 
-        Ok(vec![(TypeVar::fresh(), fun_type)])
+        let func_ty = Type::Function {
+            param: Box::new(param_ty),
+            ret: Box::new(apply_subst(&ret_ty, &s)),
+            effect: effect.cloned().unwrap_or_else(EffectRow::empty),
+            cap: Capability::Ref,
+        };
+
+        Ok((s, func_ty))
     }
 
-    // -- Application inference --
-
+    /// Infer the type of a function application.
     fn infer_app(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         func: &Expr,
         args: &[Expr],
-        span: &Span,
-    ) -> NuResult<Substitution> {
-        let func_subst = self.infer_expr(ctx, func)?;
-        let func_type = apply_subst(&ctx.get_type(func).unwrap_or(Type::Unit), &func_subst);
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        let (s1, func_ty) = self.infer_expr(ctx, func)?;
+        let mut subst = s1;
+        let mut arg_types = vec![];
 
-        // Generate fresh type variables for arguments and return
-        let arg_types: Vec<Type> = args.iter().map(|_| Type::Var(TypeVar::fresh())).collect();
-        let ret_type = Type::Var(TypeVar::fresh());
-
-        let expected = Type::Arrow(
-            arg_types.clone(),
-            Box::new(ret_type.clone()),
-            Box::new(EffectRow::pure()),
-        );
-
-        let unify_subst = mgu(&func_type, &expected, span)?;
-
-        // Apply substitution to argument types and infer each argument
-        let mut final_subst = compose_subst(&unify_subst, &func_subst);
-
-        for (arg, expected_ty) in args.iter().zip(arg_types.iter()) {
-            let actual_ty = apply_subst(expected_ty, &final_subst);
-            let arg_subst = self.infer_expr(ctx, arg)?;
-
-            // Get the inferred type of the argument expression
-            let inferred_ty = apply_subst(
-                &ctx.get_type(arg).unwrap_or(Type::Var(TypeVar::fresh())),
-                &arg_subst,
-            );
-
-            let s = mgu(&inferred_ty, &actual_ty, span)?;
-            final_subst = compose_subst(&s, &final_subst);
-            final_subst = compose_subst(&arg_subst, &final_subst);
+        // Infer each argument
+        for arg in args {
+            let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+            let (s_arg, arg_ty) = self.infer_expr(&ctx_sub, arg)?;
+            subst = compose_subst(&s_arg, &subst);
+            arg_types.push(apply_subst(&arg_ty, &subst));
         }
 
-        Ok(final_subst)
+        // Create a fresh result type
+        let result_ty = Type::Var(TypeVar::fresh());
+
+        // Build expected function type
+        let param_ty = if arg_types.len() == 1 {
+            arg_types[0].clone()
+        } else {
+            Type::Tuple(arg_types)
+        };
+
+        let expected = Type::Function {
+            param: Box::new(param_ty),
+            ret: Box::new(result_ty.clone()),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+
+        // Unify
+        let s2 = mgu(&apply_subst(&func_ty, &subst), &expected, span)?;
+        let final_subst = compose_subst(&s2, &subst);
+
+        Ok((final_subst.clone(), apply_subst(&result_ty, &final_subst)))
     }
 
-    // -- Let binding inference --
-
+    /// Infer the type of a let binding.
     fn infer_let(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         name: &str,
         value: &Expr,
         body: &Expr,
-    ) -> NuResult<Substitution> {
-        let val_subst = self.infer_expr(ctx, value)?;
-        let val_type = apply_subst(
-            &ctx.get_type(value).unwrap_or(Type::Unit),
-            &val_subst,
-        );
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        // Infer the binding value
+        let (s1, val_ty) = self.infer_expr(ctx, value)?;
 
         // Generalize the value type
-        let gen_type = generalize(ctx, &val_type);
+        let gen_ty = self.do_generalize(ctx, &apply_subst(&val_ty, &s1));
 
-        // Add to context and infer body
-        let mut body_ctx = ctx.clone();
-        body_ctx = body_ctx.extend(name.to_string(), gen_type);
-        let body_subst = self.infer_expr(&mut body_ctx, body)?;
+        // Extend context with generalized type
+        let new_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref);
 
-        Ok(compose_subst(&body_subst, &val_subst))
+        // Infer body with extended context
+        let (s2, body_ty) = self.infer_expr(&new_ctx, body)?;
+
+        let final_subst = compose_subst(&s2, &s1);
+        Ok((final_subst.clone(), apply_subst(&body_ty, &final_subst)))
     }
 
-    // -- Let-rec inference --
-
+    /// Infer the type of a recursive let binding.
     fn infer_letrec(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         name: &str,
         params: &[(String, Option<Type>)],
         value: &Expr,
         body: &Expr,
-    ) -> NuResult<Substitution> {
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
         // Create a fresh type variable for the recursive function
-        let rec_type = Type::Var(TypeVar::fresh());
-        let mut rec_ctx = ctx.clone();
-        rec_ctx = rec_ctx.extend(name.to_string(), rec_type.clone());
+        let rec_var = Type::Var(TypeVar::fresh());
+        let ctx_with_rec = ctx.extend(name.to_string(), rec_var.clone(), Capability::Ref);
 
-        // Infer the function value with the recursive binding
-        let param_types: Vec<Type> = params
-            .iter()
-            .map(|(_, ty)| ty.clone().unwrap_or_else(|| Type::Var(TypeVar::fresh())))
-            .collect();
-
-        let mut val_ctx = rec_ctx.clone();
-        for ((pname, _), pty) in params.iter().zip(&param_types) {
-            val_ctx = val_ctx.extend(pname.clone(), pty.clone());
+        // Infer the value with the recursive binding in scope
+        let mut new_ctx = ctx_with_rec.clone();
+        let mut param_types = vec![];
+        for (param_name, param_ty) in params {
+            let pty = match param_ty {
+                Some(t) => t.clone(),
+                None => Type::Var(TypeVar::fresh()),
+            };
+            new_ctx.bind(param_name.clone(), pty.clone(), Capability::Ref);
+            param_types.push(pty);
         }
 
-        let val_subst = self.infer_expr(&mut val_ctx, value)?;
-        let val_type = apply_subst(
-            &val_ctx.get_type(value).unwrap_or(Type::Unit),
-            &val_subst,
-        );
+        let (s1, val_ty) = self.infer_expr(&new_ctx, value)?;
 
-        // The recursive type should be a function
-        let fun_type = Type::Arrow(param_types, Box::new(val_type), Box::new(EffectRow::pure()));
-        let rec_subst = mgu(&rec_type, &fun_type, &Span::default())?;
+        // Build the function type from the value
+        let func_ty = match &val_ty {
+            Type::Function { .. } => val_ty.clone(),
+            _ => {
+                let param_ty = if param_types.len() == 1 {
+                    param_types[0].clone()
+                } else {
+                    Type::Tuple(param_types)
+                };
+                Type::Function {
+                    param: Box::new(param_ty),
+                    ret: Box::new(val_ty.clone()),
+                    effect: EffectRow::empty(),
+                    cap: Capability::Ref,
+                }
+            }
+        };
 
-        // Generalize and add to context
-        let combined = compose_subst(&rec_subst, &val_subst);
-        let gen_type = generalize(ctx, &apply_subst(&fun_type, &combined));
+        // Unify the recursive variable with the inferred function type
+        let s2 = mgu(&apply_subst(&rec_var, &s1), &apply_subst(&func_ty, &s1), Span::default())?;
+        let s_combined = compose_subst(&s2, &s1);
 
-        let mut body_ctx = ctx.clone();
-        body_ctx = body_ctx.extend(name.to_string(), gen_type);
-        let body_subst = self.infer_expr(&mut body_ctx, body)?;
+        // Generalize
+        let gen_ty = self.do_generalize(ctx, &apply_subst(&func_ty, &s_combined));
+        let final_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref);
 
-        Ok(compose_subst(&body_subst, &combined))
+        // Infer body
+        let (s3, body_ty) = self.infer_expr(&final_ctx, body)?;
+        let final_subst = compose_subst(&s3, &s_combined);
+
+        Ok((final_subst.clone(), apply_subst(&body_ty, &final_subst)))
     }
 
-    // -- If inference --
-
+    /// Infer the type of an if expression.
     fn infer_if(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         cond: &Expr,
         then_branch: &Expr,
-        else_branch: Option<&Expr>,
-        span: &Span,
-    ) -> NuResult<Substitution> {
-        let cond_subst = self.infer_expr(ctx, cond)?;
-        let cond_type = apply_subst(
-            &ctx.get_type(cond).unwrap_or(Type::Unit),
-            &cond_subst,
-        );
+        else_branch: Option<&Box<Expr>>,
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        // Infer condition - must be Bool
+        let (s1, cond_ty) = self.infer_expr(ctx, cond)?;
+        let s_cond = mgu(&apply_subst(&cond_ty, &s1), &Type::bool(), span)?;
+        let s1 = compose_subst(&s_cond, &s1);
 
-        // Condition must be Bool
-        let bool_subst = mgu(&cond_type, &Type::Bool, span)?;
-        let mut subst = compose_subst(&bool_subst, &cond_subst);
+        // Infer then branch
+        let ctx1 = apply_subst_to_ctx(ctx, &s1);
+        let (s2, then_ty) = self.infer_expr(&ctx1, then_branch)?;
+        let s2 = compose_subst(&s2, &s1);
 
-        let then_subst = self.infer_expr(ctx, then_branch)?;
-        let then_type = apply_subst(
-            &ctx.get_type(then_branch).unwrap_or(Type::Unit),
-            &then_subst,
-        );
-        subst = compose_subst(&then_subst, &subst);
+        // Infer else branch or use Unit
+        let (s3, else_ty) = match else_branch {
+            Some(else_expr) => {
+                let ctx2 = apply_subst_to_ctx(ctx, &s2);
+                let (s3, else_ty) = self.infer_expr(&ctx2, else_expr)?;
+                (compose_subst(&s3, &s2), else_ty)
+            }
+            None => (s2.clone(), Type::unit()),
+        };
 
-        if let Some(else_expr) = else_branch {
-            let else_subst = self.infer_expr(ctx, else_expr)?;
-            let else_type = apply_subst(
-                &ctx.get_type(else_expr).unwrap_or(Type::Unit),
-                &else_subst,
-            );
+        // Unify then and else branches
+        let s4 = mgu(
+            &apply_subst(&then_ty, &s3),
+            &apply_subst(&else_ty, &s3),
+            span,
+        )?;
+        let final_subst = compose_subst(&s4, &s3);
 
-            let branch_subst = mgu(&then_type, &else_type, span)?;
-            subst = compose_subst(&branch_subst, &subst);
-            subst = compose_subst(&else_subst, &subst);
-        }
-
-        Ok(subst)
+        Ok((final_subst.clone(), apply_subst(&then_ty, &final_subst)))
     }
 
-    // -- Binary operator inference --
-
+    /// Infer the type of a binary operator expression.
     fn infer_binary(
         &mut self,
-        ctx: &mut TypeContext,
-        op: &BinOp,
+        ctx: &TypeContext,
+        op: BinOp,
         left: &Expr,
         right: &Expr,
-        span: &Span,
-    ) -> NuResult<Substitution> {
-        let left_subst = self.infer_expr(ctx, left)?;
-        let right_subst = self.infer_expr(ctx, right)?;
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        use BinOp::*;
 
-        let left_type = apply_subst(
-            &ctx.get_type(left).unwrap_or(Type::Unit),
-            &left_subst,
-        );
-        let right_type = apply_subst(
-            &ctx.get_type(right).unwrap_or(Type::Unit),
-            &right_subst,
-        );
+        match op {
+            // Arithmetic: numeric -> numeric
+            Add | Sub | Mul | Div | Mod => {
+                let (s1, left_ty) = self.infer_expr(ctx, left)?;
+                let ctx1 = apply_subst_to_ctx(ctx, &s1);
+                let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
 
-        let (result_type, operand_type) = match op {
-            // Arithmetic: operands must be numeric, result is same type
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                // Unify left and right operand types
-                let num_subst = mgu(&left_type, &right_type, span)?;
-                let unified = apply_subst(&left_type, &num_subst);
+                let num_var = Type::Var(TypeVar::fresh());
+                let s3 = mgu(&apply_subst(&left_ty, &s1), &num_var, span)?;
+                let s_combined = compose_subst(&s3, &compose_subst(&s2, &s1));
 
-                // Must be Int or Float
-                match unified {
-                    Type::Int | Type::Float | Type::Var(_) => (unified.clone(), unified),
-                    _ => {
-                        return Err(NuError::TypeError {
-                            message: format!(
-                                "Arithmetic operator {:?} requires numeric operands, got {} and {}",
-                                op, left_type.display(), right_type.display()
-                            ),
-                            span: span.clone(),
-                        });
-                    }
-                }
+                let s4 = mgu(&apply_subst(&right_ty, &s_combined), &apply_subst(&num_var, &s_combined), span)?;
+                let final_subst = compose_subst(&s4, &s_combined);
+
+                Ok((final_subst.clone(), apply_subst(&num_var, &final_subst)))
             }
 
-            // Comparison: operands must be comparable, result is Bool
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                let cmp_subst = mgu(&left_type, &right_type, span)?;
-                (Type::Bool, apply_subst(&left_type, &cmp_subst))
+            // Comparison: comparable -> Bool
+            Eq | Ne | Lt | Le | Gt | Ge => {
+                let (s1, left_ty) = self.infer_expr(ctx, left)?;
+                let ctx1 = apply_subst_to_ctx(ctx, &s1);
+                let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
+
+                let combined = compose_subst(&s2, &s1);
+                let s3 = mgu(&apply_subst(&right_ty, &combined), &apply_subst(&left_ty, &combined), span)?;
+                let final_subst = compose_subst(&s3, &combined);
+
+                Ok((final_subst, Type::bool()))
             }
 
-            // Logical: operands must be Bool, result is Bool
-            BinOp::And | BinOp::Or => {
-                let _ = mgu(&left_type, &Type::Bool, span)?;
-                let _ = mgu(&right_type, &Type::Bool, span)?;
-                (Type::Bool, Type::Bool)
+            // Boolean: Bool -> Bool
+            And | Or => {
+                let (s1, left_ty) = self.infer_expr(ctx, left)?;
+                let s_left = mgu(&left_ty, &Type::bool(), span)?;
+                let s1 = compose_subst(&s_left, &s1);
+
+                let ctx1 = apply_subst_to_ctx(ctx, &s1);
+                let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
+                let combined = compose_subst(&s2, &s1);
+                let s_right = mgu(&apply_subst(&right_ty, &combined), &Type::bool(), span)?;
+                let final_subst = compose_subst(&s_right, &combined);
+
+                Ok((final_subst, Type::bool()))
             }
 
-            // Cons: right must be list of left's type
-            BinOp::Cons => {
-                let elem_subst = mgu(&right_type, &Type::Array(Box::new(left_type.clone())), span)?;
-                let arr_type = apply_subst(&Type::Array(Box::new(left_type.clone())), &elem_subst);
-                (arr_type.clone(), arr_type)
+            // Bitwise: Int -> Int
+            BitAnd | BitOr | BitXor | Shl | Shr => {
+                let (s1, left_ty) = self.infer_expr(ctx, left)?;
+                let s_left = mgu(&left_ty, &Type::int(), span)?;
+                let s1 = compose_subst(&s_left, &s1);
+
+                let ctx1 = apply_subst_to_ctx(ctx, &s1);
+                let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
+                let combined = compose_subst(&s2, &s1);
+                let s_right = mgu(&apply_subst(&right_ty, &combined), &Type::int(), span)?;
+                let final_subst = compose_subst(&s_right, &combined);
+
+                Ok((final_subst, Type::int()))
             }
 
-            // Pipe: left |> right means right(left)
-            BinOp::Pipe => {
-                // Pipe is handled specially in infer_pipe
-                return self.infer_pipe(ctx, left, right);
+            // Assignment (should be handled in Assign expr, but here for completeness)
+            Assign => {
+                let (s1, left_ty) = self.infer_expr(ctx, left)?;
+                let ctx1 = apply_subst_to_ctx(ctx, &s1);
+                let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
+                let s3 = mgu(&apply_subst(&right_ty, &s2), &apply_subst(&left_ty, &s1), span)?;
+                let final_subst = compose_subst(&s3, &compose_subst(&s2, &s1));
+                Ok((final_subst, Type::unit()))
             }
-        };
 
-        let mut subst = compose_subst(&left_subst, &right_subst);
-        subst.push((TypeVar::fresh(), result_type));
-
-        Ok(subst)
+            // Pipe (should be handled in Pipe expr)
+            Pipe => {
+                let (s1, left_ty) = self.infer_expr(ctx, left)?;
+                let ctx1 = apply_subst_to_ctx(ctx, &s1);
+                let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
+                let result_var = Type::Var(TypeVar::fresh());
+                let expected = Type::Function {
+                    param: Box::new(apply_subst(&left_ty, &compose_subst(&s2, &s1))),
+                    ret: Box::new(result_var.clone()),
+                    effect: EffectRow::empty(),
+                    cap: Capability::Ref,
+                };
+                let s3 = mgu(&apply_subst(&right_ty, &s2), &expected, span)?;
+                let final_subst = compose_subst(&s3, &compose_subst(&s2, &s1));
+                Ok((final_subst.clone(), apply_subst(&result_var, &final_subst)))
+            }
+        }
     }
 
-    // -- Unary operator inference --
-
+    /// Infer the type of a unary operator expression.
     fn infer_unary(
         &mut self,
-        ctx: &mut TypeContext,
-        op: &UnOp,
+        ctx: &TypeContext,
+        op: UnOp,
         expr: &Expr,
-        _span: &Span,
-    ) -> NuResult<Substitution> {
-        let expr_subst = self.infer_expr(ctx, expr)?;
-        let expr_type = apply_subst(
-            &ctx.get_type(expr).unwrap_or(Type::Unit),
-            &expr_subst,
-        );
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        use UnOp::*;
 
-        let result_type = match op {
-            UnOp::Neg => {
-                // Operand must be numeric
-                match expr_type {
-                    Type::Int | Type::Float | Type::Var(_) => expr_type,
-                    _ => Type::Var(TypeVar::fresh()),
-                }
-            }
-            UnOp::Not => {
-                // Operand must be Bool
-                Type::Bool
-            }
-        };
+        let (s, ty) = self.infer_expr(ctx, expr)?;
 
-        let mut subst = expr_subst;
-        subst.push((TypeVar::fresh(), result_type));
-        Ok(subst)
+        match op {
+            // Negation: numeric -> numeric
+            Neg => {
+                let num_var = Type::Var(TypeVar::fresh());
+                let s2 = mgu(&apply_subst(&ty, &s), &num_var, span)?;
+                let final_subst = compose_subst(&s2, &s);
+                Ok((final_subst.clone(), apply_subst(&num_var, &final_subst)))
+            }
+            // Boolean not: Bool -> Bool
+            Not => {
+                let s2 = mgu(&apply_subst(&ty, &s), &Type::bool(), span)?;
+                let final_subst = compose_subst(&s2, &s);
+                Ok((final_subst, Type::bool()))
+            }
+            // Dereference: &cap T -> T
+            Deref => {
+                let inner_var = Type::Var(TypeVar::fresh());
+                let s2 = mgu(
+                    &apply_subst(&ty, &s),
+                    &Type::Reference {
+                        cap: Capability::Ref,
+                        inner: Box::new(inner_var.clone()),
+                    },
+                    span,
+                )?;
+                let final_subst = compose_subst(&s2, &s);
+                Ok((final_subst.clone(), apply_subst(&inner_var, &final_subst)))
+            }
+            // Reference: T -> &cap T
+            Ref(cap) => {
+                let ref_ty = Type::Reference {
+                    cap,
+                    inner: Box::new(apply_subst(&ty, &s)),
+                };
+                Ok((s, ref_ty))
+            }
+        }
     }
 
-    // -- Tuple inference --
-
+    /// Infer the type of a tuple expression.
     fn infer_tuple(
         &mut self,
-        ctx: &mut TypeContext,
-        elems: &[Expr],
-        _span: &Span,
-    ) -> NuResult<Substitution> {
+        ctx: &TypeContext,
+        exprs: &[Expr],
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
         let mut subst = vec![];
-        let mut elem_types = vec![];
-
-        for elem in elems {
-            let elem_subst = self.infer_expr(ctx, elem)?;
-            let elem_type = apply_subst(
-                &ctx.get_type(elem).unwrap_or(Type::Unit),
-                &elem_subst,
-            );
-            elem_types.push(elem_type);
-            subst = compose_subst(&elem_subst, &subst);
+        let mut types = vec![];
+        for expr in exprs {
+            let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+            let (s, ty) = self.infer_expr(&ctx_sub, expr)?;
+            subst = compose_subst(&s, &subst);
+            types.push(apply_subst(&ty, &subst));
         }
-
-        subst.push((TypeVar::fresh(), Type::Tuple(elem_types)));
-        Ok(subst)
+        Ok((subst, Type::Tuple(types)))
     }
 
-    // -- Record inference --
-
+    /// Infer the type of a record expression.
     fn infer_record(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         fields: &[(String, Expr)],
-        _span: &Span,
-    ) -> NuResult<Substitution> {
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
         let mut subst = vec![];
         let mut field_types = vec![];
-
         for (name, expr) in fields {
-            let field_subst = self.infer_expr(ctx, expr)?;
-            let field_type = apply_subst(
-                &ctx.get_type(expr).unwrap_or(Type::Unit),
-                &field_subst,
-            );
-            field_types.push((name.clone(), field_type));
-            subst = compose_subst(&field_subst, &subst);
+            let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+            let (s, ty) = self.infer_expr(&ctx_sub, expr)?;
+            subst = compose_subst(&s, &subst);
+            field_types.push((name.clone(), apply_subst(&ty, &subst)));
         }
-
-        subst.push((TypeVar::fresh(), Type::Record(field_types)));
-        Ok(subst)
+        Ok((subst, Type::Record(field_types)))
     }
 
-    // -- Field access inference --
-
+    /// Infer the type of a field access expression.
     fn infer_field_access(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         expr: &Expr,
         field: &str,
-        span: &Span,
-    ) -> NuResult<Substitution> {
-        let expr_subst = self.infer_expr(ctx, expr)?;
-        let expr_type = apply_subst(
-            &ctx.get_type(expr).unwrap_or(Type::Unit),
-            &expr_subst,
-        );
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        let (s1, record_ty) = self.infer_expr(ctx, expr)?;
 
         // Create a fresh type variable for the field
-        let field_type = Type::Var(TypeVar::fresh());
+        let field_var = Type::Var(TypeVar::fresh());
 
-        // The expression type must be a record with this field
-        let expected = Type::Record(vec![(field.to_string(), field_type.clone())]);
-        let access_subst = mgu(&expr_type, &expected, span)?;
+        // Build a record type with the requested field
+        let expected = Type::Record(vec![(field.to_string(), field_var.clone())]);
 
-        let mut subst = compose_subst(&access_subst, &expr_subst);
-        subst.push((TypeVar::fresh(), field_type));
-        Ok(subst)
+        let s2 = mgu(&apply_subst(&record_ty, &s1), &expected, span)?;
+        let final_subst = compose_subst(&s2, &s1);
+
+        Ok((final_subst.clone(), apply_subst(&field_var, &final_subst)))
     }
 
-    // -- Array inference --
-
+    /// Infer the type of an array expression.
     fn infer_array(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         elems: &[Expr],
-        _span: &Span,
-    ) -> NuResult<Substitution> {
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
         if elems.is_empty() {
-            subst.push((TypeVar::fresh(), Type::Array(Box::new(Type::Var(TypeVar::fresh())))));
-            return Ok(subst);
+            let elem_var = Type::Var(TypeVar::fresh());
+            return Ok((vec![], Type::Array(Box::new(elem_var))));
         }
 
         let mut subst = vec![];
-        let first_subst = self.infer_expr(ctx, &elems[0])?;
-        let first_type = apply_subst(
-            &ctx.get_type(&elems[0]).unwrap_or(Type::Unit),
-            &first_subst,
-        );
-        subst = first_subst;
+        let (s1, first_ty) = self.infer_expr(ctx, &elems[0])?;
+        subst = s1;
 
         for elem in &elems[1..] {
-            let elem_subst = self.infer_expr(ctx, elem)?;
-            let elem_type = apply_subst(
-                &ctx.get_type(elem).unwrap_or(Type::Unit),
-                &elem_subst,
-            );
-            let unify_subst = mgu(&first_type, &elem_type, _span)?;
-            subst = compose_subst(&unify_subst, &subst);
-            subst = compose_subst(&elem_subst, &subst);
+            let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+            let (s, ty) = self.infer_expr(&ctx_sub, elem)?;
+            let s_unify = mgu(&apply_subst(&ty, &s), &apply_subst(&first_ty, &subst), Span::default())?;
+            subst = compose_subst(&s_unify, &compose_subst(&s, &subst));
         }
 
-        subst.push((TypeVar::fresh(), Type::Array(Box::new(first_type))));
-        Ok(subst)
+        Ok((subst.clone(), Type::Array(Box::new(apply_subst(&first_ty, &subst)))))
     }
 
-    // -- Index inference --
-
+    /// Infer the type of an array index expression.
     fn infer_index(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         arr: &Expr,
         idx: &Expr,
-        span: &Span,
-    ) -> NuResult<Substitution> {
-        let arr_subst = self.infer_expr(ctx, arr)?;
-        let idx_subst = self.infer_expr(ctx, idx)?;
-
-        let arr_type = apply_subst(
-            &ctx.get_type(arr).unwrap_or(Type::Unit),
-            &arr_subst,
-        );
-        let idx_type = apply_subst(
-            &ctx.get_type(idx).unwrap_or(Type::Unit),
-            &idx_subst,
-        );
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        let (s1, arr_ty) = self.infer_expr(ctx, arr)?;
+        let ctx1 = apply_subst_to_ctx(ctx, &s1);
+        let (s2, idx_ty) = self.infer_expr(&ctx1, idx)?;
 
         // Index must be Int
-        let idx_unify = mgu(&idx_type, &Type::Int, span)?;
+        let s_idx = mgu(&apply_subst(&idx_ty, &s2), &Type::int(), span)?;
+        let s_combined = compose_subst(&s_idx, &compose_subst(&s2, &s1));
 
-        // Array type must be Array of some element type
-        let elem_type = Type::Var(TypeVar::fresh());
-        let arr_unify = mgu(&arr_type, &Type::Array(Box::new(elem_type.clone())), span)?;
+        // Array type
+        let elem_var = Type::Var(TypeVar::fresh());
+        let s_arr = mgu(
+            &apply_subst(&arr_ty, &s_combined),
+            &Type::Array(Box::new(elem_var.clone())),
+            span,
+        )?;
+        let final_subst = compose_subst(&s_arr, &s_combined);
 
-        let mut subst = compose_subst(&arr_subst, &idx_subst);
-        subst = compose_subst(&idx_unify, &subst);
-        subst = compose_subst(&arr_unify, &subst);
-        subst.push((TypeVar::fresh(), elem_type));
-
-        Ok(subst)
+        Ok((final_subst.clone(), apply_subst(&elem_var, &final_subst)))
     }
 
-    // -- Pattern matching inference --
-
+    /// Infer the type of a pattern match expression.
     fn infer_match(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         scrutinee: &Expr,
         arms: &[(Pattern, Expr)],
-        span: &Span,
-    ) -> NuResult<Substitution> {
-        let scrut_subst = self.infer_expr(ctx, scrutinee)?;
-        let scrut_type = apply_subst(
-            &ctx.get_type(scrutinee).unwrap_or(Type::Unit),
-            &scrut_subst,
-        );
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        // Infer scrutinee type
+        let (s1, scrut_ty) = self.infer_expr(ctx, scrutinee)?;
 
-        let mut subst = scrut_subst;
-        let mut result_type = Type::Var(TypeVar::fresh());
+        // Infer each arm
+        let mut subst = s1;
+        let mut arm_types = vec![];
 
-        for (pattern, arm_body) in arms {
-            // Infer pattern bindings
-            let pat_bindings = self.pattern_bindings(pattern, &scrut_type);
-            let mut arm_ctx = ctx.clone();
-            for (name, ty) in pat_bindings {
-                arm_ctx = arm_ctx.extend(name, ty);
-            }
-
-            let arm_subst = self.infer_expr(&mut arm_ctx, arm_body)?;
-            let arm_type = apply_subst(
-                &arm_ctx.get_type(arm_body).unwrap_or(Type::Unit),
-                &arm_subst,
-            );
-
-            let unify_subst = mgu(&result_type, &arm_type, span)?;
-            result_type = apply_subst(&result_type, &unify_subst);
-            subst = compose_subst(&unify_subst, &subst);
-            subst = compose_subst(&arm_subst, &subst);
+        for (pattern, arm_expr) in arms {
+            let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+            // Bind pattern variables to the context
+            let pattern_ctx = self.bind_pattern(&ctx_sub, pattern, &apply_subst(&scrut_ty, &subst))?;
+            let (s_arm, arm_ty) = self.infer_expr(&pattern_ctx, arm_expr)?;
+            subst = compose_subst(&s_arm, &subst);
+            arm_types.push(apply_subst(&arm_ty, &subst));
         }
 
-        Ok(subst)
+        if arm_types.is_empty() {
+            return Err(NuError::TypeError {
+                msg: "Match expression with no arms".to_string(),
+                span,
+            });
+        }
+
+        // Unify all arm types
+        let first_arm = arm_types[0].clone();
+        let mut final_subst = subst;
+        for arm_ty in &arm_types[1..] {
+            let s = mgu(&apply_subst(arm_ty, &final_subst), &apply_subst(&first_arm, &final_subst), span)?;
+            final_subst = compose_subst(&s, &final_subst);
+        }
+
+        Ok((final_subst.clone(), apply_subst(&first_arm, &final_subst)))
     }
 
-    /// Extract variable bindings from a pattern with their types.
-    fn pattern_bindings(&mut self, pattern: &Pattern, scrut_type: &Type) -> Vec<(String, Type)> {
+    /// Bind pattern variables into a new context.
+    fn bind_pattern(
+        &mut self,
+        ctx: &TypeContext,
+        pattern: &Pattern,
+        scrut_ty: &Type,
+    ) -> NuResult<TypeContext> {
         match pattern {
-            Pattern::Wild => vec![],
-            Pattern::Var(name) => vec![(name.clone(), scrut_type.clone())],
-            Pattern::Lit(_) => vec![],
+            Pattern::Wild => Ok(ctx.clone()),
+            Pattern::Var(name) => Ok(ctx.extend(name.clone(), scrut_ty.clone(), Capability::Ref)),
+            Pattern::Lit(lit) => {
+                let lit_ty = match lit {
+                    Literal::Int(_) => Type::int(),
+                    Literal::Float(_) => Type::float(),
+                    Literal::String(_) => Type::string(),
+                    Literal::Bool(_) => Type::bool(),
+                    Literal::Unit => Type::unit(),
+                };
+                let _ = mgu(scrut_ty, &lit_ty, Span::default())?;
+                Ok(ctx.clone())
+            }
             Pattern::Tuple(pats) => {
-                if let Type::Tuple(elem_types) = scrut_type {
-                    let mut bindings = vec![];
-                    for (pat, ty) in pats.iter().zip(elem_types.iter()) {
-                        bindings.extend(self.pattern_bindings(pat, ty));
+                match scrut_ty {
+                    Type::Tuple(tys) if tys.len() == pats.len() => {
+                        let mut new_ctx = ctx.clone();
+                        for (pat, ty) in pats.iter().zip(tys.iter()) {
+                            new_ctx = self.bind_pattern(&new_ctx, pat, ty)?;
+                        }
+                        Ok(new_ctx)
                     }
-                    bindings
-                } else {
-                    vec![]
+                    _ => {
+                        // Create fresh type vars for tuple elements
+                        let mut new_ctx = ctx.clone();
+                        for pat in pats {
+                            let elem_ty = Type::Var(TypeVar::fresh());
+                            new_ctx = self.bind_pattern(&new_ctx, pat, &elem_ty)?;
+                        }
+                        Ok(new_ctx)
+                    }
                 }
             }
-            Pattern::Record(field_pats) => {
-                if let Type::Record(field_types) = scrut_type {
-                    let mut bindings = vec![];
-                    for (name, pat) in field_pats {
-                        if let Some((_, ty)) = field_types.iter().find(|(n, _)| n == name) {
-                            bindings.extend(self.pattern_bindings(pat, ty));
+            Pattern::Record(pats) => {
+                match scrut_ty {
+                    Type::Record(fields) => {
+                        let mut new_ctx = ctx.clone();
+                        let field_map: std::collections::HashMap<String, Type> = fields.iter()
+                            .map(|(n, t)| (n.clone(), t.clone()))
+                            .collect();
+                        for (field_name, pat) in pats {
+                            if let Some(ty) = field_map.get(field_name) {
+                                new_ctx = self.bind_pattern(&new_ctx, pat, ty)?;
+                            } else {
+                                let fresh = Type::Var(TypeVar::fresh());
+                                new_ctx = self.bind_pattern(&new_ctx, pat, &fresh)?;
+                            }
+                        }
+                        Ok(new_ctx)
+                    }
+                    _ => {
+                        let mut new_ctx = ctx.clone();
+                        for (_, pat) in pats {
+                            let fresh = Type::Var(TypeVar::fresh());
+                            new_ctx = self.bind_pattern(&new_ctx, pat, &fresh)?;
+                        }
+                        Ok(new_ctx)
+                    }
+                }
+            }
+            Pattern::Variant(name, pat) => {
+                match scrut_ty {
+                    Type::Variant(variants) => {
+                        let mut new_ctx = ctx.clone();
+                        if let Some((_, Some(ty))) = variants.iter().find(|(n, _)| n == name) {
+                            if let Some(p) = pat {
+                                new_ctx = self.bind_pattern(&new_ctx, p, ty)?;
+                            }
+                        }
+                        Ok(new_ctx)
+                    }
+                    _ => {
+                        if let Some(p) = pat {
+                            let fresh = Type::Var(TypeVar::fresh());
+                            self.bind_pattern(ctx, p, &fresh)
+                        } else {
+                            Ok(ctx.clone())
                         }
                     }
-                    bindings
-                } else {
-                    vec![]
                 }
             }
-            Pattern::Variant(_, Some(pat)) => self.pattern_bindings(pat, scrut_type),
-            Pattern::Variant(_, None) => vec![],
             Pattern::Alias(name, pat) => {
-                let mut bindings = self.pattern_bindings(pat, scrut_type);
-                bindings.push((name.clone(), scrut_type.clone()));
-                bindings
+                let mut new_ctx = ctx.extend(name.clone(), scrut_ty.clone(), Capability::Ref);
+                new_ctx = self.bind_pattern(&new_ctx, pat, scrut_ty)?;
+                Ok(new_ctx)
             }
         }
     }
 
-    // -- Block inference --
-
+    /// Infer the type of a block expression.
     fn infer_block(
         &mut self,
-        ctx: &mut TypeContext,
+        ctx: &TypeContext,
         exprs: &[Expr],
-    ) -> NuResult<Substitution> {
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        if exprs.is_empty() {
+            return Ok((vec![], Type::unit()));
+        }
+
         let mut subst = vec![];
+        let mut last_ty = Type::unit();
         for expr in exprs {
-            let expr_subst = self.infer_expr(ctx, expr)?;
-            subst = compose_subst(&expr_subst, &subst);
+            let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+            let (s, ty) = self.infer_expr(&ctx_sub, expr)?;
+            subst = compose_subst(&s, &subst);
+            last_ty = ty;
         }
-        Ok(subst)
+        Ok((subst.clone(), apply_subst(&last_ty, &subst)))
     }
 
-    // -- Pipe inference --
-
-    fn infer_pipe(
+    /// Infer actor declaration.
+    fn infer_actor_decl(
         &mut self,
-        ctx: &mut TypeContext,
-        left: &Expr,
-        right: &Expr,
-    ) -> NuResult<Substitution> {
-        // x |> f means f(x)
-        // Infer the left side
-        let left_subst = self.infer_expr(ctx, left)?;
-        let left_type = apply_subst(
-            &ctx.get_type(left).unwrap_or(Type::Unit),
-            &left_subst,
-        );
-
-        // The right side must be a function that accepts the left type
-        let ret_type = Type::Var(TypeVar::fresh());
-        let expected_fun = Type::Arrow(
-            vec![left_type.clone()],
-            Box::new(ret_type.clone()),
-            Box::new(EffectRow::pure()),
-        );
-
-        let right_subst = self.infer_expr(ctx, right)?;
-        let right_type = apply_subst(
-            &ctx.get_type(right).unwrap_or(Type::Unit),
-            &right_subst,
-        );
-
-        let pipe_subst = mgu(&right_type, &expected_fun, &Span::default())?;
-
-        let mut subst = compose_subst(&pipe_subst, &left_subst);
-        subst = compose_subst(&right_subst, &subst);
-        subst.push((TypeVar::fresh(), ret_type));
-
-        Ok(subst)
-    }
-
-    // -- Assignment inference --
-
-    fn infer_assign(
-        &mut self,
-        ctx: &mut TypeContext,
-        target: &Expr,
-        value: &Expr,
-        span: &Span,
-    ) -> NuResult<Substitution> {
-        let target_subst = self.infer_expr(ctx, target)?;
-        let value_subst = self.infer_expr(ctx, value)?;
-
-        let target_type = apply_subst(
-            &ctx.get_type(target).unwrap_or(Type::Unit),
-            &target_subst,
-        );
-        let value_type = apply_subst(
-            &ctx.get_type(value).unwrap_or(Type::Unit),
-            &value_subst,
-        );
-
-        let unify_subst = mgu(&target_type, &value_type, span)?;
-
-        let mut subst = compose_subst(&target_subst, &value_subst);
-        subst = compose_subst(&unify_subst, &subst);
-        subst.push((TypeVar::fresh(), Type::Unit)); // Assignment returns Unit
-
-        Ok(subst)
-    }
-
-    /// Get the inferred type of an expression from the context.
-    /// This is a helper that looks up the last inferred type for an expression.
-    pub fn get_expr_type(&self, ctx: &TypeContext, expr: &Expr) -> Option<Type> {
-        // For now, return the type based on the expression structure
-        // In a full implementation, we'd store inferred types per-expression
-        match expr {
-            Expr::Literal(lit, _) => Some(match lit {
-                Literal::Int(_) => Type::Int,
-                Literal::Float(_) => Type::Float,
-                Literal::Bool(_) => Type::Bool,
-                Literal::String(_) => Type::String,
-                Literal::Unit => Type::Unit,
-            }),
-            Expr::Var(name, _) => ctx.lookup(name).cloned(),
-            Expr::Tuple(elems, _) => {
-                let types: Vec<Type> = elems.iter()
-                    .map(|e| self.get_expr_type(ctx, e).unwrap_or(Type::Var(TypeVar::fresh())))
-                    .collect();
-                Some(Type::Tuple(types))
+        ctx: &TypeContext,
+        _name: &str,
+        behaviors: &[Behavior],
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        // Check each behavior
+        for behavior in behaviors {
+            let mut behavior_ctx = ctx.clone();
+            let mut param_types = vec![];
+            for (param_name, param_ty) in &behavior.params {
+                let pty = match param_ty {
+                    Some(t) => t.clone(),
+                    None => Type::Var(TypeVar::fresh()),
+                };
+                behavior_ctx.bind(param_name.clone(), pty.clone(), behavior.cap);
+                param_types.push(pty);
             }
-            Expr::Record(fields, _) => {
-                let types: Vec<(String, Type)> = fields.iter()
-                    .map(|(n, e)| (n.clone(), self.get_expr_type(ctx, e).unwrap_or(Type::Var(TypeVar::fresh()))))
-                    .collect();
-                Some(Type::Record(types))
-            }
-            Expr::Array(elems, _) => {
-                let elem_type = elems.first()
-                    .and_then(|e| self.get_expr_type(ctx, e))
-                    .unwrap_or(Type::Var(TypeVar::fresh()));
-                Some(Type::Array(Box::new(elem_type)))
-            }
-            _ => None,
+            let (_s, _body_ty) = self.infer_expr(&behavior_ctx, &behavior.body)?;
+            // We could store behavior types here
         }
+
+        let actor_ty = Type::Actor {
+            state: Box::new(Type::Var(TypeVar::fresh())),
+            behavior: Box::new(Type::Var(TypeVar::fresh())),
+        };
+        Ok((vec![], actor_ty))
+    }
+
+    /// Infer agent declaration.
+    fn infer_agent_decl(
+        &mut self,
+        ctx: &TypeContext,
+        _name: &str,
+        behaviors: &[Behavior],
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        // Check each behavior (similar to actors)
+        for behavior in behaviors {
+            let mut behavior_ctx = ctx.clone();
+            for (param_name, param_ty) in &behavior.params {
+                let pty = match param_ty {
+                    Some(t) => t.clone(),
+                    None => Type::Var(TypeVar::fresh()),
+                };
+                behavior_ctx.bind(param_name.clone(), pty.clone(), behavior.cap);
+            }
+            let (_s, _body_ty) = self.infer_expr(&behavior_ctx, &behavior.body)?;
+        }
+
+        let agent_ty = Type::Agent {
+            state: Box::new(Type::Var(TypeVar::fresh())),
+            policy: Box::new(Type::Var(TypeVar::fresh())),
+            memory: Box::new(Type::Var(TypeVar::fresh())),
+            tools: Box::new(Type::Var(TypeVar::fresh())),
+        };
+        Ok((vec![], agent_ty))
+    }
+
+    /// Infer spawn expression.
+    fn infer_spawn(
+        &mut self,
+        ctx: &TypeContext,
+        actor_type: &Expr,
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        let (s, actor_ty) = self.infer_expr(ctx, actor_type)?;
+        match &actor_ty {
+            Type::Actor { .. } => Ok((s, actor_ty.clone())),
+            _ => {
+                // Try to unify with Actor type
+                let fresh_actor = Type::Actor {
+                    state: Box::new(Type::Var(TypeVar::fresh())),
+                    behavior: Box::new(Type::Var(TypeVar::fresh())),
+                };
+                let s2 = mgu(&actor_ty, &fresh_actor, span)?;
+                let final_subst = compose_subst(&s2, &s);
+                Ok((final_subst, fresh_actor))
+            }
+        }
+    }
+
+    /// Infer send expression.
+    fn infer_send(
+        &mut self,
+        ctx: &TypeContext,
+        actor: &Expr,
+        _behavior: &str,
+        args: &[Expr],
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        let (s1, actor_ty) = self.infer_expr(ctx, actor)?;
+
+        // Actor must be an actor type
+        let actor_var = TypeVar::fresh();
+        let fresh_actor = Type::Actor {
+            state: Box::new(Type::Var(actor_var)),
+            behavior: Box::new(Type::Var(TypeVar::fresh())),
+        };
+        let s2 = mgu(&apply_subst(&actor_ty, &s1), &fresh_actor, span)?;
+        let s_combined = compose_subst(&s2, &s1);
+
+        // Infer argument types
+        let mut subst = s_combined;
+        for arg in args {
+            let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+            let (s_arg, _arg_ty) = self.infer_expr(&ctx_sub, arg)?;
+            subst = compose_subst(&s_arg, &subst);
+        }
+
+        // Send returns Unit
+        Ok((subst, Type::unit()))
+    }
+
+    /// Infer ask expression.
+    fn infer_ask(&mut self, ctx: &TypeContext, actor: &Expr, span: Span) -> NuResult<(Substitution, Type)> {
+        let (s1, actor_ty) = self.infer_expr(ctx, actor)?;
+
+        let fresh_actor = Type::Actor {
+            state: Box::new(Type::Var(TypeVar::fresh())),
+            behavior: Box::new(Type::Var(TypeVar::fresh())),
+        };
+        let s2 = mgu(&actor_ty, &fresh_actor, span)?;
+        let subst = compose_subst(&s2, &s1);
+
+        // Ask returns a fresh type (the behavior's return type)
+        let ret_var = Type::Var(TypeVar::fresh());
+        Ok((subst, ret_var))
+    }
+
+    /// Infer perform expression.
+    fn infer_perform(
+        &mut self,
+        ctx: &TypeContext,
+        _effect: &str,
+        args: &[Expr],
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        let mut subst = vec![];
+        for arg in args {
+            let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+            let (s, _ty) = self.infer_expr(&ctx_sub, arg)?;
+            subst = compose_subst(&s, &subst);
+        }
+        // Perform returns a fresh type variable
+        let ret_var = Type::Var(TypeVar::fresh());
+        Ok((subst, ret_var))
+    }
+
+    /// Infer handle expression.
+    fn infer_handle(
+        &mut self,
+        ctx: &TypeContext,
+        body: &Expr,
+        _span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        // Infer body type
+        let (s, body_ty) = self.infer_expr(ctx, body)?;
+        // The result type is the same as the body type (handlers must return compatible types)
+        Ok((s, body_ty))
+    }
+
+    /// Infer for comprehension.
+    fn infer_for(
+        &mut self,
+        ctx: &TypeContext,
+        var: &str,
+        iterable: &Expr,
+        body: &Expr,
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        // Infer iterable type (should be array-like)
+        let (s1, iter_ty) = self.infer_expr(ctx, iterable)?;
+
+        let elem_var = Type::Var(TypeVar::fresh());
+        let s2 = mgu(
+            &apply_subst(&iter_ty, &s1),
+            &Type::Array(Box::new(elem_var.clone())),
+            span,
+        )?;
+        let s_combined = compose_subst(&s2, &s1);
+
+        // Bind the loop variable
+        let body_ctx = ctx.extend(var.to_string(), apply_subst(&elem_var, &s_combined), Capability::Ref);
+
+        // Infer body
+        let (s3, _body_ty) = self.infer_expr(&body_ctx, body)?;
+        let final_subst = compose_subst(&s3, &s_combined);
+
+        // For returns Unit
+        Ok((final_subst, Type::unit()))
+    }
+
+    // -----------------------------------------------------------------------
+    // Generalization with tracked context vars
+    // -----------------------------------------------------------------------
+
+    /// Generalize a type by abstracting over free variables not in the context.
+    fn do_generalize(&self, ctx: &TypeContext, ty: &Type) -> Type {
+        let ty_fv: HashSet<TypeVar> = ty.free_vars().into_iter().collect();
+        let ctx_fv = self.get_ctx_free_vars(ctx);
+        let gen_vars: Vec<TypeVar> = ty_fv.difference(&ctx_fv).copied().collect();
+
+        if gen_vars.is_empty() {
+            ty.clone()
+        } else {
+            Type::Scheme {
+                vars: gen_vars,
+                body: Box::new(ty.clone()),
+            }
+        }
+    }
+
+    /// Get free type variables from the context.
+    fn get_ctx_free_vars(&self, ctx: &TypeContext) -> HashSet<TypeVar> {
+        // Combine tracked context vars with any vars we can discover
+        let mut vars = self.ctx_free_vars.clone();
+        // We can't iterate TypeContext directly, so we rely on the tracked set
+        // The tracked set is updated when we add bindings
+        vars
+    }
+}
+
+impl Default for TypeChecker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 // ---------------------------------------------------------------------------
-// TypeContext extension
-// ---------------------------------------------------------------------------
-
-impl TypeContext {
-    /// Look up a type scheme by name.
-    pub fn lookup(&self, name: &str) -> Option<&Type> {
-        self.bindings.iter().rev().find(|(n, _)| n == name).map(|(_, t)| t)
-    }
-
-    /// Extend the context with a new binding.
-    pub fn extend(&self, name: String, ty: Type) -> Self {
-        let mut ctx = self.clone();
-        ctx.bindings.push((name, ty));
-        ctx
-    }
-
-    /// Get the inferred type for an expression (placeholder for full implementation).
-    pub fn get_type(&self, _expr: &Expr) -> Option<Type> {
-        // In a full implementation, this would look up the stored type for the expression
-        None
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
+// Unit Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser;
 
-    fn infer_source(source: &str) -> NuResult<Type> {
-        let module = parser::parse(source)?;
+    // Helper to create a span
+    fn sp() -> Span {
+        Span::new(0, 0, 1, 1)
+    }
+
+    // Helper to create an int literal expression
+    fn int_lit(n: i64) -> Expr {
+        Expr::Literal(Literal::Int(n), sp())
+    }
+
+    // Helper to create a bool literal
+    fn bool_lit(b: bool) -> Expr {
+        Expr::Literal(Literal::Bool(b), sp())
+    }
+
+    // Helper to create a string literal
+    fn string_lit(s: &str) -> Expr {
+        Expr::Literal(Literal::String(s.to_string()), sp())
+    }
+
+    // Helper to create a variable expression
+    fn var(name: &str) -> Expr {
+        Expr::Var(name.to_string(), sp())
+    }
+
+    // Helper to create a lambda
+    fn lambda(param: &str, body: Expr) -> Expr {
+        Expr::Lambda {
+            params: vec![(param.to_string(), None)],
+            body: Box::new(body),
+            effect: None,
+            span: sp(),
+        }
+    }
+
+    // Helper to create application
+    fn app(func: Expr, arg: Expr) -> Expr {
+        Expr::App {
+            func: Box::new(func),
+            args: vec![arg],
+            span: sp(),
+        }
+    }
+
+    // Helper for let binding
+    fn let_(name: &str, value: Expr, body: Expr) -> Expr {
+        Expr::Let {
+            name: name.to_string(),
+            value: Box::new(value),
+            body: Box::new(body),
+            span: sp(),
+        }
+    }
+
+    // Helper for if
+    fn if_(cond: Expr, then_: Expr, else_: Option<Expr>) -> Expr {
+        Expr::If {
+            cond: Box::new(cond),
+            then_branch: Box::new(then_),
+            else_branch: else_.map(Box::new),
+            span: sp(),
+        }
+    }
+
+    // Helper for binary op
+    fn bin(op: BinOp, left: Expr, right: Expr) -> Expr {
+        Expr::Binary {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+            span: sp(),
+        }
+    }
+
+    // Helper for tuple
+    fn tuple(exprs: Vec<Expr>) -> Expr {
+        Expr::Tuple(exprs, sp())
+    }
+
+    // Helper for record
+    fn record(fields: Vec<(&str, Expr)>) -> Expr {
+        Expr::Record(
+            fields.into_iter().map(|(n, e)| (n.to_string(), e)).collect(),
+            sp(),
+        )
+    }
+
+    // Helper for field access
+    fn field(expr: Expr, name: &str) -> Expr {
+        Expr::FieldAccess {
+            expr: Box::new(expr),
+            field: name.to_string(),
+            span: sp(),
+        }
+    }
+
+    // Helper to set up context with a typed binding
+    fn ctx_with(name: &str, ty: Type) -> TypeContext {
+        let mut ctx = TypeContext::new();
+        ctx.bind(name.to_string(), ty, Capability::Ref);
+        ctx
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Literals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_int_literal() {
         let mut tc = TypeChecker::new();
-        tc.check_module(&module)
-    }
-
-    fn expect_type(source: &str, expected: &str) {
-        let ty = infer_source(source).unwrap_or_else(|e| panic!("Type error for '{}': {:?}", source, e));
-        assert_eq!(ty.display(), expected, "For source: {}", source);
-    }
-
-    fn expect_error(source: &str) {
-        assert!(infer_source(source).is_err(), "Expected type error for: {}", source);
-    }
-
-    // -- Literals --
-
-    #[test]
-    fn test_literal_int() {
-        expect_type("42", "Int");
+        let ctx = TypeContext::new();
+        let (s, ty) = tc.infer_expr(&ctx, &int_lit(42)).unwrap();
+        assert!(s.is_empty());
+        assert_eq!(ty, Type::int());
     }
 
     #[test]
-    fn test_literal_float() {
-        expect_type("3.14", "Float");
+    fn test_infer_bool_literal() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        let (s, ty) = tc.infer_expr(&ctx, &bool_lit(true)).unwrap();
+        assert!(s.is_empty());
+        assert_eq!(ty, Type::bool());
     }
 
     #[test]
-    fn test_literal_bool() {
-        expect_type("true", "Bool");
+    fn test_infer_string_literal() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        let (s, ty) = tc.infer_expr(&ctx, &string_lit("hello")).unwrap();
+        assert!(s.is_empty());
+        assert_eq!(ty, Type::string());
     }
 
     #[test]
-    fn test_literal_string() {
-        expect_type(r#""hello""#, "String");
+    fn test_infer_float_literal() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        let expr = Expr::Literal(Literal::Float(3.14), sp());
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert!(s.is_empty());
+        assert_eq!(ty, Type::float());
     }
 
     #[test]
-    fn test_literal_unit() {
-        expect_type("()", "()");
+    fn test_infer_unit_literal() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        let expr = Expr::Literal(Literal::Unit, sp());
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert!(s.is_empty());
+        assert_eq!(ty, Type::unit());
     }
 
-    // -- Variables --
+    // -----------------------------------------------------------------------
+    // Test: Variables
+    // -----------------------------------------------------------------------
 
     #[test]
-    fn test_unbound_variable() {
-        expect_error("x");
-    }
-
-    #[test]
-    fn test_bound_variable() {
-        expect_type("let x = 42 in x", "Int");
-    }
-
-    // -- Let bindings --
-
-    #[test]
-    fn test_let_binding() {
-        expect_type("let x = 5 in x + 3", "Int");
-    }
-
-    #[test]
-    fn test_nested_let() {
-        expect_type("let a = 1 in let b = 2 in a + b", "Int");
+    fn test_infer_bound_variable() {
+        let mut tc = TypeChecker::new();
+        let ctx = ctx_with("x", Type::int());
+        let (s, ty) = tc.infer_expr(&ctx, &var("x")).unwrap();
+        assert!(s.is_empty());
+        assert_eq!(ty, Type::int());
     }
 
     #[test]
-    fn test_let_shadowing() {
-        expect_type("let x = 5 in let x = 10 in x + 1", "Int");
-    }
-
-    // -- Arithmetic --
-
-    #[test]
-    fn test_int_add() {
-        expect_type("1 + 2", "Int");
+    fn test_infer_unbound_variable() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        let result = tc.infer_expr(&ctx, &var("undefined"));
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_int_sub() {
-        expect_type("10 - 3", "Int");
+    fn test_infer_polymorphic_variable() {
+        let mut tc = TypeChecker::new();
+        // Bind 'id' as a polymorphic scheme: forall a. a -> a
+        let a = TypeVar(100);
+        let scheme = Type::Scheme {
+            vars: vec![a],
+            body: Box::new(Type::Function {
+                param: Box::new(Type::Var(a)),
+                ret: Box::new(Type::Var(a)),
+                effect: EffectRow::empty(),
+                cap: Capability::Ref,
+            }),
+        };
+        let ctx = ctx_with("id", scheme);
+        let (s, ty) = tc.infer_expr(&ctx, &var("id")).unwrap();
+        assert!(s.is_empty());
+        // Should be instantiated to a fresh function type
+        match ty {
+            Type::Function { param, ret, .. } => {
+                // param and ret should be the same fresh variable
+                assert_eq!(*param, *ret);
+            }
+            _ => panic!("Expected function type, got {:?}", ty),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Lambda
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_identity_lambda() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        let expr = lambda("x", var("x"));
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert!(s.is_empty());
+        match ty {
+            Type::Function { param, ret, .. } => {
+                assert_eq!(*param, *ret);
+            }
+            _ => panic!("Expected function type, got {:?}", ty),
+        }
     }
 
     #[test]
-    fn test_int_mul() {
-        expect_type("6 * 7", "Int");
+    fn test_infer_const_lambda() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        let expr = lambda("x", int_lit(42));
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert!(s.is_empty());
+        match ty {
+            Type::Function { param: _, ret, .. } => {
+                assert_eq!(*ret, Type::int());
+            }
+            _ => panic!("Expected function type, got {:?}", ty),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Application
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_app_identity() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // (fn x => x)(42)
+        let expr = app(lambda("x", var("x")), int_lit(42));
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        // Should infer Int (applying identity to 42)
+        assert_eq!(apply_subst(&ty, &s), Type::int());
     }
 
     #[test]
-    fn test_int_div() {
-        expect_type("21 / 3", "Int");
+    fn test_infer_app_const() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // (fn x => 42)("hello")
+        let expr = app(lambda("x", int_lit(42)), string_lit("hello"));
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        // Should infer Int (const function ignores its argument)
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Let bindings
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_simple_let() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // let x = 42 in x
+        let expr = let_("x", int_lit(42), var("x"));
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
     }
 
     #[test]
-    fn test_int_mod() {
-        expect_type("17 % 5", "Int");
-    }
-
-    #[test]
-    fn test_int_neg() {
-        expect_type("-42", "Int");
-    }
-
-    #[test]
-    fn test_arithmetic_precedence() {
-        expect_type("1 + 2 * 3", "Int");
-    }
-
-    #[test]
-    fn test_float_add() {
-        expect_type("1.5 + 2.5", "Float");
-    }
-
-    #[test]
-    fn test_float_mul() {
-        expect_type("2.5 * 4.0", "Float");
-    }
-
-    // -- Comparison --
-
-    #[test]
-    fn test_int_eq() {
-        expect_type("3 == 3", "Bool");
-    }
-
-    #[test]
-    fn test_int_lt() {
-        expect_type("3 < 5", "Bool");
-    }
-
-    #[test]
-    fn test_int_gt() {
-        expect_type("5 > 3", "Bool");
-    }
-
-    #[test]
-    fn test_int_lte() {
-        expect_type("3 <= 3", "Bool");
-    }
-
-    #[test]
-    fn test_int_gte() {
-        expect_type("5 >= 5", "Bool");
-    }
-
-    // -- Boolean logic --
-
-    #[test]
-    fn test_and() {
-        expect_type("true and true", "Bool");
-        expect_error("true and 1");
-    }
-
-    #[test]
-    fn test_or() {
-        expect_type("true or false", "Bool");
-    }
-
-    #[test]
-    fn test_not() {
-        expect_type("not true", "Bool");
-    }
-
-    // -- Conditionals --
-
-    #[test]
-    fn test_if_true() {
-        expect_type("if true then 42 else 0", "Int");
-    }
-
-    #[test]
-    fn test_if_comparison() {
-        expect_type("if 3 < 5 then 1 else 0", "Int");
-    }
-
-    #[test]
-    fn test_if_nested() {
-        expect_type("if 1 < 2 then if 3 < 4 then 100 else 50 else 25", "Int");
-    }
-
-    #[test]
-    fn test_if_mismatched_branches() {
-        expect_error(r#"if true then 1 else "hello""#);
-    }
-
-    // -- Functions --
-
-    #[test]
-    fn test_function_declaration() {
-        expect_type("fun add(x: Int, y: Int) = x + y\nadd(3, 4)", "Int");
-    }
-
-    #[test]
-    fn test_function_zero_args() {
-        expect_type("fun answer() = 42\nanswer()", "Int");
-    }
-
-    #[test]
-    fn test_lambda() {
-        expect_type("fn(x: Int) -> x + 1", "(Int) -> Int {}");
-    }
-
-    // -- Tuples --
-
-    #[test]
-    fn test_tuple_create() {
-        expect_type("(1, 2, 3)", "(Int, Int, Int)");
-    }
-
-    #[test]
-    fn test_tuple_nested() {
-        expect_type("((1, 2), (3, 4))", "((Int, Int), (Int, Int))");
-    }
-
-    // -- Records --
-
-    #[test]
-    fn test_record_create() {
-        expect_type("{ x: 10, y: 20 }", "{ x: Int, y: Int }");
-    }
-
-    #[test]
-    fn test_record_access() {
-        expect_type("let r = { x: 10, y: 20 } in r.x", "Int");
-    }
-
-    // -- Arrays --
-
-    #[test]
-    fn test_array_create() {
-        expect_type("[1, 2, 3]", "[Int]");
-    }
-
-    // -- Pattern matching --
-
-    #[test]
-    fn test_match_int_literal() {
-        expect_type("match 1 with | 1 => 100 | 2 => 200 | _ => 0", "Int");
-    }
-
-    #[test]
-    fn test_match_bool() {
-        expect_type("match true with | true => 1 | false => 0", "Int");
-    }
-
-    #[test]
-    fn test_match_tuple() {
-        expect_type("match (1, 2) with | (a, b) => a + b", "Int");
-    }
-
-    #[test]
-    fn test_match_wildcard() {
-        expect_type("match 42 with | _ => 100", "Int");
-    }
-
-    // -- Recursion --
-
-    #[test]
-    fn test_factorial() {
-        expect_type(
-            "let rec fact = fn(n: Int) -> if n == 0 then 1 else n * fact(n - 1) in fact(5)",
-            "Int",
+    fn test_infer_let_with_usage() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // let x = 42 in x + 1
+        let expr = let_(
+            "x",
+            int_lit(42),
+            bin(BinOp::Add, var("x"), int_lit(1)),
         );
-    }
-
-    // -- Polymorphism --
-
-    #[test]
-    fn test_identity_polymorphic() {
-        expect_type("let id = fn(x) -> x in id(42)", "Int");
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
     }
 
     #[test]
-    fn test_identity_bool() {
-        expect_type("let id = fn(x) -> x in id(true)", "Bool");
+    fn test_infer_let_polymorphism() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // let id = fn x => x in (id(42), id(true))
+        // This tests that 'id' is polymorphic
+        let id = lambda("x", var("x"));
+        let body = tuple(vec![app(var("id"), int_lit(42)), app(var("id"), bool_lit(true))]);
+        let expr = let_("id", id, body);
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        match apply_subst(&ty, &s) {
+            Type::Tuple(ts) if ts.len() == 2 => {
+                assert_eq!(ts[0], Type::int());
+                assert_eq!(ts[1], Type::bool());
+            }
+            other => panic!("Expected Tuple[Int, Bool], got {:?}", other),
+        }
     }
 
-    // -- Type errors --
+    // -----------------------------------------------------------------------
+    // Test: If expressions
+    // -----------------------------------------------------------------------
 
     #[test]
-    fn test_type_error_int_plus_string() {
-        expect_error(r#"1 + "hello""#);
+    fn test_infer_if_then_else() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // if true then 42 else 0
+        let expr = if_(bool_lit(true), int_lit(42), Some(int_lit(0)));
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
     }
 
     #[test]
-    fn test_type_error_string_plus_int() {
-        expect_error(r#""hello" + 1"#);
+    fn test_infer_if_with_condition_error() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // if 42 then 0 else 1 (condition must be bool)
+        let expr = if_(int_lit(42), int_lit(0), Some(int_lit(1)));
+        let result = tc.infer_expr(&ctx, &expr);
+        assert!(result.is_err());
     }
 
     #[test]
-    fn test_type_error_bool_arithmetic() {
-        expect_error("true + 1");
+    fn test_infer_if_branch_mismatch() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // if true then 42 else "hello" (branch mismatch)
+        let expr = if_(bool_lit(true), int_lit(42), Some(string_lit("hello")));
+        let result = tc.infer_expr(&ctx, &expr);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Binary operators
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_binop_arithmetic() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // 1 + 2
+        let expr = bin(BinOp::Add, int_lit(1), int_lit(2));
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
     }
 
     #[test]
-    fn test_type_error_undefined_var() {
-        expect_error("x + 1");
+    fn test_infer_binop_comparison() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // 1 < 2
+        let expr = bin(BinOp::Lt, int_lit(1), int_lit(2));
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::bool());
     }
 
-    // -- Pipes --
-
     #[test]
-    fn test_pipe_operator() {
-        expect_type("let add = fn(x: Int) -> fn(y: Int) -> x + y in 5 |> add(3)", "Int");
+    fn test_infer_binop_boolean() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // true && false
+        let expr = bin(BinOp::And, bool_lit(true), bool_lit(false));
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::bool());
     }
 
-    // -- Blocks --
+    #[test]
+    fn test_infer_binop_bitwise() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // 1 & 2
+        let expr = bin(BinOp::BitAnd, int_lit(1), int_lit(2));
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
 
     #[test]
-    fn test_block() {
-        expect_type("{ 1; 2; 3 }", "Int");
+    fn test_infer_binop_boolean_error() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // 1 && 2 (must be bool)
+        let expr = bin(BinOp::And, int_lit(1), int_lit(2));
+        let result = tc.infer_expr(&ctx, &expr);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Unary operators
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_unary_neg() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // -42
+        let expr = Expr::Unary {
+            op: UnOp::Neg,
+            expr: Box::new(int_lit(42)),
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        // Negation on Int should give Int
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    #[test]
+    fn test_infer_unary_not() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // !true
+        let expr = Expr::Unary {
+            op: UnOp::Not,
+            expr: Box::new(bool_lit(true)),
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::bool());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Tuples
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_tuple() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // (42, true, "hello")
+        let expr = tuple(vec![int_lit(42), bool_lit(true), string_lit("hello")]);
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        match apply_subst(&ty, &s) {
+            Type::Tuple(ts) => {
+                assert_eq!(ts.len(), 3);
+                assert_eq!(ts[0], Type::int());
+                assert_eq!(ts[1], Type::bool());
+                assert_eq!(ts[2], Type::string());
+            }
+            other => panic!("Expected tuple, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_infer_empty_tuple() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        let expr = tuple(vec![]);
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        match apply_subst(&ty, &s) {
+            Type::Tuple(ts) => assert!(ts.is_empty()),
+            other => panic!("Expected empty tuple, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Records
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_record() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // { x: 42, y: true }
+        let expr = record(vec![("x", int_lit(42)), ("y", bool_lit(true))]);
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        match apply_subst(&ty, &s) {
+            Type::Record(fields) => {
+                assert_eq!(fields.len(), 2);
+                // Fields may be in any order
+                let field_map: std::collections::HashMap<String, Type> =
+                    fields.into_iter().collect();
+                assert_eq!(field_map.get("x"), Some(&Type::int()));
+                assert_eq!(field_map.get("y"), Some(&Type::bool()));
+            }
+            other => panic!("Expected record, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Field access
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_field_access() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // { x: 42, y: true }.x
+        let rec = record(vec![("x", int_lit(42)), ("y", bool_lit(true))]);
+        let expr = field(rec, "x");
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Recursive functions (let rec)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_letrec() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // let rec fact n = if n == 0 then 1 else n * fact(n - 1) in fact(5)
+        // (simplified: let rec f x = x in f(42))
+        let body = var("x");
+        let rec_expr = Expr::LetRec {
+            name: "f".to_string(),
+            params: vec![("x".to_string(), None)],
+            value: Box::new(body),
+            body: Box::new(app(var("f"), int_lit(42))),
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &rec_expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Block
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_block() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // { 1; 2; 3 }
+        let expr = Expr::Block {
+            exprs: vec![int_lit(1), int_lit(2), int_lit(3)],
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Array
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_array() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // [1, 2, 3]
+        let expr = Expr::Array(vec![int_lit(1), int_lit(2), int_lit(3)], sp());
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        match apply_subst(&ty, &s) {
+            Type::Array(elem_ty) => {
+                assert_eq!(*elem_ty, Type::int());
+            }
+            other => panic!("Expected array, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Pattern matching
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_match_wildcard() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // match 42 { | _ => 0 }
+        let expr = Expr::Match {
+            scrutinee: Box::new(int_lit(42)),
+            arms: vec![(Pattern::Wild, int_lit(0))],
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    #[test]
+    fn test_infer_match_variable() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // match 42 { | x => x }
+        let expr = Expr::Match {
+            scrutinee: Box::new(int_lit(42)),
+            arms: vec![(Pattern::Var("x".to_string()), var("x"))],
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Pipe operator
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_pipe() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // 42 |> (fn x => x)
+        let expr = Expr::Pipe {
+            left: Box::new(int_lit(42)),
+            right: Box::new(lambda("x", var("x"))),
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Type annotation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_type_annotate() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // 42 : Int
+        let expr = Expr::TypeAnnotate {
+            expr: Box::new(int_lit(42)),
+            ty: Type::int(),
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    #[test]
+    fn test_infer_type_annotate_error() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // 42 : Bool (wrong annotation)
+        let expr = Expr::TypeAnnotate {
+            expr: Box::new(int_lit(42)),
+            ty: Type::bool(),
+            span: sp(),
+        };
+        let result = tc.infer_expr(&ctx, &expr);
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Polymorphism
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_polymorphism_twice() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // let f = fn x => x in let a = f(1) in let b = f(true) in (a, b)
+        let f = lambda("x", var("x"));
+        let inner = let_(
+            "b",
+            app(var("f"), bool_lit(true)),
+            tuple(vec![var("a"), var("b")]),
+        );
+        let middle = let_("a", app(var("f"), int_lit(1)), inner);
+        let expr = let_("f", f, middle);
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        match apply_subst(&ty, &s) {
+            Type::Tuple(ts) => {
+                assert_eq!(ts[0], Type::int());
+                assert_eq!(ts[1], Type::bool());
+            }
+            other => panic!("Expected Tuple[Int, Bool], got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Substitution operations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compose_subst() {
+        let v1 = TypeVar(1);
+        let v2 = TypeVar(2);
+        let s1 = vec![(v1, Type::int())];
+        let s2 = vec![(v2, Type::Var(v1))];
+        let composed = compose_subst(&s2, &s1);
+        // Applying composed to v2 should give Int (v1 -> Int, then v2 -> v1)
+        let ty = apply_subst(&Type::Var(v2), &composed);
+        assert_eq!(ty, Type::int());
+    }
+
+    #[test]
+    fn test_mgu_same_type() {
+        let t1 = Type::int();
+        let t2 = Type::int();
+        let s = mgu(&t1, &t2, sp()).unwrap();
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn test_mgu_var_type() {
+        let v = TypeVar(1);
+        let t = Type::int();
+        let s = mgu(&Type::Var(v), &t, sp()).unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].0, v);
+        assert_eq!(s[0].1, Type::int());
+    }
+
+    #[test]
+    fn test_mgu_function() {
+        let v1 = TypeVar(1);
+        let v2 = TypeVar(2);
+        let f1 = Type::Function {
+            param: Box::new(Type::Var(v1)),
+            ret: Box::new(Type::Var(v1)),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        let f2 = Type::Function {
+            param: Box::new(Type::int()),
+            ret: Box::new(Type::Var(v2)),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        let s = mgu(&f1, &f2, sp()).unwrap();
+        let result = apply_subst(&Type::Var(v2), &s);
+        assert_eq!(result, Type::int());
+    }
+
+    #[test]
+    fn test_occurs_check() {
+        let v = TypeVar(1);
+        let t = Type::Function {
+            param: Box::new(Type::Var(v)),
+            ret: Box::new(Type::Var(v)),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        let result = mgu(&Type::Var(v), &t, sp());
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Module checking
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_check_empty_module() {
+        let mut tc = TypeChecker::new();
+        let module = AstModule {
+            name: "test".to_string(),
+            decls: vec![],
+        };
+        let ty = tc.check_module(&module).unwrap();
+        assert_eq!(ty, Type::unit());
+    }
+
+    #[test]
+    fn test_check_module_with_function() {
+        let mut tc = TypeChecker::new();
+        let module = AstModule {
+            name: "test".to_string(),
+            decls: vec![Decl::Function {
+                name: "add1".to_string(),
+                type_params: vec![],
+                params: vec![("x".to_string(), Some(Type::int()))],
+                ret_type: Some(Type::int()),
+                effect: None,
+                cap: None,
+                body: bin(BinOp::Add, var("x"), int_lit(1)),
+                public: true,
+                span: sp(),
+            }],
+        };
+        let ty = tc.check_module(&module).unwrap();
+        match ty {
+            Type::Function { param, ret, .. } => {
+                assert_eq!(*param, Type::int());
+                assert_eq!(*ret, Type::int());
+            }
+            other => panic!("Expected function type, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Generalization and Instantiation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_instantiate_scheme() {
+        let a = TypeVar(100);
+        let scheme = Type::Scheme {
+            vars: vec![a],
+            body: Box::new(Type::Function {
+                param: Box::new(Type::Var(a)),
+                ret: Box::new(Type::Var(a)),
+                effect: EffectRow::empty(),
+                cap: Capability::Ref,
+            }),
+        };
+        let instantiated = instantiate(&scheme);
+        match instantiated {
+            Type::Function { param, ret, .. } => {
+                // After instantiation, param and ret should be equal fresh vars
+                assert_eq!(*param, *ret);
+                // And different from the original
+                assert_ne!(*param, Type::Var(a));
+            }
+            _ => panic!("Expected function type"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Reference types
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_ref() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        // ref(42)
+        let expr = Expr::Unary {
+            op: UnOp::Ref(Capability::Ref),
+            expr: Box::new(int_lit(42)),
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        match apply_subst(&ty, &s) {
+            Type::Reference { cap, inner } => {
+                assert_eq!(cap, Capability::Ref);
+                assert_eq!(*inner, Type::int());
+            }
+            other => panic!("Expected reference type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_infer_deref() {
+        let mut tc = TypeChecker::new();
+        let ctx = ctx_with(
+            "x",
+            Type::Reference {
+                cap: Capability::Ref,
+                inner: Box::new(Type::int()),
+            },
+        );
+        let expr = Expr::Unary {
+            op: UnOp::Deref,
+            expr: Box::new(var("x")),
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
     }
 }
