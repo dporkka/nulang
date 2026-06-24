@@ -187,150 +187,146 @@ pub enum Expr {
         right: Box<Expr>,
         span: Span,
     },
-    /// Try/catch: try expr catch { | Error => handler }
-    Try {
+    /// For comprehension
+    For {
+        var: String,
+        iterable: Box<Expr>,
         body: Box<Expr>,
-        catch_arms: Vec<(Pattern, Expr)>,
         span: Span,
     },
-    /// Await: async result binding
-    Await {
-        expr: Box<Expr>,
-        span: Span,
-    },
-    /// Actor definition (nested within expressions)
-    ActorDef(ActorDef, Span),
-    /// Agent definition (nested within expressions)
-    AgentDef(AgentDef, Span),
+    /// Return from function
+    Return(Option<Box<Expr>>, Span),
+    /// Break from loop
+    Break(Span),
 }
 
-// ---------------------------------------------------------------------------
-// Binary / Unary operators
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add, Sub, Mul, Div, Mod,
     Eq, Ne, Lt, Le, Gt, Ge,
     And, Or,
-    Cons,
+    BitAnd, BitOr, BitXor, Shl, Shr,
+    Assign,
     Pipe,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
-    Neg, Not,
+    Neg, Not, Deref, Ref(Capability),
 }
-
-// ---------------------------------------------------------------------------
-// Effect handler
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectHandler {
-    pub effect: String,
-    pub op: String,
+    pub effect_name: String,
+    pub op_name: String,
     pub params: Vec<String>,
     pub body: Expr,
     pub resume: bool,
 }
 
 // ---------------------------------------------------------------------------
-// Actor definition
+// Behaviors (actor message handlers)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ActorDef {
-    pub name: String,
-    pub type_params: Vec<String>,
-    pub fields: Vec<(String, Type)>,
-    pub behaviors: Vec<Behavior>,
-    pub initial_behaviour: String,
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Behavior {
     pub name: String,
-    pub params: Vec<(String, Type)>,
+    pub params: Vec<(String, Option<Type>)>,
     pub body: Expr,
-    pub effect_annotation: Option<EffectRow>,
+    pub effect: Option<EffectRow>,
+    pub cap: Capability,
+    pub span: Span,
 }
 
 // ---------------------------------------------------------------------------
-// Agent definition
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentDef {
-    pub name: String,
-    pub fields: Vec<(String, Type)>,
-    pub behaviors: Vec<Behavior>,
-    pub llm_config: Option<LlmConfig>,
-    pub tool_bindings: Vec<ToolBinding>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct LlmConfig {
-    pub model: String,
-    pub system_prompt: String,
-    pub temperature: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ToolBinding {
-    pub name: String,
-    pub effect: String,
-    pub description: String,
-}
-
-// ---------------------------------------------------------------------------
-// Declarations (top-level)
+// Declarations
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
-    Fun {
+    /// Function declaration: pub fn name[T](x: T) -> R ! E { body }
+    Function {
         name: String,
         type_params: Vec<String>,
-        params: Vec<(String, Type)>,
+        params: Vec<(String, Option<Type>)>,
         ret_type: Option<Type>,
         effect: Option<EffectRow>,
+        cap: Option<Capability>,
         body: Expr,
+        public: bool,
         span: Span,
     },
+    /// Actor declaration: actor Name { state ..., behavior ..., init ... }
     Actor {
-        def: ActorDef,
+        name: String,
+        type_params: Vec<String>,
+        state_fields: Vec<(String, Type, Expr)>, // name, type, default
+        behaviors: Vec<Behavior>,
+        init: Vec<(String, Expr)>,
         span: Span,
     },
+    /// Agent declaration: agent Name { memory ..., tools ..., policy ..., observe ... }
     Agent {
-        def: AgentDef,
+        name: String,
+        state_fields: Vec<(String, Type, Expr)>,
+        memory_fields: Vec<(String, Type)>,
+        tools: Vec<String>,
+        policy: Option<Expr>,
+        observe: Expr,
+        behaviors: Vec<Behavior>,
         span: Span,
     },
+    /// Type alias: type MyInt = Int
     TypeAlias {
         name: String,
-        params: Vec<String>,
+        type_params: Vec<String>,
         body: Type,
+        public: bool,
         span: Span,
     },
-    Import {
-        path: String,
-        names: Vec<String>,
+    /// Record type: type Point = { x: Int, y: Int }
+    RecordType {
+        name: String,
+        type_params: Vec<String>,
+        fields: Vec<(String, Type)>,
+        public: bool,
         span: Span,
     },
+    /// Variant type: type Option[T] = Some(T) | None
+    VariantType {
+        name: String,
+        type_params: Vec<String>,
+        variants: Vec<(String, Option<Type>)>,
+        public: bool,
+        span: Span,
+    },
+    /// Effect declaration: effect MyEffect { op1: A -> B }
+    EffectDecl {
+        name: String,
+        ops: Vec<(String, Vec<Type>, Type)>, // name, arg types, ret type
+        span: Span,
+    },
+    /// Module declaration: module Name { ... }
     Module {
         name: String,
+        exports: Vec<String>,
         decls: Vec<Decl>,
+        span: Span,
+    },
+    /// Import: import "path" or import Module.{name1, name2}
+    Import {
+        path: String,
+        items: Vec<String>,
         span: Span,
     },
 }
 
 // ---------------------------------------------------------------------------
-// Module (top-level)
+// Top-level AST
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Module {
+pub struct AstModule {
     pub name: String,
     pub decls: Vec<Decl>,
-    pub span: Span,
 }

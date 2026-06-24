@@ -1,547 +1,413 @@
-use std::fmt;
+//! Shared type definitions used across all Nulang compiler and runtime modules.
+
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
-// Source location
+// Type Variables & Regions
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct Span {
-    pub start: u32,
-    pub end: u32,
-    pub line: u32,
-    pub col: u32,
-}
+static TYPE_VAR_COUNTER: AtomicU64 = AtomicU64::new(1);
+static REGION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-// ---------------------------------------------------------------------------
-// Capability lattice (inspired by Pony)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Capability {
-    Iso,  // Isolated — unique reference, no aliases
-    Trn,  // Transition — unique, can become iso or ref
-    Ref,  // Reference — shared read/write
-    Val,  // Value — shared read-only, deeply immutable
-    Box,  // Box — owned, unique but not sendable
-    Tag,  // Tag — no read/write, only identity comparison
-}
-
-impl Capability {
-    /// Check if a capability is sendable across actors.
-    pub fn is_sendable(self) -> bool {
-        matches!(self, Capability::Iso | Capability::Val | Capability::Tag)
-    }
-
-    /// Check if a capability allows reading.
-    pub fn is_readable(self) -> bool {
-        matches!(self, Capability::Iso | Capability::Trn | Capability::Ref | Capability::Val | Capability::Box)
-    }
-
-    /// Check if a capability allows writing.
-    pub fn is_writable(self) -> bool {
-        matches!(self, Capability::Iso | Capability::Trn | Capability::Ref)
-    }
-
-    /// Subtyping: can we use `self` where `other` is expected?
-    pub fn is_subtype_of(self, other: Self) -> bool {
-        match (self, other) {
-            // Iso is top — can be used anywhere a unique ref is needed
-            (Capability::Iso, _) => true,
-            // Tag is bottom — can only be used where Tag is expected
-            (_, Capability::Tag) => true,
-            // Same capability
-            (a, b) if a == b => true,
-            // Val can be used as Ref (immutable shared is safe for shared read)
-            (Capability::Val, Capability::Ref) => true,
-            // Box can be used as Ref (unique ownership can be temporarily shared)
-            (Capability::Box, Capability::Ref) => true,
-            // Trn can become Iso or Ref
-            (Capability::Trn, Capability::Iso) => false, // Trn can't become Iso without consume
-            (Capability::Trn, Capability::Ref) => true,
-            _ => false,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Effects
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Effect {
-    pub name: String,
-}
-
-impl Effect {
-    pub fn new(name: impl Into<String>) -> Self {
-        Effect { name: name.into() }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EffectRow {
-    Closed(Vec<Effect>),          // Concrete set of effects
-    Open(Vec<Effect>, u64),       // Known effects + free tail variable
-}
-
-impl EffectRow {
-    /// Create an empty (pure) effect row.
-    pub fn pure() -> Self {
-        EffectRow::Closed(vec![])
-    }
-
-    /// Check if this row contains a given effect.
-    pub fn contains(&self, eff: &Effect) -> bool {
-        match self {
-            EffectRow::Closed(es) | EffectRow::Open(es, _) => es.contains(eff),
-        }
-    }
-
-    /// Remove an effect from the row (used by handlers).
-    pub fn remove(&self, eff: &Effect) -> Self {
-        match self {
-            EffectRow::Closed(es) => {
-                EffectRow::Closed(es.iter().filter(|e| *e != eff).cloned().collect())
-            }
-            EffectRow::Open(es, v) => {
-                EffectRow::Open(es.iter().filter(|e| *e != eff).cloned().collect(), *v)
-            }
-        }
-    }
-
-    /// Combine with another effect row (union).
-    pub fn combine(&self, other: &Self) -> Self {
-        use crate::effects::effect_row_union;
-        effect_row_union(self, other)
-    }
-
-    /// Pretty-print the effect row.
-    pub fn display(&self) -> String {
-        match self {
-            EffectRow::Closed(es) if es.is_empty() => "{}".into(),
-            EffectRow::Closed(es) => {
-                let names: Vec<_> = es.iter().map(|e| e.name.clone()).collect();
-                format!("{{{}}}", names.join(", "))
-            }
-            EffectRow::Open(es, v) if es.is_empty() => {
-                format!("{{E{}}}", v)
-            }
-            EffectRow::Open(es, v) => {
-                let names: Vec<_> = es.iter().map(|e| e.name.clone()).collect();
-                format!("{{{}, E{}}}", names.join(", "), v)
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Type variables
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeVar(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Region(pub u64);
 
 impl TypeVar {
     pub fn fresh() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        TypeVar(COUNTER.fetch_add(1, Ordering::Relaxed))
+        TypeVar(TYPE_VAR_COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Region(pub u64);
 
 impl Region {
-    pub fn fresh() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(1);
-        Region(COUNTER.fetch_add(1, Ordering::Relaxed))
+    pub fn fresh() -> Region {
+        Region(REGION_COUNTER.fetch_add(1, Ordering::Relaxed))
     }
 }
 
 // ---------------------------------------------------------------------------
-// Type
+// Primitive Types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Type {
-    // Primitives
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PrimitiveType {
     Int,
     Float,
     Bool,
     String,
     Unit,
-    Never,      // Bottom type
-    Address,    // Actor/process address (opaque)
+    Never,
+    Address, // Actor address
+}
 
-    // Type variable (for inference)
+// ---------------------------------------------------------------------------
+// Reference Capabilities (Pony-inspired)
+// ---------------------------------------------------------------------------
+
+/// Reference capability lattice:
+/// ```text
+///        iso
+///         |
+///        trn
+///         |
+///        ref --- box
+///         |       ^
+///        val      |
+///          \     /
+///           \   /
+///            \ /
+///            tag
+/// ```
+/// Subtyping: iso <: trn <: ref <: box, val <: box, ref <: tag, val <: tag, box <: tag
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Capability {
+    Iso,   // Unique ownership (can be sent to another actor)
+    Trn,   // Unique writer (can be recovered to iso)
+    Ref,   // Shared read/write reference
+    Val,   // Immutable shared reference (sendable)
+    Box,   // Read-only reference (any cap except tag can be read as box)
+    Tag,   // Opaque identity only (tagged pointer, no dereference)
+}
+
+impl Capability {
+    /// Least upper bound (join) of two capabilities.
+    pub fn join(self, other: Capability) -> Capability {
+        use Capability::*;
+        match (self, other) {
+            (Iso, Iso) => Iso,
+            (Iso, Trn) | (Trn, Iso) | (Trn, Trn) => Trn,
+            (Iso, Ref) | (Ref, Iso) | (Trn, Ref) | (Ref, Trn) | (Ref, Ref) => Ref,
+            (Iso, Val) | (Val, Iso) | (Trn, Val) | (Val, Trn) | (Val, Val) => Val,
+            (Ref, Val) | (Val, Ref) => Box,
+            (Iso, Box) | (Box, Iso) | (Trn, Box) | (Box, Trn) | (Ref, Box) | (Box, Ref)
+            | (Val, Box) | (Box, Val) | (Box, Box) => Box,
+            (Tag, c) | (c, Tag) if c == Tag => Tag,
+            (Tag, c) | (c, Tag) => c, // tag is bottom-ish for read-only
+        }
+    }
+
+    /// Check if self <: other (self is a subtype of other).
+    pub fn is_subtype_of(self, other: Capability) -> bool {
+        self.join(other) == other
+    }
+
+    /// Can this capability be sent to another actor?
+    pub fn is_sendable(self) -> bool {
+        matches!(self, Capability::Iso | Capability::Val | Capability::Tag)
+    }
+
+    /// Can this capability be read through?
+    pub fn is_readable(self) -> bool {
+        !matches!(self, Capability::Tag)
+    }
+
+    /// Can this capability be written through?
+    pub fn is_writable(self) -> bool {
+        matches!(self, Capability::Iso | Capability::Trn | Capability::Ref)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Effect Rows (Koka-inspired, row polymorphism)
+// ---------------------------------------------------------------------------
+
+/// A built-in or user-defined effect.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Effect {
+    IO,
+    Net,
+    FS,
+    Rand,
+    Time,
+    Spawn,
+    Send,
+    Receive,
+    Migrate,
+    STM,
+    Async,
+    LLM,
+    Cost,
+    UserDefined(String),
+}
+
+/// Effect row: either closed (fixed set) or open (set + row variable).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EffectRow {
+    Closed(Vec<Effect>),
+    Open(Vec<Effect>, Region),
+}
+
+impl EffectRow {
+    pub fn empty() -> Self {
+        EffectRow::Closed(vec![])
+    }
+
+    pub fn singleton(e: Effect) -> Self {
+        EffectRow::Closed(vec![e])
+    }
+
+    /// Row concatenation.
+    pub fn combine(self, other: EffectRow) -> EffectRow {
+        match (self, other) {
+            (EffectRow::Closed(mut a), EffectRow::Closed(b)) => {
+                a.extend(b);
+                EffectRow::Closed(a)
+            }
+            (EffectRow::Closed(mut a), EffectRow::Open(b, r))
+            | (EffectRow::Open(mut a, r), EffectRow::Closed(b)) => {
+                a.extend(b);
+                EffectRow::Open(a, r)
+            }
+            (EffectRow::Open(mut a, r1), EffectRow::Open(b, _)) => {
+                // Open rows share the same row variable convention
+                a.extend(b);
+                EffectRow::Open(a, r1)
+            }
+        }
+    }
+
+    /// Check if a specific effect is in this row.
+    pub fn contains(&self, eff: &Effect) -> bool {
+        match self {
+            EffectRow::Closed(effects) => effects.contains(eff),
+            EffectRow::Open(effects, _) => effects.contains(eff),
+        }
+    }
+
+    /// Remove an effect from this row (for handled effects).
+    pub fn remove(self, eff: &Effect) -> EffectRow {
+        match self {
+            EffectRow::Closed(effects) => {
+                EffectRow::Closed(effects.into_iter().filter(|e| e != eff).collect())
+            }
+            EffectRow::Open(effects, r) => {
+                EffectRow::Open(effects.into_iter().filter(|e| e != eff).collect(), r)
+            }
+        }
+    }
+
+    /// Get the set of effects (ignoring row variable).
+    pub fn effects(&self) -> &[Effect] {
+        match self {
+            EffectRow::Closed(effects) => effects,
+            EffectRow::Open(effects, _) => effects,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Core Type
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Type {
+    /// Type variable (for inference)
     Var(TypeVar),
-
-    // Reference with capability
-    Ref(Box<Type>, Capability),
-
-    // Tuple
+    /// Primitive type
+    Primitive(PrimitiveType),
+    /// Tuple (A, B, ...)
     Tuple(Vec<Type>),
-
-    // Record (struct-like, nominal)
+    /// Record { field: Type, ... }
     Record(Vec<(String, Type)>),
-
-    // Variant (enum-like)
-    Variant(Vec<(String, Vec<Type>)>),
-
-    // Array
+    /// Variant Type1 | Type2 | ...
+    Variant(Vec<(String, Option<Type>)>),
+    /// Array [Type]
     Array(Box<Type>),
-
-    // Function: params -> return with effect
-    Arrow(Vec<Type>, Box<Type>, Box<EffectRow>),
-
-    // Generic type application: List[Int]
-    App(Box<Type>, Vec<Type>),
-
-    // Named type reference (resolved later)
-    Named(String),
-
-    // Polymorphic type scheme
-    Scheme(Vec<TypeVar>, Box<Type>),
+    /// Function: arg type -> return type with effect row and capability
+    Function {
+        param: Box<Type>,
+        ret: Box<Type>,
+        effect: EffectRow,
+        cap: Capability,
+    },
+    /// Actor[State, Behavior]
+    Actor {
+        state: Box<Type>,
+        behavior: Box<Type>,
+    },
+    /// Agent[State, Policy, Memory, Tools]
+    Agent {
+        state: Box<Type>,
+        policy: Box<Type>,
+        memory: Box<Type>,
+        tools: Box<Type>,
+    },
+    /// Generic type application: List[Int], Map[String, Int]
+    App { constructor: Box<Type>, args: Vec<Type> },
+    /// Reference type with capability: &cap Type
+    Reference { cap: Capability, inner: Box<Type> },
+    /// Existential / type scheme: forall vars. Type
+    Scheme { vars: Vec<TypeVar>, body: Box<Type> },
 }
 
 impl Type {
-    /// Get free type variables in this type.
+    pub fn int() -> Type {
+        Type::Primitive(PrimitiveType::Int)
+    }
+    pub fn float() -> Type {
+        Type::Primitive(PrimitiveType::Float)
+    }
+    pub fn bool() -> Type {
+        Type::Primitive(PrimitiveType::Bool)
+    }
+    pub fn string() -> Type {
+        Type::Primitive(PrimitiveType::String)
+    }
+    pub fn unit() -> Type {
+        Type::Primitive(PrimitiveType::Unit)
+    }
+
+    /// Free type variables in this type.
     pub fn free_vars(&self) -> Vec<TypeVar> {
-        let mut vars = Vec::new();
+        let mut vars = vec![];
         self.collect_free_vars(&mut vars);
-        vars.sort();
-        vars.dedup();
+        vars.sort_by_key(|v| v.0);
+        vars.dedup_by_key(|v| v.0);
         vars
     }
 
-    fn collect_free_vars(&self, vars: &mut Vec<TypeVar>) {
+    fn collect_free_vars(&self, acc: &mut Vec<TypeVar>) {
         match self {
-            Type::Var(v) => vars.push(*v),
-            Type::Tuple(ts) | Type::App(_, ts) => {
-                for t in ts {
-                    t.collect_free_vars(vars);
+            Type::Var(v) => acc.push(*v),
+            Type::Primitive(_) => {}
+            Type::Tuple(ts) => ts.iter().for_each(|t| t.collect_free_vars(acc)),
+            Type::Record(fs) => fs.iter().for_each(|(_, t)| t.collect_free_vars(acc)),
+            Type::Variant(vs) => vs.iter().for_each(|(_, t)| {
+                if let Some(t) = t {
+                    t.collect_free_vars(acc)
                 }
+            }),
+            Type::Array(t) => t.collect_free_vars(acc),
+            Type::Function { param, ret, .. } => {
+                param.collect_free_vars(acc);
+                ret.collect_free_vars(acc);
             }
-            Type::Record(fs) => {
-                for (_, t) in fs {
-                    t.collect_free_vars(vars);
-                }
+            Type::Actor { state, behavior } => {
+                state.collect_free_vars(acc);
+                behavior.collect_free_vars(acc);
             }
-            Type::Variant(vs) => {
-                for (_, ts) in vs {
-                    for t in ts {
-                        t.collect_free_vars(vars);
-                    }
-                }
+            Type::Agent {
+                state,
+                policy,
+                memory,
+                tools,
+            } => {
+                state.collect_free_vars(acc);
+                policy.collect_free_vars(acc);
+                memory.collect_free_vars(acc);
+                tools.collect_free_vars(acc);
             }
-            Type::Array(t) | Type::Ref(t, _) => t.collect_free_vars(vars),
-            Type::Arrow(params, ret, eff) => {
-                for p in params {
-                    p.collect_free_vars(vars);
-                }
-                ret.collect_free_vars(vars);
-                // Effect rows don't contain type variables in our system
-                let _ = eff;
+            Type::App { constructor, args } => {
+                constructor.collect_free_vars(acc);
+                args.iter().for_each(|a| a.collect_free_vars(acc));
             }
-            Type::Scheme(vs, t) => {
-                t.collect_free_vars(vars);
-                vars.retain(|v| !vs.contains(v));
-            }
-            _ => {}
-        }
-    }
-
-    /// Apply a substitution to this type.
-    pub fn apply_subst(&self, subst: &[(TypeVar, Type)]) -> Type {
-        match self {
-            Type::Var(v) => {
-                subst.iter().find(|(tv, _)| tv == v)
-                    .map(|(_, t)| t.clone())
-                    .unwrap_or(Type::Var(*v))
-            }
-            Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| t.apply_subst(subst)).collect()),
-            Type::Record(fs) => Type::Record(
-                fs.iter().map(|(n, t)| (n.clone(), t.apply_subst(subst))).collect()
-            ),
-            Type::Variant(vs) => Type::Variant(
-                vs.iter().map(|(n, ts)| (n.clone(), ts.iter().map(|t| t.apply_subst(subst)).collect())).collect()
-            ),
-            Type::Array(t) => Type::Array(Box::new(t.apply_subst(subst))),
-            Type::Ref(t, cap) => Type::Ref(Box::new(t.apply_subst(subst)), *cap),
-            Type::Arrow(params, ret, eff) => Type::Arrow(
-                params.iter().map(|p| p.apply_subst(subst)).collect(),
-                Box::new(ret.apply_subst(subst)),
-                eff.clone(),
-            ),
-            Type::App(name, ts) => Type::App(
-                Box::new(name.apply_subst(subst)),
-                ts.iter().map(|t| t.apply_subst(subst)).collect(),
-            ),
-            Type::Scheme(vs, t) => Type::Scheme(
-                vs.clone(),
-                Box::new(t.apply_subst(subst)),
-            ),
-            other => other.clone(),
-        }
-    }
-
-    /// Display the type in a readable format.
-    pub fn display(&self) -> String {
-        match self {
-            Type::Int => "Int".into(),
-            Type::Float => "Float".into(),
-            Type::Bool => "Bool".into(),
-            Type::String => "String".into(),
-            Type::Unit => "()".into(),
-            Type::Never => "!".into(),
-            Type::Address => "Address".into(),
-            Type::Var(v) => format!("t{}", v.0),
-            Type::Ref(t, cap) => format!("&{} {}", cap_display(*cap), t.display()),
-            Type::Tuple(ts) => {
-                let elems: Vec<_> = ts.iter().map(|t| t.display()).collect();
-                format!("({})", elems.join(", "))
-            }
-            Type::Record(fs) => {
-                let fields: Vec<_> = fs.iter()
-                    .map(|(n, t)| format!("{}: {}", n, t.display()))
-                    .collect();
-                format!("{{ {} }}", fields.join(", "))
-            }
-            Type::Variant(vs) => {
-                let arms: Vec<_> = vs.iter()
-                    .map(|(n, ts)| {
-                        if ts.is_empty() {
-                            n.clone()
-                        } else {
-                            let args: Vec<_> = ts.iter().map(|t| t.display()).collect();
-                            format!("{}({})", n, args.join(", "))
-                        }
-                    })
-                    .collect();
-                format!("[ {} ]", arms.join(" | "))
-            }
-            Type::Array(t) => format!("[{}]", t.display()),
-            Type::Arrow(params, ret, eff) => {
-                let ps: Vec<_> = params.iter().map(|p| p.display()).collect();
-                let ret_str = ret.display();
-                let eff_str = eff.display();
-                if ps.len() == 1 {
-                    format!("{} -> {} {}", ps[0], ret_str, eff_str)
-                } else {
-                    format!("({}) -> {} {}", ps.join(", "), ret_str, eff_str)
-                }
-            }
-            Type::App(name, args) => {
-                let a: Vec<_> = args.iter().map(|a| a.display()).collect();
-                format!("{}[{}]", name.display(), a.join(", "))
-            }
-            Type::Named(n) => n.clone(),
-            Type::Scheme(vs, t) => {
-                let vars: Vec<_> = vs.iter().map(|v| format!("t{}", v.0)).collect();
-                format!("forall {}. {}", vars.join(" "), t.display())
+            Type::Reference { inner, .. } => inner.collect_free_vars(acc),
+            Type::Scheme { vars, body } => {
+                body.collect_free_vars(acc);
+                // Remove bound vars
+                acc.retain(|v| !vars.contains(v));
             }
         }
     }
 }
 
-fn cap_display(cap: Capability) -> &'static str {
-    match cap {
-        Capability::Iso => "iso",
-        Capability::Trn => "trn",
-        Capability::Ref => "ref",
-        Capability::Val => "val",
-        Capability::Box => "box",
-        Capability::Tag => "tag",
-    }
-}
-
 // ---------------------------------------------------------------------------
-// TypeContext (typing environment)
+// Type Context (Gamma)
 // ---------------------------------------------------------------------------
 
-/// Gamma — the typing environment mapping names to type schemes.
-#[derive(Debug, Clone, PartialEq)]
+/// Typing context: maps variable names to their (type, capability) bindings.
+#[derive(Debug, Clone, Default)]
 pub struct TypeContext {
-    pub bindings: Vec<(String, Type)>,
+    bindings: HashMap<String, (Type, Capability)>,
+    type_aliases: HashMap<String, Type>,
 }
 
 impl TypeContext {
-    pub fn empty() -> Self {
-        TypeContext { bindings: Vec::new() }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn new(bindings: Vec<(String, Type)>) -> Self {
-        TypeContext { bindings }
+    pub fn bind(&mut self, name: impl Into<String>, ty: Type, cap: Capability) {
+        self.bindings.insert(name.into(), (ty, cap));
     }
 
-    pub fn lookup(&self, name: &str) -> Option<&Type> {
-        self.bindings.iter().rev().find(|(n, _)| n == name).map(|(_, t)| t)
+    pub fn lookup(&self, name: &str) -> Option<&(Type, Capability)> {
+        self.bindings.get(name)
     }
 
-    pub fn extend(&self, name: String, ty: Type) -> Self {
+    pub fn extend(&self, name: impl Into<String>, ty: Type, cap: Capability) -> Self {
         let mut ctx = self.clone();
-        ctx.bindings.push((name, ty));
+        ctx.bind(name, ty, cap);
         ctx
     }
+}
 
-    pub fn extend_many(&self, bindings: Vec<(String, Type)>) -> Self {
-        let mut ctx = self.clone();
-        for (name, ty) in bindings {
-            ctx.bindings.push((name, ty));
-        }
-        ctx
-    }
+// ---------------------------------------------------------------------------
+// Source Location
+// ---------------------------------------------------------------------------
 
-    /// Get free type variables from the context (used for generalization).
-    pub fn free_vars(&self) -> Vec<TypeVar> {
-        let mut vars = Vec::new();
-        for (_, ty) in &self.bindings {
-            vars.extend(ty.free_vars());
-        }
-        vars.sort();
-        vars.dedup();
-        vars
-    }
+/// Source span for error reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Span {
+    pub start: usize, // byte offset
+    pub end: usize,
+    pub line: usize,
+    pub column: usize,
+}
 
-    pub fn apply_subst(&self, subst: &[(TypeVar, Type)]) -> Self {
-        TypeContext {
-            bindings: self.bindings.iter()
-                .map(|(n, t)| (n.clone(), t.apply_subst(subst)))
-                .collect(),
+impl Span {
+    pub fn new(start: usize, end: usize, line: usize, column: usize) -> Self {
+        Span {
+            start,
+            end,
+            line,
+            column,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Runtime value representation
+// Nulang Result Type
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Value {
-    Int(i64),
-    Float(u64),     // Store as bits to derive Eq
-    Bool(bool),
-    String(String),
-    Unit,
-    Tuple(Vec<Value>),
-    Record(Vec<(String, Value)>),
-    Array(Vec<Value>),
-    // Actor reference (process ID)
-    IntAddr(u64),
-    // Variant: tag index + payload
-    Variant(usize, Box<Value>),
-    // Runtime reference (heap pointer) — only used inside the VM
-    Ref(usize),
-}
+pub type NuResult<T> = Result<T, NuError>;
 
-impl Value {
-    pub fn float_val(&self) -> f64 {
-        match self {
-            Value::Float(bits) => f64::from_bits(*bits),
-            _ => panic!("not a float: {:?}", self),
-        }
-    }
-
-    pub fn as_int(&self) -> Option<i64> {
-        match self {
-            Value::Int(n) => Some(*n),
-            _ => None,
-        }
-    }
-
-    pub fn as_bool(&self) -> Option<bool> {
-        match self {
-            Value::Bool(b) => Some(*b),
-            _ => None,
-        }
-    }
-
-    pub fn as_string(&self) -> Option<&str> {
-        match self {
-            Value::String(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    pub fn type_of(&self) -> Type {
-        match self {
-            Value::Int(_) => Type::Int,
-            Value::Float(_) => Type::Float,
-            Value::Bool(_) => Type::Bool,
-            Value::String(_) => Type::String,
-            Value::Unit => Type::Unit,
-            Value::Tuple(vs) => Type::Tuple(vs.iter().map(|v| v.type_of()).collect()),
-            Value::Record(fs) => Type::Record(
-                fs.iter().map(|(n, v)| (n.clone(), v.type_of())).collect()
-            ),
-            Value::Array(vs) => {
-                if let Some(first) = vs.first() {
-                    Type::Array(Box::new(first.type_of()))
-                } else {
-                    Type::Array(Box::new(Type::Var(TypeVar::fresh())))
-                }
-            }
-            Value::IntAddr(_) => Type::Address,
-            Value::Variant(tag, payload) => {
-                Type::Variant(vec![(format!("V{}", tag), vec![payload.type_of()])])
-            }
-            Value::Ref(_) => Type::Ref(Box::new(Type::Var(TypeVar::fresh())), Capability::Ref),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum NuError {
-    ParseError { message: String, span: Span },
-    TypeError { message: String, span: Span },
-    EffectError { message: String, span: Span },
-    CapError { message: String, span: Span },
-    CompileError { message: String, span: Span },
-    RuntimeError { message: String },
-    VMError { message: String, pc: usize },
-    LinkError { message: String },
-    NotImplemented { feature: String },
+    LexError { msg: String, span: Span },
+    ParseError { msg: String, span: Span },
+    TypeError { msg: String, span: Span },
+    EffectError { msg: String, span: Span },
+    CapError { msg: String, span: Span },
+    RuntimeError(String),
+    VMError(String),
 }
 
-impl fmt::Display for NuError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for NuError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NuError::ParseError { message, span } => {
-                write!(f, "Parse error at line {}:{}: {}", span.line, span.col, message)
+            NuError::LexError { msg, span } => {
+                write!(f, "Lex error at {}:{}: {}", span.line, span.column, msg)
             }
-            NuError::TypeError { message, span } => {
-                write!(f, "Type error at line {}:{}: {}", span.line, span.col, message)
+            NuError::ParseError { msg, span } => {
+                write!(f, "Parse error at {}:{}: {}", span.line, span.column, msg)
             }
-            NuError::EffectError { message, span } => {
-                write!(f, "Effect error at line {}:{}: {}", span.line, span.col, message)
+            NuError::TypeError { msg, span } => {
+                write!(f, "Type error at {}:{}: {}", span.line, span.column, msg)
             }
-            NuError::CapError { message, span } => {
-                write!(f, "Capability error at line {}:{}: {}", span.line, span.col, message)
+            NuError::EffectError { msg, span } => {
+                write!(f, "Effect error at {}:{}: {}", span.line, span.column, msg)
             }
-            NuError::CompileError { message, span } => {
-                write!(f, "Compile error at line {}:{}: {}", span.line, span.col, message)
+            NuError::CapError { msg, span } => {
+                write!(f, "Capability error at {}:{}: {}", span.line, span.column, msg)
             }
-            NuError::RuntimeError { message } => {
-                write!(f, "Runtime error: {}", message)
-            }
-            NuError::VMError { message, pc } => {
-                write!(f, "VM error at pc {}: {}", pc, message)
-            }
-            NuError::LinkError { message } => {
-                write!(f, "Link error: {}", message)
-            }
-            NuError::NotImplemented { feature } => {
-                write!(f, "Not yet implemented: {}", feature)
-            }
+            NuError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
+            NuError::VMError(msg) => write!(f, "VM error: {}", msg),
         }
     }
 }
 
 impl std::error::Error for NuError {}
-
-pub type NuResult<T> = Result<T, NuError>;
