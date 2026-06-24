@@ -1,6 +1,7 @@
 //! Actor runtime system for Nulang.
 //!
-//! Provides: actor lifecycle, scheduler, mailbox, heap, GC, supervision.
+//! Provides: actor lifecycle, scheduler, mailbox, heap, GC, supervision,
+//! distribution.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,6 +13,9 @@ mod heap;
 mod gc;
 mod orca_cycle;
 mod supervisor;
+mod cluster;
+mod network;
+mod distributed;
 
 #[cfg(test)]
 mod tests;
@@ -23,6 +27,9 @@ pub use heap::*;
 pub use gc::*;
 pub use supervisor::*;
 pub use orca_cycle::*;
+pub use cluster::*;
+pub use distributed::*;
+pub use network::*;
 
 use crate::vm::Value;
 // Note: OrcaCoordinator, OrcaGc, ForeignRefOp, and CycleDetector are
@@ -51,6 +58,13 @@ pub struct Runtime {
     pub next_reductions: u32,       // Remaining reductions before yield
     pub coordinator: OrcaCoordinator,  // NEW: ORCA coordinator for cross-actor GC
     pub cycle_detector: CycleDetector, // NEW: incremental cycle detection
+
+    // Distributed actor system (v0.5)
+    pub transport: Option<NetworkTransport>,      // Network transport (None if not bound)
+    pub cluster: Option<ClusterState>,            // Cluster membership (None if not in cluster)
+    pub resolver: Option<AddressResolver>,        // Address resolver for distributed routing
+    pub node_id: Option<cluster::NodeId>,          // This node's ID (None for local-only mode)
+    pub distributed_enabled: bool,                // Flag to enable/disable distributed mode
 }
 
 impl Runtime {
@@ -63,6 +77,13 @@ impl Runtime {
             next_reductions: 1000, // Default reduction quota
             coordinator: OrcaCoordinator::new(),  // NEW: ORCA coordinator
             cycle_detector: CycleDetector::new(), // NEW: cycle detector
+
+            // Distributed actor system (disabled by default)
+            transport: None,
+            cluster: None,
+            resolver: None,
+            node_id: None,
+            distributed_enabled: false,
         }
     }
 
@@ -709,6 +730,169 @@ impl Runtime {
         // Remove the supervisor itself.
         self.actors.remove(&supervisor_id);
         self.supervisors.remove(&supervisor_id);
+    }
+
+    // ========================================================================
+    // Distributed Actor System (Stage B1)
+    // ========================================================================
+
+    /// Enable distributed mode by binding to a network address.
+    ///
+    /// This initializes the network transport, cluster state, and address
+    /// resolver. After calling this, the runtime can communicate with
+    /// other Nulang nodes in the cluster.
+    ///
+    /// Returns an error if the transport cannot bind to the address.
+    pub fn enable_distribution(&mut self, bind_addr: std::net::SocketAddr) -> std::io::Result<()> {
+        let transport = NetworkTransport::bind(bind_addr)?;
+        // Convert network::NodeId to cluster::NodeId (same inner u64).
+        let node_id = cluster::NodeId(transport.node_id().0);
+        let cluster = ClusterState::new(node_id, bind_addr);
+        let resolver = AddressResolver::new(node_id);
+
+        self.transport = Some(transport);
+        self.cluster = Some(cluster);
+        self.resolver = Some(resolver);
+        self.node_id = Some(node_id);
+        self.distributed_enabled = true;
+
+        Ok(())
+    }
+
+    /// Join an existing cluster by contacting a seed node.
+    ///
+    /// Must call `enable_distribution` first.
+    pub fn join_cluster(&mut self, seed_addr: std::net::SocketAddr) {
+        if let Some(cluster) = &mut self.cluster {
+            cluster.join_cluster(seed_addr);
+        }
+    }
+
+    /// Send a message to an actor using a location-transparent address.
+    ///
+    /// If the actor is local, this behaves like `send_message`.
+    /// If the actor is remote, the message is serialized and sent over
+    /// the network.
+    ///
+    /// If distributed mode is not enabled, falls back to local send.
+    pub fn send_distributed(
+        &mut self,
+        target: ActorAddress,
+        behavior: &str,
+        args: &[Value],
+    ) {
+        if !self.distributed_enabled {
+            // Fallback: treat everything as local
+            let actor_id = match target {
+                ActorAddress::Local { actor_id } => actor_id,
+                ActorAddress::Remote { actor_id, .. } => actor_id,
+            };
+            self.send_message(actor_id, behavior, args);
+            return;
+        }
+
+        // Local address — use the existing send path directly
+        if let ActorAddress::Local { actor_id } = target {
+            self.send_message(actor_id, behavior, args);
+            return;
+        }
+
+        // Remote address — temporarily take distributed components out of
+        // self to avoid borrow-checker conflicts with send_message.
+        let mut transport = self.transport.take().unwrap();
+        let cluster = self.cluster.take().unwrap();
+        let mut resolver = self.resolver.take().unwrap();
+
+        // Delegate to the free function in the distributed module.
+        distributed::send_distributed(
+            self,
+            &mut transport,
+            &cluster,
+            &mut resolver,
+            target,
+            behavior,
+            args,
+        );
+
+        // Restore components
+        self.transport = Some(transport);
+        self.cluster = Some(cluster);
+        self.resolver = Some(resolver);
+    }
+
+    /// Process incoming network packets and cluster maintenance.
+    ///
+    /// Should be called regularly (e.g., every scheduling iteration).
+    /// This method:
+    /// 1. Reads incoming packets from the transport
+    /// 2. Delivers actor messages to their target actors
+    /// 3. Processes heartbeat packets through the cluster state
+    /// 4. Runs cluster tick (failure detection, gossip)
+    pub fn process_network(&mut self) {
+        if !self.distributed_enabled {
+            return;
+        }
+
+        // Step 1: Process incoming packets using the free function.
+        // Temporarily take cluster and resolver to avoid borrow conflicts.
+        let transport = self.transport.as_ref().unwrap();
+        let mut cluster = self.cluster.take().unwrap();
+        let mut resolver = self.resolver.take().unwrap();
+
+        distributed::process_network_packets(self, transport, &mut cluster, &mut resolver);
+
+        // Restore cluster and resolver before the cluster tick (which may
+        // need to access self.transport for action handling).
+        self.cluster = Some(cluster);
+        self.resolver = Some(resolver);
+
+        // Step 2: Run cluster maintenance tick.
+        let actions = {
+            let cluster = self.cluster.as_mut().unwrap();
+            cluster.tick()
+        };
+
+        for action in actions {
+            match action {
+                ClusterAction::SendHeartbeat { to, addr } => {
+                    if let Some(transport) = &mut self.transport {
+                        let net_node_id = network::NodeId(to.0);
+                        let packet = Packet::Heartbeat {
+                            node_id: net_node_id,
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                        };
+                        transport.send(net_node_id, addr, packet);
+                    }
+                }
+                ClusterAction::NodeJoined { node, addr } => {
+                    // Connect to the new node
+                    if let Some(transport) = &mut self.transport {
+                        let net_node_id = network::NodeId(node.0);
+                        let _ = transport.connect(net_node_id, addr);
+                    }
+                }
+                ClusterAction::NodeFailed { node } => {
+                    // Disconnect from failed node
+                    if let Some(transport) = &mut self.transport {
+                        let net_node_id = network::NodeId(node.0);
+                        transport.disconnect(net_node_id);
+                    }
+                }
+                ClusterAction::NodeLeft { node } => {
+                    if let Some(transport) = &mut self.transport {
+                        let net_node_id = network::NodeId(node.0);
+                        transport.disconnect(net_node_id);
+                    }
+                }
+                ClusterAction::SendGossip { targets: _ } => {
+                    // In MVP, gossip is piggybacked on heartbeats.
+                    // Future versions will send explicit gossip packets here.
+                }
+            }
+        }
     }
 }
 
