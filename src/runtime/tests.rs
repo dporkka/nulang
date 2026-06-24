@@ -1619,3 +1619,429 @@ mod distributed_integration_tests {
         assert!(rt.scheduler.queue_len() > 0);
     }
 }
+
+
+// =============================================================================
+// CRDT Integration Tests (v0.6)
+// =============================================================================
+
+#[cfg(test)]
+mod crdt_integration_tests {
+    use super::*;
+    use crate::runtime::crdt::{GCounter, PNCounter, GSet, Crdt};
+    use crate::runtime::crdt_reg::{LWWRegister, RGA};
+    use crate::runtime::crdt_manager::{CrdtManager, CrdtId, CrdtOp, CrdtType};
+
+    // 1. Manager creates CRDTs
+    #[test]
+    fn test_manager_creates_gcounter() {
+        let mut manager = CrdtManager::new(1);
+        let (id, counter) = manager.create_gcounter();
+        assert_eq!(manager.len(), 1);
+        assert_eq!(counter.value(), 0);
+        // Verify we can get it back
+        let c = manager.get_gcounter_mut(id);
+        assert!(c.is_some());
+        assert_eq!(c.unwrap().value(), 0);
+    }
+
+    #[test]
+    fn test_manager_creates_all_types() {
+        let mut manager = CrdtManager::new(1);
+        let (_, _) = manager.create_gcounter();
+        let (_, _) = manager.create_pncounter();
+        let (_, _) = manager.create_gset();
+        let (_, _) = manager.create_orset();
+        let (_, _) = manager.create_aworset();
+        let (_, _) = manager.create_lwwregister("hello".to_string());
+        let (_, _) = manager.create_mvregister();
+        let (_, _) = manager.create_rga();
+        assert_eq!(manager.len(), 8);
+    }
+
+    // 2. Manager gets mutable refs
+    #[test]
+    fn test_manager_get_mut_refs() {
+        let mut manager = CrdtManager::new(1);
+        let (gc_id, _) = manager.create_gcounter();
+        let (pnc_id, _) = manager.create_pncounter();
+        let (gs_id, _) = manager.create_gset();
+
+        // Modify through mutable refs
+        manager.get_gcounter_mut(gc_id).unwrap().increment_by(5);
+        manager.get_pncounter_mut(pnc_id).unwrap().increment_by(3);
+        manager.get_gset_mut(gs_id).unwrap().insert("item".to_string());
+
+        assert_eq!(manager.get_gcounter_mut(gc_id).unwrap().value(), 5);
+        assert_eq!(manager.get_pncounter_mut(pnc_id).unwrap().value(), 3);
+        assert!(manager.get_gset_mut(gs_id).unwrap().contains(&"item".to_string()));
+    }
+
+    #[test]
+    fn test_manager_get_mut_wrong_type() {
+        let mut manager = CrdtManager::new(1);
+        let (gc_id, _) = manager.create_gcounter();
+        // Trying to get a GCounter as a PNCounter should return None
+        assert!(manager.get_pncounter_mut(gc_id).is_none());
+    }
+
+    // 3. Manager queue_sync + generate_sync_ops
+    #[test]
+    fn test_manager_generate_sync_ops() {
+        let mut manager = CrdtManager::new(1);
+        let (gc_id, _) = manager.create_gcounter();
+        manager.get_gcounter_mut(gc_id).unwrap().increment_by(10);
+
+        // Queue the sync
+        manager.queue_sync(gc_id);
+        let pending = manager.drain_pending_ops();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].crdt_id, gc_id);
+        assert_eq!(pending[0].crdt_type, CrdtType::GCounter);
+    }
+
+    #[test]
+    fn test_manager_generate_sync_ops_for_all_entries() {
+        let mut manager = CrdtManager::new(1);
+        let (gc_id, _) = manager.create_gcounter();
+        let (pnc_id, _) = manager.create_pncounter();
+        manager.get_gcounter_mut(gc_id).unwrap().increment_by(3);
+        manager.get_pncounter_mut(pnc_id).unwrap().increment_by(7);
+
+        let ops = manager.generate_sync_ops();
+        assert_eq!(ops.len(), 2);
+        assert!(ops.iter().any(|op| op.crdt_id == gc_id));
+        assert!(ops.iter().any(|op| op.crdt_id == pnc_id));
+    }
+
+    // 4. Manager apply_op merges remote state
+    #[test]
+    fn test_manager_apply_op_merges_remote() {
+        let mut manager_a = CrdtManager::new(1);
+        let (gc_id, mut counter_a) = manager_a.create_gcounter();
+        counter_a.increment_by(5);
+        // Update the stored copy
+        if let Some(c) = manager_a.get_gcounter_mut(gc_id) {
+            c.increment_by(5);
+        }
+
+        // Generate a sync op from manager_a
+        let ops = manager_a.generate_sync_ops();
+        assert_eq!(ops.len(), 1);
+
+        // Apply it on a new manager_b (same node_id simulation)
+        let mut manager_b = CrdtManager::new(2);
+        for op in ops {
+            manager_b.apply_op(op);
+        }
+
+        // Manager_b should now have the GCounter with value 10
+        assert_eq!(manager_b.len(), 1);
+        assert_eq!(manager_b.get_gcounter_mut(gc_id).unwrap().value(), 10);
+        assert_eq!(manager_b.ops_synced(), 1);
+    }
+
+    // 5. Full pipeline: create -> modify -> sync -> apply on other manager
+    #[test]
+    fn test_full_sync_pipeline() {
+        // Node 1: create and modify a PNCounter
+        let mut node1 = CrdtManager::new(1);
+        let (pnc_id, _) = node1.create_pncounter();
+        node1.get_pncounter_mut(pnc_id).unwrap().increment_by(10);
+        node1.get_pncounter_mut(pnc_id).unwrap().decrement_by(3);
+
+        // Node 1 generates sync ops
+        let ops = node1.generate_sync_ops();
+
+        // Node 2: apply the sync ops
+        let mut node2 = CrdtManager::new(2);
+        for op in ops {
+            node2.apply_op(op);
+        }
+
+        // Both should converge to the same value
+        assert_eq!(node1.get_pncounter_mut(pnc_id).unwrap().value(), 7);
+        assert_eq!(node2.get_pncounter_mut(pnc_id).unwrap().value(), 7);
+    }
+
+    // 6. GCounter convergence across multiple nodes
+    #[test]
+    fn test_gcounter_convergence_three_nodes() {
+        // Three nodes, each with their own GCounter replica
+        let mut node1 = CrdtManager::new(1);
+        let mut node2 = CrdtManager::new(2);
+        let mut node3 = CrdtManager::new(3);
+
+        let (gc_id, _) = node1.create_gcounter();
+        let (_, _) = node2.create_gcounter(); // same id not assumed, we sync by id
+
+        // Each node increments independently
+        node1.get_gcounter_mut(gc_id).unwrap().increment_by(3);
+
+        // Node 1 -> Node 2
+        let ops1 = node1.generate_sync_ops();
+        for op in ops1.clone() {
+            node2.apply_op(op);
+        }
+
+        // Node 2 increments more
+        node2.get_gcounter_mut(gc_id).unwrap().increment_by(5);
+
+        // Node 2 -> Node 3
+        let ops2 = node2.generate_sync_ops();
+        for op in ops2.clone() {
+            node3.apply_op(op);
+        }
+
+        // Node 3 increments
+        node3.get_gcounter_mut(gc_id).unwrap().increment_by(2);
+
+        // All sync back to Node 1 (simulate full mesh)
+        let ops3 = node3.generate_sync_ops();
+        for op in ops3.clone() {
+            node1.apply_op(op);
+            node2.apply_op(op);
+        }
+        // Sync node1 -> node2, node3
+        let ops1_final = node1.generate_sync_ops();
+        for op in ops1_final.clone() {
+            node2.apply_op(op);
+            node3.apply_op(op);
+        }
+
+        // All should converge to 3 + 5 + 2 = 10
+        assert_eq!(node1.get_gcounter_mut(gc_id).unwrap().value(), 10);
+        assert_eq!(node2.get_gcounter_mut(gc_id).unwrap().value(), 10);
+        assert_eq!(node3.get_gcounter_mut(gc_id).unwrap().value(), 10);
+    }
+
+    // 7. LWWRegister convergence
+    #[test]
+    fn test_lwwregister_convergence() {
+        let mut node1 = CrdtManager::new(1);
+        let (reg_id, _) = node1.create_lwwregister("initial".to_string());
+
+        let mut node2 = CrdtManager::new(2);
+        // node2 learns about the register from node1
+        let ops = node1.generate_sync_ops();
+        for op in ops {
+            node2.apply_op(op);
+        }
+
+        // Both should see "initial"
+        assert_eq!(node1.get_lwwregister_mut(reg_id).unwrap().read(), "initial");
+        assert_eq!(node2.get_lwwregister_mut(reg_id).unwrap().read(), "initial");
+
+        // Node 1 writes a new value
+        node1.get_lwwregister_mut(reg_id).unwrap().write("node1-value".to_string());
+
+        // Node 2 writes a different value
+        node2.get_lwwregister_mut(reg_id).unwrap().write("node2-value".to_string());
+
+        // Sync both ways
+        let ops1 = node1.generate_sync_ops();
+        for op in ops1 {
+            node2.apply_op(op);
+        }
+        let ops2 = node2.generate_sync_ops();
+        for op in ops2 {
+            node1.apply_op(op);
+        }
+
+        // Both should converge to the same value (higher timestamp wins)
+        let val1 = node1.get_lwwregister_mut(reg_id).unwrap().read().to_string();
+        let val2 = node2.get_lwwregister_mut(reg_id).unwrap().read().to_string();
+        assert_eq!(val1, val2, "LWWRegister should converge");
+    }
+
+    // 8. RGA convergence
+    #[test]
+    fn test_rga_convergence() {
+        let mut node1 = CrdtManager::new(1);
+        let (rga_id, _) = node1.create_rga();
+
+        let mut node2 = CrdtManager::new(2);
+
+        // Node 1 inserts some text
+        node1.get_rga_mut(rga_id).unwrap().insert_at(0, "Hello ".to_string());
+        node1.get_rga_mut(rga_id).unwrap().insert_at(1, "world".to_string());
+
+        // Sync to node2
+        let ops = node1.generate_sync_ops();
+        for op in ops {
+            node2.apply_op(op);
+        }
+
+        // Both should have the same text
+        let val1 = node1.get_rga_mut(rga_id).unwrap().value();
+        let val2 = node2.get_rga_mut(rga_id).unwrap().value();
+        assert_eq!(val1, vec!["Hello ".to_string(), "world".to_string()]);
+        assert_eq!(val1, val2);
+    }
+
+    // 9. Multiple CRDTs in one manager
+    #[test]
+    fn test_multiple_crdts_in_one_manager() {
+        let mut manager = CrdtManager::new(1);
+
+        let (gc_id, _) = manager.create_gcounter();
+        let (pnc_id, _) = manager.create_pncounter();
+        let (gs_id, _) = manager.create_gset();
+        let (reg_id, _) = manager.create_lwwregister("start".to_string());
+
+        // Modify each independently
+        manager.get_gcounter_mut(gc_id).unwrap().increment_by(100);
+        manager.get_pncounter_mut(pnc_id).unwrap().increment_by(50);
+        manager.get_pncounter_mut(pnc_id).unwrap().decrement_by(10);
+        manager.get_gset_mut(gs_id).unwrap().insert("apple".to_string());
+        manager.get_gset_mut(gs_id).unwrap().insert("banana".to_string());
+        manager.get_lwwregister_mut(reg_id).unwrap().write("updated".to_string());
+
+        // Sync all
+        let ops = manager.generate_sync_ops();
+        assert_eq!(ops.len(), 4);
+
+        // Apply to a fresh manager
+        let mut manager2 = CrdtManager::new(2);
+        for op in ops {
+            manager2.apply_op(op);
+        }
+
+        assert_eq!(manager2.get_gcounter_mut(gc_id).unwrap().value(), 100);
+        assert_eq!(manager2.get_pncounter_mut(pnc_id).unwrap().value(), 40);
+        assert!(manager2.get_gset_mut(gs_id).unwrap().contains(&"apple".to_string()));
+        assert!(manager2.get_gset_mut(gs_id).unwrap().contains(&"banana".to_string()));
+        assert_eq!(manager2.get_lwwregister_mut(reg_id).unwrap().read(), "updated");
+    }
+
+    // 10. CrdtOp serialization roundtrip
+    #[test]
+    fn test_crdt_op_serialization_roundtrip() {
+        let op = CrdtOp {
+            crdt_id: CrdtId(42),
+            crdt_type: CrdtType::GCounter,
+            payload: vec![0, 1, 2, 3, 4, 5],
+        };
+
+        let bytes = op.to_bytes();
+        let restored = CrdtOp::from_bytes(&bytes).unwrap();
+
+        assert_eq!(restored.crdt_id.0, 42);
+        assert_eq!(restored.crdt_type, CrdtType::GCounter);
+        assert_eq!(restored.payload, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_crdt_op_roundtrip_all_types() {
+        for (type_val, expected) in [
+            (CrdtType::GCounter, 0u8),
+            (CrdtType::PNCounter, 1u8),
+            (CrdtType::GSet, 2u8),
+            (CrdtType::ORSet, 3u8),
+            (CrdtType::AWORSet, 4u8),
+            (CrdtType::LWWRegister, 5u8),
+            (CrdtType::MVRegister, 6u8),
+            (CrdtType::RGA, 7u8),
+        ] {
+            let op = CrdtOp {
+                crdt_id: CrdtId(123),
+                crdt_type: type_val,
+                payload: vec![9, 8, 7],
+            };
+            let bytes = op.to_bytes();
+            let restored = CrdtOp::from_bytes(&bytes).unwrap();
+            assert_eq!(restored.crdt_type, type_val);
+            assert_eq!(bytes[8], expected); // type byte position
+        }
+    }
+
+    #[test]
+    fn test_crdt_op_from_bytes_too_short() {
+        // Less than 13 bytes should return None
+        assert!(CrdtOp::from_bytes(&[0; 12]).is_none());
+        assert!(CrdtOp::from_bytes(&[]).is_none());
+    }
+
+    #[test]
+    fn test_crdt_op_invalid_type() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&1u64.to_be_bytes());
+        buf.push(255u8); // invalid type
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        assert!(CrdtOp::from_bytes(&buf).is_none());
+    }
+
+    #[test]
+    fn test_manager_creates_empty() {
+        let manager = CrdtManager::new(1);
+        assert!(manager.is_empty());
+        assert_eq!(manager.len(), 0);
+        assert_eq!(manager.ops_synced(), 0);
+    }
+
+    #[test]
+    fn test_manager_drain_pending_clears() {
+        let mut manager = CrdtManager::new(1);
+        let (gc_id, _) = manager.create_gcounter();
+        manager.get_gcounter_mut(gc_id).unwrap().increment_by(5);
+        manager.queue_sync(gc_id);
+
+        assert!(!manager.drain_pending_ops().is_empty());
+        // Second drain should be empty
+        assert!(manager.drain_pending_ops().is_empty());
+    }
+
+    #[test]
+    fn test_manager_apply_op_unknown_type_creates_entry() {
+        // When apply_op receives an op for a CRDT it doesn't have,
+        // it should create a new entry from the payload.
+        let mut manager1 = CrdtManager::new(1);
+        let (gs_id, _) = manager1.create_gset();
+        manager1.get_gset_mut(gs_id).unwrap().insert("remote-item".to_string());
+
+        let ops = manager1.generate_sync_ops();
+
+        let mut manager2 = CrdtManager::new(2);
+        assert!(manager2.is_empty());
+
+        for op in ops {
+            manager2.apply_op(op);
+        }
+
+        assert_eq!(manager2.len(), 1);
+        assert!(manager2.get_gset_mut(gs_id).unwrap().contains(&"remote-item".to_string()));
+    }
+
+    #[test]
+    fn test_gcounter_merge_divergent_replicas() {
+        // Node 1 and Node 2 each have independent increments, then sync
+        let mut node1 = CrdtManager::new(1);
+        let (gc_id, _) = node1.create_gcounter();
+        node1.get_gcounter_mut(gc_id).unwrap().increment_by(7);
+
+        let mut node2 = CrdtManager::new(2);
+        // First sync so node2 has the same ID
+        let ops = node1.generate_sync_ops();
+        for op in ops {
+            node2.apply_op(op);
+        }
+
+        // Now both diverge
+        node1.get_gcounter_mut(gc_id).unwrap().increment_by(3);
+        node2.get_gcounter_mut(gc_id).unwrap().increment_by(5);
+
+        // Sync both ways
+        let ops1 = node1.generate_sync_ops();
+        for op in ops1 {
+            node2.apply_op(op);
+        }
+        let ops2 = node2.generate_sync_ops();
+        for op in ops2 {
+            node1.apply_op(op);
+        }
+
+        // Converged: 7 + 3 + 5 = 15
+        assert_eq!(node1.get_gcounter_mut(gc_id).unwrap().value(), 15);
+        assert_eq!(node2.get_gcounter_mut(gc_id).unwrap().value(), 15);
+    }
+}
