@@ -14,3 +14,4 @@ pub mod vm;
 
 pub mod runtime;
 pub mod jit;
+pub mod lsp;

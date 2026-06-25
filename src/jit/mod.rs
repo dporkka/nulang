@@ -7,8 +7,10 @@
 //!
 //! - `JitSession`: Owns the Cranelift JIT module, tracks hot counters, and
 //!   manages compiled function pointers.
-//! - `Compiler`: Translates a bytecode region to Cranelift IR (CLIF).
-//! - `runtime.rs`: Runtime helper functions callable from JIT code for
+//! - `compiler`: Translates a bytecode region to Cranelift IR (CLIF).
+//! - `typed_compiler`: Type-aware JIT that strips NaN-tag guards when types
+//!   are known from the typechecker.
+//! - `runtime`: Runtime helper functions callable from JIT code for
 //!   NaN-tag-aware operations.
 //!
 //! # JIT Function Signature
@@ -19,18 +21,16 @@
 //! ```
 //! - `regs`: pointer to 256 u64 register file (read/write)
 //! - `constants`: pointer to the constants pool (read-only)
-//!
-//! The function reads operands from `regs`, writes results back, and
-//! returns via native `ret`. Control flow (jumps) is compiled to native
-//! branches.
 
 mod compiler;
+pub mod typed_compiler;
 pub mod runtime;
 
 #[cfg(test)]
 mod tests;
 
 pub use compiler::*;
+pub use typed_compiler::*;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,23 +47,15 @@ use cranelift_module::{Linkage, Module};
 /// before it becomes eligible for JIT compilation.
 pub const HOT_THRESHOLD: u64 = 1000;
 
-/// Per-offset execution counter. Maps bytecode instruction offset → count.
 static HOT_COUNTERS: AtomicU64 = AtomicU64::new(0);
-
-/// Counters stored in a HashMap for offsets that exceed the threshold.
 static mut HOT_COUNTER_MAP: Option<HashMap<usize, u64>> = None;
 
-/// Record that an instruction at `offset` was executed. Returns true if
-/// the region is now hot and should be JIT compiled.
+/// Record execution at offset. Returns true if region is hot.
 pub fn record_and_check_hot(offset: usize) -> bool {
     let prev = HOT_COUNTERS.fetch_add(1, Ordering::Relaxed);
-    if prev < HOT_THRESHOLD {
-        return false;
-    }
+    if prev < HOT_THRESHOLD { return false; }
     unsafe {
-        if HOT_COUNTER_MAP.is_none() {
-            HOT_COUNTER_MAP = Some(HashMap::new());
-        }
+        if HOT_COUNTER_MAP.is_none() { HOT_COUNTER_MAP = Some(HashMap::new()); }
         let map = HOT_COUNTER_MAP.as_mut().unwrap();
         let count = map.entry(offset).or_insert(0);
         *count += 1;
@@ -71,7 +63,7 @@ pub fn record_and_check_hot(offset: usize) -> bool {
     }
 }
 
-/// Reset hot counters (used for testing or after JIT compile).
+/// Reset hot counters.
 pub fn reset_hot_counters() {
     HOT_COUNTERS.store(0, Ordering::Relaxed);
     unsafe { HOT_COUNTER_MAP = None; }
@@ -90,7 +82,6 @@ pub struct JitSession {
 }
 
 impl JitSession {
-    /// Create a new JIT session with the native target ISA.
     pub fn new() -> Self {
         let flag_builder = settings::builder();
         let isa_builder = cranelift_native::builder()
@@ -106,14 +97,13 @@ impl JitSession {
         }
     }
 
-    /// Compile a bytecode region to a native function.
     pub unsafe fn compile_region(
         &mut self,
         module_idx: usize,
         start_offset: usize,
         num_instrs: usize,
         instructions: &[crate::bytecode::Instruction],
-    ) -> Option<super::jit::JitFunctionPtr> {
+    ) -> Option<JitFunctionPtr> {
         if let Some(&ptr) = self.compiled.get(&start_offset) {
             return Some(std::mem::transmute(ptr));
         }
@@ -128,21 +118,18 @@ impl JitSession {
     }
 
     pub fn is_compiled(&self, offset: usize) -> bool { self.compiled.contains_key(&offset) }
-    pub fn get_compiled(&self, offset: usize) -> Option<super::jit::JitFunctionPtr> {
+    pub fn get_compiled(&self, offset: usize) -> Option<JitFunctionPtr> {
         self.compiled.get(&offset).map(|&ptr| unsafe { std::mem::transmute(ptr) })
     }
     pub fn compiled_count(&self) -> usize { self.compiled.len() }
 }
 
-impl Default for JitSession {
-    fn default() -> Self { Self::new() }
-}
+impl Default for JitSession { fn default() -> Self { Self::new() } }
 
 // ---------------------------------------------------------------------------
 // JIT Function Type
 // ---------------------------------------------------------------------------
 
-/// JIT-compiled function: `fn(regs: *mut u64, constants: *const u64)`
 pub type JitFunctionPtr = extern "C" fn(*mut u64, *const u64);
 
 // ---------------------------------------------------------------------------
@@ -150,19 +137,12 @@ pub type JitFunctionPtr = extern "C" fn(*mut u64, *const u64);
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TieredAction {
-    Interpret,
-    RanJit,
-    CompiledAndRan,
-}
+pub enum TieredAction { Interpret, RanJit, CompiledAndRan }
 
 pub fn tiered_execute_step(
-    jit: &mut JitSession,
-    module_idx: usize,
-    pc: usize,
+    jit: &mut JitSession, module_idx: usize, pc: usize,
     instructions: &[crate::bytecode::Instruction],
-    regs: &mut [u64; 256],
-    constants: &[u64],
+    regs: &mut [u64; 256], constants: &[u64],
 ) -> TieredAction {
     if let Some(func) = jit.get_compiled(pc) {
         unsafe { func(regs.as_mut_ptr(), constants.as_ptr()); }
@@ -181,8 +161,7 @@ pub fn tiered_execute_step(
 }
 
 pub(crate) fn find_compilable_region(
-    offset: usize,
-    instructions: &[crate::bytecode::Instruction],
+    offset: usize, instructions: &[crate::bytecode::Instruction],
 ) -> usize {
     let mut len = 0;
     for i in offset..instructions.len().min(offset + 500) {
@@ -198,14 +177,12 @@ mod tests {
     use super::*;
     use crate::bytecode::*;
 
-    #[test]
-    fn test_jit_session_creation() {
+    #[test] fn test_jit_session_creation() {
         let jit = JitSession::new();
         assert_eq!(jit.compiled_count(), 0);
     }
 
-    #[test]
-    fn test_hot_counter() {
+    #[test] fn test_hot_counter() {
         reset_hot_counters();
         assert!(!record_and_check_hot(0));
         for _ in 0..HOT_THRESHOLD { record_and_check_hot(42); }
@@ -213,8 +190,7 @@ mod tests {
         reset_hot_counters();
     }
 
-    #[test]
-    fn test_find_compilable_region() {
+    #[test] fn test_find_compilable_region() {
         let instructions = vec![
             Instruction::new3(OpCode::IAdd, 0, 1, 2),
             Instruction::new3(OpCode::ISub, 0, 1, 2),
@@ -223,8 +199,7 @@ mod tests {
         assert_eq!(find_compilable_region(0, &instructions), 3);
     }
 
-    #[test]
-    fn test_find_region_stops_at_unsupported() {
+    #[test] fn test_find_region_stops_at_unsupported() {
         let instructions = vec![
             Instruction::new3(OpCode::IAdd, 0, 1, 2),
             Instruction::new3(OpCode::Spawn, 0, 0, 0),

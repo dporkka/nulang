@@ -17,6 +17,10 @@ cranelift-module = "0.132"
 cranelift-native = "0.132"
 cranelift-frontend = "0.132"
 
+# LSP server
+tower-lsp = "0.22"
+tokio = { version = "1", features = ["full"] }
+
 [lib]
 name = "nulang"
 path = "src/lib.rs"

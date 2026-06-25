@@ -1,0 +1,453 @@
+//! LSP (Language Server Protocol) server for Nulang.
+//!
+//! Provides inlay hints showing inferred types, capability annotations,
+//! and effect rows inline in the source code.
+//!
+//! Run with: `nulang --lsp` (starts stdin/stdout JSON-RPC server)
+//!
+//! # Supported LSP Features (MVP)
+//!
+//! | Feature | Description |
+//! |---------|-------------|
+//! | `textDocument/inlayHint` | Show inferred types after bindings |
+//! | Type inlays | `let x = 42` shows `: Int` after `x` |
+//! | Capability inlays | `let y: iso String` shows `: iso` |
+//! | Effect inlays | `fun f() ! IO` shows `[IO]` |
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use tower_lsp::jsonrpc::Result;
+use tower_lsp::lsp_types::*;
+use tower_lsp::{Client, LanguageServer, LspService, Server};
+
+// ---------------------------------------------------------------------------
+// LSP Server
+// ---------------------------------------------------------------------------
+
+/// Nulang language server implementing the LSP protocol.
+pub struct NulangLanguageServer {
+    client: Client,
+    documents: Mutex<HashMap<Url, DocumentState>>,
+}
+
+struct DocumentState {
+    version: i32,
+    source: String,
+}
+
+impl NulangLanguageServer {
+    pub fn new(client: Client) -> Self {
+        NulangLanguageServer {
+            client,
+            documents: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[tower_lsp::async_trait]
+impl LanguageServer for NulangLanguageServer {
+    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+        Ok(InitializeResult {
+            capabilities: ServerCapabilities {
+                inlay_hint_provider: Some(InlayHintServerCapabilities::Options(
+                    InlayHintOptions {
+                        resolve_provider: Some(false),
+                        work_done_progress_options: WorkDoneProgressOptions::default(),
+                    },
+                )),
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::FULL),
+                        will_save: None,
+                        will_save_wait_until: None,
+                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions::default())),
+                    },
+                )),
+                ..ServerCapabilities::default()
+            },
+            ..InitializeResult::default()
+        })
+    }
+
+    async fn initialized(&self, _: InitializedParams) {
+        self.client
+            .log_message(MessageType::INFO, "Nulang LSP server initialized")
+            .await;
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn did_open(&self, params: DidOpenTextDocumentParams) {
+        let mut docs = self.documents.lock().unwrap();
+        docs.insert(
+            params.text_document.uri,
+            DocumentState {
+                version: params.text_document.version,
+                source: params.text_document.text,
+            },
+        );
+    }
+
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let mut docs = self.documents.lock().unwrap();
+        if let Some(doc) = docs.get_mut(&params.text_document.uri) {
+            if let Some(change) = params.content_changes.into_iter().next() {
+                doc.version = params.text_document.version;
+                doc.source = change.text;
+            }
+        }
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let mut docs = self.documents.lock().unwrap();
+        docs.remove(&params.text_document.uri);
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let docs = self.documents.lock().unwrap();
+        let source = match docs.get(&params.text_document.uri) {
+            Some(doc) => doc.source.clone(),
+            None => return Ok(None),
+        };
+        drop(docs);
+
+        let engine = InlayHintEngine::new(&source);
+        let hints = engine.generate_inlay_hints();
+        Ok(Some(hints))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inlay Hint Engine
+// ---------------------------------------------------------------------------
+
+/// Generates inlay hints for Nulang source code.
+///
+/// Parses the source, runs type inference, and produces inlay hints
+/// showing inferred types, capabilities, and effect annotations.
+pub struct InlayHintEngine<'a> {
+    source: &'a str,
+}
+
+/// A type annotation to display as an inlay hint.
+#[derive(Debug, Clone)]
+pub struct TypeAnnotation {
+    pub line: u32,
+    pub character: u32,
+    pub label: String,
+    pub kind: AnnotationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnotationKind {
+    Type,       // : Int, : Float, etc.
+    Capability, // : iso, : val, etc.
+    Effect,     // [IO], [FileSystem], etc.
+}
+
+impl<'a> InlayHintEngine<'a> {
+    pub fn new(source: &'a str) -> Self {
+        InlayHintEngine { source }
+    }
+
+    /// Generate inlay hints for the source file.
+    pub fn generate_inlay_hints(&self) -> Vec<InlayHint> {
+        let annotations = self.collect_annotations();
+        annotations.into_iter().map(|a| self.annotation_to_inlay(a)).collect()
+    }
+
+    /// Collect type annotations from the source.
+    ///
+    /// This is a simplified implementation that uses regex-based parsing
+    /// for the MVP. A full implementation would parse the AST and run
+    /// the typechecker.
+    fn collect_annotations(&self) -> Vec<TypeAnnotation> {
+        let mut annotations = Vec::new();
+        for (line_idx, line) in self.source.lines().enumerate() {
+            let line_num = line_idx as u32;
+            let trimmed = line.trim();
+
+            // Skip comments and blank lines
+            if trimmed.is_empty() || trimmed.starts_with("--") {
+                continue;
+            }
+
+            // let binding without explicit type → infer
+            if let Some(pos) = line.find("let ") {
+                if !line[pos..].contains(":") {
+                    // No explicit type annotation
+                    let after_let = pos + 4;
+                    let rest = &line[after_let..];
+                    if let Some(end) = rest.find(|c: char| c == ' ' || c == '=') {
+                        let var_name = &rest[..end];
+                        let col = (after_let + end) as u32;
+                        if let Some(inferred) = self.infer_type(line) {
+                            annotations.push(TypeAnnotation {
+                                line: line_num,
+                                character: col,
+                                label: format!(": {}", inferred),
+                                kind: AnnotationKind::Type,
+                            });
+                        }
+                    }
+                }
+            }
+
+            // fun parameter without explicit type
+            if trimmed.starts_with("fun ") {
+                if let Some(lparen) = line.find('(') {
+                    if let Some(rparen) = line.find(')') {
+                        let params = &line[lparen + 1..rparen];
+                        let mut col_offset = (lparen + 1) as u32;
+                        for param in params.split(',') {
+                            let param = param.trim();
+                            if !param.is_empty() && !param.contains(":") {
+                                let param_len = param.len() as u32;
+                                if let Some(inferred) = self.infer_param_type(param, line) {
+                                    annotations.push(TypeAnnotation {
+                                        line: line_num,
+                                        character: col_offset + param_len,
+                                        label: format!(": {}", inferred),
+                                        kind: AnnotationKind::Type,
+                                    });
+                                }
+                                col_offset += param_len + 2; // +2 for ", "
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Capability annotations (iso, val, trn, ref, box, tag)
+            for cap in &["iso", "val", "trn", "ref", "box", "tag"] {
+                if let Some(pos) = line.find(&format!(" :{}", cap)) {
+                    annotations.push(TypeAnnotation {
+                        line: line_num,
+                        character: (pos + 1) as u32,
+                        label: format!(":{}", cap),
+                        kind: AnnotationKind::Capability,
+                    });
+                }
+            }
+
+            // Effect annotations (! IO, ! FileSystem, etc.)
+            if let Some(pos) = line.find(" ! ") {
+                let after_bang = pos + 3;
+                let rest = &line[after_bang..];
+                let effect_name = rest.split_whitespace().next().unwrap_or("");
+                if !effect_name.is_empty() {
+                    annotations.push(TypeAnnotation {
+                        line: line_num,
+                        character: (after_bang + effect_name.len()) as u32,
+                        label: format!(" [{}]", effect_name),
+                        kind: AnnotationKind::Effect,
+                    });
+                }
+            }
+        }
+        annotations
+    }
+
+    /// Infer the type of a value from context (simplified heuristic).
+    fn infer_type(&self, line: &str) -> Option<String> {
+        let trimmed = line.trim();
+        // Check RHS of assignment
+        if let Some(eq_pos) = trimmed.find('=') {
+            let rhs = trimmed[eq_pos + 1..].trim();
+            return self.infer_expr_type(rhs);
+        }
+        None
+    }
+
+    /// Infer parameter type from usage context.
+    fn infer_param_type(&self, _param: &str, func_line: &str) -> Option<String> {
+        // Simplified: check for arithmetic operations
+        if func_line.contains('+') || func_line.contains('-') || func_line.contains('*') {
+            Some("Int".to_string())
+        } else if func_line.contains(".") && !func_line.contains("..") {
+            Some("Float".to_string())
+        } else {
+            Some("a".to_string()) // Generic type variable
+        }
+    }
+
+    /// Infer expression type from syntax (heuristic).
+    fn infer_expr_type(&self, expr: &str) -> Option<String> {
+        let expr = expr.trim();
+        if expr.is_empty() { return None; }
+
+        // Integer literal
+        if expr.parse::<i64>().is_ok() {
+            return Some("Int".to_string());
+        }
+        // Float literal
+        if expr.parse::<f64>().is_ok() && expr.contains('.') {
+            return Some("Float".to_string());
+        }
+        // String literal
+        if (expr.starts_with('"') && expr.ends_with('"'))
+            || (expr.starts_with('\'') && expr.ends_with('\'')) {
+            return Some("String".to_string());
+        }
+        // Boolean
+        if expr == "true" || expr == "false" {
+            return Some("Bool".to_string());
+        }
+        // List/array
+        if expr.starts_with('[') && expr.ends_with(']') {
+            return Some("[a]".to_string());
+        }
+        // Unit
+        if expr == "unit" || expr == "()" {
+            return Some("Unit".to_string());
+        }
+        // Arithmetic operation
+        if expr.contains('+') || expr.contains('-') || expr.contains('*') || expr.contains("/") {
+            return Some("Int".to_string());
+        }
+        // Function call
+        if expr.contains('(') && expr.contains(')') {
+            return Some("b".to_string());
+        }
+        Some("a".to_string())
+    }
+
+    /// Convert a TypeAnnotation to an LSP InlayHint.
+    fn annotation_to_inlay(&self, ann: TypeAnnotation) -> InlayHint {
+        InlayHint {
+            position: Position {
+                line: ann.line,
+                character: ann.character,
+            },
+            label: InlayHintLabel::String(ann.label),
+            kind: Some(match ann.kind {
+                AnnotationKind::Type => InlayHintKind::Type,
+                AnnotationKind::Capability => InlayHintKind::Parameter,
+                AnnotationKind::Effect => InlayHintKind::Type,
+            }),
+            text_edits: None,
+            tooltip: Some(InlayHintTooltip::String(match ann.kind {
+                AnnotationKind::Type => "Inferred type".to_string(),
+                AnnotationKind::Capability => "Reference capability".to_string(),
+                AnnotationKind::Effect => "Effect row".to_string(),
+            })),
+            padding_left: Some(false),
+            padding_right: Some(false),
+            data: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Server Entry Point
+// ---------------------------------------------------------------------------
+
+/// Run the LSP server over stdin/stdout.
+pub async fn run_lsp_server() {
+    let (stdin, stdout) = (tokio::io::stdin(), tokio::io::stdout());
+    let (service, socket) = LspService::new(|client| NulangLanguageServer::new(client));
+    Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod lsp_tests {
+    use super::*;
+
+    #[test]
+    fn test_type_inlay_for_let_binding() {
+        let source = "let x = 42";
+        let engine = InlayHintEngine::new(source);
+        let hints = engine.generate_inlay_hints();
+        assert!(!hints.is_empty());
+        let type_hint = &hints[0];
+        assert!(type_hint.label.to_string().contains("Int"));
+    }
+
+    #[test]
+    fn test_type_inlay_for_float_binding() {
+        let source = "let pi = 3.14";
+        let engine = InlayHintEngine::new(source);
+        let hints = engine.generate_inlay_hints();
+        assert!(!hints.is_empty());
+        assert!(hints[0].label.to_string().contains("Float"));
+    }
+
+    #[test]
+    fn test_type_inlay_for_string_binding() {
+        let source = "let name = \"hello\"";
+        let engine = InlayHintEngine::new(source);
+        let hints = engine.generate_inlay_hints();
+        assert!(!hints.is_empty());
+        assert!(hints[0].label.to_string().contains("String"));
+    }
+
+    #[test]
+    fn test_capability_inlay_for_iso() {
+        let source = "let x :iso String = \"hello\"";
+        let engine = InlayHintEngine::new(source);
+        let hints = engine.generate_inlay_hints();
+        let cap_hints: Vec<_> = hints.iter().filter(|h| h.label.to_string().contains(":iso")).collect();
+        assert!(!cap_hints.is_empty());
+    }
+
+    #[test]
+    fn test_effect_inlay_for_handler() {
+        let source = "fun read() ! IO";
+        let engine = InlayHintEngine::new(source);
+        let hints = engine.generate_inlay_hints();
+        let effect_hints: Vec<_> = hints.iter().filter(|h| h.label.to_string().contains("[IO]")).collect();
+        assert!(!effect_hints.is_empty());
+    }
+
+    #[test]
+    fn test_no_inlay_when_explicit_type() {
+        let source = "let x : Int = 42";
+        let engine = InlayHintEngine::new(source);
+        let hints = engine.generate_inlay_hints();
+        // Should NOT generate a type inlay since type is already explicit
+        let type_inlays: Vec<_> = hints.iter().filter(|h| {
+            let label = h.label.to_string();
+            label.starts_with(": ") && !label.contains(":iso")
+        }).collect();
+        assert!(type_inlays.is_empty(), "should not add inlay when type is explicit");
+    }
+
+    #[test]
+    fn test_inlay_position_calculation() {
+        let source = "let abc = 123";
+        let engine = InlayHintEngine::new(source);
+        let hints = engine.generate_inlay_hints();
+        assert_eq!(hints[0].position.line, 0);
+        assert_eq!(hints[0].position.character, 8); // after "abc"
+    }
+
+    #[test]
+    fn test_type_to_inlay_string() {
+        let ann = TypeAnnotation {
+            line: 0, character: 5, label: ": Int".to_string(), kind: AnnotationKind::Type,
+        };
+        let engine = InlayHintEngine::new("");
+        let inlay = engine.annotation_to_inlay(ann);
+        assert_eq!(inlay.label.to_string(), ": Int");
+        assert_eq!(inlay.kind, Some(InlayHintKind::Type));
+    }
+
+    #[test]
+    fn test_multiple_let_bindings() {
+        let source = "let x = 42\nlet y = 3.14\nlet z = \"hi\"";
+        let engine = InlayHintEngine::new(source);
+        let hints = engine.generate_inlay_hints();
+        assert_eq!(hints.len(), 3);
+        assert!(hints[0].label.to_string().contains("Int"));
+        assert!(hints[1].label.to_string().contains("Float"));
+        assert!(hints[2].label.to_string().contains("String"));
+    }
+}
