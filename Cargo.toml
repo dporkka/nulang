@@ -6,8 +6,24 @@ authors = ["Nulang Team"]
 description = "Nulang - Distributed Actor-Based Programming Language with AI Agent Support"
 
 [dependencies]
+# Memory & concurrency
 mimalloc = "0.1"
 crossbeam = "0.8"
+
+# Cranelift JIT backend
+cranelift = "0.132"
+cranelift-jit = "0.132"
+cranelift-module = "0.132"
+cranelift-native = "0.132"
+cranelift-frontend = "0.132"
+
+[lib]
+name = "nulang"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nulang"
+path = "src/main.rs"
 
 [profile.release]
 opt-level = 3
