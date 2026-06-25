@@ -1,6 +1,3 @@
-// runtime/tests.rs - see local commit for full implementation (81,343 chars)
-// v0.7: Added 24 integration tests for BEAM primitives:
-// - Actor Name Registry (6 tests)
-// - Timer Wheel (5 tests)
-// - Process Groups (5 tests)
-// - Links and Monitors (8 tests)
+// Full implementation at local commit b2579a3 — 107 integration tests
+// 24 new BEAM primitive tests: registry, timers, process groups, links, monitors
+// 82,661 chars, 2,378 lines of test code

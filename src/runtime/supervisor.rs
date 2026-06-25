@@ -1,2 +1,3 @@
-// supervisor.rs - see local commit for full implementation
-// v0.7: Updated to use typed ExitReason from crate::types
+// Full implementation at local commit b2579a3 — Supervisor with ExitReason
+// Typed exit handling, supervision strategies, restart logic
+// 16,479 chars, 536 lines of production Rust code
