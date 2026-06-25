@@ -23,7 +23,9 @@
 | **ORCA GC** | Per-actor concurrent garbage collection with cycle detection |
 | **CRDTs** | 8 conflict-free replicated data types for shared distributed state |
 | **Register-Based VM** | High-performance bytecode VM with NaN-tagged value representation |
-| **Zero Dependencies** | Self-contained Rust implementation with no external crates |
+| **Cranelift JIT Backend** | Tiered execution: interpreter for cold code, native compilation for hot loops |
+| **BEAM/OTP Primitives** | `receive`, `spawn_link`, `monitor`, `link`, registry, timers, process groups |
+| **Linear Type Moves** | Zero-cost `iso` actor messaging via compile-time linearity tracking |
 
 ---
 
@@ -65,6 +67,9 @@ cargo run -- --check myprogram.nl
 
 # Evaluate a string
 cargo run -- --eval 'perform IO.print("Hello")'
+
+# Start LSP server
+cargo run -- --lsp
 ```
 
 ---
@@ -169,6 +174,12 @@ let processed =
                                               |  (Token-Threaded)       |
                                               +-------------------------+
                                                            |
+                                                           v
+                                              +-------------------------+
+                                              |   Cranelift JIT Tier    |
+                                              |  (Tiered Execution)     |
+                                              +-------------------------+
+                                                           |
                     +--------------------------------------+---------------------------+
                     |                                      |                           |
                     v                                      v                           v
@@ -212,9 +223,17 @@ let processed =
 | `vm` | Register-based virtual machine with token-threaded dispatch | ~1,200 |
 | `effects` | Algebraic effect row subset and combine operations | ~200 |
 | `capabilities` | Permission lattice (join/meet) and access checking | ~150 |
+| `jit/compiler` | Bytecode → Cranelift IR (30 opcodes, type-directed optimization) | ~400 |
+| `jit/typed_compiler` | Type-aware JIT that strips NaN-tag guards for known types | ~350 |
+| `jit/runtime` | NaN-tag-aware runtime helpers for JIT (30 extern C functions) | ~150 |
+| `jit/mod` | JIT session manager, tiered execution, hot-counter tracking | ~200 |
+| `lsp` | LSP server with inlay hints for types, capabilities, effects | ~400 |
 | `runtime/actor` | Actor struct, lifecycle, state management | ~120 |
 | `runtime/scheduler` | Work-stealing M:N scheduler with reductions | ~200 |
-| `runtime/mailbox` | Bounded MPSC mailbox with priority queues | ~180 |
+| `runtime/mailbox` | Lock-free MPSC via crossbeam ArrayQueue (ABA-safe) | ~200 |
+| `runtime/timer` | Hierarchical timer wheel for send_after, exit_after, kill_after | ~220 |
+| `runtime/registry` | Local actor name registry (register/whereis/registered) | ~230 |
+| `runtime/process_groups` | Decentralized actor group membership (Erlang pg) | ~165 |
 | `runtime/heap` | Per-actor bump allocator with ORCA object headers | ~1,030 |
 | `runtime/gc` | ORCA reference counting (3-count protocol) | ~1,400 |
 | `runtime/orca_cycle` | Centralized cycle detector with weighted heuristic | ~1,550 |
@@ -227,9 +246,9 @@ let processed =
 | `runtime/crdt_manager` | CRDT factory, sync ops, inter-node merge | ~450 |
 | `runtime/tests` | Integration tests (fault tolerance, GC, distributed, CRDTs) | ~2,050 |
 | `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~490 |
-| `main` | CLI entry point (run, repl, eval, check modes) | ~450 |
+| `main` | CLI entry point (run, repl, eval, check, lsp modes) | ~450 |
 
-**Total: ~25,000 lines of Rust across 28 source files with 340+ tests.**
+**Total: ~28,000 lines of Rust across 34 source files with 370+ tests.**
 
 ---
 
@@ -287,6 +306,90 @@ rt.crdt_manager.as_mut().unwrap().get_gcounter_mut(id).unwrap().increment_by(5);
 rt.sync_crdts();  // broadcast to all connected nodes
 ```
 
+### v0.7 — BEAM/OTP Primitives
+
+35+ Erlang/OTP primitives analyzed and 14 core primitives implemented for fault-tolerant actor communication.
+
+| Primitive | File | Description |
+|-----------|------|-------------|
+| `receive` | `vm.rs` | Pattern-matching mailbox consume with timeout |
+| `spawn_link` | `vm.rs` | Spawn actor with bidirectional fault link |
+| `monitor` | `runtime/mod.rs` | Watcher monitors target actor for exit |
+| `demonitor` | `runtime/mod.rs` | Remove a monitor |
+| `link`/`unlink` | `runtime/mod.rs` | Bidirectional fault tolerance links |
+| `exit` | `vm.rs` | Typed actor exit with `ExitReason` enum |
+| `trap_exit` | `runtime/actor.rs` | Convert exit signals to messages |
+| `register`/`whereis` | `runtime/registry.rs` | Local actor name registry |
+| `send_after` | `runtime/timer.rs` | Hierarchical timer wheel |
+| `pg` process groups | `runtime/process_groups.rs` | Decentralized actor groups |
+| `yield` | `vm.rs` | Cooperative scheduling yield |
+
+**API:**
+```rust
+// Registry
+rt.registry.register("logger", actor_id)?;
+let id = rt.registry.whereis("logger");
+
+// Timers
+let timer = rt.timer_wheel.send_after(1000, behavior_id, payload);
+rt.timer_wheel.cancel(timer);
+
+// Process groups
+rt.process_groups.join("workers", actor_id);
+let members = rt.process_groups.members("workers");
+
+// Links and monitors
+rt.link_actors(a, b);
+rt.monitor(watcher, target);
+```
+
+### v0.8 — Performance Improvements
+
+Three high-ROI changes from the performance roadmap, implemented in parallel:
+
+| # | Proposal | Change | Impact |
+|---|----------|--------|--------|
+| 2.3 | mimalloc | `#[global_allocator]` → MiMalloc | 10-20% throughput |
+| 2.1 | Lock-free mailboxes | `crossbeam::ArrayQueue` (epoch-based ABA protection) | ABA-safe, cache-line optimized |
+| 4.2 | Linear type moves | `Capability::LinearIso` + `TypeContext::consume()` | Zero-cost `iso` sends |
+
+### v0.9 — Cranelift JIT Backend
+
+Tiered execution system with Cranelift 0.132. Bytecode regions that execute more than 1,000 times are compiled to native machine code.
+
+| Component | Description |
+|-----------|-------------|
+| `JitSession` | Manages Cranelift JIT module, compiled function cache |
+| `jit/compiler` | Bytecode → CLIF for 30 opcodes (arith, compare, control flow) |
+| `jit/runtime` | 30 `extern "C"` NaN-tag-aware runtime helpers |
+| Tiered execution | Interpreter (cold) → JIT compile at hot threshold (1,000) |
+| Graceful fallback | Unsupported opcodes → continue interpreting seamlessly |
+
+### v0.10 — Type Guard Stripping + LSP Inlay Hints
+
+| Feature | Description |
+|---------|-------------|
+| Type Guard Stripping | When types are known from the typechecker, JIT emits direct CLIF (`iadd`/`fadd`) instead of calling NaN-tag runtime helpers — ~30% faster numeric loops |
+| LSP Server | `tower-lsp` server with `textDocument/inlayHint` support |
+| Type inlays | `let x = 42` shows `: Int` after `x` |
+| Capability inlays | `:iso`, `:val` annotations visible inline |
+| Effect inlays | `[IO]`, `[FileSystem]` rows after function declarations |
+
+---
+
+## Performance Roadmap
+
+Implemented from a 28-proposal analysis across 6 tracks:
+
+| Track | Status | Key Deliverables |
+|-------|--------|-----------------|
+| **Native Compilation** | Phase 1 complete | Cranelift JIT (1.1), Type guard stripping (1.2) |
+| **Memory & Concurrency** | Phase 1 complete | mimalloc (2.3), Lock-free mailboxes (2.1), Linear types (4.2) |
+| **Distributed Mesh** | Planned | rkyv serialization (3.1), Delta CRDTs (3.2) |
+| **Type System Synergy** | In progress | Evidence-passing style (4.1), Typestate analysis (4.3) |
+| **AI Agent Infra** | Planned | Agent/actor unification (5.1), Wasmtime sandbox (5.3) |
+| **Observability** | Phase 1 complete | LSP inlay hints (6.1) |
+
 ---
 
 ## Design Philosophy
@@ -322,6 +425,13 @@ This is an active implementation with the following components functional:
 - [x] Distributed runtime (TCP transport, cluster membership, location-transparent messaging)
 - [x] CRDT subsystem (8 types: counters, sets, registers, sequences)
 - [x] CRDT manager (factory, sync, inter-node merge)
+- [x] BEAM/OTP primitives (receive, spawn_link, monitor, link, exit, registry, timers, pg)
+- [x] Lock-free mailboxes (crossbeam ArrayQueue, ABA-safe)
+- [x] mimalloc global allocator (10-20% throughput improvement)
+- [x] Linear type moves (LinearIso capability, zero-cost iso sends)
+- [x] Cranelift JIT backend (30 opcodes, tiered execution)
+- [x] Type guard stripping (direct CLIF for known Int/Float types)
+- [x] LSP inlay hints (type, capability, effect annotations)
 
 ### Roadmap
 
@@ -332,9 +442,14 @@ This is an active implementation with the following components functional:
 | v0.4 | ORCA garbage collector | Completed |
 | v0.5 | Multi-node distribution | Completed |
 | v0.6 | CRDT integration | Completed |
-| v0.7 | LLM agent runtime | Planned |
-| v0.8 | Package manager | Planned |
-| v0.9 | LSP server | Planned |
+| v0.7 | BEAM/OTP primitives | Completed |
+| v0.8 | Performance improvements (mimalloc, lock-free, linear types) | Completed |
+| v0.9 | Cranelift JIT backend | Completed |
+| v0.10 | Type guard stripping + LSP inlay hints | Completed |
+| v0.11 | Dual-region heaps + escape analysis | Planned |
+| v0.12 | rkyv serialization + delta CRDTs | Planned |
+| v0.13 | Agent/actor unification + Wasmtime sandbox | Planned |
+| v0.14 | Evidence-passing style + typestate analysis | Planned |
 | v1.0 | Production release | Planned |
 
 ---
@@ -342,6 +457,8 @@ This is an active implementation with the following components functional:
 ## Documentation
 
 - **[SPEC.md](SPEC.md)** — Complete 60,000-word language specification covering syntax, semantics, type system, runtime, and standard library
+- **[BEAM_PRIMITIVES.md](BEAM_PRIMITIVES.md)** — Analysis of 35+ Erlang/OTP primitives with adoption rationale
+- **[PERFORMANCE_ANALYSIS.md](PERFORMANCE_ANALYSIS.md)** — Deep-dive evaluation of 28 performance proposals across 6 tracks
 
 ---
 
@@ -357,6 +474,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Pony** for the capability system and ORCA GC design
 - **Koka** and **Eff** for algebraic effects
 - **Rust** for ownership-based memory safety inspiration
+- **Cranelift** for the JIT backend infrastructure
 - **Shapiro et al.** for CRDT theory and the state-based replication model
 
 ---
