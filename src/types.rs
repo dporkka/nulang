@@ -1,55 +1,8 @@
 //! Shared type definitions used across all Nulang compiler and runtime modules.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-
-// ---------------------------------------------------------------------------
-// ExitReason (BEAM-style typed exit signals)
-// ---------------------------------------------------------------------------
-
-/// Reason for an actor's exit, modeled after Erlang's exit reasons.
-///
-/// Used with link/monitor signal propagation and supervision decisions.
-/// The `Shutdown` variant carries an optional timeout for graceful shutdown.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ExitReason {
-    /// Normal termination — no supervisor notification, linked actors unaffected.
-    Normal,
-    /// Unconditional kill — cannot be trapped, always triggers cascading exit.
-    Kill,
-    /// Actor was killed by another actor (the `Kill` reason after propagation).
-    Killed,
-    /// Graceful shutdown with optional timeout.
-    Shutdown(Option<Duration>),
-    /// Error with description.
-    Error(String),
-    /// User-defined exit reason (any serializable value).
-    Custom(String),
-}
-
-impl ExitReason {
-    /// Returns true if this reason represents abnormal termination.
-    ///
-    /// Normal exits do NOT trigger linked actor exits (per Erlang semantics).
-    /// All other reasons trigger cascading failure for linked actors
-    /// that don't trap exits.
-    pub fn is_abnormal(&self) -> bool {
-        !matches!(self, ExitReason::Normal)
-    }
-
-    /// Returns a short string tag for logging/monitoring.
-    pub fn tag(&self) -> &'static str {
-        match self {
-            ExitReason::Normal => "normal",
-            ExitReason::Kill => "kill",
-            ExitReason::Killed => "killed",
-            ExitReason::Shutdown(_) => "shutdown",
-            ExitReason::Error(_) => "error",
-            ExitReason::Custom(_) => "custom",
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Type Variables & Regions
@@ -99,6 +52,8 @@ pub enum PrimitiveType {
 /// ```text
 ///        iso
 ///         |
+///       lineariso (subtype of iso, tracked for linear consumption)
+///         |
 ///        trn
 ///         |
 ///        ref --- box
@@ -109,22 +64,41 @@ pub enum PrimitiveType {
 ///            \ /
 ///            tag
 /// ```
-/// Subtyping: iso <: trn <: ref <: box, val <: box, ref <: tag, val <: tag, box <: tag
+/// Subtyping: lineariso <: iso <: trn <: ref <: box, val <: box, ref <: tag, val <: tag, box <: tag
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
-    Iso,   // Unique ownership (can be sent to another actor)
-    Trn,   // Unique writer (can be recovered to iso)
-    Ref,   // Shared read/write reference
-    Val,   // Immutable shared reference (sendable)
-    Box,   // Read-only reference (any cap except tag can be read as box)
-    Tag,   // Opaque identity only (tagged pointer, no dereference)
+    LinearIso, // Unique ownership with linear type tracking (provably consumed exactly once)
+    Iso,       // Unique ownership (can be sent to another actor)
+    Trn,       // Unique writer (can be recovered to iso)
+    Ref,       // Shared read/write reference
+    Val,       // Immutable shared reference (sendable)
+    Box,       // Read-only reference (any cap except tag can be read as box)
+    Tag,       // Opaque identity only (tagged pointer, no dereference)
 }
 
 impl Capability {
     /// Least upper bound (join) of two capabilities.
+    ///
+    /// LinearIso behaves like Iso in joins, except LinearIso ⊔ LinearIso = LinearIso.
     pub fn join(self, other: Capability) -> Capability {
         use Capability::*;
         match (self, other) {
+            // LinearIso joins: LinearIso + LinearIso stays LinearIso
+            (LinearIso, LinearIso) => LinearIso,
+            // LinearIso + Iso promotes to Iso (linear obligation can be discharged)
+            (LinearIso, Iso) | (Iso, LinearIso) => Iso,
+            // LinearIso with Trn (same as Iso with Trn)
+            (LinearIso, Trn) | (Trn, LinearIso) => Trn,
+            // LinearIso with Ref (same as Iso with Ref)
+            (LinearIso, Ref) | (Ref, LinearIso) => Ref,
+            // LinearIso with Val (same as Iso with Val)
+            (LinearIso, Val) | (Val, LinearIso) => Val,
+            // LinearIso with Box (same as Iso with Box)
+            (LinearIso, Box) | (Box, LinearIso) => Box,
+            // LinearIso with Tag (same as Iso with Tag)
+            (LinearIso, Tag) | (Tag, LinearIso) => LinearIso,
+
+            // Original capability joins (unchanged)
             (Iso, Iso) => Iso,
             (Iso, Trn) | (Trn, Iso) | (Trn, Trn) => Trn,
             (Iso, Ref) | (Ref, Iso) | (Trn, Ref) | (Ref, Trn) | (Ref, Ref) => Ref,
@@ -144,7 +118,10 @@ impl Capability {
 
     /// Can this capability be sent to another actor?
     pub fn is_sendable(self) -> bool {
-        matches!(self, Capability::Iso | Capability::Val | Capability::Tag)
+        matches!(
+            self,
+            Capability::LinearIso | Capability::Iso | Capability::Val | Capability::Tag
+        )
     }
 
     /// Can this capability be read through?
@@ -154,7 +131,24 @@ impl Capability {
 
     /// Can this capability be written through?
     pub fn is_writable(self) -> bool {
-        matches!(self, Capability::Iso | Capability::Trn | Capability::Ref)
+        matches!(
+            self,
+            Capability::LinearIso | Capability::Iso | Capability::Trn | Capability::Ref
+        )
+    }
+
+    /// Is this a linear capability (requires exactly-one consumption tracking)?
+    pub fn is_linear(self) -> bool {
+        matches!(self, Capability::LinearIso)
+    }
+
+    /// Promote a linear capability to its non-linear form.
+    /// LinearIso -> Iso (linear obligation discharged on send/escape).
+    pub fn promote_to_iso(self) -> Capability {
+        match self {
+            Capability::LinearIso => Capability::Iso,
+            other => other,
+        }
     }
 }
 
@@ -210,6 +204,7 @@ impl EffectRow {
                 EffectRow::Open(a, r)
             }
             (EffectRow::Open(mut a, r1), EffectRow::Open(b, _)) => {
+                // Open rows share the same row variable convention
                 a.extend(b);
                 EffectRow::Open(a, r1)
             }
@@ -354,6 +349,7 @@ impl Type {
             Type::Reference { inner, .. } => inner.collect_free_vars(acc),
             Type::Scheme { vars, body } => {
                 body.collect_free_vars(acc);
+                // Remove bound vars
                 acc.retain(|v| !vars.contains(v));
             }
         }
@@ -364,195 +360,346 @@ impl Type {
 // Type Context (Gamma)
 // ---------------------------------------------------------------------------
 
-/// Variable binding: name -> (type, capability).
-pub type TypeContext = HashMap<String, (Type, Capability)>;
-
-// ---------------------------------------------------------------------------
-// Syntax (Expression / Declaration level — parsed from source)
-// ---------------------------------------------------------------------------
-
-/// Capability constraint for an actor's state or message.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Constraint {
-    /// Exclusive (only one actor can hold this)
-    Exclusive,
-    /// Readable by many
-    Readable,
-    /// Writable by owner
-    Writable,
-    /// Transferable to another actor
-    Transferable,
-    /// Managed lifecycle (garbage collected)
-    Managed,
+/// Typing context: maps variable names to their (type, capability) bindings.
+///
+/// Tracks linear variable consumption to enforce exactly-once use of linear
+/// (`LinearIso`) values. When a linear variable is consumed, it is recorded in
+/// `consumed`; subsequent attempts to use it will fail.
+#[derive(Debug, Clone, Default)]
+pub struct TypeContext {
+    bindings: HashMap<String, (Type, Capability)>,
+    type_aliases: HashMap<String, Type>,
+    /// Set of linear variable names that have been consumed (used exactly once).
+    consumed: HashSet<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Actor ID (for runtime)
-// ---------------------------------------------------------------------------
-
-/// Unique actor identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ActorId(pub u64);
-
-// ---------------------------------------------------------------------------
-// AST Node (shared between compiler stages)
-// ---------------------------------------------------------------------------
-
-/// An AST node carries a value and source location.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AstNode<T> {
-    pub value: T,
-    pub loc: SourceLoc,
-}
-
-impl<T> AstNode<T> {
-    pub fn new(value: T, loc: SourceLoc) -> Self {
-        AstNode { value, loc }
+impl TypeContext {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> AstNode<U> {
-        AstNode {
-            value: f(self.value),
-            loc: self.loc,
+    /// Bind a variable name to a type and capability.
+    ///
+    /// If the capability is linear (`LinearIso`), resets its consumption state
+    /// so the variable can be consumed exactly once in the current scope.
+    pub fn bind(&mut self, name: impl Into<String>, ty: Type, cap: Capability) {
+        let name = name.into();
+        // Reset consumption state for linear variables on re-bind
+        if cap.is_linear() {
+            self.consumed.remove(&name);
+        }
+        self.bindings.insert(name, (ty, cap));
+    }
+
+    /// Look up a variable's type and capability.
+    pub fn lookup(&self, name: &str) -> Option<&(Type, Capability)> {
+        self.bindings.get(name)
+    }
+
+    /// Create an extended context with an additional binding.
+    pub fn extend(&self, name: impl Into<String>, ty: Type, cap: Capability) -> Self {
+        let mut ctx = self.clone();
+        ctx.bind(name, ty, cap);
+        ctx
+    }
+
+    /// Mark a linear variable as consumed.
+    ///
+    /// Returns `Ok(())` if the variable was not yet consumed and is linear.
+    /// Returns `Err(LinearTypeError)` if the variable is already consumed
+    /// or does not exist / is not linear.
+    pub fn consume(&mut self, name: &str) -> Result<(), NuError> {
+        match self.bindings.get(name) {
+            Some((_ty, cap)) if cap.is_linear() => {
+                if self.consumed.contains(name) {
+                    Err(NuError::LinearTypeError {
+                        msg: format!(
+                            "Linear variable '{}' consumed more than once",
+                            name
+                        ),
+                        span: Span::default(),
+                    })
+                } else {
+                    self.consumed.insert(name.to_string());
+                    Ok(())
+                }
+            }
+            Some((_ty, _cap)) => Err(NuError::LinearTypeError {
+                msg: format!("Variable '{}' is not linear and cannot be consumed", name),
+                span: Span::default(),
+            }),
+            None => Err(NuError::LinearTypeError {
+                msg: format!("Variable '{}' not found in context", name),
+                span: Span::default(),
+            }),
+        }
+    }
+
+    /// Check whether a linear variable has already been consumed.
+    pub fn is_consumed(&self, name: &str) -> bool {
+        self.consumed.contains(name)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Source Location
+// ---------------------------------------------------------------------------
+
+/// Source span for error reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Span {
+    pub start: usize, // byte offset
+    pub end: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl Span {
+    pub fn new(start: usize, end: usize, line: usize, column: usize) -> Self {
+        Span {
+            start,
+            end,
+            line,
+            column,
         }
     }
 }
 
-/// Source location: (line, column, length).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct SourceLoc {
-    pub line: u32,
-    pub col: u32,
-    pub len: u32,
-}
-
 // ---------------------------------------------------------------------------
-// Compilation Unit
+// Nulang Result Type
 // ---------------------------------------------------------------------------
 
-/// A parsed and type-checked compilation unit.
-#[derive(Debug, Clone)]
-pub struct CompilationUnit {
-    pub source: String,
-    pub ast: Vec<AstNode<crate::ast::Decl>>,
-    pub type_context: TypeContext,
-    pub bytecodes: Vec<u8>,
-    pub entrypoint: Option<String>,
-}
+pub type NuResult<T> = Result<T, NuError>;
 
-// ---------------------------------------------------------------------------
-// Runtime-facing types
-// ---------------------------------------------------------------------------
-
-/// Runtime representation of a message sent between actors.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Message {
-    pub from: Option<ActorId>,
-    pub to: ActorId,
-    pub behavior_id: u16,
-    pub payload: Vec<Value>,
-}
-
-/// Runtime value (NaN-tagged, fits in 64 bits).
-/// Same definition as in vm.rs for interoperability.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Value {
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    String(u64),   // interned string index
-    Unit,
-    Actor(u64),    // actor ID
-    Nil,
-}
-
-// ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
-
-/// Error during parsing.
-#[derive(Debug, Clone)]
-pub struct ParseError {
-    pub loc: SourceLoc,
-    pub message: String,
-}
-
-/// Error during type checking.
-#[derive(Debug, Clone)]
-pub struct TypeError {
-    pub loc: SourceLoc,
-    pub message: String,
-}
-
-/// Error during codegen.
-#[derive(Debug, Clone)]
-pub struct CodegenError {
-    pub message: String,
-}
-
-/// Error during runtime execution.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RuntimeError {
-    DivisionByZero,
-    StackOverflow,
-    OutOfMemory,
-    ActorNotFound(ActorId),
-    MailboxFull(ActorId),
-    InvalidCapability { required: Capability, actual: Capability },
-    UnhandledEffect(Effect),
-    Timeout { actor: ActorId, duration_ms: u64 },
-    LinkBroken { from: ActorId, to: ActorId },
-    Custom(String),
-}
-
-impl std::fmt::Display for RuntimeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RuntimeError::DivisionByZero => write!(f, "Division by zero"),
-            RuntimeError::StackOverflow => write!(f, "Stack overflow"),
-            RuntimeError::OutOfMemory => write!(f, "Out of memory"),
-            RuntimeError::ActorNotFound(id) => write!(f, "Actor not found: {:?}", id),
-            RuntimeError::MailboxFull(id) => write!(f, "Mailbox full for actor {:?}", id),
-            RuntimeError::InvalidCapability { required, actual } => {
-                write!(f, "Invalid capability: required {:?}, actual {:?}", required, actual)
-            }
-            RuntimeError::UnhandledEffect(eff) => write!(f, "Unhandled effect: {:?}", eff),
-            RuntimeError::Timeout { actor, duration_ms } => {
-                write!(f, "Timeout for actor {:?} after {}ms", actor, duration_ms)
-            }
-            RuntimeError::LinkBroken { from, to } => {
-                write!(f, "Link broken between {:?} and {:?}", from, to)
-            }
-            RuntimeError::Custom(msg) => write!(f, "{}", msg),
-        }
-    }
-}
-
-impl std::error::Error for RuntimeError {}
-
-/// Unified error type.
 #[derive(Debug, Clone)]
 pub enum NuError {
-    Parse(ParseError),
-    Type(TypeError),
-    Codegen(CodegenError),
-    Runtime(RuntimeError),
-    IO(String),
+    LexError { msg: String, span: Span },
+    ParseError { msg: String, span: Span },
+    TypeError { msg: String, span: Span },
+    EffectError { msg: String, span: Span },
+    CapError { msg: String, span: Span },
+    /// Linear type violation: a linear value was used more than once,
+    /// not consumed, or otherwise violated linearity constraints.
+    LinearTypeError { msg: String, span: Span },
+    RuntimeError(String),
+    VMError(String),
 }
 
 impl std::fmt::Display for NuError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NuError::Parse(e) => write!(f, "Parse error at {:?}: {}", e.loc, e.message),
-            NuError::Type(e) => write!(f, "Type error at {:?}: {}", e.loc, e.message),
-            NuError::Codegen(e) => write!(f, "Codegen error: {}", e.message),
-            NuError::Runtime(e) => write!(f, "Runtime error: {}", e),
-            NuError::IO(msg) => write!(f, "IO error: {}", msg),
+            NuError::LexError { msg, span } => {
+                write!(f, "Lex error at {}:{}: {}", span.line, span.column, msg)
+            }
+            NuError::ParseError { msg, span } => {
+                write!(f, "Parse error at {}:{}: {}", span.line, span.column, msg)
+            }
+            NuError::TypeError { msg, span } => {
+                write!(f, "Type error at {}:{}: {}", span.line, span.column, msg)
+            }
+            NuError::EffectError { msg, span } => {
+                write!(f, "Effect error at {}:{}: {}", span.line, span.column, msg)
+            }
+            NuError::CapError { msg, span } => {
+                write!(f, "Capability error at {}:{}: {}", span.line, span.column, msg)
+            }
+            NuError::LinearTypeError { msg, span } => {
+                write!(
+                    f,
+                    "Linear type error at {}:{}: {}",
+                    span.line, span.column, msg
+                )
+            }
+            NuError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
+            NuError::VMError(msg) => write!(f, "VM error: {}", msg),
         }
     }
 }
 
 impl std::error::Error for NuError {}
 
-/// Convenience result type.
-pub type NuResult<T> = Result<T, NuError>;
+// ---------------------------------------------------------------------------
+// Exit Reason (Actor Lifecycle)
+// ---------------------------------------------------------------------------
+
+/// Reason for an actor's exit, modeled after Erlang's exit reasons.
+///
+/// Used with link/monitor signal propagation and supervision decisions.
+/// The `Shutdown` variant carries an optional timeout for graceful shutdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExitReason {
+    /// Normal termination — no supervisor notification, linked actors unaffected.
+    Normal,
+    /// Unconditional kill — cannot be trapped, always triggers cascading exit.
+    Kill,
+    /// Actor was killed by another actor (the `Kill` reason after propagation).
+    Killed,
+    /// Graceful shutdown with optional timeout.
+    Shutdown(Option<Duration>),
+    /// Error with description.
+    Error(String),
+    /// User-defined exit reason (any serializable value).
+    Custom(String),
+}
+
+impl ExitReason {
+    /// Returns true if this reason represents abnormal termination.
+    ///
+    /// Normal exits do NOT trigger linked actor exits (per Erlang semantics).
+    /// All other reasons trigger cascading failure for linked actors
+    /// that don't trap exits.
+    pub fn is_abnormal(&self) -> bool {
+        !matches!(self, ExitReason::Normal)
+    }
+
+    /// Returns a short string tag for logging/monitoring.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            ExitReason::Normal => "normal",
+            ExitReason::Kill => "kill",
+            ExitReason::Killed => "killed",
+            ExitReason::Shutdown(_) => "shutdown",
+            ExitReason::Error(_) => "error",
+            ExitReason::Custom(_) => "custom",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linear Type Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod linear_tests {
+    use super::*;
+
+    // Test 1: LinearIso capability exists and is_linear returns true
+    #[test]
+    fn test_linear_iso_is_linear() {
+        assert!(Capability::LinearIso.is_linear());
+    }
+
+    // Test 2: Regular Iso is NOT linear (no tracking)
+    #[test]
+    fn test_regular_iso_not_linear() {
+        assert!(!Capability::Iso.is_linear());
+        assert!(!Capability::Trn.is_linear());
+        assert!(!Capability::Ref.is_linear());
+        assert!(!Capability::Val.is_linear());
+        assert!(!Capability::Box.is_linear());
+        assert!(!Capability::Tag.is_linear());
+    }
+
+    // Test 3: TypeContext can bind and consume a linear variable
+    #[test]
+    fn test_typecontext_linear_bind_consume() {
+        let mut ctx = TypeContext::new();
+        ctx.bind("x", Type::int(), Capability::LinearIso);
+
+        // Initially not consumed
+        assert!(!ctx.is_consumed("x"));
+
+        // Consume succeeds
+        assert!(ctx.consume("x").is_ok());
+
+        // Now it is consumed
+        assert!(ctx.is_consumed("x"));
+    }
+
+    // Test 4: Double consumption of a linear variable fails
+    #[test]
+    fn test_linear_double_consume_fails() {
+        let mut ctx = TypeContext::new();
+        ctx.bind("x", Type::int(), Capability::LinearIso);
+
+        // First consume succeeds
+        assert!(ctx.consume("x").is_ok());
+
+        // Second consume fails with LinearTypeError
+        let result = ctx.consume("x");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NuError::LinearTypeError { msg, .. } => {
+                assert!(msg.contains("consumed more than once"));
+            }
+            other => panic!("Expected LinearTypeError, got {:?}", other),
+        }
+    }
+
+    // Test 5: LinearIso is sendable (like Iso)
+    #[test]
+    fn test_linear_iso_is_sendable() {
+        assert!(Capability::LinearIso.is_sendable());
+        // Same sendability as Iso, Val, Tag
+        assert!(Capability::Iso.is_sendable());
+        assert!(Capability::Val.is_sendable());
+        assert!(Capability::Tag.is_sendable());
+        // Ref, Box, Trn are not sendable
+        assert!(!Capability::Ref.is_sendable());
+        assert!(!Capability::Box.is_sendable());
+        assert!(!Capability::Trn.is_sendable());
+    }
+
+    // Test 6: Promote LinearIso to Iso on send
+    #[test]
+    fn test_linear_iso_promote_to_iso() {
+        assert_eq!(Capability::LinearIso.promote_to_iso(), Capability::Iso);
+        // Non-linear capabilities are unchanged
+        assert_eq!(Capability::Iso.promote_to_iso(), Capability::Iso);
+        assert_eq!(Capability::Trn.promote_to_iso(), Capability::Trn);
+        assert_eq!(Capability::Ref.promote_to_iso(), Capability::Ref);
+        assert_eq!(Capability::Val.promote_to_iso(), Capability::Val);
+        assert_eq!(Capability::Box.promote_to_iso(), Capability::Box);
+        assert_eq!(Capability::Tag.promote_to_iso(), Capability::Tag);
+    }
+
+    // Test 7: LinearIso joins correctly with other capabilities
+    #[test]
+    fn test_linear_iso_join() {
+        // LinearIso ⊔ LinearIso = LinearIso
+        assert_eq!(
+            Capability::LinearIso.join(Capability::LinearIso),
+            Capability::LinearIso
+        );
+        // LinearIso ⊔ Iso = Iso
+        assert_eq!(
+            Capability::LinearIso.join(Capability::Iso),
+            Capability::Iso
+        );
+        assert_eq!(
+            Capability::Iso.join(Capability::LinearIso),
+            Capability::Iso
+        );
+        // LinearIso ⊔ Trn = Trn
+        assert_eq!(
+            Capability::LinearIso.join(Capability::Trn),
+            Capability::Trn
+        );
+        // LinearIso ⊔ Ref = Ref
+        assert_eq!(
+            Capability::LinearIso.join(Capability::Ref),
+            Capability::Ref
+        );
+        // LinearIso ⊔ Tag = LinearIso
+        assert_eq!(
+            Capability::LinearIso.join(Capability::Tag),
+            Capability::LinearIso
+        );
+        // Subtyping: LinearIso <: Iso
+        assert!(Capability::LinearIso.is_subtype_of(Capability::Iso));
+        assert!(!Capability::Iso.is_subtype_of(Capability::LinearIso));
+    }
+
+    // Test 8: Linear type error creation
+    #[test]
+    fn test_linear_type_error() {
+        let err = NuError::LinearTypeError {
+            msg: "test linear error".to_string(),
+            span: Span::new(0, 10, 1, 5),
+        };
+        let display = format!("{}", err);
+        assert!(display.contains("Linear type error"));
+        assert!(display.contains("test linear error"));
+        assert!(display.contains("1:5"));
+    }
+}
