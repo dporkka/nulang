@@ -6,6 +6,7 @@ pub mod effect_checker;
 pub mod effects;
 pub mod integration_tests;
 pub mod lexer;
+pub mod lsp;
 pub mod parser;
 pub mod repl;
 pub mod typechecker;
@@ -14,4 +15,4 @@ pub mod vm;
 
 pub mod runtime;
 pub mod jit;
-pub mod lsp;
+pub mod escape_analysis;
