@@ -5,11 +5,13 @@
 //!   nulang --repl
 //!   nulang --eval <CODE>
 //!   nulang --check <FILE>
+//!   nulang --lsp         Start LSP server
 //!
 //! Options:
 //!   -r, --repl       Start interactive REPL
 //!   -e, --eval       Evaluate a code string
 //!   -c, --check      Type-check a file (don't run)
+//!   -l, --lsp        Start LSP server (stdin/stdout)
 //!   -v, --verbose    Show bytecode and AST
 //!   -h, --help       Show this help message
 
@@ -61,6 +63,9 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "-l" | "--lsp" => {
+                opts.lsp = true;
+            }
             "-v" | "--verbose" => opts.verbose = true,
             "-h" | "--help" => {
                 print_help();
@@ -73,6 +78,20 @@ fn main() {
             arg => positional.push(arg.to_string()),
         }
         i += 1;
+    }
+
+    if opts.lsp {
+        #[cfg(feature = "tokio")]
+        {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(nulang::lsp::run_lsp_server());
+        }
+        #[cfg(not(feature = "tokio"))]
+        {
+            eprintln!("LSP server requires tokio runtime. Build with: cargo build --features tokio");
+            std::process::exit(1);
+        }
+        return;
     }
 
     if opts.repl {
@@ -130,6 +149,7 @@ struct Options {
     repl: bool,
     eval_code: Option<String>,
     check_file: Option<String>,
+    lsp: bool,
     verbose: bool,
 }
 
@@ -138,11 +158,13 @@ fn print_help() {
     println!("       nulang --repl");
     println!("       nulang --eval <CODE>");
     println!("       nulang --check <FILE>");
+    println!("       nulang --lsp");
     println!();
     println!("Options:");
     println!("  -r, --repl       Start interactive REPL");
     println!("  -e, --eval       Evaluate a code string");
     println!("  -c, --check      Type-check a file (don't run)");
+    println!("  -l, --lsp        Start LSP server (stdin/stdout)");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  -h, --help       Show this help message");
 }
