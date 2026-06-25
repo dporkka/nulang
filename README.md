@@ -27,6 +27,8 @@
 | **BEAM/OTP Primitives** | `receive`, `spawn_link`, `monitor`, `link`, registry, timers, process groups |
 | **Linear Type Moves** | Zero-cost `iso` actor messaging via compile-time linearity tracking |
 | **SIMD Vectorization** | Auto-vectorization of array loops via Cranelift SIMD (I64x2, F64x2, I32x4, F32x4) |
+| **Dual-Region Heaps** | Generational GC with nursery + tenured spaces |
+| **Escape Analysis** | Stack-allocate non-escaping objects, reducing GC pressure |
 
 ---
 
@@ -161,7 +163,7 @@ fun shareData(data: iso String, target: Address): Unit =
 
 ## Implementation Status
 
-### Modules (34 source files, ~35,000 lines, 490+ tests)
+### Modules (36 source files, ~38,000 lines, 520+ tests)
 
 | Module | File | Description | Tests |
 |--------|------|-------------|-------|
@@ -195,6 +197,8 @@ fun shareData(data: iso String, target: Address): Unit =
 | Timer | `src/timer.rs` | Hierarchical timer wheel | 8 |
 | Exit Reason | `src/exit_reason.rs` | Exit signal types | - |
 | LSP Server | `src/lsp/mod.rs` | Language server with inlay hints | 9 |
+| Dual Heap | `src/runtime/dual_heap.rs` | Generational heap (nursery + tenured) | 15 |
+| Escape Analysis | `src/escape_analysis.rs` | Bytecode-level escape analysis | 30 |
 | Runtime | `src/runtime.rs` | Standard library runtime | 15 |
 | Integration | `src/integration_tests.rs` | End-to-end pipeline tests | 16 |
 | Types | `src/types.rs` | Type definitions, error types | 6 |
@@ -270,6 +274,27 @@ Auto-vectorization of element-wise array loops using Cranelift SIMD instructions
 | Tiered integration | `CompiledSimdAndRan` action in tiered execution |
 | ISA flag | `enable_simd = true` in Cranelift settings |
 
+### v0.12 — Dual-Region Heaps + Escape Analysis
+
+Generational heap partitioning with compile-time escape analysis to reduce GC pressure:
+
+| Component | Description |
+|-----------|-------------|
+| `dual_heap.rs` | Nursery (256KB) + Tenured generational heap |
+| `NurseryRegion` | Fast bump allocator for short-lived objects |
+| `TenuredRegion` | Full size-class free lists for long-lived objects |
+| Minor GC | Collect nursery only; promote survivors to tenured |
+| Promotion threshold | Objects surviving 2 minor collections promoted |
+| `escape_analysis.rs` | Bytecode-level flow analysis for object lifetimes |
+| `EscapeStatus` | `NoEscape` / `ArgEscape` / `GlobalEscape` classification |
+| Stack allocation | `NoEscape` objects bypass heap entirely |
+| `OrcaHeap` trait | Dual heap is compatible with existing ORCA GC |
+
+**Expected impact:** 30-50% reduction in GC pressure for typical workloads by:
+- Avoiding heap allocation for temporary objects (escape analysis)
+- Fast minor GC of nursery only (O(nursery) not O(all objects))
+- Promoting long-lived objects out of the fast path
+
 ---
 
 ## Design Philosophy
@@ -315,6 +340,8 @@ This is an active implementation with the following components functional:
 - [x] Type guard stripping (direct CLIF when types known, ~30% speedup in numeric loops)
 - [x] LSP inlay hints (type/capability/effect annotations via tower-lsp)
 - [x] SIMD vectorization (auto-vectorize array loops: I64x2, F64x2, I32x4, F32x4)
+- [x] Dual-region generational heap (nursery + tenured, minor GC)
+- [x] Escape analysis (stack-allocate non-escaping objects)
 
 ### Roadmap
 
@@ -330,7 +357,7 @@ This is an active implementation with the following components functional:
 | v0.9 | Cranelift JIT backend | Completed |
 | v0.10 | Type guard stripping + LSP inlay hints | Completed |
 | v0.11 | SIMD vectorization (auto-vectorize array loops) | Completed |
-| v0.12 | Dual-region heaps + escape analysis | Planned |
+| v0.12 | Dual-region heaps + escape analysis | Completed |
 | v1.0 | Production release | Planned |
 
 ---
