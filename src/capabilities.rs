@@ -12,15 +12,17 @@ pub fn check(value_cap: Capability, required_cap: Capability) -> bool {
     value_cap.is_subtype_of(required_cap)
 }
 
-/// Check if a value can be sent to another actor (must be iso, val, or tag).
+/// Check if a value can be sent to another actor (must be iso, val, tag, or lineariso).
 pub fn check_sendable(cap: Capability) -> bool {
     cap.is_sendable()
 }
 
-/// Recover iso from trn.
+/// Recover iso from trn (or preserve LinearIso).
 pub fn recover_iso(cap: Capability) -> Option<Capability> {
     match cap {
         Capability::Trn => Some(Capability::Iso),
+        // LinearIso is already a form of unique ownership, no recovery needed
+        Capability::LinearIso => Some(Capability::LinearIso),
         _ => None,
     }
 }
@@ -33,10 +35,10 @@ pub fn recover_val(cap: Capability) -> Option<Capability> {
     }
 }
 
-/// Read a reference through a box (box can read iso, trn, ref, val as box).
+/// Read a reference through a box (box can read iso, lineariso, trn, ref, val as box).
 pub fn read_as_box(cap: Capability) -> Option<Capability> {
     match cap {
-        Capability::Iso | Capability::Trn | Capability::Ref | Capability::Val | Capability::Box => {
+        Capability::Iso | Capability::LinearIso | Capability::Trn | Capability::Ref | Capability::Val | Capability::Box => {
             Some(Capability::Box)
         }
         Capability::Tag => None,
@@ -47,6 +49,7 @@ pub fn read_as_box(cap: Capability) -> Option<Capability> {
 pub fn format_cap(cap: Capability) -> &'static str {
     match cap {
         Capability::Iso => "iso",
+        Capability::LinearIso => "lineariso",
         Capability::Trn => "trn",
         Capability::Ref => "ref",
         Capability::Val => "val",
