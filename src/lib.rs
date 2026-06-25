@@ -13,3 +13,4 @@ pub mod types;
 pub mod vm;
 
 pub mod runtime;
+pub mod jit;
