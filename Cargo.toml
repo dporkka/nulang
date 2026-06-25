@@ -6,8 +6,8 @@ authors = ["Nulang Team"]
 description = "Nulang - Distributed Actor-Based Programming Language with AI Agent Support"
 
 [dependencies]
-# Core - none for now, keeping dependencies minimal
-# We may add: crossbeam, parking_lot, rustc-hash in later phases
+mimalloc = "0.1"
+crossbeam = "0.8"
 
 [profile.release]
 opt-level = 3
