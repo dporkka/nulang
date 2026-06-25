@@ -8,7 +8,8 @@ pub mod integration_tests;
 pub mod lexer;
 pub mod parser;
 pub mod repl;
-pub mod runtime;
-pub mod types;
 pub mod typechecker;
+pub mod types;
 pub mod vm;
+
+pub mod runtime;
