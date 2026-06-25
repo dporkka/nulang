@@ -1,24 +1,24 @@
 //! Nulang CLI entry point.
+
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 //!
 //! Usage:
 //!   nulang [OPTIONS] <FILE>
 //!   nulang --repl
 //!   nulang --eval <CODE>
 //!   nulang --check <FILE>
-//!   nulang --lsp         Start LSP server
+//!   nulang --lsp       Start LSP server
 //!
 //! Options:
 //!   -r, --repl       Start interactive REPL
 //!   -e, --eval       Evaluate a code string
 //!   -c, --check      Type-check a file (don't run)
-//!   -l, --lsp        Start LSP server (stdin/stdout)
+//!   --lsp            Start Language Server (stdio)
 //!   -v, --verbose    Show bytecode and AST
 //!   -h, --help       Show this help message
-
-use mimalloc::MiMalloc;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
 
 use nulang::compiler::Compiler;
 use nulang::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
@@ -29,15 +29,18 @@ use nulang::typechecker::TypeChecker;
 use nulang::types::{NuError, NuResult, Type};
 use nulang::vm::VM;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() <= 1 {
+        // Default: start REPL
         let mut repl = Repl::new();
         repl.run();
         return;
     }
 
+    // Parse arguments
     let mut opts = Options::default();
     let mut positional = Vec::new();
     let mut i = 1;
@@ -63,9 +66,7 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-            "-l" | "--lsp" => {
-                opts.lsp = true;
-            }
+            "--lsp" => opts.lsp = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-h" | "--help" => {
                 print_help();
@@ -73,6 +74,7 @@ fn main() {
             }
             arg if arg.starts_with('-') => {
                 eprintln!("Error: Unknown option: {}", arg);
+                eprintln!("Run with --help for usage information.");
                 std::process::exit(1);
             }
             arg => positional.push(arg.to_string()),
@@ -81,16 +83,7 @@ fn main() {
     }
 
     if opts.lsp {
-        #[cfg(feature = "tokio")]
-        {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(nulang::lsp::run_lsp_server());
-        }
-        #[cfg(not(feature = "tokio"))]
-        {
-            eprintln!("LSP server requires tokio runtime. Build with: cargo build --features tokio");
-            std::process::exit(1);
-        }
+        nulang::lsp::run_lsp_server().await;
         return;
     }
 
@@ -124,6 +117,7 @@ fn main() {
         return;
     }
 
+    // Run a source file
     if !positional.is_empty() {
         let path = &positional[0];
         let source = match std::fs::read_to_string(path) {
@@ -140,6 +134,7 @@ fn main() {
         return;
     }
 
+    // No arguments and no options: start REPL
     let mut repl = Repl::new();
     repl.run();
 }
@@ -164,7 +159,7 @@ fn print_help() {
     println!("  -r, --repl       Start interactive REPL");
     println!("  -e, --eval       Evaluate a code string");
     println!("  -c, --check      Type-check a file (don't run)");
-    println!("  -l, --lsp        Start LSP server (stdin/stdout)");
+    println!("  --lsp            Start Language Server (stdio)");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  -h, --help       Show this help message");
 }
@@ -173,71 +168,143 @@ fn print_error(err: &NuError) {
     eprintln!("Error: {}", err);
 }
 
+/// Full pipeline: parse -> typecheck -> effect check -> compile -> vm.run()
 fn run_source(source: &str, verbose: bool) -> NuResult<()> {
+    // 1. Lex
     let mut lexer = Lexer::new(source);
-    let tokens = lexer.lex().map_err(|e| { eprintln!("Lex error: {}", e); e })?;
+    let tokens = lexer.lex().map_err(|e| {
+        eprintln!("Lex error: {}", e);
+        e
+    })?;
+
+    // 2. Parse
     let mut parser = Parser::new(tokens);
-    let ast = parser.parse_module().map_err(|e| { eprintln!("Parse error: {}", e); e })?;
+    let ast = parser.parse_module().map_err(|e| {
+        eprintln!("Parse error: {}", e);
+        e
+    })?;
 
-    if verbose { println!("=== AST ===\n{:#?}\n", ast); }
+    if verbose {
+        println!("=== AST ===");
+        println!("{:#?}", ast);
+        println!();
+    }
 
+    // 3. Type check
     let mut type_checker = TypeChecker::new();
-    let module_type = type_checker.check_module(&ast).map_err(|e| { eprintln!("Type error: {}", e); e })?;
-    if verbose { println!("=== Inferred Type ===\n{}\n", type_to_string(&module_type)); }
+    let module_type = type_checker.check_module(&ast).map_err(|e| {
+        eprintln!("Type error: {}", e);
+        e
+    })?;
 
+    if verbose {
+        println!("=== Inferred Type ===");
+        println!("{}\n", type_to_string(&module_type));
+    }
+
+    // 4. Effect check
     let mut effect_checker = EffectChecker::new();
     let effect_ctx = EffectContext::empty();
     for decl in &ast.decls {
         if let nulang::ast::Decl::Function { body, .. } = decl {
-            effect_checker.infer_effects(&effect_ctx, body).map_err(|e| { eprintln!("Effect error: {}", e); e })?;
+            effect_checker.infer_effects(&effect_ctx, body).map_err(|e| {
+                eprintln!("Effect error: {}", e);
+                e
+            })?;
         }
     }
 
+    // 5. Capability analysis
     let mut cap_analyzer = CapabilityAnalyzer::new();
     let cap_ctx = CapContext::new();
     for decl in &ast.decls {
         if let nulang::ast::Decl::Function { body, .. } = decl {
-            cap_analyzer.infer_cap(&cap_ctx, body).map_err(|e| { eprintln!("Capability error: {}", e); e })?;
+            cap_analyzer.infer_cap(&cap_ctx, body).map_err(|e| {
+                eprintln!("Capability error: {}", e);
+                e
+            })?;
         }
     }
 
+    // 6. Compile
     let mut compiler = Compiler::new("main");
     let code_module = compiler.compile_module(&ast)?.clone();
-    if verbose { println!("=== Bytecode ===\n{}", disassemble(&code_module)); }
 
+    if verbose {
+        println!("=== Bytecode ===");
+        println!("{}", disassemble(&code_module));
+    }
+
+    // 7. Execute
     let mut vm = VM::new();
     vm.load_module(code_module);
-    let value = vm.run().map_err(|e| { eprintln!("Runtime error: {}", e); e })?;
+    let value = vm.run().map_err(|e| {
+        eprintln!("Runtime error: {}", e);
+        e
+    })?;
 
     let result_str = value.to_string_repr();
-    if result_str != "unit" { println!("{}", result_str); }
+    if result_str != "unit" {
+        println!("{}", result_str);
+    }
+
     Ok(())
 }
 
 fn check_source(source: &str, verbose: bool) -> NuResult<()> {
+    // 1. Lex
     let mut lexer = Lexer::new(source);
-    let tokens = lexer.lex().map_err(|e| { eprintln!("Lex error: {}", e); e })?;
+    let tokens = lexer.lex().map_err(|e| {
+        eprintln!("Lex error: {}", e);
+        e
+    })?;
+
+    // 2. Parse
     let mut parser = Parser::new(tokens);
-    let ast = parser.parse_module().map_err(|e| { eprintln!("Parse error: {}", e); e })?;
-    if verbose { println!("=== AST ===\n{:#?}\n", ast); }
+    let ast = parser.parse_module().map_err(|e| {
+        eprintln!("Parse error: {}", e);
+        e
+    })?;
 
+    if verbose {
+        println!("=== AST ===");
+        println!("{:#?}", ast);
+        println!();
+    }
+
+    // 3. Type check
     let mut type_checker = TypeChecker::new();
-    let module_type = type_checker.check_module(&ast).map_err(|e| { eprintln!("Type error: {}", e); e })?;
-    if verbose { println!("=== Inferred Type ===\n{}\n", type_to_string(&module_type)); }
+    let module_type = type_checker.check_module(&ast).map_err(|e| {
+        eprintln!("Type error: {}", e);
+        e
+    })?;
 
+    if verbose {
+        println!("=== Inferred Type ===");
+        println!("{}\n", type_to_string(&module_type));
+    }
+
+    // 4. Effect check
     let mut effect_checker = EffectChecker::new();
     let effect_ctx = EffectContext::empty();
     for decl in &ast.decls {
         if let nulang::ast::Decl::Function { body, .. } = decl {
-            effect_checker.infer_effects(&effect_ctx, body).map_err(|e| { eprintln!("Effect error: {}", e); e })?;
+            effect_checker.infer_effects(&effect_ctx, body).map_err(|e| {
+                eprintln!("Effect error: {}", e);
+                e
+            })?;
         }
     }
 
+    // 5. Capability analysis
     let mut cap_analyzer = CapabilityAnalyzer::new();
     let cap_ctx = CapContext::new();
     for decl in &ast.decls {
         if let nulang::ast::Decl::Function { body, .. } = decl {
-            cap_analyzer.infer_cap(&cap_ctx, body).map_err(|e| { eprintln!("Capability error: {}", e); e })?;
+            cap_analyzer.infer_cap(&cap_ctx, body).map_err(|e| {
+                eprintln!("Capability error: {}", e);
+                e
+            })?;
         }
     }
 
@@ -245,6 +312,7 @@ fn check_source(source: &str, verbose: bool) -> NuResult<()> {
         println!("Effect check passed.");
         println!("Capability analysis passed.");
     }
+
     Ok(())
 }
 
