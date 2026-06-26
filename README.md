@@ -27,6 +27,7 @@
 | **BEAM/OTP Primitives** | `receive`, `spawn_link`, `monitor`, `link`, registry, timers, process groups |
 | **Linear Type Moves** | Zero-cost `iso` actor messaging via compile-time linearity tracking |
 | **SIMD Vectorization** | Auto-vectorization of array loops via Cranelift SIMD (I64x2, F64x2, I32x4, F32x4) |
+| **Python Interop** | Import and call Python libraries (PyTorch, Transformers, NumPy) via PyO3 |
 | **Dual-Region Heaps** | Generational GC with nursery + tenured spaces |
 | **Escape Analysis** | Stack-allocate non-escaping objects, reducing GC pressure |
 
@@ -70,9 +71,6 @@ cargo run -- --check myprogram.nl
 
 # Evaluate a string
 cargo run -- --eval 'perform IO.print("Hello")'
-
-# Start LSP server
-cargo run -- --lsp
 ```
 
 ---
@@ -89,45 +87,66 @@ fun main() =
 ### Actors
 
 ```nulang
-actor Counter(start: Int) =
-  behavior Count(n: Int) =>
+actor Counter {
+  state count: Int
+  initial init
+
+  behavior init() =
     receive
-      | Increment => become Count(n + 1)
-      | GetValue(reply) =>
-          perform reply(n)
-          become Count(n)
-    end
-  become Count(start)
+    | Tick =>
+        self ! count(count + 1)
+    | Get =>
+        count
+}
+```
+
+### Effects
+
+```nulang
+let result = handle compute() with
+  | Log.msg(msg) =>
+      perform IO.print(msg)
+      resume ()
+  | return(x) =>
+      x
 ```
 
 ### AI Agents
 
 ```nulang
-agent WeatherBot =
-  model "gpt-4"
-  tools [WeatherAPI.check, Calendar.schedule]
-  memory episodic
-  policy SafeToolUse
+agent CodeReviewer {
+  llm "gpt-4",
+      "You are a senior code reviewer.",
+      0.7
+
+  tool analyze: SyntaxAnalysis,
+       "Perform syntax analysis on the given code"
+
+  behavior review(code: String) =
+    let analysis = perform SyntaxAnalysis.analyze(code)
+    let review = perform LLM.generate(analysis)
+    review
+}
 ```
 
-### Algebraic Effects
+### Pattern Matching
 
 ```nulang
-effect FileSystem
-  fun read(path: String) ! FileSystem: String
-  fun write(path: String, content: String) ! FileSystem: Unit
-
-fun readConfig() ! FileSystem: Config =
-  let raw = perform FileSystem.read("app.conf")
-  parseConfig(raw)
+match result with
+| Ok(value) =>
+    perform IO.print("Success: " <> value)
+| Err(message) =>
+    perform IO.print("Error: " <> message)
 ```
 
-### Capabilities
+### Pipe Operator
 
 ```nulang
-fun shareData(data: iso String, target: Address): Unit =
-  -- `iso` guarantees unique reference; compiler tracks linear consumption
-  perform send(target, DataMessage(consume data))
+let processed =
+  data
+  |> transform
+  |> filter(predicate)
+  |> aggregate
 ```
 
 ---
@@ -135,98 +154,184 @@ fun shareData(data: iso String, target: Address): Unit =
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Source Code (.nl)                         │
-├─────────────────────────────────────────────────────────────────┤
-│  Lexer → Parser → AST                                          │
-├─────────────────────────────────────────────────────────────────┤
-│  Type Checker (Hindley-Milner) → Effect Checker                │
-│  Capability Analyzer → Linear Move Validator                    │
-├─────────────────────────────────────────────────────────────────┤
-│  Bytecode Compiler (register-based, 84 opcodes)                 │
-├─────────────────────────────────────────────────────────────────┤
-│  Tiered Execution:                                               │
-│    ┌──────────────┐    ┌──────────────┐    ┌─────────────────┐ │
-│    │  Interpreter │───→│ Type-special │───→│ SIMD Vectorized │ │
-│    │   (cold)     │    │    JIT       │    │      JIT        │ │
-│    └──────────────┘    │   (warm)     │    │    (hot)        │ │
-│                        └──────────────┘    └─────────────────┘ │
-├─────────────────────────────────────────────────────────────────┤
-│  VM: Register file (256×u64), NaN-tagged values, actor heap     │
-├─────────────────────────────────────────────────────────────────┤
-│  Runtime: Actor scheduler (work-stealing), ORCA GC, mailbox     │
-│  BEAM/OTP primitives, CRDT manager, distributed transport       │
-└─────────────────────────────────────────────────────────────────┘
+                    +-------------------------+
+                    |      Source Code        |
+                    +-------------------------+
+                              |
+                              v
++----------+    +-------------------------+    +----------+
+|  Lexer   |--->|     Parser (AST)        |--->| Compiler |
++----------+    +-------------------------+    +----------+
+                              |                       |
+                              v                       v
+                    +-------------------------+  +-------------------+
+                    |  Type Checker (H-M)     |  | Bytecode Module   |
+                    |  Effect Checker         |  | (64 opcodes)      |
+                    +-------------------------+  +-------------------+
+                                                           |
+                                                           v
+                                              +-------------------------+
+                                              |   Register-Based VM     |
+                                              |  (Token-Threaded)       |
+                                              +-------------------------+
+                                                           |
+                                                           v
+                                              +-------------------------+
+                                              |   Cranelift JIT Tier    |
+                                              |  (Tiered Execution)     |
+                                              +-------------------------+
+                                                           |
+                    +--------------------------------------+---------------------------+
+                    |                                      |                           |
+                    v                                      v                           v
+          +------------------+                    +------------------+        +------------------+
+          | Actor Runtime    |                    |   Scheduler      |        |   ORCA GC        |
+          | (Spawn/Send/     |                    | (Work-Stealing   |        | (Per-Actor Heap, |
+          |  Receive/Links)  |                    |  M:N Threads)    |        |  Ref Counting,   |
+          +--------+---------+                    +------------------+        |  Cycle Detect)   |
+                   |                                                          +------------------+
+                   |
+         +---------+------------------------------------------+
+         |                                                    |
+         v                                                    v
++------------------+                            +-------------------------+
+| Supervision      |                            | Distributed Runtime     |
+| (OneForOne/All/  |                            | (TCP Transport, Cluster |
+|  RestForOne)     |                            |  Membership, CRDT Sync) |
++------------------+                            +-------------------------+
+                                                           |
+                                                           v
+                                               +-------------------------+
+                                               | CRDT Manager            |
+                                               | (GCounter, PNCounter,   |
+                                               |  GSet, ORSet, AWORSet,  |
+                                               |  LWWReg, MVReg, RGA)    |
+                                               +-------------------------+
 ```
+
+### Module Structure
+
+| Module | Description | Lines |
+|--------|-------------|-------|
+| `lexer` | Hand-written state machine, indentation-based tokenization | ~550 |
+| `parser` | Recursive descent with Pratt precedence climbing | ~1,400 |
+| `ast` | Abstract syntax tree definitions (30+ expression types) | ~400 |
+| `types` | Type system, capabilities, effects, NaN-tagged values | ~600 |
+| `typechecker` | Hindley-Milner Algorithm W with full inference | ~2,500 |
+| `effect_checker` | Algebraic effect row checking + capability analysis | ~1,750 |
+| `bytecode` | 64 opcodes, 32-bit fixed-width instructions | ~300 |
+| `compiler` | AST-to-bytecode compilation with register allocation | ~1,000 |
+| `vm` | Register-based virtual machine with token-threaded dispatch | ~1,200 |
+| `effects` | Algebraic effect row subset and combine operations | ~200 |
+| `capabilities` | Permission lattice (join/meet) and access checking | ~150 |
+| `jit/compiler` | Bytecode → Cranelift IR (30 opcodes, type-directed optimization) | ~400 |
+| `jit/runtime` | NaN-tag-aware runtime helpers for JIT (30 extern C functions) | ~150 |
+| `jit/mod` | JIT session manager, tiered execution, hot-counter tracking | ~200 |
+| `runtime/actor` | Actor struct, lifecycle, state management | ~120 |
+| `runtime/scheduler` | Work-stealing M:N scheduler with reductions | ~200 |
+| `runtime/mailbox` | Lock-free MPSC via crossbeam ArrayQueue (ABA-safe) | ~200 |
+| `runtime/timer` | Hierarchical timer wheel for send_after, exit_after, kill_after | ~220 |
+| `runtime/registry` | Local actor name registry (register/whereis/registered) | ~230 |
+| `runtime/process_groups` | Decentralized actor group membership (Erlang pg) | ~165 |
+| `runtime/heap` | Per-actor bump allocator with ORCA object headers | ~1,030 |
+| `runtime/gc` | ORCA reference counting (3-count protocol) | ~1,400 |
+| `runtime/orca_cycle` | Centralized cycle detector with weighted heuristic | ~1,550 |
+| `runtime/supervisor` | Erlang/OTP-style supervision strategies | ~465 |
+| `runtime/network` | TCP transport, NUL0 wire protocol | ~1,390 |
+| `runtime/cluster` | Gossip-based cluster membership + failure detection | ~1,080 |
+| `runtime/distributed` | Location-transparent actor addressing | ~1,140 |
+| `runtime/crdt` | CRDT trait + GCounter, PNCounter, GSet, ORSet, AWORSet | ~1,680 |
+| `runtime/crdt_reg` | LWWRegister, MVRegister, RGA sequence CRDT | ~1,170 |
+| `runtime/crdt_manager` | CRDT factory, sync ops, inter-node merge | ~450 |
+| `runtime/tests` | Integration tests (fault tolerance, GC, distributed, CRDTs) | ~2,050 |
+| `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~490 |
+| `main` | CLI entry point (run, repl, eval, check modes) | ~450 |
+
+**Total: ~32,000 lines of Rust across 37 source files with 530+ tests.**
 
 ---
 
-## Implementation Status
+## Implemented Subsystems
 
-### Modules (36 source files, ~38,000 lines, 520+ tests)
+### v0.4 — ORCA Garbage Collector
 
-| Module | File | Description | Tests |
-|--------|------|-------------|-------|
-| Lexer | `src/lexer.rs` | Tokenization, indentation handling | 42 |
-| Parser | `src/parser.rs` | Recursive descent, all expression types | 38 |
-| AST | `src/ast.rs` | Complete AST node types | - |
-| Type Checker | `src/typechecker.rs` | Hindley-Milner Algorithm W | 45 |
-| Effect Checker | `src/effect_checker.rs` | Effect row compatibility | 28 |
-| Capabilities | `src/capabilities.rs` | Reference capability analysis | 15 |
-| Bytecode | `src/bytecode.rs` | 84 opcodes, instruction encoding | 12 |
-| Compiler | `src/compiler.rs` | AST-to-bytecode with reg alloc | 24 |
-| VM | `src/vm.rs` | Register-based execution engine | 36 |
-| REPL | `src/repl.rs` | Interactive loop | 8 |
-| JIT Core | `src/jit/compiler.rs` | Bytecode → CLIF (30 opcodes) | 17 |
-| JIT Typed | `src/jit/typed_compiler.rs` | Type guard stripping | 8 |
-| JIT SIMD Analyzer | `src/jit/simd_analyzer.rs` | Vectorization pattern detection | 14 |
-| JIT SIMD Compiler | `src/jit/simd_compiler.rs` | SIMD CLIF emission | 10 |
-| JIT Runtime | `src/jit/runtime.rs` | 30 NaN-tag runtime helpers | - |
-| Scheduler | `src/scheduler.rs` | Work-stealing M:N threading | 22 |
-| Actor | `src/actor.rs` | Spawn, send, receive, behavior | 31 |
-| Mailbox | `src/mailbox.rs` | Lock-free message queues | 18 |
-| Supervisor | `src/supervisor.rs` | Supervision trees | 18 |
-| GC | `src/gc.rs` | ORCA per-actor collector | 24 |
-| GC Cycle | `src/gc_cycle.rs` | Cycle detection | 12 |
-| Distributed | `src/distributed.rs` | TCP transport, clustering | 16 |
-| CRDT | `src/crdt.rs` | 8 CRDT types | 20 |
-| CRDT Manager | `src/crdt_manager.rs` | Factory, sync, merge | 14 |
-| BEAM Primitives | `src/beam_primitives.rs` | 14 core OTP functions | 8 |
-| Process Groups | `src/process_groups.rs` | Decentralized group membership | 6 |
-| Registry | `src/registry.rs` | Actor register/whereis | 10 |
-| Timer | `src/timer.rs` | Hierarchical timer wheel | 8 |
-| Exit Reason | `src/exit_reason.rs` | Exit signal types | - |
-| LSP Server | `src/lsp/mod.rs` | Language server with inlay hints | 9 |
-| Dual Heap | `src/runtime/dual_heap.rs` | Generational heap (nursery + tenured) | 15 |
-| Escape Analysis | `src/escape_analysis.rs` | Bytecode-level escape analysis | 30 |
-| Runtime | `src/runtime.rs` | Standard library runtime | 15 |
-| Integration | `src/integration_tests.rs` | End-to-end pipeline tests | 16 |
-| Types | `src/types.rs` | Type definitions, error types | 6 |
+Nulang uses the **ORCA (Optimized Reference Counting Architecture)** protocol from Pony for memory management. Each actor has its own heap, and garbage is collected without global stop-the-world pauses.
 
-### Version History
+| Component | Description |
+|-----------|-------------|
+| `ActorHeap` | Bump allocator with 5 size-class free lists and live-object tracking |
+| `OrcaGc` | Three-count reference counting (local/foreign/sticky) |
+| `OrcaCoordinator` | Routes cross-actor reference operations between nodes |
+| `CycleDetector` | Weighted-heuristic DFS cycle detection with trial decrements |
+
+### v0.5 — Multi-Node Distribution
+
+Actors can communicate across machine boundaries with location-transparent messaging.
+
+| Component | Description |
+|-----------|-------------|
+| `NetworkTransport` | TCP-based transport with NUL0 binary wire protocol |
+| `ClusterState` | Gossip-based membership with heartbeat failure detection |
+| `ActorAddress` | Location-transparent addressing (local or remote) |
+| `AddressResolver` | Resolves addresses to local actors or network routes |
+
+**API:**
+```rust
+rt.enable_distribution("0.0.0.0:7878".parse()?)?;
+rt.join_cluster("192.168.1.100:7878".parse()?);
+rt.send_distributed(ActorAddress::remote(node_id, actor_id), "hello", &[]);
+rt.process_network();  // handle incoming packets
+```
+
+### v0.6 — CRDT Integration
+
+Eight conflict-free replicated data types enable actors to share mutable state across nodes without coordination.
+
+| CRDT | Type | Operations | Use Case |
+|------|------|-----------|----------|
+| `GCounter` | Counter | increment | Page views, likes |
+| `PNCounter` | Counter | increment, decrement | Inventory, voting |
+| `GSet` | Set | insert | Tags, followers |
+| `ORSet` | Set | add, remove (add-wins) | Shopping cart |
+| `AWORSet` | Set | add, remove (timestamp) | Collaborative todo |
+| `LWWRegister` | Register | write | Profile name, config |
+| `MVRegister` | Register | write (multi-value) | Conflict detection |
+| `RGA` | Sequence | insert, delete | Collaborative text |
+
+**API:**
+```rust
+let (id, _) = rt.crdt_manager.as_mut().unwrap().create_gcounter();
+rt.crdt_manager.as_mut().unwrap().get_gcounter_mut(id).unwrap().increment_by(5);
+rt.sync_crdts();  // broadcast to all connected nodes
+```
 
 ### v0.7 — BEAM/OTP Primitives
 
-| Primitive | Description |
-|-----------|-------------|
-| `receive`/`after` | Selective message receive with timeout |
-| `spawn_link` | Spawn actor with bidirectional link |
-| `monitor`/`demonitor` | One-way actor monitoring |
-| `link`/`unlink` | Dynamic link management |
-| `exit` | Signal-based actor termination |
-| `trap_exit` | Convert exit signals to messages |
-| `register`/`whereis` | Named actor registry |
-| `send_after` | Delayed message delivery |
-| `pg` | Process groups (decentralized) |
-| `yield` | Cooperative scheduling |
+35+ Erlang/OTP primitives analyzed and 14 core primitives implemented:
+
+| Primitive | File | Description |
+|-----------|------|-------------|
+| `receive` | `vm.rs` | Pattern-matching mailbox consume with timeout |
+| `spawn_link` | `vm.rs` | Spawn actor with bidirectional fault link |
+| `monitor` | `runtime/mod.rs` | Watcher monitors target actor for exit |
+| `demonitor` | `runtime/mod.rs` | Remove a monitor |
+| `link`/`unlink` | `runtime/mod.rs` | Bidirectional fault tolerance links |
+| `exit` | `vm.rs` | Typed actor exit with `ExitReason` enum |
+| `trap_exit` | `runtime/actor.rs` | Convert exit signals to messages |
+| `register`/`whereis` | `runtime/registry.rs` | Local actor name registry |
+| `send_after` | `runtime/timer.rs` | Hierarchical timer wheel |
+| `pg` process groups | `runtime/process_groups.rs` | Decentralized actor groups |
+| `yield` | `vm.rs` | Cooperative scheduling yield |
 
 ### v0.8 — Performance Improvements
 
-| Feature | Implementation | Impact |
-|---------|---------------|--------|
-| mimalloc | Global allocator replacement | ~15% faster allocation, reduced fragmentation |
-| Lock-free mailboxes | `crossbeam::queue::ArrayQueue` | Eliminated mutex contention under high concurrency |
-| LinearIso capability | `Capability::LinearIso` + `TypeContext::consume()` | Zero-copy actor message passing |
+Three high-ROI changes implemented in parallel:
+
+| # | Proposal | Change | Impact |
+|---|----------|--------|--------|
+| 2.3 | mimalloc | `#[global_allocator]` → MiMalloc | 10-20% throughput |
+| 2.1 | Lock-free mailboxes | `crossbeam::ArrayQueue` | ABA-safe, cache-line optimized |
+| 4.2 | Linear type moves | `Capability::LinearIso` + consumption tracking | Zero-cost `iso` sends |
 
 ### v0.9 — Cranelift JIT Backend
 
@@ -295,6 +400,41 @@ Generational heap partitioning with compile-time escape analysis to reduce GC pr
 - Fast minor GC of nursery only (O(nursery) not O(all objects))
 - Promoting long-lived objects out of the fast path
 
+### v0.13 — Python Interop
+
+Direct integration with the Python ecosystem via PyO3. This is the critical path for AI adoption — enabling Nulang to leverage PyTorch, Transformers, NumPy, and the entire Python ML stack.
+
+```nulang
+import python "torch" as torch
+import python "transformers" as transformers
+
+let tensor = torch.Tensor([1.0, 2.0, 3.0])
+let result = tensor.sum()
+perform IO.print(result)  -- 6.0
+```
+
+| Component | Description |
+|-----------|-------------|
+| `python/bridge.rs` | PyO3 interpreter bridge with GIL management |
+| `python/marshal.rs` | Bidirectional Nulang Value ↔ Python object conversion |
+| `python/mod.rs` | Module exports and public API |
+| `PyBridge` | Import modules, get/set attributes, call functions |
+| `PythonRegistry` | Thread-safe slab allocator for Python object handles |
+| `TAG_PYTHON` | NaN tag (0x7FFE...) for Python object references in VM |
+| 8 new opcodes | PyImport, PyGetAttr, PyCall, PyCallKw, PySetAttr, PyToNu, PyFromNu, PyRelease |
+| Value constructors | `Value::python_object(id)`, `Value::as_python_object_id()` |
+| VM dispatch | Full opcode implementation with error propagation |
+| Compiler emission | `emit_py_import`, `emit_py_getattr`, `emit_py_call`, etc. |
+| `NuError::PythonError` | Dedicated error variant for Python interop failures |
+| 26 tests | Registry, import, getattr, call, marshal round-trips, VM dispatch |
+
+**Design documents created:**
+- [DESIGN_AI_SDK.md](DESIGN_AI_SDK.md) — OpenAI SDK equivalent (1,309 lines)
+- [DESIGN_WORKFLOW_SDK.md](DESIGN_WORKFLOW_SDK.md) — Temporal SDK equivalent (1,774 lines)
+- [DESIGN_WEB_FRAMEWORK.md](DESIGN_WEB_FRAMEWORK.md) — Phoenix Framework equivalent (1,978 lines)
+- [DESIGN_PACKAGE_MANAGER.md](DESIGN_PACKAGE_MANAGER.md) — Cargo-equivalent package manager (1,627 lines)
+- [DESIGN_CLOUD.md](DESIGN_CLOUD.md) — Nulang Cloud platform architecture (1,738 lines)
+
 ---
 
 ## Design Philosophy
@@ -317,7 +457,7 @@ This is an active implementation with the following components functional:
 - [x] AST (complete node types)
 - [x] Hindley-Milner type checker (Algorithm W with full inference)
 - [x] Algebraic effect checker (effect row compatibility, capability analysis)
-- [x] Bytecode (84 opcodes, constant pool, behavior table)
+- [x] Bytecode (91 opcodes, constant pool, behavior table)
 - [x] Compiler (AST-to-bytecode with register allocation)
 - [x] VM (register-based execution, arithmetic, comparisons, control flow)
 - [x] REPL (parse-typecheck-compile-execute cycle with introspection)
@@ -342,6 +482,12 @@ This is an active implementation with the following components functional:
 - [x] SIMD vectorization (auto-vectorize array loops: I64x2, F64x2, I32x4, F32x4)
 - [x] Dual-region generational heap (nursery + tenured, minor GC)
 - [x] Escape analysis (stack-allocate non-escaping objects)
+- [x] Python interop (PyO3 bridge, 8 opcodes, bidirectional marshalling)
+- [x] AI SDK design document (agent DSL, tool binding, memory, multi-agent)
+- [x] Workflow SDK design document (durable actors, sagas, timers, signals)
+- [x] Web Framework design document (endpoints, controllers, channels, LiveView)
+- [x] Package Manager design document (manifest, resolver, registry, workspace)
+- [x] Cloud Platform design document (global deploy, auto-scaling, persistence)
 
 ### Roadmap
 
@@ -358,6 +504,7 @@ This is an active implementation with the following components functional:
 | v0.10 | Type guard stripping + LSP inlay hints | Completed |
 | v0.11 | SIMD vectorization (auto-vectorize array loops) | Completed |
 | v0.12 | Dual-region heaps + escape analysis | Completed |
+| v0.13 | Python interop + AI ecosystem design foundation | Completed |
 | v1.0 | Production release | Planned |
 
 ---
@@ -370,4 +517,18 @@ This is an active implementation with the following components functional:
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## Acknowledgments
+
+- **Erlang/OTP** for the actor model and fault-tolerance philosophy
+- **Pony** for the capability system and ORCA GC design
+- **Koka** and **Eff** for algebraic effects
+- **Rust** for ownership-based memory safety inspiration
+- **Shapiro et al.** for CRDT theory and the state-based replication model
+
+---
+
+> *"Concurrency should be a language primitive, not a library afterthought."*
