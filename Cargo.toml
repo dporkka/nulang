@@ -21,6 +21,9 @@ cranelift-frontend = "0.132"
 tower-lsp = "0.22"
 tokio = { version = "1", features = ["full"] }
 
+# Python interop (PyO3)
+pyo3 = { version = "0.22", features = ["auto-initialize"] }
+
 [lib]
 name = "nulang"
 path = "src/lib.rs"
