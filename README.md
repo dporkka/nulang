@@ -27,9 +27,9 @@
 | **BEAM/OTP Primitives** | `receive`, `spawn_link`, `monitor`, `link`, registry, timers, process groups |
 | **Linear Type Moves** | Zero-cost `iso` actor messaging via compile-time linearity tracking |
 | **SIMD Vectorization** | Auto-vectorization of array loops via Cranelift SIMD (I64x2, F64x2, I32x4, F32x4) |
-| **Python Interop** | Import and call Python libraries (PyTorch, Transformers, NumPy) via PyO3 |
-| **Dual-Region Heaps** | Generational GC with nursery + tenured spaces |
-| **Escape Analysis** | Stack-allocate non-escaping objects, reducing GC pressure |
+| **Python Interop** | Native Actor pattern: Python isolated to dedicated OS threads, marshal-only boundary |
+| **Unbounded Mailboxes** | Lock-free MPSC queues (crossbeam::SegQueue) — BEAM-semantics, no message loss |
+| **Stress Test Suite** | 10 chaos tests for actor-effect boundary, supervision, scheduler fairness |
 
 ---
 
@@ -247,7 +247,7 @@ let processed =
 | `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~490 |
 | `main` | CLI entry point (run, repl, eval, check modes) | ~450 |
 
-**Total: ~32,000 lines of Rust across 37 source files with 530+ tests.**
+**Total: ~33,000 lines of Rust across 37 source files with 540+ tests.**
 
 ---
 
@@ -379,54 +379,58 @@ Auto-vectorization of element-wise array loops using Cranelift SIMD instructions
 | Tiered integration | `CompiledSimdAndRan` action in tiered execution |
 | ISA flag | `enable_simd = true` in Cranelift settings |
 
-### v0.12 — Dual-Region Heaps + Escape Analysis
+### v0.12 — Architectural Audit & Corrections
 
-Generational heap partitioning with compile-time escape analysis to reduce GC pressure:
+An external technical audit identified several architectural risks. The following corrections were applied:
 
-| Component | Description |
-|-----------|-------------|
-| `dual_heap.rs` | Nursery (256KB) + Tenured generational heap |
-| `NurseryRegion` | Fast bump allocator for short-lived objects |
-| `TenuredRegion` | Full size-class free lists for long-lived objects |
-| Minor GC | Collect nursery only; promote survivors to tenured |
-| Promotion threshold | Objects surviving 2 minor collections promoted |
-| `escape_analysis.rs` | Bytecode-level flow analysis for object lifetimes |
-| `EscapeStatus` | `NoEscape` / `ArgEscape` / `GlobalEscape` classification |
-| Stack allocation | `NoEscape` objects bypass heap entirely |
-| `OrcaHeap` trait | Dual heap is compatible with existing ORCA GC |
+**Reverted:** Dual-Region Heaps + Escape Analysis
 
-**Expected impact:** 30-50% reduction in GC pressure for typical workloads by:
-- Avoiding heap allocation for temporary objects (escape analysis)
-- Fast minor GC of nursery only (O(nursery) not O(all objects))
-- Promoting long-lived objects out of the fast path
+| Audit Finding | Risk | Action |
+|---------------|------|--------|
+| Generational nursery + ORCA foreign-ref tracking | Cross-actor pointer rewriting during minor GC is a massive corruption vector | Reverted to pure ORCA per-actor heap |
+| Escape analysis without generational GC | Vestigial — no runtime benefit without nursery | Removed from build |
+| Bounded mailboxes (`ArrayQueue`) | Violates BEAM semantics — supervisor signals can be dropped | Switched to `crossbeam::SegQueue` (unbounded) |
+| Centralized cycle detector (1,550 lines) | Distributed DFS over TCP misidentifies slow refs as dead cycles | Restricted to intra-node only |
+| Deep Python integration (TAG_PYTHON in VM) | CPython global mutable state leaks into clean Rust runtime | Replaced with Native Actor pattern |
 
-### v0.13 — Python Interop
+**Philosophy:** Optimize pure ORCA first. Layer generational GC only after ORCA is provably correct under chaotic conditions. Layer Python interop only via isolated native actors with marshal-only boundaries.
 
-Direct integration with the Python ecosystem via PyO3. This is the critical path for AI adoption — enabling Nulang to leverage PyTorch, Transformers, NumPy, and the entire Python ML stack.
+### v0.13 — Python Interop (Native Actor Pattern) + Stress Tests
+
+**Python interop** is the critical path for AI adoption. After architectural audit, the design shifted from deep VM integration to the **Native Actor pattern** — Python runs only in dedicated OS threads with marshal-only data crossing.
 
 ```nulang
-import python "torch" as torch
-import python "transformers" as transformers
-
-let tensor = torch.Tensor([1.0, 2.0, 3.0])
-let result = tensor.sum()
-perform IO.print(result)  -- 6.0
+-- Python interop via native actors (isolated, explicit marshal)
+let result = perform Python.call("torch", ["Tensor"], [[1.0, 2.0, 3.0]])
+perform IO.print(result)  -- marshaled Float value: 6.0
 ```
 
 | Component | Description |
 |-----------|-------------|
 | `python/bridge.rs` | PyO3 interpreter bridge with GIL management |
 | `python/marshal.rs` | Bidirectional Nulang Value ↔ Python object conversion |
-| `python/mod.rs` | Module exports and public API |
-| `PyBridge` | Import modules, get/set attributes, call functions |
-| `PythonRegistry` | Thread-safe slab allocator for Python object handles |
-| `TAG_PYTHON` | NaN tag (0x7FFE...) for Python object references in VM |
-| 8 new opcodes | PyImport, PyGetAttr, PyCall, PyCallKw, PySetAttr, PyToNu, PyFromNu, PyRelease |
-| Value constructors | `Value::python_object(id)`, `Value::as_python_object_id()` |
-| VM dispatch | Full opcode implementation with error propagation |
-| Compiler emission | `emit_py_import`, `emit_py_getattr`, `emit_py_call`, etc. |
-| `NuError::PythonError` | Dedicated error variant for Python interop failures |
-| 26 tests | Registry, import, getattr, call, marshal round-trips, VM dispatch |
+| `python/native_actor.rs` | Native Actor pool: dedicated OS threads for Python |
+| `NativeActorPool` | Thread pool with task/result channels + reply dispatcher |
+| `NativeTask` | Import / Call / Eval / Shutdown task variants |
+| `is_safe_to_marshal()` | Validates pure primitives before boundary crossing |
+| Enforced isolation | No Python objects in Nulang VM — marshal at boundary |
+| 8 opcodes reserved | 0x94-0x9B reserved for future native-actor bytecode |
+| 17 tests | Registry, import, call, marshal round-trips, pool concurrency |
+
+**Stress test suite** (10 chaos tests) deliberately breaks the actor-effect boundary:
+
+| Test | Scenario |
+|------|----------|
+| `stress_slow_io_effect_with_mailbox_flood` | 15K message flood during slow effect — verify scheduler non-blocking |
+| `stress_actor_crash_during_effect_yield` | Crash mid-effect yield — verify supervisor cleans partial stack |
+| `stress_cascading_exit_under_load` | 5-level supervision tree — leaf crash, verify cascade boundaries |
+| `stress_monitor_during_rapid_spawn_exit` | 100 actors spawned/exited — verify exactly 100 DOWN messages |
+| `stress_scheduler_with_mixed_workload` | CPU + I/O + message-heavy actors — verify no starvation |
+| `stress_mailbox_never_drops_system_messages` | 1M normal + 100 system messages — verify all system msgs present |
+| `stress_orphaned_actor_cleanup` | 50-actor mesh, kill hub — verify no orphans |
+| `stress_reduction_quota_fairness` | Two competing actors — verify equal progress |
+| `stress_effect_resume_after_mailbox_pressure` | Effect yield → flood → resume → drain |
+| `stress_supervisor_crash_during_effect_recovery` | Supervisor crashes mid-effect-recovery |
 
 **Design documents created:**
 - [DESIGN_AI_SDK.md](DESIGN_AI_SDK.md) — OpenAI SDK equivalent (1,309 lines)
@@ -471,7 +475,7 @@ This is an active implementation with the following components functional:
 - [x] CRDT subsystem (8 types: counters, sets, registers, sequences)
 - [x] CRDT manager (factory, sync, inter-node merge)
 - [x] BEAM/OTP primitives (receive, spawn_link, monitor, link, exit, trap_exit, register, whereis, send_after, pg, yield)
-- [x] Lock-free mailboxes (crossbeam ArrayQueue, ABA-safe)
+- [x] Unbounded mailboxes (crossbeam::SegQueue — BEAM semantics, no message loss)
 - [x] Hierarchical timer wheel (send_after, exit_after, kill_after)
 - [x] Actor registry (register/whereis/registered)
 - [x] Process groups (decentralized actor group membership)
@@ -480,9 +484,10 @@ This is an active implementation with the following components functional:
 - [x] Type guard stripping (direct CLIF when types known, ~30% speedup in numeric loops)
 - [x] LSP inlay hints (type/capability/effect annotations via tower-lsp)
 - [x] SIMD vectorization (auto-vectorize array loops: I64x2, F64x2, I32x4, F32x4)
-- [x] Dual-region generational heap (nursery + tenured, minor GC)
-- [x] Escape analysis (stack-allocate non-escaping objects)
-- [x] Python interop (PyO3 bridge, 8 opcodes, bidirectional marshalling)
+- [x] ~~Dual-region generational heap~~ **REVERTED** (audit: ORCA+nursery corruption risk)
+- [x] ~~Escape analysis~~ **REVERTED** (audit: no benefit without nursery)
+- [x] Python interop — Native Actor pattern (isolated OS threads, marshal-only boundary)
+- [x] Stress test suite (10 chaos tests: actor-effect boundary, supervision, scheduler)
 - [x] AI SDK design document (agent DSL, tool binding, memory, multi-agent)
 - [x] Workflow SDK design document (durable actors, sagas, timers, signals)
 - [x] Web Framework design document (endpoints, controllers, channels, LiveView)
@@ -503,9 +508,9 @@ This is an active implementation with the following components functional:
 | v0.9 | Cranelift JIT backend | Completed |
 | v0.10 | Type guard stripping + LSP inlay hints | Completed |
 | v0.11 | SIMD vectorization (auto-vectorize array loops) | Completed |
-| v0.12 | Dual-region heaps + escape analysis | Completed |
-| v0.13 | Python interop + AI ecosystem design foundation | Completed |
-| v1.0 | Production release | Planned |
+| v0.12 | Architectural audit & corrections (reverted nursery, bounded mailbox, deep Python) | Completed |
+| v0.13 | Python interop (Native Actor) + stress tests + AI ecosystem design foundation | Completed |
+| v1.0 | Production release — requires: chaos test suite passing, scheduler profiled, cycle detector intra-node only | Planned |
 
 ---
 
