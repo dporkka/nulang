@@ -102,16 +102,17 @@ fn test_supervisor_restart_rate_limiting() {
     let spec = ChildSpec::new("fragile", RestartPolicy::Permanent).with_limits(2, 60);
     rt.supervise_child(sup_id, spec, child_id);
 
+    // Crash 1: child should be restarted (restart #1)
     rt.exit_actor(child_id, ExitReason::Error("crash1".to_string()));
-    assert_eq!(rt.supervisors[&sup_id].restart_count(
-        rt.supervisors[&sup_id].children[0].1), 1);
-
     let child_id_2 = rt.supervisors[&sup_id].children[0].1;
-    rt.exit_actor(child_id_2, ExitReason::Error("crash2".to_string()));
-    assert_eq!(rt.supervisors[&sup_id].restart_count(
-        rt.supervisors[&sup_id].children[0].1), 2);
+    assert_eq!(rt.supervisors[&sup_id].restart_count(child_id_2), 1);
 
+    // Crash 2: child should be restarted again (restart #2)
+    rt.exit_actor(child_id_2, ExitReason::Error("crash2".to_string()));
     let child_id_3 = rt.supervisors[&sup_id].children[0].1;
+    assert_eq!(rt.supervisors[&sup_id].restart_count(child_id_3), 2);
+
+    // Crash 3: max_restarts=2 exceeded → supervisor shuts down
     rt.exit_actor(child_id_3, ExitReason::Error("crash3".to_string()));
     assert!(!rt.supervisors.contains_key(&sup_id), "supervisor should shut down after max restarts");
 }

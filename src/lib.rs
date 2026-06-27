@@ -16,4 +16,5 @@ pub mod vm;
 pub mod runtime;
 pub mod jit;
 pub mod python;
+#[cfg(test)]
 pub mod stress_tests;

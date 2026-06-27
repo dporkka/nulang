@@ -114,8 +114,10 @@ pub struct Supervisor {
     pub strategy: RestartStrategy,
     /// Children: (spec, actor_id) pairs in start order.
     pub children: Vec<(ChildSpec, u64)>,
-    /// Restart history: (actor_id, restart_time) for rate limiting.
-    pub restart_history: Vec<(u64, Instant)>,
+    /// Restart history: (spec_id, restart_time) for rate limiting.
+    /// Uses spec.id (String) so that restarts are tracked per child spec,
+    /// not per actor_id (which changes on each restart).
+    pub restart_history: Vec<(String, Instant)>,
     /// Parent supervisor actor ID (if any).
     pub parent: Option<u64>,
 }
@@ -202,10 +204,11 @@ impl Supervisor {
         };
         let now = Instant::now();
         let window = Duration::from_secs(spec.restart_window_secs as u64);
+        // Track restarts per spec.id (not actor_id, which changes on restart).
         let recent_restarts = self
             .restart_history
             .iter()
-            .filter(|(id, time)| *id == actor_id && now.duration_since(*time) < window)
+            .filter(|(spec_id, time)| *spec_id == spec.id && now.duration_since(*time) < window)
             .count() as u32;
         recent_restarts < spec.max_restarts
     }
@@ -218,7 +221,7 @@ impl Supervisor {
         let recent_restarts = self
             .restart_history
             .iter()
-            .filter(|(id, time)| *id == actor_id && now.duration_since(*time) < window)
+            .filter(|(spec_id, time)| *spec_id == spec.id && now.duration_since(*time) < window)
             .count() as u32;
         if recent_restarts >= spec.max_restarts {
             return None;
@@ -231,7 +234,7 @@ impl Supervisor {
         new_actor.parent = Some(self.id);
         runtime.actors.insert(new_id, new_actor);
         self.update_child_id(actor_id, new_id);
-        self.restart_history.push((new_id, now));
+        self.restart_history.push((spec.id.clone(), now));
         self.prune_restart_history();
         runtime.scheduler.enqueue(new_id);
         Some(new_id)
@@ -252,7 +255,7 @@ impl Supervisor {
                 runtime.actors.insert(new_id, new_actor);
                 runtime.scheduler.enqueue(new_id);
                 self.update_child_id(old_id, new_id);
-                self.restart_history.push((new_id, now));
+                self.restart_history.push((spec.id, now));
             }
         }
         self.prune_restart_history();
@@ -282,7 +285,7 @@ impl Supervisor {
             runtime.actors.insert(new_id, new_actor);
             runtime.scheduler.enqueue(new_id);
             self.update_child_id(old_id, new_id);
-            self.restart_history.push((new_id, now));
+            self.restart_history.push((spec.id, now));
         }
         self.prune_restart_history();
     }
@@ -314,7 +317,7 @@ impl Supervisor {
             let recent_restarts = self
                 .restart_history
                 .iter()
-                .filter(|(id, time)| *id == actor_id && now.duration_since(*time) < window)
+                .filter(|(spec_id, time)| *spec_id == spec.id && now.duration_since(*time) < window)
                 .count() as u32;
             if recent_restarts >= spec.max_restarts {
                 return SupervisorAction::Shutdown;
@@ -357,7 +360,7 @@ impl Supervisor {
         let window = Duration::from_secs(spec.restart_window_secs as u64);
         self.restart_history
             .iter()
-            .filter(|(id, time)| *id == actor_id && now.duration_since(*time) < window)
+            .filter(|(spec_id, time)| *spec_id == spec.id && now.duration_since(*time) < window)
             .count() as u32
     }
 
