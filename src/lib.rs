@@ -15,5 +15,5 @@ pub mod vm;
 
 pub mod runtime;
 pub mod jit;
-pub mod escape_analysis;
 pub mod python;
+pub mod stress_tests;
