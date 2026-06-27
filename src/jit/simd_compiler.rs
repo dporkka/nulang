@@ -59,8 +59,10 @@
 //! ```
 
 use cranelift::prelude::*;
+use cranelift::codegen::ir::{FuncRef, BlockArg};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
+use cranelift_jit::JITModule;
 
 use std::collections::HashMap;
 
@@ -105,10 +107,10 @@ impl SimdBinOp {
 /// Get the Cranelift SIMD vector type for a given element type.
 fn vector_clif_type(elem_type: SimdElemType) -> Type {
     match elem_type {
-        SimdElemType::Int64 => types::I64x2,
-        SimdElemType::Float64 => types::F64x2,
-        SimdElemType::Int32 => types::I32x4,
-        SimdElemType::Float32 => types::F32x4,
+        SimdElemType::Int64 => types::I64X2,
+        SimdElemType::Float64 => types::F64X2,
+        SimdElemType::Int32 => types::I32X4,
+        SimdElemType::Float32 => types::F32X4,
     }
 }
 
@@ -170,8 +172,8 @@ pub fn is_simd_supported() -> bool {
 ///
 /// # Returns
 /// A raw function pointer to the compiled code, or an error.
-pub fn compile_simd_region<M: Module>(
-    module: &mut M,
+pub fn compile_simd_region(
+    module: &mut JITModule,
     builder_context: &mut FunctionBuilderContext,
     ctx: &mut codegen::Context,
     func_name: &str,
@@ -282,7 +284,7 @@ pub fn compile_simd_region<M: Module>(
 
     // Jump to prefix loop with index = 0
     let index_init = builder.ins().iconst(types::I64, 0);
-    builder.ins().jump(prefix_header, &[index_init]);
+    builder.ins().jump(prefix_header, &[BlockArg::from(index_init)]);
 
     // -----------------------------------------------------------------------
     // Scalar Prefix Loop: for i in 0..prefix_count
@@ -293,9 +295,7 @@ pub fn compile_simd_region<M: Module>(
 
     // Check: index < prefix_count?
     let prefix_cond = builder.ins().icmp(IntCC::SignedLessThan, prefix_index, prefix_count);
-    builder.ins().brnz(prefix_cond, prefix_body, &[]);
-    // Done with prefix: start SIMD at index = prefix_count
-    builder.ins().jump(simd_header, &[prefix_count]);
+    builder.ins().brif(prefix_cond, prefix_body, &[], simd_header, &[BlockArg::from(prefix_count)]);
 
     // Prefix body: scalar iteration
     builder.switch_to_block(prefix_body);
@@ -306,7 +306,7 @@ pub fn compile_simd_region<M: Module>(
     // Increment and loop back
     let one = builder.ins().iconst(types::I64, 1);
     let prefix_next = builder.ins().iadd(prefix_index, one);
-    builder.ins().jump(prefix_header, &[prefix_next]);
+    builder.ins().jump(prefix_header, &[BlockArg::from(prefix_next)]);
 
     builder.seal_block(prefix_body);
 
@@ -320,9 +320,7 @@ pub fn compile_simd_region<M: Module>(
     // Check: index + vector_width <= trip_count?
     let simd_end_bound = builder.ins().isub(trip_count, vwidth_val);
     let simd_cond = builder.ins().icmp(IntCC::SignedLessThanOrEqual, simd_index, simd_end_bound);
-    builder.ins().brnz(simd_cond, simd_body, &[]);
-    // SIMD done: fall through to epilogue with current index
-    builder.ins().jump(epilogue_header, &[simd_index]);
+    builder.ins().brif(simd_cond, simd_body, &[], epilogue_header, &[BlockArg::from(simd_index)]);
 
     // SIMD body: vectorized iteration
     builder.switch_to_block(simd_body);
@@ -353,7 +351,7 @@ pub fn compile_simd_region<M: Module>(
 
     // Increment index by vector_width and loop back
     let simd_next = builder.ins().iadd(simd_index, vwidth_val);
-    builder.ins().jump(simd_header, &[simd_next]);
+    builder.ins().jump(simd_header, &[BlockArg::from(simd_next)]);
 
     builder.seal_block(simd_body);
 
@@ -366,9 +364,7 @@ pub fn compile_simd_region<M: Module>(
 
     // Check: index < trip_count?
     let epilogue_cond = builder.ins().icmp(IntCC::SignedLessThan, epilogue_index, trip_count);
-    builder.ins().brnz(epilogue_cond, epilogue_body, &[]);
-    // Done: return
-    builder.ins().jump(return_block, &[]);
+    builder.ins().brif(epilogue_cond, epilogue_body, &[], return_block, &[]);
 
     // Epilogue body: scalar iteration
     builder.switch_to_block(epilogue_body);
@@ -377,8 +373,9 @@ pub fn compile_simd_region<M: Module>(
         epilogue_index, lhs_base, rhs_base, dst_base,
     );
     // Increment and loop back
-    let epilogue_next = builder.ins().iadd(epilogue_index, one);
-    builder.ins().jump(epilogue_header, &[epilogue_next]);
+    let one_val = builder.ins().iconst(types::I64, 1);
+    let epilogue_next = builder.ins().iadd(epilogue_index, one_val);
+    builder.ins().jump(epilogue_header, &[BlockArg::from(epilogue_next)]);
 
     builder.seal_block(epilogue_body);
 
@@ -406,7 +403,7 @@ pub fn compile_simd_region<M: Module>(
 
     module
         .define_function(func_id, ctx)
-        .map_err(|e| CompileError::CompileFailed(format!("{}", e)))?;
+        .map_err(|e| CompileError::CompileFailed(format!("{:?}", e)))?;
 
     module.finalize_definitions().unwrap();
 
@@ -420,8 +417,8 @@ pub fn compile_simd_region<M: Module>(
 
 /// When SIMD is not supported or the region can't be vectorized, fall back
 /// to the typed scalar compiler.
-fn fallback_to_scalar<M: Module>(
-    module: &mut M,
+fn fallback_to_scalar(
+    module: &mut JITModule,
     builder_context: &mut FunctionBuilderContext,
     ctx: &mut codegen::Context,
     func_name: &str,
@@ -660,7 +657,7 @@ fn emit_scalar_load(
         }
         SimdElemType::Float64 => {
             let bits = builder.ins().load(types::I64, MemFlags::trusted(), addr, 0);
-            builder.ins().bitcast(types::F64, bits)
+            builder.ins().bitcast(types::F64, MemFlags::new(), bits)
         }
         SimdElemType::Int32 => {
             let val32 = builder.ins().load(types::I32, MemFlags::trusted(), addr, 0);
@@ -694,7 +691,7 @@ fn emit_scalar_store(
             builder.ins().store(MemFlags::trusted(), tagged, addr, 0);
         }
         SimdElemType::Float64 => {
-            let bits = builder.ins().bitcast(types::I64, value);
+            let bits = builder.ins().bitcast(types::I64, MemFlags::new(), value);
             builder.ins().store(MemFlags::trusted(), bits, addr, 0);
         }
         SimdElemType::Int32 => {
@@ -796,7 +793,9 @@ fn emit_scalar_iteration(
                 }
             };
             // Convert boolean result to i64 (1 or 0)
-            builder.ins().bint(types::I64, cond)
+            let one = builder.ins().iconst(types::I64, 1);
+            let zero = builder.ins().iconst(types::I64, 0);
+            builder.ins().select(cond, one, zero)
         }
     };
 
@@ -827,15 +826,14 @@ fn emit_scalar_prefix_loop(
     builder.switch_to_block(prefix_header);
     let index = builder.ins().iconst(types::I64, 0);
     let cond = builder.ins().icmp(IntCC::SignedLessThan, index, prefix_count);
-    builder.ins().brnz(cond, prefix_body, &[]);
-    builder.ins().jump(prefix_post, &[]);
+    builder.ins().brif(cond, prefix_body, &[], prefix_post, &[]);
 
     builder.switch_to_block(prefix_body);
     emit_scalar_iteration(builder, simd_region, index, a_base, b_base, c_base);
-    let next = builder.ins().iadd(index, builder.ins().iconst(types::I64, 1));
+    let one = builder.ins().iconst(types::I64, 1);
+    let next = builder.ins().iadd(index, one);
     let cond2 = builder.ins().icmp(IntCC::SignedLessThan, next, prefix_count);
-    builder.ins().brnz(cond2, prefix_body, &[]);
-    builder.ins().jump(prefix_post, &[]);
+    builder.ins().brif(cond2, prefix_body, &[], prefix_post, &[]);
 
     builder.seal_block(prefix_body);
 
@@ -858,15 +856,14 @@ fn emit_scalar_epilogue_loop(
 
     builder.switch_to_block(epilogue_header);
     let cond = builder.ins().icmp(IntCC::SignedLessThan, start_index, trip_count);
-    builder.ins().brnz(cond, epilogue_body, &[]);
-    builder.ins().jump(epilogue_post, &[]);
+    builder.ins().brif(cond, epilogue_body, &[], epilogue_post, &[]);
 
     builder.switch_to_block(epilogue_body);
     emit_scalar_iteration(builder, simd_region, start_index, a_base, b_base, c_base);
-    let next = builder.ins().iadd(start_index, builder.ins().iconst(types::I64, 1));
+    let one = builder.ins().iconst(types::I64, 1);
+    let next = builder.ins().iadd(start_index, one);
     let cond2 = builder.ins().icmp(IntCC::SignedLessThan, next, trip_count);
-    builder.ins().brnz(cond2, epilogue_body, &[]);
-    builder.ins().jump(epilogue_post, &[]);
+    builder.ins().brif(cond2, epilogue_body, &[], epilogue_post, &[]);
 
     builder.seal_block(epilogue_body);
 
@@ -933,18 +930,18 @@ fn declare_simd_runtime_helpers<M: Module>(
 /// Signature for I64x2 SIMD operations: fn(I64x2, I64x2) -> I64x2
 fn make_simd_i64x2_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(types::I64x2));
-    sig.params.push(AbiParam::new(types::I64x2));
-    sig.returns.push(AbiParam::new(types::I64x2));
+    sig.params.push(AbiParam::new(types::I64X2));
+    sig.params.push(AbiParam::new(types::I64X2));
+    sig.returns.push(AbiParam::new(types::I64X2));
     sig
 }
 
 /// Signature for F64x2 SIMD operations: fn(F64x2, F64x2) -> F64x2
 fn make_simd_f64x2_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(types::F64x2));
-    sig.params.push(AbiParam::new(types::F64x2));
-    sig.returns.push(AbiParam::new(types::F64x2));
+    sig.params.push(AbiParam::new(types::F64X2));
+    sig.params.push(AbiParam::new(types::F64X2));
+    sig.returns.push(AbiParam::new(types::F64X2));
     sig
 }
 
@@ -1155,7 +1152,7 @@ mod simd_compiler_tests {
 
         // Verify the CLIF vector type
         let clif_ty = vector_clif_type(region.elem_type);
-        assert_eq!(clif_ty, types::I64x2);
+        assert_eq!(clif_ty, types::I64X2);
     }
 
     // ------------------------------------------------------------------

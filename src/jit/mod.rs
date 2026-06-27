@@ -40,7 +40,7 @@ mod tests;
 pub use compiler::*;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
@@ -54,32 +54,24 @@ use cranelift_module::{Linkage, Module};
 /// before it becomes eligible for JIT compilation.
 pub const HOT_THRESHOLD: u64 = 1000;
 
-static HOT_COUNTERS: AtomicU64 = AtomicU64::new(0);
-static mut HOT_COUNTER_MAP: Option<HashMap<usize, u64>> = None;
+static HOT_COUNTERS: OnceLock<Mutex<HashMap<usize, u64>>> = OnceLock::new();
+
+fn get_hot_counters() -> &'static Mutex<HashMap<usize, u64>> {
+    HOT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Record execution at offset. Returns true if region is hot.
 pub fn record_and_check_hot(offset: usize) -> bool {
-    let prev = HOT_COUNTERS.fetch_add(1, Ordering::Relaxed);
-    if prev < HOT_THRESHOLD {
-        return false;
-    }
-    unsafe {
-        if HOT_COUNTER_MAP.is_none() {
-            HOT_COUNTER_MAP = Some(HashMap::new());
-        }
-        let map = HOT_COUNTER_MAP.as_mut().unwrap();
-        let count = map.entry(offset).or_insert(0);
-        *count += 1;
-        *count >= HOT_THRESHOLD
-    }
+    let mut map = get_hot_counters().lock().unwrap();
+    let count = map.entry(offset).or_insert(0);
+    *count += 1;
+    *count >= HOT_THRESHOLD
 }
 
 /// Reset hot counters.
 pub fn reset_hot_counters() {
-    HOT_COUNTERS.store(0, Ordering::Relaxed);
-    unsafe {
-        HOT_COUNTER_MAP = None;
-    }
+    let mut map = get_hot_counters().lock().unwrap();
+    map.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -115,14 +107,49 @@ impl JitSession {
             .finish(settings::Flags::new(flag_builder))
             .unwrap();
 
-        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+
+        // Register NaN-tag-aware runtime helpers so compiled code can call them.
+        // Each helper is defined in `runtime.rs` with `#[no_mangle]` and `extern "C"`.
+        let helpers: &[(&str, *const u8)] = &[
+            ("nulang_iadd", crate::jit::runtime::nulang_iadd as *const u8),
+            ("nulang_isub", crate::jit::runtime::nulang_isub as *const u8),
+            ("nulang_imul", crate::jit::runtime::nulang_imul as *const u8),
+            ("nulang_idiv", crate::jit::runtime::nulang_idiv as *const u8),
+            ("nulang_imod", crate::jit::runtime::nulang_imod as *const u8),
+            ("nulang_icmp_eq", crate::jit::runtime::nulang_icmp_eq as *const u8),
+            ("nulang_icmp_lt", crate::jit::runtime::nulang_icmp_lt as *const u8),
+            ("nulang_icmp_gt", crate::jit::runtime::nulang_icmp_gt as *const u8),
+            ("nulang_icmp_le", crate::jit::runtime::nulang_icmp_le as *const u8),
+            ("nulang_icmp_ge", crate::jit::runtime::nulang_icmp_ge as *const u8),
+            ("nulang_fadd", crate::jit::runtime::nulang_fadd as *const u8),
+            ("nulang_fsub", crate::jit::runtime::nulang_fsub as *const u8),
+            ("nulang_fmul", crate::jit::runtime::nulang_fmul as *const u8),
+            ("nulang_fdiv", crate::jit::runtime::nulang_fdiv as *const u8),
+            ("nulang_fcmp_eq", crate::jit::runtime::nulang_fcmp_eq as *const u8),
+            ("nulang_fcmp_lt", crate::jit::runtime::nulang_fcmp_lt as *const u8),
+            ("nulang_fcmp_gt", crate::jit::runtime::nulang_fcmp_gt as *const u8),
+            ("nulang_ineg", crate::jit::runtime::nulang_ineg as *const u8),
+            ("nulang_iinc", crate::jit::runtime::nulang_iinc as *const u8),
+            ("nulang_idec", crate::jit::runtime::nulang_idec as *const u8),
+            ("nulang_not", crate::jit::runtime::nulang_not as *const u8),
+            ("nulang_and", crate::jit::runtime::nulang_and as *const u8),
+            ("nulang_or", crate::jit::runtime::nulang_or as *const u8),
+            ("nulang_itof", crate::jit::runtime::nulang_itof as *const u8),
+            ("nulang_ftoi", crate::jit::runtime::nulang_ftoi as *const u8),
+        ];
+        for (name, ptr) in helpers {
+            builder.symbol(*name, *ptr);
+        }
+
         let module = JITModule::new(builder);
+        let ctx = module.make_context();
 
         JitSession {
             module,
             compiled: HashMap::new(),
             builder_context: FunctionBuilderContext::new(),
-            ctx: module.make_context(),
+            ctx,
         }
     }
 
@@ -336,63 +363,4 @@ pub enum TieredAction {
     CompiledSimdAndRan,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bytecode::*;
 
-    #[test]
-    fn test_jit_session_creation() {
-        let jit = JitSession::new();
-        assert_eq!(jit.compiled_count(), 0);
-    }
-
-    #[test]
-    fn test_hot_counter() {
-        reset_hot_counters();
-        assert!(!record_and_check_hot(0));
-        // Manually make it hot
-        for _ in 0..HOT_THRESHOLD {
-            record_and_check_hot(42);
-        }
-        assert!(record_and_check_hot(42));
-        reset_hot_counters();
-    }
-
-    #[test]
-    fn test_find_compilable_region() {
-        let instructions = vec![
-            Instruction::new3(OpCode::IAdd, 0, 1, 2),
-            Instruction::new3(OpCode::ISub, 0, 1, 2),
-            Instruction::new0(OpCode::Ret),
-        ];
-        let len = find_compilable_region(0, &instructions);
-        assert_eq!(len, 3); // Includes Ret
-    }
-
-    #[test]
-    fn test_find_region_stops_at_unsupported() {
-        let instructions = vec![
-            Instruction::new3(OpCode::IAdd, 0, 1, 2),
-            Instruction::new3(OpCode::Spawn, 0, 0, 0), // unsupported
-            Instruction::new3(OpCode::ISub, 0, 1, 2),
-        ];
-        let len = find_compilable_region(0, &instructions);
-        assert_eq!(len, 1); // Stops before Spawn
-    }
-
-    #[test]
-    fn test_tiered_action_has_simd_variant() {
-        let action = TieredAction::CompiledSimdAndRan;
-        assert_ne!(action, TieredAction::Interpret);
-        assert_ne!(action, TieredAction::RanJit);
-        assert_ne!(action, TieredAction::CompiledAndRan);
-    }
-
-    #[test]
-    fn test_jit_session_simd_enabled() {
-        let jit = JitSession::new();
-        // Session created successfully with SIMD enabled in ISA flags
-        assert_eq!(jit.compiled_count(), 0);
-    }
-}

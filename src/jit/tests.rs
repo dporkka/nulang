@@ -73,7 +73,7 @@ fn test_jit_compile_integer_loop() {
         Instruction::new3(OpCode::IAdd, 0, 1, 0),
         Instruction::new1(OpCode::IInc, 1),
         Instruction::new3(OpCode::ICmpLt, 1, 2, 2),
-        Instruction::new3(OpCode::JmpT, 2, 0xFC),
+        Instruction::new2(OpCode::JmpT, 2, 0xFC),
         Instruction::new0(OpCode::Halt),
     ];
     let ptr = unsafe { jit.compile_region(0, 0, 7, &instructions) };
@@ -226,4 +226,19 @@ fn test_jit_compile_rejects_unsupported_opcode() {
     ];
     let ptr = unsafe { jit.compile_region(0, 0, 1, &instructions) };
     assert!(ptr.is_some());
+}
+
+#[test]
+fn test_tiered_action_has_simd_variant() {
+    let action = TieredAction::CompiledSimdAndRan;
+    assert_ne!(action, TieredAction::Interpret);
+    assert_ne!(action, TieredAction::RanJit);
+    assert_ne!(action, TieredAction::CompiledAndRan);
+}
+
+#[test]
+fn test_jit_session_simd_enabled() {
+    let jit = JitSession::new();
+    // Session created successfully with SIMD enabled in ISA flags
+    assert_eq!(jit.compiled_count(), 0);
 }

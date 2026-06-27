@@ -4,13 +4,112 @@
 
 use crate::ast::*;
 use crate::bytecode::*;
-use crate::types::NuResult;
+use crate::types::{NuResult, Span};
 
 /// Workaround for the `Self` opcode (0x83) which conflicts with the Rust keyword.
 /// Uses transmute from the known discriminant value.
 fn op_self() -> OpCode {
     // Safety: 0x83 is the guaranteed discriminant for the `Self` variant.
     unsafe { std::mem::transmute::<u8, OpCode>(0x83) }
+}
+
+/// Collect all variable names bound by a pattern.
+fn pattern_bindings(pat: &Pattern, out: &mut std::collections::HashSet<String>) {
+    match pat {
+        Pattern::Wild | Pattern::Lit(_) => {}
+        Pattern::Var(name) | Pattern::Alias(name, _) => { out.insert(name.clone()); }
+        Pattern::Tuple(pats) => {
+            for p in pats { pattern_bindings(p, out); }
+        }
+        Pattern::Record(fields) => {
+            for (_, p) in fields { pattern_bindings(p, out); }
+        }
+        Pattern::Variant(_, Some(inner)) => pattern_bindings(inner, out),
+        Pattern::Variant(_, None) => {}
+    }
+}
+
+/// Accumulate free variable names in `expr` that are not in `bound`.
+fn free_vars(expr: &Expr, bound: &std::collections::HashSet<String>, acc: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::Var(name, _) => {
+            if !bound.contains(name) {
+                acc.insert(name.clone());
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            let mut new_bound = bound.clone();
+            for (p, _) in params { new_bound.insert(p.clone()); }
+            free_vars(body, &new_bound, acc);
+        }
+        Expr::App { func, args, .. } => {
+            free_vars(func, bound, acc);
+            for a in args { free_vars(a, bound, acc); }
+        }
+        Expr::Let { name, value, body, .. } => {
+            free_vars(value, bound, acc);
+            let mut new_bound = bound.clone();
+            new_bound.insert(name.clone());
+            free_vars(body, &new_bound, acc);
+        }
+        Expr::LetRec { name, params, value, body, .. } => {
+            let mut value_bound = bound.clone();
+            value_bound.insert(name.clone());
+            for (p, _) in params { value_bound.insert(p.clone()); }
+            free_vars(value, &value_bound, acc);
+            let mut body_bound = bound.clone();
+            body_bound.insert(name.clone());
+            free_vars(body, &body_bound, acc);
+        }
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            free_vars(cond, bound, acc);
+            free_vars(then_branch, bound, acc);
+            if let Some(e) = else_branch { free_vars(e, bound, acc); }
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            free_vars(scrutinee, bound, acc);
+            for (pat, arm_expr) in arms {
+                let mut arm_bound = bound.clone();
+                pattern_bindings(pat, &mut arm_bound);
+                free_vars(arm_expr, &arm_bound, acc);
+            }
+        }
+        Expr::Block { exprs, .. } | Expr::Tuple(exprs, _) | Expr::Array(exprs, _) => {
+            for e in exprs { free_vars(e, bound, acc); }
+        }
+        Expr::Record(fields, _) => {
+            for (_, e) in fields { free_vars(e, bound, acc); }
+        }
+        Expr::FieldAccess { expr, .. } => free_vars(expr, bound, acc),
+        Expr::Index { arr, idx, .. } => {
+            free_vars(arr, bound, acc);
+            free_vars(idx, bound, acc);
+        }
+        Expr::Binary { left, right, .. } => {
+            free_vars(left, bound, acc);
+            free_vars(right, bound, acc);
+        }
+        Expr::Unary { expr, .. } => free_vars(expr, bound, acc),
+        Expr::Pipe { left, right, .. } => {
+            free_vars(left, bound, acc);
+            free_vars(right, bound, acc);
+        }
+        Expr::Assign { target, value, .. } => {
+            free_vars(target, bound, acc);
+            free_vars(value, bound, acc);
+        }
+        Expr::For { var, iterable, body, .. } => {
+            free_vars(iterable, bound, acc);
+            let mut new_bound = bound.clone();
+            new_bound.insert(var.clone());
+            free_vars(body, &new_bound, acc);
+        }
+        Expr::Return(e, _) => {
+            if let Some(e) = e { free_vars(e, bound, acc); }
+        }
+        Expr::TypeAnnotate { expr, .. } | Expr::CapAnnotate { expr, .. } => free_vars(expr, bound, acc),
+        _ => {}
+    }
 }
 
 /// A mapping from local variable name to register index within a scope.
@@ -48,6 +147,9 @@ pub struct Compiler {
     func_map: std::collections::HashMap<String, usize>,
     /// Track the function_table index of the __main entry function.
     main_func_idx: Option<usize>,
+    /// Dedicated high-register allocator for let-bound values, so closures
+    /// and other multi-use bindings survive argument/dst register churn.
+    binding_reg: u8,
 }
 
 impl Compiler {
@@ -62,6 +164,7 @@ impl Compiler {
             next_field_id: 0,
             func_map: std::collections::HashMap::new(),
             main_func_idx: None,
+            binding_reg: 240,
         }
     }
 
@@ -207,6 +310,17 @@ impl Compiler {
     }
 
     fn compile_lambda(&mut self, params: &[(String, Option<crate::types::Type>)], body: &Expr) -> NuResult<u8> {
+        // Compute free variables before changing scope state.
+        let param_set: std::collections::HashSet<String> = params.iter().map(|(n, _)| n.clone()).collect();
+        let mut free = std::collections::HashSet::new();
+        free_vars(body, &param_set, &mut free);
+        // Only capture variables that are live in the enclosing scope. Top-level
+        // function references are resolved via func_map and do not need captures.
+        let mut captures: Vec<String> = free.into_iter()
+            .filter(|name| self.lookup_local(name).is_some())
+            .collect();
+        captures.sort(); // deterministic ordering
+
         // Save current state
         let saved_locals = std::mem::replace(&mut self.locals, vec![ScopeFrame::new()]);
         let saved_next_reg = self.next_reg;
@@ -218,12 +332,33 @@ impl Compiler {
             self.define_local(name, reg);
         }
 
+        // Emit a jump over the lambda body so it is not executed as part of
+        // the enclosing __main flow. The closure instruction still references
+        // the body start for Call/ClosureCall.
+        let skip_jmp_idx = self.emit(Instruction::new2(OpCode::Jmp, 0, 0));
+
         // Record start offset before compiling body
         let start_offset = self.module.current_offset();
+
+        // Prologue: load captured free variables into registers and bind them
+        // as locals so the body can reference them normally.
+        for (idx, name) in captures.iter().enumerate() {
+            let reg = self.alloc_reg();
+            self.define_local(name, reg);
+            self.emit(Instruction::new3(OpCode::CapLoad, idx as u8, reg, 0));
+        }
 
         // Compile body
         let body_reg = self.compile_expr(body)?;
         self.emit(Instruction::new1(OpCode::RetVal, body_reg));
+
+        // Patch the skip jump to land after the body
+        let after_body = self.module.current_offset() as i16;
+        let skip_offset = after_body - skip_jmp_idx as i16;
+        if let Some(instr) = self.module.instructions.get_mut(skip_jmp_idx) {
+            instr.op1 = ((skip_offset as u16) >> 8) as u8;
+            instr.op2 = ((skip_offset as u16) & 0xFF) as u8;
+        }
 
         // Restore state
         self.locals = saved_locals;
@@ -237,11 +372,44 @@ impl Compiler {
             ((func_idx >> 8) & 0xFF) as u8,
             (func_idx & 0xFF) as u8,
             dst));
+
+        // Capture live values from the enclosing scope into the closure.
+        for (idx, name) in captures.iter().enumerate() {
+            let src = if let Some(reg) = self.lookup_local(name) {
+                reg
+            } else {
+                // Fallback: materialise the value into a register. This should
+                // not be reached for local captures, but keeps the compiler
+                // self-contained for global references.
+                self.compile_var(name)?
+            };
+            self.emit(Instruction::new3(OpCode::CapStore, dst, idx as u8, src));
+        }
+
         Ok(dst)
     }
-
     fn compile_app(&mut self, func: &Expr, args: &[Expr]) -> NuResult<u8> {
+        const FUNC_VALUE_REG: u8 = 254;
         let saved_next_reg = self.next_reg;
+
+        // Compile the function reference first using normal allocation, then
+        // stash the value in a high fixed register. This guarantees argument
+        // compilation (which resets allocation to r0) cannot overwrite the
+        // function value — essential for recursive calls and local closures.
+        let func_src = if let Expr::Var(name, _) = func {
+            if let Some(&func_idx) = self.func_map.get(name) {
+                // Named top-level function: load its table index as a constant.
+                let fr = self.alloc_reg();
+                let idx_const = self.add_const(Constant::Int(func_idx as i64));
+                self.emit(make_constu(idx_const as u16, fr));
+                fr
+            } else {
+                self.compile_expr(func)?
+            }
+        } else {
+            self.compile_expr(func)?
+        };
+        self.emit(Instruction::new2(OpCode::Move, func_src, FUNC_VALUE_REG));
 
         // Compile arguments, tracking which register each result lands in
         self.next_reg = 0;
@@ -259,24 +427,9 @@ impl Compiler {
             }
         }
 
-        // Compile function reference past all args
-        self.next_reg = args.len() as u8;
-        let func_reg = if let Expr::Var(name, _) = func {
-            if let Some(&func_idx) = self.func_map.get(name) {
-                let fr = self.alloc_reg();
-                let idx_const = self.add_const(Constant::Int(func_idx as i64));
-                self.emit(make_constu(idx_const as u16, fr));
-                fr
-            } else {
-                self.compile_expr(func)?
-            }
-        } else {
-            self.compile_expr(func)?
-        };
-
         let dst = self.alloc_reg();
         let argc = args.len().min(255) as u8;
-        self.emit(Instruction::new3(OpCode::Call, func_reg, argc, dst));
+        self.emit(Instruction::new3(OpCode::Call, FUNC_VALUE_REG, argc, dst));
         // Restore next_reg, but ensure dst is reserved for the caller
         self.next_reg = saved_next_reg.max(dst + 1);
         Ok(dst)
@@ -284,23 +437,87 @@ impl Compiler {
 
     fn compile_let(&mut self, name: &str, value: &Expr, body: &Expr) -> NuResult<u8> {
         let val_reg = self.compile_expr(value)?;
-        self.define_local(name, val_reg);
+        // Bind the name to a dedicated high register and move the value there.
+        // This prevents later argument/sub-expression compilation from
+        // overwriting the binding (critical when the value is a closure used
+        // multiple times, e.g. `let id = fn(x) x in (id(1), id(true))`).
+        let bound_reg = self.binding_reg;
+        self.binding_reg = self.binding_reg.saturating_add(1);
+        self.emit(Instruction::new2(OpCode::Move, val_reg, bound_reg));
+        self.define_local(name, bound_reg);
         self.compile_expr(body)
     }
 
-    fn compile_let_rec(&mut self, name: &str, _params: &[(String, Option<crate::types::Type>)], value: &Expr, body: &Expr) -> NuResult<u8> {
-        let rec_reg = self.alloc_reg();
-        self.define_local(name, rec_reg);
-        let val_reg = self.compile_expr(value)?;
-        // Update the binding
-        if let Some(frame) = self.locals.last_mut() {
-            for (n, r) in frame.bindings.iter_mut().rev() {
-                if n == name {
-                    *r = val_reg;
-                    break;
+    fn compile_let_rec(&mut self, name: &str, params: &[(String, Option<crate::types::Type>)], value: &Expr, body: &Expr) -> NuResult<u8> {
+        // Reserve a function-table slot for the recursive function and make it
+        // resolvable by name (like a top-level function declaration).
+        let func_idx = self.module.function_table.len();
+        self.module.function_table.push(0); // placeholder
+        self.func_map.insert(name.to_string(), func_idx);
+
+        // Emit a jump over the function body so it is not executed as part of
+        // the enclosing __main flow. The closure instruction still references
+        // the body start for Call/ClosureCall.
+        let skip_jmp_idx = self.emit(Instruction::new2(OpCode::Jmp, 0, 0));
+
+        // Save outer compilation state.
+        let saved_locals = std::mem::replace(&mut self.locals, vec![ScopeFrame::new()]);
+        let saved_next_reg = self.next_reg;
+        self.next_reg = 0;
+
+        // Bind parameters to low registers initially, then save them to a high
+        // register safe zone so recursive calls (which use r0, r1, ... for args
+        // and temporaries) do not overwrite them.
+        const PARAM_SAVE_BASE: u8 = 16;
+        for (param_name, _) in params {
+            let reg = self.alloc_reg();
+            self.define_local(param_name, reg);
+        }
+
+        // Record start offset BEFORE param saves — they are part of the body.
+        let start_offset = self.module.current_offset();
+
+        for (i, (param_name, _)) in params.iter().enumerate() {
+            let old_reg = i as u8;
+            let new_reg = PARAM_SAVE_BASE + i as u8;
+            self.emit(Instruction::new2(OpCode::Move, old_reg, new_reg));
+            if let Some(frame) = self.locals.last_mut() {
+                for (n, r) in frame.bindings.iter_mut() {
+                    if n == param_name {
+                        *r = new_reg;
+                        break;
+                    }
                 }
             }
         }
+        self.next_reg = PARAM_SAVE_BASE + params.len() as u8;
+
+        // Compile the recursive body.
+        let body_reg = self.compile_expr(value)?;
+        self.emit(Instruction::new1(OpCode::RetVal, body_reg));
+
+        // Restore outer state.
+        self.locals = saved_locals;
+        self.next_reg = saved_next_reg;
+
+        // Patch the skip jump to land after the body.
+        let after_body = self.module.current_offset() as i16;
+        let skip_offset = after_body - skip_jmp_idx as i16;
+        if let Some(instr) = self.module.instructions.get_mut(skip_jmp_idx) {
+            instr.op1 = ((skip_offset as u16) >> 8) as u8;
+            instr.op2 = ((skip_offset as u16) & 0xFF) as u8;
+        }
+
+        // Patch the function table with the actual code offset.
+        self.module.function_table[func_idx] = start_offset;
+
+        // Bind the name in the outer scope to a register holding the function
+        // index, so references in the let body work.
+        let closure_reg = self.alloc_reg();
+        let idx_const = self.add_const(Constant::Int(func_idx as i64));
+        self.emit(make_constu(idx_const as u16, closure_reg));
+        self.define_local(name, closure_reg);
+
         self.compile_expr(body)
     }
 
@@ -742,29 +959,33 @@ impl Compiler {
     }
 
     fn compile_pipe(&mut self, left: &Expr, right: &Expr) -> NuResult<u8> {
-        let left_reg = self.compile_expr(left)?;
-        match right {
-            Expr::App { func, args, .. } => {
-                let func_reg = self.compile_expr(func)?;
-                for arg in args {
-                    let _r = self.compile_expr(arg)?;
+        // Lower `x |> f(a, b)` to `f(x, a, b)` and reuse the standard
+        // application compiler, which correctly places arguments in R0.. and
+        // protects the function value from register churn.
+        let app = match right {
+            Expr::App { func, args, span } => {
+                let mut new_args = vec![left.clone()];
+                new_args.extend(args.iter().cloned());
+                Expr::App {
+                    func: func.clone(),
+                    args: new_args,
+                    span: *span,
                 }
-                let dst = self.alloc_reg();
-                self.emit(Instruction::new3(OpCode::Call, func_reg, (args.len() + 1) as u8, dst));
-                Ok(dst)
             }
-            Expr::Var(name, _) => {
-                let func_reg = self.compile_var(name)?;
-                let dst = self.alloc_reg();
-                self.emit(Instruction::new3(OpCode::Call, func_reg, 1, dst));
-                Ok(dst)
+            Expr::Var(name, span) => Expr::App {
+                func: Box::new(Expr::Var(name.clone(), *span)),
+                args: vec![left.clone()],
+                span: *span,
+            },
+            _ => Expr::App {
+                func: Box::new(right.clone()),
+                args: vec![left.clone()],
+                span: Span::default(),
             }
-            _ => {
-                let func_reg = self.compile_expr(right)?;
-                let dst = self.alloc_reg();
-                self.emit(Instruction::new3(OpCode::Call, func_reg, 1, dst));
-                Ok(dst)
-            }
+        };
+        match app {
+            Expr::App { func, args, .. } => self.compile_app(func.as_ref(), args.as_slice()),
+            _ => unreachable!(),
         }
     }
 
@@ -808,7 +1029,6 @@ impl Compiler {
                 if body_reg != 0 {
                     self.emit(Instruction::new2(OpCode::Move, body_reg, 0));
                 }
-                self.emit(Instruction::new1(OpCode::Print, 0));
                 self.emit(Instruction::new0(OpCode::Halt));
             }
             Decl::Function { name, params, body, .. } => {

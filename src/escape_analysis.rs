@@ -288,10 +288,11 @@ impl EscapeAnalyzer {
             }
 
             // -- Returns (object returned to caller) --------------------
-            Ret | RetVal => {
+            RetVal => {
                 let result_reg = instr.op1;
                 self.mark_escape_if_tracked(result_reg, EscapeStatus::GlobalEscape, result);
             }
+            Ret => {}
 
             // -- Actor send (message escapes to another actor) ----------
             Send => {
@@ -543,6 +544,8 @@ impl EscapeAnalyzer {
             CapChk => {
                 // No tracked values involved in escape.
             }
+            // -- Default fallback for unhandled or custom opcodes -------
+            _ => {}
         }
     }
 
@@ -707,6 +710,9 @@ pub fn analyze_region(
     start_offset: usize,
     num_instrs: usize,
 ) -> EscapeAnalysis {
+    if start_offset >= instructions.len() {
+        return EscapeAnalysis::new();
+    }
     let end = (start_offset + num_instrs).min(instructions.len());
     let region = &instructions[start_offset..end];
 

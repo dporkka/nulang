@@ -471,7 +471,20 @@ impl TypeChecker {
         for decl in &module.decls {
             let (s, ty) = self.infer_decl(&ctx, decl)?;
             ctx = apply_subst_to_ctx(&ctx, &s);
-            last_type = ty;
+            let final_ty = apply_subst(&ty, &s);
+            match decl {
+                Decl::Function { name, .. } => {
+                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                }
+                Decl::Actor { name, .. } => {
+                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                }
+                Decl::Agent { name, .. } => {
+                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                }
+                _ => {}
+            }
+            last_type = final_ty;
         }
         Ok(last_type)
     }
@@ -489,18 +502,45 @@ impl TypeChecker {
             } => {
                 // Create fresh type variables for parameters
                 let mut param_types = vec![];
-                let mut new_ctx = ctx.clone();
                 for (param_name, param_ty) in params {
                     let pty = match param_ty {
                         Some(t) => t.clone(),
                         None => Type::Var(TypeVar::fresh()),
                     };
-                    new_ctx.bind(param_name.clone(), pty.clone(), Capability::Ref);
                     param_types.push(pty);
+                }
+
+                // Preliminary parameter type for the function binding
+                let param_ty = if param_types.len() == 1 {
+                    param_types[0].clone()
+                } else {
+                    Type::Tuple(param_types.clone())
+                };
+
+                // Fresh return type variable so the function can refer to itself
+                // recursively before its body is inferred.
+                let ret_var = Type::Var(TypeVar::fresh());
+                let recursive_func_ty = Type::Function {
+                    param: Box::new(param_ty.clone()),
+                    ret: Box::new(ret_var.clone()),
+                    effect: EffectRow::empty(),
+                    cap: Capability::Ref,
+                };
+
+                let mut new_ctx = ctx.clone();
+                // Bind the function name so recursive calls resolve.
+                new_ctx.bind(name.clone(), recursive_func_ty, Capability::Ref);
+                // Bind parameters
+                for (param_name, pty) in params.iter().zip(param_types.iter()) {
+                    new_ctx.bind(param_name.0.clone(), pty.clone(), Capability::Ref);
                 }
 
                 // Infer body type
                 let (s1, body_ty) = self.infer_expr(&new_ctx, body)?;
+
+                // Unify the preliminary return variable with the inferred body type
+                let s_rec = mgu(&apply_subst(&ret_var, &s1), &body_ty, *span)?;
+                let s1 = compose_subst(&s_rec, &s1);
 
                 // Unify with declared return type if present
                 let s2 = match ret_type {
@@ -513,12 +553,8 @@ impl TypeChecker {
                 };
                 let s_combined = compose_subst(&s2, &s1);
 
-                // Build function type
-                let param_ty = if param_types.len() == 1 {
-                    apply_subst(&param_types[0], &s_combined)
-                } else {
-                    Type::Tuple(param_types.iter().map(|t| apply_subst(t, &s_combined)).collect())
-                };
+                // Build final function type
+                let param_ty = apply_subst(&param_ty, &s_combined);
                 let ret_ty = apply_subst(&body_ty, &s_combined);
                 let func_ty = Type::Function {
                     param: Box::new(param_ty),
@@ -721,10 +757,27 @@ impl TypeChecker {
                 Ok((compose_subst(&s2, &s1), apply_subst(ty, &compose_subst(&s2, &s1))))
             }
 
-            // Pipe operator: x |> f  ===  f(x)
+            // Pipe operator: x |> f  ===  f(x), and x |> f(a, b) === f(x, a, b)
             Expr::Pipe { left, right, span } => {
                 let (s1, left_ty) = self.infer_expr(ctx, left)?;
                 let ctx1 = apply_subst_to_ctx(ctx, &s1);
+
+                // If the right side is already a function application, prepend
+                // the piped value as the first argument. This matches the
+                // compiler's pipe lowering and supports multi-arg functions.
+                if let Expr::App { func, args, .. } = right.as_ref() {
+                    let mut new_args = vec![left.as_ref().clone()];
+                    new_args.extend(args.iter().cloned());
+                    let app = Expr::App {
+                        func: func.clone(),
+                        args: new_args,
+                        span: *span,
+                    };
+                    let (s2, ty) = self.infer_expr(&ctx1, &app)?;
+                    let final_subst = compose_subst(&s2, &s1);
+                    return Ok((final_subst.clone(), apply_subst(&ty, &final_subst)));
+                }
+
                 let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
                 // right should be a function taking left's type
                 let result_var = Type::Var(TypeVar::fresh());
@@ -1216,17 +1269,26 @@ impl TypeChecker {
         span: Span,
     ) -> NuResult<(Substitution, Type)> {
         let (s1, record_ty) = self.infer_expr(ctx, expr)?;
+        let record_ty_resolved = apply_subst(&record_ty, &s1);
 
-        // Create a fresh type variable for the field
-        let field_var = Type::Var(TypeVar::fresh());
-
-        // Build a record type with the requested field
-        let expected = Type::Record(vec![(field.to_string(), field_var.clone())]);
-
-        let s2 = mgu(&apply_subst(&record_ty, &s1), &expected, span)?;
-        let final_subst = compose_subst(&s2, &s1);
-
-        Ok((final_subst.clone(), apply_subst(&field_var, &final_subst)))
+        match record_ty_resolved {
+            Type::Record(ref fields) => {
+                if let Some((_, field_ty)) = fields.iter().find(|(name, _)| name == field) {
+                    return Ok((s1, field_ty.clone()));
+                }
+                Err(NuError::TypeError {
+                    msg: format!("Field '{}' not found in record type", field),
+                    span,
+                })
+            }
+            _ => {
+                let field_var = Type::Var(TypeVar::fresh());
+                let expected = Type::Record(vec![(field.to_string(), field_var.clone())]);
+                let s2 = mgu(&record_ty_resolved, &expected, span)?;
+                let final_subst = compose_subst(&s2, &s1);
+                Ok((final_subst.clone(), apply_subst(&field_var, &final_subst)))
+            }
+        }
     }
 
     /// Infer the type of an array expression.

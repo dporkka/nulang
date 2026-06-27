@@ -17,7 +17,7 @@ use crossbeam::queue::SegQueue;
 use crate::vm::Value;
 
 /// Message sent between actors.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub behavior_id: u16,
     pub payload: Vec<Value>,

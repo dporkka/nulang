@@ -31,6 +31,7 @@ const TAG_ACTOR: u64 = 0x7FFB000000000000;  // actor reference
 const TAG_SPECIAL: u64 = 0x7FFC000000000000; // true, false, unit, nil
 const TAG_STRING: u64 = 0x7FFD000000000000; // interned string
 const TAG_PYTHON: u64 = 0x7FFE000000000000; // Python object reference (registry index)
+const TAG_CLOSURE: u64 = 0x7FF8000000000000; // VM closure object id
 
 const SPECIAL_UNIT: u64 = 0;
 const SPECIAL_TRUE: u64 = 1;
@@ -67,6 +68,9 @@ impl Value {
     }
     pub fn python_object(id: u64) -> Value {
         Value(TAG_PYTHON | (id & 0x0000FFFFFFFFFFFF))
+    }
+    pub fn closure(id: usize) -> Value {
+        Value(TAG_CLOSURE | (id as u64 & 0x0000FFFFFFFFFFFF))
     }
 
     pub fn as_int(&self) -> Option<i64> {
@@ -125,6 +129,20 @@ impl Value {
             None
         }
     }
+    pub fn as_string_id(&self) -> Option<u32> {
+        if self.0 & TAG_MASK == TAG_STRING {
+            Some((self.0 & 0x0000FFFFFFFFFFFF) as u32)
+        } else {
+            None
+        }
+    }
+    pub fn as_closure_id(&self) -> Option<usize> {
+        if self.0 & TAG_MASK == TAG_CLOSURE {
+            Some((self.0 & 0x0000FFFFFFFFFFFF) as usize)
+        } else {
+            None
+        }
+    }
     pub fn is_truthy(&self) -> bool {
         !self.is_nil() && self.as_bool() != Some(false) && self.as_int() != Some(0)
     }
@@ -136,6 +154,8 @@ impl Value {
         if self.is_nil() { return "nil".to_string(); }
         if let Some(id) = self.as_actor_id() { return format!("<actor:{}>", id); }
         if let Some(id) = self.as_python_object_id() { return format!("<python:{}>", id); }
+        if let Some(id) = self.as_string_id() { return format!("<string:{}>", id); }
+        if let Some(id) = self.as_closure_id() { return format!("<closure:{}>", id); }
         format!("<value:0x{:016X}>", self.0)
     }
 }
@@ -148,7 +168,8 @@ impl Value {
 pub struct Frame {
     pub regs: [Value; 256],
     pub pc: usize,              // Program counter
-    pub closure: Option<Value>, // Closure value (for captures, or return dst)
+    pub return_dst: u8,         // Register in caller to store return value
+    pub closure_env: Option<usize>, // Active closure environment id (for captures)
     pub caller: Option<Box<Frame>>, // Linked list of frames
     pub module_idx: usize,      // Which module this frame is executing
 }
@@ -158,7 +179,8 @@ impl Frame {
         Frame {
             regs: [Value::nil(); 256],
             pc: 0,
-            closure: None,
+            return_dst: 0,
+            closure_env: None,
             caller,
             module_idx,
         }
@@ -169,6 +191,13 @@ impl Frame {
 // VM
 // ---------------------------------------------------------------------------
 
+/// Lightweight closure object stored by the VM. Captures are immutable values
+/// copied from the creating scope.
+struct Closure {
+    func_idx: usize,
+    captures: Vec<Value>,
+}
+
 pub struct VM {
     modules: Vec<CodeModule>,
     current_frame: Option<Box<Frame>>,
@@ -176,6 +205,7 @@ pub struct VM {
     pub runtime: Runtime,
     step_count: usize,
     py_bridge: Option<PyBridge>,
+    closures: Vec<Box<Closure>>,
 }
 
 impl VM {
@@ -187,7 +217,30 @@ impl VM {
             runtime: Runtime::new(),
             step_count: 0,
             py_bridge: None,
+            closures: Vec::new(),
         }
+    }
+
+    fn alloc_closure(&mut self, func_idx: usize) -> usize {
+        let id = self.closures.len();
+        self.closures.push(Box::new(Closure {
+            func_idx,
+            captures: Vec::new(),
+        }));
+        id
+    }
+
+    fn closure_store(&mut self, closure_id: usize, idx: usize, val: Value) {
+        if let Some(closure) = self.closures.get_mut(closure_id) {
+            if idx >= closure.captures.len() {
+                closure.captures.resize(idx + 1, Value::nil());
+            }
+            closure.captures[idx] = val;
+        }
+    }
+
+    fn closure_load(&self, closure_id: usize, idx: usize) -> Option<Value> {
+        self.closures.get(closure_id)?.captures.get(idx).copied()
     }
 
     pub fn load_module(&mut self, module: CodeModule) -> usize {
@@ -249,6 +302,19 @@ impl VM {
         Ok(self.current_frame.as_ref().map(|f| f.regs[0]).unwrap_or(Value::unit()))
     }
 
+    /// Resolve a function value to a (function_table_index, optional_closure_env_id).
+    fn resolve_function(&self, func_val: Value, _module_idx: usize) -> NuResult<(usize, Option<usize>)> {
+        if let Some(func_idx) = func_val.as_int() {
+            Ok((func_idx as usize, None))
+        } else if let Some(closure_id) = func_val.as_closure_id() {
+            let closure = self.closures.get(closure_id)
+                .ok_or_else(|| NuError::VMError(format!("Closure {} not found", closure_id)))?;
+            Ok((closure.func_idx, Some(closure_id)))
+        } else {
+            Err(NuError::VMError("Invalid function reference".to_string()))
+        }
+    }
+
     /// Single-step execute one instruction.
     pub fn step(&mut self) -> NuResult<()> {
         // Safety limit to prevent infinite loops
@@ -292,9 +358,7 @@ impl VM {
                 let module_idx = frame.module_idx;
                 let argc = instr.op2;
                 let dst = instr.op3;
-                // Save old frame as caller in a new frame
-                let func_idx = func_val.as_int()
-                    .ok_or_else(|| NuError::VMError("Invalid function reference".to_string()))? as usize;
+                let (func_idx, closure_env) = self.resolve_function(func_val, module_idx)?;
                 let code_offset = self.modules.get(module_idx)
                     .and_then(|m| m.function_table.get(func_idx)).copied()
                     .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
@@ -303,7 +367,8 @@ impl VM {
                 for i in 0..(argc as usize).min(256) {
                     new_frame.regs[i] = frame.regs[i];
                 }
-                new_frame.closure = Some(Value::int(dst as i64));
+                new_frame.return_dst = dst;
+                new_frame.closure_env = closure_env;
                 new_frame.caller = Some(frame);
                 self.current_frame = Some(Box::new(new_frame));
                 return Ok(());
@@ -323,8 +388,7 @@ impl VM {
             OpCode::Ret => {
                 let ret_val = frame.regs[0];
                 if let Some(mut caller_frame) = frame.caller {
-                    let dst = frame.closure.as_ref()
-                        .and_then(|v| v.as_int()).unwrap_or(0) as usize;
+                    let dst = frame.return_dst as usize;
                     caller_frame.regs[dst] = ret_val;
                     self.current_frame = Some(caller_frame);
                 } else {
@@ -341,8 +405,7 @@ impl VM {
                 let val_reg = instr.op1 as usize;
                 let ret_val = frame.regs[val_reg];
                 if let Some(mut caller_frame) = frame.caller {
-                    let dst = frame.closure.as_ref()
-                        .and_then(|v| v.as_int()).unwrap_or(0) as usize;
+                    let dst = frame.return_dst as usize;
                     caller_frame.regs[dst] = ret_val;
                     self.current_frame = Some(caller_frame);
                 } else {
@@ -356,13 +419,11 @@ impl VM {
                 return Ok(());
             }
             OpCode::ClosureCall => {
-                // MVP: treat same as regular call
                 let func_val = frame.regs[instr.op1 as usize];
                 let module_idx = frame.module_idx;
                 let argc = instr.op2;
                 let dst = instr.op3;
-                let func_idx = func_val.as_int()
-                    .ok_or_else(|| NuError::VMError("Invalid function reference".to_string()))? as usize;
+                let (func_idx, closure_env) = self.resolve_function(func_val, module_idx)?;
                 let code_offset = self.modules.get(module_idx)
                     .and_then(|m| m.function_table.get(func_idx)).copied()
                     .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
@@ -371,7 +432,8 @@ impl VM {
                 for i in 0..(argc as usize).min(256) {
                     new_frame.regs[i] = frame.regs[i];
                 }
-                new_frame.closure = Some(Value::int(dst as i64));
+                new_frame.return_dst = dst;
+                new_frame.closure_env = closure_env;
                 new_frame.caller = Some(frame);
                 self.current_frame = Some(Box::new(new_frame));
                 return Ok(());
@@ -682,12 +744,29 @@ impl VM {
 
             // -- Closures (MVP) --
             OpCode::Closure => {
-                let func_idx = instr.imm16();
+                let func_idx = instr.imm16() as usize;
                 let dst = instr.op3;
-                frame.regs[dst as usize] = Value::int(func_idx as i64);
+                let closure_id = self.alloc_closure(func_idx);
+                frame.regs[dst as usize] = Value::closure(closure_id);
             }
-            OpCode::CapLoad => {}
-            OpCode::CapStore => {}
+            OpCode::CapLoad => {
+                let idx = instr.op1 as usize;
+                let dst = instr.op2 as usize;
+                if let Some(closure_id) = frame.closure_env {
+                    if let Some(val) = self.closure_load(closure_id, idx) {
+                        frame.regs[dst] = val;
+                    }
+                }
+            }
+            OpCode::CapStore => {
+                let closure_reg = instr.op1 as usize;
+                let idx = instr.op2 as usize;
+                let src = instr.op3 as usize;
+                if let Some(closure_id) = frame.regs[closure_reg].as_closure_id() {
+                    let val = frame.regs[src];
+                    self.closure_store(closure_id, idx, val);
+                }
+            }
             OpCode::FreeVar => {}
 
             // -- Memory & Objects --
@@ -977,10 +1056,13 @@ impl VM {
                 let obj_id = PythonObjectId(frame.regs[instr.op1 as usize].as_python_object_id().unwrap_or(0));
                 let attr_name = self.module_const_string(frame.module_idx, instr.op2 as u16);
                 let dst = instr.op3 as usize;
-                let bridge = self.py_bridge.as_ref().ok_or_else(|| {
-                    self.current_frame = Some(frame);
-                    NuError::PythonError("Python not initialized".into())
-                })?;
+                let bridge = match &self.py_bridge {
+                    Some(b) => b,
+                    None => {
+                        self.current_frame = Some(frame);
+                        return Err(NuError::PythonError("Python not initialized".into()));
+                    }
+                };
                 match bridge.get_attr(obj_id, &attr_name) {
                     Ok(result_id) => frame.regs[dst] = Value::python_object(result_id.0),
                     Err(e) => {
@@ -993,10 +1075,13 @@ impl VM {
                 let callable_id = PythonObjectId(frame.regs[instr.op1 as usize].as_python_object_id().unwrap_or(0));
                 let arg_count = instr.op2 as usize;
                 let dst = instr.op3 as usize;
-                let bridge = self.py_bridge.as_ref().ok_or_else(|| {
-                    self.current_frame = Some(frame);
-                    NuError::PythonError("Python not initialized".into())
-                })?;
+                let bridge = match &self.py_bridge {
+                    Some(b) => b,
+                    None => {
+                        self.current_frame = Some(frame);
+                        return Err(NuError::PythonError("Python not initialized".into()));
+                    }
+                };
                 let mut args = Vec::new();
                 for i in 0..arg_count {
                     let arg_reg = (instr.op1 as usize + 1 + i) % 256;
@@ -1021,10 +1106,13 @@ impl VM {
             OpCode::PyCallKw => {
                 // MVP: delegate to regular call with no kwargs
                 let callable_id = PythonObjectId(frame.regs[instr.op1 as usize].as_python_object_id().unwrap_or(0));
-                let bridge = self.py_bridge.as_ref().ok_or_else(|| {
-                    self.current_frame = Some(frame);
-                    NuError::PythonError("Python not initialized".into())
-                })?;
+                let bridge = match &self.py_bridge {
+                    Some(b) => b,
+                    None => {
+                        self.current_frame = Some(frame);
+                        return Err(NuError::PythonError("Python not initialized".into()));
+                    }
+                };
                 match bridge.call(callable_id, Vec::new()) {
                     Ok(result_id) => frame.regs[instr.op3 as usize] = Value::python_object(result_id.0),
                     Err(e) => {
@@ -1037,10 +1125,13 @@ impl VM {
                 let obj_id = PythonObjectId(frame.regs[instr.op1 as usize].as_python_object_id().unwrap_or(0));
                 let attr_name = self.module_const_string(frame.module_idx, instr.op2 as u16);
                 let val_id = PythonObjectId(frame.regs[instr.op3 as usize].as_python_object_id().unwrap_or(0));
-                let bridge = self.py_bridge.as_ref().ok_or_else(|| {
-                    self.current_frame = Some(frame);
-                    NuError::PythonError("Python not initialized".into())
-                })?;
+                let bridge = match &self.py_bridge {
+                    Some(b) => b,
+                    None => {
+                        self.current_frame = Some(frame);
+                        return Err(NuError::PythonError("Python not initialized".into()));
+                    }
+                };
                 if let Err(e) = bridge.set_attr(obj_id, &attr_name, val_id) {
                     self.current_frame = Some(frame);
                     return Err(NuError::PythonError(format!("{}", e)));
@@ -1049,10 +1140,13 @@ impl VM {
             OpCode::PyToNu => {
                 let py_val_reg = instr.op1 as usize;
                 let dst = instr.op2 as usize;
-                let bridge = self.py_bridge.as_ref().ok_or_else(|| {
-                    self.current_frame = Some(frame);
-                    NuError::PythonError("Python not initialized".into())
-                })?;
+                let bridge = match &self.py_bridge {
+                    Some(b) => b,
+                    None => {
+                        self.current_frame = Some(frame);
+                        return Err(NuError::PythonError("Python not initialized".into()));
+                    }
+                };
                 let obj_id = PythonObjectId(frame.regs[py_val_reg].as_python_object_id().unwrap_or(0));
                 match marshal::python_object_to_value(obj_id, bridge) {
                     Ok(val) => frame.regs[dst] = val,
@@ -1065,10 +1159,13 @@ impl VM {
             OpCode::PyFromNu => {
                 let nu_val_reg = instr.op1 as usize;
                 let dst = instr.op2 as usize;
-                let bridge = self.py_bridge.as_ref().ok_or_else(|| {
-                    self.current_frame = Some(frame);
-                    NuError::PythonError("Python not initialized".into())
-                })?;
+                let bridge = match &self.py_bridge {
+                    Some(b) => b,
+                    None => {
+                        self.current_frame = Some(frame);
+                        return Err(NuError::PythonError("Python not initialized".into()));
+                    }
+                };
                 let val = frame.regs[nu_val_reg];
                 match marshal::value_to_python_object(val, bridge) {
                     Ok(obj_id) => frame.regs[dst] = Value::python_object(obj_id.0),
@@ -1153,9 +1250,7 @@ impl VM {
         let func_val = old_frame.regs[func_reg as usize];
         let module_idx = old_frame.module_idx;
 
-        // Resolve function: func_val is either a function index (int) or a code offset
-        let func_idx = func_val.as_int()
-            .ok_or_else(|| NuError::VMError("Invalid function reference (not an integer index)".to_string()))? as usize;
+        let (func_idx, closure_env) = self.resolve_function(func_val, module_idx)?;
 
         let code_offset = self.modules.get(module_idx)
             .and_then(|m| m.function_table.get(func_idx)).copied()
@@ -1171,8 +1266,8 @@ impl VM {
             new_frame.regs[i] = old_frame.regs[i];
         }
 
-        // Store return destination in closure field
-        new_frame.closure = Some(Value::int(dst as i64));
+        new_frame.return_dst = dst;
+        new_frame.closure_env = closure_env;
 
         // Link frames
         new_frame.caller = Some(old_frame);
@@ -1187,9 +1282,8 @@ impl VM {
         let ret_val = old_frame.regs[0];
 
         if let Some(mut caller_frame) = old_frame.caller {
-            let dst = old_frame.closure.as_ref()
-                .and_then(|v| v.as_int()).unwrap_or(0) as u8;
-            caller_frame.regs[dst as usize] = ret_val;
+            let dst = old_frame.return_dst as usize;
+            caller_frame.regs[dst] = ret_val;
             self.current_frame = Some(caller_frame);
         } else {
             // Top-level return: create dummy frame to hold return value
@@ -1209,9 +1303,8 @@ impl VM {
         let ret_val = old_frame.regs[val_reg as usize];
 
         if let Some(mut caller_frame) = old_frame.caller {
-            let dst = old_frame.closure.as_ref()
-                .and_then(|v| v.as_int()).unwrap_or(0) as u8;
-            caller_frame.regs[dst as usize] = ret_val;
+            let dst = old_frame.return_dst as usize;
+            caller_frame.regs[dst] = ret_val;
             self.current_frame = Some(caller_frame);
         } else {
             let module_idx = old_frame.module_idx;
@@ -1490,6 +1583,9 @@ fn constant_to_value(c: &Constant) -> Value {
 #[cfg(test)]
 mod python_tests {
     use super::*;
+    use pyo3::prelude::*;
+    use pyo3::types::PyAnyMethods;
+    use crate::python::{get_object, PythonObjectId};
 
     /// Test 1: Value::python_object creates a properly tagged value.
     #[test]
@@ -1572,18 +1668,32 @@ mod python_tests {
         // Add constants
         let mod_name_idx = module.add_constant(Constant::String("math".to_string()));
         let attr_name_idx = module.add_constant(Constant::String("sqrt".to_string()));
+        let val_idx = module.add_constant(Constant::Float(16.0));
 
         // Emit: PyImport "math" -> r0
         module.emit(Instruction::new2(OpCode::PyImport, mod_name_idx as u8, 0));
         // Emit: PyGetAttr r0, "sqrt" -> r1
         module.emit(Instruction::new3(OpCode::PyGetAttr, 0, attr_name_idx as u8, 1));
-        // Emit: PyCall r1, 0 args -> r2
-        module.emit(Instruction::new3(OpCode::PyCall, 1, 0, 2));
+        // Emit: ConstU val_idx -> r2
+        module.emit(Instruction::new3(OpCode::ConstU, ((val_idx >> 8) & 0xFF) as u8, (val_idx & 0xFF) as u8, 2));
+        // Emit: PyCall r1, 1 args -> r3
+        module.emit(Instruction::new3(OpCode::PyCall, 1, 1, 3));
+        // Emit: Move r3 -> r0
+        module.emit(Instruction::new2(OpCode::Move, 3, 0));
         module.emit(Instruction::new0(OpCode::Halt));
 
         vm.load_module(module);
         let result = vm.run();
         assert!(result.is_ok(), "PyCall should succeed: {:?}", result.err());
+
+        // Verify result is 4.0
+        let val = result.unwrap();
+        let py_id = val.as_python_object_id().expect("Expected Python object");
+        Python::with_gil(|py| {
+            let obj = get_object(PythonObjectId(py_id)).expect("Expected object in registry");
+            let f: f64 = obj.bind(py).extract().expect("Expected float");
+            assert!((f - 4.0).abs() < f64::EPSILON);
+        });
     }
 
     /// Test 7: PyRelease opcode is a no-op (does not crash).

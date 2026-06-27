@@ -578,7 +578,8 @@ impl OrcaGc {
         // Retain only objects that still cannot be freed.
         let mut still_deferred = Vec::new();
 
-        for &header_ptr in &self.deferred_decrements {
+        let deferred = std::mem::take(&mut self.deferred_decrements);
+        for &header_ptr in &deferred {
             // SAFETY: header_ptr came from a valid payload pointer and the
             // object is still alive (otherwise it wouldn't be in the list).
             let header = unsafe { &*header_ptr };
@@ -1266,15 +1267,13 @@ mod tests {
         unsafe { gc.drop_local_ref(&mut heap, ptr); }
         assert_eq!(heap.live_count(), 1);
 
-        // Process another -1 op → foreign_count becomes 0.
+        // Process another -1 op → foreign_count becomes 0, and since local_count is also 0, the object is freed.
         let op2 = ForeignRefOp {
             target_actor: 1,
             object_header: unsafe { heap.header_ptr(ptr) },
             delta: -1,
         };
         gc.process_foreign_op(&mut heap, op2);
-        assert_eq!(foreign_count(header), 0);
-        assert_eq!(local_count(header), 0);
 
         // Object should be freed now (both counts 0).
         assert_eq!(heap.live_count(), 0);

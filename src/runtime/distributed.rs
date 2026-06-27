@@ -432,7 +432,7 @@ impl AddressResolver {
             behavior_id,
             payload,
             sender_actor,
-            sender_node: super::network::NodeId(self.local_node.0),
+            sender_node: NodeId(self.local_node.0),
             priority,
         }
     }
@@ -479,6 +479,11 @@ impl AddressResolver {
     /// Get a reference to the remote actor cache.
     pub fn cache(&self) -> &RemoteActorCache {
         &self.remote_cache
+    }
+
+    /// Get a mutable reference to the remote actor cache.
+    pub fn cache_mut(&mut self) -> &mut RemoteActorCache {
+        &mut self.remote_cache
     }
 
     /// Get the local node ID.
@@ -668,7 +673,7 @@ pub fn send_distributed(
             );
 
             if let Some(node_info) = cluster.get_node(node_id) {
-                let net_node_id = super::network::NodeId(node_id.0);
+                let net_node_id = NodeId(node_id.0);
                 transport.send(net_node_id, node_info.address, packet);
                 resolver.record_remote_send(node_id, actor_id);
             }
@@ -749,7 +754,7 @@ pub fn spawn_on_node(
         };
 
         if let Some(node_info) = cluster.get_node(node) {
-            let net_node_id = super::network::NodeId(node.0);
+            let net_node_id = NodeId(node.0);
             transport.send(net_node_id, node_info.address, packet);
         }
 
@@ -912,7 +917,7 @@ mod tests {
         assert_eq!(result, ResolveResult::Remote { node_id: peer_id, actor_id: 55 });
         assert_eq!(resolver.stats().remote_resolves, 1);
         // Should be cached after resolution.
-        assert!(resolver.cache().get(peer_id, 55).is_some());
+        assert!(resolver.cache_mut().get(peer_id, 55).is_some());
     }
 
     // -- 8. Resolver: unresolvable (unknown node) --------------------------
@@ -951,7 +956,7 @@ mod tests {
         resolver.record_remote_send(NodeId(5), 99);
 
         assert_eq!(resolver.cache().len(), 1);
-        let info = resolver.cache().get(NodeId(5), 99).unwrap();
+        let info = resolver.cache_mut().get(NodeId(5), 99).unwrap();
         assert_eq!(info.node_id, NodeId(5));
         assert_eq!(info.actor_id, 99);
         assert_eq!(info.message_count, 1);
@@ -1006,7 +1011,7 @@ mod tests {
             behavior_id: 2,
             payload: vec![Value::int(123)],
             sender_actor: 88,
-            sender_node: super::network::NodeId(9), // Remote node 9
+            sender_node: NodeId(9), // Remote node 9
             priority: MessagePriority::System,
         };
 
@@ -1021,7 +1026,7 @@ mod tests {
         assert_eq!(msg.payload.len(), 1);
 
         // The sender should now be in the cache.
-        assert!(resolver.cache().get(NodeId(9), 88).is_some());
+        assert!(resolver.cache_mut().get(NodeId(9), 88).is_some());
     }
 
     // -- 12. DistributedRuntime trait compiles -------------------------------

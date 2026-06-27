@@ -248,7 +248,7 @@ impl Crdt for PNCounter {
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let (node_id, pos) = read_u64(bytes, 0)?;
         let (num_entries, _) = read_u32(bytes, pos)?;
-        let increment_len = 16 + (num_entries as usize) * 16;
+        let increment_len = 12 + (num_entries as usize) * 16;
         let inc_bytes = &bytes[0..increment_len];
         let dec_bytes = &bytes[increment_len..];
         let increments = GCounter::from_bytes(inc_bytes)?;

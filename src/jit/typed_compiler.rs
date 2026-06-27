@@ -25,8 +25,10 @@
 //! ```
 
 use cranelift::prelude::*;
+use cranelift::codegen::ir::FuncRef;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
+use cranelift_jit::JITModule;
 
 use std::collections::HashMap;
 
@@ -41,7 +43,7 @@ const TAG_INT: i64 = 0x7FF9_0000_0000_0000;
 const TAG_SPECIAL: i64 = 0x7FFC_0000_0000_0000;
 const PAYLOAD_MASK: i64 = 0x0000_FFFF_FFFF_FFFF;
 const SIGN_BIT: i64 = 0x0000_8000_0000_0000;
-const SIGN_EXTEND: i64 = 0xFFFF_0000_0000_0000;
+const SIGN_EXTEND: i64 = 0xFFFF_0000_0000_0000u64 as i64;
 const SPECIAL_TRUE: i64 = 1;
 const SPECIAL_FALSE: i64 = 2;
 
@@ -259,7 +261,8 @@ pub(crate) fn emit_sext48(builder: &mut FunctionBuilder, raw: Value) -> Value {
     let sign_bit = builder.ins().band(raw, sign_mask);
     let zero = builder.ins().iconst(types::I64, 0);
     let is_negative = builder.ins().icmp(IntCC::NotEqual, sign_bit, zero);
-    let extended = builder.ins().bor(payload, builder.ins().iconst(types::I64, SIGN_EXTEND));
+    let sign_extend_const = builder.ins().iconst(types::I64, SIGN_EXTEND);
+    let extended = builder.ins().bor(payload, sign_extend_const);
     builder.ins().select(is_negative, extended, payload)
 }
 
@@ -275,12 +278,12 @@ fn emit_tag_int(builder: &mut FunctionBuilder, value: Value) -> Value {
 
 /// Bitcast an i64 (raw float bits) to f64 for direct float operations.
 fn emit_bitcast_i64_to_f64(builder: &mut FunctionBuilder, bits: Value) -> Value {
-    builder.ins().bitcast(types::F64, bits)
+    builder.ins().bitcast(types::F64, MemFlags::new(), bits)
 }
 
 /// Bitcast an f64 back to i64 for storage in registers.
 fn emit_bitcast_f64_to_i64(builder: &mut FunctionBuilder, val: Value) -> Value {
-    builder.ins().bitcast(types::I64, val)
+    builder.ins().bitcast(types::I64, MemFlags::new(), val)
 }
 
 /// Tag a boolean comparison result (i8 from icmp/fcmp) as a NaN-tagged Bool value.
@@ -503,20 +506,17 @@ fn emit_typed_logic(
         let a_is_false = builder.ins().icmp(IntCC::Equal, a_raw, false_val);
         let a_is_nil = builder.ins().icmp(IntCC::Equal, a_raw, nil_val);
         let a_is_zero = builder.ins().icmp(IntCC::Equal, a_raw, zero_int);
-        let a_not_falsy = builder.ins().bor(
-            builder.ins().bor(a_is_false, a_is_nil),
-            a_is_zero,
-        );
-        let a_truthy = builder.ins().icmp(IntCC::Equal, a_not_falsy, builder.ins().iconst(types::I64, 0));
+        let a_falsy_part = builder.ins().bor(a_is_false, a_is_nil);
+        let a_not_falsy = builder.ins().bor(a_falsy_part, a_is_zero);
+        let zero_const = builder.ins().iconst(types::I64, 0);
+        let a_truthy = builder.ins().icmp(IntCC::Equal, a_not_falsy, zero_const);
 
         let b_is_false = builder.ins().icmp(IntCC::Equal, b_raw, false_val);
         let b_is_nil = builder.ins().icmp(IntCC::Equal, b_raw, nil_val);
         let b_is_zero = builder.ins().icmp(IntCC::Equal, b_raw, zero_int);
-        let b_not_falsy = builder.ins().bor(
-            builder.ins().bor(b_is_false, b_is_nil),
-            b_is_zero,
-        );
-        let b_truthy = builder.ins().icmp(IntCC::Equal, b_not_falsy, builder.ins().iconst(types::I64, 0));
+        let b_falsy_part = builder.ins().bor(b_is_false, b_is_nil);
+        let b_not_falsy = builder.ins().bor(b_falsy_part, b_is_zero);
+        let b_truthy = builder.ins().icmp(IntCC::Equal, b_not_falsy, zero_const);
 
         let result_cond = match op {
             TypedLogicOp::And => builder.ins().band(a_truthy, b_truthy),
@@ -636,8 +636,8 @@ fn emit_unary_runtime(
 ///
 /// # Returns
 /// A raw function pointer to the compiled code, or an error if compilation fails.
-pub fn compile_bytecode_region_typed<M: Module>(
-    module: &mut M,
+pub fn compile_bytecode_region_typed(
+    module: &mut JITModule,
     builder_context: &mut FunctionBuilderContext,
     ctx: &mut codegen::Context,
     func_name: &str,
@@ -953,8 +953,7 @@ pub fn compile_bytecode_region_typed<M: Module>(
                 let is_nonzero = builder.ins().icmp(IntCC::NotEqual, cond_val, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
-                    builder.ins().brnz(is_nonzero, target_block, &[]);
-                    builder.ins().jump(fallthrough, &[]);
+                    builder.ins().brif(is_nonzero, target_block, &[], fallthrough, &[]);
                 } else {
                     builder.ins().jump(fallthrough, &[]);
                 }
@@ -966,8 +965,7 @@ pub fn compile_bytecode_region_typed<M: Module>(
                 let is_zero = builder.ins().icmp(IntCC::Equal, cond_val, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
-                    builder.ins().brnz(is_zero, target_block, &[]);
-                    builder.ins().jump(fallthrough, &[]);
+                    builder.ins().brif(is_zero, target_block, &[], fallthrough, &[]);
                 } else {
                     builder.ins().jump(fallthrough, &[]);
                 }
@@ -1023,6 +1021,10 @@ pub fn compile_bytecode_region_typed<M: Module>(
                 builder.ins().jump(return_block, &[]);
             }
         }
+    }
+
+    for block in blocks.values() {
+        builder.seal_block(*block);
     }
 
     // Seal the return block
@@ -1265,7 +1267,7 @@ mod typed_tests {
             Instruction::new3(OpCode::IAdd, 0, 1, 0),   // sum = sum + i
             Instruction::new1(OpCode::IInc, 1),         // i++
             Instruction::new3(OpCode::ICmpLt, 1, 2, 2), // R2 = (i < 5)
-            Instruction::new3(OpCode::JmpT, 2, 0xFC),   // if R2, jmp -4
+            Instruction::new2(OpCode::JmpT, 2, 0xFC),   // if R2, jmp -4
             Instruction::new0(OpCode::Halt),
         ];
 

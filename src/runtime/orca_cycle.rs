@@ -99,7 +99,7 @@ pub enum NodeColor {
 /// - `ref_count` is always > 0 for edges stored in the graph.
 /// - `target_actor` must differ from the source object's owning actor
 ///   (otherwise it would not be a *foreign* reference).
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct ForeignEdge {
     /// The actor that owns the target object.
     pub target_actor: u64,
@@ -467,7 +467,7 @@ impl CycleDetector {
     ///
     /// - `runtime` — The runtime context, used to send trial decrements
     ///   and reclaim objects.
-    pub fn incremental_detect(&mut self, runtime: &Runtime) {
+    pub fn incremental_detect<R>(&mut self, runtime: &mut R) {
         self.epoch += 1;
 
         if self.epoch % self.detection_interval == 0 {
@@ -495,7 +495,7 @@ impl CycleDetector {
     ///
     /// This method is `unsafe` because it dereferences header pointers when
     /// computing weights. All headers are checked for liveness first.
-    fn refresh_suspects(&mut self, _runtime: &Runtime) {
+    fn refresh_suspects<R>(&mut self, _runtime: &R) {
         self.suspects.clear();
 
         // Collect keys first to avoid borrowing issues.
@@ -562,7 +562,7 @@ impl CycleDetector {
     ///
     /// - `runtime` — Mutable reference to the runtime for sending operations
     ///   and reclaiming objects.
-    pub fn detect_cycles(&mut self, runtime: &mut Runtime) {
+    pub fn detect_cycles<R>(&mut self, runtime: &mut R) {
         self.epoch += 1;
         self.refresh_suspects(runtime);
 
@@ -603,7 +603,7 @@ impl CycleDetector {
     ///
     /// Dereferences `suspect.object_header` and potentially other headers
     /// during DFS. All headers are checked for liveness before dereferencing.
-    unsafe fn process_suspect(&mut self, suspect: &Suspect, runtime: &mut Runtime) {
+    unsafe fn process_suspect<R>(&mut self, suspect: &Suspect, runtime: &mut R) {
         // Verify the suspect object is still alive.
         let key = (suspect.actor_id, suspect.object_header as usize);
         let Some(start_node) = self.graph.get(&key) else {
@@ -738,12 +738,12 @@ impl CycleDetector {
     /// A vector of `ForeignRefOp` representing the trial decrements.
     fn send_trial_decrements(&mut self, cycle: &[(u64, *mut OrcaHeader)]) -> Vec<ForeignRefOp> {
         let mut ops = Vec::with_capacity(cycle.len());
-
+ 
         // For a cycle [A, B, C], we send decrements along edges A->B, B->C, C->A.
         for i in 0..cycle.len() {
-            let (from_actor, from_object) = cycle[i];
+            let (_from_actor, _from_object) = cycle[i];
             let (to_actor, to_object) = cycle[(i + 1) % cycle.len()];
-
+ 
             // SAFETY: We are constructing an operation, not yet applying it.
             // The header pointer is validated before any decrement is applied.
             let op = ForeignRefOp {
@@ -752,21 +752,16 @@ impl CycleDetector {
                 delta: -1,
             };
             ops.push(op);
-
-            // Also decrement the from_object's local count to simulate
-            // the reference being dropped. This is done in-memory without
-            // going through the runtime queue.
+ 
+            // Decrement the target's foreign count
+            // to simulate the reference being dropped within the cycle.
             unsafe {
-                // SAFETY: The object was verified alive during DFS.
-                let header = &*from_object;
-                let current = header.foreign_count.load(Ordering::Acquire);
-                // We use a temporary decrement. In the real implementation,
-                // this would be mediated through the runtime's foreign op queue.
-                // For the trial, we just track it logically.
-                let _ = current;
+                // SAFETY: The objects were verified alive during DFS.
+                let target_header = &*to_object;
+                target_header.foreign_count.fetch_sub(1, Ordering::SeqCst);
             }
         }
-
+ 
         ops
     }
 
@@ -817,7 +812,7 @@ impl CycleDetector {
     ///
     /// - `cycle` — The confirmed garbage cycle.
     /// - `runtime` — The runtime context for freeing objects.
-    fn confirm_and_reclaim(&mut self, cycle: &[(u64, *mut OrcaHeader)], _runtime: &mut Runtime) {
+    fn confirm_and_reclaim<R>(&mut self, cycle: &[(u64, *mut OrcaHeader)], _runtime: &mut R) {
         self.cycles_found
             .fetch_add(1, Ordering::Relaxed);
         self.objects_reclaimed
@@ -846,7 +841,7 @@ impl CycleDetector {
     ///
     /// - `cycle` — The cycle whose trial decrements should be cancelled.
     fn cancel_trial_decrements(&mut self, cycle: &[(u64, *mut OrcaHeader)]) {
-        // For each edge in the cycle, increment the foreign count back.
+        // For each edge in the cycle, increment the counts back.
         for i in 0..cycle.len() {
             let (_from_actor, _from_object) = cycle[i];
             let (_to_actor, to_object) = cycle[(i + 1) % cycle.len()];
@@ -854,12 +849,8 @@ impl CycleDetector {
             // SAFETY: The object was alive during DFS and hasn't been freed
             // (we only free after confirming garbage).
             unsafe {
-                let header = &*to_object;
-                let current = header.foreign_count.load(Ordering::Acquire);
-                // Restore the count. In the real implementation, this would
-                // go through the runtime's foreign op queue as a +1 delta.
-                // For the MVP, we just acknowledge the cancellation.
-                let _ = current;
+                let target_header = &*to_object;
+                target_header.foreign_count.fetch_add(1, Ordering::SeqCst);
             }
         }
 
@@ -1017,7 +1008,7 @@ mod mock {
                         actor_id,
                         size_class: SizeClass::Small,
                         gc_color: std::sync::atomic::AtomicU8::new(GcColor::White as u8),
-                        type_tag: TypeTag::Object,
+                        type_tag: TypeTag::Record,
                         payload_size: 64,
                     },
                 );
@@ -1112,9 +1103,9 @@ mod tests {
         let mut detector = CycleDetector::new();
         let mut runtime = MockRuntime::new();
 
-        // Create objects: each has 1 local ref (from their actor).
-        let obj_a = runtime.create_object(1, 1, 0);
-        let obj_b = runtime.create_object(2, 1, 0);
+        // Create objects: each has 0 local refs (not reachable from roots).
+        let obj_a = runtime.create_object(1, 0, 0);
+        let obj_b = runtime.create_object(2, 0, 0);
 
         // Set up foreign counts: each object has one foreign ref from the other.
         // SAFETY: obj_a and obj_b are valid headers.
@@ -1392,12 +1383,12 @@ mod tests {
     #[test]
     fn test_incremental_detection() {
         let mut detector = CycleDetector::new();
-        let runtime = Runtime {}; // minimal forward-declared runtime
+        let mut runtime = MockRuntime::new();
 
         // With an empty graph, incremental_detect should advance the epoch
         // but do nothing else.
         let epoch_before = detector.current_epoch();
-        detector.incremental_detect(&runtime);
+        detector.incremental_detect(&mut runtime);
         assert_eq!(detector.current_epoch(), epoch_before + 1);
     }
 
@@ -1440,12 +1431,12 @@ mod tests {
     #[test]
     fn test_epoch_progression() {
         let mut detector = CycleDetector::new();
-        let runtime = Runtime {};
+        let mut runtime = MockRuntime::new();
 
         assert_eq!(detector.current_epoch(), 0);
 
         for expected in 1..=10 {
-            detector.incremental_detect(&runtime);
+            detector.incremental_detect(&mut runtime);
             assert_eq!(
                 detector.current_epoch(),
                 expected,
@@ -1503,11 +1494,11 @@ mod tests {
     #[test]
     fn test_should_detect_interval() {
         let mut detector = CycleDetector::new();
-        let runtime = Runtime {};
+        let mut runtime = MockRuntime::new();
 
         // Default interval is 10.
         for _ in 0..9 {
-            detector.incremental_detect(&runtime);
+            detector.incremental_detect(&mut runtime);
             assert!(
                 !detector.should_detect(),
                 "should_detect should be false before interval"
@@ -1515,7 +1506,7 @@ mod tests {
         }
 
         // 10th call: should_detect becomes true.
-        detector.incremental_detect(&runtime);
+        detector.incremental_detect(&mut runtime);
         assert!(detector.should_detect(), "should_detect should be true at interval");
     }
 

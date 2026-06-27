@@ -313,9 +313,9 @@ impl NurseryRegion {
         self.total_size
     }
 
-    /// Returns `true` if there is no remaining free space.
+    /// Returns `true` if there is no remaining free space to allocate a typical object.
     pub fn is_full(&self) -> bool {
-        self.free_bytes() == 0
+        (self.limit as usize - self.current as usize) < 96
     }
 
     /// Returns the occupancy ratio (0.0 = empty, 1.0 = full).

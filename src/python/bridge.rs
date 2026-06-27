@@ -14,7 +14,7 @@
 //! pointer — cloning it merely increments the Python reference count.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyTuple, PyDictMethods, PyListMethods};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -95,13 +95,13 @@ impl PythonRegistry {
         PythonObjectId(id)
     }
 
-    /// Retrieve a clone of the `PyObject` handle for the given ID.
+    /// Retrieve a reference to the `PyObject` handle for the given ID.
     ///
     /// Returns `None` if the ID is invalid or the object has been removed.
-    /// The returned `PyObject` can be used within a `Python::with_gil`
-    /// scope to access the underlying Python object.
-    pub fn get(&self, id: PythonObjectId) -> Option<PyObject> {
-        self.objects.get(id.0 as usize)?.as_ref().cloned()
+    /// The caller must hold the registry lock and must clone the returned
+    /// handle under the GIL before releasing the lock.
+    pub fn get(&self, id: PythonObjectId) -> Option<&PyObject> {
+        self.objects.get(id.0 as usize)?.as_ref()
     }
 
     /// Remove a Python object from the registry.
@@ -156,8 +156,13 @@ pub fn register_object(obj: PyObject) -> PythonObjectId {
 }
 
 /// Convenience: get a `PyObject` from the global registry.
+///
+/// Acquires the GIL before locking the registry to avoid a lock-order
+/// deadlock with callers that hold the GIL and then touch the registry.
 pub fn get_object(id: PythonObjectId) -> Option<PyObject> {
-    global_registry().get(id)
+    Python::with_gil(|py| {
+        global_registry().get(id).map(|obj| obj.clone_ref(py))
+    })
 }
 
 /// Convenience: remove a `PyObject` from the global registry.
@@ -210,7 +215,7 @@ impl PyBridge {
     pub fn initialize(&self) -> Result<(), String> {
         // PyO3 auto-initialize handles the actual init.
         // Just verify we can acquire the GIL.
-        Python::with_gil(|_py| Ok(()))
+        Python::with_gil(|_py| Ok::<(), pyo3::PyErr>(()))
             .map_err(|e| format!("Failed to initialize Python: {}", e))
     }
 
@@ -244,10 +249,9 @@ impl PyBridge {
     ///
     /// Equivalent to Python's `getattr(obj, attr)`.
     pub fn get_attr(&self, obj_id: PythonObjectId, attr: &str) -> Result<PythonObjectId, String> {
-        let obj = get_object(obj_id)
-            .ok_or_else(|| format!("Python object ID {:?} not found in registry", obj_id))?;
-
         Python::with_gil(|py| {
+            let obj = get_object(obj_id)
+                .ok_or_else(|| format!("Python object ID {:?} not found in registry", obj_id))?;
             let bound = obj.bind(py);
             let attr_obj = bound
                 .getattr(attr)
@@ -266,12 +270,11 @@ impl PyBridge {
         attr: &str,
         val_id: PythonObjectId,
     ) -> Result<(), String> {
-        let obj = get_object(obj_id)
-            .ok_or_else(|| format!("Python object ID {:?} not found in registry", obj_id))?;
-        let val = get_object(val_id)
-            .ok_or_else(|| format!("Python object ID {:?} not found in registry", val_id))?;
-
         Python::with_gil(|py| {
+            let obj = get_object(obj_id)
+                .ok_or_else(|| format!("Python object ID {:?} not found in registry", obj_id))?;
+            let val = get_object(val_id)
+                .ok_or_else(|| format!("Python object ID {:?} not found in registry", val_id))?;
             let bound = obj.bind(py);
             let val_bound = val.bind(py);
             bound
@@ -288,27 +291,26 @@ impl PyBridge {
         callable_id: PythonObjectId,
         args: Vec<PythonObjectId>,
     ) -> Result<PythonObjectId, String> {
-        let callable = get_object(callable_id)
-            .ok_or_else(|| format!("Callable ID {:?} not found in registry", callable_id))?;
-
-        // Collect argument objects from the registry
-        let arg_objs: Vec<PyObject> = args
-            .iter()
-            .map(|&id| {
-                get_object(id)
-                    .ok_or_else(|| format!("Argument ID {:?} not found in registry", id))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         Python::with_gil(|py| {
+            let callable = get_object(callable_id)
+                .ok_or_else(|| format!("Callable ID {:?} not found in registry", callable_id))?;
+
+            // Collect argument objects from the registry
+            let arg_objs: Vec<PyObject> = args
+                .iter()
+                .map(|&id| {
+                    get_object(id)
+                        .ok_or_else(|| format!("Argument ID {:?} not found in registry", id))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
             let callable_bound = callable.bind(py);
 
             // Build a PyTuple from the argument objects
             let arg_refs: Vec<&pyo3::Bound<'_, pyo3::PyAny>> =
                 arg_objs.iter().map(|o| o.bind(py)).collect();
 
-            let args_tuple = PyTuple::new(py, &arg_refs)
-                .map_err(|e| format!("Failed to create argument tuple: {}", e))?;
+            let args_tuple = PyTuple::new_bound(py, &arg_refs);
 
             let result = callable_bound
                 .call1(args_tuple)
@@ -328,37 +330,36 @@ impl PyBridge {
         args: Vec<PythonObjectId>,
         kwargs: HashMap<String, PythonObjectId>,
     ) -> Result<PythonObjectId, String> {
-        let callable = get_object(callable_id)
-            .ok_or_else(|| format!("Callable ID {:?} not found in registry", callable_id))?;
-
-        // Collect positional arg objects
-        let arg_objs: Vec<PyObject> = args
-            .iter()
-            .map(|&id| {
-                get_object(id)
-                    .ok_or_else(|| format!("Argument ID {:?} not found in registry", id))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Collect keyword arg objects
-        let mut kwarg_objs: HashMap<String, PyObject> = HashMap::new();
-        for (key, id) in kwargs {
-            let obj = get_object(id)
-                .ok_or_else(|| format!("Kwarg '{}' ID {:?} not found in registry", key, id))?;
-            kwarg_objs.insert(key, obj);
-        }
-
         Python::with_gil(|py| {
+            let callable = get_object(callable_id)
+                .ok_or_else(|| format!("Callable ID {:?} not found in registry", callable_id))?;
+
+            // Collect positional arg objects
+            let arg_objs: Vec<PyObject> = args
+                .iter()
+                .map(|&id| {
+                    get_object(id)
+                        .ok_or_else(|| format!("Argument ID {:?} not found in registry", id))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            // Collect keyword arg objects
+            let mut kwarg_objs: HashMap<String, PyObject> = HashMap::new();
+            for (key, id) in kwargs {
+                let obj = get_object(id)
+                    .ok_or_else(|| format!("Kwarg '{}' ID {:?} not found in registry", key, id))?;
+                kwarg_objs.insert(key, obj);
+            }
+
             let callable_bound = callable.bind(py);
 
             // Build positional tuple
             let arg_refs: Vec<&pyo3::Bound<'_, pyo3::PyAny>> =
                 arg_objs.iter().map(|o| o.bind(py)).collect();
-            let args_tuple = PyTuple::new(py, &arg_refs)
-                .map_err(|e| format!("Failed to create argument tuple: {}", e))?;
+            let args_tuple = PyTuple::new_bound(py, &arg_refs);
 
             // Build keyword dict
-            let kwargs_dict = PyDict::new(py);
+            let kwargs_dict = PyDict::new_bound(py);
             for (key, obj) in &kwarg_objs {
                 kwargs_dict
                     .set_item(key, obj.bind(py))
@@ -376,19 +377,18 @@ impl PyBridge {
 
     /// Create a Python `list` from a sequence of registry object IDs.
     pub fn create_list(&self, items: Vec<PythonObjectId>) -> Result<PythonObjectId, String> {
-        let item_objs: Vec<PyObject> = items
-            .iter()
-            .map(|&id| {
-                get_object(id)
-                    .ok_or_else(|| format!("List item ID {:?} not found in registry", id))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         Python::with_gil(|py| {
+            let item_objs: Vec<PyObject> = items
+                .iter()
+                .map(|&id| {
+                    get_object(id)
+                        .ok_or_else(|| format!("List item ID {:?} not found in registry", id))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
             let item_refs: Vec<&pyo3::Bound<'_, pyo3::PyAny>> =
                 item_objs.iter().map(|o| o.bind(py)).collect();
-            let list = PyList::new(py, &item_refs)
-                .map_err(|e| format!("Failed to create list: {}", e))?;
+            let list = PyList::new_bound(py, &item_refs);
             let handle: PyObject = list.unbind().into();
             Ok(register_object(handle))
         })
@@ -399,16 +399,16 @@ impl PyBridge {
         &self,
         items: HashMap<String, PythonObjectId>,
     ) -> Result<PythonObjectId, String> {
-        // Pre-resolve all values from the registry
-        let mut resolved: HashMap<String, PyObject> = HashMap::new();
-        for (key, id) in items {
-            let obj = get_object(id)
-                .ok_or_else(|| format!("Dict value ID {:?} for key '{}' not found", id, key))?;
-            resolved.insert(key, obj);
-        }
-
         Python::with_gil(|py| {
-            let dict = PyDict::new(py);
+            // Pre-resolve all values from the registry
+            let mut resolved: HashMap<String, PyObject> = HashMap::new();
+            for (key, id) in items {
+                let obj = get_object(id)
+                    .ok_or_else(|| format!("Dict value ID {:?} for key '{}' not found", id, key))?;
+                resolved.insert(key, obj);
+            }
+
+            let dict = PyDict::new_bound(py);
             for (key, obj) in &resolved {
                 dict.set_item(key, obj.bind(py))
                     .map_err(|e| format!("Failed to set dict item '{}': {}", key, e))?;
@@ -458,25 +458,24 @@ mod tests {
     fn test_registry_insert_get_remove() {
         ensure_python();
 
-        let mut reg = PythonRegistry::new();
-        assert_eq!(reg.get_count(), 0);
+        Python::with_gil(|py| {
+            let mut reg = PythonRegistry::new();
+            assert_eq!(reg.get_count(), 0);
 
-        // Insert an object
-        let obj = Python::with_gil(|py| {
+            // Insert an object
             let val: PyObject = py.None();
-            val
+            let id = reg.insert(val);
+            assert_eq!(reg.get_count(), 1);
+
+            // Get it back
+            let retrieved = reg.get(id);
+            assert!(retrieved.is_some());
+
+            // Remove it
+            reg.remove(id);
+            assert_eq!(reg.get_count(), 0);
+            assert!(reg.get(id).is_none());
         });
-        let id = reg.insert(obj);
-        assert_eq!(reg.get_count(), 1);
-
-        // Get it back
-        let retrieved = reg.get(id);
-        assert!(retrieved.is_some());
-
-        // Remove it
-        reg.remove(id);
-        assert_eq!(reg.get_count(), 0);
-        assert!(reg.get(id).is_none());
     }
 
     // ------------------------------------------------------------------

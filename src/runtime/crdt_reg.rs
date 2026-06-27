@@ -571,7 +571,7 @@ mod tests {
         let mut a = RGA::new(1);
         let mut b = RGA::new(2);
         let common_id = a.insert_after(None, "base".to_string());
-        b.elements = a.elements.clone(); b.clock = a.clock;
+        b.elements = a.elements.clone(); b.clock.counter = a.clock.counter;
         a.insert_after(Some(common_id), "a-first".to_string());
         b.insert_after(Some(common_id), "b-first".to_string());
         let mut am = a.clone(); am.merge(&b);

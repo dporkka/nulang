@@ -29,7 +29,16 @@ mod tests {
 
         // 2. Type check
         let mut type_checker = TypeChecker::new();
-        let module_type = type_checker.check_module(&ast)?;
+        let mut module_type = type_checker.check_module(&ast)?;
+
+        // If the last declaration is the synthetic function wrapper __main, unpack its return type
+        if let Some(crate::ast::Decl::Function { name, .. }) = ast.decls.last() {
+            if name == "__main" {
+                if let Type::Function { ret, .. } = module_type {
+                    module_type = *ret;
+                }
+            }
+        }
 
         // 3. Effect check
         let mut effect_checker = EffectChecker::new();

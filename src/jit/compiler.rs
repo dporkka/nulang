@@ -22,8 +22,10 @@
 use std::collections::HashMap;
 
 use cranelift::prelude::*;
+use cranelift::codegen::ir::FuncRef;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
+use cranelift_jit::JITModule;
 
 use crate::bytecode::{Instruction, OpCode};
 
@@ -132,8 +134,8 @@ impl std::fmt::Display for CompileError {
 impl std::error::Error for CompileError {}
 
 /// Compile a bytecode region to a native function.
-pub fn compile_bytecode_region<M: Module>(
-    module: &mut M,
+pub fn compile_bytecode_region(
+    module: &mut JITModule,
     builder_context: &mut FunctionBuilderContext,
     ctx: &mut codegen::Context,
     func_name: &str,
@@ -237,8 +239,7 @@ pub fn compile_bytecode_region<M: Module>(
                 let is_nonzero = builder.ins().icmp(IntCC::NotEqual, cond_val, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
-                    builder.ins().brnz(is_nonzero, target_block, &[]);
-                    builder.ins().jump(fallthrough, &[]);
+                    builder.ins().brif(is_nonzero, target_block, &[], fallthrough, &[]);
                 } else {
                     builder.ins().jump(fallthrough, &[]);
                 }
@@ -250,8 +251,7 @@ pub fn compile_bytecode_region<M: Module>(
                 let is_zero = builder.ins().icmp(IntCC::Equal, cond_val, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
-                    builder.ins().brnz(is_zero, target_block, &[]);
-                    builder.ins().jump(fallthrough, &[]);
+                    builder.ins().brif(is_zero, target_block, &[], fallthrough, &[]);
                 } else {
                     builder.ins().jump(fallthrough, &[]);
                 }
@@ -279,6 +279,10 @@ pub fn compile_bytecode_region<M: Module>(
                 builder.ins().jump(return_block, &[]);
             }
         }
+    }
+
+    for block in blocks.values() {
+        builder.seal_block(*block);
     }
 
     builder.switch_to_block(return_block);

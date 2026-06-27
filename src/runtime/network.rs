@@ -41,6 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::MessagePriority;
 use super::crdt_manager::CrdtOp;
+use super::NodeId;
 use crate::vm::Value;
 
 // ---------------------------------------------------------------------------
@@ -79,24 +80,7 @@ const TYPE_CRDT_SYNC: u8 = 5;
 // NodeId
 // ---------------------------------------------------------------------------
 
-/// Unique identifier for a node in the cluster.
-///
-/// `NodeId` is derived by hashing a [`SocketAddr`] so that the same
-/// physical node (re-)started with the same address receives a stable
-/// identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeId(pub u64);
-
-impl NodeId {
-    /// Hash the socket address to produce a stable [`NodeId`].
-    pub fn new(addr: &SocketAddr) -> Self {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        addr.hash(&mut hasher);
-        NodeId(hasher.finish())
-    }
-}
+// NodeId is imported from super::cluster::NodeId
 
 // ---------------------------------------------------------------------------
 // Packet
@@ -337,7 +321,8 @@ impl Packet {
             return None;
         }
         let request_id = read_u64(payload, 0)?;
-        let (behavior_name, mut offset) = read_string(payload, 8)?;
+        let (behavior_name, consumed) = read_string(payload, 8)?;
+        let mut offset = 8 + consumed;
         let count = read_u32(payload, offset)? as usize;
         offset += 4;
         let mut initial_state = Vec::with_capacity(count.min(256));
@@ -414,34 +399,24 @@ const VAL_UNIT: u8 = 4;
 
 /// Write a [`Value`] into `buf`.
 fn write_value(buf: &mut Vec<u8>, v: &Value) {
-    match v {
-        Value::Int(i) => {
-            buf.push(VAL_INT);
-            buf.extend_from_slice(&i.to_be_bytes());
-        }
-        Value::Float(f) => {
-            buf.push(VAL_FLOAT);
-            buf.extend_from_slice(&f.to_be_bytes());
-        }
-        Value::Bool(b) => {
-            buf.push(VAL_BOOL);
-            buf.push(if *b { 1 } else { 0 });
-        }
-        Value::String(s) => {
-            buf.push(VAL_STRING);
-            write_string(buf, s);
-        }
-        Value::Unit => {
-            buf.push(VAL_UNIT);
-        }
-        // SAFETY: Any new variants added to Value in the future will simply
-        // be encoded as Unit, preserving forward compatibility for unknown
-        // variants.  This match arm is unreachable *today* but will catch
-        // future additions.
-        #[allow(unreachable_patterns)]
-        _ => {
-            buf.push(VAL_UNIT);
-        }
+    if let Some(i) = v.as_int() {
+        buf.push(VAL_INT);
+        buf.extend_from_slice(&i.to_be_bytes());
+    } else if let Some(f) = v.as_float() {
+        buf.push(VAL_FLOAT);
+        buf.extend_from_slice(&f.to_be_bytes());
+    } else if let Some(b) = v.as_bool() {
+        buf.push(VAL_BOOL);
+        buf.push(if b { 1 } else { 0 });
+    } else if let Some(id) = v.as_string_id() {
+        buf.push(VAL_STRING);
+        buf.extend_from_slice(&id.to_be_bytes());
+    } else if v.is_unit() {
+        buf.push(VAL_UNIT);
+    } else {
+        // Fall back to writing raw bits as float (for NaN floats or other tagged NaNs)
+        buf.push(VAL_FLOAT);
+        buf.extend_from_slice(&v.0.to_be_bytes());
     }
 }
 
@@ -453,21 +428,21 @@ fn read_value(bytes: &[u8], offset: usize) -> Option<(Value, usize)> {
     match tag {
         VAL_INT => {
             let v = read_i64(bytes, offset + 1)?;
-            Some((Value::Int(v), 1 + 8))
+            Some((Value::int(v), 1 + 8))
         }
         VAL_FLOAT => {
             let bits = read_u64(bytes, offset + 1)?;
-            Some((Value::Float(f64::from_bits(bits)), 1 + 8))
+            Some((Value::float(f64::from_bits(bits)), 1 + 8))
         }
         VAL_BOOL => {
             let b = *bytes.get(offset + 1)? != 0;
-            Some((Value::Bool(b), 1 + 1))
+            Some((Value::bool(b), 1 + 1))
         }
         VAL_STRING => {
-            let (s, consumed) = read_string(bytes, offset + 1)?;
-            Some((Value::String(s), 1 + consumed))
+            let id = read_u32(bytes, offset + 1)?;
+            Some((Value::string(id), 1 + 4))
         }
-        VAL_UNIT => Some((Value::Unit, 1)),
+        VAL_UNIT => Some((Value::unit(), 1)),
         _ => None,
     }
 }
@@ -1120,8 +1095,8 @@ mod tests {
             target_actor: 42,
             behavior_id: 7,
             payload: vec![
-                Value::Int(123),
-                Value::String("hello".into()),
+                Value::int(123),
+                Value::string(456),
             ],
             sender_actor: 99,
             sender_node: NodeId(0xDEAD_BEEF_CAFE_BABE),
@@ -1157,7 +1132,7 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn test_value_serialization_int() {
-        let v = Value::Int(-42_000_000_000_i64);
+        let v = Value::int(-42_000_000_000_i64);
         let mut buf = Vec::new();
         write_value(&mut buf, &v);
 
@@ -1171,12 +1146,12 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn test_value_serialization_string() {
-        let v = Value::String("nulang distributed actors".into());
+        let v = Value::string(42);
         let mut buf = Vec::new();
         write_value(&mut buf, &v);
 
         let (decoded, consumed) = read_value(&buf, 0).unwrap();
-        assert!(consumed > 5);
+        assert_eq!(consumed, 5); // 1 tag + 4 bytes
         assert_eq!(decoded, v);
     }
 
@@ -1186,19 +1161,19 @@ mod tests {
     #[test]
     fn test_value_serialization_complex() {
         let values = vec![
-            Value::Int(0),
-            Value::Int(-1),
-            Value::Int(i64::MAX),
-            Value::Int(i64::MIN),
-            Value::Float(3.14159),
-            Value::Float(f64::NAN),
-            Value::Float(f64::INFINITY),
-            Value::Bool(true),
-            Value::Bool(false),
-            Value::String("".into()),
-            Value::String("hello".into()),
-            Value::String("unicode: αβγ δ" .into()),
-            Value::Unit,
+            Value::int(0),
+            Value::int(-1),
+            Value::int(i64::MAX),
+            Value::int(i64::MIN),
+            Value::float(3.14159),
+            Value::float(f64::NAN),
+            Value::float(f64::INFINITY),
+            Value::bool(true),
+            Value::bool(false),
+            Value::string(0),
+            Value::string(1),
+            Value::string(999),
+            Value::unit(),
         ];
 
         for v in &values {
@@ -1207,8 +1182,8 @@ mod tests {
             let (decoded, _) = read_value(&buf, 0).unwrap();
 
             // For NaN, we need to compare bits because NaN != NaN.
-            match (v, &decoded) {
-                (Value::Float(a), Value::Float(b)) if a.is_nan() && b.is_nan() => {}
+            match (v.as_float(), decoded.as_float()) {
+                (Some(a), Some(b)) if a.is_nan() && b.is_nan() => {}
                 _ => assert_eq!(decoded, *v, "roundtrip failed for {:?}", v),
             }
         }
@@ -1367,8 +1342,8 @@ mod tests {
             request_id: 12345,
             behavior_name: "Counter".into(),
             initial_state: vec![
-                ("count".into(), Value::Int(0)),
-                ("name".into(), Value::String("my_counter".into())),
+                ("count".into(), Value::int(0)),
+                ("name".into(), Value::string(42)),
             ],
         };
         let bytes = req.to_bytes(99);

@@ -18,11 +18,11 @@ cranelift-native = "0.132"
 cranelift-frontend = "0.132"
 
 # LSP server
-tower-lsp = "0.22"
+tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 
 # Python interop (PyO3)
-pyo3 = { version = "0.22", features = ["auto-initialize"] }
+pyo3 = { version = "0.22", features = ["auto-initialize", "py-clone"] }
 
 [lib]
 name = "nulang"

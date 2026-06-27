@@ -255,41 +255,41 @@ fn test_registry_invalid_name() {
 
 #[test]
 fn test_timer_send_after() {
-    let mut tw = TimerWheel::new();
-    let timer_id = tw.send_after(100, 42, Value::int(1));
+    let tw = TimerWheel::new();
+    let timer_id = tw.send_after(Duration::from_millis(100), 42, 1, vec![]);
     assert_eq!(timer_id, TimerId(1));
     assert_eq!(tw.len(), 1);
 }
 
 #[test]
 fn test_timer_cancel() {
-    let mut tw = TimerWheel::new();
-    let timer_id = tw.send_after(100, 42, Value::int(1));
+    let tw = TimerWheel::new();
+    let timer_id = tw.send_after(Duration::from_millis(100), 42, 1, vec![]);
     assert!(tw.cancel(timer_id));
     assert_eq!(tw.len(), 0);
 }
 
 #[test]
 fn test_timer_tick_fires() {
-    let mut tw = TimerWheel::new();
-    let _ = tw.send_after(0, 42, Value::int(99));
-    let fired = tw.tick(1000);
+    let tw = TimerWheel::new();
+    let _ = tw.send_after(Duration::from_millis(0), 42, 99, vec![]);
+    let fired = tw.tick(Instant::now() + Duration::from_millis(1000));
     assert_eq!(fired.len(), 1);
     assert_eq!(tw.len(), 0);
 }
 
 #[test]
 fn test_timer_exit_after() {
-    let mut tw = TimerWheel::new();
-    let timer_id = tw.exit_after(50, 42, ExitReason::Shutdown(None));
+    let tw = TimerWheel::new();
+    let timer_id = tw.exit_after(Duration::from_millis(50), 42, "shutdown".to_string());
     assert_eq!(timer_id, TimerId(1));
     assert_eq!(tw.len(), 1);
 }
 
 #[test]
 fn test_timer_kill_after() {
-    let mut tw = TimerWheel::new();
-    let timer_id = tw.kill_after(50, 42);
+    let tw = TimerWheel::new();
+    let timer_id = tw.kill_after(Duration::from_millis(50), 42);
     assert_eq!(timer_id, TimerId(1));
 }
 

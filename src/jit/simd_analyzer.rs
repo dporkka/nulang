@@ -383,7 +383,15 @@ impl SimdAnalyzer {
                 }
 
                 if let Some(region) = analyze_region(instructions, start, len, type_metadata) {
-                    regions.push(region);
+                    // Skip if this region overlaps an already-discovered region.
+                    let overlaps = regions.iter().any(|r: &SimdRegion| {
+                        let r_end = r.start_offset + r.num_instrs;
+                        let new_end = region.start_offset + region.num_instrs;
+                        region.start_offset < r_end && new_end > r.start_offset
+                    });
+                    if !overlaps {
+                        regions.push(region);
+                    }
                     break; // Found one at this start, move on.
                 }
             }
@@ -1081,8 +1089,8 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
             Instruction::new3(OpCode::IAdd, 4, 5, 6),     // R6 = R4 + R5
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3, 0, 0),     // R3++
-            Instruction::new2(OpCode::Jmp, 0, 0, 0),      // jmp back (patched later)
+            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new2(OpCode::Jmp, 0, 0),      // jmp back (patched later)
         ]
     }
 
@@ -1093,8 +1101,8 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
             Instruction::new3(OpCode::IMul, 4, 5, 6),     // R6 = R4 * R5
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3, 0, 0),     // R3++
-            Instruction::new2(OpCode::Jmp, 0, 0, 0),
+            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
 
@@ -1105,8 +1113,8 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
             Instruction::new3(OpCode::FAdd, 4, 5, 6),     // R6 = R4 + R5 (float)
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3, 0, 0),     // R3++
-            Instruction::new2(OpCode::Jmp, 0, 0, 0),
+            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
 
@@ -1114,8 +1122,8 @@ mod simd_analyzer_tests {
     fn build_numeric_loop_no_arrays() -> Vec<Instruction> {
         vec![
             Instruction::new3(OpCode::IAdd, 3, 4, 5), // R5 = R3 + R4 (just arithmetic)
-            Instruction::new1(OpCode::IInc, 3, 0, 0), // R3++
-            Instruction::new2(OpCode::Jmp, 0, 0, 0),
+            Instruction::new1(OpCode::IInc, 3), // R3++
+            Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
 
@@ -1127,8 +1135,8 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = a[R3]
             Instruction::new3(OpCode::IAdd, 4, 5, 6),     // R6 = R4 + R5
             Instruction::new3(OpCode::ArrStore, 0, 3, 6), // sum[R3] = R6  (same as src!)
-            Instruction::new1(OpCode::IInc, 3, 0, 0),     // R3++
-            Instruction::new2(OpCode::Jmp, 0, 0, 0),
+            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
 
@@ -1138,8 +1146,8 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 0, 3, 4),   // R4 = a[R3]
             Instruction::new3(OpCode::Call, 7, 0, 5),      // R5 = call(R7)
             Instruction::new3(OpCode::ArrStore, 1, 3, 5),  // b[R3] = R5
-            Instruction::new1(OpCode::IInc, 3, 0, 0),      // R3++
-            Instruction::new2(OpCode::Jmp, 0, 0, 0),
+            Instruction::new1(OpCode::IInc, 3),      // R3++
+            Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
 
@@ -1150,8 +1158,8 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
             Instruction::new3(OpCode::ICmpLt, 4, 5, 6),   // R6 = R4 < R5
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3, 0, 0),     // R3++
-            Instruction::new2(OpCode::Jmp, 0, 0, 0),
+            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
 
@@ -1277,7 +1285,7 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
             Instruction::new3(OpCode::IAdd, 4, 5, 6),     // R6 = R4 + R5
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3, 0, 0),     // R3++
+            Instruction::new1(OpCode::IInc, 3),     // R3++
             // Back-edge: jump back to start of this loop (offset 0)
             // simm16 = -5 (jump back 5 instructions from pc=5 to target=0)
             Instruction::new3(OpCode::Jmp, 0xFF, 0xFB, 0), // jmp -5
@@ -1294,7 +1302,7 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 11, 13, 15),  // R15 = f[R13]
             Instruction::new3(OpCode::IMul, 14, 15, 16),     // R16 = R14 * R15
             Instruction::new3(OpCode::ArrStore, 12, 13, 16), // e[R13] = R16
-            Instruction::new1(OpCode::IInc, 13, 0, 0),       // R13++
+            Instruction::new1(OpCode::IInc, 13),       // R13++
             // Back-edge: simm16 = -5 (pc = loop2_start+5, target = loop2_start)
             Instruction::new3(OpCode::Jmp, 0xFF, 0xFB, 0),  // jmp -5
         ];
@@ -1387,8 +1395,8 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 0, 3, 4),
             Instruction::new3(OpCode::Spawn, 0, 0, 0),    // actor spawn — not vectorizable
             Instruction::new3(OpCode::ArrStore, 1, 3, 4),
-            Instruction::new1(OpCode::IInc, 3, 0, 0),
-            Instruction::new2(OpCode::Jmp, 0, 0, 0),
+            Instruction::new1(OpCode::IInc, 3),
+            Instruction::new2(OpCode::Jmp, 0, 0),
         ];
 
         let region = analyze_region(&instructions, 0, instructions.len(), None);
@@ -1459,8 +1467,8 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 1, 4, 6),  // R6 = b[R4]  (different idx!)
             Instruction::new3(OpCode::IAdd, 5, 6, 7),     // R7 = R5 + R6
             Instruction::new3(OpCode::ArrStore, 2, 3, 7), // c[R3] = R7
-            Instruction::new1(OpCode::IInc, 3, 0, 0),     // R3++
-            Instruction::new2(OpCode::Jmp, 0, 0, 0),
+            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new2(OpCode::Jmp, 0, 0),
         ];
 
         let region = analyze_region(&instructions, 0, instructions.len(), None);
@@ -1477,8 +1485,8 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
             Instruction::new3(OpCode::ISub, 4, 5, 6),     // R6 = R4 - R5
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3, 0, 0),     // R3++
-            Instruction::new2(OpCode::Jmp, 0, 0, 0),
+            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new2(OpCode::Jmp, 0, 0),
         ];
 
         let region = analyze_region(&instructions, 0, instructions.len(), None);

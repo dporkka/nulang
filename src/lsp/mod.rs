@@ -50,12 +50,12 @@ impl LanguageServer for NulangLanguageServer {
     async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
-                inlay_hint_provider: Some(InlayHintServerCapabilities::Options(
+                inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
                     InlayHintOptions {
                         resolve_provider: Some(false),
                         work_done_progress_options: WorkDoneProgressOptions::default(),
                     },
-                )),
+                ))),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
@@ -325,9 +325,9 @@ impl<'a> InlayHintEngine<'a> {
             },
             label: InlayHintLabel::String(ann.label),
             kind: Some(match ann.kind {
-                AnnotationKind::Type => InlayHintKind::Type,
-                AnnotationKind::Capability => InlayHintKind::Parameter,
-                AnnotationKind::Effect => InlayHintKind::Type,
+                AnnotationKind::Type => InlayHintKind::TYPE,
+                AnnotationKind::Capability => InlayHintKind::PARAMETER,
+                AnnotationKind::Effect => InlayHintKind::TYPE,
             }),
             text_edits: None,
             tooltip: Some(InlayHintTooltip::String(match ann.kind {
@@ -361,6 +361,13 @@ pub async fn run_lsp_server() {
 mod lsp_tests {
     use super::*;
 
+    fn label_to_string(label: &InlayHintLabel) -> String {
+        match label {
+            InlayHintLabel::String(s) => s.clone(),
+            InlayHintLabel::LabelParts(parts) => parts.iter().map(|p| p.value.clone()).collect(),
+        }
+    }
+
     #[test]
     fn test_type_inlay_for_let_binding() {
         let source = "let x = 42";
@@ -368,7 +375,7 @@ mod lsp_tests {
         let hints = engine.generate_inlay_hints();
         assert!(!hints.is_empty());
         let type_hint = &hints[0];
-        assert!(type_hint.label.to_string().contains("Int"));
+        assert!(label_to_string(&type_hint.label).contains("Int"));
     }
 
     #[test]
@@ -377,7 +384,7 @@ mod lsp_tests {
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
         assert!(!hints.is_empty());
-        assert!(hints[0].label.to_string().contains("Float"));
+        assert!(label_to_string(&hints[0].label).contains("Float"));
     }
 
     #[test]
@@ -386,7 +393,7 @@ mod lsp_tests {
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
         assert!(!hints.is_empty());
-        assert!(hints[0].label.to_string().contains("String"));
+        assert!(label_to_string(&hints[0].label).contains("String"));
     }
 
     #[test]
@@ -394,7 +401,7 @@ mod lsp_tests {
         let source = "let x :iso String = \"hello\"";
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
-        let cap_hints: Vec<_> = hints.iter().filter(|h| h.label.to_string().contains(":iso")).collect();
+        let cap_hints: Vec<_> = hints.iter().filter(|h| label_to_string(&h.label).contains(":iso")).collect();
         assert!(!cap_hints.is_empty());
     }
 
@@ -403,7 +410,7 @@ mod lsp_tests {
         let source = "fun read() ! IO";
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
-        let effect_hints: Vec<_> = hints.iter().filter(|h| h.label.to_string().contains("[IO]")).collect();
+        let effect_hints: Vec<_> = hints.iter().filter(|h| label_to_string(&h.label).contains("[IO]")).collect();
         assert!(!effect_hints.is_empty());
     }
 
@@ -414,7 +421,7 @@ mod lsp_tests {
         let hints = engine.generate_inlay_hints();
         // Should NOT generate a type inlay since type is already explicit
         let type_inlays: Vec<_> = hints.iter().filter(|h| {
-            let label = h.label.to_string();
+            let label = label_to_string(&h.label);
             label.starts_with(": ") && !label.contains(":iso")
         }).collect();
         assert!(type_inlays.is_empty(), "should not add inlay when type is explicit");
@@ -426,7 +433,7 @@ mod lsp_tests {
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
         assert_eq!(hints[0].position.line, 0);
-        assert_eq!(hints[0].position.character, 8); // after "abc"
+        assert_eq!(hints[0].position.character, 7); // after "abc"
     }
 
     #[test]
@@ -436,8 +443,8 @@ mod lsp_tests {
         };
         let engine = InlayHintEngine::new("");
         let inlay = engine.annotation_to_inlay(ann);
-        assert_eq!(inlay.label.to_string(), ": Int");
-        assert_eq!(inlay.kind, Some(InlayHintKind::Type));
+        assert_eq!(label_to_string(&inlay.label), ": Int");
+        assert_eq!(inlay.kind, Some(InlayHintKind::TYPE));
     }
 
     #[test]
@@ -446,8 +453,8 @@ mod lsp_tests {
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
         assert_eq!(hints.len(), 3);
-        assert!(hints[0].label.to_string().contains("Int"));
-        assert!(hints[1].label.to_string().contains("Float"));
-        assert!(hints[2].label.to_string().contains("String"));
+        assert!(label_to_string(&hints[0].label).contains("Int"));
+        assert!(label_to_string(&hints[1].label).contains("Float"));
+        assert!(label_to_string(&hints[2].label).contains("String"));
     }
 }

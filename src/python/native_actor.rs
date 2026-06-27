@@ -44,7 +44,7 @@
 
 use crossbeam::channel::{bounded, unbounded, Receiver, Sender};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyTuple, PyDictMethods};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -63,6 +63,11 @@ const TAG_ACTOR: u64 = 0x7FFB000000000000;
 const TAG_SPECIAL: u64 = 0x7FFC000000000000;
 const TAG_STRING: u64 = 0x7FFD000000000000;
 const TAG_PYTHON: u64 = 0x7FFE000000000000;
+
+const SPECIAL_UNIT: u64 = 0;
+const SPECIAL_TRUE: u64 = 1;
+const SPECIAL_FALSE: u64 = 2;
+const SPECIAL_NIL: u64 = 3;
 
 // ---------------------------------------------------------------------------
 // NativeTask — work sent to native actors
@@ -611,7 +616,7 @@ fn handle_call(
         // Step 2: Walk the attribute path to resolve the callable
         let mut current = module_obj.into_any();
         for attr in attr_path {
-            match current.getattr(attr) {
+            match current.getattr(attr.as_str()) {
                 Ok(obj) => current = obj,
                 Err(e) => {
                     return NativeResult::Err {
@@ -654,17 +659,9 @@ fn handle_call(
         let arg_refs: Vec<&pyo3::Bound<'_, pyo3::PyAny>> =
             py_args.iter().map(|o| o.bind(py)).collect();
 
-        let args_tuple = match PyTuple::new(py, &arg_refs) {
-            Ok(t) => t,
-            Err(e) => {
-                return NativeResult::Err {
-                    reply_id,
-                    error: format!("Failed to build argument tuple: {}", e),
-                };
-            }
-        };
+        let args_tuple: Bound<'_, PyTuple> = PyTuple::new_bound(py, &arg_refs);
 
-        let kwargs_dict = PyDict::new(py);
+        let kwargs_dict = PyDict::new_bound(py);
         for (key, obj) in &py_kwargs {
             if let Err(e) = kwargs_dict.set_item(key, obj.bind(py)) {
                 return NativeResult::Err {
@@ -701,37 +698,9 @@ fn handle_call(
 /// and marshals the result back to a Nulang [`Value`].
 fn handle_eval(code: &str, reply_id: u64) -> NativeResult {
     Python::with_gil(|py| {
-        let builtins = match py.import_bound("builtins") {
-            Ok(b) => b,
-            Err(e) => {
-                return NativeResult::Err {
-                    reply_id,
-                    error: format!("Failed to import builtins: {}", e),
-                };
-            }
-        };
-
-        let eval_fn = match builtins.getattr("eval") {
-            Ok(f) => f,
-            Err(e) => {
-                return NativeResult::Err {
-                    reply_id,
-                    error: format!("Failed to get eval: {}", e),
-                };
-            }
-        };
-
-        let code_obj = match PyTuple::new(py, &[code]) {
-            Ok(t) => t,
-            Err(e) => {
-                return NativeResult::Err {
-                    reply_id,
-                    error: format!("Failed to build eval args: {}", e),
-                };
-            }
-        };
-
-        let py_result = match eval_fn.call1(code_obj) {
+        // eval() requires globals/locals when called without a frame.
+        let locals = PyDict::new_bound(py);
+        let py_result = match py.eval_bound(code, None, Some(&locals)) {
             Ok(r) => r,
             Err(e) => {
                 return NativeResult::Err {
@@ -1072,7 +1041,7 @@ mod native_actor_tests {
 
         let handle_b = std::thread::spawn(move || {
             pool_b.call_function(
-                "math",
+                "builtins",
                 &["pow".to_string()],
                 vec![Value::int(2), Value::int(10)],
                 vec![],

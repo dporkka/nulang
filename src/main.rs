@@ -1,9 +1,4 @@
 //! Nulang CLI entry point.
-
-use mimalloc::MiMalloc;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
 //!
 //! Usage:
 //!   nulang [OPTIONS] <FILE>
@@ -19,6 +14,11 @@ static GLOBAL: MiMalloc = MiMalloc;
 //!   --lsp            Start Language Server (stdio)
 //!   -v, --verbose    Show bytecode and AST
 //!   -h, --help       Show this help message
+
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 use nulang::compiler::Compiler;
 use nulang::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};

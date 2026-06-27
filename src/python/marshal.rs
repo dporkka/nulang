@@ -20,9 +20,9 @@
 //! | Other Python | `TAG_PYTHON` | Stored as opaque Python object |
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyDictMethods, PyListMethods};
 
-use crate::python::bridge::{register_object, get_object, PythonObjectId};
+use crate::python::bridge::{register_object, get_object, PythonObjectId, PyBridge};
 use crate::vm::Value;
 
 // ---------------------------------------------------------------------------
@@ -165,7 +165,7 @@ pub fn python_to_nulang(obj: &pyo3::Bound<'_, pyo3::PyAny>) -> Result<Value, Str
             .unwrap_or_else(|_| {
                 // Big int — try to extract and clamp
                 Python::with_gil(|_py| {
-                    let big_int_str = i.str().unwrap_or_default().to_string();
+                    let big_int_str = i.str().map(|s| s.to_string()).unwrap_or_default();
                     big_int_str.parse::<i64>().unwrap_or(i64::MAX)
                 })
             });
@@ -432,7 +432,7 @@ mod tests {
 
         // Create a Python list
         let list_id = Python::with_gil(|py| {
-            let list = PyList::new(py, &[1i64, 2i64, 3i64]).unwrap();
+            let list = PyList::new_bound(py, &[1i64, 2i64, 3i64]);
             let obj: PyObject = list.unbind().into();
             register_object(obj)
         });
@@ -462,7 +462,7 @@ mod tests {
 
         // Create a Python dict
         let dict_id = Python::with_gil(|py| {
-            let dict = PyDict::new(py);
+            let dict = PyDict::new_bound(py);
             dict.set_item("key", 42i64).unwrap();
             let obj: PyObject = dict.unbind().into();
             register_object(obj)

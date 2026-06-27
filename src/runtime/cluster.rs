@@ -738,8 +738,8 @@ mod tests {
             info.status = NodeStatus::Healthy;
         }
 
-        // Call tick immediately — peer should still be healthy because
-        // not enough time has elapsed.
+        // Call tick — we force the heartbeat timer to have expired so it sends a heartbeat
+        cs.last_heartbeat_sent = Instant::now() - cs.heartbeat_interval - Duration::from_secs(1);
         let actions = cs.tick();
         // Peer is still healthy because the real timeout hasn't passed.
         // The test documents the API; full timeout testing requires
