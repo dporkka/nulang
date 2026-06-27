@@ -7,8 +7,7 @@
 
 use crate::bytecode::*;
 use crate::runtime::*;
-use crate::types::NuResult;
-use crate::types::NuError;
+use crate::types::{NuResult, NuError, Span};
 // Python interop is handled via NativeActor (see src/python/native_actor.rs).
 // No Python types enter the VM value representation.
 
@@ -188,6 +187,101 @@ struct Closure {
     captures: Vec<Value>,
 }
 
+// ---------------------------------------------------------------------------
+// Continuation (for algebraic effects)
+// ---------------------------------------------------------------------------
+
+/// Recursively deep-clone a frame chain (for continuation capture).
+fn clone_frame_chain(frame: &Frame) -> Box<Frame> {
+    Box::new(Frame {
+        regs: frame.regs,
+        pc: frame.pc,
+        return_dst: frame.return_dst,
+        closure_env: frame.closure_env,
+        caller: frame.caller.as_ref().map(|c| clone_frame_chain(c)),
+        module_idx: frame.module_idx,
+    }))
+}
+
+/// A captured continuation — a deep snapshot of the VM's execution state
+/// at the point of a `perform` call. Restored by `resume` to continue
+/// the suspended computation with a value.
+#[derive(Debug)]
+struct Continuation {
+    /// Deep-cloned frame chain (innermost frame is the head).
+    frame: Box<Frame>,
+    /// The PC to resume at (points to the instruction after Perform).
+    resume_pc: usize,
+    /// Which module the resumed code lives in.
+    module_idx: usize,
+    /// Which register to store the resume value into.
+    resume_dst: u8,
+    /// Step count at capture time.
+    step_count: usize,
+}
+
+impl Continuation {
+    /// Capture a continuation from the current VM state.
+    fn capture(vm: &VM, resume_dst: u8) -> Option<Self> {
+        let current = vm.current_frame.as_ref()?;
+        Some(Continuation {
+            frame: clone_frame_chain(current),
+            resume_pc: current.pc, // PC already points past the Perform instruction
+            module_idx: current.module_idx,
+            resume_dst,
+            step_count: vm.step_count,
+        })
+    }
+
+    /// Restore this continuation into the VM, placing `value` in the
+    /// resume destination register.
+    fn restore(self, vm: &mut VM, value: Value) {
+        let mut frame = self.frame;
+        frame.regs[self.resume_dst as usize] = value;
+        frame.pc = self.resume_pc;
+        vm.current_frame = Some(frame);
+        vm.step_count = self.step_count;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handler Frame (for algebraic effects)
+// ---------------------------------------------------------------------------
+
+/// An active handler frame on the handler stack. One frame per
+/// `handle { ... }` block. Tracks which effects this block handles
+/// and where to resume after normal completion.
+#[derive(Debug)]
+struct HandlerFrame {
+    /// Index into the current module's handler_tables.
+    handler_table_idx: usize,
+    /// Which module this handler belongs to.
+    module_idx: usize,
+    /// The PC to resume at when the handle block completes normally
+    /// (i.e., the instruction after the matching Unwind).
+    resume_pc: usize,
+    /// The register to store the normal completion result in.
+    resume_dst: u8,
+    /// The captured continuation (set by Perform, consumed by Resume).
+    captured_continuation: Option<Continuation>,
+}
+
+impl HandlerFrame {
+    fn new(handler_table_idx: usize, module_idx: usize, resume_pc: usize, resume_dst: u8) -> Self {
+        HandlerFrame {
+            handler_table_idx,
+            module_idx,
+            resume_pc,
+            resume_dst,
+            captured_continuation: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VM
+// ---------------------------------------------------------------------------
+
 pub struct VM {
     modules: Vec<CodeModule>,
     current_frame: Option<Box<Frame>>,
@@ -195,6 +289,9 @@ pub struct VM {
     pub runtime: Runtime,
     step_count: usize,
     closures: Vec<Box<Closure>>,
+    /// Handler stack: one frame per active `handle { ... }` block.
+    /// Grows on Handle, shrinks on Unwind or Resume.
+    handler_stack: Vec<HandlerFrame>,
     // Note: Python interop is handled externally via NativeActor.
     // No Python state is stored in the VM (audit requirement).
 }
@@ -208,6 +305,7 @@ impl VM {
             runtime: Runtime::new(),
             step_count: 0,
             closures: Vec::new(),
+            handler_stack: Vec::new(),
         }
     }
 
@@ -1019,11 +1117,133 @@ impl VM {
                 self.running = false;
             }
 
-            // -- Effects (MVP) --
-            OpCode::Perform => { frame.regs[instr.op3 as usize] = Value::unit(); }
-            OpCode::Handle => {}
-            OpCode::Resume => {}
-            OpCode::Unwind => {}
+            // -- Algebraic Effects --
+            OpCode::Handle => {
+                // Handle: push a new handler frame onto the handler stack.
+                // op1 = handler_table_idx (index into module.handler_tables)
+                // The handler remains active until matching Unwind.
+                //
+                // Resume PC: we save the current PC (which points past this Handle
+                // instruction) as the place to resume when the handle block
+                // completes normally.
+                let handler_table_idx = instr.op1 as usize;
+                let module_idx = frame.module_idx;
+                let resume_pc = frame.pc; // already incremented past Handle
+                // dst reg for normal completion result — stored in op2
+                let resume_dst = instr.op2;
+                self.handler_stack.push(HandlerFrame::new(
+                    handler_table_idx, module_idx, resume_pc, resume_dst,
+                ));
+            }
+            OpCode::Perform => {
+                // Perform: invoke an effect operation.
+                // op1<<8 | op2 = effect_name constant pool index
+                // op3 = dst_reg (where to store the result after resume)
+                let eff_name_idx = instr.imm16();
+                let dst_reg = instr.op3;
+                let effect_name = self.module_const_string(frame.module_idx, eff_name_idx);
+
+                // Search handler stack from top (innermost) to bottom (outermost).
+                let handler_idx = self.handler_stack.iter().rposition(|hf| {
+                    if let Some(module) = self.modules.get(hf.module_idx) {
+                        if let Some(ht) = module.handler_tables.get(hf.handler_table_idx) {
+                            ht.bindings.iter().any(|b| b.effect_name == effect_name)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                });
+
+                if let Some(handler_stack_idx) = handler_idx {
+                    // Found a handler. Capture continuation and invoke handler.
+                    let hf = &mut self.handler_stack[handler_stack_idx];
+
+                    // Look up the binding to get the handler code offset.
+                    let (handler_offset, _arg_count, result_reg) = {
+                        let module = self.modules.get(hf.module_idx).unwrap();
+                        let ht = module.handler_tables.get(hf.handler_table_idx).unwrap();
+                        let binding = ht.bindings.iter()
+                            .find(|b| b.effect_name == effect_name)
+                            .unwrap();
+                        (binding.handler_offset, binding.arg_count, binding.result_reg)
+                    };
+
+                    // Capture continuation BEFORE we modify execution.
+                    let cont = Continuation::capture(self, dst_reg)
+                        .ok_or_else(|| NuError::VMError(
+                            "Cannot capture continuation: no current frame".into()
+                        ))?;
+                    self.handler_stack[handler_stack_idx].captured_continuation = Some(cont);
+
+                    // Save the result register so Resume knows where to place
+                    // the handler's return value.
+                    self.handler_stack[handler_stack_idx].resume_dst = result_reg;
+
+                    // Set up execution at the handler code offset.
+                    // The handler body receives effect arguments in r0..rn.
+                    // For MVP: args are already in r0 from the compiled Perform site.
+                    frame.pc = handler_offset;
+
+                    // Continue with the handler body executing.
+                } else {
+                    // No handler found — check for fallback.
+                    let has_fallback = self.handler_stack.last().and_then(|hf| {
+                        self.modules.get(hf.module_idx)
+                            .and_then(|m| m.handler_tables.get(hf.handler_table_idx))
+                            .and_then(|ht| ht.fallback_offset)
+                    }).is_some();
+
+                    if has_fallback {
+                        // Jump to fallback handler.
+                        let fallback_offset = self.handler_stack.last().and_then(|hf| {
+                            self.modules.get(hf.module_idx)
+                                .and_then(|m| m.handler_tables.get(hf.handler_table_idx))
+                                .and_then(|ht| ht.fallback_offset)
+                        }).unwrap();
+                        frame.pc = fallback_offset;
+                    } else {
+                        self.current_frame = Some(frame);
+                        return Err(NuError::EffectError {
+                            msg: format!("Unhandled effect: '{}'", effect_name),
+                            span: Span::default(),
+                        });
+                    }
+                }
+            }
+            OpCode::Resume => {
+                // Resume: restore the captured continuation with a value.
+                // op1 = register containing the value to resume with.
+                let val_reg = instr.op1 as usize;
+                let val = frame.regs[val_reg];
+
+                // Pop the handler frame that was invoked.
+                if let Some(hf) = self.handler_stack.pop() {
+                    if let Some(cont) = hf.captured_continuation {
+                        // Restore continuation: this resets the frame chain and PC.
+                        cont.restore(self, val);
+                        // The restored frame's PC points past the original Perform.
+                        // Do NOT put the current frame back — it's been replaced
+                        // by the restored continuation.
+                        return Ok(());
+                    }
+                }
+
+                // Resume without a captured continuation — error.
+                self.current_frame = Some(frame);
+                return Err(NuError::VMError(
+                    "resume called without a captured continuation".into()
+                ));
+            }
+            OpCode::Unwind => {
+                // Unwind: the handle block completed normally. Pop the handler
+                // frame and continue execution at the next instruction.
+                // The PC already points past Unwind (incremented in step()),
+                // so we just pop the handler frame and let execution flow
+                // continue naturally.
+                self.handler_stack.pop();
+            }
 
             // -- Capabilities (MVP) --
             OpCode::CapChk => { frame.regs[instr.op2 as usize] = Value::bool(true); }
@@ -1385,8 +1605,8 @@ impl VM {
             let module_name = self.modules.get(frame.module_idx)
                 .map(|m| m.name.clone())
                 .unwrap_or_else(|| "?".to_string());
-            eprintln!("  [{}] module={} pc={} module_idx={}",
-                depth, module_name, frame.pc, frame_idx);
+            eprintln!("  [{}] module={} pc={}",
+                depth, module_name, frame.pc);
             depth += 1;
             frame_ref = frame.caller.as_deref();
         }
@@ -1536,5 +1756,333 @@ mod vm_tests {
         for i in 0..256 {
             assert!(frame.regs[i].is_nil(), "Register {} should be nil", i);
         }
+    }
+
+    // =====================================================================
+    // Effect System Tests
+    // =====================================================================
+
+    /// Build a module with a handler table for testing.
+    fn module_with_handler_table(bindings: Vec<(&str, usize, u8, u8)>) -> CodeModule {
+        let mut module = CodeModule::new("test_effects");
+        let ht_bindings: Vec<_> = bindings.into_iter()
+            .map(|(name, offset, argc, res)| HandlerBinding {
+                effect_name: name.to_string(),
+                handler_offset: offset,
+                arg_count: argc,
+                result_reg: res,
+            })
+            .collect();
+        module.add_handler_table(HandlerTable {
+            bindings: ht_bindings,
+            fallback_offset: None,
+        });
+        module
+    }
+
+    /// Test 9: Handle pushes a handler frame; Unwind pops it.
+    #[test]
+    fn test_handle_unwind_lifecycle() {
+        let mut module = module_with_handler_table(vec![]);
+        // Set up: Handle(0) -> Const1 r0 -> Unwind -> Halt
+        module.emit(Instruction::new2(OpCode::Handle, 0, 0));
+        module.emit(Instruction::new1(OpCode::Const1, 0));
+        module.emit(Instruction::new0(OpCode::Unwind));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        assert!(vm.handler_stack.is_empty());
+        let result = vm.run();
+        assert!(result.is_ok(), "Handle/Unwind should complete: {:?}", result.err());
+        assert!(vm.handler_stack.is_empty(), "Handler stack should be empty after Unwind");
+        assert_eq!(result.unwrap().as_int(), Some(1), "Result should be 1");
+    }
+
+    /// Test 10: Perform invokes a matching handler; Resume restores continuation.
+    #[test]
+    fn test_perform_resume() {
+        let mut module = CodeModule::new("test_perform");
+
+        // Handler table: effect "Get42" -> handler at offset 7
+        module.add_handler_table(HandlerTable {
+            bindings: vec![
+                HandlerBinding {
+                    effect_name: "Get42".to_string(),
+                    handler_offset: 7, // handler body PC
+                    arg_count: 0,
+                    result_reg: 0,
+                },
+            ],
+            fallback_offset: None,
+        });
+
+        // Constant pool: "Get42" at index 0
+        let get42_idx = module.add_constant(Constant::String("Get42".to_string()));
+        assert_eq!(get42_idx, 0);
+
+        // Program:
+        // PC 0: Handle(0)          — push handler frame
+        // PC 1: Perform "Get42" -> r1  — should invoke handler
+        // PC 2: (after perform) Move r1 -> r0  — copy result to return reg
+        // PC 3: Unwind
+        // PC 4: Halt
+        // PC 5-6: (padding)
+        // PC 7: handler body: ConstU c42 -> r0; Resume r0
+
+        module.emit(Instruction::new1(OpCode::Handle, 0));           // 0
+        module.emit(Instruction::new3(OpCode::Perform, 0, 0, 1));    // 1: perform Get42 -> r1
+        // After resume, r1 should have 42. Copy it to r0 for return.
+        module.emit(Instruction::new2(OpCode::Move, 1, 0));          // 2
+        module.emit(Instruction::new0(OpCode::Unwind));              // 3
+        module.emit(Instruction::new0(OpCode::Halt));                // 4
+        // Handler body at PC 7:
+        // Place 42 in r0, then resume with it
+        module.emit(Instruction::new0(OpCode::Nop));                 // 5 (padding)
+        module.emit(Instruction::new0(OpCode::Nop));                 // 6 (padding)
+        module.emit(Instruction::new2(OpCode::ConstU, 0, 0));        // 7: const 42 -> r0
+        module.emit(Instruction::new1(OpCode::Resume, 0));           // 8: resume with r0
+
+        // Patch ConstU at PC 7 to load constant 42
+        let c42_idx = module.add_constant(Constant::Int(42));
+        if let Some(instr) = module.instructions.get_mut(7) {
+            instr.op1 = ((c42_idx >> 8) & 0xFF) as u8;
+            instr.op2 = (c42_idx & 0xFF) as u8;
+            instr.op3 = 0; // dst = r0
+        }
+
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "Perform/Resume should work: {:?}", result.err());
+        assert_eq!(result.unwrap().as_int(), Some(42), "Should get 42 from effect handler");
+    }
+
+    /// Test 11: Perform without a matching handler raises EffectError.
+    #[test]
+    fn test_unhandled_effect_errors() {
+        let mut module = module_with_handler_table(vec![]);
+        let no_effect_idx = module.add_constant(Constant::String("NoHandler".to_string()));
+
+        module.emit(Instruction::new1(OpCode::Handle, 0));
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((no_effect_idx >> 8) & 0xFF) as u8,
+            (no_effect_idx & 0xFF) as u8,
+            0));
+        module.emit(Instruction::new0(OpCode::Unwind));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_err(), "Unhandled effect should error");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Unhandled effect"), "Error should mention unhandled effect: {}", err_msg);
+        assert!(err_msg.contains("NoHandler"), "Error should name the effect: {}", err_msg);
+    }
+
+    /// Test 12: Nested handlers — inner handler shadows outer.
+    #[test]
+    fn test_nested_handlers_shadow() {
+        let mut module = CodeModule::new("test_nested");
+
+        // Handler table 0: "GetVal" -> returns 10
+        module.add_handler_table(HandlerTable {
+            bindings: vec![
+                HandlerBinding {
+                    effect_name: "GetVal".to_string(),
+                    handler_offset: 12,
+                    arg_count: 0,
+                    result_reg: 0,
+                },
+            ],
+            fallback_offset: None,
+        });
+
+        // Handler table 1: "GetVal" -> returns 20 (shadows)
+        module.add_handler_table(HandlerTable {
+            bindings: vec![
+                HandlerBinding {
+                    effect_name: "GetVal".to_string(),
+                    handler_offset: 15,
+                    arg_count: 0,
+                    result_reg: 0,
+                },
+            ],
+            fallback_offset: None,
+        });
+
+        let getval_idx = module.add_constant(Constant::String("GetVal".to_string()));
+        let c10_idx = module.add_constant(Constant::Int(10));
+        let c20_idx = module.add_constant(Constant::Int(20));
+
+        // Program:
+        // 0: Handle(0)          — outer handler
+        // 1: Handle(1)          — inner handler (shadows)
+        // 2: Perform "GetVal" -> r0
+        // 3: Unwind             — pop inner
+        // 4: Unwind             — pop outer
+        // 5: Halt
+        // Padding: 6-11
+        // 12: handler outer: ConstU c10 -> r0; Resume r0
+        // 15: handler inner: ConstU c20 -> r0; Resume r0
+
+        module.emit(Instruction::new1(OpCode::Handle, 0));            // 0
+        module.emit(Instruction::new1(OpCode::Handle, 1));            // 1
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((getval_idx >> 8) & 0xFF) as u8,
+            (getval_idx & 0xFF) as u8,
+            0));                                                      // 2
+        module.emit(Instruction::new0(OpCode::Unwind));               // 3
+        module.emit(Instruction::new0(OpCode::Unwind));               // 4
+        module.emit(Instruction::new0(OpCode::Halt));                 // 5
+        // padding
+        for _ in 6..12 { module.emit(Instruction::new0(OpCode::Nop)); }
+        // Outer handler at 12: load 10, resume
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c10_idx >> 8) & 0xFF) as u8, (c10_idx & 0xFF) as u8, 0)); // 12
+        module.emit(Instruction::new1(OpCode::Resume, 0));             // 13
+        module.emit(Instruction::new0(OpCode::Nop));                   // 14 (padding)
+        // Inner handler at 15: load 20, resume
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c20_idx >> 8) & 0xFF) as u8, (c20_idx & 0xFF) as u8, 0)); // 15
+        module.emit(Instruction::new1(OpCode::Resume, 0));             // 16
+
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "Nested handlers should work: {:?}", result.err());
+        // Inner handler shadows outer, so we should get 20
+        assert_eq!(result.unwrap().as_int(), Some(20),
+            "Inner handler should shadow outer handler");
+    }
+
+    /// Test 13: Multiple effects in one handler table.
+    #[test]
+    fn test_multi_effect_handler() {
+        let mut module = CodeModule::new("test_multi");
+
+        // Handler table with two effects: "GetA" and "GetB"
+        module.add_handler_table(HandlerTable {
+            bindings: vec![
+                HandlerBinding {
+                    effect_name: "GetA".to_string(),
+                    handler_offset: 8,
+                    arg_count: 0,
+                    result_reg: 0,
+                },
+                HandlerBinding {
+                    effect_name: "GetB".to_string(),
+                    handler_offset: 11,
+                    arg_count: 0,
+                    result_reg: 0,
+                },
+            ],
+            fallback_offset: None,
+        });
+
+        let geta_idx = module.add_constant(Constant::String("GetA".to_string()));
+        let getb_idx = module.add_constant(Constant::String("GetB".to_string()));
+        let c100_idx = module.add_constant(Constant::Int(100));
+        let c200_idx = module.add_constant(Constant::Int(200));
+
+        // Program: perform GetA -> r0, then GetB -> r1, add them
+        module.emit(Instruction::new1(OpCode::Handle, 0));             // 0
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((geta_idx >> 8) & 0xFF) as u8, (geta_idx & 0xFF) as u8, 0)); // 1: GetA -> r0
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((getb_idx >> 8) & 0xFF) as u8, (getb_idx & 0xFF) as u8, 1)); // 2: GetB -> r1
+        module.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0));          // 3: r0 + r1 -> r0
+        module.emit(Instruction::new0(OpCode::Unwind));                 // 4
+        module.emit(Instruction::new0(OpCode::Halt));                   // 5
+        // padding 6-7
+        module.emit(Instruction::new0(OpCode::Nop));                    // 6
+        module.emit(Instruction::new0(OpCode::Nop));                    // 7
+        // GetA handler at 8
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c100_idx >> 8) & 0xFF) as u8, (c100_idx & 0xFF) as u8, 0)); // 8
+        module.emit(Instruction::new1(OpCode::Resume, 0));              // 9
+        module.emit(Instruction::new0(OpCode::Nop));                    // 10
+        // GetB handler at 11
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c200_idx >> 8) & 0xFF) as u8, (c200_idx & 0xFF) as u8, 0)); // 11
+        module.emit(Instruction::new1(OpCode::Resume, 0));              // 12
+
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "Multi-effect handler should work: {:?}", result.err());
+        assert_eq!(result.unwrap().as_int(), Some(300), "100 + 200 = 300");
+    }
+
+    /// Test 14: Handler fallback — effect not in bindings triggers fallback.
+    #[test]
+    fn test_handler_fallback() {
+        let mut module = CodeModule::new("test_fallback");
+
+        // Handler table: handles "Known", fallback for everything else
+        module.add_handler_table(HandlerTable {
+            bindings: vec![
+                HandlerBinding {
+                    effect_name: "Known".to_string(),
+                    handler_offset: 8,
+                    arg_count: 0,
+                    result_reg: 0,
+                },
+            ],
+            fallback_offset: Some(11), // fallback handler
+        });
+
+        let unknown_idx = module.add_constant(Constant::String("Unknown".to_string()));
+        let c999_idx = module.add_constant(Constant::Int(999));
+
+        module.emit(Instruction::new1(OpCode::Handle, 0));              // 0
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((unknown_idx >> 8) & 0xFF) as u8, (unknown_idx & 0xFF) as u8, 0)); // 1
+        module.emit(Instruction::new0(OpCode::Unwind));                 // 2
+        module.emit(Instruction::new0(OpCode::Halt));                   // 3
+        // padding 4-7
+        for _ in 4..8 { module.emit(Instruction::new0(OpCode::Nop)); }
+        // Known handler at 8 (not used)
+        module.emit(Instruction::new1(OpCode::Const1, 0));              // 8
+        module.emit(Instruction::new1(OpCode::Resume, 0));              // 9
+        module.emit(Instruction::new0(OpCode::Nop));                    // 10
+        // Fallback handler at 11: returns 999
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c999_idx >> 8) & 0xFF) as u8, (c999_idx & 0xFF) as u8, 0)); // 11
+        module.emit(Instruction::new1(OpCode::Resume, 0));              // 12
+
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "Fallback handler should work: {:?}", result.err());
+        assert_eq!(result.unwrap().as_int(), Some(999), "Fallback should return 999");
+    }
+
+    /// Test 15: Resume without captured continuation errors.
+    #[test]
+    fn test_resume_without_continuation_errors() {
+        let mut module = CodeModule::new("test_bad_resume");
+        module.emit(Instruction::new1(OpCode::Resume, 0));              // 0
+        module.emit(Instruction::new0(OpCode::Halt));                   // 1
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_err(), "Resume without continuation should error");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("resume called without a captured continuation"),
+            "Error should mention missing continuation: {}", err_msg);
     }
 }
