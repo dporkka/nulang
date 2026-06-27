@@ -9,8 +9,8 @@ use crate::bytecode::*;
 use crate::runtime::*;
 use crate::types::NuResult;
 use crate::types::NuError;
-use crate::python::bridge::{PyBridge, PythonObjectId};
-use crate::python::marshal;
+// Python interop is handled via NativeActor (see src/python/native_actor.rs).
+// No Python types enter the VM value representation.
 
 // ---------------------------------------------------------------------------
 // Value Representation (NaN Tagging)
@@ -30,8 +30,9 @@ const TAG_PTR: u64 = 0x7FFA000000000000;    // heap pointer
 const TAG_ACTOR: u64 = 0x7FFB000000000000;  // actor reference
 const TAG_SPECIAL: u64 = 0x7FFC000000000000; // true, false, unit, nil
 const TAG_STRING: u64 = 0x7FFD000000000000; // interned string
-const TAG_PYTHON: u64 = 0x7FFE000000000000; // Python object reference (registry index)
 const TAG_CLOSURE: u64 = 0x7FF8000000000000; // VM closure object id
+// TAG_PYTHON (0x7FFE...) removed per audit — Python objects are quarantined
+// to NativeActor OS threads; they never enter the VM value representation.
 
 const SPECIAL_UNIT: u64 = 0;
 const SPECIAL_TRUE: u64 = 1;
@@ -65,9 +66,6 @@ impl Value {
     }
     pub fn string(id: u32) -> Value {
         Value(TAG_STRING | (id as u64))
-    }
-    pub fn python_object(id: u64) -> Value {
-        Value(TAG_PYTHON | (id & 0x0000FFFFFFFFFFFF))
     }
     pub fn closure(id: usize) -> Value {
         Value(TAG_CLOSURE | (id as u64 & 0x0000FFFFFFFFFFFF))
@@ -122,13 +120,6 @@ impl Value {
             None
         }
     }
-    pub fn as_python_object_id(&self) -> Option<u64> {
-        if self.0 & TAG_MASK == TAG_PYTHON {
-            Some(self.0 & 0x0000FFFFFFFFFFFF)
-        } else {
-            None
-        }
-    }
     pub fn as_string_id(&self) -> Option<u32> {
         if self.0 & TAG_MASK == TAG_STRING {
             Some((self.0 & 0x0000FFFFFFFFFFFF) as u32)
@@ -153,7 +144,6 @@ impl Value {
         if self.is_unit() { return "unit".to_string(); }
         if self.is_nil() { return "nil".to_string(); }
         if let Some(id) = self.as_actor_id() { return format!("<actor:{}>", id); }
-        if let Some(id) = self.as_python_object_id() { return format!("<python:{}>", id); }
         if let Some(id) = self.as_string_id() { return format!("<string:{}>", id); }
         if let Some(id) = self.as_closure_id() { return format!("<closure:{}>", id); }
         format!("<value:0x{:016X}>", self.0)
@@ -204,8 +194,9 @@ pub struct VM {
     running: bool,
     pub runtime: Runtime,
     step_count: usize,
-    py_bridge: Option<PyBridge>,
     closures: Vec<Box<Closure>>,
+    // Note: Python interop is handled externally via NativeActor.
+    // No Python state is stored in the VM (audit requirement).
 }
 
 impl VM {
@@ -216,7 +207,6 @@ impl VM {
             running: false,
             runtime: Runtime::new(),
             step_count: 0,
-            py_bridge: None,
             closures: Vec::new(),
         }
     }
@@ -317,10 +307,15 @@ impl VM {
 
     /// Single-step execute one instruction.
     pub fn step(&mut self) -> NuResult<()> {
-        // Safety limit to prevent infinite loops
+        // Step limit: configurable via env var NULANG_STEP_LIMIT.
+        // Default 10M steps — long-running actors (servers, processors) may need more.
         self.step_count += 1;
-        if self.step_count > 100000 {
-            return Err(NuError::VMError(format!("Step limit exceeded at step {}, possible infinite loop", self.step_count)));
+        let limit = std::env::var("NULANG_STEP_LIMIT")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(10_000_000);
+        if self.step_count > limit {
+            return Err(NuError::VMError(
+                format!("Step limit exceeded ({} steps). Set NULANG_STEP_LIMIT env var to increase.", limit)
+            ));
         }
         // Debug: print first 50 steps
         let debug = self.step_count <= 50;
@@ -1036,148 +1031,23 @@ impl VM {
             OpCode::CapDown => { frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize]; }
             OpCode::CapSend => { frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize]; }
 
-            // -- Python Interop --
-            OpCode::PyImport => {
-                let module_name = self.module_const_string(frame.module_idx, instr.op1 as u16);
-                let dst = instr.op2 as usize;
-                if self.py_bridge.is_none() {
-                    self.py_bridge = Some(PyBridge::new());
-                }
-                let bridge = self.py_bridge.as_mut().unwrap();
-                match bridge.import_module(&module_name) {
-                    Ok(obj_id) => frame.regs[dst] = Value::python_object(obj_id.0),
-                    Err(e) => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError(format!("{}", e)));
-                    }
-                }
-            }
-            OpCode::PyGetAttr => {
-                let obj_id = PythonObjectId(frame.regs[instr.op1 as usize].as_python_object_id().unwrap_or(0));
-                let attr_name = self.module_const_string(frame.module_idx, instr.op2 as u16);
-                let dst = instr.op3 as usize;
-                let bridge = match &self.py_bridge {
-                    Some(b) => b,
-                    None => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError("Python not initialized".into()));
-                    }
-                };
-                match bridge.get_attr(obj_id, &attr_name) {
-                    Ok(result_id) => frame.regs[dst] = Value::python_object(result_id.0),
-                    Err(e) => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError(format!("{}", e)));
-                    }
-                }
-            }
-            OpCode::PyCall => {
-                let callable_id = PythonObjectId(frame.regs[instr.op1 as usize].as_python_object_id().unwrap_or(0));
-                let arg_count = instr.op2 as usize;
-                let dst = instr.op3 as usize;
-                let bridge = match &self.py_bridge {
-                    Some(b) => b,
-                    None => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError("Python not initialized".into()));
-                    }
-                };
-                let mut args = Vec::new();
-                for i in 0..arg_count {
-                    let arg_reg = (instr.op1 as usize + 1 + i) % 256;
-                    let arg_val = frame.regs[arg_reg];
-                    let arg_py_id = match marshal::value_to_python_object(arg_val, bridge) {
-                        Ok(id) => id,
-                        Err(msg) => {
-                            self.current_frame = Some(frame);
-                            return Err(NuError::PythonError(msg));
-                        }
-                    };
-                    args.push(arg_py_id);
-                }
-                match bridge.call(callable_id, args) {
-                    Ok(result_id) => frame.regs[dst] = Value::python_object(result_id.0),
-                    Err(e) => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError(format!("{}", e)));
-                    }
-                }
-            }
-            OpCode::PyCallKw => {
-                // MVP: delegate to regular call with no kwargs
-                let callable_id = PythonObjectId(frame.regs[instr.op1 as usize].as_python_object_id().unwrap_or(0));
-                let bridge = match &self.py_bridge {
-                    Some(b) => b,
-                    None => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError("Python not initialized".into()));
-                    }
-                };
-                match bridge.call(callable_id, Vec::new()) {
-                    Ok(result_id) => frame.regs[instr.op3 as usize] = Value::python_object(result_id.0),
-                    Err(e) => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError(format!("{}", e)));
-                    }
-                }
-            }
-            OpCode::PySetAttr => {
-                let obj_id = PythonObjectId(frame.regs[instr.op1 as usize].as_python_object_id().unwrap_or(0));
-                let attr_name = self.module_const_string(frame.module_idx, instr.op2 as u16);
-                let val_id = PythonObjectId(frame.regs[instr.op3 as usize].as_python_object_id().unwrap_or(0));
-                let bridge = match &self.py_bridge {
-                    Some(b) => b,
-                    None => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError("Python not initialized".into()));
-                    }
-                };
-                if let Err(e) = bridge.set_attr(obj_id, &attr_name, val_id) {
-                    self.current_frame = Some(frame);
-                    return Err(NuError::PythonError(format!("{}", e)));
-                }
-            }
-            OpCode::PyToNu => {
-                let py_val_reg = instr.op1 as usize;
-                let dst = instr.op2 as usize;
-                let bridge = match &self.py_bridge {
-                    Some(b) => b,
-                    None => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError("Python not initialized".into()));
-                    }
-                };
-                let obj_id = PythonObjectId(frame.regs[py_val_reg].as_python_object_id().unwrap_or(0));
-                match marshal::python_object_to_value(obj_id, bridge) {
-                    Ok(val) => frame.regs[dst] = val,
-                    Err(msg) => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError(msg));
-                    }
-                }
-            }
-            OpCode::PyFromNu => {
-                let nu_val_reg = instr.op1 as usize;
-                let dst = instr.op2 as usize;
-                let bridge = match &self.py_bridge {
-                    Some(b) => b,
-                    None => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError("Python not initialized".into()));
-                    }
-                };
-                let val = frame.regs[nu_val_reg];
-                match marshal::value_to_python_object(val, bridge) {
-                    Ok(obj_id) => frame.regs[dst] = Value::python_object(obj_id.0),
-                    Err(msg) => {
-                        self.current_frame = Some(frame);
-                        return Err(NuError::PythonError(msg));
-                    }
-                }
-            }
-            OpCode::PyRelease => {
-                // The registry will drop the PyObject when removed.
-                // For now, this is a no-op — the registry handles cleanup.
+            // -- Python Interop — RESERVED (see audit, native_actor.rs) --
+            //
+            // Python interop is handled EXTERNALLY via NativeActor (see
+            // src/python/native_actor.rs). These opcodes are reserved for
+            // a future bytecode-level native-actor call instruction.
+            //
+            // Per the architectural audit: Python objects MUST NOT enter
+            // the VM value representation. All Python code runs in
+            // dedicated OS threads with marshal-only data crossing.
+            OpCode::PyImport | OpCode::PyGetAttr | OpCode::PyCall
+            | OpCode::PyCallKw | OpCode::PySetAttr | OpCode::PyToNu
+            | OpCode::PyFromNu | OpCode::PyRelease => {
+                self.current_frame = Some(frame);
+                return Err(NuError::VMError(
+                    "Python opcodes require native actor runtime. \
+                     Use perform Python.call(...) instead.".into()
+                ));
             }
 
             // -- Distribution (MVP) --
@@ -1516,7 +1386,7 @@ impl VM {
                 .map(|m| m.name.clone())
                 .unwrap_or_else(|| "?".to_string());
             eprintln!("  [{}] module={} pc={} module_idx={}",
-                depth, module_name, frame.pc, frame.module_idx);
+                depth, module_name, frame.pc, frame_idx);
             depth += 1;
             frame_ref = frame.caller.as_deref();
         }
@@ -1577,162 +1447,94 @@ fn constant_to_value(c: &Constant) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Python Interop Tests
+// VM Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod python_tests {
+mod vm_tests {
     use super::*;
-    use pyo3::prelude::*;
-    use pyo3::types::PyAnyMethods;
-    use crate::python::{get_object, PythonObjectId};
 
-    /// Test 1: Value::python_object creates a properly tagged value.
+    /// Test 1: Value::int creates a properly tagged value.
     #[test]
-    fn test_python_object_tagging() {
-        let val = Value::python_object(42);
-        assert_eq!(val.as_python_object_id(), Some(42));
-        // Verify the tag bits are correct
-        assert!(val.0 & TAG_MASK == TAG_PYTHON);
+    fn test_int_tagging() {
+        let val = Value::int(42);
+        assert_eq!(val.as_int(), Some(42));
+        assert!(val.0 & TAG_MASK == TAG_INT);
     }
 
-    /// Test 2: to_string_repr formats Python objects correctly.
+    /// Test 2: Value::bool creates a properly tagged value.
     #[test]
-    fn test_python_object_string_repr() {
-        let val = Value::python_object(7);
-        assert_eq!(val.to_string_repr(), "<python:7>");
+    fn test_bool_tagging() {
+        let t = Value::bool(true);
+        let f = Value::bool(false);
+        assert_eq!(t.as_bool(), Some(true));
+        assert_eq!(f.as_bool(), Some(false));
+        assert!(t.0 & TAG_MASK == TAG_SPECIAL);
+        assert!(f.0 & TAG_MASK == TAG_SPECIAL);
     }
 
-    /// Test 3: Non-Python values return None from as_python_object_id.
+    /// Test 3: Unit and nil values.
     #[test]
-    fn test_non_python_object_id() {
-        let int_val = Value::int(42);
-        assert_eq!(int_val.as_python_object_id(), None);
-
-        let nil_val = Value::nil();
-        assert_eq!(nil_val.as_python_object_id(), None);
-
-        let bool_val = Value::bool(true);
-        assert_eq!(bool_val.as_python_object_id(), None);
+    fn test_special_values() {
+        let u = Value::unit();
+        let n = Value::nil();
+        assert!(u.is_unit());
+        assert!(n.is_nil());
+        assert!(!u.is_nil());
+        assert!(!n.is_unit());
     }
 
-    /// Test 4: PyImport opcode initializes the bridge and stores a Python object.
+    /// Test 4: Actor reference values.
     #[test]
-    fn test_py_import_opcode() {
+    fn test_actor_ref() {
+        let val = Value::actor_ref(123);
+        assert_eq!(val.as_actor_id(), Some(123));
+        assert!(val.0 & TAG_MASK == TAG_ACTOR);
+    }
+
+    /// Test 5: to_string_repr formats values correctly.
+    #[test]
+    fn test_to_string_repr() {
+        assert_eq!(Value::int(42).to_string_repr(), "42");
+        assert_eq!(Value::bool(true).to_string_repr(), "true");
+        assert_eq!(Value::unit().to_string_repr(), "unit");
+        assert_eq!(Value::nil().to_string_repr(), "nil");
+        assert_eq!(Value::actor_ref(7).to_string_repr(), "<actor:7>");
+    }
+
+    /// Test 6: Python opcodes trap with a clear error (audit requirement).
+    #[test]
+    fn test_python_opcodes_trap() {
         let mut vm = VM::new();
         let mut module = CodeModule::new("test");
 
-        // Add a module name constant
         let mod_name_idx = module.add_constant(Constant::String("math".to_string()));
-
-        // Emit: PyImport "math" -> r0
         module.emit(Instruction::new2(OpCode::PyImport, mod_name_idx as u8, 0));
         module.emit(Instruction::new0(OpCode::Halt));
 
         vm.load_module(module);
         let result = vm.run();
-        assert!(result.is_ok(), "PyImport should succeed: {:?}", result.err());
-
-        let val = result.unwrap();
-        assert!(val.as_python_object_id().is_some(),
-            "PyImport result should be a Python object, got {}", val.to_string_repr());
+        assert!(result.is_err(), "PyImport should trap in clean VM");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Python opcodes require native actor runtime"),
+            "Error should mention native actor runtime: {}", err_msg);
     }
 
-    /// Test 5: PyGetAttr opcode retrieves an attribute from a Python object.
+    /// Test 7: Step limit is configurable and defaults to 10M.
     #[test]
-    fn test_py_getattr_opcode() {
-        let mut vm = VM::new();
-        let mut module = CodeModule::new("test");
-
-        // Add constants
-        let mod_name_idx = module.add_constant(Constant::String("math".to_string()));
-        let attr_name_idx = module.add_constant(Constant::String("pi".to_string()));
-
-        // Emit: PyImport "math" -> r0
-        module.emit(Instruction::new2(OpCode::PyImport, mod_name_idx as u8, 0));
-        // Emit: PyGetAttr r0, "pi" -> r1
-        module.emit(Instruction::new3(OpCode::PyGetAttr, 0, attr_name_idx as u8, 1));
-        module.emit(Instruction::new0(OpCode::Halt));
-
-        vm.load_module(module);
-        let result = vm.run();
-        assert!(result.is_ok(), "PyGetAttr should succeed: {:?}", result.err());
+    fn test_step_limit_default() {
+        // Verify the default limit is 10M by checking the env var fallback
+        let limit = std::env::var("NULANG_STEP_LIMIT")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(10_000_000);
+        assert_eq!(limit, 10_000_000, "Default step limit should be 10M");
     }
 
-    /// Test 6: PyCall opcode calls a Python callable.
+    /// Test 8: Frame register initialization.
     #[test]
-    fn test_py_call_opcode() {
-        let mut vm = VM::new();
-        let mut module = CodeModule::new("test");
-
-        // Add constants
-        let mod_name_idx = module.add_constant(Constant::String("math".to_string()));
-        let attr_name_idx = module.add_constant(Constant::String("sqrt".to_string()));
-        let val_idx = module.add_constant(Constant::Float(16.0));
-
-        // Emit: PyImport "math" -> r0
-        module.emit(Instruction::new2(OpCode::PyImport, mod_name_idx as u8, 0));
-        // Emit: PyGetAttr r0, "sqrt" -> r1
-        module.emit(Instruction::new3(OpCode::PyGetAttr, 0, attr_name_idx as u8, 1));
-        // Emit: ConstU val_idx -> r2
-        module.emit(Instruction::new3(OpCode::ConstU, ((val_idx >> 8) & 0xFF) as u8, (val_idx & 0xFF) as u8, 2));
-        // Emit: PyCall r1, 1 args -> r3
-        module.emit(Instruction::new3(OpCode::PyCall, 1, 1, 3));
-        // Emit: Move r3 -> r0
-        module.emit(Instruction::new2(OpCode::Move, 3, 0));
-        module.emit(Instruction::new0(OpCode::Halt));
-
-        vm.load_module(module);
-        let result = vm.run();
-        assert!(result.is_ok(), "PyCall should succeed: {:?}", result.err());
-
-        // Verify result is 4.0
-        let val = result.unwrap();
-        let py_id = val.as_python_object_id().expect("Expected Python object");
-        Python::with_gil(|py| {
-            let obj = get_object(PythonObjectId(py_id)).expect("Expected object in registry");
-            let f: f64 = obj.bind(py).extract().expect("Expected float");
-            assert!((f - 4.0).abs() < f64::EPSILON);
-        });
-    }
-
-    /// Test 7: PyRelease opcode is a no-op (does not crash).
-    #[test]
-    fn test_py_release_opcode() {
-        let mut vm = VM::new();
-        let mut module = CodeModule::new("test");
-
-        let mod_name_idx = module.add_constant(Constant::String("math".to_string()));
-
-        // Emit: PyImport "math" -> r0
-        module.emit(Instruction::new2(OpCode::PyImport, mod_name_idx as u8, 0));
-        // Emit: PyRelease r0
-        module.emit(Instruction::new1(OpCode::PyRelease, 0));
-        module.emit(Instruction::new0(OpCode::Halt));
-
-        vm.load_module(module);
-        let result = vm.run();
-        assert!(result.is_ok(), "PyRelease should succeed: {:?}", result.err());
-    }
-
-    /// Test 8: PyToNu and PyFromNu round-trip conversion.
-    #[test]
-    fn test_py_to_nu_and_from_nu() {
-        let mut vm = VM::new();
-        let mut module = CodeModule::new("test");
-
-        let mod_name_idx = module.add_constant(Constant::String("math".to_string()));
-
-        // Emit: PyImport "math" -> r0
-        module.emit(Instruction::new2(OpCode::PyImport, mod_name_idx as u8, 0));
-        // Emit: PyFromNu r0 -> r1 (convert Python object ref to Python object)
-        module.emit(Instruction::new2(OpCode::PyFromNu, 0, 1));
-        // Emit: PyToNu r1 -> r2 (convert back)
-        module.emit(Instruction::new2(OpCode::PyToNu, 1, 2));
-        module.emit(Instruction::new0(OpCode::Halt));
-
-        vm.load_module(module);
-        let result = vm.run();
-        assert!(result.is_ok(), "PyToNu/PyFromNu should succeed: {:?}", result.err());
+    fn test_frame_registers_nil() {
+        let frame = Frame::new(None, 0);
+        for i in 0..256 {
+            assert!(frame.regs[i].is_nil(), "Register {} should be nil", i);
+        }
     }
 }
