@@ -131,7 +131,7 @@ pub enum OpCode {
     // == Capabilities (0xA0-0xAF) ==
     CapChk  = 0xA0, // Capability check (required_cap, fail_label)
     CapUp   = 0xA1, // Capability upgrade (iso <- trn, etc.)
-    CapDown = 0xA2, // Capability downgrade (ref -> box)
+    CapDown = 0x2, // Capability downgrade (ref -> box)
     CapSend = 0xA3, // Mark value as sendable (check iso/val/tag)
 
     // == Distribution (0xD0-0xDF) ==
@@ -298,6 +298,34 @@ pub enum Constant {
 }
 
 // ---------------------------------------------------------------------------
+// Effect Handler Table
+// ---------------------------------------------------------------------------
+
+/// A single binding from effect name to handler code offset.
+/// Compiled by the compiler when processing `handle eff_name -> { body }` blocks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandlerBinding {
+    pub effect_name: String,
+    /// Bytecode offset of the handler body (receives args in r0..rn).
+    pub handler_offset: usize,
+    /// Number of arguments the effect operation expects.
+    pub arg_count: u8,
+    /// Register to place the effect operation result into (for resume).
+    pub result_reg: u8,
+}
+
+/// A handler table: maps effect names to their handler implementations.
+/// One table per `handle { ... }` block. Pushed onto the handler stack at
+/// runtime by the Handle opcode.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandlerTable {
+    pub bindings: Vec<HandlerBinding>,
+    /// Optional fallback: code offset to jump to if no binding matches.
+    /// If None, an unhandled effect triggers a runtime error.
+    pub fallback_offset: Option<usize>,
+}
+
+// ---------------------------------------------------------------------------
 // Behavior Table Entry
 // ---------------------------------------------------------------------------
 
@@ -324,6 +352,9 @@ pub struct CodeModule {
     pub exports: Vec<(String, usize)>, // name -> constant/function index
     /// Entry point for inline __main (None if no __main, defaults to 0 in VM)
     pub entry_point: Option<usize>,
+    /// Effect handler tables: one per `handle { ... }` block.
+    /// Indexed by the handler_table_idx operand of the Handle opcode.
+    pub handler_tables: Vec<HandlerTable>,
 }
 
 impl CodeModule {
@@ -336,6 +367,7 @@ impl CodeModule {
             function_table: Vec::new(),
             exports: Vec::new(),
             entry_point: None,
+            handler_tables: Vec::new(),
         }
     }
 
@@ -362,6 +394,12 @@ impl CodeModule {
     pub fn add_behavior(&mut self, b: BehaviorTableEntry) -> usize {
         let idx = self.behaviors.len();
         self.behaviors.push(b);
+        idx
+    }
+
+    pub fn add_handler_table(&mut self, ht: HandlerTable) -> usize {
+        let idx = self.handler_tables.len();
+        self.handler_tables.push(ht);
         idx
     }
 
