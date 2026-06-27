@@ -1,1 +1,298 @@
-S
+//! Work-stealing scheduler: Chase-Lev deque per worker thread.
+//!
+//! Each worker thread maintains a local Chase-Lev deque for LIFO
+//! push/pop of actor IDs. When a worker's local deque is empty, it
+//! attempts to steal from other workers' deques (FIFO steal for
+//! load balancing) and falls back to a global injector queue.
+//!
+//! This design provides:
+//! - Lock-free local operations (push/pop on own deque)
+//! - Lock-free work stealing from other workers
+//! - Global overflow queue for newly spawned / requeued actors
+//! - Backoff and sleep for idle workers (avoids busy-waiting)
+//!
+//! Based on the Chase-Lev algorithm (PPoPP 2005) as implemented by
+//! crossbeam::deque.
+
+use crossbeam::deque::{Injector, Stealer, Worker};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+
+/// A work-stealing scheduler with Chase-Lev deques.
+///
+/// Created with a fixed number of worker slots. Each worker thread
+/// claims one slot and uses its local deque for LIFO operations.
+/// Staling uses FIFO order to promote breadth-first execution.
+pub struct Scheduler {
+    /// Global overflow queue for actors that don't belong to any
+    /// specific worker (newly spawned, woken from sleep, etc.)
+    global: Injector<u64>,
+
+    /// Per-worker deques. Each worker has one Worker handle;
+    /// all other workers hold Stealer handles to it.
+    ///
+    /// Index 0 is reserved for the global injector (stealers only).
+    /// Workers 1..N are the actual worker threads.
+    workers: Vec<Worker<u64>>,
+    stealers: Vec<Stealer<u64>>,
+
+    /// Number of worker threads this scheduler was configured for.
+    worker_count: usize,
+
+    /// Total number of actors processed (statistics).
+    processed_count: AtomicUsize,
+}
+
+impl Scheduler {
+    /// Create a new work-stealing scheduler for `worker_count` threads.
+    ///
+    /// Each worker gets its own Chase-Lev deque. The global injector
+    /// handles overflow.
+    pub fn new(worker_count: usize) -> Self {
+        let mut workers = Vec::with_capacity(worker_count);
+        let mut stealers = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let w = Worker::new_fifo();
+            stealers.push(w.stealer());
+            workers.push(w);
+        }
+
+        Scheduler {
+            global: Injector::new(),
+            workers,
+            stealers,
+            worker_count,
+            processed_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Push an actor ID onto the global injector queue.
+    ///
+    /// Used when:
+    /// - A new actor is spawned (no affinity yet)
+    /// - An actor is requeued after yielding / completing a message
+    /// - An actor is woken from a timer or I/O event
+    ///
+    /// The next worker to need work will pick this actor up from the
+    /// global queue or steal it via FIFO from another worker.
+    pub fn enqueue(&self, actor_id: u64) {
+        self.global.push(actor_id);
+    }
+
+    /// Push an actor ID onto a specific worker's local deque.
+    ///
+    /// Used for actor affinity — if an actor was just processed by
+    /// worker N, requeue it to worker N's local deque for cache
+    /// locality (LIFO = hot actor stays hot).
+    pub fn enqueue_local(&self, worker_idx: usize, actor_id: u64) {
+        if worker_idx < self.workers.len() {
+            self.workers[worker_idx].push(actor_id);
+        } else {
+            self.global.push(actor_id);
+        }
+    }
+
+    /// Pop the next actor ID for the given worker.
+    ///
+    /// Tries in order:
+    /// 1. Worker's own local deque (LIFO — hot cache)
+    /// 2. Global injector queue
+    /// 3. Steal from other workers' deques (FIFO — load balancing)
+    ///
+    /// Returns `None` if no work is available across all sources.
+    pub fn next_task(&self, worker_idx: usize) -> Option<u64> {
+        // 1. Try local deque first (LIFO — cache hot)
+        if worker_idx < self.workers.len() {
+            if let Some(task) = self.workers[worker_idx].pop() {
+                return Some(task);
+            }
+        }
+
+        // 2. Try the global injector
+        if let Ok(task) = self.global.steal() {
+            return Some(task);
+        }
+
+        // 3. Steal from other workers (FIFO — promotes breadth-first)
+        //    We iterate in a different order per worker to reduce
+        //    contention (each worker starts stealing from a different
+        //    neighbor).
+        for i in 0..self.stealers.len() {
+            let steal_idx = (worker_idx + i + 1) % self.stealers.len();
+            if steal_idx == worker_idx {
+                continue; // Don't steal from self
+            }
+            if let Ok(task) = self.stealers[steal_idx].steal() {
+                return Some(task);
+            }
+        }
+
+        None
+    }
+
+    /// Steal one task from any source, without a local deque.
+    ///
+    /// Used by external event loops (I/O, timers) that need to
+    /// grab work but don't have a dedicated worker thread.
+    pub fn steal_one(&self) -> Option<u64> {
+        // Try global first
+        if let Ok(task) = self.global.steal() {
+            return Some(task);
+        }
+        // Try any worker
+        for stealer in &self.stealers {
+            if let Ok(task) = stealer.steal() {
+                return Some(task);
+            }
+        }
+        None
+    }
+
+    /// Run the scheduler loop for the given worker.
+    ///
+    /// Repeatedly calls `process_fn` with dequeued actor IDs until
+    /// no work is available and all steal attempts fail. Then
+    /// returns, allowing the caller to park the thread or check
+    /// for external events.
+    pub fn run_worker<F>(&self, worker_idx: usize, mut process_fn: F)
+    where
+        F: FnMut(u64),
+    {
+        const MAX_STEAL_ATTEMPTS: usize = 3;
+        const EMPTY_SLEEP_US: u64 = 100;
+
+        let mut empty_count = 0;
+
+        loop {
+            if let Some(actor_id) = self.next_task(worker_idx) {
+                empty_count = 0;
+                process_fn(actor_id);
+                self.processed_count
+                    .fetch_add(1, Ordering::Relaxed);
+            } else {
+                empty_count += 1;
+
+                if empty_count >= MAX_STEAL_ATTEMPTS {
+                    // No work after multiple attempts — sleep briefly
+                    // to avoid busy-waiting, then check again.
+                    thread::sleep(std::time::Duration::from_micros(EMPTY_SLEEP_US));
+
+                    // If still no work, let the caller decide
+                    // whether to park or continue.
+                    if self.next_task(worker_idx).is_none() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Process one task for the given worker.
+    ///
+    /// Returns `true` if a task was processed, `false` if no work
+    /// was available.
+    pub fn run_one<F>(&self, worker_idx: usize, mut process_fn: F) -> bool
+    where
+        F: FnMut(u64),
+    {
+        if let Some(actor_id) = self.next_task(worker_idx) {
+            process_fn(actor_id);
+            self.processed_count
+                .fetch_add(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Number of configured worker threads.
+    pub fn worker_count(&self) -> usize {
+        self.worker_count
+    }
+
+    /// Total number of actors processed since creation.
+    pub fn processed_count(&self) -> usize {
+        self.processed_count.load(Ordering::Relaxed)
+    }
+
+    /// Reset the processed count to zero.
+    pub fn reset_processed_count(&self) {
+        self.processed_count.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod scheduler_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_enqueue_dequeue() {
+        let s = Scheduler::new(2);
+        s.enqueue(42);
+        s.enqueue(43);
+        let v1 = s.steal_one().unwrap();
+        let v2 = s.steal_one().unwrap();
+        assert!((v1 == 42 && v2 == 43) || (v1 == 43 && v2 == 42));
+        assert!(s.steal_one().is_none());
+    }
+
+    #[test]
+    fn test_local_enqueue() {
+        let s = Scheduler::new(2);
+        s.enqueue_local(0, 100);
+        s.enqueue_local(1, 200);
+        assert_eq!(s.next_task(0).unwrap(), 100);
+        assert_eq!(s.next_task(1).unwrap(), 200);
+    }
+
+    #[test]
+    fn test_run_one() {
+        let s = Scheduler::new(2);
+        let processed = Arc::new(AtomicU64::new(0));
+        s.enqueue(1); s.enqueue(2); s.enqueue(3);
+        for _ in 0..3 {
+            let p = Arc::clone(&processed);
+            s.run_one(0, |_id| { p.fetch_add(1, Ordering::Relaxed); });
+        }
+        assert_eq!(processed.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_processed_count() {
+        let s = Scheduler::new(1);
+        assert_eq!(s.processed_count(), 0);
+        s.enqueue(7);
+        s.run_one(0, |_id| {});
+        assert_eq!(s.processed_count(), 1);
+    }
+
+    #[test]
+    fn test_empty_scheduler() {
+        let s = Scheduler::new(1);
+        assert!(s.next_task(0).is_none());
+        assert!(s.steal_one().is_none());
+    }
+
+    #[test]
+    fn test_concurrent_enqueue() {
+        use std::thread;
+        let s = Arc::new(Scheduler::new(4));
+        let mut handles = Vec::new();
+        for t in 0..4 {
+            let s_clone = Arc::clone(&s);
+            handles.push(thread::spawn(move || {
+                for i in 0..100 { s_clone.enqueue((t * 100 + i) as u64); }
+            }));
+        }
+        for h in handles { h.join().unwrap(); }
+        let count = Arc::new(AtomicU64::new(0));
+        for _ in 0..400 {
+            let c = Arc::clone(&count);
+            s.run_one(0, move |_id| { c.fetch_add(1, Ordering::Relaxed); });
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 400);
+    }
+}
