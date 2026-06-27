@@ -110,7 +110,7 @@ impl Scheduler {
         }
 
         // 2. Try the global injector
-        if let Ok(task) = self.global.steal() {
+        if let crossbeam::deque::Steal::Success(task) = self.global.steal() {
             return Some(task);
         }
 
@@ -123,7 +123,7 @@ impl Scheduler {
             if steal_idx == worker_idx {
                 continue; // Don't steal from self
             }
-            if let Ok(task) = self.stealers[steal_idx].steal() {
+            if let crossbeam::deque::Steal::Success(task) = self.stealers[steal_idx].steal() {
                 return Some(task);
             }
         }
@@ -137,12 +137,12 @@ impl Scheduler {
     /// grab work but don't have a dedicated worker thread.
     pub fn steal_one(&self) -> Option<u64> {
         // Try global first
-        if let Ok(task) = self.global.steal() {
+        if let crossbeam::deque::Steal::Success(task) = self.global.steal() {
             return Some(task);
         }
         // Try any worker
         for stealer in &self.stealers {
-            if let Ok(task) = stealer.steal() {
+            if let crossbeam::deque::Steal::Success(task) = stealer.steal() {
                 return Some(task);
             }
         }
@@ -278,14 +278,22 @@ mod scheduler_tests {
 
     #[test]
     fn test_concurrent_enqueue() {
+        // Scheduler is !Sync (Worker contains Cell), so we can't share
+        // Arc<Scheduler> across threads. Instead, use a channel to collect
+        // values from worker threads and enqueue from the main thread.
         use std::thread;
-        let s = Arc::new(Scheduler::new(4));
+        let s = Scheduler::new(4);
+        let (tx, rx) = std::sync::mpsc::channel();
         let mut handles = Vec::new();
         for t in 0..4 {
-            let s_clone = Arc::clone(&s);
+            let tx_clone = tx.clone();
             handles.push(thread::spawn(move || {
-                for i in 0..100 { s_clone.enqueue((t * 100 + i) as u64); }
+                for i in 0..100 { tx_clone.send((t * 100 + i) as u64).unwrap(); }
             }));
+        }
+        drop(tx); // Close original sender; rx ends when all clones dropped.
+        for val in rx {
+            s.enqueue(val);
         }
         for h in handles { h.join().unwrap(); }
         let count = Arc::new(AtomicU64::new(0));
