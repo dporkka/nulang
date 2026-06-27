@@ -1,0 +1,124 @@
+    Checking nulang v0.1.0 (/home/dporkka/dev/nulang)
+src/bytecode.rs:3:5: warning: unused import: `std::collections::HashMap`
+src/repl.rs:9:41: warning: unused import: `Literal`
+src/vm.rs:794:13: warning: unused doc comment
+src/vm.rs:840:13: warning: unused doc comment
+src/vm.rs:862:13: warning: unused doc comment
+src/vm.rs:882:13: warning: unused doc comment
+src/vm.rs:899:13: warning: unused doc comment
+src/vm.rs:917:13: warning: unused doc comment
+src/vm.rs:939:13: warning: unused doc comment
+src/runtime/heap.rs:22:48: warning: unused import: `Ordering`
+src/runtime/dual_heap.rs:54:48: warning: unused import: `Ordering`
+src/runtime/orca_cycle.rs:63:40: warning: unused imports: `GcColor`, `SizeClass`, and `TypeTag`
+src/runtime/network.rs:36:36: warning: unused imports: `SystemTime` and `UNIX_EPOCH`
+src/runtime/distributed.rs:48:5: warning: unused import: `super::crdt_manager::CrdtManager`
+src/runtime/timer.rs:10:5: warning: unused import: `std::cmp::Reverse`
+src/runtime/mod.rs:33:9: warning: ambiguous glob re-exports: the name `OrcaHeader` in the type namespace is first re-exported here
+src/runtime/mod.rs:33:9: warning: ambiguous glob re-exports: the name `SizeClass` in the type namespace is first re-exported here
+src/runtime/mod.rs:33:9: warning: ambiguous glob re-exports: the name `GcColor` in the type namespace is first re-exported here
+src/runtime/mod.rs:33:9: warning: ambiguous glob re-exports: the name `TypeTag` in the type namespace is first re-exported here
+src/runtime/mod.rs:41:9: warning: ambiguous glob re-exports: the name `LamportTime` in the type namespace is first re-exported here
+src/runtime/mod.rs:41:9: warning: ambiguous glob re-exports: the name `LamportClock` in the type namespace is first re-exported here
+src/jit/simd_compiler.rs:68:36: warning: unused import: `OpCode`
+src/jit/simd_compiler.rs:70:31: warning: unused import: `SimdWidth`
+src/jit/mod.rs:47:24: warning: unused import: `Linkage`
+src/lsp/mod.rs:53:43: error[E0308]: mismatched types: expected `OneOf<bool, InlayHintServerCapabilities>`, found `InlayHintServerCapabilities`
+src/lsp/mod.rs:328:56: error[E0599]: no associated function or constant named `Type` found for struct `tower_lsp::lsp_types::InlayHintKind` in the current scope: associated function or constant not found in `tower_lsp::lsp_types::InlayHintKind`
+src/lsp/mod.rs:329:62: error[E0599]: no associated function or constant named `Parameter` found for struct `tower_lsp::lsp_types::InlayHintKind` in the current scope: associated function or constant not found in `tower_lsp::lsp_types::InlayHintKind`
+src/lsp/mod.rs:330:58: error[E0599]: no associated function or constant named `Type` found for struct `tower_lsp::lsp_types::InlayHintKind` in the current scope: associated function or constant not found in `tower_lsp::lsp_types::InlayHintKind`
+src/parser.rs:121:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:122:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:123:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:124:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:137:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:138:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:139:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:160:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:164:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`, `None` is interpreted as a unit variant, not a new binding
+src/parser.rs:128:21: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:235:17: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:243:17: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:290:17: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:298:17: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:359:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:495:17: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:496:17: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`, `None` is interpreted as a unit variant, not a new binding
+src/parser.rs:531:21: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:601:26: error[E0425]: cannot find function `token_to_binop` in this scope: not found in this scope
+src/parser.rs:622:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`, `None` is interpreted as a unit variant, not a new binding
+src/parser.rs:626:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:745:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:750:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:755:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:760:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/parser.rs:765:13: error[E0308]: mismatched types: expected `TokenKind`, found `Option<_>`
+src/jit/compiler.rs:241:35: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/compiler.rs:254:35: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/compiler.rs:295:12: error[E0599]: no method named `finalize_definitions` found for mutable reference `&mut M` in the current scope: method not found in `&mut M`
+src/jit/compiler.rs:297:23: error[E0599]: no method named `get_finalized_function` found for mutable reference `&mut M` in the current scope
+src/jit/typed_compiler.rs:957:35: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/typed_compiler.rs:970:35: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/typed_compiler.rs:1045:12: error[E0599]: no method named `finalize_definitions` found for mutable reference `&mut M` in the current scope: method not found in `&mut M`
+src/jit/typed_compiler.rs:1047:23: error[E0599]: no method named `get_finalized_function` found for mutable reference `&mut M` in the current scope
+src/jit/simd_compiler.rs:286:39: error[E0271]: type mismatch resolving `<&[Value; 1] as IntoIterator>::Item == &BlockArg`: expected `&BlockArg`, found `&Value`
+src/jit/simd_compiler.rs:297:19: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/simd_compiler.rs:299:37: error[E0271]: type mismatch resolving `<&[Value; 1] as IntoIterator>::Item == &BlockArg`: expected `&BlockArg`, found `&Value`
+src/jit/simd_compiler.rs:310:39: error[E0271]: type mismatch resolving `<&[Value; 1] as IntoIterator>::Item == &BlockArg`: expected `&BlockArg`, found `&Value`
+src/jit/simd_compiler.rs:324:19: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/simd_compiler.rs:326:41: error[E0271]: type mismatch resolving `<&[Value; 1] as IntoIterator>::Item == &BlockArg`: expected `&BlockArg`, found `&Value`
+src/jit/simd_compiler.rs:357:37: error[E0271]: type mismatch resolving `<&[Value; 1] as IntoIterator>::Item == &BlockArg`: expected `&BlockArg`, found `&Value`
+src/jit/simd_compiler.rs:370:19: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/simd_compiler.rs:382:41: error[E0271]: type mismatch resolving `<&[Value; 1] as IntoIterator>::Item == &BlockArg`: expected `&BlockArg`, found `&Value`
+src/jit/simd_compiler.rs:412:12: error[E0599]: no method named `finalize_definitions` found for mutable reference `&mut M` in the current scope: method not found in `&mut M`
+src/jit/simd_compiler.rs:414:23: error[E0599]: no method named `get_finalized_function` found for mutable reference `&mut M` in the current scope
+src/jit/simd_compiler.rs:800:27: error[E0599]: no method named `bint` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/simd_compiler.rs:831:19: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/simd_compiler.rs:838:19: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/simd_compiler.rs:862:19: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/jit/simd_compiler.rs:869:19: error[E0599]: no method named `brnz` found for struct `FuncInstBuilder<'short, 'long>` in the current scope: method not found in `FuncInstBuilder<'_, '_>`
+src/python/bridge.rs:104:51: error[E0277]: the trait bound `Py<PyAny>: Clone` is not satisfied: the trait `Clone` is not implemented for `Py<PyAny>`
+src/python/bridge.rs:214:23: error[E0282]: type annotations needed
+src/python/bridge.rs:310:39: error[E0599]: no associated function or constant named `new` found for struct `PyTuple` in the current scope: associated function or constant not found in `PyTuple`
+src/python/bridge.rs:357:39: error[E0599]: no associated function or constant named `new` found for struct `PyTuple` in the current scope: associated function or constant not found in `PyTuple`
+src/python/marshal.rs:168:47: error[E0277]: the trait bound `pyo3::Bound<'_, PyString>: std::default::Default` is not satisfied: unsatisfied trait bound
+src/python/native_actor.rs:619:35: error[E0277]: `&std::string::String` cannot be converted to a Python object: unsatisfied trait bound
+src/python/native_actor.rs:662:41: error[E0599]: no associated function or constant named `new` found for struct `PyTuple` in the current scope: associated function or constant not found in `PyTuple`
+src/python/native_actor.rs:597:1: error: this function depends on never type fallback being `()`
+src/python/native_actor.rs:729:39: error[E0599]: no associated function or constant named `new` found for struct `PyTuple` in the current scope: associated function or constant not found in `PyTuple`
+src/python/native_actor.rs:707:1: error: this function depends on never type fallback being `()`
+src/runtime/network.rs:32:62: warning: unused import: `ToSocketAddrs`
+src/python/marshal.rs:23:93: warning: unused import: `PyListMethods`
+src/python/bridge.rs:17:59: warning: unused import: `PyListMethods`
+src/python/marshal.rs:23:78: warning: unused import: `PyDictMethods`
+src/compiler.rs:745:13: warning: unused variable: `left_reg`: help: if this is intentional, prefix it with an underscore: `_left_reg`
+src/effect_checker.rs:874:25: warning: variable does not need to be mutable
+src/effects.rs:47:37: warning: unused variable: `r`
+src/lsp/mod.rs:186:29: warning: unused variable: `var_name`: help: if this is intentional, prefix it with an underscore: `_var_name`
+src/parser.rs:441:13: warning: variable does not need to be mutable
+src/parser.rs:730:31: warning: unused variable: `left`: help: if this is intentional, prefix it with an underscore: `_left`
+src/parser.rs:905:13: warning: unused variable: `span`: help: if this is intentional, prefix it with an underscore: `_span`
+src/repl.rs:224:21: warning: unused variable: `expr`: help: if this is intentional, prefix it with an underscore: `_expr`
+src/typechecker.rs:707:44: warning: unused variable: `span`: help: try ignoring the field: `span: _`
+src/typechecker.rs:790:48: warning: unused variable: `span`: help: if this is intentional, prefix it with an underscore: `_span`
+src/typechecker.rs:1665:13: warning: variable does not need to be mutable
+src/typechecker.rs:1663:33: warning: unused variable: `ctx`: help: if this is intentional, prefix it with an underscore: `_ctx`
+src/vm.rs:397:21: warning: unused variable: `behavior_idx`: help: if this is intentional, prefix it with an underscore: `_behavior_idx`
+src/runtime/orca_cycle.rs:744:18: warning: unused variable: `from_actor`: help: if this is intentional, prefix it with an underscore: `_from_actor`
+src/runtime/mod.rs:192:13: warning: variable does not need to be mutable
+src/jit/typed_compiler.rs:263:47: error[E0499]: cannot borrow `*builder` as mutable more than once at a time: second mutable borrow occurs here
+src/jit/typed_compiler.rs:508:13: error[E0499]: cannot borrow `*builder` as mutable more than once at a time: second mutable borrow occurs here
+src/jit/typed_compiler.rs:511:70: error[E0499]: cannot borrow `*builder` as mutable more than once at a time: second mutable borrow occurs here
+src/jit/typed_compiler.rs:517:13: error[E0499]: cannot borrow `*builder` as mutable more than once at a time: second mutable borrow occurs here
+src/jit/typed_compiler.rs:520:70: error[E0499]: cannot borrow `*builder` as mutable more than once at a time: second mutable borrow occurs here
+src/jit/simd_analyzer.rs:425:9: warning: variable `back_edge_found` is assigned to, but never used
+src/jit/simd_analyzer.rs:462:21: warning: value assigned to `back_edge_found` is never read: this value is reassigned later and never used
+src/jit/simd_analyzer.rs:480:21: warning: value assigned to `back_edge_found` is never read
+src/jit/simd_analyzer.rs:641:17: warning: unused variable: `load1_idx`: help: if this is intentional, prefix it with an underscore: `_load1_idx`
+src/jit/simd_analyzer.rs:642:21: warning: unused variable: `load2_idx`: help: if this is intentional, prefix it with an underscore: `_load2_idx`
+src/jit/simd_compiler.rs:627:5: warning: unused variable: `simd_region`: help: if this is intentional, prefix it with an underscore: `_simd_region`
+src/jit/mod.rs:278:9: warning: unnecessary `unsafe` block: unnecessary `unsafe` block
+src/jit/mod.rs:293:17: warning: unnecessary `unsafe` block: unnecessary `unsafe` block
+src/python/native_actor.rs:516:5: warning: unused variable: `actor_id`: help: if this is intentional, prefix it with an underscore: `_actor_id`
+warning: `nulang` (lib) generated 52 warnings
+error: could not compile `nulang` (lib) due to 71 previous errors; 52 warnings emitted
