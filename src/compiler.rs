@@ -1196,71 +1196,42 @@ impl Compiler {
     // Python Interop Bytecode Emission
     // ===================================================================
 
-    /// Emit a Python import instruction.
+    // -- Python Interop — RESERVED (see audit, native_actor.rs) --
+    //
+    // These emit methods are retained for API compatibility but emit
+    // reserved opcodes that trap at runtime with a clear error message.
+    // Python interop goes through NativeActor (src/python/native_actor.rs),
+    // never through direct bytecode.
     ///
-    /// Loads a Python module by name (from the constant pool) and stores
-    /// the resulting Python object reference in `dst_reg`.
-    ///
-    /// Encoding: op1=module_name_const_idx (u8), op2=dst_reg
+    /// RESERVED: Python module import. Use `perform Python.import(...)`
+    /// via the native actor runtime instead.
     pub fn emit_py_import(&mut self, module_name_const_idx: u16, dst_reg: u8) {
         self.emit(Instruction::new2(OpCode::PyImport, (module_name_const_idx & 0xFF) as u8, dst_reg));
     }
-
-    /// Emit a Python getattr instruction.
-    ///
-    /// Retrieves an attribute from a Python object and stores the result.
-    ///
-    /// Encoding: op1=obj_reg, op2=attr_name_const_idx (u8), op3=dst_reg
+    /// RESERVED: Python getattr. Use native actor runtime.
     pub fn emit_py_getattr(&mut self, obj_reg: u8, attr_name_const_idx: u16, dst_reg: u8) {
         self.emit(Instruction::new3(OpCode::PyGetAttr, obj_reg, (attr_name_const_idx & 0xFF) as u8, dst_reg));
     }
-
-    /// Emit a Python call instruction.
-    ///
-    /// Calls a Python callable with `arg_count` positional arguments.
-    /// Arguments are read from consecutive registers starting at callable_reg + 1.
-    ///
-    /// Encoding: op1=callable_reg, op2=arg_count, op3=dst_reg
+    /// RESERVED: Python call. Use native actor runtime.
     pub fn emit_py_call(&mut self, callable_reg: u8, arg_count: u8, dst_reg: u8) {
         self.emit(Instruction::new3(OpCode::PyCall, callable_reg, arg_count, dst_reg));
     }
-
-    /// Emit a Python call-with-kwargs instruction.
-    ///
-    /// MVP: Delegates to a regular call (kwargs are ignored).
-    ///
-    /// Encoding: op1=callable_reg, op2=args_tuple_reg, op3=kwargs_dict_reg
+    /// RESERVED: Python call with kwargs. Use native actor runtime.
     pub fn emit_py_call_kw(&mut self, callable_reg: u8, args_tuple_reg: u8, kwargs_dict_reg: u8) {
         self.emit(Instruction::new3(OpCode::PyCallKw, callable_reg, args_tuple_reg, kwargs_dict_reg));
     }
-
-    /// Emit a Python setattr instruction.
-    ///
-    /// Sets an attribute on a Python object.
-    ///
-    /// Encoding: op1=obj_reg, op2=attr_name_const_idx (u8), op3=val_reg
+    /// RESERVED: Python setattr. Use native actor runtime.
     pub fn emit_py_setattr(&mut self, obj_reg: u8, attr_name_const_idx: u16, val_reg: u8) {
         self.emit(Instruction::new3(OpCode::PySetAttr, obj_reg, (attr_name_const_idx & 0xFF) as u8, val_reg));
     }
-
-    /// Emit a Python-to-Nulang conversion instruction.
-    ///
-    /// Converts a Python object to a native Nulang Value.
-    ///
-    /// Encoding: op1=py_val_reg, op2=dst_reg
+    /// RESERVED: Python-to-Nulang marshal. Use native actor runtime.
     pub fn emit_py_to_nu(&mut self, py_val_reg: u8, dst_reg: u8) {
         self.emit(Instruction::new2(OpCode::PyToNu, py_val_reg, dst_reg));
     }
-
-    /// Emit a Nulang-to-Python conversion instruction.
-    ///
-    /// Converts a native Nulang Value to a Python object reference.
-    ///
-    /// Encoding: op1=nu_val_reg, op2=dst_reg
+    /// RESERVED: Nulang-to-Python marshal. Use native actor runtime.
     pub fn emit_py_from_nu(&mut self, nu_val_reg: u8, dst_reg: u8) {
         self.emit(Instruction::new2(OpCode::PyFromNu, nu_val_reg, dst_reg));
     }
-
     /// Emit a Python release instruction.
     ///
     /// Releases a reference to a Python object (MVP: no-op).
