@@ -225,30 +225,39 @@ mod tests {
     #[test]
     fn test_perform_effect_with_handler() {
         // perform with a handler that catches the effect.
-        // The compiler generates a Handle opcode and handler table.
+        // The compiler generates a Handle opcode and handler table with
+        // HandlerBindings, and the VM invokes the handler + resumes.
         let source = r#"
             handle perform IO.print("hello") {
                 | IO.print(msg) => unit
             }
         "#;
-        // NOTE: Full compiler support for handle blocks with handler tables
-        // is partially implemented. This test verifies the parser accepts
-        // the syntax; the VM may need additional work to fully support
-        // effect resumption across the parser/compiler boundary.
-        let result = run_source(source);
-        // For now, accept either success or the expected unhandled-effect error
-        // depending on compiler maturity.
-        match result {
-            Ok((value, _)) => assert!(value.is_unit(), "Expected unit from handled perform"),
-            Err(e) => {
-                let msg = format!("{}", e);
-                assert!(
-                    msg.contains("Unhandled effect") || msg.contains("handler"),
-                    "Expected effect-related error, got: {}",
-                    msg
-                );
+        let (value, _ty) = run_source(source).unwrap();
+        assert!(value.is_unit(), "Expected unit from handled perform");
+    }
+
+    #[test]
+    fn test_handler_returns_value_via_resume() {
+        // Handler computes a value and resumes with it.
+        let source = r#"
+            handle perform Math.getAnswer() {
+                | Math.getAnswer() => 42
             }
-        }
+        "#;
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(value.as_int(), Some(42), "Handler should return 42 via resume");
+    }
+
+    #[test]
+    fn test_handler_with_parameter() {
+        // Handler receives the perform argument and uses it.
+        let source = r#"
+            handle perform Math.double(21) {
+                | Math.double(x) => x + x
+            }
+        "#;
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(value.as_int(), Some(42), "Handler should double 21 to 42");
     }
 
     // -----------------------------------------------------------------------
