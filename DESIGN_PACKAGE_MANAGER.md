@@ -65,7 +65,7 @@ name = "http-client"
 version = "1.2.3"
 edition = "2024"
 authors = ["Alice <alice@example.com>", "Bob <bob@example.com>"]
-license = "MIT"
+license = "Apache-2.0"
 description = "A high-performance HTTP client for Nulang"
 repository = "https://github.com/nulang/http-client"
 documentation = "https://docs.nulang.org/http-client"
@@ -586,7 +586,7 @@ $ nu search http --detailed
     http v3.2.0
     =============
     HTTP client and server implementation
-    Downloads: 1.2M | Stars: 450 | License: MIT
+    Downloads: 1.2M | Stars: 450 | License: Apache-2.0
     https://nulang.org/packages/http
 
 # Search with filters
@@ -742,7 +742,7 @@ description = "A short description of the package"
 documentation = "https://docs.example.com/my-package"
 homepage = "https://example.com/my-package"
 repository = "https://github.com/username/my-package"
-license = "MIT"                          # SPDX identifier
+license = "Apache-2.0"                          # SPDX identifier
 license-file = "LICENSE"                 # Alternative to 'license'
 readme = "README.md"
 keywords = ["web", "http", "async"]      # Up to 5
@@ -834,7 +834,7 @@ exclude = ["experiments", "deprecated/*"]
 package.version = "1.0.0"
 package.edition = "2024"
 package.authors = ["Team <team@example.com>"]
-package.license = "MIT"
+package.license = "Apache-2.0"
 package.repository = "https://github.com/example/monorepo"
 
 # Shared dependencies

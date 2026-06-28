@@ -1,0 +1,7 @@
+[advisories]
+# RUSTSEC-2026-0186 is an "unsound" warning for memmap2 < 0.9.11.
+# The vulnerable APIs (Mmap::advise_range, MmapMut::flush[_async]_range)
+# are not called by nulang or by its transitive dependency cranelift-jit,
+# which only uses MmapMut::map_anon. Upgrading memmap2 is blocked on
+# cranelift-jit updating its own memmap2 requirement.
+ignore = ["RUSTSEC-2026-0186"]

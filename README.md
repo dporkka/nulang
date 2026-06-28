@@ -533,7 +533,9 @@ This is an active implementation with the following components functional:
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Copyright 2026 © David Porkka
+
+This project is licensed under the Apache License, Version 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ---
 

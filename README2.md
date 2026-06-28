@@ -3,7 +3,7 @@
 > **Erlang's fault tolerance + Temporal's durability + LangGraph's agent orchestration — in one language with one mental model.**
 
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Docs](https://img.shields.io/badge/docs-nulang.dev-green)](https://nulang.dev/docs)
 [![Discord](https://img.shields.io/discord/1234567890?label=discord&logo=discord&color=7289da)](https://discord.gg/nulang)
 
@@ -198,4 +198,6 @@ See the full [roadmap](https://nulang.dev/roadmap) for details.
 
 ## License
 
-Nulang is licensed under the [MIT License](https://opensource.org/licenses/MIT).
+Copyright 2026 © David Porkka
+
+Nulang is licensed under the [Apache License, Version 2.0](https://opensource.org/licenses/Apache-2.0).

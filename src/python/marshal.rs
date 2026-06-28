@@ -12,7 +12,7 @@
 //! | `TAG_SPECIAL` (true/false) | `bool` | Direct mapping |
 //! | `TAG_SPECIAL` (unit) | `None` | Nulang `()` → Python `None` |
 //! | `TAG_STRING` | `str` | Interned string (ID → string lookup) |
-//! | `TAG_PYTHON` | opaque PyObject | Direct registry lookup |
+//! | `TAG_PYTHON` | opaque Py<PyAny> | Direct registry lookup |
 //! | `TAG_PTR` | `None` | Heap pointers are opaque |
 //! | Python `str` | `TAG_PYTHON` | Stored as opaque Python object |
 //! | Python `list` | `TAG_PYTHON` | Stored as opaque Python object |
@@ -47,7 +47,7 @@ const TAG_CLOSURE: u64 = 0x7FF7_0000_0000_0000;
 
 /// Convert a Nulang `Value` to a Python object.
 ///
-/// This function acquires the GIL internally and returns a `PyObject`
+/// This function acquires the GIL internally and returns a `Py<PyAny>`
 /// (a refcounted handle). The caller is responsible for managing the
 /// returned object's lifecycle — typically by inserting it into the
 /// [`PYTHON_REGISTRY`](crate::python::bridge::PYTHON_REGISTRY).
@@ -61,21 +61,37 @@ const TAG_CLOSURE: u64 = 0x7FF7_0000_0000_0000;
 /// | `TAG_SPECIAL` (true/false) | `bool` |
 /// | `TAG_SPECIAL` (unit/nil) | `None` |
 /// | `TAG_STRING` | `str` (via interned string ID) |
-/// | `TAG_PYTHON` | opaque `PyObject` (registry lookup) |
+/// | `TAG_PYTHON` | opaque `Py<PyAny>` (registry lookup) |
 /// | `TAG_PTR` | `None` (opaque heap pointer) |
 /// | `TAG_ACTOR` | `None` (opaque actor reference) |
-pub fn nulang_to_python(value: Value) -> Result<PyObject, String> {
+pub fn nulang_to_python(value: Value) -> Result<Py<PyAny>, String> {
     if let Some(n) = value.as_int() {
-        return Ok(Python::with_gil(|py| n.into_py(py)));
+        return Python::attach(|py| -> Result<Py<PyAny>, String> {
+            Ok(n.into_pyobject(py)
+                .map_err(|e| e.to_string())?
+                .unbind()
+                .into_any())
+        });
     }
     if let Some(b) = value.as_bool() {
-        return Ok(Python::with_gil(|py| b.into_py(py)));
+        return Python::attach(|py| -> Result<Py<PyAny>, String> {
+            Ok(b.into_pyobject(py)
+                .map_err(|e| e.to_string())?
+                .to_owned()
+                .unbind()
+                .into_any())
+        });
     }
     if value.is_nil() || value.is_unit() {
-        return Ok(Python::with_gil(|py| py.None()));
+        return Ok(Python::attach(|py| py.None()));
     }
     if let Some(f) = value.as_float() {
-        return Ok(Python::with_gil(|py| f.into_py(py)));
+        return Python::attach(|py| -> Result<Py<PyAny>, String> {
+            Ok(f.into_pyobject(py)
+                .map_err(|e| e.to_string())?
+                .unbind()
+                .into_any())
+        });
     }
 
     let tag = value.as_raw() & TAG_MASK;
@@ -87,19 +103,24 @@ pub fn nulang_to_python(value: Value) -> Result<PyObject, String> {
         // through the string interner.
         let string_id = (value.as_raw() & 0x0000_FFFF_FFFF_FFFF) as u32;
         let repr = format!("<nulang_string:{}>", string_id);
-        Ok(Python::with_gil(|py| repr.into_py(py)))
+        Python::attach(|py| -> Result<Py<PyAny>, String> {
+            Ok(repr.into_pyobject(py)
+                .map_err(|e| e.to_string())?
+                .unbind()
+                .into_any())
+        })
     } else if tag == TAG_PYTHON {
-        // TAG_PYTHON → look up in registry and return the PyObject
+        // TAG_PYTHON → look up in registry and return the Py<PyAny>
         let obj_id = (value.as_raw() & 0x0000_FFFF_FFFF_FFFF) as u64;
         let py_id = PythonObjectId(obj_id);
         get_object(py_id)
             .ok_or_else(|| format!("TAG_PYTHON object with ID {} not found in registry", obj_id))
     } else if tag == TAG_PTR || tag == TAG_ACTOR || tag == TAG_CLOSURE {
         // Opaque references → None
-        Ok(Python::with_gil(|py| py.None()))
+        Ok(Python::attach(|py| py.None()))
     } else {
         // Unrecognized value — return None as fallback
-        Ok(Python::with_gil(|py| py.None()))
+        Ok(Python::attach(|py| py.None()))
     }
 }
 
@@ -110,7 +131,7 @@ pub fn nulang_to_python(value: Value) -> Result<PyObject, String> {
 /// Convert a Python object (as a `Bound` reference) to a Nulang `Value`.
 ///
 /// The caller must hold the GIL — this function takes a `&Bound<'_, PyAny>`
-/// which can only be obtained within a `Python::with_gil` scope.
+/// which can only be obtained within a `Python::attach` scope.
 ///
 /// # Type Mapping
 ///
@@ -132,18 +153,18 @@ pub fn python_to_nulang(obj: &pyo3::Bound<'_, pyo3::PyAny>) -> Result<Value, Str
     }
 
     // Check for bool (must come before int, since bool subclasses int in Python)
-    if let Ok(b) = obj.downcast::<PyBool>() {
+    if let Ok(b) = obj.cast::<PyBool>() {
         let val: bool = b.extract().map_err(|e| format!("Failed to extract bool: {}", e))?;
         return Ok(Value::bool(val));
     }
 
     // Check for int
-    if let Ok(i) = obj.downcast::<PyInt>() {
+    if let Ok(i) = obj.cast::<PyInt>() {
         let val: i64 = i
             .extract()
             .unwrap_or_else(|_| {
                 // Big int — try to extract and clamp
-                Python::with_gil(|_py| {
+                Python::attach(|_py| {
                     let big_int_str = i.str().map(|s| s.to_string()).unwrap_or_default();
                     big_int_str.parse::<i64>().unwrap_or(i64::MAX)
                 })
@@ -152,43 +173,43 @@ pub fn python_to_nulang(obj: &pyo3::Bound<'_, pyo3::PyAny>) -> Result<Value, Str
     }
 
     // Check for float
-    if let Ok(f) = obj.downcast::<PyFloat>() {
+    if let Ok(f) = obj.cast::<PyFloat>() {
         let val: f64 = f.extract().map_err(|e| format!("Failed to extract float: {}", e))?;
         return Ok(Value::float(val));
     }
 
     // Check for str
-    if let Ok(_s) = obj.downcast::<PyString>() {
+    if let Ok(_s) = obj.cast::<PyString>() {
         // Store as opaque Python object (TAG_PYTHON).
         // Future optimization: intern the string and use TAG_STRING.
-        let py_obj: PyObject = obj.clone().unbind().into();
+        let py_obj: Py<PyAny> = obj.clone().unbind().into_any();
         let id = register_object(py_obj);
         return Ok(Value::from_raw(TAG_PYTHON | id.0));
     }
 
     // Check for list
-    if let Ok(_lst) = obj.downcast::<PyList>() {
-        let py_obj: PyObject = obj.clone().unbind().into();
+    if let Ok(_lst) = obj.cast::<PyList>() {
+        let py_obj: Py<PyAny> = obj.clone().unbind().into_any();
         let id = register_object(py_obj);
         return Ok(Value::from_raw(TAG_PYTHON | id.0));
     }
 
     // Check for tuple
-    if let Ok(_tup) = obj.downcast::<PyTuple>() {
-        let py_obj: PyObject = obj.clone().unbind().into();
+    if let Ok(_tup) = obj.cast::<PyTuple>() {
+        let py_obj: Py<PyAny> = obj.clone().unbind().into_any();
         let id = register_object(py_obj);
         return Ok(Value::from_raw(TAG_PYTHON | id.0));
     }
 
     // Check for dict
-    if let Ok(_d) = obj.downcast::<PyDict>() {
-        let py_obj: PyObject = obj.clone().unbind().into();
+    if let Ok(_d) = obj.cast::<PyDict>() {
+        let py_obj: Py<PyAny> = obj.clone().unbind().into_any();
         let id = register_object(py_obj);
         return Ok(Value::from_raw(TAG_PYTHON | id.0));
     }
 
     // Any other Python type — store as opaque Python object
-    let py_obj: PyObject = obj.clone().unbind().into();
+    let py_obj: Py<PyAny> = obj.clone().unbind().into_any();
     let id = register_object(py_obj);
     Ok(Value::from_raw(TAG_PYTHON | id.0))
 }
@@ -226,7 +247,7 @@ pub fn python_object_id_to_value(obj_id: PythonObjectId) -> Result<Value, String
     let py_obj = get_object(obj_id)
         .ok_or_else(|| format!("Python object ID {:?} not found in registry", obj_id))?;
 
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let bound = py_obj.bind(py);
         python_to_nulang(bound)
     })
@@ -263,7 +284,7 @@ mod tests {
 
     // Helper: ensure Python is initialized
     fn ensure_python() {
-        let _ = Python::with_gil(|_py| ());
+        let _ = Python::attach(|_py| ());
     }
 
     // ------------------------------------------------------------------
@@ -278,7 +299,7 @@ mod tests {
         let py_obj = nulang_to_python(original).expect("nulang_to_python failed");
 
         // Convert back
-        let restored = Python::with_gil(|py| {
+        let restored = Python::attach(|py| {
             let bound = py_obj.bind(py);
             python_to_nulang(bound).expect("python_to_nulang failed")
         });
@@ -293,7 +314,7 @@ mod tests {
         let original = Value::int(-1000);
         let py_obj = nulang_to_python(original).expect("nulang_to_python failed");
 
-        let restored = Python::with_gil(|py| {
+        let restored = Python::attach(|py| {
             let bound = py_obj.bind(py);
             python_to_nulang(bound).expect("python_to_nulang failed")
         });
@@ -312,7 +333,7 @@ mod tests {
         let original = Value::float(3.14159);
         let py_obj = nulang_to_python(original).expect("nulang_to_python failed");
 
-        let restored = Python::with_gil(|py| {
+        let restored = Python::attach(|py| {
             let bound = py_obj.bind(py);
             python_to_nulang(bound).expect("python_to_nulang failed")
         });
@@ -333,7 +354,7 @@ mod tests {
             let original = Value::bool(original_bool);
             let py_obj = nulang_to_python(original).expect("nulang_to_python failed");
 
-            let restored = Python::with_gil(|py| {
+            let restored = Python::attach(|py| {
                 let bound = py_obj.bind(py);
                 python_to_nulang(bound).expect("python_to_nulang failed")
             });
@@ -359,14 +380,14 @@ mod tests {
         let py_obj = nulang_to_python(original).expect("nulang_to_python failed");
 
         // Verify it's None
-        let is_none = Python::with_gil(|py| {
+        let is_none = Python::attach(|py| {
             let bound = py_obj.bind(py);
             bound.is_none()
         });
         assert!(is_none, "Value::unit() should convert to Python None");
 
         // Convert back
-        let restored = Python::with_gil(|py| {
+        let restored = Python::attach(|py| {
             let bound = py_obj.bind(py);
             python_to_nulang(bound).expect("python_to_nulang failed")
         });
@@ -382,8 +403,8 @@ mod tests {
         ensure_python();
 
         // Create a Python object and register it
-        let py_id = Python::with_gil(|py| {
-            let obj: PyObject = 99i64.into_py(py);
+        let py_id = Python::attach(|py| {
+            let obj: Py<PyAny> = 99i64.into_pyobject(py).unwrap().unbind().into_any();
             register_object(obj)
         });
 
@@ -394,7 +415,7 @@ mod tests {
         let py_obj = nulang_to_python(val).expect("nulang_to_python failed");
 
         // Verify it's the same value
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let bound = py_obj.bind(py);
             let extracted: i64 = bound.extract().expect("Expected int");
             assert_eq!(extracted, 99, "TAG_PYTHON object should resolve to 99");
@@ -410,15 +431,15 @@ mod tests {
         ensure_python();
 
         // Create a Python list
-        let list_id = Python::with_gil(|py| {
-            let list = PyList::new_bound(py, &[1i64, 2i64, 3i64]);
-            let obj: PyObject = list.unbind().into();
+        let list_id = Python::attach(|py| {
+            let list = PyList::new(py, &[1i64, 2i64, 3i64]).unwrap();
+            let obj: Py<PyAny> = list.unbind().into_any();
             register_object(obj)
         });
 
         // Get the list from registry and convert to Nulang
         let py_obj = get_object(list_id).unwrap();
-        let val = Python::with_gil(|py| {
+        let val = Python::attach(|py| {
             let bound = py_obj.bind(py);
             python_to_nulang(bound).expect("python_to_nulang failed")
         });
@@ -440,16 +461,16 @@ mod tests {
         ensure_python();
 
         // Create a Python dict
-        let dict_id = Python::with_gil(|py| {
-            let dict = PyDict::new_bound(py);
+        let dict_id = Python::attach(|py| {
+            let dict = PyDict::new(py);
             dict.set_item("key", 42i64).unwrap();
-            let obj: PyObject = dict.unbind().into();
+            let obj: Py<PyAny> = dict.unbind().into_any();
             register_object(obj)
         });
 
         // Convert to Nulang
         let py_obj = get_object(dict_id).unwrap();
-        let val = Python::with_gil(|py| {
+        let val = Python::attach(|py| {
             let bound = py_obj.bind(py);
             python_to_nulang(bound).expect("python_to_nulang failed")
         });
@@ -470,14 +491,14 @@ mod tests {
         ensure_python();
 
         // Create a Python string
-        let str_id = Python::with_gil(|py| {
-            let s: PyObject = "hello nulang".into_py(py);
+        let str_id = Python::attach(|py| {
+            let s: Py<PyAny> = "hello nulang".into_pyobject(py).unwrap().unbind().into_any();
             register_object(s)
         });
 
         // Convert to Nulang
         let py_obj = get_object(str_id).unwrap();
-        let val = Python::with_gil(|py| {
+        let val = Python::attach(|py| {
             let bound = py_obj.bind(py);
             python_to_nulang(bound).expect("python_to_nulang failed")
         });
@@ -520,7 +541,7 @@ mod tests {
         let original = Value::nil();
         let py_obj = nulang_to_python(original).expect("nulang_to_python failed");
 
-        let is_none = Python::with_gil(|py| {
+        let is_none = Python::attach(|py| {
             let bound = py_obj.bind(py);
             bound.is_none()
         });
@@ -535,7 +556,7 @@ mod tests {
             let original = Value::float(special);
             let py_obj = nulang_to_python(original).expect("nulang_to_python failed");
 
-            let restored = Python::with_gil(|py| {
+            let restored = Python::attach(|py| {
                 let bound = py_obj.bind(py);
                 python_to_nulang(bound).expect("python_to_nulang failed")
             });

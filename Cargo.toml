@@ -2,7 +2,8 @@
 name = "nulang"
 version = "0.1.0"
 edition = "2021"
-authors = ["Nulang Team"]
+authors = ["David Porkka"]
+license = "Apache-2.0"
 description = "Nulang - Distributed Actor-Based Programming Language with AI Agent Support"
 
 [dependencies]
@@ -22,7 +23,7 @@ tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 
 # Python interop (PyO3)
-pyo3 = { version = "0.22", features = ["auto-initialize", "py-clone"] }
+pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"] }
 
 [lib]
 name = "nulang"
@@ -44,3 +45,4 @@ debug = true
 [profile.test]
 lto = false
 codegen-units = 16
+
