@@ -4,6 +4,7 @@ pub mod capabilities;
 pub mod compiler;
 pub mod effect_checker;
 pub mod effects;
+pub mod escape_analysis;
 pub mod integration_tests;
 pub mod lexer;
 pub mod lsp;
