@@ -521,8 +521,11 @@ mod tests {
     fn test_rga_insert_multiple() {
         let mut rga = RGA::new(1);
         rga.insert_after(None, "a".to_string());
-        let live: Vec<_> = rga.elements.iter().filter(|e| e.value.is_some()).collect();
-        let id_a = live[0].id;
+        let id_a = rga.elements.iter()
+            .filter(|e| e.value.is_some())
+            .next()
+            .map(|e| e.id)
+            .expect("expected at least one live element");
         rga.insert_after(Some(id_a), "b".to_string());
         rga.insert_after(Some(id_a), "c".to_string());
         assert_eq!(rga.len(), 3);

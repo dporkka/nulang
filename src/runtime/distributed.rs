@@ -197,12 +197,10 @@ impl RemoteActorCache {
         let key = (node_id, actor_id);
 
         // If already present, just update position and timestamp.
-        if self.entries.contains_key(&key) {
+        if let Some(info) = self.entries.get_mut(&key) {
             self.access_order.retain(|&k| k != key);
             self.access_order.push_back(key);
-            if let Some(info) = self.entries.get_mut(&key) {
-                info.last_accessed = Instant::now();
-            }
+            info.last_accessed = Instant::now();
             return;
         }
 

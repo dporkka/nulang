@@ -25,7 +25,7 @@
 //! payload of an f64. This gives us 51 bits of payload space for
 //! pointers, integers, and type tags.
 
-use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
+use crate::bytecode::{CodeModule, Constant, OpCode};
 use crate::jit::{self, JitSession, TieredAction};
 use crate::types::{NuError, NuResult, Span};
 use std::collections::HashMap;
@@ -1326,7 +1326,7 @@ fn module_with_handler_table(bindings: Vec<crate::bytecode::HandlerBinding>) -> 
 #[cfg(test)]
 mod vm_tests {
     use super::*;
-    use crate::bytecode::{HandlerBinding, HandlerTable};
+    use crate::bytecode::{HandlerBinding, HandlerTable, Instruction};
 
     /// Test 1: Basic integer arithmetic.
     #[test]
