@@ -41,9 +41,10 @@ mod tests {
         NativeActorPool::ensure_python();
     }
 
-    fn is_safe_to_marshal(_val: &Value) -> bool {
-        // All values are safe to marshal when Python support is disabled
-        true
+    fn is_safe_to_marshal(val: &Value) -> bool {
+        // Primitive scalar values are safe; heap references and opaque
+        // handles are not.
+        val.is_int() || val.is_bool() || val.is_float() || val.is_nil() || val.is_unit()
     }
 
     #[test]

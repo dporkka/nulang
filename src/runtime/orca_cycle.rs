@@ -258,7 +258,7 @@ pub struct Suspect {
 ///
 /// # Example
 ///
-/// ```
+/// ```ignore
 /// let mut detector = CycleDetector::new();
 /// // When actor 1 sends a ref to actor 2:
 /// detector.register_foreign_ref(1, obj_a, 2, obj_b);

@@ -40,8 +40,8 @@ mod tests {
         // (placeholder: effect checker would go here)
 
         // 4. Compile
-        let mut compiler = crate::compiler::Compiler::new();
-        let module = compiler.compile_module(&ast)?;
+        let mut compiler = crate::compiler::Compiler::new("test");
+        let module = compiler.compile_module(&ast)?.clone();
 
         // 5. Run
         let mut vm = VM::new();
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn test_spawn_returns_actor_ref() {
         let source = r#"
-            spawn {
+            actor Counter {
                 state count = 0
                 behavior get() { self.count }
                 behavior inc() { self.count + 1 }
@@ -362,7 +362,7 @@ mod tests {
             Ok((value, _)) => {
                 // Should be some kind of string representation
                 assert!(
-                    value.as_int().is_some() || value.is_nil(),
+                    value.as_int().is_some() || value.is_nil() || value.is_string(),
                     "String literal should produce a value"
                 );
             }

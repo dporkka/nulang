@@ -29,18 +29,17 @@ use crate::vm::Value;
 // Constants (mirrored from vm.rs for local use)
 // ---------------------------------------------------------------------------
 
-const TAG_MASK: u64 = 0xFFFF000000000000;
-const TAG_INT: u64 = 0x7FF9000000000000;
-const TAG_PTR: u64 = 0x7FFA000000000000;
-const TAG_ACTOR: u64 = 0x7FFB000000000000;
-const TAG_SPECIAL: u64 = 0x7FFC000000000000;
-const TAG_STRING: u64 = 0x7FFD000000000000;
-const TAG_PYTHON: u64 = 0x7FFE000000000000;
-
-const SPECIAL_UNIT: u64 = 0;
-const SPECIAL_TRUE: u64 = 1;
-const SPECIAL_FALSE: u64 = 2;
-const SPECIAL_NIL: u64 = 3;
+// These constants must stay in sync with the NaN-boxing layout in src/vm.rs.
+const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+const TAG_NIL: u64 = 0x7FF8_0000_0000_0000;
+const TAG_UNIT: u64 = 0x7FF9_0000_0000_0000;
+const TAG_BOOL: u64 = 0x7FFA_0000_0000_0000;
+const TAG_INT: u64 = 0x7FFB_0000_0000_0000;
+const TAG_PTR: u64 = 0x7FFC_0000_0000_0000;
+const TAG_ACTOR: u64 = 0x7FFD_0000_0000_0000;
+const TAG_STRING: u64 = 0x7FFE_0000_0000_0000;
+const TAG_PYTHON: u64 = 0x7FF7_0000_0000_0000;
+const TAG_CLOSURE: u64 = 0x7FF7_0000_0000_0000;
 
 // ---------------------------------------------------------------------------
 // Nulang → Python
@@ -66,61 +65,41 @@ const SPECIAL_NIL: u64 = 3;
 /// | `TAG_PTR` | `None` (opaque heap pointer) |
 /// | `TAG_ACTOR` | `None` (opaque actor reference) |
 pub fn nulang_to_python(value: Value) -> Result<PyObject, String> {
-    let tag = value.0 & TAG_MASK;
+    if let Some(n) = value.as_int() {
+        return Ok(Python::with_gil(|py| n.into_py(py)));
+    }
+    if let Some(b) = value.as_bool() {
+        return Ok(Python::with_gil(|py| b.into_py(py)));
+    }
+    if value.is_nil() || value.is_unit() {
+        return Ok(Python::with_gil(|py| py.None()));
+    }
+    if let Some(f) = value.as_float() {
+        return Ok(Python::with_gil(|py| f.into_py(py)));
+    }
 
-    if tag == TAG_INT {
-        // TAG_INT → Python int
-        let bits = value.0 & 0x0000FFFFFFFFFFFF;
-        let n = if bits & 0x0000800000000000 != 0 {
-            (bits | 0xFFFF000000000000) as i64
-        } else {
-            bits as i64
-        };
-        Ok(Python::with_gil(|py| n.into_py(py)))
-    } else if tag == TAG_SPECIAL {
-        // TAG_SPECIAL → Python bool or None
-        let s = value.0 & 0xFFFF;
-        match s {
-            SPECIAL_TRUE => Ok(Python::with_gil(|py| true.into_py(py))),
-            SPECIAL_FALSE => Ok(Python::with_gil(|py| false.into_py(py))),
-            SPECIAL_UNIT | SPECIAL_NIL => {
-                Ok(Python::with_gil(|py| py.None()))
-            }
-            _ => {
-                // Unknown special value — return None as fallback
-                Ok(Python::with_gil(|py| py.None()))
-            }
-        }
-    } else if tag == TAG_STRING {
+    let tag = value.as_raw() & TAG_MASK;
+    if tag == TAG_STRING {
         // TAG_STRING → Python str
         // Nulang strings are interned; the payload is a u32 string pool ID.
         // Since we don't have the string pool here, we represent it as a
         // descriptive string. A future optimization will resolve the ID
         // through the string interner.
-        let string_id = (value.0 & 0x0000FFFFFFFFFFFF) as u32;
+        let string_id = (value.as_raw() & 0x0000_FFFF_FFFF_FFFF) as u32;
         let repr = format!("<nulang_string:{}>", string_id);
         Ok(Python::with_gil(|py| repr.into_py(py)))
     } else if tag == TAG_PYTHON {
         // TAG_PYTHON → look up in registry and return the PyObject
-        let obj_id = (value.0 & 0x0000FFFFFFFFFFFF) as u64;
+        let obj_id = (value.as_raw() & 0x0000_FFFF_FFFF_FFFF) as u64;
         let py_id = PythonObjectId(obj_id);
         get_object(py_id)
             .ok_or_else(|| format!("TAG_PYTHON object with ID {} not found in registry", obj_id))
-    } else if tag == TAG_PTR {
-        // TAG_PTR → None (heap pointers are opaque to Python)
-        Ok(Python::with_gil(|py| py.None()))
-    } else if tag == TAG_ACTOR {
-        // TAG_ACTOR → None (actor references are opaque to Python)
+    } else if tag == TAG_PTR || tag == TAG_ACTOR || tag == TAG_CLOSURE {
+        // Opaque references → None
         Ok(Python::with_gil(|py| py.None()))
     } else {
-        // Check if it's a float (non-NaN IEEE 754 value)
-        let f = f64::from_bits(value.0);
-        if !f.is_nan() {
-            Ok(Python::with_gil(|py| f.into_py(py)))
-        } else {
-            // Unrecognized NaN-tagged value — return None as fallback
-            Ok(Python::with_gil(|py| py.None()))
-        }
+        // Unrecognized value — return None as fallback
+        Ok(Python::with_gil(|py| py.None()))
     }
 }
 
@@ -184,34 +163,34 @@ pub fn python_to_nulang(obj: &pyo3::Bound<'_, pyo3::PyAny>) -> Result<Value, Str
         // Future optimization: intern the string and use TAG_STRING.
         let py_obj: PyObject = obj.clone().unbind().into();
         let id = register_object(py_obj);
-        return Ok(Value(TAG_PYTHON | id.0));
+        return Ok(Value::from_raw(TAG_PYTHON | id.0));
     }
 
     // Check for list
     if let Ok(_lst) = obj.downcast::<PyList>() {
         let py_obj: PyObject = obj.clone().unbind().into();
         let id = register_object(py_obj);
-        return Ok(Value(TAG_PYTHON | id.0));
+        return Ok(Value::from_raw(TAG_PYTHON | id.0));
     }
 
     // Check for tuple
     if let Ok(_tup) = obj.downcast::<PyTuple>() {
         let py_obj: PyObject = obj.clone().unbind().into();
         let id = register_object(py_obj);
-        return Ok(Value(TAG_PYTHON | id.0));
+        return Ok(Value::from_raw(TAG_PYTHON | id.0));
     }
 
     // Check for dict
     if let Ok(_d) = obj.downcast::<PyDict>() {
         let py_obj: PyObject = obj.clone().unbind().into();
         let id = register_object(py_obj);
-        return Ok(Value(TAG_PYTHON | id.0));
+        return Ok(Value::from_raw(TAG_PYTHON | id.0));
     }
 
     // Any other Python type — store as opaque Python object
     let py_obj: PyObject = obj.clone().unbind().into();
     let id = register_object(py_obj);
-    Ok(Value(TAG_PYTHON | id.0))
+    Ok(Value::from_raw(TAG_PYTHON | id.0))
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +388,7 @@ mod tests {
         });
 
         // Create a Nulang Value referencing it
-        let val = Value(TAG_PYTHON | py_id.0);
+        let val = Value::from_raw(TAG_PYTHON | py_id.0);
 
         // Convert to Python
         let py_obj = nulang_to_python(val).expect("nulang_to_python failed");
@@ -446,10 +425,10 @@ mod tests {
 
         // Verify it has TAG_PYTHON tag
         assert_eq!(
-            val.0 & TAG_MASK,
+            val.as_raw() & TAG_MASK,
             TAG_PYTHON,
             "Python list should be stored as TAG_PYTHON, got tag 0x{:016X}",
-            val.0 & TAG_MASK
+            val.as_raw() & TAG_MASK
         );
 
         // Cleanup
@@ -477,7 +456,7 @@ mod tests {
 
         // Verify it has TAG_PYTHON tag
         assert_eq!(
-            val.0 & TAG_MASK,
+            val.as_raw() & TAG_MASK,
             TAG_PYTHON,
             "Python dict should be stored as TAG_PYTHON"
         );
@@ -505,7 +484,7 @@ mod tests {
 
         // Verify it has TAG_PYTHON tag (strings from Python stay opaque)
         assert_eq!(
-            val.0 & TAG_MASK,
+            val.as_raw() & TAG_MASK,
             TAG_PYTHON,
             "Python str should be stored as TAG_PYTHON"
         );

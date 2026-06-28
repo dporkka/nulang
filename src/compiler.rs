@@ -7,10 +7,8 @@ use crate::bytecode::*;
 use crate::types::{NuResult, Span};
 
 /// Workaround for the `Self` opcode (0x83) which conflicts with the Rust keyword.
-/// Uses transmute from the known discriminant value.
 fn op_self() -> OpCode {
-    // Safety: 0x83 is the guaranteed discriminant for the `Self` variant.
-    unsafe { std::mem::transmute::<u8, OpCode>(0x83) }
+    OpCode::SelfOp
 }
 
 /// Collect all variable names bound by a pattern.
@@ -287,6 +285,10 @@ impl Compiler {
                 let idx = self.add_const(Constant::Bool(false));
                 self.emit(make_constu(idx as u16, dst));
             }
+            Literal::Nil => {
+                let idx = self.add_const(Constant::Nil);
+                self.emit(make_constu(idx as u16, dst));
+            }
             Literal::Unit => {
                 let idx = self.add_const(Constant::Unit);
                 self.emit(make_constu(idx as u16, dst));
@@ -436,6 +438,13 @@ impl Compiler {
     }
 
     fn compile_let(&mut self, name: &str, value: &Expr, body: &Expr) -> NuResult<u8> {
+        // Let-bound lambdas that reference themselves (e.g. `let fac = fn(n) ...
+        // fac(n-1) ... in ...`) are compiled as recursive functions so the
+        // self-reference resolves without capture support.
+        if let Expr::Lambda { params, body: lam_body, .. } = value {
+            return self.compile_let_rec(name, params, lam_body, body);
+        }
+
         let val_reg = self.compile_expr(value)?;
         // Bind the name to a dedicated high register and move the value there.
         // This prevents later argument/sub-expression compilation from
@@ -678,7 +687,8 @@ impl Compiler {
     fn compile_block(&mut self, exprs: &[Expr]) -> NuResult<u8> {
         if exprs.is_empty() {
             let r = self.alloc_reg();
-            self.emit(Instruction::new1(OpCode::Const0, r));
+            let idx = self.add_const(Constant::Unit);
+            self.emit(make_constu(idx as u16, r));
             return Ok(r);
         }
         let mut last_reg = 0;

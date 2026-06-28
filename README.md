@@ -18,7 +18,7 @@
 | **Actor Model** | Lightweight green-thread actors with M:N scheduling, work-stealing queues, and supervision trees |
 | **Algebraic Effects** | First-class effect system with `perform`/`handle`/`resume` semantics |
 | **Capability System** | Fine-grained reference permissions (iso/trn/ref/val/box/tag) for memory safety |
-| **AI Agent DSL** | Built-in syntax for defining LLM-powered agents with tool binding |
+| **AI Capabilities** | LLM access through the capability/effect system (agent DSL removed in v0.7) |
 | **Distributed Runtime** | Location-transparent actor messaging across nodes with TCP transport |
 | **ORCA GC** | Per-actor concurrent garbage collection with cycle detection |
 | **CRDTs** | 8 conflict-free replicated data types for shared distributed state |
@@ -30,6 +30,17 @@
 | **Python Interop** | Native Actor pattern: Python isolated to dedicated OS threads, marshal-only boundary |
 | **Unbounded Mailboxes** | Lock-free MPSC queues (crossbeam::SegQueue) — BEAM-semantics, no message loss |
 | **Stress Test Suite** | 10 chaos tests for actor-effect boundary, supervision, scheduler fairness |
+
+### Current Status
+
+- ✅ Builds with `cargo build`
+- ✅ All 508 unit tests pass with `cargo test`
+- ✅ NaN-boxed `Value` representation with distinct high-16 type tags
+- ✅ 91-opcode bytecode ISA (arithmetic, control flow, closures, arrays, effects, actors, capabilities, distribution)
+- ✅ Hindley-Milner type inference with algebraic effects
+- ✅ Actor runtime: spawn, send, receive, monitors, links, supervision, timers, registry, process groups
+- ✅ ORCA-style per-actor GC with cycle detection
+- ⚠️ AI agent DSL removed; LLM integration planned via capability-based effects
 
 ---
 

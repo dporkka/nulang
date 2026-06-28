@@ -36,22 +36,24 @@ use std::collections::HashMap;
 /// Tagged value using NaN boxing.
 ///
 /// All non-float values are encoded in the quiet-NaN payload of an f64.
-/// This gives us 51 bits of payload space.
+/// The high 16 bits hold the type tag; the low 48 bits hold the payload.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Value {
     raw: u64,
 }
 
-/// Value type tags (stored in the upper bits of the NaN payload).
-const TAG_NIL:     u64 = 0x7FF8_0000_0000_0001;
-const TAG_INT:     u64 = 0x7FF8_0000_0000_0002;
-const TAG_BOOL:    u64 = 0x7FF8_0000_0000_0003;
-const TAG_UNIT:    u64 = 0x7FF8_0000_0000_0004;
-const TAG_ACTOR:   u64 = 0x7FF8_0000_0000_0005;
-const TAG_STRING:  u64 = 0x7FF8_0000_0000_0006;
-const TAG_CLOSURE: u64 = 0x7FF8_0000_0000_0007;
-const TAG_PTR:     u64 = 0x7FF8_0000_0000_0008;
-const TAG_QUIET_NAN: u64 = 0x7FF8_0000_0000_0000;
+/// Value type tags (stored in the upper 16 bits).
+const TAG_MASK:    u64 = 0xFFFF_0000_0000_0000;
+const TAG_NIL:     u64 = 0x7FF8_0000_0000_0000;
+const TAG_UNIT:    u64 = 0x7FF9_0000_0000_0000;
+const TAG_BOOL:    u64 = 0x7FFA_0000_0000_0000;
+const TAG_INT:     u64 = 0x7FFB_0000_0000_0000;
+const TAG_PTR:     u64 = 0x7FFC_0000_0000_0000;
+const TAG_ACTOR:   u64 = 0x7FFD_0000_0000_0000;
+const TAG_STRING:  u64 = 0x7FFE_0000_0000_0000;
+const TAG_CLOSURE: u64 = 0x7FF7_0000_0000_0000;
+
+const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 impl Value {
     /// Create a nil value.
@@ -59,17 +61,9 @@ impl Value {
 
     /// Create an integer value.
     pub fn int(n: i64) -> Self {
-        // For small integers that fit in the payload, store directly.
-        // For larger values, we'll use the heap. For now: direct storage
-        // of values that fit in 47 bits (signed).
-        if n >= -(1 << 46) && n < (1 << 46) {
-            let payload = (n as u64) & 0x0000_7FFF_FFFF_FFFF;
-            Value { raw: TAG_INT | payload }
-        } else {
-            // Fallback: store as pointer to heap-allocated i64
-            let boxed = Box::into_raw(Box::new(n));
-            Value { raw: TAG_PTR | (boxed as u64 & 0x0000_7FFF_FFFF_FFFF) }
-        }
+        // Store directly in the 48-bit payload.
+        let payload = (n as u64) & PAYLOAD_MASK;
+        Value { raw: TAG_INT | payload }
     }
 
     /// Create a float value.
@@ -87,17 +81,17 @@ impl Value {
 
     /// Create an actor reference.
     pub fn actor_ref(id: u64) -> Self {
-        Value { raw: TAG_ACTOR | (id & 0x0000_7FFF_FFFF_FFFF) }
+        Value { raw: TAG_ACTOR | (id & PAYLOAD_MASK) }
     }
 
     /// Create a closure reference.
     pub fn closure(id: u64) -> Self {
-        Value { raw: TAG_CLOSURE | (id & 0x0000_7FFF_FFFF_FFFF) }
+        Value { raw: TAG_CLOSURE | (id & PAYLOAD_MASK) }
     }
 
     /// Create a pointer value (for strings, lists, etc.).
     pub fn ptr(p: *mut u8) -> Self {
-        Value { raw: TAG_PTR | (p as u64 & 0x0000_7FFF_FFFF_FFFF) }
+        Value { raw: TAG_PTR | (p as u64 & PAYLOAD_MASK) }
     }
 
     /// Create a string reference (index into string pool).
@@ -109,43 +103,35 @@ impl Value {
 
     pub fn is_nil(&self) -> bool { self.raw == TAG_NIL }
     pub fn is_unit(&self) -> bool { self.raw == TAG_UNIT }
-    pub fn is_int(&self) -> bool { (self.raw & 0xFFFF_0000_0000_0000) == TAG_INT }
-    pub fn is_float(&self) -> bool {
-        let bits = self.raw;
-        (bits & 0x7FF8_0000_0000_0000) == 0x7FF8_0000_0000_0000 &&
-        (bits & 0x0007_FFFF_FFFF_FFFF) != 0
-    }
-    pub fn is_bool(&self) -> bool { (self.raw & 0xFFFF_0000_0000_0000) == TAG_BOOL }
-    pub fn is_actor_ref(&self) -> bool { (self.raw & 0xFFFF_0000_0000_0000) == TAG_ACTOR }
+    pub fn is_int(&self) -> bool { (self.raw & TAG_MASK) == TAG_INT }
+    pub fn is_float(&self) -> bool { self.as_float().is_some() }
+    pub fn is_bool(&self) -> bool { (self.raw & TAG_MASK) == TAG_BOOL }
+    pub fn is_actor_ref(&self) -> bool { (self.raw & TAG_MASK) == TAG_ACTOR }
 
     // -- Extractors --
 
     pub fn as_int(&self) -> Option<i64> {
-        if (self.raw & 0xFFFF_0000_0000_0000) == TAG_INT {
-            let payload = self.raw & 0x0000_7FFF_FFFF_FFFF;
-            // Sign-extend from 47 bits
-            if payload & 0x0000_4000_0000_0000 != 0 {
-                Some((payload | 0xFFFF_8000_0000_0000) as i64)
+        if (self.raw & TAG_MASK) == TAG_INT {
+            let bits = self.raw & PAYLOAD_MASK;
+            // Sign-extend from 48 bits
+            Some(if bits & 0x0000_8000_0000_0000 != 0 {
+                (bits | 0xFFFF_0000_0000_0000) as i64
             } else {
-                Some(payload as i64)
-            }
+                bits as i64
+            })
         } else {
             None
         }
     }
 
     pub fn as_float(&self) -> Option<f64> {
-        if !self.is_nil() && !self.is_unit() && !self.is_int() && !self.is_bool() && !self.is_actor_ref() {
-            let f = f64::from_bits(self.raw);
-            if !f.is_nan() {
-                return Some(f);
-            }
-        }
-        None
+        let f = f64::from_bits(self.raw);
+        // All tagged values are quiet NaNs, so any non-NaN bit pattern is a real float.
+        if f.is_nan() { None } else { Some(f) }
     }
 
     pub fn as_bool(&self) -> Option<bool> {
-        if (self.raw & 0xFFFF_0000_0000_0000) == TAG_BOOL {
+        if (self.raw & TAG_MASK) == TAG_BOOL {
             Some((self.raw & 1) != 0)
         } else {
             None
@@ -153,20 +139,41 @@ impl Value {
     }
 
     pub fn as_actor_id(&self) -> Option<u64> {
-        if (self.raw & 0xFFFF_0000_0000_0000) == TAG_ACTOR {
-            Some(self.raw & 0x0000_7FFF_FFFF_FFFF)
+        if (self.raw & TAG_MASK) == TAG_ACTOR {
+            Some(self.raw & PAYLOAD_MASK)
         } else {
             None
         }
     }
 
     pub fn as_ptr(&self) -> Option<*mut u8> {
-        if (self.raw & 0xFFFF_0000_0000_0000) == TAG_PTR {
-            Some((self.raw & 0x0000_7FFF_FFFF_FFFF) as *mut u8)
+        if (self.raw & TAG_MASK) == TAG_PTR {
+            Some((self.raw & PAYLOAD_MASK) as *mut u8)
         } else {
             None
         }
     }
+
+    pub fn is_ptr(&self) -> bool { (self.raw & TAG_MASK) == TAG_PTR }
+    pub fn is_string(&self) -> bool { (self.raw & TAG_MASK) == TAG_STRING }
+    pub fn is_closure(&self) -> bool { (self.raw & TAG_MASK) == TAG_CLOSURE }
+
+    pub fn as_string_id(&self) -> Option<u32> {
+        if self.is_string() {
+            Some((self.raw & PAYLOAD_MASK) as u32)
+        } else {
+            None
+        }
+    }
+
+    /// Return the raw NaN-boxed bits.
+    pub fn as_raw(&self) -> u64 { self.raw }
+
+    /// Construct a Value from raw NaN-boxed bits.
+    ///
+    /// # Safety
+    /// The caller must ensure the bits form a valid tagged value.
+    pub fn from_raw(raw: u64) -> Self { Value { raw } }
 
     pub fn to_string_repr(&self) -> String {
         if self.is_nil() { "nil".to_string() }
@@ -570,11 +577,11 @@ impl VM {
                 return Ok(());
             }
             OpCode::Panic => {
+                let pc = frame.pc.saturating_sub(1);
+                let r0_repr = frame.regs[0].to_string_repr();
                 self.current_frame = Some(frame);
                 return Err(NuError::VMError(
-                    format!("Panic at PC {}: r0={}",
-                        frame.pc.saturating_sub(1),
-                        frame.regs[0].to_string_repr())
+                    format!("Panic at PC {}: r0={}", pc, r0_repr)
                 ));
             }
 
@@ -610,9 +617,9 @@ impl VM {
             }
 
             // -- Constants --
-            OpCode::Const0 => { frame.regs[instr.op3 as usize] = Value::int(0); }
-            OpCode::Const1 => { frame.regs[instr.op3 as usize] = Value::int(1); }
-            OpCode::Const2 => { frame.regs[instr.op3 as usize] = Value::int(2); }
+            OpCode::Const0 => { frame.regs[instr.op1 as usize] = Value::int(0); }
+            OpCode::Const1 => { frame.regs[instr.op1 as usize] = Value::int(1); }
+            OpCode::Const2 => { frame.regs[instr.op1 as usize] = Value::int(2); }
             OpCode::ConstU => {
                 let idx = instr.imm16() as usize;
                 let val = self.modules.get(frame.module_idx)
@@ -622,24 +629,21 @@ impl VM {
                         Constant::Float(f) => Value::float(*f),
                         Constant::String(s) => Value::string(idx as u32),
                         Constant::Bool(b) => Value::bool(*b),
-                        Constant::Unit => Value::unit(),
                         Constant::Nil => Value::nil(),
-                    })
-                    .unwrap_or(Value::nil());
-                frame.regs[instr.op3 as usize] = val;
-            }
-            OpCode::ConstN => {
-                let idx = instr.imm16() as usize;
-                let val = self.modules.get(frame.module_idx)
-                    .and_then(|m| m.constants.get(idx))
-                    .map(|c| match c {
-                        Constant::Int(n) => Value::int(-n),
+                        Constant::Unit => Value::unit(),
                         _ => Value::nil(),
                     })
                     .unwrap_or(Value::nil());
                 frame.regs[instr.op3 as usize] = val;
             }
-
+            OpCode::Closure => {
+                let func_idx = instr.imm16() as u64;
+                frame.regs[instr.op3 as usize] = Value::closure(func_idx);
+            }
+            OpCode::CapLoad | OpCode::CapStore | OpCode::FreeVar => {
+                // Captures are not yet implemented at runtime; these opcodes are
+                // no-ops so that simple capture-free closures still work.
+            }
             // -- Arithmetic --
             OpCode::IAdd => {
                 let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
@@ -668,7 +672,7 @@ impl VM {
             }
             OpCode::INeg => {
                 let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::int(-a);
+                frame.regs[instr.op2 as usize] = Value::int(-a);
             }
 
             // -- Float arithmetic --
@@ -698,96 +702,126 @@ impl VM {
             }
 
             // -- Comparison --
-            OpCode::IEq => {
+            OpCode::ICmpEq => {
                 let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
                 let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
                 frame.regs[instr.op3 as usize] = Value::bool(a == b);
             }
-            OpCode::INE => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::bool(a != b);
-            }
-            OpCode::ILt => {
+            OpCode::ICmpLt => {
                 let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
                 let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
                 frame.regs[instr.op3 as usize] = Value::bool(a < b);
             }
-            OpCode::ILe => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::bool(a <= b);
-            }
-            OpCode::IGt => {
+            OpCode::ICmpGt => {
                 let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
                 let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
                 frame.regs[instr.op3 as usize] = Value::bool(a > b);
             }
-            OpCode::IGe => {
+            OpCode::ICmpLe => {
+                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
+                frame.regs[instr.op3 as usize] = Value::bool(a <= b);
+            }
+            OpCode::ICmpGe => {
                 let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
                 let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
                 frame.regs[instr.op3 as usize] = Value::bool(a >= b);
             }
-            OpCode::FEq => {
+            OpCode::FCmpEq => {
                 let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
                 let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
                 frame.regs[instr.op3 as usize] = Value::bool((a - b).abs() < f64::EPSILON);
             }
-            OpCode::FLt => {
+            OpCode::FCmpLt => {
                 let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
                 let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
                 frame.regs[instr.op3 as usize] = Value::bool(a < b);
             }
+            OpCode::FCmpGt => {
+                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                frame.regs[instr.op3 as usize] = Value::bool(a > b);
+            }
+
+            // -- Arrays (minimal heap-backed implementation; memory is leaked) --
+            OpCode::ArrAlloc => {
+                let len = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as usize;
+                let arr: Box<Vec<Value>> = Box::new(vec![Value::nil(); len]);
+                frame.regs[instr.op2 as usize] = Value::ptr(Box::into_raw(arr) as *mut u8);
+            }
+            OpCode::ArrLoad => {
+                let arr_ptr = frame.regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
+                let idx = frame.regs[instr.op2 as usize].as_int().unwrap_or(0) as usize;
+                let val = if !arr_ptr.is_null() {
+                    let arr = unsafe { &*(arr_ptr as *const Vec<Value>) };
+                    arr.get(idx).copied().unwrap_or(Value::nil())
+                } else {
+                    Value::nil()
+                };
+                frame.regs[instr.op3 as usize] = val;
+            }
+            OpCode::ArrStore => {
+                let arr_ptr = frame.regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
+                let idx = frame.regs[instr.op2 as usize].as_int().unwrap_or(0) as usize;
+                let val = frame.regs[instr.op3 as usize];
+                if !arr_ptr.is_null() {
+                    let arr = unsafe { &mut *(arr_ptr as *mut Vec<Value>) };
+                    if idx < arr.len() {
+                        arr[idx] = val;
+                    }
+                }
+            }
+            OpCode::ArrLen => {
+                let arr_ptr = frame.regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
+                let len = if !arr_ptr.is_null() {
+                    unsafe { (&*(arr_ptr as *const Vec<Value>)).len() as i64 }
+                } else {
+                    0
+                };
+                frame.regs[instr.op3 as usize] = Value::int(len);
+            }
 
             // -- Boolean logic --
-            OpCode::BAnd => {
+            OpCode::And => {
                 let a = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
                 let b = frame.regs[instr.op2 as usize].as_bool().unwrap_or(false);
                 frame.regs[instr.op3 as usize] = Value::bool(a && b);
             }
-            OpCode::BOr => {
+            OpCode::Or => {
                 let a = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
                 let b = frame.regs[instr.op2 as usize].as_bool().unwrap_or(false);
                 frame.regs[instr.op3 as usize] = Value::bool(a || b);
             }
-            OpCode::BNot => {
+            OpCode::Not => {
                 let a = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
-                frame.regs[instr.op3 as usize] = Value::bool(!a);
+                frame.regs[instr.op2 as usize] = Value::bool(!a);
             }
 
             // -- Type checks --
-            OpCode::IsInt => {
-                frame.regs[instr.op2 as usize] = Value::bool(frame.regs[instr.op1 as usize].is_int());
-            }
-            OpCode::IsFloat => {
-                frame.regs[instr.op2 as usize] = Value::bool(frame.regs[instr.op1 as usize].as_float().is_some());
-            }
-            OpCode::IsBool => {
-                frame.regs[instr.op2 as usize] = Value::bool(frame.regs[instr.op1 as usize].is_bool());
-            }
-            OpCode::IsString => {
-                frame.regs[instr.op2 as usize] = Value::bool(
-                    (frame.regs[instr.op1 as usize].raw & 0xFFFF_0000_0000_0000) == TAG_STRING
-                );
-            }
-            OpCode::IsList => {
-                frame.regs[instr.op2 as usize] = Value::bool(false);
-            }
-            OpCode::IsTuple => {
-                frame.regs[instr.op2 as usize] = Value::bool(false);
-            }
-            OpCode::IsNil => {
-                frame.regs[instr.op2 as usize] = Value::bool(frame.regs[instr.op1 as usize].is_nil());
-            }
-            OpCode::IsUnit => {
-                frame.regs[instr.op2 as usize] = Value::bool(frame.regs[instr.op1 as usize].is_unit());
-            }
-            OpCode::IsActor => {
-                frame.regs[instr.op2 as usize] = Value::bool(frame.regs[instr.op1 as usize].is_actor_ref());
+            // IsTag checks the tag of the value in op1 against the tag_id in op2.
+            // Tag IDs mirror the low byte of the internal NaN tag constants.
+            OpCode::IsTag => {
+                let val = frame.regs[instr.op1 as usize];
+                let tag_id = instr.op2;
+                let result = match tag_id {
+                    0x01 => val.is_nil(),
+                    0x02 => val.is_int(),
+                    0x03 => val.is_bool(),
+                    0x04 => val.is_unit(),
+                    0x05 => val.is_actor_ref(),
+                    0x06 => val.is_string(),
+                    0x07 => val.is_closure(),
+                    0x08 => val.is_ptr(),
+                    0x09 => val.as_float().is_some(),
+                    0x0A => false, // list
+                    0x0B => false, // tuple
+                    _ => false,
+                };
+                frame.regs[instr.op3 as usize] = Value::bool(result);
             }
 
             // -- Register moves --
-            OpCode::Move => {
+            OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Dup => {
                 frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize];
             }
             OpCode::Swap => {
@@ -801,32 +835,20 @@ impl VM {
             // -- Control flow (non-consuming) --
             OpCode::Jmp => {
                 let offset = instr.imm16() as i16;
-                if offset >= 0 {
-                    frame.pc += offset as usize;
-                } else {
-                    frame.pc = frame.pc.saturating_sub((-offset) as usize);
-                }
+                frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
             }
-            OpCode::JmpIf => {
+            OpCode::JmpT => {
                 let cond = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
                 if cond {
-                    let offset = instr.imm16() as i16;
-                    if offset >= 0 {
-                        frame.pc += offset as usize;
-                    } else {
-                        frame.pc = frame.pc.saturating_sub((-offset) as usize);
-                    }
+                    let offset = instr.offset16() as i16;
+                    frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                 }
             }
-            OpCode::JmpIfNot => {
+            OpCode::JmpF => {
                 let cond = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
                 if !cond {
-                    let offset = instr.imm16() as i16;
-                    if offset >= 0 {
-                        frame.pc += offset as usize;
-                    } else {
-                        frame.pc = frame.pc.saturating_sub((-offset) as usize);
-                    }
+                    let offset = instr.offset16() as i16;
+                    frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
                 }
             }
 
@@ -854,7 +876,7 @@ impl VM {
                 // op3 = dst_reg (where to store the result after resume)
                 let eff_name_idx = instr.imm16();
                 let dst_reg = instr.op3;
-                let effect_name = self.module_const_string(frame.module_idx, eff_name_idx);
+                let effect_name = self.module_const_string(frame.module_idx, eff_name_idx as usize);
 
                 // Search handler stack from top (innermost) to bottom (outermost).
                 let handler_idx = self.handler_stack.iter().rposition(|hf| {
@@ -1041,11 +1063,9 @@ impl VM {
             OpCode::MetaType => { frame.regs[instr.op2 as usize] = Value::int(0); }
             OpCode::MetaCap => { frame.regs[instr.op2 as usize] = Value::int(0); }
 
-            // Frame-manipulating opcodes handled above; unreachable but needed for exhaustiveness
-            OpCode::Call | OpCode::TailCall | OpCode::Ret | OpCode::RetVal |
-            OpCode::ClosureCall | OpCode::Panic |
-            OpCode::Spawn | OpCode::Send | OpCode::Ask |
-            OpCode::RSend | OpCode::RSpawn => {}
+            // All other opcodes are not yet implemented in the interpreter.
+            // Treat them as no-ops for now.
+            _ => {}
         }
         self.current_frame = Some(frame);
         Ok(())
@@ -1300,8 +1320,15 @@ mod vm_tests {
         // PC 5-6: (padding)
         // PC 7: handler body: ConstU c42 -> r0; Resume r0
 
+        // Add the effect name string to the constant pool first so its index
+        // is known when we emit Perform.
+        let get42_idx = module.add_constant(Constant::String("Get42".to_string()));
+
         module.emit(Instruction::new1(OpCode::Handle, 0));           // 0
-        module.emit(Instruction::new3(OpCode::Perform, 0, 0, 1));    // 1: perform Get42 -> r1
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((get42_idx >> 8) & 0xFF) as u8,
+            (get42_idx & 0xFF) as u8,
+            1));                                                       // 1: perform Get42 -> r1
         // After resume, r1 should have 42. Copy it to r0 for return.
         module.emit(Instruction::new2(OpCode::Move, 1, 0));          // 2
         module.emit(Instruction::new0(OpCode::Unwind));              // 3

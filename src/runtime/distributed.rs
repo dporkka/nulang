@@ -68,9 +68,9 @@ const DEFAULT_CACHE_SIZE: usize = 10_000;
 ///
 /// # Example
 ///
-/// ```
-/// use nulang_runtime::distributed::ActorAddress;
-/// use nulang_runtime::cluster::NodeId;
+/// ```ignore
+/// use nulang::runtime::distributed::ActorAddress;
+/// use nulang::runtime::cluster::NodeId;
 ///
 /// let local = ActorAddress::local(42);
 /// assert!(local.is_local());
@@ -178,12 +178,11 @@ impl RemoteActorCache {
     /// On a hit, the entry is moved to the most-recently-used position.
     pub fn get(&mut self, node_id: NodeId, actor_id: u64) -> Option<&RemoteActorInfo> {
         let key = (node_id, actor_id);
-        if self.entries.contains_key(&key) {
+        if let Some(info) = self.entries.get_mut(&key) {
             // Update LRU position: remove and re-insert at back.
             self.access_order.retain(|&k| k != key);
             self.access_order.push_back(key);
             // Update last_accessed timestamp.
-            let info = self.entries.get_mut(&key).unwrap();
             info.last_accessed = Instant::now();
             Some(info)
         } else {

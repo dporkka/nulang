@@ -846,6 +846,7 @@ impl TypeChecker {
             Literal::Float(_) => Type::float(),
             Literal::String(_) => Type::string(),
             Literal::Bool(_) => Type::bool(),
+            Literal::Nil => Type::unit(), // TODO: dedicated nil type
             Literal::Unit => Type::unit(),
         };
         Ok((vec![], ty))
@@ -956,6 +957,22 @@ impl TypeChecker {
         body: &Expr,
         _span: Span,
     ) -> NuResult<(Substitution, Type)> {
+        // For let-bound lambdas that reference themselves (e.g.
+        // `let fac = fn(n) ... fac(n-1) ... in ...`), make the binding name
+        // available inside the lambda body with a fresh type variable.
+        if matches!(value, Expr::Lambda { .. }) {
+            let rec_var = Type::Var(TypeVar::fresh());
+            let ctx_with_rec = ctx.extend(name.to_string(), rec_var.clone(), Capability::Ref);
+            let (s1, val_ty) = self.infer_expr(&ctx_with_rec, value)?;
+            let s2 = mgu(&apply_subst(&rec_var, &s1), &apply_subst(&val_ty, &s1), Span::default())?;
+            let s_combined = compose_subst(&s2, &s1);
+            let gen_ty = self.do_generalize(ctx, &apply_subst(&val_ty, &s_combined));
+            let new_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref);
+            let (s3, body_ty) = self.infer_expr(&new_ctx, body)?;
+            let final_subst = compose_subst(&s3, &s_combined);
+            return Ok((final_subst.clone(), apply_subst(&body_ty, &final_subst)));
+        }
+
         // Infer the binding value
         let (s1, val_ty) = self.infer_expr(ctx, value)?;
 
@@ -1403,6 +1420,7 @@ impl TypeChecker {
                     Literal::Float(_) => Type::float(),
                     Literal::String(_) => Type::string(),
                     Literal::Bool(_) => Type::bool(),
+                    Literal::Nil => Type::unit(), // TODO: dedicated nil type
                     Literal::Unit => Type::unit(),
                 };
                 let _ = mgu(scrut_ty, &lit_ty, Span::default())?;

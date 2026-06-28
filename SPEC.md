@@ -77,10 +77,18 @@ Defined in `src/types.rs`. All modules import from here.
 - `OpCode`: u8 enum
 - `Instruction`: OpCode + 3 u8 operands (or extended)
 - `Module`: Constant pool + bytecode + behavior table + debug info
-- `Constant`: String, Float, Int, TypeDescriptor, FunctionRef
+- `Constant`: Int, Float, String, Bool, Nil, Unit, TypeDescriptor, FunctionRef, BehaviorRef
 
 ### Runtime Types (in `src/runtime/`)
-- `Value`: 64-bit NaN-tagged (immediate int/float, heap ptr, actor ref, special)
+- `Value`: 64-bit NaN-tagged using distinct high-16 type tags:
+  - `0x7FF8` nil
+  - `0x7FF9` unit
+  - `0x7FFA` bool
+  - `0x7FFB` int (48-bit signed payload)
+  - `0x7FFC` heap pointer
+  - `0x7FFD` actor reference
+  - `0x7FFE` interned string ID
+  - `0x7FF7` closure reference
 - `ActorRef`: 64-bit (node_id: u16, local_id: u32, generation: u16)
 - `ActorContext`: self_addr, mailbox, heap pointer, behavior table, state
 - `Message`: behavior_id + payload bytes + sender Addr

@@ -131,7 +131,7 @@ pub enum OpCode {
     // == Capabilities (0xA0-0xAF) ==
     CapChk  = 0xA0, // Capability check (required_cap, fail_label)
     CapUp   = 0xA1, // Capability upgrade (iso <- trn, etc.)
-    CapDown = 0x2, // Capability downgrade (ref -> box)
+    CapDown = 0xA2, // Capability downgrade (ref -> box)
     CapSend = 0xA3, // Mark value as sendable (check iso/val/tag)
 
     // == Distribution (0xD0-0xDF) ==
@@ -291,6 +291,7 @@ pub enum Constant {
     Float(f64),
     String(String),
     Bool(bool),
+    Nil,
     Unit,
     TypeDescriptor(String), // String representation of type
     FunctionRef(usize),     // Index into function table

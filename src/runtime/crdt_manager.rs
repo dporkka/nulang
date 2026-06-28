@@ -146,7 +146,7 @@ impl CrdtManager {
 
     pub fn create_orset(&mut self) -> (CrdtId, ORSet<String>) {
         let id = CrdtId::new();
-        let set = ORSet::new(self.node_id);
+        let set = ORSet::new(self.node_id as u32);
         self.entries.insert(id, CrdtEntry::ORSet(set.clone()));
         (id, set)
     }

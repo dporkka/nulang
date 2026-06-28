@@ -1,28 +1,28 @@
-# v0.7 Push Instructions
+# Push Instructions
 
-The full v0.7 implementation is in local commit `1c2cde9` at `/mnt/agents/output/nulang-impl/`.
+This document records how to push the current working tree to the GitHub remote.
 
-To push to GitHub, run:
+## Quick Push
+
 ```bash
-cd /mnt/agents/output/nulang-impl
+cd /home/dporkka/dev/nulang
 git push origin main
 ```
 
-## Files Changed (15 files, +7,091 lines)
+## Current State
 
-### New Files
-- `src/runtime/process_groups.rs` — Process groups (Erlang pg), 323 lines
-- `src/runtime/registry.rs` — Actor name registry, 453 lines
-- `src/runtime/timer.rs` — Hierarchical timer wheel, 438 lines
+- Branch: `main`
+- Remote: `https://github.com/dporkka/nulang.git`
+- Build: `cargo build` succeeds
+- Tests: `cargo test` succeeds (508 unit tests pass)
 
-### Modified Files
-- `src/lib.rs` — Fixed module declarations
-- `src/types.rs` — Added ExitReason enum
-- `src/vm.rs` — Implemented 7 BEAM opcodes (Receive, Monitor, Demon, Link, Unlink, Exit, Yield)
-- `src/runtime/actor.rs` — Added exit_reason field
-- `src/runtime/mod.rs` — Integrated timer, registry, process_groups into Runtime
-- `src/runtime/supervisor.rs` — Updated for typed ExitReason
-- `src/runtime/tests.rs` — Added 24 integration tests for BEAM primitives
+## Recent Changes
 
-### BEAM_PRIMITIVES.md
-- Full adoption analysis of BEAM/OTP primitives
+- Fixed upstream bytecode ISA / `Value` representation refactor that left the build broken.
+- Restored `Runtime` and `fresh_actor_id()`.
+- Replaced the colliding low-nibble NaN-boxing scheme with distinct high-16 type tags.
+- Fixed VM operand layouts for constants, `Not`, `INeg`, jumps, `Load`/`Store`/`Dup`.
+- Added lexer/parser support for `and`, `or`, `not`, `then`, `nil`, `case`.
+- Implemented minimal array opcodes and capture-free closure support.
+- Updated Python marshaling to use the new `Value` tagging.
+- All unit tests now pass.

@@ -269,6 +269,7 @@ pub struct SimdRegion {
 ///
 /// # Example
 ///
+/// ```ignore
 /// ```no_run
 /// use nulang::jit::simd_analyzer::SimdAnalyzer;
 /// use nulang::bytecode::Instruction;

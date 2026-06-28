@@ -31,7 +31,7 @@ impl std::error::Error for PgError {}
 ///
 /// # Example
 /// ```
-/// use nulang_impl::runtime::ProcessGroups;
+/// use nulang::runtime::ProcessGroups;
 ///
 /// let groups = ProcessGroups::new();
 /// groups.join("workers", 42).unwrap();

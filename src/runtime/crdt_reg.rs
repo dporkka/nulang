@@ -139,30 +139,34 @@ impl<T: Clone + Eq + Hash> MVRegister<T> {
 
     pub fn write(&mut self, value: T) {
         let ts = self.clock.tick();
-        let old: Vec<_> = self.values.iter().cloned().collect();
-        for (v, t) in &old {
-            if *t < ts { self.values.remove(&(v.clone(), *t)); }
-        }
+        self.values.retain(|(_, t)| *t >= ts);
         self.values.insert((value, ts));
     }
 
     pub fn read(&self) -> HashSet<T> {
-        if self.values.is_empty() { return HashSet::new(); }
-        let max_ts = self.values.iter().map(|(_, t)| *t).max().unwrap();
-        self.values.iter().filter(|(_, t)| *t == max_ts).map(|(v, _)| v.clone()).collect()
+        self.values.iter()
+            .map(|(_, t)| *t)
+            .max()
+            .map(|max_ts| {
+                self.values.iter()
+                    .filter(|(_, t)| *t == max_ts)
+                    .map(|(v, _)| v.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn is_conflicted(&self) -> bool { self.read().len() > 1 }
 
     pub fn merge(&mut self, other: &Self) {
-        let combined: Vec<_> = self.values.iter().cloned().chain(other.values.iter().cloned()).collect();
-        if combined.is_empty() {
-            self.clock.counter = self.clock.counter.max(other.clock.counter);
-            return;
-        }
-        let max_ts = combined.iter().map(|(_, t)| *t).max().unwrap();
-        self.values = combined.into_iter().filter(|(_, t)| *t == max_ts).collect();
         self.clock.counter = self.clock.counter.max(other.clock.counter);
+        for (val, ts) in &other.values {
+            self.values.insert((val.clone(), *ts));
+        }
+        if !self.values.is_empty() {
+            let max_ts = self.values.iter().map(|(_, t)| *t).max().unwrap();
+            self.values.retain(|(_, t)| *t == max_ts);
+        }
     }
 }
 
@@ -247,8 +251,14 @@ impl<T: Clone + PartialEq> RGA<T> {
     }
 
     pub fn insert_at(&mut self, index: usize, value: T) -> ElementId {
-        let live: Vec<_> = self.elements.iter().filter(|e| e.value.is_some()).map(|e| e.id).collect();
-        let parent = if index == 0 { None } else { Some(live[index - 1]) };
+        let parent = if index == 0 {
+            None
+        } else {
+            self.elements.iter()
+                .filter(|e| e.value.is_some())
+                .nth(index - 1)
+                .map(|e| e.id)
+        };
         self.insert_after(parent, value)
     }
 
@@ -257,8 +267,12 @@ impl<T: Clone + PartialEq> RGA<T> {
     }
 
     pub fn delete_at(&mut self, index: usize) {
-        let live: Vec<_> = self.elements.iter().filter(|e| e.value.is_some()).map(|e| e.id).collect();
-        self.delete(live[index]);
+        if let Some(id) = self.elements.iter()
+            .filter(|e| e.value.is_some())
+            .nth(index)
+            .map(|e| e.id) {
+            self.delete(id);
+        }
     }
 
     pub fn get(&self, index: usize) -> Option<&T> {

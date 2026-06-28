@@ -131,6 +131,13 @@ impl Scheduler {
         None
     }
 
+    /// Pop the next task from the scheduler.
+    ///
+    /// Alias for `steal_one` — used by the runtime's scheduler loop.
+    pub fn dequeue(&self) -> Option<u64> {
+        self.steal_one()
+    }
+
     /// Steal one task from any source, without a local deque.
     ///
     /// Used by external event loops (I/O, timers) that need to

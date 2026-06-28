@@ -654,7 +654,7 @@ impl Parser {
                 match kind {
                     // Literals
                     TokenKind::IntLit(_) | TokenKind::FloatLit(_) | TokenKind::StringLit(_)
-                    | TokenKind::BoolLit(_) | TokenKind::UnitLit => self.parse_literal(),
+                    | TokenKind::BoolLit(_) | TokenKind::NilLit | TokenKind::UnitLit => self.parse_literal(),
 
                     // Identifiers
                     TokenKind::Ident(name) => {
@@ -764,6 +764,10 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Literal(Literal::Bool(b), span))
             }
+            TokenKind::NilLit => {
+                self.advance();
+                Ok(Expr::Literal(Literal::Nil, span))
+            }
             TokenKind::UnitLit => {
                 self.advance();
                 Ok(Expr::Literal(Literal::Unit, span))
@@ -842,6 +846,9 @@ impl Parser {
         self.advance(); // consume 'if'
         let cond = self.parse_expr()?;
 
+        // Optional `then` keyword for ML-style syntax: `if c then a else b`
+        let _ = self.consume_if(&TokenKind::Then);
+
         // Parse then branch: either { block } or single expression
         let then_branch = if self.match_token(&TokenKind::LBrace) {
             Box::new(self.parse_block()?)
@@ -871,7 +878,7 @@ impl Parser {
         let span = self.current_span();
         self.advance(); // consume 'match'
         let scrutinee = self.parse_expr()?;
-        self.expect(TokenKind::With)?;
+        let _ = self.consume_if(&TokenKind::With); // `with` is optional
         self.expect(TokenKind::LBrace)?;
 
         let mut arms = Vec::new();
@@ -882,7 +889,8 @@ impl Parser {
                 break;
             }
 
-            // Pattern starts with '|'
+            // Optional leading `case` or `|` before each arm.
+            let _ = self.consume_if(&TokenKind::Case);
             if self.consume_if(&TokenKind::Pipe) {
                 // OK
             }
@@ -1137,6 +1145,7 @@ impl Parser {
                 | TokenKind::FloatLit(_)
                 | TokenKind::StringLit(_)
                 | TokenKind::BoolLit(_)
+                | TokenKind::NilLit
                 | TokenKind::UnitLit
                 | TokenKind::Ident(_)
                 | TokenKind::UpperIdent(_)
@@ -1595,6 +1604,10 @@ impl Parser {
                 let b = *b;
                 self.advance();
                 Ok(Pattern::Lit(Literal::Bool(b)))
+            }
+            TokenKind::NilLit => {
+                self.advance();
+                Ok(Pattern::Lit(Literal::Nil))
             }
             TokenKind::UnitLit => {
                 self.advance();

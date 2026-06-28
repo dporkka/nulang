@@ -74,7 +74,7 @@ impl Ord for TimerEntry {
 ///
 /// # Example
 /// ```
-/// use nulang_impl::runtime::TimerWheel;
+/// use nulang::runtime::TimerWheel;
 /// use std::time::Duration;
 ///
 /// let wheel = TimerWheel::new();
@@ -216,36 +216,20 @@ impl TimerWheel {
     /// delivering these messages.
     pub fn tick(&self, now: Instant) -> Vec<(u64, TimerMessage)> {
         let mut fired = Vec::new();
-        let mut to_remove = Vec::new();
 
-        {
-            let timers = match self.timers.read() {
-                Ok(t) => t,
-                Err(_) => return fired,
-            };
-
-            for entry in timers.iter() {
+        if let Ok(mut timers) = self.timers.write() {
+            while let Some(entry) = timers.peek() {
                 if entry.cancelled.load(Ordering::SeqCst) {
-                    to_remove.push(entry.id);
+                    timers.pop();
                     continue;
                 }
                 if entry.fire_at <= now {
-                    fired.push((entry.target_actor, entry.message.clone()));
-                    to_remove.push(entry.id);
-                }
-            }
-        }
-
-        // Remove fired and cancelled timers
-        if !to_remove.is_empty() {
-            if let Ok(mut timers) = self.timers.write() {
-                let mut new_heap = BinaryHeap::new();
-                while let Some(entry) = timers.pop() {
-                    if !to_remove.contains(&entry.id) {
-                        new_heap.push(entry);
+                    if let Some(entry) = timers.pop() {
+                        fired.push((entry.target_actor, entry.message));
                     }
+                } else {
+                    break;
                 }
-                *timers = new_heap;
             }
         }
 

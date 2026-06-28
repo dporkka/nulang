@@ -416,7 +416,7 @@ fn write_value(buf: &mut Vec<u8>, v: &Value) {
     } else {
         // Fall back to writing raw bits as float (for NaN floats or other tagged NaNs)
         buf.push(VAL_FLOAT);
-        buf.extend_from_slice(&v.0.to_be_bytes());
+        buf.extend_from_slice(&v.as_raw().to_be_bytes());
     }
 }
 

@@ -317,25 +317,27 @@ impl Crdt for GSet<String> {
 // ORSet
 // =============================================================================
 
-pub type Tag = u64;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Tag {
+    pub node_id: u32,
+    pub counter: u32,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ORSet<T: Clone + Eq + std::hash::Hash> {
     pub entries: HashMap<T, HashSet<Tag>>,
-    pub tag_counter: u64,
-    pub node_id: u64,
+    pub tag_counter: u32,
+    pub node_id: u32,
 }
 
 impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
-    pub fn new(node_id: u64) -> Self {
-        assert!(node_id <= u32::MAX as u64, "ORSet node_id must fit in 32 bits");
+    pub fn new(node_id: u32) -> Self {
         Self { entries: HashMap::new(), tag_counter: 0, node_id }
     }
 
     fn fresh_tag(&mut self) -> Tag {
-        assert!(self.tag_counter <= u32::MAX as u64);
-        let tag = (self.node_id << 32) | self.tag_counter;
-        self.tag_counter += 1;
+        let tag = Tag { node_id: self.node_id, counter: self.tag_counter };
+        self.tag_counter = self.tag_counter.checked_add(1).expect("Counter overflow");
         tag
     }
 
@@ -379,13 +381,13 @@ impl Crdt for ORSet<String> {
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        push_u64(&mut buf, self.node_id);
-        push_u64(&mut buf, self.tag_counter);
+        push_u64(&mut buf, self.node_id as u64);
+        push_u64(&mut buf, self.tag_counter as u64);
         push_u32(&mut buf, self.entries.len() as u32);
         for (element, tags) in &self.entries {
             push_string(&mut buf, element);
             push_u32(&mut buf, tags.len() as u32);
-            for tag in tags { push_u64(&mut buf, *tag); }
+            for tag in tags { push_u64(&mut buf, ((tag.node_id as u64) << 32) | (tag.counter as u64)); }
         }
         buf
     }
@@ -400,14 +402,14 @@ impl Crdt for ORSet<String> {
             let (tag_count, mut p) = read_u32(bytes, p)?;
             let mut tags = HashSet::new();
             for _ in 0..tag_count {
-                let (tag, p2) = read_u64(bytes, p)?;
-                tags.insert(tag);
+                let (tag_val, p2) = read_u64(bytes, p)?;
+                tags.insert(Tag { node_id: (tag_val >> 32) as u32, counter: tag_val as u32 });
                 p = p2;
             }
             entries.insert(element, tags);
             pos = p;
         }
-        Some(Self { entries, tag_counter, node_id })
+        Some(Self { entries, tag_counter: tag_counter as u32, node_id: node_id as u32 })
     }
 }
 
@@ -732,14 +734,14 @@ mod tests {
 
     #[test]
     fn test_orset_add() {
-        let mut s = ORSet::<String>::new(1);
+        let mut s = ORSet::<String>::new(1_u32);
         s.add("a".to_string());
         assert!(s.contains(&"a".to_string()));
     }
 
     #[test]
     fn test_orset_remove() {
-        let mut s = ORSet::<String>::new(1);
+        let mut s = ORSet::<String>::new(1_u32);
         s.add("a".to_string());
         s.remove(&"a".to_string());
         assert!(!s.contains(&"a".to_string()));
@@ -747,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_orset_add_wins() {
-        let mut a = ORSet::<String>::new(1);
+        let mut a = ORSet::<String>::new(1_u32);
         a.add("x".to_string());
         let mut b = a.clone();
         a.add("x".to_string());
@@ -758,8 +760,8 @@ mod tests {
 
     #[test]
     fn test_orset_merge() {
-        let mut a = ORSet::<String>::new(1); a.add("x".to_string());
-        let mut b = ORSet::<String>::new(2); b.add("y".to_string());
+        let mut a = ORSet::<String>::new(1_u32); a.add("x".to_string());
+        let mut b = ORSet::<String>::new(2_u32); b.add("y".to_string());
         a.merge(&b);
         assert!(a.contains(&"x".to_string()));
         assert!(a.contains(&"y".to_string()));
@@ -767,8 +769,8 @@ mod tests {
 
     #[test]
     fn test_orset_merge_commutative() {
-        let mut a = ORSet::<String>::new(1); a.add("x".to_string());
-        let mut b = ORSet::<String>::new(2); b.add("y".to_string());
+        let mut a = ORSet::<String>::new(1_u32); a.add("x".to_string());
+        let mut b = ORSet::<String>::new(2_u32); b.add("y".to_string());
         let b_snap = b.clone_replica();
         a.merge(&b_snap);
         let mut b = b_snap.clone();
@@ -778,7 +780,7 @@ mod tests {
 
     #[test]
     fn test_orset_serialize_roundtrip() {
-        let mut s = ORSet::<String>::new(1);
+        let mut s = ORSet::<String>::new(1_u32);
         s.add("hello".to_string());
         s.add("world".to_string());
         let bytes = s.to_bytes();

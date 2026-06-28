@@ -36,14 +36,14 @@ pub extern "C" fn nulang_imul(a: u64, b: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn nulang_idiv(a: u64, b: u64) -> u64 {
     let bv = sext48(b & 0x0000FFFFFFFFFFFF);
-    if bv == 0 { return Value::nil().0; }
+    if bv == 0 { return Value::nil().as_raw(); }
     tag_int(sext48(a & 0x0000FFFFFFFFFFFF) / bv)
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_imod(a: u64, b: u64) -> u64 {
     let bv = sext48(b & 0x0000FFFFFFFFFFFF);
-    if bv == 0 { return Value::nil().0; }
+    if bv == 0 { return Value::nil().as_raw(); }
     tag_int(sext48(a & 0x0000FFFFFFFFFFFF) % bv)
 }
 
@@ -64,89 +64,89 @@ pub extern "C" fn nulang_idec(a: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_eq(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) == sext48(b & 0x0000FFFFFFFFFFFF)).0
+    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) == sext48(b & 0x0000FFFFFFFFFFFF)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_lt(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) < sext48(b & 0x0000FFFFFFFFFFFF)).0
+    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) < sext48(b & 0x0000FFFFFFFFFFFF)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_gt(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) > sext48(b & 0x0000FFFFFFFFFFFF)).0
+    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) > sext48(b & 0x0000FFFFFFFFFFFF)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_le(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) <= sext48(b & 0x0000FFFFFFFFFFFF)).0
+    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) <= sext48(b & 0x0000FFFFFFFFFFFF)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_ge(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) >= sext48(b & 0x0000FFFFFFFFFFFF)).0
+    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) >= sext48(b & 0x0000FFFFFFFFFFFF)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_fadd(a: u64, b: u64) -> u64 {
-    Value::float(f64::from_bits(a) + f64::from_bits(b)).0
+    Value::float(f64::from_bits(a) + f64::from_bits(b)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_fsub(a: u64, b: u64) -> u64 {
-    Value::float(f64::from_bits(a) - f64::from_bits(b)).0
+    Value::float(f64::from_bits(a) - f64::from_bits(b)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_fmul(a: u64, b: u64) -> u64 {
-    Value::float(f64::from_bits(a) * f64::from_bits(b)).0
+    Value::float(f64::from_bits(a) * f64::from_bits(b)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_fdiv(a: u64, b: u64) -> u64 {
-    Value::float(f64::from_bits(a) / f64::from_bits(b)).0
+    Value::float(f64::from_bits(a) / f64::from_bits(b)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_fcmp_eq(a: u64, b: u64) -> u64 {
-    Value::bool((f64::from_bits(a) - f64::from_bits(b)).abs() < f64::EPSILON).0
+    Value::bool((f64::from_bits(a) - f64::from_bits(b)).abs() < f64::EPSILON).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_fcmp_lt(a: u64, b: u64) -> u64 {
-    Value::bool(f64::from_bits(a) < f64::from_bits(b)).0
+    Value::bool(f64::from_bits(a) < f64::from_bits(b)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_fcmp_gt(a: u64, b: u64) -> u64 {
-    Value::bool(f64::from_bits(a) > f64::from_bits(b)).0
+    Value::bool(f64::from_bits(a) > f64::from_bits(b)).as_raw()
 }
 
 fn is_truthy(v: u64) -> bool {
-    v != Value::nil().0 && v != Value::bool(false).0 && v != Value::int(0).0
+    v != Value::nil().as_raw() && v != Value::bool(false).as_raw() && v != Value::int(0).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_not(a: u64) -> u64 {
-    Value::bool(!is_truthy(a)).0
+    Value::bool(!is_truthy(a)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_and(a: u64, b: u64) -> u64 {
-    Value::bool(is_truthy(a) && is_truthy(b)).0
+    Value::bool(is_truthy(a) && is_truthy(b)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_or(a: u64, b: u64) -> u64 {
-    Value::bool(is_truthy(a) || is_truthy(b)).0
+    Value::bool(is_truthy(a) || is_truthy(b)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_itof(a: u64) -> u64 {
-    Value::float(sext48(a & 0x0000FFFFFFFFFFFF) as f64).0
+    Value::float(sext48(a & 0x0000FFFFFFFFFFFF) as f64).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_ftoi(a: u64) -> u64 {
-    Value::int(f64::from_bits(a) as i64).0
+    Value::int(f64::from_bits(a) as i64).as_raw()
 }
