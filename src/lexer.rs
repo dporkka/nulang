@@ -202,6 +202,13 @@ impl<'a> Lexer<'a> {
                     span: Span::new(start, self.pos, start_line, start_col),
                 }
             }
+            b'@' => {
+                self.advance();
+                Token {
+                    kind: TokenKind::At,
+                    span: Span::new(start, self.pos, start_line, start_col),
+                }
+            }
             b';' => {
                 self.advance();
                 Token {
@@ -710,5 +717,224 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "not" => Some(TokenKind::Not),
         "unit" => Some(TokenKind::UnitLit),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lex(source: &str) -> Vec<TokenKind> {
+        let mut lexer = Lexer::new(source);
+        lexer
+            .lex()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
+    }
+
+    #[test]
+    fn test_simple_tokens() {
+        let kinds = lex("let x = 42 in x + 1");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident("x".to_string()),
+                TokenKind::Assign,
+                TokenKind::IntLit(42),
+                TokenKind::In,
+                TokenKind::Ident("x".to_string()),
+                TokenKind::Plus,
+                TokenKind::IntLit(1),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_nested_block_comments() {
+        // Nested comments are supported by the lexer.
+        let source = "/* outer /* inner */ still outer */ 42";
+        let kinds = lex(source);
+        assert_eq!(kinds, vec![TokenKind::IntLit(42), TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_doc_comment_preserved() {
+        let kinds = lex("/// hello\n42");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::DocComment(" hello".to_string()),
+                TokenKind::Newline,
+                TokenKind::IntLit(42),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_line_comment_skipped() {
+        let kinds = lex("// ignored\n42");
+        assert_eq!(
+            kinds,
+            vec![TokenKind::Newline, TokenKind::IntLit(42), TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_string_escapes() {
+        let kinds = lex(r#""a\nb\tc\"d""#);
+        assert_eq!(
+            kinds,
+            vec![TokenKind::StringLit("a\nb\tc\"d".to_string()), TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_float_variants() {
+        let kinds = lex("3.14 1e3 2.5e-2");
+        assert!(matches!(kinds[0], TokenKind::FloatLit(v) if (v - 3.14).abs() < 1e-9));
+        assert!(matches!(kinds[1], TokenKind::FloatLit(v) if (v - 1000.0).abs() < 1e-9));
+        assert!(matches!(kinds[2], TokenKind::FloatLit(v) if (v - 0.025).abs() < 1e-9));
+    }
+
+    #[test]
+    fn test_all_operators() {
+        // Exercise every operator that the lexer currently recognizes.
+        let source = "+ - * / % == != < <= > >= && || & | |> ^ ~ << >> = += -= -> => <- . .. : ::";
+        let kinds = lex(source);
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Plus,
+                TokenKind::Minus,
+                TokenKind::Star,
+                TokenKind::Slash,
+                TokenKind::Percent,
+                TokenKind::Eq,
+                TokenKind::Ne,
+                TokenKind::Lt,
+                TokenKind::Le,
+                TokenKind::Gt,
+                TokenKind::Ge,
+                TokenKind::And,
+                TokenKind::Or,
+                TokenKind::Ampersand,
+                TokenKind::Pipe,
+                TokenKind::PipeOp,
+                TokenKind::Caret,
+                TokenKind::Tilde,
+                TokenKind::Shl,
+                TokenKind::Shr,
+                TokenKind::Assign,
+                TokenKind::PlusAssign,
+                TokenKind::MinusAssign,
+                TokenKind::Arrow,
+                TokenKind::FatArrow,
+                TokenKind::ThinArrow,
+                TokenKind::Dot,
+                TokenKind::DotDot,
+                TokenKind::Colon,
+                TokenKind::DoubleColon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_keywords_and_identifiers() {
+        let kinds = lex("fn let rec if true False MyType _under");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Fn,
+                TokenKind::Let,
+                TokenKind::Rec,
+                TokenKind::If,
+                TokenKind::BoolLit(true),
+                TokenKind::UpperIdent("False".to_string()),
+                TokenKind::UpperIdent("MyType".to_string()),
+                TokenKind::Ident("_under".to_string()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_unterminated_block_comment() {
+        // Unterminated block comments are currently accepted and consume to EOF.
+        let kinds = lex("/* never closed");
+        assert_eq!(kinds, vec![TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_unterminated_string_errors() {
+        let mut lexer = Lexer::new("\"hello");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("Unterminated string literal"));
+            }
+            _ => panic!("Expected LexError"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_escape_errors() {
+        let mut lexer = Lexer::new("\"\\q\"");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("Unknown escape sequence"));
+            }
+            _ => panic!("Expected LexError"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_hex_errors() {
+        let mut lexer = Lexer::new("0x");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("Expected hex digits"));
+            }
+            _ => panic!("Expected LexError"),
+        }
+    }
+
+    #[test]
+    fn test_invalid_float_exponent_errors() {
+        let mut lexer = Lexer::new("1e");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("Expected digits in exponent"));
+            }
+            _ => panic!("Expected LexError"),
+        }
+    }
+
+    #[test]
+    fn test_unexpected_character_errors() {
+        let mut lexer = Lexer::new("$");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("Unexpected character"));
+            }
+            _ => panic!("Expected LexError"),
+        }
+    }
+
+    #[test]
+    fn test_unicode_identifier_rejected() {
+        // The current lexer only accepts ASCII identifiers.
+        let mut lexer = Lexer::new("α");
+        let err = lexer.lex().unwrap_err();
+        assert!(matches!(err, NuError::LexError { .. }));
     }
 }

@@ -16,6 +16,7 @@ pub mod vm;
 
 pub mod runtime;
 pub mod jit;
+pub use crate::jit::reset_hot_counters;
 pub mod python;
 #[cfg(test)]
 pub mod stress_tests;

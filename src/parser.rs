@@ -150,6 +150,7 @@ impl Parser {
                     decls.push(self.parse_decl()?);
                     self.skip_newlines();
                 }
+                self.expect(TokenKind::RBrace)?;
                 Ok(Decl::Module {
                     name,
                     exports: vec![],
@@ -1743,5 +1744,277 @@ fn token_to_binop(kind: &TokenKind) -> Option<BinOp> {
         TokenKind::Shr => Some(BinOp::Shr),
         TokenKind::Assign => Some(BinOp::Assign),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn parse(source: &str) -> NuResult<AstModule> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        parser.parse_module()
+    }
+
+    fn parse_expr(source: &str) -> NuResult<Expr> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        parser.parse_expr()
+    }
+
+    #[test]
+    fn test_parse_record_type() {
+        let ast = parse("type Point = { x: Int, y: Int }").unwrap();
+        assert_eq!(ast.decls.len(), 1);
+        match &ast.decls[0] {
+            Decl::RecordType { name, fields, .. } => {
+                assert_eq!(name, "Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "x");
+                assert_eq!(fields[0].1, Type::Primitive(PrimitiveType::Int));
+                assert_eq!(fields[1].0, "y");
+                assert_eq!(fields[1].1, Type::Primitive(PrimitiveType::Int));
+            }
+            _ => panic!("Expected record type declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_variant_type() {
+        let ast = parse("type Option[T] = Some(T) | None").unwrap();
+        match &ast.decls[0] {
+            Decl::VariantType {
+                name,
+                type_params,
+                variants,
+                ..
+            } => {
+                assert_eq!(name, "Option");
+                assert_eq!(type_params, &["T"]);
+                assert_eq!(variants.len(), 2);
+                assert_eq!(variants[0].0, "Some");
+                assert!(variants[0].1.is_some());
+                assert_eq!(variants[1].0, "None");
+                assert!(variants[1].1.is_none());
+            }
+            _ => panic!("Expected variant type declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_effect_decl() {
+        // Parenthesize the argument so the effect-decl parser does not consume
+        // the `->` as part of a function-typed argument.
+        let ast = parse("effect IO { print: (String) -> Unit }").unwrap();
+        match &ast.decls[0] {
+            Decl::EffectDecl { name, ops, .. } => {
+                assert_eq!(name, "IO");
+                assert_eq!(ops.len(), 1);
+                assert_eq!(ops[0].0, "print");
+                assert_eq!(ops[0].1, vec![Type::Primitive(PrimitiveType::String)]);
+                assert_eq!(ops[0].2, Type::Primitive(PrimitiveType::Unit));
+            }
+            _ => panic!("Expected effect declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_alias() {
+        let ast = parse("type alias MyInt = Int").unwrap();
+        match &ast.decls[0] {
+            Decl::TypeAlias { name, body, .. } => {
+                assert_eq!(name, "MyInt");
+                assert_eq!(body, &Type::Primitive(PrimitiveType::Int));
+            }
+            _ => panic!("Expected type alias declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_module_decl() {
+        let ast = parse("module M { fn f() 1 }").unwrap();
+        match &ast.decls[0] {
+            Decl::Module { name, decls, .. } => {
+                assert_eq!(name, "M");
+                assert_eq!(decls.len(), 1);
+                assert!(matches!(&decls[0], Decl::Function { name, .. } if name == "f"));
+            }
+            _ => panic!("Expected module declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_import() {
+        let ast = parse("import Foo").unwrap();
+        match &ast.decls[0] {
+            Decl::Import { path, .. } => {
+                assert_eq!(path, "Foo");
+            }
+            _ => panic!("Expected import declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actor_decl() {
+        let source = r#"actor Counter {
+            state count = 0
+            behavior get() { self.count }
+        }"#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Actor {
+                name,
+                state_fields,
+                behaviors,
+                ..
+            } => {
+                assert_eq!(name, "Counter");
+                assert_eq!(state_fields.len(), 1);
+                assert_eq!(state_fields[0].0, "count");
+                assert_eq!(behaviors.len(), 1);
+                assert_eq!(behaviors[0].name, "get");
+            }
+            _ => panic!("Expected actor declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_record_literal() {
+        let ast = parse("{ x: 1, y: 2 }").unwrap();
+        match &ast.decls[0] {
+            Decl::Function { name, body, .. } if name == "__main" => match body {
+                Expr::Record(fields, _) => {
+                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields[0].0, "x");
+                    assert_eq!(fields[1].0, "y");
+                }
+                _ => panic!("Expected record literal"),
+            },
+            _ => panic!("Expected synthetic __main wrapping record literal"),
+        }
+    }
+
+    #[test]
+    fn test_parse_record_pattern() {
+        let source = r#"match r { { x: a, y: b } => a + b }"#;
+        let expr = parse_expr(source).unwrap();
+        match expr {
+            Expr::Match { arms, .. } => {
+                assert_eq!(arms.len(), 1);
+                match &arms[0].0 {
+                    Pattern::Record(fields) => {
+                        assert_eq!(fields.len(), 2);
+                        assert_eq!(fields[0].0, "x");
+                        assert_eq!(fields[1].0, "y");
+                    }
+                    _ => panic!("Expected record pattern"),
+                }
+            }
+            _ => panic!("Expected match expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_variant_pattern() {
+        let source = r#"match o { Some(x) => x | None => 0 }"#;
+        let expr = parse_expr(source).unwrap();
+        match expr {
+            Expr::Match { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                match &arms[0].0 {
+                    Pattern::Variant(name, Some(_)) => assert_eq!(name, "Some"),
+                    _ => panic!("Expected Some variant pattern"),
+                }
+                match &arms[1].0 {
+                    Pattern::Variant(name, None) => assert_eq!(name, "None"),
+                    _ => panic!("Expected None variant pattern"),
+                }
+            }
+            _ => panic!("Expected match expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_handle_with_resume() {
+        let source = r#"handle perform E.op() { | E.op() resume => 42 }"#;
+        let expr = parse_expr(source).unwrap();
+        match expr {
+            Expr::Handle { handlers, .. } => {
+                assert_eq!(handlers.len(), 1);
+                assert_eq!(handlers[0].effect_name, "E");
+                assert_eq!(handlers[0].op_name, "op");
+                assert!(handlers[0].resume);
+            }
+            _ => panic!("Expected handle expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pipe_operator() {
+        let expr = parse_expr("5 |> f").unwrap();
+        match expr {
+            Expr::Pipe { left, right, .. } => {
+                assert!(matches!(left.as_ref(), Expr::Literal(Literal::Int(5), _)));
+                assert!(matches!(right.as_ref(), Expr::Var(name, _) if name == "f"));
+            }
+            _ => panic!("Expected pipe expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_annotation() {
+        let expr = parse_expr("(x : Int)").unwrap();
+        match expr {
+            Expr::TypeAnnotate { expr, ty, .. } => {
+                assert!(matches!(expr.as_ref(), Expr::Var(name, _) if name == "x"));
+                assert_eq!(ty, Type::Primitive(PrimitiveType::Int));
+            }
+            _ => panic!("Expected type annotation"),
+        }
+    }
+
+    #[test]
+    fn test_parse_capability_annotation() {
+        let expr = parse_expr("x :cap iso").unwrap();
+        match expr {
+            Expr::CapAnnotate { expr, cap, .. } => {
+                assert!(matches!(expr.as_ref(), Expr::Var(name, _) if name == "x"));
+                assert_eq!(cap, Capability::Iso);
+            }
+            _ => panic!("Expected capability annotation"),
+        }
+    }
+
+    #[test]
+    fn test_parse_alias_pattern() {
+        let expr = parse_expr("match v { n @ Some(x) => n }").unwrap();
+        match expr {
+            Expr::Match { arms, .. } => {
+                match &arms[0].0 {
+                    Pattern::Alias(name, inner) => {
+                        assert_eq!(name, "n");
+                        assert!(matches!(inner.as_ref(), Pattern::Variant(v, _) if v == "Some"));
+                    }
+                    _ => panic!("Expected alias pattern"),
+                }
+            }
+            _ => panic!("Expected match expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_error_unexpected_token() {
+        let result = parse("fn");
+        assert!(result.is_err(), "Expected parse error for bare 'fn'");
+    }
+
+    #[test]
+    fn test_parse_error_missing_arrow_in_effect() {
+        let result = parse("effect E { op: Int }");
+        assert!(result.is_err(), "Expected parse error for effect op missing arrow");
     }
 }

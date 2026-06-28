@@ -26,8 +26,50 @@
 //! pointers, integers, and type tags.
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
+use crate::jit::{self, JitSession, TieredAction};
 use crate::types::{NuError, NuResult, Span};
 use std::collections::HashMap;
+
+// ---------------------------------------------------------------------------
+// Distributed runtime callbacks for VM opcode integration.
+//
+// The VM does not depend on the actor runtime directly (that would create a
+// circular crate dependency). Instead, a lightweight callback trait can be
+// installed when the VM is used inside a distributed actor context.
+// ---------------------------------------------------------------------------
+
+/// Callback interface that supplies real distributed behavior for the VM's
+/// `NodeId`, `Migrate`, `RAsk`, and `Gossip` opcodes.
+///
+/// A default no-op implementation is provided so the standalone VM remains
+/// usable without any distributed runtime attached.
+pub trait DistributedVmCallbacks: std::any::Any + std::fmt::Debug {
+    /// Return the local node ID.
+    fn node_id(&self) -> u64 { 0 }
+
+    /// Record an actor migration request.
+    fn migrate(&mut self, _actor_id: u64, _target_node_id: u64) {}
+
+    /// Perform a synchronous remote ask.
+    ///
+    /// Returns the response value, or `Value::nil()` on timeout / failure.
+    fn remote_ask(
+        &mut self,
+        _target_actor: u64,
+        _behavior: &str,
+        _args: &[Value],
+        _timeout_ms: u64,
+    ) -> Value {
+        Value::nil()
+    }
+
+    /// Send a gossip-style message to a subset of known nodes.
+    ///
+    /// Returns `Value::unit()`.
+    fn gossip(&mut self, _message: &str) -> Value {
+        Value::unit()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Value: NaN-boxed tagged value
@@ -175,6 +217,12 @@ impl Value {
     /// The caller must ensure the bits form a valid tagged value.
     pub fn from_raw(raw: u64) -> Self { Value { raw } }
 
+    /// Return the raw NaN-boxed bits (opaque bit pattern).
+    pub fn to_bits(self) -> u64 { self.raw }
+
+    /// Construct a Value from raw NaN-boxed bits.
+    pub fn from_bits(raw: u64) -> Self { Value { raw } }
+
     pub fn to_string_repr(&self) -> String {
         if self.is_nil() { "nil".to_string() }
         else if self.is_unit() { "()".to_string() }
@@ -184,6 +232,24 @@ impl Value {
         else if self.is_actor_ref() { format!("#Actor:{}", self.as_actor_id().unwrap()) }
         else { format!("#Value({:x})", self.raw) }
     }
+}
+
+/// Convert a bytecode constant pool to raw NaN-boxed bits for the JIT.
+fn constants_to_jit_bits(constants: &[Constant]) -> Vec<u64> {
+    constants
+        .iter()
+        .map(|c| match c {
+            Constant::Int(i) => Value::int(*i).to_bits(),
+            Constant::Float(f) => Value::float(*f).to_bits(),
+            Constant::Bool(b) => Value::bool(*b).to_bits(),
+            Constant::Nil => Value::nil().to_bits(),
+            Constant::Unit => Value::unit().to_bits(),
+            Constant::String(_) |
+            Constant::FunctionRef(_) |
+            Constant::BehaviorRef(_) |
+            Constant::TypeDescriptor(_) => Value::nil().to_bits(),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -347,6 +413,20 @@ pub struct VM {
     handler_stack: Vec<HandlerFrame>,
     /// Step counter (for debugging / limits).
     step_count: usize,
+    /// Optional JIT session for tiered compilation.
+    jit_session: Option<JitSession>,
+    /// Per-module constant pools converted to raw bits for the JIT.
+    jit_constants: Vec<Vec<u64>>,
+    /// Local node ID reported by the `NodeId` opcode.
+    node_id: u64,
+    /// Migration requests recorded by the `Migrate` opcode when no runtime
+    /// callback is installed.
+    pending_migrations: Vec<(u64, u64)>,
+    /// Gossip messages recorded by the `Gossip` opcode when no runtime
+    /// callback is installed.
+    gossip_log: Vec<String>,
+    /// Optional distributed runtime callbacks for remote operations.
+    distributed_callbacks: Option<Box<dyn DistributedVmCallbacks>>,
 }
 
 impl VM {
@@ -357,12 +437,40 @@ impl VM {
             current_frame: None,
             handler_stack: Vec::new(),
             step_count: 0,
+            jit_session: Some(JitSession::new()),
+            jit_constants: Vec::new(),
+            node_id: 0,
+            pending_migrations: Vec::new(),
+            gossip_log: Vec::new(),
+            distributed_callbacks: None,
         }
+    }
+
+    /// Set the local node ID returned by the `NodeId` opcode.
+    pub fn set_node_id(&mut self, node_id: u64) {
+        self.node_id = node_id;
+    }
+
+    /// Install distributed runtime callbacks for remote opcodes.
+    pub fn set_distributed_callbacks(&mut self, callbacks: Box<dyn DistributedVmCallbacks>) {
+        self.distributed_callbacks = Some(callbacks);
+    }
+
+    /// Take a snapshot of recorded migration requests.
+    pub fn pending_migrations(&self) -> &[(u64, u64)] {
+        &self.pending_migrations
+    }
+
+    /// Take a snapshot of recorded gossip messages.
+    pub fn gossip_log(&self) -> &[String] {
+        &self.gossip_log
     }
 
     /// Load a bytecode module into the VM.
     pub fn load_module(&mut self, module: CodeModule) {
+        let bits = constants_to_jit_bits(&module.constants);
         self.modules.push(module);
+        self.jit_constants.push(bits);
     }
 
     /// Get a constant string from a module's constant pool.
@@ -472,6 +580,38 @@ impl VM {
         }
         // Debug: print first 50 steps
         let debug = self.step_count <= 50;
+
+        // Try JIT execution for hot bytecode regions before interpreting.
+        if let Some(ref mut frame) = self.current_frame {
+            let module_idx = frame.module_idx;
+            let pc = frame.pc;
+            if let Some(module) = self.modules.get(module_idx) {
+                let constants = self.jit_constants.get(module_idx)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let instructions = &module.instructions;
+
+                let mut regs: [u64; 256] = [0; 256];
+                for (i, r) in frame.regs.iter().enumerate() {
+                    regs[i] = r.to_bits();
+                }
+
+                if let Some(ref mut jit) = self.jit_session {
+                    let action = jit::tiered_execute_step(
+                        jit, module_idx, pc, instructions, &mut regs, constants, None,
+                    );
+                    if action != TieredAction::Interpret {
+                        for (i, bits) in regs.iter().enumerate() {
+                            frame.regs[i] = Value::from_bits(*bits);
+                        }
+                        let region_len = jit::find_compilable_region(pc, instructions);
+                        frame.pc += region_len;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         // Fetch instruction
         let instr = {
             let frame = self.current_frame.as_ref()
@@ -1013,10 +1153,54 @@ impl VM {
             }
 
             // -- Distribution (MVP) --
-            OpCode::NodeId => { frame.regs[instr.op1 as usize] = Value::int(0); }
-            OpCode::Migrate => {}
-            OpCode::RAsk => { frame.regs[instr.op3 as usize] = Value::nil(); }
-            OpCode::Gossip => {}
+            //
+            // If a distributed runtime callback is installed, remote opcodes
+            // delegate to it. Otherwise they fall back to local, queryable
+            // stubs so the standalone VM never panics.
+            OpCode::NodeId => {
+                let node_id = self
+                    .distributed_callbacks
+                    .as_ref()
+                    .map(|cb| cb.node_id())
+                    .unwrap_or(self.node_id);
+                frame.regs[instr.op1 as usize] = Value::int(node_id as i64);
+            }
+            OpCode::Migrate => {
+                let actor_id = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as u64;
+                let target_node_id = frame.regs[instr.op2 as usize].as_int().unwrap_or(0) as u64;
+                self.pending_migrations.push((actor_id, target_node_id));
+                if let Some(ref mut cb) = self.distributed_callbacks {
+                    cb.migrate(actor_id, target_node_id);
+                }
+                frame.regs[instr.op3 as usize] = Value::unit();
+            }
+            OpCode::RAsk => {
+                // Instruction layout: op1 = target_actor_reg,
+                // op2 = behavior string constant index,
+                // op3 = dst_reg.
+                let target_actor = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as u64;
+                let behavior_const_idx = instr.op2 as usize;
+                let behavior = self.module_const_string(frame.module_idx, behavior_const_idx);
+                let result = if let Some(ref mut cb) = self.distributed_callbacks {
+                    cb.remote_ask(target_actor, &behavior, &[], 5_000)
+                } else {
+                    Value::nil()
+                };
+                frame.regs[instr.op3 as usize] = result;
+            }
+            OpCode::Gossip => {
+                // Instruction layout: op1 = message string constant index,
+                // op3 = dst_reg.
+                let message_const_idx = instr.op1 as usize;
+                let message = self.module_const_string(frame.module_idx, message_const_idx);
+                self.gossip_log.push(message.clone());
+                let result = if let Some(ref mut cb) = self.distributed_callbacks {
+                    cb.gossip(&message)
+                } else {
+                    Value::unit()
+                };
+                frame.regs[instr.op3 as usize] = result;
+            }
 
             // -- String & IO --
             OpCode::SConcat => {
@@ -1576,5 +1760,210 @@ mod vm_tests {
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("resume called without a captured continuation"),
             "Error should mention missing continuation: {}", err_msg);
+    }
+
+    /// Test 16: JIT-compiled hot loop produces the same result as the interpreter.
+    #[test]
+    fn test_jit_hot_loop_matches_interpreter() {
+        let mut module = CodeModule::new("test_jit_hot_loop");
+        // Registers: r0 = sum, r1 = i, r2 = limit, r3 = one, r4 = condition.
+        module.emit(Instruction::new1(OpCode::Const0, 0)); // 0: sum = 0
+        module.emit(Instruction::new1(OpCode::Const0, 1)); // 1: i = 0
+        module.emit(Instruction::new2(OpCode::Const2, 2, 0)); // 2: limit = 2
+        module.emit(Instruction::new2(OpCode::Const2, 3, 0)); // 3: tmp = 2
+        module.emit(Instruction::new3(OpCode::IAdd, 2, 3, 2)); // limit = 4
+        module.emit(Instruction::new1(OpCode::Const1, 3));     // r3 = 1
+
+        let loop_check = module.current_offset();
+        module.emit(Instruction::new3(OpCode::ICmpLt, 1, 2, 4)); // r4 = i < limit
+        let jmpf_idx = module.current_offset();
+        module.emit(Instruction::new2(OpCode::JmpF, 4, 0)); // exit loop when false
+        module.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0)); // sum += i
+        module.emit(Instruction::new3(OpCode::IAdd, 1, 3, 1)); // i += 1
+        let jmp_back_idx = module.current_offset();
+        let back_offset = loop_check as i64 - jmp_back_idx as i64;
+        module.emit(Instruction::new3(OpCode::Jmp,
+            ((back_offset as i16 >> 8) & 0xFF) as u8,
+            (back_offset as i16 & 0xFF) as u8,
+            0));
+        let after_loop = module.current_offset();
+        if let Some(instr) = module.instructions.get_mut(jmpf_idx) {
+            let forward_offset = after_loop as i64 - jmpf_idx as i64;
+            instr.op2 = ((forward_offset as i16 >> 8) & 0xFF) as u8;
+            instr.op3 = (forward_offset as i16 & 0xFF) as u8;
+        }
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        // Cold interpreter run.
+        crate::jit::reset_hot_counters();
+        let mut vm = VM::new();
+        vm.load_module(module.clone());
+        let cold_result = vm.run_from(0, 0).unwrap();
+
+        // Heat the entry region until it is JIT-compiled.
+        crate::jit::reset_hot_counters();
+        for _ in 0..2000 {
+            let _ = vm.run_from(0, 0);
+        }
+
+        let hot_result = vm.run_from(0, 0).unwrap();
+        assert_eq!(hot_result.as_int(), cold_result.as_int(),
+            "JIT hot loop should match interpreter");
+        assert_eq!(hot_result.as_int(), Some(6), "sum 0..4 = 6");
+    }
+
+    /// Test 17: NodeId returns the configured local node ID.
+    #[test]
+    fn test_node_id_returns_configured_value() {
+        let mut module = CodeModule::new("test_node_id");
+        module.emit(Instruction::new1(OpCode::NodeId, 0));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.set_node_id(42);
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "NodeId should not fail: {:?}", result.err());
+        assert_eq!(result.unwrap().as_int(), Some(42));
+    }
+
+    /// Test 18: NodeId defaults to 0 with no explicit configuration.
+    #[test]
+    fn test_node_id_defaults_to_zero() {
+        let mut module = CodeModule::new("test_node_id_default");
+        module.emit(Instruction::new1(OpCode::NodeId, 0));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().as_int(), Some(0));
+    }
+
+    /// Test 19: Migrate records a migration request.
+    #[test]
+    fn test_migrate_records_request() {
+        let mut module = CodeModule::new("test_migrate");
+        let actor_const = module.add_constant(Constant::Int(7));
+        let node_const = module.add_constant(Constant::Int(99));
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((actor_const >> 8) & 0xFF) as u8, (actor_const & 0xFF) as u8, 1)); // r1 = 7
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((node_const >> 8) & 0xFF) as u8, (node_const & 0xFF) as u8, 2)); // r2 = 99
+        module.emit(Instruction::new3(OpCode::Migrate, 1, 2, 0)); // migrate actor 7 to node 99 -> r0
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "Migrate should not fail: {:?}", result.err());
+        assert!(result.unwrap().is_unit(), "Migrate should return unit");
+        assert_eq!(vm.pending_migrations(), &[(7, 99)]);
+    }
+
+    /// Test 20: RAsk returns nil when no distributed runtime is attached.
+    #[test]
+    fn test_rask_returns_nil_without_runtime() {
+        let mut module = CodeModule::new("test_rask");
+        let behavior_const = module.add_constant(Constant::String("ping".to_string()));
+        let actor_const = module.add_constant(Constant::Int(3));
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((actor_const >> 8) & 0xFF) as u8, (actor_const & 0xFF) as u8, 1)); // r1 = 3
+        module.emit(Instruction::new3(OpCode::RAsk, 1, behavior_const as u8, 0)); // rask -> r0
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "RAsk should not fail: {:?}", result.err());
+        assert!(result.unwrap().is_nil(), "RAsk should return nil without runtime");
+    }
+
+    /// Test 21: Gossip records intent and returns unit.
+    #[test]
+    fn test_gossip_records_intent_and_returns_unit() {
+        let mut module = CodeModule::new("test_gossip");
+        let msg_const = module.add_constant(Constant::String("hello".to_string()));
+        module.emit(Instruction::new3(OpCode::Gossip, msg_const as u8, 0, 0)); // gossip -> r0
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "Gossip should not fail: {:?}", result.err());
+        assert!(result.unwrap().is_unit(), "Gossip should return unit");
+        assert_eq!(vm.gossip_log(), &["hello".to_string()]);
+    }
+
+    /// Test 22: Distributed callbacks are invoked by remote opcodes.
+    #[test]
+    fn test_distributed_callbacks_invoked() {
+        #[derive(Debug)]
+        struct MockCallbacks {
+            node_id: u64,
+            migrations: Vec<(u64, u64)>,
+            asks: Vec<(u64, String)>,
+            gossips: Vec<String>,
+        }
+        impl DistributedVmCallbacks for MockCallbacks {
+            fn node_id(&self) -> u64 { self.node_id }
+            fn migrate(&mut self, actor_id: u64, target_node_id: u64) {
+                self.migrations.push((actor_id, target_node_id));
+            }
+            fn remote_ask(&mut self, target_actor: u64, behavior: &str, _args: &[Value], _timeout_ms: u64) -> Value {
+                self.asks.push((target_actor, behavior.to_string()));
+                Value::int(123)
+            }
+            fn gossip(&mut self, message: &str) -> Value {
+                self.gossips.push(message.to_string());
+                Value::unit()
+            }
+        }
+
+        let mut module = CodeModule::new("test_callbacks");
+        let actor_const = module.add_constant(Constant::Int(5));
+        let node_const = module.add_constant(Constant::Int(11));
+        let behavior_const = module.add_constant(Constant::String("echo".to_string()));
+        let msg_const = module.add_constant(Constant::String("sync".to_string()));
+
+        module.emit(Instruction::new1(OpCode::NodeId, 0)); // r0 = node_id
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((actor_const >> 8) & 0xFF) as u8, (actor_const & 0xFF) as u8, 1)); // r1 = 5
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((node_const >> 8) & 0xFF) as u8, (node_const & 0xFF) as u8, 2)); // r2 = 11
+        module.emit(Instruction::new3(OpCode::Migrate, 1, 2, 3)); // r3 = migrate
+        module.emit(Instruction::new3(OpCode::RAsk, 1, behavior_const as u8, 4)); // r4 = rask
+        module.emit(Instruction::new3(OpCode::Gossip, msg_const as u8, 0, 5)); // r5 = gossip
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut callbacks = Box::new(MockCallbacks {
+            node_id: 77,
+            migrations: Vec::new(),
+            asks: Vec::new(),
+            gossips: Vec::new(),
+        });
+        let expected_node_id = callbacks.node_id;
+
+        let mut vm = VM::new();
+        vm.set_distributed_callbacks(callbacks);
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "Callbacks should not fail: {:?}", result.err());
+
+        let cb = (vm.distributed_callbacks.as_ref().unwrap().as_ref() as &dyn std::any::Any)
+            .downcast_ref::<MockCallbacks>()
+            .unwrap();
+        assert_eq!(cb.node_id, expected_node_id);
+        assert_eq!(cb.migrations, &[(5, 11)]);
+        assert_eq!(cb.asks, &[(5, "echo".to_string())]);
+        assert_eq!(cb.gossips, &["sync".to_string()]);
     }
 }

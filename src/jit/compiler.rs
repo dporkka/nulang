@@ -341,7 +341,7 @@ fn store_reg(builder: &mut FunctionBuilder, regs_ptr: Value, idx: usize, val: Va
 }
 
 fn emit_const(builder: &mut FunctionBuilder, regs_ptr: Value, dst: usize, value: i64) {
-    let tag = builder.ins().iconst(types::I64, 0x7FF9000000000000i64);
+    let tag = builder.ins().iconst(types::I64, 0x7FFB_0000_0000_0000i64);
     let masked = value & 0x0000FFFFFFFFFFFFi64;
     let val_part = builder.ins().iconst(types::I64, masked);
     let tagged = builder.ins().bor(tag, val_part);

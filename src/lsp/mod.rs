@@ -56,6 +56,13 @@ impl LanguageServer for NulangLanguageServer {
                         work_done_progress_options: WorkDoneProgressOptions::default(),
                     },
                 ))),
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(false),
+                    trigger_characters: None,
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                    all_commit_characters: None,
+                    completion_item: None,
+                }),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
@@ -118,6 +125,19 @@ impl LanguageServer for NulangLanguageServer {
         let engine = InlayHintEngine::new(&source);
         let hints = engine.generate_inlay_hints();
         Ok(Some(hints))
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let docs = self.documents.lock().unwrap();
+        let source = match docs.get(&params.text_document_position.text_document.uri) {
+            Some(doc) => doc.source.clone(),
+            None => return Ok(None),
+        };
+        drop(docs);
+
+        let engine = CompletionEngine::new(&source);
+        let items = engine.complete(params.text_document_position.position);
+        Ok(Some(CompletionResponse::Array(items)))
     }
 }
 
@@ -343,6 +363,132 @@ impl<'a> InlayHintEngine<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// Completion Engine
+// ---------------------------------------------------------------------------
+
+/// Generates completion items for Nulang source code.
+///
+/// The engine is intentionally lightweight: it offers keywords, built-in
+/// effect names, and top-level function names extracted from the current
+/// document. It does not require a full parse or typecheck.
+pub struct CompletionEngine<'a> {
+    source: &'a str,
+}
+
+impl<'a> CompletionEngine<'a> {
+    /// Nulang language keywords offered by the completion provider.
+    const KEYWORDS: &'static [&'static str] = &[
+        "fn", "let", "if", "else", "match", "effect", "actor", "type",
+        "module", "import", "handle", "perform", "resume", "return",
+        "true", "false", "nil", "unit",
+    ];
+
+    /// Built-in effect names offered by the completion provider.
+    const EFFECTS: &'static [&'static str] = &[
+        "IO", "Net", "FS", "Spawn", "Send", "Receive", "Migrate", "STM",
+        "Async", "LLM", "Cost", "Rand", "Time",
+    ];
+
+    pub fn new(source: &'a str) -> Self {
+        CompletionEngine { source }
+    }
+
+    /// Return completion items at the given LSP position.
+    pub fn complete(&self, position: Position) -> Vec<CompletionItem> {
+        let offset = self.position_to_offset(position);
+        let prefix = self.prefix_at(offset);
+        let prefix_lower = prefix.to_lowercase();
+
+        let mut items = Vec::new();
+
+        // Keywords.
+        for &kw in Self::KEYWORDS {
+            if kw.to_lowercase().starts_with(&prefix_lower) {
+                items.push(CompletionItem {
+                    label: kw.to_string(),
+                    kind: Some(CompletionItemKind::KEYWORD),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Built-in effects.
+        for &eff in Self::EFFECTS {
+            let eff_lower = eff.to_lowercase();
+            if eff_lower.starts_with(prefix_lower.as_str()) {
+                items.push(CompletionItem {
+                    label: eff.to_string(),
+                    kind: Some(CompletionItemKind::ENUM_MEMBER),
+                    detail: Some("built-in effect".to_string()),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Top-level function names (`fun name(...)`).
+        for name in self.top_level_functions() {
+            if name.to_lowercase().starts_with(&prefix_lower) {
+                items.push(CompletionItem {
+                    label: name,
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some("function".to_string()),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        items
+    }
+
+    /// Convert an LSP position to a byte offset in the source.
+    fn position_to_offset(&self, position: Position) -> usize {
+        let mut offset = 0usize;
+        for (line_idx, line) in self.source.lines().enumerate() {
+            if line_idx as u32 == position.line {
+                return offset + (position.character as usize).min(line.len());
+            }
+            offset += line.len() + 1; // +1 for newline
+        }
+        self.source.len()
+    }
+
+    /// Extract the identifier fragment the user has typed so far.
+    fn prefix_at(&self, offset: usize) -> String {
+        let bytes = self.source.as_bytes();
+        let mut start = offset;
+        while start > 0 {
+            let prev = bytes[start - 1] as char;
+            if prev.is_alphanumeric() || prev == '_' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        self.source[start..offset].to_string()
+    }
+
+    /// Extract top-level function names from the document.
+    fn top_level_functions(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for line in self.source.lines() {
+            let trimmed = line.trim_start();
+            if let Some(after_fun) = trimmed.strip_prefix("fun ") {
+                let name = after_fun
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                let name = name.split('(').next().unwrap_or("").trim();
+                if !name.is_empty() && !name.contains(':') {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        names
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Server Entry Point
 // ---------------------------------------------------------------------------
 
@@ -456,5 +602,64 @@ mod lsp_tests {
         assert!(label_to_string(&hints[0].label).contains("Int"));
         assert!(label_to_string(&hints[1].label).contains("Float"));
         assert!(label_to_string(&hints[2].label).contains("String"));
+    }
+
+    // -- Completion engine tests --
+
+    fn labels(items: &[CompletionItem]) -> Vec<&str> {
+        items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    #[test]
+    fn test_completion_keywords() {
+        let source = "let x = 42";
+        let engine = CompletionEngine::new(source);
+        let items = engine.complete(Position { line: 0, character: 0 });
+        let labels = labels(&items);
+        assert!(labels.contains(&"let"));
+        assert!(labels.contains(&"fn"));
+        assert!(labels.contains(&"match"));
+    }
+
+    #[test]
+    fn test_completion_prefix_filtering() {
+        let source = "ret";
+        let engine = CompletionEngine::new(source);
+        // Cursor at end of "ret".
+        let items = engine.complete(Position { line: 0, character: 3 });
+        let labels = labels(&items);
+        assert!(labels.contains(&"return"), "should offer 'return' for prefix 'ret'");
+        assert!(!labels.contains(&"let"), "'let' should not match prefix 'ret'");
+    }
+
+    #[test]
+    fn test_completion_top_level_functions() {
+        let source = "fun foo()\nfun bar(x: Int)\nlet x = 1";
+        let engine = CompletionEngine::new(source);
+        let items = engine.complete(Position { line: 2, character: 0 });
+        let labels = labels(&items);
+        assert!(labels.contains(&"foo"));
+        assert!(labels.contains(&"bar"));
+    }
+
+    #[test]
+    fn test_completion_effects() {
+        let source = "";
+        let engine = CompletionEngine::new(source);
+        let items = engine.complete(Position { line: 0, character: 0 });
+        let labels = labels(&items);
+        assert!(labels.contains(&"IO"));
+        assert!(labels.contains(&"Migrate"));
+        assert!(labels.contains(&"LLM"));
+    }
+
+    #[test]
+    fn test_completion_case_insensitive() {
+        // Effect names are matched case-insensitively by prefix.
+        let source = "mi";
+        let engine = CompletionEngine::new(source);
+        let items = engine.complete(Position { line: 0, character: 2 });
+        let labels = labels(&items);
+        assert!(labels.contains(&"Migrate"), "should match 'Migrate' for prefix 'mi'");
     }
 }

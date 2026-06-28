@@ -2,7 +2,7 @@
 
 use crate::vm::Value;
 
-const TAG_INT: u64 = 0x7FF9000000000000;
+const TAG_INT: u64 = 0x7FFB_0000_0000_0000;
 
 #[inline]
 fn sext48(bits: u64) -> i64 {
