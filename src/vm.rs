@@ -128,6 +128,9 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
 
     /// Write a field on the current actor's state.  Default is a no-op.
     fn set_state_field(&mut self, _field: &str, _value: Value) {}
+
+    /// Emit an event in the current actor.  Default is a no-op.
+    fn emit_event(&mut self, _event: &str, _args: &[Value]) {}
 }
 
 /// Standalone callbacks used when the VM runs without an actor runtime.
@@ -939,6 +942,13 @@ impl VM {
                 let field = self.module_const_string(frame.module_idx, field_idx);
                 let val = frame.regs[instr.op3 as usize];
                 self.actor_callbacks.set_state_field(&field, val);
+            }
+            OpCode::Emit => {
+                let event_idx = instr.imm16() as usize;
+                let event = self.module_const_string(frame.module_idx, event_idx);
+                let arg_count = instr.op3 as usize;
+                let args: Vec<Value> = frame.regs[0..arg_count].to_vec();
+                self.actor_callbacks.emit_event(&event, &args);
             }
             OpCode::RSend => {
                 // Placeholder: remote send.

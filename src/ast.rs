@@ -151,6 +151,12 @@ pub enum Expr {
     },
     /// Self reference within actor
     SelfRef(Span),
+    /// Emit event: emit EventName(args)
+    Emit {
+        event: String,
+        args: Vec<Expr>,
+        span: Span,
+    },
     /// Perform effect: perform Effect.op(arg)
     Perform {
         effect: String,

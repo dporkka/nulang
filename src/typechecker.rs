@@ -661,6 +661,17 @@ impl TypeChecker {
                 self.infer_perform(ctx, effect, args, *span)
             }
 
+            // Emit event
+            Expr::Emit { args, .. } => {
+                let mut subst = Vec::new();
+                for arg in args {
+                    let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+                    let (s, _ty) = self.infer_expr(&ctx_sub, arg)?;
+                    subst = compose_subst(&s, &subst);
+                }
+                Ok((subst, Type::unit()))
+            }
+
             // Handle effect
             Expr::Handle {
                 body,

@@ -78,6 +78,7 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "Async" => Effect::Async,
         "LLM" => Effect::LLM,
         "Cost" => Effect::Cost,
+        "Event" => Effect::Event,
         other => Effect::UserDefined(other.to_string()),
     }
 }
@@ -214,6 +215,11 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
         }
         Expr::SelfRef(_) => {}
         Expr::Perform { args, .. } => {
+            for arg in args {
+                free_vars(arg, bound, acc);
+            }
+        }
+        Expr::Emit { args, .. } => {
             for arg in args {
                 free_vars(arg, bound, acc);
             }
@@ -571,6 +577,15 @@ impl EffectChecker {
                     row = effect_row_union(&row, &self.infer_effects(ctx, arg)?);
                 }
 
+                Ok(row)
+            }
+
+            // Emit event: contributes an Event effect plus argument effects.
+            Expr::Emit { args, .. } => {
+                let mut row = EffectRow::singleton(Effect::Event);
+                for arg in args {
+                    row = effect_row_union(&row, &self.infer_effects(ctx, arg)?);
+                }
                 Ok(row)
             }
 
@@ -1026,6 +1041,15 @@ impl CapabilityAnalyzer {
                 Ok(cap)
             }
 
+            // Emit event: returns Unit (Val).
+            Expr::Emit { args, .. } => {
+                let mut cap = Capability::Val;
+                for arg in args {
+                    cap = cap.join(self.infer_cap(ctx, arg)?);
+                }
+                Ok(cap)
+            }
+
             // Handle: capability of the body (handlers don't change the value
             // capability, only the effect row).
             Expr::Handle { body, .. } => self.infer_cap(ctx, body),
@@ -1143,6 +1167,7 @@ fn expr_span(expr: &Expr) -> Span {
         Expr::Ask { span, .. } => *span,
         Expr::Receive { span, .. } => *span,
         Expr::SelfRef(s) => *s,
+        Expr::Emit { span, .. } => *span,
         Expr::Perform { span, .. } => *span,
         Expr::Handle { span, .. } => *span,
         Expr::Migrate { span, .. } => *span,

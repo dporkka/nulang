@@ -785,4 +785,43 @@ mod tests {
             "counter should continue incrementing after recovery"
         );
     }
+
+    #[test]
+    fn test_event_sourced_counter_emits_and_recovers() {
+        let source = r#"
+            persistent actor EventCounter {
+                state event_sourced count: Int = 0
+                behavior inc() {
+                    emit Incremented()
+                }
+                behavior get() {
+                    self.count
+                }
+            }
+            let c = spawn EventCounter {} in {
+                send c inc()
+                send c inc()
+                send c inc()
+                c
+            }
+        "#;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("count").and_then(|v| v.as_int()),
+            Some(3),
+            "event-sourced counter should be 3 after three inc messages"
+        );
+        assert_eq!(actor.event_log.len(), 3, "three events should be logged");
+        assert_eq!(actor.event_log[0].0, "Incremented");
+    }
 }

@@ -172,6 +172,7 @@ pub enum Effect {
     Async,
     LLM,
     Cost,
+    Event,
     UserDefined(String),
 }
 

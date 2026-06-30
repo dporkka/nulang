@@ -244,6 +244,7 @@ impl Compiler {
             Expr::Ask { actor, behavior, args, .. } => self.compile_ask(actor, behavior, args),
             Expr::SelfRef(_) => Ok(self.compile_self()),
             Expr::Perform { effect, op, args, .. } => self.compile_perform(effect, op, args),
+            Expr::Emit { event, args, .. } => self.compile_emit(event, args),
             Expr::Handle { body, handlers, .. } => self.compile_handle(body, handlers),
             Expr::Assign { target, value, .. } => self.compile_assign(target, value),
             Expr::For { var, iterable, body, .. } => self.compile_for(var, iterable, body),
@@ -931,6 +932,23 @@ impl Compiler {
             dst));
         let _ = _op_idx;
         Ok(dst)
+    }
+
+    fn compile_emit(&mut self, event: &str, args: &[Expr]) -> NuResult<u8> {
+        // Event arguments are placed in the first N registers, matching the
+        // convention used by Send/Ask opcodes.
+        for (i, arg) in args.iter().enumerate().take(256) {
+            let reg = self.compile_expr(arg)?;
+            if reg != i as u8 {
+                self.emit(Instruction::new2(OpCode::Move, reg, i as u8));
+            }
+        }
+        let event_idx = self.add_const(Constant::String(event.to_string()));
+        self.emit(Instruction::new3(OpCode::Emit,
+            ((event_idx >> 8) & 0xFF) as u8,
+            (event_idx & 0xFF) as u8,
+            args.len() as u8));
+        Ok(0)
     }
 
     fn compile_handle(&mut self, body: &Expr, handlers: &[EffectHandler]) -> NuResult<u8> {

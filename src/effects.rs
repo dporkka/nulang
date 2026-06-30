@@ -128,6 +128,7 @@ fn format_effect(eff: &Effect) -> String {
         Effect::Async => "Async".to_string(),
         Effect::LLM => "LLM".to_string(),
         Effect::Cost => "Cost".to_string(),
+        Effect::Event => "Event".to_string(),
         Effect::UserDefined(s) => s.clone(),
     }
 }

@@ -671,6 +671,7 @@ impl Parser {
                     TokenKind::Send => self.parse_send_keyword(),
                     TokenKind::Ask => self.parse_ask(),
                     TokenKind::Perform => self.parse_perform(),
+                    TokenKind::Emit => self.parse_emit(),
                     TokenKind::Handle => self.parse_handle(),
                     TokenKind::For => self.parse_for(),
                     TokenKind::Migrate => self.parse_migrate(),
@@ -1014,6 +1015,19 @@ impl Parser {
         })
     }
 
+    fn parse_emit(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.advance(); // consume 'emit'
+        let event = self.expect_ident("event name")?;
+        self.expect(TokenKind::LParen)?;
+        let args = self.parse_arg_list()?;
+        Ok(Expr::Emit {
+            event,
+            args,
+            span,
+        })
+    }
+
     // === Helper Methods ===
 
     fn is_at_end(&self) -> bool {
@@ -1125,6 +1139,7 @@ impl Parser {
                 | TokenKind::Send
                 | TokenKind::Ask
                 | TokenKind::Perform
+                | TokenKind::Emit
                 | TokenKind::Handle
                 | TokenKind::For
                 | TokenKind::Migrate

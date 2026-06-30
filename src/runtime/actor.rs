@@ -25,6 +25,7 @@ pub struct Actor {
     pub orca_gc: OrcaGc,                // ORCA GC engine for this actor
     pub state_data: Vec<(String, Value)>, // Named actor state fields
     pub state_models: HashMap<String, StateModel>, // Persistence model per field
+    pub event_log: Vec<(String, Vec<Value>)>, // Emitted events for event_sourced actors
     pub persistent: bool,              // Whether this actor survives restarts
     pub behavior_table: Vec<BehaviorEntry>,
     /// Bytecode behavior offsets by behavior_id. Empty entries mean no bytecode
@@ -61,6 +62,7 @@ impl Actor {
             orca_gc: OrcaGc::new(id),         // ORCA GC engine
             state_data: Vec::new(),
             state_models: HashMap::new(),
+            event_log: Vec::new(),
             persistent: false,
             behavior_table: Vec::new(),
             bytecode_offsets: Vec::new(),

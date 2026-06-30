@@ -177,6 +177,26 @@ impl Runtime {
         self.recovery_modules.insert(actor_id, (module, offsets));
     }
 
+    /// Record an emitted event on an actor.  For the event-sourced MVP, each
+    /// event also increments every `event_sourced` integer counter by one.
+    pub fn emit_event(&mut self, actor_id: u64, event: &str, args: &[crate::vm::Value]) {
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.event_log.push((event.to_string(), args.to_vec()));
+            // MVP: increment all event_sourced Int state fields.
+            let event_sourced_names: Vec<String> = actor
+                .state_models
+                .iter()
+                .filter(|(_, model)| **model == StateModel::EventSourced)
+                .map(|(name, _)| name.clone())
+                .collect();
+            for name in event_sourced_names {
+                if let Some(n) = actor.get_state_field(&name).and_then(|v| v.as_int()) {
+                    actor.set_state_field(name, crate::vm::Value::int(n + 1));
+                }
+            }
+        }
+    }
+
     pub fn send_message(&mut self, target_id: u64, behavior: &str, args: &[Value]) {
         let behavior_id = self.behavior_id_for(target_id, behavior).unwrap_or(0);
         self.send_message_by_id(target_id, behavior_id, args);
@@ -1019,6 +1039,13 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             }
         }
     }
+
+    fn emit_event(&mut self, event: &str, args: &[crate::vm::Value]) {
+        let mut rt = self.runtime.borrow_mut();
+        if let Some(actor_id) = rt.current_actor {
+            rt.emit_event(actor_id, event, args);
+        }
+    }
 }
 
 /// Raw-pointer callbacks used when the runtime itself executes an actor's
@@ -1093,6 +1120,12 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             if let Some(actor) = (*self.runtime).actors.get_mut(&self.actor_id) {
                 actor.set_state_field(field, value);
             }
+        }
+    }
+
+    fn emit_event(&mut self, event: &str, args: &[crate::vm::Value]) {
+        unsafe {
+            (*self.runtime).emit_event(self.actor_id, event, args);
         }
     }
 }
