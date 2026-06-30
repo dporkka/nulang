@@ -270,13 +270,6 @@ pub enum Type {
         state: Box<Type>,
         behavior: Box<Type>,
     },
-    /// Agent[State, Policy, Memory, Tools]
-    Agent {
-        state: Box<Type>,
-        policy: Box<Type>,
-        memory: Box<Type>,
-        tools: Box<Type>,
-    },
     /// Generic type application: List[Int], Map[String, Int]
     App { constructor: Box<Type>, args: Vec<Type> },
     /// Reference type with capability: &cap Type
@@ -330,17 +323,6 @@ impl Type {
             Type::Actor { state, behavior } => {
                 state.collect_free_vars(acc);
                 behavior.collect_free_vars(acc);
-            }
-            Type::Agent {
-                state,
-                policy,
-                memory,
-                tools,
-            } => {
-                state.collect_free_vars(acc);
-                policy.collect_free_vars(acc);
-                memory.collect_free_vars(acc);
-                tools.collect_free_vars(acc);
             }
             Type::App { constructor, args } => {
                 constructor.collect_free_vars(acc);

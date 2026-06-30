@@ -334,7 +334,6 @@ fn type_to_string(ty: &Type) -> String {
         Type::Array(t) => format!("[{}]", type_to_string(t)),
         Type::Function { param, ret, .. } => format!("{} -> {}", type_to_string(param), type_to_string(ret)),
         Type::Actor { state, behavior } => format!("Actor[{}, {}]", type_to_string(state), type_to_string(behavior)),
-        Type::Agent { state, policy, memory, tools } => format!("Agent[{}, {}, {}, {}]", type_to_string(state), type_to_string(policy), type_to_string(memory), type_to_string(tools)),
         Type::App { constructor, args } => format!("{}[{}]", type_to_string(constructor), args.iter().map(type_to_string).collect::<Vec<_>>().join(", ")),
         Type::Reference { cap, inner } => format!("&{:?} {}", cap, type_to_string(inner)),
         Type::Scheme { vars, body } => format!("forall {}. {}", vars.iter().map(|v| format!("'t{}", v.0)).collect::<Vec<_>>().join(", "), type_to_string(body)),

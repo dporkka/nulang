@@ -27,6 +27,7 @@
 
 use crate::bytecode::{CodeModule, Constant, OpCode};
 use crate::jit::{self, JitSession, TieredAction};
+use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
 use crate::types::{NuError, NuResult, Span};
 use std::collections::HashMap;
 
@@ -69,6 +70,116 @@ pub trait DistributedVmCallbacks: std::any::Any + std::fmt::Debug {
     fn gossip(&mut self, _message: &str) -> Value {
         Value::unit()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Actor runtime callbacks for VM opcode integration.
+//
+// The VM is designed to run standalone, but when embedded in the actor
+// runtime these callbacks wire Spawn to real actors and route heap
+// allocations through the current actor's heap.
+// ---------------------------------------------------------------------------
+
+/// Callback interface that supplies real actor-runtime behavior for the VM's
+/// `Spawn`, `ArrAlloc`, `SConcat`, `SRead`, and `Drop` opcodes.
+pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
+    /// Return the ID of the actor currently executing in the VM, if any.
+    fn current_actor_id(&self) -> Option<u64> { None }
+
+    /// Allocate `size` bytes on the current actor's heap.
+    ///
+    /// `type_tag` tells the heap what kind of object is being allocated.
+    /// Returns a pointer to the payload region, or `None` if allocation fails.
+    fn alloc(&mut self, size: usize, type_tag: HeapTypeTag) -> Option<*mut u8>;
+
+    /// Drop a local reference to a heap object.
+    ///
+    /// For standalone heaps this frees immediately; for actor heaps it should
+    /// decrement the local reference count and reclaim when possible.
+    fn drop_ref(&mut self, ptr: *mut u8);
+
+    /// Return the number of elements in an array allocated on the actor heap.
+    fn array_len(&self, ptr: *mut u8) -> Option<usize>;
+
+    /// Spawn a real actor from `module.actor_metadata`.
+    ///
+    /// `behavior_idx` is the behavior table index embedded in the `Spawn`
+    /// instruction. The callback should find the matching `ActorMeta`, apply
+    /// its persistence defaults, and return an actor reference value.
+    fn spawn_actor(
+        &mut self,
+        module: &CodeModule,
+        behavior_idx: usize,
+        init: Vec<(String, Value)>,
+    ) -> Value;
+
+    /// Send a message to an actor by behavior table index.
+    fn send_message(&mut self, target: Value, behavior_id: u16, args: &[Value]);
+
+    /// Synchronously ask an actor and return its response.
+    /// Default implementation sends the message and returns nil.
+    fn ask_actor(&mut self, target: Value, behavior_id: u16, args: &[Value]) -> Value {
+        let _ = (target, behavior_id, args);
+        Value::nil()
+    }
+
+    /// Read a field from the current actor's state.  Default returns nil.
+    fn get_state_field(&self, _field: &str) -> Value { Value::nil() }
+
+    /// Write a field on the current actor's state.  Default is a no-op.
+    fn set_state_field(&mut self, _field: &str, _value: Value) {}
+}
+
+/// Standalone callbacks used when the VM runs without an actor runtime.
+///
+/// Allocations go through a private `ActorHeap` so that `Drop` actually
+/// reclaims memory instead of leaking.
+#[derive(Debug)]
+struct StandaloneVmCallbacks {
+    heap: ActorHeap,
+}
+
+impl StandaloneVmCallbacks {
+    fn new() -> Self {
+        let mut heap = ActorHeap::new(1024 * 1024);
+        heap.set_actor_id(0);
+        Self { heap }
+    }
+}
+
+impl ActorVmCallbacks for StandaloneVmCallbacks {
+    fn alloc(&mut self, size: usize, type_tag: HeapTypeTag) -> Option<*mut u8> {
+        self.heap.alloc(size, type_tag)
+    }
+
+    fn drop_ref(&mut self, ptr: *mut u8) {
+        unsafe {
+            self.heap.free(ptr);
+        }
+    }
+
+    fn array_len(&self, ptr: *mut u8) -> Option<usize> {
+        unsafe {
+            let header = &*ActorHeap::header_of(ptr);
+            if header.type_tag == HeapTypeTag::Array {
+                let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                Some(payload_size / std::mem::size_of::<Value>())
+            } else {
+                None
+            }
+        }
+    }
+
+    fn spawn_actor(
+        &mut self,
+        _module: &CodeModule,
+        _behavior_idx: usize,
+        _init: Vec<(String, Value)>,
+    ) -> Value {
+        Value::actor_ref(0)
+    }
+
+    fn send_message(&mut self, _target: Value, _behavior_id: u16, _args: &[Value]) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +342,21 @@ impl Value {
         else if let Some(b) = self.as_bool() { b.to_string() }
         else if self.is_actor_ref() { format!("#Actor:{}", self.as_actor_id().unwrap()) }
         else { format!("#Value({:x})", self.raw) }
+    }
+}
+
+/// Convert a bytecode constant into a runtime value.
+pub(crate) fn constant_to_value(c: &Constant) -> Value {
+    match c {
+        Constant::Int(i) => Value::int(*i),
+        Constant::Float(f) => Value::float(*f),
+        Constant::String(_) => Value::nil(), // strings are heap-allocated on demand
+        Constant::Bool(b) => Value::bool(*b),
+        Constant::Nil => Value::nil(),
+        Constant::Unit => Value::unit(),
+        Constant::FunctionRef(_) | Constant::BehaviorRef(_) | Constant::TypeDescriptor(_) => {
+            Value::nil()
+        }
     }
 }
 
@@ -427,6 +553,10 @@ pub struct VM {
     gossip_log: Vec<String>,
     /// Optional distributed runtime callbacks for remote operations.
     distributed_callbacks: Option<Box<dyn DistributedVmCallbacks>>,
+    /// Actor-runtime callbacks: heap allocation, drop, spawn.
+    ///
+    /// Defaults to a standalone heap so the VM is usable without a runtime.
+    actor_callbacks: Box<dyn ActorVmCallbacks>,
 }
 
 impl VM {
@@ -443,6 +573,7 @@ impl VM {
             pending_migrations: Vec::new(),
             gossip_log: Vec::new(),
             distributed_callbacks: None,
+            actor_callbacks: Box::new(StandaloneVmCallbacks::new()),
         }
     }
 
@@ -454,6 +585,20 @@ impl VM {
     /// Install distributed runtime callbacks for remote opcodes.
     pub fn set_distributed_callbacks(&mut self, callbacks: Box<dyn DistributedVmCallbacks>) {
         self.distributed_callbacks = Some(callbacks);
+    }
+
+    /// Install actor-runtime callbacks for Spawn and heap operations.
+    ///
+    /// Replaces the default standalone heap, so all subsequent allocations go
+    /// through the supplied runtime.
+    pub fn set_actor_callbacks(&mut self, callbacks: Box<dyn ActorVmCallbacks>) {
+        self.actor_callbacks = callbacks;
+    }
+
+    /// Set the current execution frame. Used by the runtime to execute actor
+    /// bytecode behavior handlers.
+    pub fn set_current_frame(&mut self, frame: Frame) {
+        self.current_frame = Some(Box::new(frame));
     }
 
     /// Take a snapshot of recorded migration requests.
@@ -727,22 +872,73 @@ impl VM {
 
             // -- Actor opcodes (consume frame for Spawn/Send/Ask) --
             OpCode::Spawn => {
-                // Placeholder: spawn a new actor.
-                // For now, return a dummy actor reference.
-                frame.regs[instr.op3 as usize] = Value::actor_ref(0);
+                let behavior_idx = instr.imm16() as usize;
+                let module = self.modules.get(frame.module_idx);
+                let init: Vec<(String, Value)> = module
+                    .and_then(|m| {
+                        m.actor_metadata
+                            .iter()
+                            .find(|meta| meta.behavior_indices.contains(&behavior_idx))
+                    })
+                    .map(|meta| {
+                        meta.state_defaults
+                            .iter()
+                            .map(|(name, c)| (name.clone(), constant_to_value(c)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let result = if let Some(module) = module {
+                    self.actor_callbacks.spawn_actor(module, behavior_idx, init)
+                } else {
+                    Value::actor_ref(0)
+                };
+                frame.regs[instr.op3 as usize] = result;
                 self.current_frame = Some(frame);
                 return Ok(());
             }
             OpCode::Send => {
-                // Placeholder: send a message to an actor.
+                let actor_val = frame.regs[instr.op1 as usize];
+                let behavior_idx = instr.imm16() as usize;
+                let (param_count, behavior_id) = self.modules.get(frame.module_idx)
+                    .and_then(|m| m.behaviors.get(behavior_idx))
+                    .map(|b| (b.param_count, behavior_idx as u16))
+                    .unwrap_or((0, 0));
+                let args: Vec<Value> = (0..param_count)
+                    .map(|i| frame.regs[i])
+                    .collect();
+                self.actor_callbacks.send_message(actor_val, behavior_id, &args);
                 self.current_frame = Some(frame);
                 return Ok(());
             }
             OpCode::Ask => {
-                // Placeholder: ask an actor (sync send/receive).
-                frame.regs[instr.op3 as usize] = Value::nil();
+                let actor_val = frame.regs[instr.op1 as usize];
+                let behavior_idx = instr.imm16() as usize;
+                let (param_count, behavior_id) = self.modules.get(frame.module_idx)
+                    .and_then(|m| m.behaviors.get(behavior_idx))
+                    .map(|b| (b.param_count, behavior_idx as u16))
+                    .unwrap_or((0, 0));
+                let args: Vec<Value> = (0..param_count)
+                    .map(|i| frame.regs[i])
+                    .collect();
+                let result = self.actor_callbacks.ask_actor(actor_val, behavior_id, &args);
+                frame.regs[instr.op3 as usize] = result;
                 self.current_frame = Some(frame);
                 return Ok(());
+            }
+            OpCode::SelfOp => {
+                let actor_id = self.actor_callbacks.current_actor_id().unwrap_or(0);
+                frame.regs[instr.op1 as usize] = Value::actor_ref(actor_id);
+            }
+            OpCode::StateGet => {
+                let field_idx = instr.imm16() as usize;
+                let field = self.module_const_string(frame.module_idx, field_idx);
+                frame.regs[instr.op3 as usize] = self.actor_callbacks.get_state_field(&field);
+            }
+            OpCode::StateSet => {
+                let field_idx = instr.imm16() as usize;
+                let field = self.module_const_string(frame.module_idx, field_idx);
+                let val = frame.regs[instr.op3 as usize];
+                self.actor_callbacks.set_state_field(&field, val);
             }
             OpCode::RSend => {
                 // Placeholder: remote send.
@@ -883,18 +1079,35 @@ impl VM {
                 frame.regs[instr.op3 as usize] = Value::bool(a > b);
             }
 
-            // -- Arrays (minimal heap-backed implementation; memory is leaked) --
+            // -- Arrays (actor-heap backed; no longer leaked) --
             OpCode::ArrAlloc => {
                 let len = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as usize;
-                let arr: Box<Vec<Value>> = Box::new(vec![Value::nil(); len]);
-                frame.regs[instr.op2 as usize] = Value::ptr(Box::into_raw(arr) as *mut u8);
+                let size = len.checked_mul(std::mem::size_of::<Value>()).unwrap_or(0);
+                frame.regs[instr.op2 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(size, HeapTypeTag::Array) {
+                    unsafe {
+                        let slots = std::slice::from_raw_parts_mut(ptr as *mut Value, len);
+                        for slot in slots.iter_mut() {
+                            *slot = Value::nil();
+                        }
+                    }
+                    Value::ptr(ptr)
+                } else {
+                    Value::nil()
+                };
             }
             OpCode::ArrLoad => {
                 let arr_ptr = frame.regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
                 let idx = frame.regs[instr.op2 as usize].as_int().unwrap_or(0) as usize;
                 let val = if !arr_ptr.is_null() {
-                    let arr = unsafe { &*(arr_ptr as *const Vec<Value>) };
-                    arr.get(idx).copied().unwrap_or(Value::nil())
+                    if let Some(len) = self.actor_callbacks.array_len(arr_ptr) {
+                        if idx < len {
+                            unsafe { *((arr_ptr as *const Value).add(idx)) }
+                        } else {
+                            Value::nil()
+                        }
+                    } else {
+                        Value::nil()
+                    }
                 } else {
                     Value::nil()
                 };
@@ -905,16 +1118,17 @@ impl VM {
                 let idx = frame.regs[instr.op2 as usize].as_int().unwrap_or(0) as usize;
                 let val = frame.regs[instr.op3 as usize];
                 if !arr_ptr.is_null() {
-                    let arr = unsafe { &mut *(arr_ptr as *mut Vec<Value>) };
-                    if idx < arr.len() {
-                        arr[idx] = val;
+                    if let Some(len) = self.actor_callbacks.array_len(arr_ptr) {
+                        if idx < len {
+                            unsafe { *((arr_ptr as *mut Value).add(idx)) = val; }
+                        }
                     }
                 }
             }
             OpCode::ArrLen => {
                 let arr_ptr = frame.regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
                 let len = if !arr_ptr.is_null() {
-                    unsafe { (&*(arr_ptr as *const Vec<Value>)).len() as i64 }
+                    self.actor_callbacks.array_len(arr_ptr).unwrap_or(0) as i64
                 } else {
                     0
                 };
@@ -1207,13 +1421,25 @@ impl VM {
                 let s1 = frame.regs[instr.op1 as usize].to_string_repr();
                 let s2 = frame.regs[instr.op2 as usize].to_string_repr();
                 let result = format!("{}{}", s1, s2);
-                frame.regs[instr.op3 as usize] = Value::ptr(result.into_bytes().leak().as_mut_ptr());
+                let bytes = result.into_bytes();
+                frame.regs[instr.op3 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(bytes.len(), HeapTypeTag::String) {
+                    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()); }
+                    Value::ptr(ptr)
+                } else {
+                    Value::nil()
+                };
             }
             OpCode::SPrint => { print!("{}", frame.regs[instr.op1 as usize].to_string_repr()); }
             OpCode::SRead => {
                 let mut input = String::new();
                 frame.regs[instr.op1 as usize] = if std::io::stdin().read_line(&mut input).is_ok() {
-                    Value::ptr(input.into_bytes().leak().as_mut_ptr())
+                    let bytes = input.into_bytes();
+                    if let Some(ptr) = self.actor_callbacks.alloc(bytes.len(), HeapTypeTag::String) {
+                        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()); }
+                        Value::ptr(ptr)
+                    } else {
+                        Value::nil()
+                    }
                 } else { Value::nil() };
             }
             OpCode::FOpen => { frame.regs[instr.op2 as usize] = Value::nil(); }
@@ -1246,6 +1472,14 @@ impl VM {
             }
             OpCode::MetaType => { frame.regs[instr.op2 as usize] = Value::int(0); }
             OpCode::MetaCap => { frame.regs[instr.op2 as usize] = Value::int(0); }
+
+            // -- Reference counting / deallocation --
+            OpCode::Drop => {
+                let val = frame.regs[instr.op1 as usize];
+                if let Some(ptr) = val.as_ptr() {
+                    self.actor_callbacks.drop_ref(ptr);
+                }
+            }
 
             // All other opcodes are not yet implemented in the interpreter.
             // Treat them as no-ops for now.

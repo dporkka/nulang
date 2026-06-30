@@ -6,7 +6,7 @@
 //! - Tuples, Records, Variants, Arrays
 //! - Functions with effect rows and capability annotations
 //! - Reference types with capabilities
-//! - Actor/Agent types
+//! - Actor types
 //! - Pattern matching
 //! - Binary and unary operators
 //!
@@ -71,17 +71,6 @@ fn apply_subst(ty: &Type, subst: &Substitution) -> Type {
         Type::Actor { state, behavior } => Type::Actor {
             state: Box::new(apply_subst(state, subst)),
             behavior: Box::new(apply_subst(behavior, subst)),
-        },
-        Type::Agent {
-            state,
-            policy,
-            memory,
-            tools,
-        } => Type::Agent {
-            state: Box::new(apply_subst(state, subst)),
-            policy: Box::new(apply_subst(policy, subst)),
-            memory: Box::new(apply_subst(memory, subst)),
-            tools: Box::new(apply_subst(tools, subst)),
         },
         Type::App { constructor, args } => Type::App {
             constructor: Box::new(apply_subst(constructor, subst)),
@@ -283,31 +272,6 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             Ok(compose_subst(&s_beh, &s_state))
         }
 
-        // Agents
-        (
-            Type::Agent {
-                state: s1,
-                policy: p1,
-                memory: m1,
-                tools: t1,
-            },
-            Type::Agent {
-                state: s2,
-                policy: p2,
-                memory: m2,
-                tools: t2,
-            },
-        ) => {
-            let s_state = mgu(s1, s2, span)?;
-            let subst = compose_subst(&s_state, &vec![]);
-            let s_policy = mgu(&apply_subst(p1, &subst), &apply_subst(p2, &subst), span)?;
-            let subst = compose_subst(&s_policy, &subst);
-            let s_mem = mgu(&apply_subst(m1, &subst), &apply_subst(m2, &subst), span)?;
-            let subst = compose_subst(&s_mem, &subst);
-            let s_tools = mgu(&apply_subst(t1, &subst), &apply_subst(t2, &subst), span)?;
-            Ok(compose_subst(&s_tools, &subst))
-        }
-
         // Reference types
         (Type::Reference { cap: c1, inner: i1 }, Type::Reference { cap: c2, inner: i2 }) => {
             if c1 != c2 {
@@ -409,17 +373,6 @@ fn occurs_in(v: TypeVar, t: &Type) -> bool {
         Type::Array(t) => occurs_in(v, t),
         Type::Function { param, ret, .. } => occurs_in(v, param) || occurs_in(v, ret),
         Type::Actor { state, behavior } => occurs_in(v, state) || occurs_in(v, behavior),
-        Type::Agent {
-            state,
-            policy,
-            memory,
-            tools,
-        } => {
-            occurs_in(v, state)
-                || occurs_in(v, policy)
-                || occurs_in(v, memory)
-                || occurs_in(v, tools)
-        }
         Type::App { constructor, args } => {
             occurs_in(v, constructor) || args.iter().any(|a| occurs_in(v, a))
         }
@@ -479,9 +432,7 @@ impl TypeChecker {
                 Decl::Actor { name, .. } => {
                     ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
                 }
-                Decl::Agent { name, .. } => {
-                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
-                }
+
                 _ => {}
             }
             last_type = final_ty;
@@ -496,6 +447,7 @@ impl TypeChecker {
                 name,
                 params,
                 ret_type,
+                effect,
                 body,
                 span,
                 ..
@@ -520,10 +472,11 @@ impl TypeChecker {
                 // Fresh return type variable so the function can refer to itself
                 // recursively before its body is inferred.
                 let ret_var = Type::Var(TypeVar::fresh());
+                let declared_effect = effect.clone().unwrap_or_else(EffectRow::empty);
                 let recursive_func_ty = Type::Function {
                     param: Box::new(param_ty.clone()),
                     ret: Box::new(ret_var.clone()),
-                    effect: EffectRow::empty(),
+                    effect: declared_effect.clone(),
                     cap: Capability::Ref,
                 };
 
@@ -559,7 +512,7 @@ impl TypeChecker {
                 let func_ty = Type::Function {
                     param: Box::new(param_ty),
                     ret: Box::new(ret_ty),
-                    effect: EffectRow::empty(),
+                    effect: declared_effect.clone(),
                     cap: Capability::Ref,
                 };
 
@@ -577,9 +530,7 @@ impl TypeChecker {
             Decl::Actor { name, behaviors, span, .. } => {
                 self.infer_actor_decl(ctx, name, behaviors, *span)
             }
-            Decl::Agent { name, behaviors, span, .. } => {
-                self.infer_agent_decl(ctx, name, behaviors, *span)
-            }
+
             Decl::Module { decls, .. } => {
                 let mut ctx = ctx.clone();
                 let mut last = Type::unit();
@@ -713,9 +664,9 @@ impl TypeChecker {
             // Handle effect
             Expr::Handle {
                 body,
-                handlers: _,
+                handlers,
                 span,
-            } => self.infer_handle(ctx, body, *span),
+            } => self.infer_handle(ctx, body, handlers, *span),
 
             // Migrate actor
             Expr::Migrate { actor, node: _, span } => {
@@ -934,15 +885,24 @@ impl TypeChecker {
             Type::Tuple(arg_types)
         };
 
+        // Preserve the function's effect row instead of forcing it to empty.
+        // If the function type is not yet known, use a fresh open row so that
+        // row-polymorphic functions can still unify.
+        let func_ty_subst = apply_subst(&func_ty, &subst);
+        let expected_effect = match &func_ty_subst {
+            Type::Function { effect, .. } => effect.clone(),
+            _ => EffectRow::Open(vec![], Region::fresh()),
+        };
+
         let expected = Type::Function {
             param: Box::new(param_ty),
             ret: Box::new(result_ty.clone()),
-            effect: EffectRow::empty(),
+            effect: expected_effect,
             cap: Capability::Ref,
         };
 
         // Unify
-        let s2 = mgu(&apply_subst(&func_ty, &subst), &expected, span)?;
+        let s2 = mgu(&func_ty_subst, &expected, span)?;
         let final_subst = compose_subst(&s2, &subst);
 
         Ok((final_subst.clone(), apply_subst(&result_ty, &final_subst)))
@@ -1555,36 +1515,6 @@ impl TypeChecker {
         Ok((vec![], actor_ty))
     }
 
-    /// Infer agent declaration.
-    fn infer_agent_decl(
-        &mut self,
-        ctx: &TypeContext,
-        _name: &str,
-        behaviors: &[Behavior],
-        _span: Span,
-    ) -> NuResult<(Substitution, Type)> {
-        // Check each behavior (similar to actors)
-        for behavior in behaviors {
-            let mut behavior_ctx = ctx.clone();
-            for (param_name, param_ty) in &behavior.params {
-                let pty = match param_ty {
-                    Some(t) => t.clone(),
-                    None => Type::Var(TypeVar::fresh()),
-                };
-                behavior_ctx.bind(param_name.clone(), pty.clone(), behavior.cap);
-            }
-            let (_s, _body_ty) = self.infer_expr(&behavior_ctx, &behavior.body)?;
-        }
-
-        let agent_ty = Type::Agent {
-            state: Box::new(Type::Var(TypeVar::fresh())),
-            policy: Box::new(Type::Var(TypeVar::fresh())),
-            memory: Box::new(Type::Var(TypeVar::fresh())),
-            tools: Box::new(Type::Var(TypeVar::fresh())),
-        };
-        Ok((vec![], agent_ty))
-    }
-
     /// Infer spawn expression.
     fn infer_spawn(
         &mut self,
@@ -1680,12 +1610,26 @@ impl TypeChecker {
         &mut self,
         ctx: &TypeContext,
         body: &Expr,
+        handlers: &[EffectHandler],
         _span: Span,
     ) -> NuResult<(Substitution, Type)> {
         // Infer body type
-        let (s, body_ty) = self.infer_expr(ctx, body)?;
-        // The result type is the same as the body type (handlers must return compatible types)
-        Ok((s, body_ty))
+        let (mut subst, body_ty) = self.infer_expr(ctx, body)?;
+
+        // Each handler body must produce a value compatible with the body's type.
+        for h in handlers {
+            let mut handler_ctx = apply_subst_to_ctx(ctx, &subst);
+            for p in &h.params {
+                handler_ctx.bind(p.clone(), Type::Var(TypeVar::fresh()), Capability::Ref);
+            }
+            let (s, handler_ty) = self.infer_expr(&handler_ctx, &h.body)?;
+            let handler_ty_subst = apply_subst(&handler_ty, &s);
+            let body_ty_subst = apply_subst(&body_ty, &compose_subst(&s, &subst));
+            let s_unify = mgu(&handler_ty_subst, &body_ty_subst, Span::default())?;
+            subst = compose_subst(&s_unify, &compose_subst(&s, &subst));
+        }
+
+        Ok((subst.clone(), apply_subst(&body_ty, &subst)))
     }
 
     /// Infer for comprehension.
@@ -2612,5 +2556,86 @@ mod tests {
         };
         let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
         assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Effect row handling in application and declarations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_infer_app_preserves_lambda_effect() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        let lam = Expr::Lambda {
+            params: vec![("x".to_string(), Some(Type::int()))],
+            body: Box::new(var("x")),
+            effect: Some(EffectRow::Closed(vec![Effect::IO])),
+            span: sp(),
+        };
+        let app = Expr::App {
+            func: Box::new(lam),
+            args: vec![int_lit(1)],
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &app).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+    }
+
+    #[test]
+    fn test_infer_function_decl_with_effect() {
+        let mut tc = TypeChecker::new();
+        let module = AstModule {
+            name: "test".to_string(),
+            decls: vec![Decl::Function {
+                name: "io_fn".to_string(),
+                type_params: vec![],
+                params: vec![("x".to_string(), Some(Type::int()))],
+                ret_type: Some(Type::int()),
+                effect: Some(EffectRow::Closed(vec![Effect::IO])),
+                cap: None,
+                body: bin(BinOp::Add, var("x"), int_lit(1)),
+                public: true,
+                span: sp(),
+            }],
+        };
+        let ty = tc.check_module(&module).unwrap();
+        match ty {
+            Type::Function { effect, .. } => {
+                assert!(effect.contains(&Effect::IO));
+            }
+            other => panic!("Expected function type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_infer_handle_checks_handler_body() {
+        let mut tc = TypeChecker::new();
+        let ctx = TypeContext::new();
+        let handle_ok = Expr::Handle {
+            body: Box::new(int_lit(42)),
+            handlers: vec![EffectHandler {
+                effect_name: "IO".to_string(),
+                op_name: "print".to_string(),
+                params: vec!["msg".to_string()],
+                body: int_lit(0),
+                resume: false,
+            }],
+            span: sp(),
+        };
+        let (s, ty) = tc.infer_expr(&ctx, &handle_ok).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::int());
+
+        let handle_bad = Expr::Handle {
+            body: Box::new(int_lit(42)),
+            handlers: vec![EffectHandler {
+                effect_name: "IO".to_string(),
+                op_name: "print".to_string(),
+                params: vec!["msg".to_string()],
+                body: string_lit("oops"),
+                resume: false,
+            }],
+            span: sp(),
+        };
+        assert!(tc.infer_expr(&ctx, &handle_bad).is_err());
     }
 }

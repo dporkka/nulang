@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod actor;
 mod scheduler;
 mod mailbox;
-mod heap;
+pub mod heap;
 mod gc;
 mod orca_cycle;
 mod supervisor;
@@ -22,6 +22,7 @@ mod crdt_manager;
 mod timer;
 mod registry;
 mod process_groups;
+mod persistence;
 
 #[cfg(test)]
 mod tests;
@@ -42,6 +43,7 @@ pub use crdt_manager::*;
 pub use timer::*;
 pub use registry::*;
 pub use process_groups::*;
+pub use persistence::*;
 
 use crate::types::ExitReason;
 use crate::vm::Value;
@@ -88,6 +90,16 @@ pub struct Runtime {
 
     // Process groups (v0.7)
     pub process_groups: ProcessGroups,
+
+    // Persistence engine (v0.7)
+    pub persistence: Box<dyn PersistenceStore>,
+
+    // VM used to execute bytecode behavior handlers.
+    vm: Option<crate::vm::VM>,
+
+    // Bytecode modules for actors that may need to be recovered after a
+    // runtime restart.  Maps actor_id -> (bytecode_module, behavior_offsets).
+    recovery_modules: HashMap<u64, (crate::bytecode::CodeModule, Vec<usize>)>,
 }
 
 impl Runtime {
@@ -112,6 +124,9 @@ impl Runtime {
             timer_wheel: TimerWheel::new(),
             registry: ActorRegistry::new(),
             process_groups: ProcessGroups::new(),
+            persistence: Box::new(MemoryStore::new()),
+            vm: None,
+            recovery_modules: HashMap::new(),
         }
     }
 
@@ -119,29 +134,65 @@ impl Runtime {
         &mut self,
         init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
     ) -> u64 {
+        self.spawn_actor_with_models(init, HashMap::new(), false)
+    }
+
+    pub fn spawn_persistent_actor(
+        &mut self,
+        init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
+        state_models: HashMap<String, StateModel>,
+    ) -> u64 {
+        self.spawn_actor_with_models(init, state_models, true)
+    }
+
+    fn spawn_actor_with_models(
+        &mut self,
+        init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
+        state_models: HashMap<String, StateModel>,
+        persistent: bool,
+    ) -> u64 {
         let id = fresh_actor_id();
         let mut actor = Actor::new(id, format!("actor_{}", id), 256);
         let state_fields = init();
         for (name, value) in state_fields {
             actor.set_state_field(name, value);
         }
+        actor.state_models = state_models;
+        actor.persistent = persistent;
         actor.state = ActorState::Running;
         self.actors.insert(id, actor);
         self.scheduler.enqueue(id);
         id
     }
 
+    /// Register bytecode metadata so that a persistent actor can be recovered
+    /// after a runtime restart.  The runtime stores the module and behavior
+    /// offsets; `recover_actor` will restore them on the recreated actor.
+    pub fn register_recovery_module(
+        &mut self,
+        actor_id: u64,
+        module: crate::bytecode::CodeModule,
+        offsets: Vec<usize>,
+    ) {
+        self.recovery_modules.insert(actor_id, (module, offsets));
+    }
+
     pub fn send_message(&mut self, target_id: u64, behavior: &str, args: &[Value]) {
-        let actor = match self.actors.get(&target_id) {
-            Some(a) => a,
-            None => return,
-        };
-        let behavior_id = actor
+        let behavior_id = self.behavior_id_for(target_id, behavior).unwrap_or(0);
+        self.send_message_by_id(target_id, behavior_id, args);
+    }
+
+    fn behavior_id_for(&self, target_id: u64, behavior: &str) -> Option<u16> {
+        let actor = self.actors.get(&target_id)?;
+        let suffix = format!(".{}", behavior);
+        actor
             .behavior_table
             .iter()
-            .position(|entry| entry.name == behavior)
+            .position(|entry| entry.name == behavior || entry.name.ends_with(&suffix))
             .map(|idx| idx as u16)
-            .unwrap_or(0);
+    }
+
+    pub fn send_message_by_id(&mut self, target_id: u64, behavior_id: u16, args: &[Value]) {
         let msg = Message {
             behavior_id,
             payload: args.to_vec(),
@@ -244,6 +295,7 @@ impl Runtime {
             }
         };
         let should_requeue = if let Some(msg) = msg_opt {
+            let behavior_idx = msg.behavior_id as usize;
             let handler_fn: Option<fn(&mut Actor, &[Value])> = {
                 let actor = match self.actors.get(&actor_id) {
                     Some(a) => a,
@@ -252,7 +304,6 @@ impl Runtime {
                         return;
                     }
                 };
-                let behavior_idx = msg.behavior_id as usize;
                 if behavior_idx < actor.behavior_table.len() {
                     Some(actor.behavior_table[behavior_idx].handler_fn)
                 } else {
@@ -260,6 +311,19 @@ impl Runtime {
                 }
             };
             if let Some(handler) = handler_fn {
+                // Journal the message before handling so recovery can replay it.
+                if self.actor_is_persistent(actor_id) {
+                    let seq = self.next_sequence(actor_id);
+                    let payload = msg.payload.iter().map(PersistedValue::from_value).collect();
+                    let _ = self.persistence.append_journal(
+                        actor_id,
+                        JournalEntry {
+                            sequence: seq,
+                            behavior_id: msg.behavior_id,
+                            payload,
+                        },
+                    );
+                }
                 let actor = match self.actors.get_mut(&actor_id) {
                     Some(a) => a,
                     None => {
@@ -268,6 +332,25 @@ impl Runtime {
                     }
                 };
                 handler(actor, &msg.payload);
+                // Snapshot durable state after the message is processed.
+                self.checkpoint_actor(actor_id);
+            } else if self.has_bytecode_handler(actor_id, behavior_idx) {
+                // Journal before executing bytecode as well.
+                if self.actor_is_persistent(actor_id) {
+                    let seq = self.next_sequence(actor_id);
+                    let payload = msg.payload.iter().map(PersistedValue::from_value).collect();
+                    let _ = self.persistence.append_journal(
+                        actor_id,
+                        JournalEntry {
+                            sequence: seq,
+                            behavior_id: msg.behavior_id,
+                            payload,
+                        },
+                    );
+                }
+                let payload = msg.payload.clone();
+                let _result = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
+                self.checkpoint_actor(actor_id);
             }
             let actor = match self.actors.get_mut(&actor_id) {
                 Some(a) => a,
@@ -290,6 +373,157 @@ impl Runtime {
             self.scheduler.enqueue(actor_id);
         }
         self.current_actor = None;
+    }
+
+    fn actor_is_persistent(&self, actor_id: u64) -> bool {
+        self.actors
+            .get(&actor_id)
+            .map(|a| a.persistent)
+            .unwrap_or(false)
+    }
+
+    fn has_bytecode_handler(&self, actor_id: u64, behavior_idx: usize) -> bool {
+        self.actors
+            .get(&actor_id)
+            .map(|a| {
+                a.bytecode_module.is_some()
+                    && behavior_idx < a.bytecode_offsets.len()
+                    && a.bytecode_offsets[behavior_idx] > 0
+            })
+            .unwrap_or(false)
+    }
+
+    fn next_sequence(&self, actor_id: u64) -> u64 {
+        self.persistence.latest_sequence(actor_id) + 1
+    }
+
+    /// Snapshot durable fields of an actor to the persistence store.
+    pub fn checkpoint_actor(&mut self, actor_id: u64) {
+        let actor = match self.actors.get(&actor_id) {
+            Some(a) => a,
+            None => return,
+        };
+        if !actor.persistent {
+            return;
+        }
+        let seq = self.next_sequence(actor_id);
+        let mut state = HashMap::new();
+        for (name, value) in &actor.state_data {
+            let model = actor.state_models.get(name).copied().unwrap_or(StateModel::Local);
+            if model.is_persistent() {
+                state.insert(name.clone(), PersistedValue::from_value(value));
+            }
+        }
+        let snapshot = ActorSnapshot { actor_id, sequence: seq, state };
+        let _ = self.persistence.save_snapshot(snapshot);
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.sequence = seq;
+        }
+    }
+
+    /// Execute a bytecode behavior for an actor.
+    fn run_bytecode_behavior(
+        &mut self,
+        actor_id: u64,
+        behavior_idx: usize,
+        args: &[Value],
+    ) -> Value {
+        let (module, code_offset) = {
+            let actor = match self.actors.get(&actor_id) {
+                Some(a) => a,
+                None => return Value::nil(),
+            };
+            let module = match actor.bytecode_module.clone() {
+                Some(m) => m,
+                None => return Value::nil(),
+            };
+            let offset = actor.bytecode_offsets.get(behavior_idx).copied().unwrap_or(0);
+            (module, offset)
+        };
+
+        let self_ptr: *mut Runtime = self;
+        unsafe {
+            if (*self_ptr).vm.is_none() {
+                (*self_ptr).vm = Some(crate::vm::VM::new());
+            }
+            let vm = (*self_ptr).vm.as_mut().unwrap();
+
+            let module_idx = if let Some(idx) = (*self_ptr).actors.get(&actor_id).unwrap().bytecode_module_idx {
+                idx
+            } else {
+                let idx = vm.modules.len();
+                vm.load_module(module);
+                if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                    actor.bytecode_module_idx = Some(idx);
+                }
+                idx
+            };
+
+            vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
+
+            let mut frame = crate::vm::Frame::new(None, module_idx);
+            frame.pc = code_offset;
+            for (i, arg) in args.iter().enumerate().take(256) {
+                frame.regs[i] = *arg;
+            }
+            vm.set_current_frame(frame);
+
+            vm.run_from(module_idx, code_offset).unwrap_or(Value::nil())
+        }
+    }
+
+    /// Recover a persistent actor from the latest snapshot and replay the journal.
+    pub fn recover_actor(&mut self, actor_id: u64) -> Option<u64> {
+        let snapshot = self.persistence.load_snapshot(actor_id)?;
+        let journal = self.persistence.read_journal(actor_id);
+        let mut actor = Actor::new(actor_id, format!("actor_{}", actor_id), 256);
+        actor.persistent = true;
+        actor.sequence = snapshot.sequence;
+        for (name, value) in snapshot.state {
+            actor.set_state_field(name, value.to_value());
+        }
+        // Restore bytecode metadata registered for recovery.
+        if let Some((module, offsets)) = self.recovery_modules.get(&actor_id) {
+            actor.bytecode_module = Some(module.clone());
+            actor.bytecode_offsets = offsets.clone();
+        }
+        self.actors.insert(actor_id, actor);
+
+        // Replay journal entries that arrived after the snapshot.
+        let entries_to_replay: Vec<_> = journal
+            .iter()
+            .filter(|e| e.sequence > snapshot.sequence)
+            .cloned()
+            .collect();
+        for entry in entries_to_replay {
+            let behavior_idx = entry.behavior_id as usize;
+            let payload: Vec<Value> = entry.payload.iter().map(|p| p.to_value()).collect();
+            if self.has_native_handler(actor_id, behavior_idx) {
+                let handler = self.actors.get(&actor_id)
+                    .and_then(|a| a.behavior_table.get(behavior_idx))
+                    .map(|b| b.handler_fn)?;
+                if let Some(actor) = self.actors.get_mut(&actor_id) {
+                    handler(actor, &payload);
+                    actor.sequence = entry.sequence;
+                }
+            } else if self.has_bytecode_handler(actor_id, behavior_idx) {
+                self.current_actor = Some(actor_id);
+                let _ = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
+                self.current_actor = None;
+                if let Some(actor) = self.actors.get_mut(&actor_id) {
+                    actor.sequence = entry.sequence;
+                }
+            }
+        }
+        self.scheduler.enqueue(actor_id);
+        Some(actor_id)
+    }
+
+    fn has_native_handler(&self, actor_id: u64, behavior_idx: usize) -> bool {
+        self.actors
+            .get(&actor_id)
+            .map(|a| behavior_idx < a.behavior_table.len())
+            .unwrap_or(false)
     }
 
     // -- Fault Tolerance: Links --
@@ -621,6 +855,256 @@ impl Runtime {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VM runtime callbacks
+// ---------------------------------------------------------------------------
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// Bridges the standalone VM to a real `Runtime`.
+///
+/// Used in tests and in any context where bytecode should create real actors
+/// and allocate on the current actor's heap.
+pub struct RuntimeVmCallbacks {
+    runtime: Rc<RefCell<Runtime>>,
+}
+
+impl RuntimeVmCallbacks {
+    pub fn new(runtime: Rc<RefCell<Runtime>>) -> Self {
+        RuntimeVmCallbacks { runtime }
+    }
+}
+
+impl std::fmt::Debug for RuntimeVmCallbacks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeVmCallbacks").finish_non_exhaustive()
+    }
+}
+
+impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
+    fn current_actor_id(&self) -> Option<u64> {
+        self.runtime.borrow().current_actor
+    }
+
+    fn alloc(
+        &mut self,
+        size: usize,
+        type_tag: crate::runtime::heap::TypeTag,
+    ) -> Option<*mut u8> {
+        let mut rt = self.runtime.borrow_mut();
+        if let Some(actor_id) = rt.current_actor {
+            if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                return actor.heap.alloc(size, type_tag);
+            }
+        }
+        None
+    }
+
+    fn drop_ref(&mut self, ptr: *mut u8) {
+        let mut rt = self.runtime.borrow_mut();
+        if let Some(actor_id) = rt.current_actor {
+            if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                unsafe { actor.heap.free(ptr); }
+            }
+        }
+    }
+
+    fn array_len(&self, ptr: *mut u8) -> Option<usize> {
+        let rt = self.runtime.borrow();
+        if let Some(actor_id) = rt.current_actor {
+            if rt.actors.get(&actor_id).is_some() {
+                unsafe {
+                    let header = &*crate::runtime::heap::ActorHeap::header_of(ptr);
+                    if header.type_tag == crate::runtime::heap::TypeTag::Array {
+                        let payload_size = header
+                            .size
+                            .saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);
+                        Some(payload_size / std::mem::size_of::<crate::vm::Value>())
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn spawn_actor(
+        &mut self,
+        module: &crate::bytecode::CodeModule,
+        behavior_idx: usize,
+        init: Vec<(String, crate::vm::Value)>,
+    ) -> crate::vm::Value {
+        let mut rt = self.runtime.borrow_mut();
+        let meta = module
+            .actor_metadata
+            .iter()
+            .find(|m| m.behavior_indices.contains(&behavior_idx));
+        let id = if let Some(meta) = meta {
+            let state_models: HashMap<String, crate::runtime::persistence::StateModel> = meta
+                .state_models
+                .iter()
+                .map(|(name, model)| (name.clone(), map_ast_state_model(*model)))
+                .collect();
+            let defaults = meta.state_defaults.clone();
+            rt.spawn_actor_with_models(
+                Box::new(move || {
+                    let mut fields: Vec<(String, crate::vm::Value)> = defaults
+                        .iter()
+                        .map(|(name, c)| (name.clone(), crate::vm::constant_to_value(c)))
+                        .collect();
+                    fields.extend(init);
+                    fields
+                }),
+                state_models,
+                meta.persistent,
+            )
+        } else {
+            rt.spawn_actor(Box::new(move || init))
+        };
+        // Record bytecode behavior offsets so the runtime can execute bytecode handlers.
+        let mut offsets = vec![0; module.behaviors.len()];
+        if let Some(meta) = meta {
+            for &idx in &meta.behavior_indices {
+                if let Some(entry) = module.behaviors.get(idx) {
+                    offsets[idx] = entry.code_offset;
+                }
+            }
+        }
+        if let Some(actor) = rt.actors.get_mut(&id) {
+            actor.bytecode_module = Some(module.clone());
+            actor.bytecode_offsets = offsets.clone();
+        }
+        // Keep a copy for recovery after a runtime restart.
+        rt.register_recovery_module(id, module.clone(), offsets);
+        crate::vm::Value::actor_ref(id)
+    }
+
+    fn send_message(&mut self, target: crate::vm::Value, behavior_id: u16, args: &[crate::vm::Value]) {
+        if let Some(actor_id) = target.as_actor_id() {
+            let mut rt = self.runtime.borrow_mut();
+            rt.send_message_by_id(actor_id, behavior_id, args);
+        }
+    }
+
+    fn ask_actor(&mut self, target: crate::vm::Value, behavior_id: u16, args: &[crate::vm::Value]) -> crate::vm::Value {
+        // Synchronous request/response requires a response mailbox and
+        // dedicated ask protocol; for now treat ask as fire-and-forget.
+        self.send_message(target, behavior_id, args);
+        crate::vm::Value::nil()
+    }
+
+    fn get_state_field(&self, field: &str) -> crate::vm::Value {
+        let rt = self.runtime.borrow();
+        if let Some(actor_id) = rt.current_actor {
+            if let Some(actor) = rt.actors.get(&actor_id) {
+                return actor.get_state_field(field).unwrap_or(crate::vm::Value::nil());
+            }
+        }
+        crate::vm::Value::nil()
+    }
+
+    fn set_state_field(&mut self, field: &str, value: crate::vm::Value) {
+        let mut rt = self.runtime.borrow_mut();
+        if let Some(actor_id) = rt.current_actor {
+            if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                actor.set_state_field(field, value);
+            }
+        }
+    }
+}
+
+/// Raw-pointer callbacks used when the runtime itself executes an actor's
+/// bytecode behavior. Holds a transient borrow of the executing `Runtime`.
+#[derive(Debug)]
+struct BytecodeRuntimeCallbacks {
+    runtime: *mut Runtime,
+    actor_id: u64,
+}
+
+unsafe impl Send for BytecodeRuntimeCallbacks {}
+unsafe impl Sync for BytecodeRuntimeCallbacks {}
+
+impl BytecodeRuntimeCallbacks {
+    fn new(runtime: *mut Runtime, actor_id: u64) -> Self {
+        BytecodeRuntimeCallbacks { runtime, actor_id }
+    }
+}
+
+impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
+    fn current_actor_id(&self) -> Option<u64> {
+        Some(self.actor_id)
+    }
+
+    fn alloc(&mut self, size: usize, type_tag: crate::runtime::heap::TypeTag) -> Option<*mut u8> {
+        unsafe { (*self.runtime).actors.get_mut(&self.actor_id)?.heap.alloc(size, type_tag) }
+    }
+
+    fn drop_ref(&mut self, ptr: *mut u8) {
+        unsafe {
+            if let Some(actor) = (*self.runtime).actors.get_mut(&self.actor_id) {
+                actor.heap.free(ptr);
+            }
+        }
+    }
+
+    fn array_len(&self, ptr: *mut u8) -> Option<usize> {
+        unsafe {
+            let actor = (*self.runtime).actors.get(&self.actor_id)?;
+            let header = &*crate::runtime::heap::ActorHeap::header_of(ptr);
+            if header.type_tag == crate::runtime::heap::TypeTag::Array {
+                let payload_size = header.size.saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);
+                Some(payload_size / std::mem::size_of::<crate::vm::Value>())
+            } else {
+                None
+            }
+        }
+    }
+
+    fn spawn_actor(
+        &mut self,
+        _module: &crate::bytecode::CodeModule,
+        _behavior_idx: usize,
+        _init: Vec<(String, crate::vm::Value)>,
+    ) -> crate::vm::Value {
+        crate::vm::Value::actor_ref(0)
+    }
+
+    fn send_message(&mut self, _target: crate::vm::Value, _behavior_id: u16, _args: &[crate::vm::Value]) {}
+
+    fn get_state_field(&self, field: &str) -> crate::vm::Value {
+        unsafe {
+            if let Some(actor) = (*self.runtime).actors.get(&self.actor_id) {
+                return actor.get_state_field(field).unwrap_or(crate::vm::Value::nil());
+            }
+        }
+        crate::vm::Value::nil()
+    }
+
+    fn set_state_field(&mut self, field: &str, value: crate::vm::Value) {
+        unsafe {
+            if let Some(actor) = (*self.runtime).actors.get_mut(&self.actor_id) {
+                actor.set_state_field(field, value);
+            }
+        }
+    }
+}
+
+fn map_ast_state_model(model: crate::ast::StateModel) -> crate::runtime::persistence::StateModel {
+    use crate::ast::StateModel as AstModel;
+    use crate::runtime::persistence::StateModel as RuntimeModel;
+    match model {
+        AstModel::Local => RuntimeModel::Local,
+        AstModel::Durable => RuntimeModel::Durable,
+        AstModel::EventSourced => RuntimeModel::EventSourced,
+        AstModel::Crdt => RuntimeModel::Crdt,
     }
 }
 

@@ -103,14 +103,16 @@ pub enum OpCode {
     Spawn   = 0x80, // Spawn actor (behavior_idx, init_reg, dst_addr)
     Send    = 0x81, // Send message (addr_reg, behavior_id, args...)
     Ask     = 0x82, // Ask / request-response
-    SelfOp  = 0x83, // Get self actor address (dst)
-    Receive = 0x84, // Receive / await message (timeout_reg)
-    Monitor = 0x85, // Monitor actor (target_addr, dst)
-    Demon   = 0x86, // Demonitor
-    Link    = 0x87, // Link actors bidirectionally
-    Unlink  = 0x88, // Unlink actors
-    Exit    = 0x89, // Exit / terminate actor (reason_reg)
-    Yield   = 0x8A, // Yield execution (reduction quota exhausted)
+    SelfOp   = 0x83, // Get self actor address (dst)
+    Receive  = 0x84, // Receive / await message (timeout_reg)
+    Monitor  = 0x85, // Monitor actor (target_addr, dst)
+    Demon    = 0x86, // Demonitor
+    Link     = 0x87, // Link actors bidirectionally
+    Unlink   = 0x88, // Unlink actors
+    Exit     = 0x89, // Exit / terminate actor (reason_reg)
+    Yield    = 0x8A, // Yield execution (reduction quota exhausted)
+    StateGet = 0x8B, // Load current actor state field by name (field_const_idx, dst)
+    StateSet = 0x8C, // Store to current actor state field by name (val_reg, field_const_idx)
 
     // == Effects (0x90-0x93) ==
     Perform = 0x90, // Perform effect operation (eff_id, op_id, args, dst)
@@ -194,6 +196,7 @@ impl OpCode {
             0x83 => Some(SelfOp), 0x84 => Some(Receive), 0x85 => Some(Monitor),
             0x86 => Some(Demon), 0x87 => Some(Link), 0x88 => Some(Unlink),
             0x89 => Some(Exit), 0x8A => Some(Yield),
+            0x8B => Some(StateGet), 0x8C => Some(StateSet),
             0x90 => Some(Perform), 0x91 => Some(Handle), 0x92 => Some(Resume),
             0x93 => Some(Unwind),
             0x94 => Some(PyImport), 0x95 => Some(PyGetAttr), 0x96 => Some(PyCall),
@@ -339,6 +342,31 @@ pub struct BehaviorTableEntry {
     pub effect_mask: u32,      // Which effects this behavior may perform (bitmap)
 }
 
+/// Actor metadata for durable execution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActorMeta {
+    pub name: String,
+    pub persistent: bool,
+    /// State field name -> model (Local, Durable, EventSourced, Crdt).
+    pub state_models: Vec<(String, crate::ast::StateModel)>,
+    /// Default values for state fields (literals only in the MVP).
+    pub state_defaults: Vec<(String, Constant)>,
+    /// Indices into the behavior table that belong to this actor.
+    pub behavior_indices: Vec<usize>,
+}
+
+impl ActorMeta {
+    pub fn new(name: impl Into<String>) -> Self {
+        ActorMeta {
+            name: name.into(),
+            persistent: false,
+            state_models: Vec::new(),
+            state_defaults: Vec::new(),
+            behavior_indices: Vec::new(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Code Module
 // ---------------------------------------------------------------------------
@@ -356,6 +384,8 @@ pub struct CodeModule {
     /// Effect handler tables: one per `handle { ... }` block.
     /// Indexed by the handler_table_idx operand of the Handle opcode.
     pub handler_tables: Vec<HandlerTable>,
+    /// Actor metadata for durable execution (v0.7).
+    pub actor_metadata: Vec<ActorMeta>,
 }
 
 impl CodeModule {
@@ -369,7 +399,14 @@ impl CodeModule {
             exports: Vec::new(),
             entry_point: None,
             handler_tables: Vec::new(),
+            actor_metadata: Vec::new(),
         }
+    }
+
+    pub fn add_actor_meta(&mut self, meta: ActorMeta) -> usize {
+        let idx = self.actor_metadata.len();
+        self.actor_metadata.push(meta);
+        idx
     }
 
     pub fn emit(&mut self, instr: Instruction) -> usize {

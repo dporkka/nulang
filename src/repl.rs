@@ -426,20 +426,6 @@ pub fn type_to_string(ty: &Type) -> String {
                 type_to_string(behavior)
             )
         }
-        Type::Agent {
-            state,
-            policy,
-            memory,
-            tools,
-        } => {
-            format!(
-                "Agent[{}, {}, {}, {}]",
-                type_to_string(state),
-                type_to_string(policy),
-                type_to_string(memory),
-                type_to_string(tools)
-            )
-        }
         Type::App { constructor, args } => {
             let cstr = type_to_string(constructor);
             let args_str: Vec<String> = args.iter().map(type_to_string).collect();

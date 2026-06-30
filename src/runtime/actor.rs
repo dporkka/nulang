@@ -3,6 +3,7 @@
 use super::*;
 use super::gc::OrcaGc;
 use crate::vm::Value;
+use std::collections::HashMap;
 
 /// Actor state machine: Created → Running → Waiting → Suspended → Terminated
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,7 +24,16 @@ pub struct Actor {
     pub heap: ActorHeap,
     pub orca_gc: OrcaGc,                // ORCA GC engine for this actor
     pub state_data: Vec<(String, Value)>, // Named actor state fields
+    pub state_models: HashMap<String, StateModel>, // Persistence model per field
+    pub persistent: bool,              // Whether this actor survives restarts
     pub behavior_table: Vec<BehaviorEntry>,
+    /// Bytecode behavior offsets by behavior_id. Empty entries mean no bytecode
+    /// handler for that behavior (native handler or missing).
+    pub bytecode_offsets: Vec<usize>,
+    /// Bytecode module used by this actor's bytecode behaviors.
+    pub bytecode_module: Option<crate::bytecode::CodeModule>,
+    /// Index of the loaded bytecode module in the runtime VM.
+    pub bytecode_module_idx: Option<usize>,
     pub parent: Option<u64>,       // Supervisor
     pub children: Vec<u64>,        // Supervised actors
     pub monitors: Vec<u64>,        // Actors monitoring this one
@@ -31,6 +41,7 @@ pub struct Actor {
     pub trap_exits: bool,          // If true, exit signals become messages instead of killing this actor
     pub reduction_count: u32,      // Reductions since last yield
     pub max_reductions: u32,       // Max reductions before yield (preemption)
+    pub sequence: u64,             // Last persisted sequence number
 }
 
 /// A behavior entry: maps behavior name to handler.
@@ -49,7 +60,12 @@ impl Actor {
             heap: ActorHeap::new(64 * 1024), // 64KB initial heap
             orca_gc: OrcaGc::new(id),         // ORCA GC engine
             state_data: Vec::new(),
+            state_models: HashMap::new(),
+            persistent: false,
             behavior_table: Vec::new(),
+            bytecode_offsets: Vec::new(),
+            bytecode_module: None,
+            bytecode_module_idx: None,
             parent: None,
             children: Vec::new(),
             monitors: Vec::new(),
@@ -57,6 +73,7 @@ impl Actor {
             trap_exits: false,
             reduction_count: 0,
             max_reductions: 1000,
+            sequence: 0,
         }
     }
 

@@ -119,8 +119,7 @@ impl Parser {
         self.skip_newlines();
         match self.peek_kind().clone() {
             TokenKind::Fn => self.parse_function(public),
-            TokenKind::Actor => self.parse_actor(),
-            TokenKind::Agent => self.parse_agent(),
+            TokenKind::Actor | TokenKind::Persistent => self.parse_actor(),
             TokenKind::Type => {
                 self.advance(); // consume 'type'
                 self.skip_newlines();
@@ -218,7 +217,8 @@ impl Parser {
 
     fn parse_actor(&mut self) -> NuResult<Decl> {
         let span = self.current_span();
-        self.advance(); // consume 'actor'
+        let persistent = self.consume_if(&TokenKind::Persistent);
+        self.expect(TokenKind::Actor)?;
         let name = self.expect_ident("actor name")?;
         let type_params = self.parse_type_params()?;
         self.expect(TokenKind::LBrace)?;
@@ -235,18 +235,22 @@ impl Parser {
             match self.peek_kind().clone() {
                 TokenKind::State => {
                     self.advance(); // 'state'
+                    let model = self.parse_state_model();
                     let field_name = self.expect_ident("state field name")?;
+                    let ty = if self.consume_if(&TokenKind::Colon) {
+                        self.parse_type()?
+                    } else {
+                        Type::unit()
+                    };
                     self.expect(TokenKind::Assign)?;
                     let default = self.parse_expr()?;
-                    state_fields.push((field_name, Type::unit(), default));
+                    state_fields.push((field_name, model, ty, default));
                     self.skip_newlines_semicolons();
                 }
                 TokenKind::Behavior => {
                     behaviors.push(self.parse_behavior()?);
                 }
                 _ => {
-                    // Try to parse as behavior without explicit 'behavior' keyword
-                    // (some syntax variants)
                     return Err(NuError::ParseError {
                         msg: format!(
                             "Expected 'state' or 'behavior' in actor body, got {:?}",
@@ -262,6 +266,7 @@ impl Parser {
         Ok(Decl::Actor {
             name,
             type_params,
+            persistent,
             state_fields,
             behaviors,
             init: vec![],
@@ -269,67 +274,26 @@ impl Parser {
         })
     }
 
-    fn parse_agent(&mut self) -> NuResult<Decl> {
-        let span = self.current_span();
-        self.advance(); // consume 'agent'
-        let name = self.expect_ident("agent name")?;
-        self.expect(TokenKind::LBrace)?;
-
-        let mut state_fields = Vec::new();
-        let mut memory_fields = Vec::new();
-        let mut tools = Vec::new();
-        let policy = None;
-        let mut behaviors = Vec::new();
-
-        self.skip_newlines();
-        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
-            self.skip_newlines();
-            if self.match_token(&TokenKind::RBrace) {
-                break;
+    fn parse_state_model(&mut self) -> StateModel {
+        match self.peek_kind() {
+            TokenKind::Local => {
+                self.advance();
+                StateModel::Local
             }
-            match self.peek_kind().clone() {
-                TokenKind::State => {
-                    self.advance(); // 'state'
-                    let field_name = self.expect_ident("state field name")?;
-                    self.expect(TokenKind::Assign)?;
-                    let default = self.parse_expr()?;
-                    state_fields.push((field_name, Type::unit(), default));
-                    self.skip_newlines_semicolons();
-                }
-                TokenKind::Behavior => {
-                    behaviors.push(self.parse_behavior()?);
-                }
-                _ => {
-                    // For simplicity, try to parse fields generically
-                    let field = self.expect_ident("field name")?;
-                    self.skip_newlines();
-                    if self.consume_if(&TokenKind::Colon) {
-                        self.skip_newlines();
-                        let ty = self.parse_type()?;
-                        memory_fields.push((field, ty));
-                    } else {
-                        // Could be a tool or policy
-                        tools.push(field);
-                    }
-                    self.skip_newlines_semicolons();
-                }
+            TokenKind::Durable => {
+                self.advance();
+                StateModel::Durable
             }
+            TokenKind::EventSourced => {
+                self.advance();
+                StateModel::EventSourced
+            }
+            TokenKind::Crdt => {
+                self.advance();
+                StateModel::Crdt
+            }
+            _ => StateModel::Local,
         }
-        self.expect(TokenKind::RBrace)?;
-
-        // Observe expression defaults to unit if none was parsed
-        let observe_expr = Expr::Literal(Literal::Unit, span);
-
-        Ok(Decl::Agent {
-            name,
-            state_fields,
-            memory_fields,
-            tools,
-            policy,
-            observe: observe_expr,
-            behaviors,
-            span,
-        })
     }
 
     fn parse_type_alias(&mut self, public: bool) -> NuResult<Decl> {
@@ -1868,13 +1832,52 @@ mod tests {
         match &ast.decls[0] {
             Decl::Actor {
                 name,
+                persistent,
                 state_fields,
                 behaviors,
                 ..
             } => {
                 assert_eq!(name, "Counter");
+                assert!(!persistent);
                 assert_eq!(state_fields.len(), 1);
                 assert_eq!(state_fields[0].0, "count");
+                assert_eq!(state_fields[0].1, StateModel::Local);
+                assert_eq!(behaviors.len(), 1);
+                assert_eq!(behaviors[0].name, "get");
+            }
+            _ => panic!("Expected actor declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_persistent_actor_with_state_models() {
+        let source = r#"
+            persistent actor BankAccount {
+                state durable balance: Int = 0
+                state local temp: Int = 0
+                state event_sourced events: Int = 0
+                state crdt viewers: Int = 0
+                behavior get() { self.balance }
+            }
+        "#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Actor {
+                name,
+                persistent,
+                state_fields,
+                behaviors,
+                ..
+            } => {
+                assert_eq!(name, "BankAccount");
+                assert!(persistent);
+                assert_eq!(state_fields.len(), 4);
+                assert_eq!(state_fields[0].0, "balance");
+                assert_eq!(state_fields[0].1, StateModel::Durable);
+                assert_eq!(state_fields[0].2, Type::int());
+                assert_eq!(state_fields[1].1, StateModel::Local);
+                assert_eq!(state_fields[2].1, StateModel::EventSourced);
+                assert_eq!(state_fields[3].1, StateModel::Crdt);
                 assert_eq!(behaviors.len(), 1);
                 assert_eq!(behaviors[0].name, "get");
             }

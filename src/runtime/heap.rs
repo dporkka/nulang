@@ -246,6 +246,7 @@ impl OrcaHeader {
 /// `ActorHeap` is **not** `Sync` — it is designed to be owned by a single
 /// actor and accessed only while that actor is running.  It **is** `Send`
 /// so that an actor (and its heap) can be migrated between scheduler threads.
+#[derive(Debug)]
 pub struct ActorHeap {
     /// Owning actor ID (0 until `set_actor_id` is called).
     actor_id: u64,

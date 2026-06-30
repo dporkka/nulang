@@ -20,7 +20,8 @@ pub enum TokenKind {
 
     // Keywords
     Fn, Let, Rec, In, If, Then, Else, Match, With, Case,
-    Actor, Agent, Behavior, State, SelfKw, Spawn, Send, Ask,
+    Actor, Behavior, State, SelfKw, Spawn, Send, Ask,
+    Persistent, Local, Durable, EventSourced, Crdt, Emit,
     Effect, Perform, Handle, Resume,
     Module, Import, Pub, Priv, Where,
     Migrate, Node, Monitor, Link, Exit,
@@ -31,7 +32,7 @@ pub enum TokenKind {
 
     // Identifiers
     Ident(String),
-    UpperIdent(String), // Type/actor/agent names (convention)
+    UpperIdent(String), // Type/actor names (convention)
 
     // Operators
     Plus, Minus, Star, Slash, Percent,       // + - * / %
@@ -676,9 +677,14 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "with" => Some(TokenKind::With),
         "case" => Some(TokenKind::Case),
         "actor" => Some(TokenKind::Actor),
-        "agent" => Some(TokenKind::Agent),
         "behavior" => Some(TokenKind::Behavior),
         "state" => Some(TokenKind::State),
+        "persistent" => Some(TokenKind::Persistent),
+        "local" => Some(TokenKind::Local),
+        "durable" => Some(TokenKind::Durable),
+        "event_sourced" => Some(TokenKind::EventSourced),
+        "crdt" => Some(TokenKind::Crdt),
+        "emit" => Some(TokenKind::Emit),
         "self" => Some(TokenKind::SelfKw),
         "spawn" => Some(TokenKind::Spawn),
         "send" => Some(TokenKind::Send),

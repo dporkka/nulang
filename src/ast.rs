@@ -240,6 +240,24 @@ pub struct Behavior {
 }
 
 // ---------------------------------------------------------------------------
+// State models for actor fields
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateModel {
+    Local,
+    Durable,
+    EventSourced,
+    Crdt,
+}
+
+impl Default for StateModel {
+    fn default() -> Self {
+        StateModel::Local
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
 
@@ -257,24 +275,14 @@ pub enum Decl {
         public: bool,
         span: Span,
     },
-    /// Actor declaration: actor Name { state ..., behavior ..., init ... }
+    /// Actor declaration: [persistent] actor Name { state [model] name: Type = expr, behavior ... }
     Actor {
         name: String,
         type_params: Vec<String>,
-        state_fields: Vec<(String, Type, Expr)>, // name, type, default
+        persistent: bool,
+        state_fields: Vec<(String, StateModel, Type, Expr)>, // name, model, type, default
         behaviors: Vec<Behavior>,
         init: Vec<(String, Expr)>,
-        span: Span,
-    },
-    /// Agent declaration: agent Name { memory ..., tools ..., policy ..., observe ... }
-    Agent {
-        name: String,
-        state_fields: Vec<(String, Type, Expr)>,
-        memory_fields: Vec<(String, Type)>,
-        tools: Vec<String>,
-        policy: Option<Expr>,
-        observe: Expr,
-        behaviors: Vec<Behavior>,
         span: Span,
     },
     /// Type alias: type MyInt = Int

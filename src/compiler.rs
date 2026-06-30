@@ -4,11 +4,18 @@
 
 use crate::ast::*;
 use crate::bytecode::*;
-use crate::types::{NuResult, Span};
+use crate::types::{NuResult, Span, Type};
 
 /// Workaround for the `Self` opcode (0x83) which conflicts with the Rust keyword.
 fn op_self() -> OpCode {
     OpCode::SelfOp
+}
+
+fn actor_name_from_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Var(name, _) => Some(name.clone()),
+        _ => None,
+    }
 }
 
 /// Collect all variable names bound by a pattern.
@@ -738,7 +745,21 @@ impl Compiler {
             BinOp::Shl => { self.emit(Instruction::new3(OpCode::And, r1_save, r2, dst)); }
             BinOp::Shr => { self.emit(Instruction::new3(OpCode::And, r1_save, r2, dst)); }
             BinOp::Assign => {
-                self.emit(Instruction::new2(OpCode::Store, r2, r1_save));
+                // Assignment to `self.field` writes actor state rather than a local register.
+                let is_self_field = matches!(left, Expr::FieldAccess { expr, .. }
+                    if matches!(expr.as_ref(), Expr::SelfRef(_))
+                        || matches!(expr.as_ref(), Expr::Var(name, _) if name == "self"));
+                if is_self_field {
+                    if let Expr::FieldAccess { field, .. } = left {
+                        let field_idx = self.add_const(Constant::String(field.to_string()));
+                        self.emit(Instruction::new3(OpCode::StateSet,
+                            ((field_idx >> 8) & 0xFF) as u8,
+                            (field_idx & 0xFF) as u8,
+                            r2));
+                    }
+                } else {
+                    self.emit(Instruction::new2(OpCode::Store, r2, r1_save));
+                }
                 self.emit(Instruction::new2(OpCode::Move, r2, dst));
             }
             BinOp::Pipe => {
@@ -799,6 +820,20 @@ impl Compiler {
     }
 
     fn compile_field_access(&mut self, expr: &Expr, field: &str) -> NuResult<u8> {
+        // `self.field` inside an actor behavior reads from the current actor's state.
+        // The parser produces `SelfRef`; `compile_behavior` also binds `self` as a
+        // local variable, so accept both forms.
+        let is_self = matches!(expr, Expr::SelfRef(_))
+            || matches!(expr, Expr::Var(name, _) if name == "self");
+        if is_self {
+            let dst = self.alloc_reg();
+            let field_idx = self.add_const(Constant::String(field.to_string()));
+            self.emit(Instruction::new3(OpCode::StateGet,
+                ((field_idx >> 8) & 0xFF) as u8,
+                (field_idx & 0xFF) as u8,
+                dst));
+            return Ok(dst);
+        }
         let obj_reg = self.compile_expr(expr)?;
         let dst = self.alloc_reg();
         // Use RecL with field name constant pool index
@@ -814,17 +849,37 @@ impl Compiler {
         Ok(dst)
     }
 
-    fn compile_spawn(&mut self, _actor_type: &Expr, init: &[(String, Expr)]) -> NuResult<u8> {
+    fn compile_spawn(&mut self, actor_type: &Expr, init: &[(String, Expr)]) -> NuResult<u8> {
         for (_name, expr) in init {
             let _r = self.compile_expr(expr)?;
         }
-        let behavior_idx = self.module.behaviors.len();
+        let behavior_idx = match actor_type {
+            Expr::Var(name, _) => self
+                .module
+                .actor_metadata
+                .iter()
+                .find(|m| m.name == *name)
+                .and_then(|m| m.behavior_indices.first().copied())
+                .unwrap_or(self.module.behaviors.len()),
+            _ => self.module.behaviors.len(),
+        };
         let dst = self.alloc_reg();
-        self.emit(Instruction::new3(OpCode::Spawn,
+        self.emit(Instruction::new3(
+            OpCode::Spawn,
             ((behavior_idx >> 8) & 0xFF) as u8,
             (behavior_idx & 0xFF) as u8,
-            dst));
+            dst,
+        ));
         Ok(dst)
+    }
+
+    fn behavior_table_index(&self, actor_name: &str, behavior: &str) -> usize {
+        let full_name = format!("{}.{}", actor_name, behavior);
+        self.module
+            .behaviors
+            .iter()
+            .position(|b| b.name == full_name)
+            .unwrap_or(self.module.behaviors.len())
     }
 
     fn compile_send(&mut self, actor: &Expr, behavior: &str, args: &[Expr]) -> NuResult<u8> {
@@ -832,7 +887,8 @@ impl Compiler {
         for arg in args {
             let _r = self.compile_expr(arg)?;
         }
-        let behavior_idx = self.add_const(Constant::String(behavior.to_string()));
+        let actor_name = actor_name_from_expr(actor).unwrap_or_default();
+        let behavior_idx = self.behavior_table_index(&actor_name, behavior);
         let dst = self.alloc_reg();
         self.emit(Instruction::new3(OpCode::Send, addr_reg,
             ((behavior_idx >> 8) & 0xFF) as u8,
@@ -846,7 +902,8 @@ impl Compiler {
         for arg in args {
             let _r = self.compile_expr(arg)?;
         }
-        let behavior_idx = self.add_const(Constant::String(behavior.to_string()));
+        let actor_name = actor_name_from_expr(actor).unwrap_or_default();
+        let behavior_idx = self.behavior_table_index(&actor_name, behavior);
         let dst = self.alloc_reg();
         self.emit(Instruction::new3(OpCode::Ask, addr_reg,
             ((behavior_idx >> 8) & 0xFF) as u8,
@@ -984,6 +1041,16 @@ impl Compiler {
                     self.emit(Instruction::new2(OpCode::Store, val_reg, name_reg));
                     Ok(val_reg)
                 }
+            }
+            Expr::FieldAccess { expr, field, .. }
+                if matches!(expr.as_ref(), Expr::SelfRef(_))
+                    || matches!(expr.as_ref(), Expr::Var(name, _) if name == "self") => {
+                let field_idx = self.add_const(Constant::String(field.to_string()));
+                self.emit(Instruction::new3(OpCode::StateSet,
+                    ((field_idx >> 8) & 0xFF) as u8,
+                    (field_idx & 0xFF) as u8,
+                    val_reg));
+                Ok(val_reg)
             }
             _ => {
                 let target_reg = self.compile_expr(target)?;
@@ -1130,12 +1197,17 @@ impl Compiler {
             Decl::Function { name, params, body, .. } => {
                 self.compile_function(name, params, body)?;
             }
-            Decl::Actor { name, behaviors, init, .. } => {
-                self.compile_actor(name, behaviors, init)?;
+            Decl::Actor {
+                name,
+                persistent,
+                state_fields,
+                behaviors,
+                init,
+                ..
+            } => {
+                self.compile_actor(name, *persistent, state_fields, behaviors, init)?;
             }
-            Decl::Agent { name, state_fields, behaviors, observe, .. } => {
-                self.compile_agent(name, state_fields, behaviors, observe)?;
-            }
+
             Decl::TypeAlias { .. }
             | Decl::RecordType { .. }
             | Decl::VariantType { .. }
@@ -1201,24 +1273,45 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_actor(&mut self, name: &str, behaviors: &[Behavior], init: &[(String, Expr)]) -> NuResult<()> {
+    fn compile_actor(
+        &mut self,
+        name: &str,
+        persistent: bool,
+        state_fields: &[(String, StateModel, Type, Expr)],
+        behaviors: &[Behavior],
+        init: &[(String, Expr)],
+    ) -> NuResult<()> {
         for (_field_name, expr) in init {
             let _ = self.compile_expr(expr)?;
         }
+        let first_behavior_idx = self.module.behaviors.len();
         for behavior in behaviors {
             self.compile_behavior(behavior, name)?;
         }
-        Ok(())
-    }
-
-    fn compile_agent(&mut self, name: &str, state_fields: &[(String, crate::types::Type, Expr)], behaviors: &[Behavior], observe: &Expr) -> NuResult<()> {
-        for (_field_name, _ty, expr) in state_fields {
-            let _ = self.compile_expr(expr)?;
-        }
-        for behavior in behaviors {
-            self.compile_behavior(behavior, name)?;
-        }
-        let _ = self.compile_expr(observe)?;
+        let behavior_indices: Vec<usize> =
+            (first_behavior_idx..self.module.behaviors.len()).collect();
+        let state_models: Vec<(String, StateModel)> = state_fields
+            .iter()
+            .map(|(field_name, model, _ty, _default)| (field_name.clone(), *model))
+            .collect();
+        let state_defaults: Vec<(String, Constant)> = state_fields
+            .iter()
+            .filter_map(|(field_name, _model, _ty, default)| {
+                if let Expr::Literal(lit, _) = default {
+                    Some((field_name.clone(), literal_to_constant(lit)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let meta = ActorMeta {
+            name: name.to_string(),
+            persistent,
+            state_models,
+            state_defaults,
+            behavior_indices,
+        };
+        self.module.add_actor_meta(meta);
         Ok(())
     }
 
@@ -1348,7 +1441,113 @@ impl Compiler {
     }
 }
 
+/// Convert an AST literal into a bytecode constant.
+fn literal_to_constant(lit: &Literal) -> Constant {
+    match lit {
+        Literal::Int(n) => Constant::Int(*n),
+        Literal::Float(f) => Constant::Float(*f),
+        Literal::String(s) => Constant::String(s.clone()),
+        Literal::Bool(b) => Constant::Bool(*b),
+        Literal::Nil => Constant::Nil,
+        Literal::Unit => Constant::Unit,
+    }
+}
+
 // Helper: create a ConstU instruction with constant pool index and destination register.
 fn make_constu(idx: u16, dst: u8) -> Instruction {
     Instruction::new3(OpCode::ConstU, ((idx >> 8) & 0xFF) as u8, (idx & 0xFF) as u8, dst)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    fn compile_source(source: &str) -> CodeModule {
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut compiler = Compiler::new("test");
+        compiler.compile_module(&ast).unwrap().clone()
+    }
+
+    #[test]
+    fn test_actor_meta_persistence_and_state_models() {
+        let source = r#"
+            persistent actor BankAccount {
+                state durable balance: Int = 0
+                state local temp: Int = 0
+                behavior get() { self.balance }
+            }
+        "#;
+        let module = compile_source(source);
+        assert_eq!(module.actor_metadata.len(), 1);
+        let meta = &module.actor_metadata[0];
+        assert_eq!(meta.name, "BankAccount");
+        assert!(meta.persistent);
+        assert_eq!(
+            meta.state_models,
+            vec![
+                ("balance".to_string(), StateModel::Durable),
+                ("temp".to_string(), StateModel::Local),
+            ]
+        );
+        assert_eq!(meta.behavior_indices, vec![0]);
+    }
+
+    #[test]
+    fn test_non_persistent_actor_meta() {
+        let source = r#"
+            actor Counter {
+                state count = 0
+                behavior inc() { self.count + 1 }
+            }
+        "#;
+        let module = compile_source(source);
+        assert_eq!(module.actor_metadata.len(), 1);
+        let meta = &module.actor_metadata[0];
+        assert_eq!(meta.name, "Counter");
+        assert!(!meta.persistent);
+        assert_eq!(meta.state_models, vec![("count".to_string(), StateModel::Local)]);
+        assert_eq!(meta.behavior_indices, vec![0]);
+    }
+
+    #[test]
+    fn test_compile_spawn_references_actor_meta() {
+        let source = r#"
+            actor Counter {
+                state count = 0
+                behavior inc() { self.count + 1 }
+            }
+            spawn Counter { count = 0 }
+        "#;
+        let module = compile_source(source);
+        assert_eq!(module.actor_metadata.len(), 1);
+        let meta = &module.actor_metadata[0];
+        assert_eq!(meta.name, "Counter");
+        assert_eq!(meta.behavior_indices, vec![0]);
+
+        let spawn_instr = module
+            .instructions
+            .iter()
+            .find(|i| i.opcode == OpCode::Spawn)
+            .expect("Expected a Spawn instruction");
+        assert_eq!(spawn_instr.imm16() as usize, meta.behavior_indices[0]);
+    }
+
+    #[test]
+    fn test_actor_meta_multiple_behaviors() {
+        let source = r#"
+            actor Counter {
+                state durable count: Int = 0
+                behavior get() { self.count }
+                behavior inc() { self.count + 1 }
+                behavior dec() { self.count - 1 }
+            }
+        "#;
+        let module = compile_source(source);
+        assert_eq!(module.actor_metadata.len(), 1);
+        let meta = &module.actor_metadata[0];
+        assert_eq!(meta.behavior_indices, vec![0, 1, 2]);
+    }
 }

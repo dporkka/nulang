@@ -360,10 +360,17 @@ impl EffectChecker {
             Expr::Literal(_, _) => Ok(EffectRow::empty()),
             Expr::Var(_, _) => Ok(EffectRow::empty()),
 
-            // Lambda: effects of the body with parameters bound.
-            // Parameters don't add effects themselves (they're just bindings).
-            Expr::Lambda { body, .. } => {
-                self.infer_effects(ctx, body)
+            // Lambda: effects are given by its annotation, or inferred from the
+            // body if unannotated. If annotated, the body must not perform effects
+            // beyond the annotation.
+            Expr::Lambda { body, effect, .. } => {
+                if let Some(ann) = effect {
+                    let lambda_ctx = EffectContext::with_allowed(ann.clone());
+                    self.check_effects(&lambda_ctx, body, ann)?;
+                    Ok(ann.clone())
+                } else {
+                    self.infer_effects(ctx, body)
+                }
             }
 
             // Application: effects of function + arguments + the implicit Call
@@ -1746,5 +1753,43 @@ mod tests {
         };
         let row = checker.infer_effects(&ctx, &perform).unwrap();
         assert!(row.contains(&Effect::UserDefined("Logger".to_string())));
+    }
+
+    #[test]
+    fn test_infer_lambda_effect_annotation_satisfied() {
+        let mut checker = EffectChecker::new();
+        let ctx = EffectContext::empty();
+        let lam = Expr::Lambda {
+            params: vec![("x".to_string(), None)],
+            body: Box::new(Expr::Perform {
+                effect: "IO".to_string(),
+                op: "print".to_string(),
+                args: vec![Expr::Var("x".to_string(), s())],
+                span: s(),
+            }),
+            effect: Some(EffectRow::Closed(vec![Effect::IO])),
+            span: s(),
+        };
+        let row = checker.infer_effects(&ctx, &lam).unwrap();
+        assert_eq!(row, EffectRow::Closed(vec![Effect::IO]));
+    }
+
+    #[test]
+    fn test_infer_lambda_effect_annotation_violated() {
+        let mut checker = EffectChecker::new();
+        let ctx = EffectContext::empty();
+        let lam = Expr::Lambda {
+            params: vec![("x".to_string(), None)],
+            body: Box::new(Expr::Perform {
+                effect: "FS".to_string(),
+                op: "read".to_string(),
+                args: vec![],
+                span: s(),
+            }),
+            effect: Some(EffectRow::Closed(vec![Effect::IO])),
+            span: s(),
+        };
+        let result = checker.infer_effects(&ctx, &lam);
+        assert!(result.is_err());
     }
 }

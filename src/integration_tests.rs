@@ -10,6 +10,42 @@ mod tests {
     use crate::typechecker::TypeChecker;
     use crate::types::Type;
     use crate::types::NuError;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+    use crate::runtime::{Runtime, RuntimeVmCallbacks, MemoryStore, PersistenceStore, ActorSnapshot, JournalEntry};
+
+    /// Thread-safe, shareable in-memory persistence store for tests that need
+    /// to simulate a runtime restart while keeping the same underlying storage.
+    #[derive(Debug, Clone)]
+    struct SharedMemoryStore(Arc<Mutex<MemoryStore>>);
+
+    impl SharedMemoryStore {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(MemoryStore::new())))
+        }
+    }
+
+    impl PersistenceStore for SharedMemoryStore {
+        fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> std::io::Result<()> {
+            self.0.lock().unwrap().save_snapshot(snapshot)
+        }
+        fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
+            self.0.lock().unwrap().load_snapshot(actor_id)
+        }
+        fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> std::io::Result<()> {
+            self.0.lock().unwrap().append_journal(actor_id, entry)
+        }
+        fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
+            self.0.lock().unwrap().read_journal(actor_id)
+        }
+        fn latest_sequence(&self, actor_id: u64) -> u64 {
+            self.0.lock().unwrap().latest_sequence(actor_id)
+        }
+        fn clear(&mut self, actor_id: u64) -> std::io::Result<()> {
+            self.0.lock().unwrap().clear(actor_id)
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Test helpers
@@ -55,6 +91,37 @@ mod tests {
     fn assert_int(source: &str, expected: i64) {
         let (value, _ty) = run_source(source).unwrap();
         assert_eq!(value.as_int(), Some(expected), "Expected integer result for: {}", source);
+    }
+
+    /// Run source through the full compiler pipeline using a real actor runtime.
+    fn run_source_with_runtime(
+        source: &str,
+        runtime: Rc<RefCell<Runtime>>,
+    ) -> Result<(Value, Type), NuError> {
+        let (module, module_type) = compile_source(source)?;
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(runtime)));
+        let value = vm.run()?;
+
+        Ok((value, module_type))
+    }
+
+    /// Compile source into a bytecode module and its top-level type.
+    fn compile_source(source: &str) -> Result<(crate::bytecode::CodeModule, Type), NuError> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module()?;
+
+        let mut type_checker = TypeChecker::new();
+        let module_type = type_checker.check_module(&ast)?;
+
+        let mut compiler = crate::compiler::Compiler::new("test");
+        let module = compiler.compile_module(&ast)?.clone();
+
+        Ok((module, module_type))
     }
 
     // -----------------------------------------------------------------------
@@ -574,5 +641,148 @@ mod tests {
     fn test_negative_zero() {
         // -0 should be 0
         assert_int("-0", 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: v0.7 persistent actor end-to-end spawn
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_persistent_actor_spawn_end_to_end() {
+        let store = MemoryStore::new();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+
+        let source = r#"
+            persistent actor Counter {
+                state durable count: Int = 0
+                behavior inc() { self.count }
+            }
+            spawn Counter {}
+        "#;
+
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert!(actor.persistent, "actor should be persistent");
+        assert_eq!(
+            actor.state_models.get("count"),
+            Some(&crate::runtime::StateModel::Durable),
+            "count should use durable state model"
+        );
+    }
+
+    #[test]
+    fn test_persistent_counter_end_to_end_messages() {
+        let store = MemoryStore::new();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+
+        let source = r#"
+            persistent actor Counter {
+                state durable count: Int = 0
+                behavior inc() { self.count = self.count + 1 }
+            }
+            let c = spawn Counter {} in {
+                send c inc()
+                send c inc()
+                c
+            }
+        "#;
+
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(actor.mailbox.len(), 2, "two inc messages should be queued");
+            assert!(
+                !actor.bytecode_offsets.is_empty(),
+                "actor should have bytecode behavior offsets"
+            );
+            assert!(actor.bytecode_module.is_some(), "actor should have a bytecode module");
+        }
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("count").and_then(|v| v.as_int()),
+            Some(2),
+            "counter should be 2 after two inc messages"
+        );
+    }
+
+    #[test]
+    fn test_persistent_counter_recover_after_restart() {
+        let source = r#"
+            persistent actor Counter {
+                state durable count: Int = 0
+                behavior inc() { self.count = self.count + 1 }
+                behavior get() { self.count }
+            }
+            spawn Counter {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+            }
+        }
+
+        // First runtime: spawn, send 3 inc messages, and run scheduler.
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt1.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt1.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt1.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt1.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt1.borrow().actors.get(&actor_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            Some(3)
+        );
+
+        // Simulate a runtime restart: new runtime sharing the same store,
+        // register the bytecode module, then recover.
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(actor_id, module.clone(), offsets.clone());
+        rt2.borrow_mut().recover_actor(actor_id);
+
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            Some(3),
+            "recovered counter should still be 3"
+        );
+
+        // Send two more inc messages on the recovered runtime.
+        rt2.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt2.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt2.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            Some(5),
+            "counter should continue incrementing after recovery"
+        );
     }
 }
