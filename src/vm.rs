@@ -395,21 +395,22 @@ pub struct Frame {
     pub module_idx: usize,
     /// Return destination register.
     pub return_dst: u8,
-    /// Caller frame (None for top-level).
-    pub caller: Option<Box<Frame>>,
+    /// Index of the caller frame in the VM's flat frame stack.
+    /// None for the top-level frame.
+    pub caller_idx: Option<usize>,
     /// Closure environment (None if not a closure).
     pub closure_env: Option<Value>,
 }
 
 impl Frame {
     /// Create a new frame with all registers initialized to nil.
-    pub fn new(caller: Option<Box<Frame>>, module_idx: usize) -> Self {
+    pub fn new(caller_idx: Option<usize>, module_idx: usize) -> Self {
         Frame {
             regs: [Value::nil(); 256],
             pc: 0,
             module_idx,
             return_dst: 0,
-            caller,
+            caller_idx,
             closure_env: None,
         }
     }
@@ -424,7 +425,7 @@ impl std::fmt::Debug for Frame {
             .field("module_idx", &self.module_idx)
             .field("return_dst", &self.return_dst)
             .field("regs[0..8]", &&self.regs[0..8])
-            .field("has_caller", &self.caller.is_some())
+            .field("caller_idx", &self.caller_idx)
             .field("closure_env", &self.closure_env)
             .finish()
     }
@@ -474,8 +475,10 @@ impl HandlerFrame {
 /// the suspended computation with a value.
 #[derive(Debug)]
 struct Continuation {
-    /// Deep-cloned frame chain (current frame + all callers).
-    frame: Box<Frame>,
+    /// Deep-cloned frames (current frame + all callers).
+    frames: Vec<Frame>,
+    /// Index of the active frame within `frames`.
+    current_frame_idx: usize,
     /// Program counter at the point of capture (points past Perform).
     resume_pc: usize,
     /// Module index for the frame.
@@ -489,11 +492,12 @@ struct Continuation {
 impl Continuation {
     /// Capture a continuation from the current VM state.
     fn capture(vm: &VM, resume_dst: u8) -> Option<Self> {
-        let current = vm.current_frame.as_ref()?;
+        let current_idx = vm.current_frame_idx?;
         Some(Continuation {
-            frame: clone_frame_chain(current),
-            resume_pc: current.pc, // PC already points past the Perform instruction
-            module_idx: current.module_idx,
+            frames: vm.frames.iter().take(current_idx + 1).map(clone_frame).collect(),
+            current_frame_idx: current_idx,
+            resume_pc: vm.frames[current_idx].pc, // PC already points past the Perform instruction
+            module_idx: vm.frames[current_idx].module_idx,
             resume_dst,
             step_count: vm.step_count,
         })
@@ -502,10 +506,10 @@ impl Continuation {
     /// Restore this continuation into the VM, placing `value` in the
     /// resume destination register.
     fn restore(self, vm: &mut VM, value: Value) {
-        let mut frame = self.frame;
-        frame.regs[self.resume_dst as usize] = value;
-        frame.pc = self.resume_pc;
-        vm.current_frame = Some(frame);
+        vm.frames = self.frames;
+        vm.current_frame_idx = Some(self.current_frame_idx);
+        vm.frames[self.current_frame_idx].regs[self.resume_dst as usize] = value;
+        vm.frames[self.current_frame_idx].pc = self.resume_pc;
         vm.step_count = self.step_count;
     }
 }
@@ -514,16 +518,16 @@ impl Continuation {
 // VM: Virtual Machine
 // ---------------------------------------------------------------------------
 
-/// Deep-clone a frame chain (current + all callers).
-fn clone_frame_chain(frame: &Frame) -> Box<Frame> {
-    Box::new(Frame {
+/// Deep-clone a single frame.
+fn clone_frame(frame: &Frame) -> Frame {
+    Frame {
         regs: frame.regs,
         pc: frame.pc,
         module_idx: frame.module_idx,
         return_dst: frame.return_dst,
-        caller: frame.caller.as_ref().map(|c| clone_frame_chain(c)),
+        caller_idx: frame.caller_idx,
         closure_env: frame.closure_env,
-    })
+    }
 }
 
 /// Register-based bytecode virtual machine.
@@ -536,8 +540,11 @@ fn clone_frame_chain(frame: &Frame) -> Box<Frame> {
 pub struct VM {
     /// Loaded bytecode modules.
     pub modules: Vec<CodeModule>,
-    /// Current execution frame.
-    current_frame: Option<Box<Frame>>,
+    /// Flat stack of activation frames.  The active frame is at
+    /// `current_frame_idx`; earlier entries are callers.
+    frames: Vec<Frame>,
+    /// Index of the currently executing frame in `frames`.
+    current_frame_idx: Option<usize>,
     /// Handler stack for algebraic effects.
     handler_stack: Vec<HandlerFrame>,
     /// Step counter (for debugging / limits).
@@ -567,7 +574,8 @@ impl VM {
     pub fn new() -> Self {
         VM {
             modules: Vec::new(),
-            current_frame: None,
+            frames: Vec::with_capacity(64),
+            current_frame_idx: None,
             handler_stack: Vec::new(),
             step_count: 0,
             jit_session: Some(JitSession::new()),
@@ -601,7 +609,9 @@ impl VM {
     /// Set the current execution frame. Used by the runtime to execute actor
     /// bytecode behavior handlers.
     pub fn set_current_frame(&mut self, frame: Frame) {
-        self.current_frame = Some(Box::new(frame));
+        self.frames.clear();
+        self.frames.push(frame);
+        self.current_frame_idx = Some(0);
     }
 
     /// Take a snapshot of recorded migration requests.
@@ -644,23 +654,25 @@ impl VM {
 
         let mut frame = Frame::new(None, module_idx);
         frame.pc = entry_point;
-        self.current_frame = Some(Box::new(frame));
+        self.frames.clear();
+        self.frames.push(frame);
+        self.current_frame_idx = Some(0);
 
         // Main execution loop
         loop {
             // Check if halted
-            if let Some(ref frame) = self.current_frame {
-                let module_idx = frame.module_idx;
-                let pc = frame.pc;
+            if let Some(idx) = self.current_frame_idx {
+                let module_idx = self.frames[idx].module_idx;
+                let pc = self.frames[idx].pc;
                 if let Some(module) = self.modules.get(module_idx) {
                     if pc >= module.instructions.len() {
                         // PC past end — program complete
-                        return Ok(self.current_frame.as_ref().map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                        return Ok(self.frames.get(idx).map(|f| f.regs[0]).unwrap_or(Value::unit()));
                     }
                     // Check if next instruction is Halt
                     if module.instructions.get(pc).map(|i| i.opcode == OpCode::Halt).unwrap_or(false) {
-                        self.current_frame.as_mut().unwrap().pc += 1;
-                        return Ok(self.current_frame.as_ref().map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                        self.frames[idx].pc += 1;
+                        return Ok(self.frames.get(idx).map(|f| f.regs[0]).unwrap_or(Value::unit()));
                     }
                 } else {
                     return Ok(Value::unit());
@@ -672,7 +684,7 @@ impl VM {
             match self.step() {
                 Ok(()) => {},
                 Err(NuError::VMError(msg)) if msg == "Halt" => {
-                    return Ok(self.current_frame.as_ref().map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                    return Ok(self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit()));
                 }
                 Err(e) => return Err(e),
             }
@@ -683,19 +695,21 @@ impl VM {
     pub fn run_from(&mut self, module_idx: usize, pc: usize) -> NuResult<Value> {
         let mut frame = Frame::new(None, module_idx);
         frame.pc = pc;
-        self.current_frame = Some(Box::new(frame));
+        self.frames.clear();
+        self.frames.push(frame);
+        self.current_frame_idx = Some(0);
 
         loop {
-            if let Some(ref frame) = self.current_frame {
-                let m_idx = frame.module_idx;
-                let pc = frame.pc;
+            if let Some(idx) = self.current_frame_idx {
+                let m_idx = self.frames[idx].module_idx;
+                let pc = self.frames[idx].pc;
                 if let Some(module) = self.modules.get(m_idx) {
                     if pc >= module.instructions.len() {
-                        return Ok(self.current_frame.as_ref().map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                        return Ok(self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit()));
                     }
                     if module.instructions.get(pc).map(|i| i.opcode == OpCode::Halt).unwrap_or(false) {
-                        self.current_frame.as_mut().unwrap().pc += 1;
-                        return Ok(self.current_frame.as_ref().map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                        self.frames[idx].pc += 1;
+                        return Ok(self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit()));
                     }
                 } else {
                     return Ok(Value::unit());
@@ -707,7 +721,7 @@ impl VM {
             match self.step() {
                 Ok(()) => {},
                 Err(NuError::VMError(msg)) if msg == "Halt" => {
-                    return Ok(self.current_frame.as_ref().map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                    return Ok(self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit()));
                 }
                 Err(e) => return Err(e),
             }
@@ -726,158 +740,130 @@ impl VM {
                 format!("Step limit exceeded ({} steps). Set NULANG_STEP_LIMIT env var to increase.", self.step_count)
             ));
         }
-        // Debug: print first 50 steps
-        let debug = self.step_count <= 50;
+        let _debug = self.step_count <= 50;
+
+        let frame_idx = self.current_frame_idx
+            .ok_or_else(|| NuError::VMError("No current frame".to_string()))?;
 
         // Try JIT execution for hot bytecode regions before interpreting.
-        if let Some(ref mut frame) = self.current_frame {
-            let module_idx = frame.module_idx;
-            let pc = frame.pc;
-            if let Some(module) = self.modules.get(module_idx) {
-                let constants = self.jit_constants.get(module_idx)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-                let instructions = &module.instructions;
-
+        if let Some(module) = self.modules.get(self.frames[frame_idx].module_idx) {
+            let pc = self.frames[frame_idx].pc;
+            let instructions = &module.instructions;
+            let module_idx = self.frames[frame_idx].module_idx;
+            let constants = self.jit_constants.get(module_idx)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            if let Some(ref mut jit) = self.jit_session {
                 let mut regs: [u64; 256] = [0; 256];
-                for (i, r) in frame.regs.iter().enumerate() {
+                for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
                     regs[i] = r.to_bits();
                 }
-
-                if let Some(ref mut jit) = self.jit_session {
-                    let action = jit::tiered_execute_step(
-                        jit, module_idx, pc, instructions, &mut regs, constants, None,
-                    );
-                    if action != TieredAction::Interpret {
-                        for (i, bits) in regs.iter().enumerate() {
-                            frame.regs[i] = Value::from_bits(*bits);
-                        }
-                        let region_len = jit::find_compilable_region(pc, instructions);
-                        frame.pc += region_len;
-                        return Ok(());
+                let action = jit::tiered_execute_step(
+                    jit, module_idx, pc, instructions, &mut regs, constants, None,
+                );
+                if action != TieredAction::Interpret {
+                    for (i, bits) in regs.iter().enumerate() {
+                        self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
                     }
+                    let region_len = jit::find_compilable_region(pc, instructions);
+                    self.frames[frame_idx].pc += region_len;
+                    return Ok(());
                 }
             }
         }
 
         // Fetch instruction
+        let module_idx = self.frames[frame_idx].module_idx;
+        let pc = self.frames[frame_idx].pc;
         let instr = {
-            let frame = self.current_frame.as_ref()
-                .ok_or_else(|| NuError::VMError("No current frame".to_string()))?;
-            let module = self.modules.get(frame.module_idx)
-                .ok_or_else(|| NuError::VMError(format!("Module {} not found", frame.module_idx)))?;
-            let pc = frame.pc;
+            let module = self.modules.get(module_idx)
+                .ok_or_else(|| NuError::VMError(format!("Module {} not found", module_idx)))?;
             *module.instructions.get(pc)
-                .ok_or_else(|| NuError::VMError(format!("PC {} out of bounds in module {}", pc, frame.module_idx)))?
+                .ok_or_else(|| NuError::VMError(format!("PC {} out of bounds in module {}", pc, module_idx)))?
         };
-
-        // Take ownership of the current frame to eliminate borrow-checker issues.
-        // Call/Ret/TailCall/ClosureCall consume the frame; all other opcodes put it back.
-        let mut frame = self.current_frame.take()
-            .ok_or_else(|| NuError::VMError("No current frame".to_string()))?;
-
-        // Increment PC before execution
-        frame.pc += 1;
-
-        let _ = debug; // silence unused warning when debug is off
-        // if debug {
-        //     eprintln!("[step {}] PC={} op={:?} op1={} op2={} op3={} regs[0]={} regs[1]={}",
-        //         self.step_count, frame.pc - 1, instr.opcode,
-        //         instr.op1, instr.op2, instr.op3,
-        //         frame.regs[0].to_string_repr(), frame.regs[1].to_string_repr());
-        // }
+        self.frames[frame_idx].pc += 1;
 
         match instr.opcode {
-            // -- Frame-manipulating opcodes (consume frame) --
+            // -- Frame-manipulating opcodes --
             OpCode::Call => {
-                let func_val = frame.regs[instr.op1 as usize];
-                let module_idx = frame.module_idx;
+                let func_val = self.frames[frame_idx].regs[instr.op1 as usize];
                 let argc = instr.op2;
                 let dst = instr.op3;
                 let (func_idx, closure_env) = self.resolve_function(func_val, module_idx)?;
                 let code_offset = self.modules.get(module_idx)
                     .and_then(|m| m.function_table.get(func_idx)).copied()
                     .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
-                let mut new_frame = Frame::new(None, module_idx);
+                let mut new_frame = Frame::new(Some(frame_idx), module_idx);
                 new_frame.pc = code_offset;
                 for i in 0..(argc as usize).min(256) {
-                    new_frame.regs[i] = frame.regs[i];
+                    new_frame.regs[i] = self.frames[frame_idx].regs[i];
                 }
                 new_frame.return_dst = dst;
                 new_frame.closure_env = closure_env;
-                new_frame.caller = Some(frame);
-                self.current_frame = Some(Box::new(new_frame));
+                self.frames.push(new_frame);
+                self.current_frame_idx = Some(self.frames.len() - 1);
                 return Ok(());
             }
             OpCode::TailCall => {
-                let func_val = frame.regs[instr.op1 as usize];
-                let module_idx = frame.module_idx;
+                let func_val = self.frames[frame_idx].regs[instr.op1 as usize];
                 let func_idx = func_val.as_int()
                     .ok_or_else(|| NuError::VMError("Invalid function reference".to_string()))? as usize;
                 let code_offset = self.modules.get(module_idx)
                     .and_then(|m| m.function_table.get(func_idx)).copied()
                     .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
-                frame.pc = code_offset;
-                self.current_frame = Some(frame);
+                self.frames[frame_idx].pc = code_offset;
                 return Ok(());
             }
             OpCode::Ret => {
-                let ret_val = frame.regs[0];
-                if let Some(mut caller_frame) = frame.caller {
-                    let dst = frame.return_dst as usize;
-                    caller_frame.regs[dst] = ret_val;
-                    self.current_frame = Some(caller_frame);
-                } else {
-                    // Top-level return: store value and halt
-                    frame.regs[0] = ret_val;
-                    self.current_frame = Some(frame);
+                let ret_val = self.frames[frame_idx].regs[0];
+                if let Some(caller_idx) = self.frames[frame_idx].caller_idx {
+                    let dst = self.frames[frame_idx].return_dst;
+                    self.frames[caller_idx].regs[dst as usize] = ret_val;
+                    self.frames.pop();
+                    self.current_frame_idx = Some(caller_idx);
                 }
                 return Ok(());
             }
             OpCode::RetVal => {
-                let ret_val = frame.regs[instr.op1 as usize];
-                if let Some(mut caller_frame) = frame.caller {
-                    let dst = frame.return_dst as usize;
-                    caller_frame.regs[dst] = ret_val;
-                    self.current_frame = Some(caller_frame);
+                let ret_val = self.frames[frame_idx].regs[instr.op1 as usize];
+                if let Some(caller_idx) = self.frames[frame_idx].caller_idx {
+                    let dst = self.frames[frame_idx].return_dst;
+                    self.frames[caller_idx].regs[dst as usize] = ret_val;
+                    self.frames.pop();
+                    self.current_frame_idx = Some(caller_idx);
                 } else {
-                    frame.regs[0] = ret_val;
-                    self.current_frame = Some(frame);
+                    self.frames[frame_idx].regs[0] = ret_val;
                 }
                 return Ok(());
             }
             OpCode::ClosureCall => {
-                let closure_val = frame.regs[instr.op1 as usize];
-                let module_idx = frame.module_idx;
+                let closure_val = self.frames[frame_idx].regs[instr.op1 as usize];
+                let dst = instr.op3;
                 let (func_idx, closure_env) = self.resolve_function(closure_val, module_idx)?;
                 let code_offset = self.modules.get(module_idx)
                     .and_then(|m| m.function_table.get(func_idx)).copied()
                     .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
-                let mut new_frame = Frame::new(None, module_idx);
+                let mut new_frame = Frame::new(Some(frame_idx), module_idx);
                 new_frame.pc = code_offset;
-                for i in 0..256 {
-                    new_frame.regs[i] = frame.regs[i];
-                }
-                new_frame.return_dst = instr.op3;
+                new_frame.regs = self.frames[frame_idx].regs;
+                new_frame.return_dst = dst;
                 new_frame.closure_env = closure_env;
-                new_frame.caller = Some(frame);
-                self.current_frame = Some(Box::new(new_frame));
+                self.frames.push(new_frame);
+                self.current_frame_idx = Some(self.frames.len() - 1);
                 return Ok(());
             }
             OpCode::Panic => {
-                let pc = frame.pc.saturating_sub(1);
-                let r0_repr = frame.regs[0].to_string_repr();
-                self.current_frame = Some(frame);
+                let pc = self.frames[frame_idx].pc.saturating_sub(1);
+                let r0_repr = self.frames[frame_idx].regs[0].to_string_repr();
                 return Err(NuError::VMError(
                     format!("Panic at PC {}: r0={}", pc, r0_repr)
                 ));
             }
 
-            // -- Actor opcodes (consume frame for Spawn/Send/Ask) --
+            // -- Actor opcodes --
             OpCode::Spawn => {
                 let behavior_idx = instr.imm16() as usize;
-                let module = self.modules.get(frame.module_idx);
-                let init: Vec<(String, Value)> = module
+                let init: Vec<(String, Value)> = self.modules.get(module_idx)
                     .and_then(|m| {
                         m.actor_metadata
                             .iter()
@@ -890,210 +876,206 @@ impl VM {
                             .collect()
                     })
                     .unwrap_or_default();
-                let result = if let Some(module) = module {
+                let result = if let Some(module) = self.modules.get(module_idx) {
                     self.actor_callbacks.spawn_actor(module, behavior_idx, init)
                 } else {
                     Value::actor_ref(0)
                 };
-                frame.regs[instr.op3 as usize] = result;
-                self.current_frame = Some(frame);
+                self.frames[frame_idx].regs[instr.op3 as usize] = result;
                 return Ok(());
             }
             OpCode::Send => {
-                let actor_val = frame.regs[instr.op1 as usize];
+                let actor_val = self.frames[frame_idx].regs[instr.op1 as usize];
                 let behavior_idx = instr.imm16() as usize;
-                let (param_count, behavior_id) = self.modules.get(frame.module_idx)
+                let (param_count, behavior_id) = self.modules.get(module_idx)
                     .and_then(|m| m.behaviors.get(behavior_idx))
                     .map(|b| (b.param_count, behavior_idx as u16))
                     .unwrap_or((0, 0));
                 let args: Vec<Value> = (0..param_count)
-                    .map(|i| frame.regs[i])
+                    .map(|i| self.frames[frame_idx].regs[i])
                     .collect();
                 self.actor_callbacks.send_message(actor_val, behavior_id, &args);
-                self.current_frame = Some(frame);
                 return Ok(());
             }
             OpCode::Ask => {
-                let actor_val = frame.regs[instr.op1 as usize];
+                let actor_val = self.frames[frame_idx].regs[instr.op1 as usize];
                 let behavior_idx = instr.imm16() as usize;
-                let (param_count, behavior_id) = self.modules.get(frame.module_idx)
+                let (param_count, behavior_id) = self.modules.get(module_idx)
                     .and_then(|m| m.behaviors.get(behavior_idx))
                     .map(|b| (b.param_count, behavior_idx as u16))
                     .unwrap_or((0, 0));
                 let args: Vec<Value> = (0..param_count)
-                    .map(|i| frame.regs[i])
+                    .map(|i| self.frames[frame_idx].regs[i])
                     .collect();
                 let result = self.actor_callbacks.ask_actor(actor_val, behavior_id, &args);
-                frame.regs[instr.op3 as usize] = result;
-                self.current_frame = Some(frame);
+                self.frames[frame_idx].regs[instr.op3 as usize] = result;
                 return Ok(());
             }
             OpCode::SelfOp => {
                 let actor_id = self.actor_callbacks.current_actor_id().unwrap_or(0);
-                frame.regs[instr.op1 as usize] = Value::actor_ref(actor_id);
+                self.frames[frame_idx].regs[instr.op1 as usize] = Value::actor_ref(actor_id);
             }
             OpCode::StateGet => {
                 let field_idx = instr.imm16() as usize;
-                let field = self.module_const_string(frame.module_idx, field_idx);
-                frame.regs[instr.op3 as usize] = self.actor_callbacks.get_state_field(&field);
+                let field = self.module_const_string(module_idx, field_idx);
+                self.frames[frame_idx].regs[instr.op3 as usize] = self.actor_callbacks.get_state_field(&field);
             }
             OpCode::StateSet => {
                 let field_idx = instr.imm16() as usize;
-                let field = self.module_const_string(frame.module_idx, field_idx);
-                let val = frame.regs[instr.op3 as usize];
+                let field = self.module_const_string(module_idx, field_idx);
+                let val = self.frames[frame_idx].regs[instr.op3 as usize];
                 self.actor_callbacks.set_state_field(&field, val);
             }
             OpCode::Emit => {
                 let event_idx = instr.imm16() as usize;
-                let event = self.module_const_string(frame.module_idx, event_idx);
+                let event = self.module_const_string(module_idx, event_idx);
                 let arg_count = instr.op3 as usize;
-                let args: Vec<Value> = frame.regs[0..arg_count].to_vec();
+                let args: Vec<Value> = (0..arg_count)
+                    .map(|i| self.frames[frame_idx].regs[i])
+                    .collect();
                 self.actor_callbacks.emit_event(&event, &args);
             }
             OpCode::RSend => {
-                // Placeholder: remote send.
-                self.current_frame = Some(frame);
                 return Ok(());
             }
             OpCode::RSpawn => {
-                // Placeholder: remote spawn.
-                frame.regs[instr.op3 as usize] = Value::actor_ref(0);
-                self.current_frame = Some(frame);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::actor_ref(0);
                 return Ok(());
             }
 
             // -- Constants --
-            OpCode::Const0 => { frame.regs[instr.op1 as usize] = Value::int(0); }
-            OpCode::Const1 => { frame.regs[instr.op1 as usize] = Value::int(1); }
-            OpCode::Const2 => { frame.regs[instr.op1 as usize] = Value::int(2); }
+            OpCode::Const0 => { self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(0); }
+            OpCode::Const1 => { self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(1); }
+            OpCode::Const2 => { self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(2); }
             OpCode::ConstU => {
                 let idx = instr.imm16() as usize;
-                let val = self.modules.get(frame.module_idx)
+                let val = self.modules.get(module_idx)
                     .and_then(|m| m.constants.get(idx))
-                    .map(|c| match c {
-                        Constant::Int(n) => Value::int(*n),
-                        Constant::Float(f) => Value::float(*f),
-                        Constant::String(s) => Value::string(idx as u32),
-                        Constant::Bool(b) => Value::bool(*b),
+                    .map(|c| match *c {
+                        Constant::Int(n) => Value::int(n),
+                        Constant::Float(f) => Value::float(f),
+                        Constant::String(_) => Value::string(idx as u32),
+                        Constant::Bool(b) => Value::bool(b),
                         Constant::Nil => Value::nil(),
                         Constant::Unit => Value::unit(),
                         _ => Value::nil(),
                     })
                     .unwrap_or(Value::nil());
-                frame.regs[instr.op3 as usize] = val;
+                self.frames[frame_idx].regs[instr.op3 as usize] = val;
             }
             OpCode::Closure => {
                 let func_idx = instr.imm16() as u64;
-                frame.regs[instr.op3 as usize] = Value::closure(func_idx);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::closure(func_idx);
             }
             OpCode::CapLoad | OpCode::CapStore | OpCode::FreeVar => {
                 // Captures are not yet implemented at runtime; these opcodes are
                 // no-ops so that simple capture-free closures still work.
             }
+
             // -- Arithmetic --
             OpCode::IAdd => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::int(a + b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a + b);
             }
             OpCode::ISub => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::int(a - b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a - b);
             }
             OpCode::IMul => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::int(a * b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a * b);
             }
             OpCode::IDiv => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(1);
-                frame.regs[instr.op3 as usize] = if b != 0 { Value::int(a / b) } else { Value::nil() };
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(1);
+                self.frames[frame_idx].regs[instr.op3 as usize] = if b != 0 { Value::int(a / b) } else { Value::nil() };
             }
             OpCode::IMod => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(1);
-                frame.regs[instr.op3 as usize] = if b != 0 { Value::int(a % b) } else { Value::nil() };
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(1);
+                self.frames[frame_idx].regs[instr.op3 as usize] = if b != 0 { Value::int(a % b) } else { Value::nil() };
             }
             OpCode::INeg => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op2 as usize] = Value::int(-a);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(-a);
             }
 
             // -- Float arithmetic --
             OpCode::FAdd => {
-                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
-                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
-                frame.regs[instr.op3 as usize] = Value::float(a + b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a + b);
             }
             OpCode::FSub => {
-                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
-                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
-                frame.regs[instr.op3 as usize] = Value::float(a - b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a - b);
             }
             OpCode::FMul => {
-                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
-                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
-                frame.regs[instr.op3 as usize] = Value::float(a * b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a * b);
             }
             OpCode::FDiv => {
-                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
-                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(1.0);
-                frame.regs[instr.op3 as usize] = if b != 0.0 { Value::float(a / b) } else { Value::nil() };
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_float().unwrap_or(1.0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = if b != 0.0 { Value::float(a / b) } else { Value::nil() };
             }
             OpCode::FNeg => {
-                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
-                frame.regs[instr.op3 as usize] = Value::float(-a);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(-a);
             }
 
             // -- Comparison --
             OpCode::ICmpEq => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::bool(a == b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a == b);
             }
             OpCode::ICmpLt => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::bool(a < b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a < b);
             }
             OpCode::ICmpGt => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::bool(a > b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a > b);
             }
             OpCode::ICmpLe => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::bool(a <= b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a <= b);
             }
             OpCode::ICmpGe => {
-                let a = frame.regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = frame.regs[instr.op2 as usize].as_int().unwrap_or(0);
-                frame.regs[instr.op3 as usize] = Value::bool(a >= b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a >= b);
             }
             OpCode::FCmpEq => {
-                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
-                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
-                frame.regs[instr.op3 as usize] = Value::bool((a - b).abs() < f64::EPSILON);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool((a - b).abs() < f64::EPSILON);
             }
             OpCode::FCmpLt => {
-                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
-                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
-                frame.regs[instr.op3 as usize] = Value::bool(a < b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a < b);
             }
             OpCode::FCmpGt => {
-                let a = frame.regs[instr.op1 as usize].as_float().unwrap_or(0.0);
-                let b = frame.regs[instr.op2 as usize].as_float().unwrap_or(0.0);
-                frame.regs[instr.op3 as usize] = Value::bool(a > b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_float().unwrap_or(0.0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a > b);
             }
 
             // -- Arrays (actor-heap backed; no longer leaked) --
             OpCode::ArrAlloc => {
-                let len = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as usize;
+                let len = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0) as usize;
                 let size = len.checked_mul(std::mem::size_of::<Value>()).unwrap_or(0);
-                frame.regs[instr.op2 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(size, HeapTypeTag::Array) {
+                self.frames[frame_idx].regs[instr.op2 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(size, HeapTypeTag::Array) {
                     unsafe {
                         let slots = std::slice::from_raw_parts_mut(ptr as *mut Value, len);
                         for slot in slots.iter_mut() {
@@ -1106,8 +1088,8 @@ impl VM {
                 };
             }
             OpCode::ArrLoad => {
-                let arr_ptr = frame.regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
-                let idx = frame.regs[instr.op2 as usize].as_int().unwrap_or(0) as usize;
+                let arr_ptr = self.frames[frame_idx].regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
+                let idx = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0) as usize;
                 let val = if !arr_ptr.is_null() {
                     if let Some(len) = self.actor_callbacks.array_len(arr_ptr) {
                         if idx < len {
@@ -1121,12 +1103,12 @@ impl VM {
                 } else {
                     Value::nil()
                 };
-                frame.regs[instr.op3 as usize] = val;
+                self.frames[frame_idx].regs[instr.op3 as usize] = val;
             }
             OpCode::ArrStore => {
-                let arr_ptr = frame.regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
-                let idx = frame.regs[instr.op2 as usize].as_int().unwrap_or(0) as usize;
-                let val = frame.regs[instr.op3 as usize];
+                let arr_ptr = self.frames[frame_idx].regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
+                let idx = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0) as usize;
+                let val = self.frames[frame_idx].regs[instr.op3 as usize];
                 if !arr_ptr.is_null() {
                     if let Some(len) = self.actor_callbacks.array_len(arr_ptr) {
                         if idx < len {
@@ -1136,36 +1118,34 @@ impl VM {
                 }
             }
             OpCode::ArrLen => {
-                let arr_ptr = frame.regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
+                let arr_ptr = self.frames[frame_idx].regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
                 let len = if !arr_ptr.is_null() {
                     self.actor_callbacks.array_len(arr_ptr).unwrap_or(0) as i64
                 } else {
                     0
                 };
-                frame.regs[instr.op3 as usize] = Value::int(len);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(len);
             }
 
             // -- Boolean logic --
             OpCode::And => {
-                let a = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
-                let b = frame.regs[instr.op2 as usize].as_bool().unwrap_or(false);
-                frame.regs[instr.op3 as usize] = Value::bool(a && b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_bool().unwrap_or(false);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_bool().unwrap_or(false);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a && b);
             }
             OpCode::Or => {
-                let a = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
-                let b = frame.regs[instr.op2 as usize].as_bool().unwrap_or(false);
-                frame.regs[instr.op3 as usize] = Value::bool(a || b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_bool().unwrap_or(false);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_bool().unwrap_or(false);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a || b);
             }
             OpCode::Not => {
-                let a = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
-                frame.regs[instr.op2 as usize] = Value::bool(!a);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_bool().unwrap_or(false);
+                self.frames[frame_idx].regs[instr.op2 as usize] = Value::bool(!a);
             }
 
             // -- Type checks --
-            // IsTag checks the tag of the value in op1 against the tag_id in op2.
-            // Tag IDs mirror the low byte of the internal NaN tag constants.
             OpCode::IsTag => {
-                let val = frame.regs[instr.op1 as usize];
+                let val = self.frames[frame_idx].regs[instr.op1 as usize];
                 let tag_id = instr.op2;
                 let result = match tag_id {
                     0x01 => val.is_nil(),
@@ -1181,68 +1161,56 @@ impl VM {
                     0x0B => false, // tuple
                     _ => false,
                 };
-                frame.regs[instr.op3 as usize] = Value::bool(result);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(result);
             }
 
             // -- Register moves --
             OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Dup => {
-                frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize];
+                let src = self.frames[frame_idx].regs[instr.op1 as usize];
+                self.frames[frame_idx].regs[instr.op2 as usize] = src;
             }
             OpCode::Swap => {
                 let a = instr.op1 as usize;
                 let b = instr.op2 as usize;
-                let tmp = frame.regs[a];
-                frame.regs[a] = frame.regs[b];
-                frame.regs[b] = tmp;
+                let tmp = self.frames[frame_idx].regs[a];
+                self.frames[frame_idx].regs[a] = self.frames[frame_idx].regs[b];
+                self.frames[frame_idx].regs[b] = tmp;
             }
 
             // -- Control flow (non-consuming) --
             OpCode::Jmp => {
                 let offset = instr.imm16() as i16;
-                frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+                self.frames[frame_idx].pc = (self.frames[frame_idx].pc as i64 + offset as i64 - 1) as usize;
             }
             OpCode::JmpT => {
-                let cond = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
+                let cond = self.frames[frame_idx].regs[instr.op1 as usize].as_bool().unwrap_or(false);
                 if cond {
                     let offset = instr.offset16() as i16;
-                    frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+                    self.frames[frame_idx].pc = (self.frames[frame_idx].pc as i64 + offset as i64 - 1) as usize;
                 }
             }
             OpCode::JmpF => {
-                let cond = frame.regs[instr.op1 as usize].as_bool().unwrap_or(false);
+                let cond = self.frames[frame_idx].regs[instr.op1 as usize].as_bool().unwrap_or(false);
                 if !cond {
                     let offset = instr.offset16() as i16;
-                    frame.pc = (frame.pc as i64 + offset as i64 - 1) as usize;
+                    self.frames[frame_idx].pc = (self.frames[frame_idx].pc as i64 + offset as i64 - 1) as usize;
                 }
             }
 
             // -- Algebraic Effects --
             OpCode::Handle => {
-                // Handle: push a new handler frame onto the handler stack.
-                // op1 = handler_table_idx (index into module.handler_tables)
-                // The handler remains active until matching Unwind.
-                //
-                // Resume PC: we save the current PC (which points past this Handle
-                // instruction) as the place to resume when the handle block
-                // completes normally.
                 let handler_table_idx = instr.op1 as usize;
-                let module_idx = frame.module_idx;
-                let resume_pc = frame.pc; // already incremented past Handle
-                // dst reg for normal completion result — stored in op2
+                let resume_pc = self.frames[frame_idx].pc; // already incremented past Handle
                 let resume_dst = instr.op2;
                 self.handler_stack.push(HandlerFrame::new(
                     handler_table_idx, module_idx, resume_pc, resume_dst,
                 ));
             }
             OpCode::Perform => {
-                // Perform: invoke an effect operation.
-                // op1<<8 | op2 = effect_name constant pool index
-                // op3 = dst_reg (where to store the result after resume)
                 let eff_name_idx = instr.imm16();
                 let dst_reg = instr.op3;
-                let effect_name = self.module_const_string(frame.module_idx, eff_name_idx as usize);
+                let effect_name = self.module_const_string(module_idx, eff_name_idx as usize);
 
-                // Search handler stack from top (innermost) to bottom (outermost).
                 let handler_idx = self.handler_stack.iter().rposition(|hf| {
                     if let Some(module) = self.modules.get(hf.module_idx) {
                         if let Some(ht) = module.handler_tables.get(hf.handler_table_idx) {
@@ -1255,31 +1223,24 @@ impl VM {
                     }
                 });
 
-                // Determine the handler to invoke and capture continuation.
-                // We temporarily put the frame back so capture() can clone it.
-                self.current_frame = Some(frame);
-
                 let target_offset = if let Some(handler_stack_idx) = handler_idx {
-                    // Found a matching handler.
-                    let hf = &mut self.handler_stack[handler_stack_idx];
-                    let (handler_offset, _arg_count, result_reg) = {
+                    let (handler_offset, result_reg) = {
+                        let hf = &self.handler_stack[handler_stack_idx];
                         let module = self.modules.get(hf.module_idx).unwrap();
                         let ht = module.handler_tables.get(hf.handler_table_idx).unwrap();
                         let binding = ht.bindings.iter()
                             .find(|b| b.effect_name == effect_name)
                             .unwrap();
-                        (binding.handler_offset, binding.arg_count, binding.result_reg)
+                        (binding.handler_offset, binding.result_reg)
                     };
                     self.handler_stack[handler_stack_idx].resume_dst = result_reg;
                     Some(handler_offset)
                 } else {
-                    // No handler found — check for fallback.
-                    let fallback_offset = self.handler_stack.last().and_then(|hf| {
+                    self.handler_stack.last().and_then(|hf| {
                         self.modules.get(hf.module_idx)
                             .and_then(|m| m.handler_tables.get(hf.handler_table_idx))
                             .and_then(|ht| ht.fallback_offset)
-                    });
-                    fallback_offset
+                    })
                 };
 
                 if let Some(handler_stack_idx) = handler_idx {
@@ -1289,7 +1250,6 @@ impl VM {
                         ))?;
                     self.handler_stack[handler_stack_idx].captured_continuation = Some(cont);
                 } else if target_offset.is_some() {
-                    // Fallback path — capture continuation on the innermost handler.
                     let hf_idx = self.handler_stack.len().saturating_sub(1);
                     let cont = Continuation::capture(self, dst_reg)
                         .ok_or_else(|| NuError::VMError(
@@ -1297,79 +1257,40 @@ impl VM {
                         ))?;
                     self.handler_stack[hf_idx].captured_continuation = Some(cont);
                 } else {
-                    // No handler and no fallback — error.
-                    frame = self.current_frame.take().unwrap();
-                    self.current_frame = Some(frame);
                     return Err(NuError::EffectError {
                         msg: format!("Unhandled effect: '{}'", effect_name),
                         span: Span::default(),
                     });
                 }
 
-                // Redirect execution to the handler/fallback body.
-                frame = self.current_frame.take().unwrap();
-                frame.pc = target_offset.unwrap();
+                self.frames[frame_idx].pc = target_offset.unwrap();
             }
             OpCode::Resume => {
-                // Resume: restore the captured continuation with a value.
-                // op1 = register containing the value to resume with.
-                let val_reg = instr.op1 as usize;
-                let val = frame.regs[val_reg];
-
-                // Peek at the innermost handler frame (do NOT pop — the handler
-                // stays active until Unwind, allowing multiple effects in the
-                // same handle block to be handled by the same handler).
+                let val = self.frames[frame_idx].regs[instr.op1 as usize];
                 if let Some(hf) = self.handler_stack.last_mut() {
                     if let Some(cont) = hf.captured_continuation.take() {
-                        // Restore continuation: this resets the frame chain and PC.
                         cont.restore(self, val);
-                        // The restored frame's PC points past the original Perform.
-                        // Do NOT put the current frame back — it's been replaced
-                        // by the restored continuation.
                         return Ok(());
                     }
                 }
-
-                // Resume without a captured continuation — error.
-                self.current_frame = Some(frame);
                 return Err(NuError::VMError(
                     "resume called without a captured continuation".into()
                 ));
             }
             OpCode::Unwind => {
-                // Unwind: the handle block completed normally. Pop the handler
-                // frame and continue execution at the next instruction.
-                // The PC already points past Unwind (incremented in step()),
-                // so we just pop the handler frame and let execution flow
-                // continue naturally.
                 self.handler_stack.pop();
             }
 
             // -- Capabilities (MVP) --
-            OpCode::CapChk => { frame.regs[instr.op2 as usize] = Value::bool(true); }
-            OpCode::CapUp => { frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize]; }
-            OpCode::CapDown => { frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize]; }
-            OpCode::CapSend => { frame.regs[instr.op2 as usize] = frame.regs[instr.op1 as usize]; }
+            OpCode::CapChk => { self.frames[frame_idx].regs[instr.op2 as usize] = Value::bool(true); }
+            OpCode::CapUp => { self.frames[frame_idx].regs[instr.op2 as usize] = self.frames[frame_idx].regs[instr.op1 as usize]; }
+            OpCode::CapDown => { self.frames[frame_idx].regs[instr.op2 as usize] = self.frames[frame_idx].regs[instr.op1 as usize]; }
+            OpCode::CapSend => { self.frames[frame_idx].regs[instr.op2 as usize] = self.frames[frame_idx].regs[instr.op1 as usize]; }
 
             // -- Python Interop — RESERVED (see audit, native_actor.rs) --
-            //
-            // All Python opcodes trap with a descriptive error. Python code
-            // runs in dedicated OS threads via native_actor.rs, not inline
-            // in the VM. This prevents Python objects from entering the
-            // value representation and keeps the VM boundary clean.
-            //
-            // To call Python from Nulang, use:
-            //   perform Python.call("module.function", args)
-            // which is dispatched by the effect handler to
-            // a future bytecode-level native-actor call instruction.
-            //
-            // Per the architectural audit: Python objects MUST NOT enter
-            // the VM value representation. All Python code runs in
-            // dedicated OS threads with marshal-only data crossing.
             OpCode::PyImport | OpCode::PyGetAttr | OpCode::PyCall
             | OpCode::PyCallKw | OpCode::PySetAttr | OpCode::PyToNu
             | OpCode::PyFromNu | OpCode::PyRelease => {
-                self.current_frame = Some(frame);
                 return Err(NuError::VMError(
                     "Python opcodes require native actor runtime. \
                      Use perform Python.call(...) instead.".into()
@@ -1377,72 +1298,63 @@ impl VM {
             }
 
             // -- Distribution (MVP) --
-            //
-            // If a distributed runtime callback is installed, remote opcodes
-            // delegate to it. Otherwise they fall back to local, queryable
-            // stubs so the standalone VM never panics.
             OpCode::NodeId => {
                 let node_id = self
                     .distributed_callbacks
                     .as_ref()
                     .map(|cb| cb.node_id())
                     .unwrap_or(self.node_id);
-                frame.regs[instr.op1 as usize] = Value::int(node_id as i64);
+                self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(node_id as i64);
             }
             OpCode::Migrate => {
-                let actor_id = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as u64;
-                let target_node_id = frame.regs[instr.op2 as usize].as_int().unwrap_or(0) as u64;
+                let actor_id = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0) as u64;
+                let target_node_id = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0) as u64;
                 self.pending_migrations.push((actor_id, target_node_id));
                 if let Some(ref mut cb) = self.distributed_callbacks {
                     cb.migrate(actor_id, target_node_id);
                 }
-                frame.regs[instr.op3 as usize] = Value::unit();
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::unit();
             }
             OpCode::RAsk => {
-                // Instruction layout: op1 = target_actor_reg,
-                // op2 = behavior string constant index,
-                // op3 = dst_reg.
-                let target_actor = frame.regs[instr.op1 as usize].as_int().unwrap_or(0) as u64;
+                let target_actor = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0) as u64;
                 let behavior_const_idx = instr.op2 as usize;
-                let behavior = self.module_const_string(frame.module_idx, behavior_const_idx);
+                let behavior = self.module_const_string(module_idx, behavior_const_idx);
                 let result = if let Some(ref mut cb) = self.distributed_callbacks {
                     cb.remote_ask(target_actor, &behavior, &[], 5_000)
                 } else {
                     Value::nil()
                 };
-                frame.regs[instr.op3 as usize] = result;
+                self.frames[frame_idx].regs[instr.op3 as usize] = result;
             }
             OpCode::Gossip => {
-                // Instruction layout: op1 = message string constant index,
-                // op3 = dst_reg.
                 let message_const_idx = instr.op1 as usize;
-                let message = self.module_const_string(frame.module_idx, message_const_idx);
+                let message = self.module_const_string(module_idx, message_const_idx);
                 self.gossip_log.push(message.clone());
                 let result = if let Some(ref mut cb) = self.distributed_callbacks {
                     cb.gossip(&message)
                 } else {
                     Value::unit()
                 };
-                frame.regs[instr.op3 as usize] = result;
+                self.frames[frame_idx].regs[instr.op3 as usize] = result;
             }
 
             // -- String & IO --
             OpCode::SConcat => {
-                let s1 = frame.regs[instr.op1 as usize].to_string_repr();
-                let s2 = frame.regs[instr.op2 as usize].to_string_repr();
+                let s1 = self.frames[frame_idx].regs[instr.op1 as usize].to_string_repr();
+                let s2 = self.frames[frame_idx].regs[instr.op2 as usize].to_string_repr();
                 let result = format!("{}{}", s1, s2);
                 let bytes = result.into_bytes();
-                frame.regs[instr.op3 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(bytes.len(), HeapTypeTag::String) {
+                self.frames[frame_idx].regs[instr.op3 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(bytes.len(), HeapTypeTag::String) {
                     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()); }
                     Value::ptr(ptr)
                 } else {
                     Value::nil()
                 };
             }
-            OpCode::SPrint => { print!("{}", frame.regs[instr.op1 as usize].to_string_repr()); }
+            OpCode::SPrint => { print!("{}", self.frames[frame_idx].regs[instr.op1 as usize].to_string_repr()); }
             OpCode::SRead => {
                 let mut input = String::new();
-                frame.regs[instr.op1 as usize] = if std::io::stdin().read_line(&mut input).is_ok() {
+                self.frames[frame_idx].regs[instr.op1 as usize] = if std::io::stdin().read_line(&mut input).is_ok() {
                     let bytes = input.into_bytes();
                     if let Some(ptr) = self.actor_callbacks.alloc(bytes.len(), HeapTypeTag::String) {
                         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()); }
@@ -1452,11 +1364,11 @@ impl VM {
                     }
                 } else { Value::nil() };
             }
-            OpCode::FOpen => { frame.regs[instr.op2 as usize] = Value::nil(); }
-            OpCode::FRead => { frame.regs[instr.op2 as usize] = Value::nil(); }
+            OpCode::FOpen => { self.frames[frame_idx].regs[instr.op2 as usize] = Value::nil(); }
+            OpCode::FRead => { self.frames[frame_idx].regs[instr.op2 as usize] = Value::nil(); }
             OpCode::FWrite => {}
             OpCode::FClose => {}
-            OpCode::Print => { println!("{}", frame.regs[instr.op1 as usize].to_string_repr()); }
+            OpCode::Print => { println!("{}", self.frames[frame_idx].regs[instr.op1 as usize].to_string_repr()); }
 
             // -- Debug & Meta --
             OpCode::DbgBreak => {}
@@ -1464,65 +1376,37 @@ impl VM {
                 eprintln!("=== Debug: Register State ===");
                 for i in (0..256).step_by(8) {
                     let mut line = format!("R{:03}-R{:03}: ", i, i + 7);
-                    for j in 0..8 { line.push_str(&format!("{:>20} ", frame.regs[i + j].to_string_repr())); }
+                    for j in 0..8 { line.push_str(&format!("{:>20} ", self.frames[frame_idx].regs[i + j].to_string_repr())); }
                     eprintln!("{}", line);
                 }
             }
             OpCode::DbgStack => {
                 eprintln!("=== Debug: Call Stack ===");
                 let mut depth = 0;
-                let mut fref: Option<&Frame> = Some(&frame);
-                while let Some(fr) = fref {
+                let mut idx = Some(frame_idx);
+                while let Some(i) = idx {
+                    let fr = &self.frames[i];
                     let mname = self.modules.get(fr.module_idx).map(|m| m.name.as_str()).unwrap_or("?");
                     eprintln!("  [{}] module={} pc={}", depth, mname, fr.pc);
                     depth += 1;
-                    fref = fr.caller.as_deref();
+                    idx = fr.caller_idx;
                 }
                 if depth == 0 { eprintln!("  (empty)"); }
             }
-            OpCode::MetaType => { frame.regs[instr.op2 as usize] = Value::int(0); }
-            OpCode::MetaCap => { frame.regs[instr.op2 as usize] = Value::int(0); }
+            OpCode::MetaType => { self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(0); }
+            OpCode::MetaCap => { self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(0); }
 
             // -- Reference counting / deallocation --
             OpCode::Drop => {
-                let val = frame.regs[instr.op1 as usize];
+                let val = self.frames[frame_idx].regs[instr.op1 as usize];
                 if let Some(ptr) = val.as_ptr() {
                     self.actor_callbacks.drop_ref(ptr);
                 }
             }
 
             // All other opcodes are not yet implemented in the interpreter.
-            // Treat them as no-ops for now.
             _ => {}
         }
-        self.current_frame = Some(frame);
-        Ok(())
-    }
-
-    // === Frame-Manipulating Dispatchers (called before frame borrow) ===
-
-    fn dispatch_call(&mut self, func_reg: u8, argc: u8, dst: u8) -> NuResult<()> {
-        let old_frame = self.current_frame.take()
-            .ok_or_else(|| NuError::VMError("No frame for call".to_string()))?;
-
-        let func_val = old_frame.regs[func_reg as usize];
-        let module_idx = old_frame.module_idx;
-
-        let (func_idx, closure_env) = self.resolve_function(func_val, module_idx)?;
-        let code_offset = self.modules.get(module_idx)
-            .and_then(|m| m.function_table.get(func_idx)).copied()
-            .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
-
-        let mut new_frame = Frame::new(None, module_idx);
-        new_frame.pc = code_offset;
-        for i in 0..(argc as usize).min(256) {
-            new_frame.regs[i] = old_frame.regs[i];
-        }
-        new_frame.return_dst = dst;
-        new_frame.closure_env = closure_env;
-        new_frame.caller = Some(old_frame);
-
-        self.current_frame = Some(Box::new(new_frame));
         Ok(())
     }
 
