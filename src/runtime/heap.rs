@@ -19,7 +19,9 @@
 //! * **Zero `actor_id` default** — the heap is created before the actor ID is
 //!   known; callers should invoke `set_actor_id` immediately after creation.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -55,33 +57,7 @@ pub enum SizeClass {
     Huge = 4,
 }
 
-impl SizeClass {
-    /// Convert a raw discriminant back to a `SizeClass`.
-    ///
-    /// # Safety
-    /// `disc` must be one of the valid discriminants (0–4). Values outside
-    /// this range are clamped to `Huge`.
-    fn from_discriminant(disc: u8) -> Self {
-        match disc {
-            0 => SizeClass::Tiny,
-            1 => SizeClass::Small,
-            2 => SizeClass::Medium,
-            3 => SizeClass::Large,
-            _ => SizeClass::Huge,
-        }
-    }
-
-    /// Return the inclusive upper bound (in bytes) for this size class.
-    fn max_size(&self) -> usize {
-        match self {
-            SizeClass::Tiny => 32,
-            SizeClass::Small => 64,
-            SizeClass::Medium => 128,
-            SizeClass::Large => 256,
-            SizeClass::Huge => usize::MAX,
-        }
-    }
-}
+impl SizeClass {}
 
 /// Map a *total* allocation size (header + payload, already aligned) to its
 /// size class and the rounded-up block size for free-list bucketing.

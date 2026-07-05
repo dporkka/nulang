@@ -66,11 +66,13 @@ use cranelift_jit::JITModule;
 
 use std::collections::HashMap;
 
-use crate::bytecode::{Instruction, OpCode};
+use crate::bytecode::Instruction;
 use crate::jit::simd_analyzer::{
-    SimdRegion, SimdElemType, SimdWidth, VectorizablePattern,
+    SimdRegion, SimdElemType, VectorizablePattern,
     BinopKind, UnaryKind, CmpKind,
 };
+#[cfg(test)]
+use crate::jit::simd_analyzer::SimdWidth;
 use crate::jit::typed_compiler::{
     emit_sext48, emit_extract_payload, load_reg,
 };
@@ -620,7 +622,7 @@ pub fn emit_simd_load(
 /// - `value`: The SIMD vector value to store
 pub fn emit_simd_store(
     builder: &mut FunctionBuilder,
-    simd_region: &SimdRegion,
+    _simd_region: &SimdRegion,
     base_ptr: Value,
     index: Value,
     elem_size_val: Value,
@@ -811,7 +813,8 @@ fn emit_scalar_iteration(
 ///
 /// The prefix loop handles the first `trip_count % vector_width` elements
 /// individually using scalar operations before the main SIMD loop.
-fn emit_scalar_prefix_loop(
+#[allow(dead_code)]
+    fn emit_scalar_prefix_loop(
     builder: &mut FunctionBuilder,
     simd_region: &SimdRegion,
     a_base: Value,
@@ -841,7 +844,8 @@ fn emit_scalar_prefix_loop(
 }
 
 /// Generate a scalar loop for the epilogue elements.
-fn emit_scalar_epilogue_loop(
+#[allow(dead_code)]
+    fn emit_scalar_epilogue_loop(
     builder: &mut FunctionBuilder,
     simd_region: &SimdRegion,
     a_base: Value,
@@ -878,6 +882,7 @@ fn emit_scalar_epilogue_loop(
 ///
 /// These helpers provide a fallback path when direct SIMD CLIF emission
 /// is not sufficient or when the host doesn't support SIMD.
+#[allow(dead_code)]
 fn declare_simd_runtime_helpers<M: Module>(
     module: &mut M,
     builder: &mut FunctionBuilder,
@@ -928,6 +933,7 @@ fn declare_simd_runtime_helpers<M: Module>(
 }
 
 /// Signature for I64x2 SIMD operations: fn(I64x2, I64x2) -> I64x2
+#[allow(dead_code)]
 fn make_simd_i64x2_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64X2));
@@ -937,6 +943,7 @@ fn make_simd_i64x2_sig<M: Module>(module: &M) -> Signature {
 }
 
 /// Signature for F64x2 SIMD operations: fn(F64x2, F64x2) -> F64x2
+#[allow(dead_code)]
 fn make_simd_f64x2_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::F64X2));
@@ -946,6 +953,7 @@ fn make_simd_f64x2_sig<M: Module>(module: &M) -> Signature {
 }
 
 /// Signature for scalar array load: fn(base: i64, idx: i64, len: i64) -> i64
+#[allow(dead_code)]
 fn make_scalar_load_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
@@ -956,6 +964,7 @@ fn make_scalar_load_sig<M: Module>(module: &M) -> Signature {
 }
 
 /// Signature for scalar array store: fn(base: i64, idx: i64, len: i64, value: i64)
+#[allow(dead_code)]
 fn make_scalar_store_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
@@ -979,7 +988,8 @@ fn elem_size_val(builder: &mut FunctionBuilder, elem_type: SimdElemType) -> Valu
 // ---------------------------------------------------------------------------
 
 /// Create a SIMD vector constant with all lanes set to the same value.
-fn emit_simd_splat(
+#[allow(dead_code)]
+    fn emit_simd_splat(
     builder: &mut FunctionBuilder,
     elem_type: SimdElemType,
     value: Value,
@@ -989,7 +999,8 @@ fn emit_simd_splat(
 }
 
 /// Extract a single lane from a SIMD vector.
-fn emit_simd_extract_lane(
+#[allow(dead_code)]
+    fn emit_simd_extract_lane(
     builder: &mut FunctionBuilder,
     _elem_type: SimdElemType,
     vector: Value,
@@ -999,7 +1010,8 @@ fn emit_simd_extract_lane(
 }
 
 /// Insert a single lane into a SIMD vector.
-fn emit_simd_insert_lane(
+#[allow(dead_code)]
+    fn emit_simd_insert_lane(
     builder: &mut FunctionBuilder,
     vector: Value,
     value: Value,
@@ -1009,17 +1021,20 @@ fn emit_simd_insert_lane(
 }
 
 /// Emit SIMD bitwise AND.
-fn emit_simd_band(builder: &mut FunctionBuilder, a: Value, b: Value) -> Value {
+#[allow(dead_code)]
+    fn emit_simd_band(builder: &mut FunctionBuilder, a: Value, b: Value) -> Value {
     builder.ins().band(a, b)
 }
 
 /// Emit SIMD bitwise OR.
-fn emit_simd_bor(builder: &mut FunctionBuilder, a: Value, b: Value) -> Value {
+#[allow(dead_code)]
+    fn emit_simd_bor(builder: &mut FunctionBuilder, a: Value, b: Value) -> Value {
     builder.ins().bor(a, b)
 }
 
 /// Emit SIMD bitwise XOR.
-fn emit_simd_bxor(builder: &mut FunctionBuilder, a: Value, b: Value) -> Value {
+#[allow(dead_code)]
+    fn emit_simd_bxor(builder: &mut FunctionBuilder, a: Value, b: Value) -> Value {
     builder.ins().bxor(a, b)
 }
 
@@ -1096,16 +1111,14 @@ mod simd_compiler_tests {
             Instruction::new0(OpCode::Halt),
         ];
 
-        let ptr = unsafe {
-            compile_simd_region(
+        let ptr = compile_simd_region(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_simd_i64x2",
                 &instructions,
                 &region,
-            )
-        };
+            );
         assert!(ptr.is_ok(), "I64x2 SIMD region should compile: {:?}", ptr.err());
     }
 
@@ -1123,16 +1136,14 @@ mod simd_compiler_tests {
             Instruction::new0(OpCode::Halt),
         ];
 
-        let ptr = unsafe {
-            compile_simd_region(
+        let ptr = compile_simd_region(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_simd_f64x2",
                 &instructions,
                 &region,
-            )
-        };
+            );
         assert!(ptr.is_ok(), "F64x2 SIMD region should compile: {:?}", ptr.err());
     }
 
@@ -1177,16 +1188,14 @@ mod simd_compiler_tests {
             Instruction::new0(OpCode::Halt),
         ];
 
-        let ptr = unsafe {
-            compile_simd_region(
+        let ptr = compile_simd_region(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_simd_fallback",
                 &instructions,
                 &region,
-            )
-        };
+            );
         assert!(ptr.is_ok(), "SIMD region should compile (with or without SIMD): {:?}", ptr.err());
     }
 
@@ -1279,16 +1288,14 @@ mod simd_compiler_tests {
             Instruction::new0(OpCode::Halt),
         ];
 
-        let ptr = unsafe {
-            compile_simd_region(
+        let ptr = compile_simd_region(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_simd_epilogue",
                 &instructions,
                 &region,
-            )
-        };
+            );
         assert!(ptr.is_ok(), "SIMD region with epilogue should compile: {:?}", ptr.err());
     }
 
@@ -1306,16 +1313,14 @@ mod simd_compiler_tests {
             Instruction::new0(OpCode::Halt),
         ];
 
-        let ptr = unsafe {
-            compile_simd_region(
+        let ptr = compile_simd_region(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_simd_sub",
                 &instructions,
                 &sub_region,
-            )
-        };
+            );
         assert!(ptr.is_ok(), "SIMD ISub should compile: {:?}", ptr.err());
 
         let mut jit2 = JitSession::new();
@@ -1338,16 +1343,14 @@ mod simd_compiler_tests {
             trip_count_hint: Some(8),
         };
 
-        let ptr2 = unsafe {
-            compile_simd_region(
+        let ptr2 = compile_simd_region(
                 &mut jit2.module,
                 &mut jit2.builder_context,
                 &mut jit2.ctx,
                 "test_simd_mul",
                 &instructions,
                 &mul_region,
-            )
-        };
+            );
         assert!(ptr2.is_ok(), "SIMD IMul should compile: {:?}", ptr2.err());
     }
 
@@ -1382,16 +1385,14 @@ mod simd_compiler_tests {
             Instruction::new0(OpCode::Halt),
         ];
 
-        let ptr = unsafe {
-            compile_simd_region(
+        let ptr = compile_simd_region(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_simd_i32x4",
                 &instructions,
                 &region,
-            )
-        };
+            );
         assert!(ptr.is_ok(), "I32x4 SIMD region should compile: {:?}", ptr.err());
     }
 
@@ -1443,16 +1444,14 @@ mod simd_compiler_tests {
             Instruction::new0(OpCode::Halt),
         ];
 
-        let ptr = unsafe {
-            compile_simd_region(
+        let ptr = compile_simd_region(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_no_hint_fallback",
                 &instructions,
                 &region,
-            )
-        };
+            );
         assert!(ptr.is_ok(), "Fallback without trip count hint should compile: {:?}", ptr.err());
     }
 }

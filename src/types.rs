@@ -351,7 +351,6 @@ impl Type {
 #[derive(Debug, Clone, Default)]
 pub struct TypeContext {
     bindings: HashMap<String, (Type, Capability)>,
-    type_aliases: HashMap<String, Type>,
     /// Set of linear variable names that have been consumed (used exactly once).
     consumed: HashSet<String>,
 }

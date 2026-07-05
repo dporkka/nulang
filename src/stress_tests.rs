@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::Ordering;
 
 use crate::runtime::*;
 use crate::vm::Value;
@@ -17,11 +16,13 @@ use crate::types::ExitReason;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 struct TestContext {
     counters: HashMap<String, u64>,
     log: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl TestContext {
     fn increment(&mut self, key: &str) {
         *self.counters.entry(key.to_string()).or_insert(0) += 1;
@@ -43,7 +44,7 @@ impl TestContext {
 #[test]
 fn stress_slow_worker_with_mailbox_flood() {
     let mut rt = Runtime::new();
-    let ctx = Arc::new(Mutex::new(TestContext::default()));
+    let _ctx = Arc::new(Mutex::new(TestContext::default()));
 
     let slow_actor = rt.spawn_actor(Box::new(|| vec![
         ("name".into(),   Value::int(1)), // 1 = "slow_worker"
@@ -641,7 +642,7 @@ fn stress_supervisor_crash_during_recovery() {
     ]));
     rt.supervise_child(mid, ChildSpec::new("leaf", RestartPolicy::Permanent), leaf);
 
-    let pre_crash_count = rt.actors.len();
+    let _pre_crash_count = rt.actors.len();
 
     rt.exit_actor(mid, ExitReason::Error("supervisor_died_mid_recovery".into()));
     rt.run_scheduler();

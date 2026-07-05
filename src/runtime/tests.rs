@@ -333,7 +333,7 @@ fn test_timer_kill_after() {
 fn test_pg_join_and_members() {
     let mut rt = Runtime::new();
     let actor_id = rt.spawn_actor(Box::new(|| vec![]));
-    rt.process_groups.join("workers", actor_id);
+    assert!(rt.process_groups.join("workers", actor_id).is_ok());
     let members = rt.process_groups.members("workers");
     assert!(members.contains(&actor_id));
 }
@@ -342,7 +342,7 @@ fn test_pg_join_and_members() {
 fn test_pg_leave() {
     let mut rt = Runtime::new();
     let actor_id = rt.spawn_actor(Box::new(|| vec![]));
-    rt.process_groups.join("group", actor_id);
+    assert!(rt.process_groups.join("group", actor_id).is_ok());
     rt.process_groups.leave("group", actor_id);
     assert!(!rt.process_groups.is_member("group", actor_id));
 }
@@ -351,8 +351,8 @@ fn test_pg_leave() {
 fn test_pg_leave_all() {
     let mut rt = Runtime::new();
     let a1 = rt.spawn_actor(Box::new(|| vec![]));
-    rt.process_groups.join("g1", a1);
-    rt.process_groups.join("g2", a1);
+    assert!(rt.process_groups.join("g1", a1).is_ok());
+    assert!(rt.process_groups.join("g2", a1).is_ok());
     rt.process_groups.leave_all(a1);
     assert!(rt.process_groups.members("g1").is_empty());
     assert!(rt.process_groups.members("g2").is_empty());
@@ -363,8 +363,8 @@ fn test_pg_multiple_members() {
     let mut rt = Runtime::new();
     let a1 = rt.spawn_actor(Box::new(|| vec![]));
     let a2 = rt.spawn_actor(Box::new(|| vec![]));
-    rt.process_groups.join("pool", a1);
-    rt.process_groups.join("pool", a2);
+    assert!(rt.process_groups.join("pool", a1).is_ok());
+    assert!(rt.process_groups.join("pool", a2).is_ok());
     assert_eq!(rt.process_groups.member_count("pool"), 2);
 }
 
@@ -372,8 +372,8 @@ fn test_pg_multiple_members() {
 fn test_pg_join_idempotent() {
     let mut rt = Runtime::new();
     let actor_id = rt.spawn_actor(Box::new(|| vec![]));
-    rt.process_groups.join("idempotent", actor_id);
-    rt.process_groups.join("idempotent", actor_id);
+    assert!(rt.process_groups.join("idempotent", actor_id).is_ok());
+    assert!(rt.process_groups.join("idempotent", actor_id).is_ok());
     assert_eq!(rt.process_groups.member_count("idempotent"), 1);
 }
 
@@ -868,7 +868,7 @@ fn test_vm_arr_alloc_uses_actor_heap() {
     use std::rc::Rc;
     use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
     use crate::runtime::heap::{ActorHeap, TypeTag};
-    use crate::vm::{VM, Value};
+    use crate::vm::VM;
 
     let rt = Rc::new(RefCell::new(Runtime::new()));
     let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
@@ -908,7 +908,7 @@ fn test_vm_arr_load_store_and_len_on_actor_heap() {
     use std::cell::RefCell;
     use std::rc::Rc;
     use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
-    use crate::vm::{VM, Value};
+    use crate::vm::VM;
 
     let rt = Rc::new(RefCell::new(Runtime::new()));
     let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
@@ -1118,3 +1118,63 @@ fn test_runtime_scheduler_stats() {
     assert_eq!(cleared.empty_polls, 0);
 }
 
+
+// ========================================================================
+// ORCA cycle-detector wiring tests
+// ========================================================================
+
+#[test]
+fn test_cycle_detector_registers_real_cross_actor_ref() {
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    rt.current_actor = Some(a);
+
+    let ptr = {
+        let actor = rt.actors.get_mut(&a).unwrap();
+        actor.heap.alloc(16, crate::runtime::heap::TypeTag::Raw).unwrap()
+    };
+    unsafe {
+        let header = &*ActorHeap::header_of(ptr);
+        assert_eq!(header.actor_id, a, "heap actor_id should be set on creation");
+    }
+
+    let v = Value::ptr(ptr);
+    rt.send_message_by_id(b, 0, &[v]);
+    assert_eq!(
+        rt.cycle_detector.graph_size(),
+        1,
+        "cycle detector should track the foreign reference via the target actor sentinel"
+    );
+
+    rt.process_gc_ops();
+    assert_eq!(
+        rt.cycle_detector.graph_size(),
+        0,
+        "cycle detector should remove the edge after the op is processed"
+    );
+}
+
+#[test]
+fn test_cycle_detector_accumulates_edge_ref_count() {
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    rt.current_actor = Some(a);
+
+    let ptr = rt.actors.get_mut(&a).unwrap().heap.alloc(16, crate::runtime::heap::TypeTag::Raw).unwrap();
+    let v = Value::ptr(ptr);
+
+    rt.send_message_by_id(b, 0, &[v]);
+    rt.send_message_by_id(b, 0, &[v]);
+    assert_eq!(
+        rt.cycle_detector.graph_size(),
+        1,
+        "only one sentinel node should exist for the target actor"
+    );
+
+    rt.process_gc_ops();
+    // Both pending ops are drained in one call, so the edge ref_count drops
+    // from 2 to 0 and the node is removed.
+    assert_eq!(rt.cycle_detector.graph_size(), 0);
+}

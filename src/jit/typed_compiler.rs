@@ -1057,7 +1057,7 @@ pub fn compile_bytecode_region_typed(
 mod typed_tests {
     use super::*;
     use crate::bytecode::*;
-    use crate::jit::{JitSession, find_compilable_region};
+    use crate::jit::JitSession;
 
     /// Helper: Build a JIT session.
     fn make_jit() -> JitSession {
@@ -1083,15 +1083,13 @@ mod typed_tests {
         meta.set_type(0, KnownType::Int);
         meta.set_type(1, KnownType::Int);
 
-        let ptr = unsafe {
-            compile_bytecode_region_typed(
+        let ptr = compile_bytecode_region_typed(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_typed_iadd",
                 0, 2, &instructions, Some(&meta),
-            )
-        };
+            );
         assert!(ptr.is_ok(), "typed IAdd should compile: {:?}", ptr.err());
     }
 
@@ -1112,15 +1110,13 @@ mod typed_tests {
         ];
 
         // No type metadata — forces runtime fallback for all ops
-        let ptr = unsafe {
-            compile_bytecode_region_typed(
+        let ptr = compile_bytecode_region_typed(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_untyped_fallback",
                 0, 4, &instructions, None,
-            )
-        };
+            );
         assert!(ptr.is_ok(), "untyped fallback should compile: {:?}", ptr.err());
     }
 
@@ -1145,15 +1141,13 @@ mod typed_tests {
         meta.set_type(0, KnownType::Float);
         meta.set_type(1, KnownType::Float);
 
-        let ptr = unsafe {
-            compile_bytecode_region_typed(
+        let ptr = compile_bytecode_region_typed(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_typed_float",
                 0, 5, &instructions, Some(&meta),
-            )
-        };
+            );
         assert!(ptr.is_ok(), "typed float ops should compile: {:?}", ptr.err());
     }
 
@@ -1179,15 +1173,13 @@ mod typed_tests {
         meta.set_type(0, KnownType::Int);
         meta.set_type(1, KnownType::Int);
 
-        let ptr = unsafe {
-            compile_bytecode_region_typed(
+        let ptr = compile_bytecode_region_typed(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_typed_icmp",
                 0, 6, &instructions, Some(&meta),
-            )
-        };
+            );
         assert!(ptr.is_ok(), "typed int comparisons should compile: {:?}", ptr.err());
 
         // Also test float comparisons
@@ -1203,15 +1195,13 @@ mod typed_tests {
         meta2.set_type(0, KnownType::Float);
         meta2.set_type(1, KnownType::Float);
 
-        let ptr2 = unsafe {
-            compile_bytecode_region_typed(
+        let ptr2 = compile_bytecode_region_typed(
                 &mut jit2.module,
                 &mut jit2.builder_context,
                 &mut jit2.ctx,
                 "test_typed_fcmp",
                 0, 4, &float_instrs, Some(&meta2),
-            )
-        };
+            );
         assert!(ptr2.is_ok(), "typed float comparisons should compile: {:?}", ptr2.err());
     }
 
@@ -1237,15 +1227,13 @@ mod typed_tests {
         meta.set_type(3, KnownType::Int);
         // R1 is deliberately left unknown
 
-        let ptr = unsafe {
-            compile_bytecode_region_typed(
+        let ptr = compile_bytecode_region_typed(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_mixed",
                 0, 3, &instructions, Some(&meta),
-            )
-        };
+            );
         assert!(ptr.is_ok(), "mixed typed/untyped should compile: {:?}", ptr.err());
     }
 
@@ -1276,15 +1264,13 @@ mod typed_tests {
         meta.set_type(1, KnownType::Int); // i
         // R2 holds the comparison result; we mark it as Bool after ICmpLt
 
-        let ptr = unsafe {
-            compile_bytecode_region_typed(
+        let ptr = compile_bytecode_region_typed(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_typed_loop",
                 0, 7, &instructions, Some(&meta),
-            )
-        };
+            );
         assert!(ptr.is_ok(), "typed int loop should compile: {:?}", ptr.err());
     }
 
@@ -1309,15 +1295,13 @@ mod typed_tests {
         meta.set_type(0, KnownType::Int);
         meta.set_type(1, KnownType::Int);
 
-        let ptr = unsafe {
-            compile_bytecode_region_typed(
+        let ptr = compile_bytecode_region_typed(
                 &mut jit.module,
                 &mut jit.builder_context,
                 &mut jit.ctx,
                 "test_sext48",
                 0, 2, &instructions, Some(&meta),
-            )
-        };
+            );
         assert!(ptr.is_ok(), "sext48 extraction pipeline should compile: {:?}", ptr.err());
 
         // Also test with negative operand (sign bit set)
@@ -1332,15 +1316,13 @@ mod typed_tests {
         meta2.set_type(0, KnownType::Int);
         meta2.set_type(1, KnownType::Int);
 
-        let ptr2 = unsafe {
-            compile_bytecode_region_typed(
+        let ptr2 = compile_bytecode_region_typed(
                 &mut jit2.module,
                 &mut jit2.builder_context,
                 &mut jit2.ctx,
                 "test_sext48_negative",
                 0, 3, &instructions2, Some(&meta2),
-            )
-        };
+            );
         assert!(ptr2.is_ok(), "sext48 with negative should compile: {:?}", ptr2.err());
     }
 

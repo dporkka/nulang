@@ -29,7 +29,6 @@ use crate::bytecode::{CodeModule, Constant, OpCode};
 use crate::jit::{self, JitSession, TieredAction};
 use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
 use crate::types::{NuError, NuResult, Span};
-use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Distributed runtime callbacks for VM opcode integration.
@@ -451,7 +450,7 @@ pub struct HandlerFrame {
     /// Destination register for the handle block's result.
     pub resume_dst: u8,
     /// Captured continuation (set by Perform, consumed by Resume).
-    pub captured_continuation: Option<Continuation>,
+    captured_continuation: Option<Continuation>,
 }
 
 impl HandlerFrame {
@@ -481,8 +480,6 @@ struct Continuation {
     current_frame_idx: usize,
     /// Program counter at the point of capture (points past Perform).
     resume_pc: usize,
-    /// Module index for the frame.
-    module_idx: usize,
     /// Destination register for the resume value.
     resume_dst: u8,
     /// Step count at capture time.
@@ -497,7 +494,6 @@ impl Continuation {
             frames: vm.frames.iter().take(current_idx + 1).map(clone_frame).collect(),
             current_frame_idx: current_idx,
             resume_pc: vm.frames[current_idx].pc, // PC already points past the Perform instruction
-            module_idx: vm.frames[current_idx].module_idx,
             resume_dst,
             step_count: vm.step_count,
         })
@@ -1287,7 +1283,7 @@ impl VM {
             OpCode::CapDown => { self.frames[frame_idx].regs[instr.op2 as usize] = self.frames[frame_idx].regs[instr.op1 as usize]; }
             OpCode::CapSend => { self.frames[frame_idx].regs[instr.op2 as usize] = self.frames[frame_idx].regs[instr.op1 as usize]; }
 
-            // -- Python Interop — RESERVED (see audit, native_actor.rs) --
+            // -- Python Interop — RESERVED (see python/bridge.rs) --
             OpCode::PyImport | OpCode::PyGetAttr | OpCode::PyCall
             | OpCode::PyCallKw | OpCode::PySetAttr | OpCode::PyToNu
             | OpCode::PyFromNu | OpCode::PyRelease => {
@@ -2072,7 +2068,7 @@ mod vm_tests {
         module.emit(Instruction::new0(OpCode::Halt));
         module.entry_point = Some(0);
 
-        let mut callbacks = Box::new(MockCallbacks {
+        let callbacks = Box::new(MockCallbacks {
             node_id: 77,
             migrations: Vec::new(),
             asks: Vec::new(),

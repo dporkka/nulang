@@ -420,13 +420,9 @@ perform IO.print(result)  -- marshaled Float value: 6.0
 |-----------|-------------|
 | `python/bridge.rs` | PyO3 interpreter bridge with GIL management |
 | `python/marshal.rs` | Bidirectional Nulang Value ↔ Python object conversion |
-| `python/native_actor.rs` | Native Actor pool: dedicated OS threads for Python |
-| `NativeActorPool` | Thread pool with task/result channels + reply dispatcher |
-| `NativeTask` | Import / Call / Eval / Shutdown task variants |
-| `is_safe_to_marshal()` | Validates pure primitives before boundary crossing |
 | Enforced isolation | No Python objects in Nulang VM — marshal at boundary |
-| 8 opcodes reserved | 0x94-0x9B reserved for future native-actor bytecode |
-| 17 tests | Registry, import, call, marshal round-trips, pool concurrency |
+| 8 opcodes reserved | 0x94-0x9B reserved for future Python bytecode |
+| 22 tests | Registry, import, call, marshal round-trips |
 
 **Stress test suite** (10 chaos tests) deliberately breaks the actor-effect boundary:
 

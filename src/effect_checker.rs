@@ -893,7 +893,7 @@ impl CapabilityAnalyzer {
                 if exprs.is_empty() {
                     Ok(Capability::Val)
                 } else {
-                    let mut block_ctx = ctx.clone();
+                    let block_ctx = ctx.clone();
                     for (i, e) in exprs.iter().enumerate() {
                         if i == exprs.len() - 1 {
                             return self.infer_cap(&block_ctx, e);

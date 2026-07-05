@@ -143,15 +143,11 @@ pub struct Compiler {
     module: CodeModule,
     locals: Vec<ScopeFrame>,
     next_reg: u8,
-    constants: Vec<Constant>,
-    label_counter: usize,
     /// Map field names to numeric indices for FieldL.
     field_map: std::collections::HashMap<String, u8>,
     next_field_id: u8,
     /// Map function names to function_table indices.
     func_map: std::collections::HashMap<String, usize>,
-    /// Track the function_table index of the __main entry function.
-    main_func_idx: Option<usize>,
     /// Dedicated high-register allocator for let-bound values, so closures
     /// and other multi-use bindings survive argument/dst register churn.
     binding_reg: u8,
@@ -163,12 +159,9 @@ impl Compiler {
             module: CodeModule::new(module_name),
             locals: vec![ScopeFrame::new()],
             next_reg: 0,
-            constants: Vec::new(),
-            label_counter: 0,
             field_map: std::collections::HashMap::new(),
             next_field_id: 0,
             func_map: std::collections::HashMap::new(),
-            main_func_idx: None,
             binding_reg: 240,
         }
     }
@@ -957,7 +950,7 @@ impl Compiler {
         // We remember the offset of each handler body to build the HandlerTable.
 
         // Save the offset where handler bodies will start (after body + Unwind).
-        let body_start = self.current_offset();
+        let _body_start = self.current_offset();
 
         // We need two passes:
         //   1. Emit the Handle + body + Unwind (jumping past handler bodies)
@@ -1396,19 +1389,17 @@ impl Compiler {
     fn pop_scope(&mut self) { self.locals.pop(); }
     fn emit(&mut self, instr: Instruction) -> usize { self.module.emit(instr) }
     fn add_const(&mut self, c: Constant) -> usize { self.module.add_constant(c) }
-    fn fresh_label(&mut self) -> usize { self.label_counter += 1; self.label_counter }
     fn current_offset(&self) -> usize { self.module.current_offset() }
-    fn patch_jump(&mut self, instr_idx: usize, target: i16) { self.module.patch_jump(instr_idx, target); }
 
     // ===================================================================
     // Python Interop Bytecode Emission
     // ===================================================================
 
-    // -- Python Interop — RESERVED (see audit, native_actor.rs) --
+    // -- Python Interop — RESERVED --
     //
     // These emit methods are retained for API compatibility but emit
     // reserved opcodes that trap at runtime with a clear error message.
-    // Python interop goes through NativeActor (src/python/native_actor.rs),
+    // Python interop goes through the PyO3 bridge (src/python/bridge.rs),
     // never through direct bytecode.
     //
     // To call Python from Nulang, use:

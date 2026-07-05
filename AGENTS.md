@@ -51,7 +51,7 @@ Custom TCP wire protocol (`src/runtime/network.rs`): length-prefixed frames, mag
 - `src/runtime/` — actor runtime: `mod.rs` (`Runtime` god-object), `actor.rs`, `scheduler.rs`, `mailbox.rs`, `heap.rs`, `dual_heap.rs`, `gc.rs`, `orca_cycle.rs`, `supervisor.rs`, `registry.rs`, `process_groups.rs`, `timer.rs`, `cluster.rs`, `network.rs`, `distributed.rs`, `crdt.rs`/`crdt_reg.rs`/`crdt_manager.rs`, `persistence.rs`, `tests.rs`.
 - `src/jit/` — Cranelift JIT: `mod.rs` (`JitSession`, `tiered_execute_step`, hot counters), `compiler.rs` (scalar CLIF), `typed_compiler.rs`, `simd_analyzer.rs`/`simd_compiler.rs`, `runtime.rs` (extern-C helpers), `tests.rs`.
 - `src/lsp/` — `tower-lsp` language server (single `mod.rs`).
-- `src/python/` — PyO3 interop: `bridge.rs` (GIL + `PythonRegistry`), `marshal.rs` (Value↔Py), `native_actor.rs` (stub; Python removed in v0.14, `eval` → `nil`).
+- `src/python/` — PyO3 interop: `bridge.rs` (GIL + `PythonRegistry`), `marshal.rs` (Value↔Py).
 - `.cargo/` — `config.toml` (bfd linker + PyO3 abi3 env), `audit.toml` (one ignored advisory).
 - `build.rs` — Fedora libpython symlink workaround for PyO3 linking.
 - `.agents/` — orchestration scratch/handoff artifacts from a prior multi-agent analysis run; **not language source**.
@@ -118,7 +118,7 @@ python3 verify_report.py                          # gate: validates codebase_ana
 ## Known Hazards (for assistants)
 
 - `src/escape_analysis.rs` is **dead code** — unit-tested but never imported by `compiler.rs`/`vm.rs`/`jit/`; do not assume it affects codegen.
-- NaN-tag constants are **duplicated** between `src/vm.rs`, `src/jit/runtime.rs`, `src/jit/typed_compiler.rs`, and `src/python/marshal.rs`. `marshal.rs` has `TAG_PYTHON=0x7FF7` colliding with `TAG_CLOSURE` and conflicting with `bridge.rs`'s `TAG_PYTHON=0x7FFE` — a latent consistency hazard.
+- NaN-tag constants are **duplicated** between `src/vm.rs`, `src/jit/runtime.rs`, `src/jit/typed_compiler.rs`, and `src/python/marshal.rs`. `marshal.rs` imports `TAG_PYTHON` from `bridge.rs` (`0x7FF6`) so it does not collide with `TAG_CLOSURE` (`0x7FF7`) or `TAG_STRING` (`0x7FFE`).
 - Remote actor messages send `behavior_id=0` as a placeholder (remote side resolves the name) — a known stub in the distributed trait API.
 - `LamportTime`/`LamportClock` is defined twice (`crdt.rs` ~line 470 and `crdt_reg.rs` ~line 19) — potential dedup target.
 - LSP is MVP: inlay hints (regex-heuristic type/cap/effect) + completion (keywords/effects/`fun` names) + full sync. **No hover, no diagnostics, no goto/refs.**

@@ -29,11 +29,11 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Imports from the rest of the crate
@@ -509,14 +509,6 @@ pub struct TcpConnection {
 }
 
 impl TcpConnection {
-    /// Set standard timeouts on the underlying stream.
-    fn configure_stream(&self) -> io::Result<()> {
-        self.stream.set_read_timeout(Some(IO_TIMEOUT))?;
-        self.stream.set_write_timeout(Some(IO_TIMEOUT))?;
-        self.stream.set_nodelay(true)?;
-        Ok(())
-    }
-
     /// Write a framed packet (length-prefixed) to the stream.
     fn send_packet(&mut self, packet_bytes: &[u8]) -> io::Result<()> {
         let len = packet_bytes.len() as u32;

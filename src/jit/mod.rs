@@ -44,7 +44,7 @@ use std::sync::{Mutex, OnceLock};
 
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Linkage, Module};
+use cranelift_module::Module;
 
 // ---------------------------------------------------------------------------
 // Hot Counter
@@ -301,9 +301,7 @@ pub fn tiered_execute_step(
     // Check if already compiled
     if let Some(func) = jit.get_compiled(pc) {
         // Execute JIT-compiled code
-        unsafe {
-            func(regs.as_mut_ptr(), constants.as_ptr());
-        }
+        func(regs.as_mut_ptr(), constants.as_ptr());
         return TieredAction::RanJit;
     }
 
@@ -316,9 +314,7 @@ pub fn tiered_execute_step(
             if let Some(func) = unsafe {
                 jit.compile_region_simd(module_idx, pc, region_len, instructions, type_metadata)
             } {
-                unsafe {
-                    func(regs.as_mut_ptr(), constants.as_ptr());
-                }
+                func(regs.as_mut_ptr(), constants.as_ptr());
                 return TieredAction::CompiledSimdAndRan;
             }
         }

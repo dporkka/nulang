@@ -7,7 +7,6 @@
 //! - `cancel_timer`: Cancel a scheduled timer
 //! - `read_timer`: Get remaining time for a timer
 
-use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;

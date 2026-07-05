@@ -45,7 +45,6 @@ use std::time::Instant;
 use super::{ClusterState, NodeId, NodeStatus};
 use super::mailbox::{Message, MessagePriority};
 use super::network::{NetworkTransport, Packet};
-use super::crdt_manager::CrdtManager;
 use crate::runtime::Runtime;
 use crate::vm::Value;
 

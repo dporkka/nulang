@@ -203,7 +203,7 @@ impl<'a> InlayHintEngine<'a> {
                     let after_let = pos + 4;
                     let rest = &line[after_let..];
                     if let Some(end) = rest.find(|c: char| c == ' ' || c == '=') {
-                        let var_name = &rest[..end];
+                        let _var_name = &rest[..end];
                         let col = (after_let + end) as u32;
                         if let Some(inferred) = self.infer_type(line) {
                             annotations.push(TypeAnnotation {

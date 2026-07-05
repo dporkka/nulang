@@ -431,7 +431,7 @@ pub fn analyze_region(
 
     // --- Requirement 7 & 8: Check for unsupported opcodes ---
     let mut induction_reg: Option<u8> = None;
-    let mut back_edge_found = false;
+    let mut _back_edge_found = false;
 
     for (i, instr) in body.iter().enumerate() {
         match instr.opcode {
@@ -468,7 +468,7 @@ pub fn analyze_region(
             OpCode::Jmp => {
                 let target = (start_offset + i) as i64 + instr.simm16() as i64;
                 if (target as usize) < start_offset + i {
-                    back_edge_found = true;
+                    _back_edge_found = true;
                 }
                 // Forward jumps inside the loop body are also not allowed (except exit).
                 let target_usize = target as usize;
@@ -486,7 +486,7 @@ pub fn analyze_region(
                     // loop exit — OK
                 } else if target_usize < start_offset + i {
                     // backward jump — another back-edge
-                    back_edge_found = true;
+                    _back_edge_found = true;
                 }
             }
             _ => {}
@@ -647,8 +647,8 @@ fn try_detect_elementwise_binop(
     }
 
     // Try every pair of loads and every store.
-    for (li1, &(load1_idx, arr1, _idx1, dst1)) in loads.iter().enumerate() {
-        for (li2, &(load2_idx, arr2, _idx2, dst2)) in loads.iter().enumerate() {
+    for (li1, &(_load1_idx, arr1, _idx1, dst1)) in loads.iter().enumerate() {
+        for (li2, &(_load2_idx, arr2, _idx2, dst2)) in loads.iter().enumerate() {
             if li1 == li2 {
                 continue;
             }

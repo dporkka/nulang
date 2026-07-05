@@ -57,12 +57,12 @@
 //! `register_foreign_ref` and `remove_foreign_ref` on every foreign
 //! reference operation.
 
-use super::Runtime;
-// OrcaHeap is part of the public API surface but not directly used in this module.
-// It is re-exported here for downstream consumers who may need it.
-use crate::runtime::gc::{ForeignRefOp, GcColor, OrcaHeader, SizeClass, TypeTag};
+use crate::runtime::gc::ForeignRefOp;
+use crate::runtime::heap::OrcaHeader;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 
 // ---------------------------------------------------------------------------
 //  Data Structures
@@ -188,7 +188,7 @@ impl ForeignRefNode {
         // SAFETY: The runtime guarantees that headers are not freed until
         // the cycle detector processes the removal notification.
         let header = &*self.object_header;
-        let local = header.local_count.load(Ordering::Acquire);
+        let local = header.ref_count.load(Ordering::Acquire);
         let foreign = header.foreign_count.load(Ordering::Acquire);
         (local + foreign) > 0
     }
@@ -311,12 +311,6 @@ pub struct CycleDetector {
     /// Number of objects reclaimed from broken cycles (for statistics).
     objects_reclaimed: AtomicU64,
 
-    /// Whether a background detection thread is currently running.
-    ///
-    /// In the MVP, detection is synchronous (no background thread), but
-    /// this flag supports future work to move detection to a background
-    /// thread for reduced latency.
-    thread_running: AtomicBool,
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +333,6 @@ impl CycleDetector {
             local_actors: None,
             cycles_found: AtomicU64::new(0),
             objects_reclaimed: AtomicU64::new(0),
-            thread_running: AtomicBool::new(false),
         }
     }
 
@@ -562,7 +555,7 @@ impl CycleDetector {
                     // Quick check: if the memory has been unmapped, this could
                     // fault. The runtime guarantees it only frees objects after
                     // notifying the cycle detector, so this should be safe.
-                    (*node.object_header).local_count.load(Ordering::Acquire)
+                    (*node.object_header).ref_count.load(Ordering::Acquire)
                         + (*node.object_header).foreign_count.load(Ordering::Acquire)
                         > 0
                 };
@@ -809,7 +802,7 @@ impl CycleDetector {
             // The header pointer is validated before any decrement is applied.
             let op = ForeignRefOp {
                 target_actor: to_actor,
-                object_header: to_object,
+                object_header: to_object as *mut crate::runtime::gc::OrcaHeader,
                 delta: -1,
             };
             ops.push(op);
@@ -850,7 +843,7 @@ impl CycleDetector {
             let (local, foreign) = unsafe {
                 let header = &*object;
                 (
-                    header.local_count.load(Ordering::Acquire),
+                    header.ref_count.load(Ordering::Acquire),
                     header.foreign_count.load(Ordering::Acquire),
                 )
             };
@@ -1001,8 +994,9 @@ mod mock {
     //! environment without requiring the full system.
 
     use super::*;
+    use crate::runtime::heap::{GcColor, SizeClass, TypeTag};
     use std::alloc::{alloc, dealloc, Layout};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
 
     /// A mock runtime for testing.
     ///
@@ -1010,6 +1004,7 @@ mod mock {
     /// - A registry of mock objects (actor-owned heap objects)
     /// - A queue of foreign reference operations to be processed
     /// - Statistics tracking for reclaimed objects
+    #[allow(dead_code)]
     pub struct MockRuntime {
         /// Objects "owned" by each actor, indexed by actor_id.
         /// The outer Vec is indexed by actor_id; the inner Vec contains
@@ -1058,21 +1053,22 @@ mod mock {
             let ptr = unsafe { alloc(layout) as *mut OrcaHeader };
             assert!(!ptr.is_null(), "alloc failed");
 
-            // SAFETY: ptr is valid and properly aligned.
+            // SAFETY: ptr is valid and properly aligned. We zero the whole
+            // header (including private padding) and then initialize every
+            // public field through a raw pointer.
             unsafe {
-                std::ptr::write(
-                    ptr,
-                    OrcaHeader {
-                        local_count: AtomicU32::new(local_refs),
-                        foreign_count: AtomicU32::new(foreign_refs),
-                        sticky: AtomicBool::new(false),
-                        actor_id,
-                        size_class: SizeClass::Small,
-                        gc_color: std::sync::atomic::AtomicU8::new(GcColor::White as u8),
-                        type_tag: TypeTag::Record,
-                        payload_size: 64,
-                    },
-                );
+                std::ptr::write_bytes(ptr, 0, 1);
+                std::ptr::addr_of_mut!((*ptr).ref_count).write(AtomicU32::new(local_refs));
+                std::ptr::addr_of_mut!((*ptr).foreign_count)
+                    .write(AtomicU32::new(foreign_refs));
+                std::ptr::addr_of_mut!((*ptr).sticky).write(AtomicBool::new(false));
+                (*ptr).size_class = SizeClass::Small;
+                (*ptr).gc_color = GcColor::White;
+                (*ptr).type_tag = TypeTag::Record;
+                (*ptr).actor_id = actor_id;
+                (*ptr).size = std::mem::size_of::<OrcaHeader>();
+                (*ptr).live_next = std::ptr::null_mut();
+                (*ptr).live_prev = std::ptr::null_mut();
             }
 
             self.objects_by_actor

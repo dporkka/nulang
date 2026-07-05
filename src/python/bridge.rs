@@ -14,7 +14,7 @@
 //! pointer — cloning it merely increments the Python reference count.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple, PyDictMethods, PyListMethods};
+use pyo3::types::{PyDict, PyList, PyTuple, PyDictMethods};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -23,8 +23,11 @@ use std::sync::{Mutex, OnceLock};
 // ---------------------------------------------------------------------------
 
 /// NaN tag for Python object references stored in Nulang `Value`s.
-/// See `crate::vm::Value` for the tagging scheme.
-pub const TAG_PYTHON: u64 = 0x7FFE000000000000;
+///
+/// This tag occupies the unused NaN slot `0x7FF6` so it does not collide
+/// with `TAG_STRING` (`0x7FFE`) or `TAG_CLOSURE` (`0x7FF7`) defined in
+/// `crate::vm::Value`. See `src/vm.rs` for the full NaN-boxing layout.
+pub const TAG_PYTHON: u64 = 0x7FF6_0000_0000_0000;
 
 // ---------------------------------------------------------------------------
 // PythonObjectId — opaque handle to a registered Python object
@@ -592,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_create_list() {
-        let mut bridge = PyBridge::new();
+        let bridge = PyBridge::new();
         bridge.initialize().expect("Python init failed");
 
         // Create some Python integers
@@ -622,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_create_dict() {
-        let mut bridge = PyBridge::new();
+        let bridge = PyBridge::new();
         bridge.initialize().expect("Python init failed");
 
         // Create key-value pairs

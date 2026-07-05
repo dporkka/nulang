@@ -23,8 +23,6 @@ const PREC_TERM: u8 = 7;    // + -
 const PREC_FACTOR: u8 = 8;  // * / %
 const PREC_SHIFT: u8 = 9;   // << >>
 const PREC_PREFIX: u8 = 10; // ! - & (prefix)
-const PREC_CALL: u8 = 11;   // f(x), obj.field, arr[i]
-const PREC_HIGHEST: u8 = 12;// Literals, identifiers, grouping
 
 fn prefix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
     match op {
@@ -347,14 +345,6 @@ impl Parser {
         }
     }
 
-    fn parse_record_type(&mut self, public: bool) -> NuResult<Decl> {
-        self.parse_type_decl_variant_or_record(public)
-    }
-
-    fn parse_variant_type(&mut self, public: bool) -> NuResult<Decl> {
-        self.parse_type_decl_variant_or_record(public)
-    }
-
     fn parse_effect_decl(&mut self) -> NuResult<Decl> {
         let span = self.current_span();
         self.advance(); // consume 'effect'
@@ -403,7 +393,7 @@ impl Parser {
         let span = self.current_span();
         self.advance(); // consume 'import'
         let path = self.expect_ident("import path")?;
-        let mut items = Vec::new();
+        let items = Vec::new();
         self.skip_newlines_semicolons();
         Ok(Decl::Import { path, items, span })
     }
@@ -699,16 +689,6 @@ impl Parser {
         }
     }
 
-    fn parse_infix(&mut self, left: Expr, op: TokenKind, _prec: u8) -> NuResult<Expr> {
-        // This is handled inline in parse_expr_with_prec for most cases.
-        // This method exists for extensibility.
-        let span = self.current_span();
-        Err(NuError::ParseError {
-            msg: format!("Unhandled infix operator: {:?}", op),
-            span,
-        })
-    }
-
     // === Expression Primitives ===
 
     fn parse_literal(&mut self) -> NuResult<Expr> {
@@ -878,7 +858,7 @@ impl Parser {
     }
 
     fn parse_block(&mut self) -> NuResult<Expr> {
-        let span = self.current_span();
+        let _span = self.current_span();
         self.advance(); // consume '{'
         let mut exprs = Vec::new();
         self.skip_newlines();
@@ -951,20 +931,6 @@ impl Parser {
         Ok(Expr::Spawn {
             actor_type: Box::new(actor_type),
             init,
-            span,
-        })
-    }
-
-    fn parse_send_or_ask(&mut self, actor: Expr) -> NuResult<Expr> {
-        let span = self.current_span();
-        self.advance(); // consume '!' or we already have 'ask'
-        let behavior = self.expect_ident("behavior name")?;
-        self.expect(TokenKind::LParen)?;
-        let args = self.parse_arg_list()?;
-        Ok(Expr::Send {
-            actor: Box::new(actor),
-            behavior,
-            args,
             span,
         })
     }

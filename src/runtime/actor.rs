@@ -4,6 +4,7 @@ use super::*;
 use super::gc::OrcaGc;
 use crate::vm::Value;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 /// Actor state machine: Created → Running → Waiting → Suspended → Terminated
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +44,9 @@ pub struct Actor {
     pub reduction_count: u32,      // Reductions since last yield
     pub max_reductions: u32,       // Max reductions before yield (preemption)
     pub sequence: u64,             // Last persisted sequence number
+    /// Sentinel heap object used by the cycle detector to represent this
+    /// actor as a holder of foreign references.
+    cycle_sentinel: Option<*mut OrcaHeader>,
 }
 
 /// A behavior entry: maps behavior name to handler.
@@ -58,7 +62,11 @@ impl Actor {
             name: name.into(),
             state: ActorState::Created,
             mailbox: Mailbox::new(mailbox_cap),
-            heap: ActorHeap::new(64 * 1024), // 64KB initial heap
+            heap: {
+                let mut heap = ActorHeap::new(64 * 1024); // 64KB initial heap
+                heap.set_actor_id(id);
+                heap
+            },
             orca_gc: OrcaGc::new(id),         // ORCA GC engine
             state_data: Vec::new(),
             state_models: HashMap::new(),
@@ -76,7 +84,26 @@ impl Actor {
             reduction_count: 0,
             max_reductions: 1000,
             sequence: 0,
+            cycle_sentinel: None,
         }
+    }
+
+    /// Return the cycle-detector sentinel header for this actor.
+    ///
+    /// The sentinel is lazily allocated on the actor's heap and pinned
+    /// (sticky) so it is never collected. It represents the actor itself as
+    /// a holder of foreign references for coarse-grained cycle detection.
+    pub fn cycle_sentinel(&mut self) -> Option<*mut OrcaHeader> {
+        if self.cycle_sentinel.is_none() {
+            if let Some(ptr) = self.heap.alloc(8, TypeTag::Raw) {
+                let header = unsafe { ActorHeap::header_of(ptr) };
+                unsafe {
+                    (*header).sticky.store(true, Ordering::Relaxed);
+                }
+                self.cycle_sentinel = Some(header);
+            }
+        }
+        self.cycle_sentinel
     }
 
     /// Pop a message from the mailbox.

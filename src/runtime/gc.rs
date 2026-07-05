@@ -140,13 +140,11 @@ impl OrcaHeader {
     }
 }
 
-/// Tricolor abstraction for cycle detection.
+/// ORCA object color: White objects are candidates for collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum GcColor {
     White = 0,
-    Gray = 1,
-    Black = 2,
 }
 
 /// Classify a payload size into a size class.

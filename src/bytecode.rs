@@ -1,7 +1,5 @@
 //! Bytecode ISA, instruction encoding, and module format for the Nulang VM.
 
-use std::collections::HashMap;
-
 // ---------------------------------------------------------------------------
 // Opcodes (91 total across 10 categories)
 // ---------------------------------------------------------------------------

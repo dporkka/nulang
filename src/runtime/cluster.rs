@@ -208,7 +208,6 @@ pub struct NodeGossip {
 pub struct ClusterState {
     /// This node's identity.
     local_node: NodeId,
-    local_addr: SocketAddr,
 
     /// Membership table: node_id → node info.
     members: HashMap<NodeId, NodeInfo>,
@@ -256,7 +255,6 @@ impl ClusterState {
 
         ClusterState {
             local_node,
-            local_addr,
             members,
             failed_nodes: HashMap::new(),
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
@@ -660,7 +658,6 @@ mod tests {
         let cs = ClusterState::new(local, a);
 
         assert_eq!(cs.local_node, local);
-        assert_eq!(cs.local_addr, a);
         assert_eq!(cs.healthy_node_count(), 1);
         assert!(cs.is_member(local));
         assert_eq!(cs.incarnation(), 1);

@@ -44,8 +44,8 @@ pub fn unify_rows(row1: &EffectRow, row2: &EffectRow) -> NuResult<(EffectRow, Ve
         // One open, one closed: check if closed effects are a subset of open's effects.
         // If so, the open row can be instantiated to the closed row.  If not, the
         // row variable absorbs the extra effects.
-        (EffectRow::Open(open_effs, r), EffectRow::Closed(closed_effs))
-        | (EffectRow::Closed(closed_effs), EffectRow::Open(open_effs, r)) => {
+        (EffectRow::Open(open_effs, _r), EffectRow::Closed(closed_effs))
+        | (EffectRow::Closed(closed_effs), EffectRow::Open(open_effs, _r)) => {
             // Check if all concrete effects in the closed row are present in the open row.
             for eff in closed_effs {
                 if !open_effs.contains(eff) {

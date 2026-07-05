@@ -31,14 +31,14 @@ pub use actor::*;
 pub use scheduler::*;
 pub use mailbox::*;
 pub use heap::*;
-pub use gc::*;
+pub use gc::{ForeignRefOp, GcStats, OrcaCoordinator, OrcaGc, OrcaHeap, SharedHeapGc};
 pub use supervisor::*;
 pub use orca_cycle::*;
 pub use cluster::*;
 pub use distributed::*;
 pub use network::*;
 pub use crdt::*;
-pub use crdt_reg::*;
+pub use crdt_reg::{ElementId, LWWRegister, MVRegister, RGA, RGAElement};
 pub use crdt_manager::*;
 pub use timer::*;
 pub use registry::*;
@@ -235,6 +235,27 @@ impl Runtime {
                         };
                         self.coordinator.submit_op(op);
                     }
+                    // Register the cross-actor reference with the cycle detector.
+                    // The receiving actor is represented by its pinned sentinel;
+                    // the edge target_sentinel -> source_object records that the
+                    // target actor holds a reference to the source object.
+                    if self.actors.contains_key(&source_actor_id)
+                        && self.actors.contains_key(&target_id)
+                    {
+                        let source_header = unsafe {
+                            crate::runtime::heap::ActorHeap::header_of(ptr)
+                        };
+                        if let Some(target_actor) = self.actors.get_mut(&target_id) {
+                            if let Some(sentinel) = target_actor.cycle_sentinel() {
+                                self.cycle_detector.register_foreign_ref(
+                                    target_id,
+                                    sentinel,
+                                    source_actor_id,
+                                    source_header,
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -244,7 +265,20 @@ impl Runtime {
     pub fn process_gc_ops(&mut self) {
         let ops = std::mem::take(&mut self.coordinator.pending_ops);
         for op in ops {
+            // The object_header points to the source actor's heap object.
+            let source_header = op.object_header as *mut crate::runtime::heap::OrcaHeader;
+            let source_actor = unsafe { (*source_header).actor_id };
+            // Remove the edge from the cycle detector graph before applying the
+            // ORCA decrement so the graph stays consistent with the ref count.
             if let Some(target_actor) = self.actors.get_mut(&op.target_actor) {
+                if let Some(sentinel) = target_actor.cycle_sentinel() {
+                    self.cycle_detector.remove_foreign_ref(
+                        op.target_actor,
+                        sentinel,
+                        source_actor,
+                        source_header,
+                    );
+                }
                 target_actor.orca_gc.process_foreign_op(&mut target_actor.heap, op);
             }
         }
@@ -271,7 +305,7 @@ impl Runtime {
     }
 
     pub fn gc_stats(&self) -> GcStats {
-        let mut total = GcStats::default();
+        let total = GcStats::default();
         for actor in self.actors.values() {
             let stats = actor.orca_gc.stats();
             total.objects_allocated.fetch_add(
@@ -1096,7 +1130,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
 
     fn array_len(&self, ptr: *mut u8) -> Option<usize> {
         unsafe {
-            let actor = (*self.runtime).actors.get(&self.actor_id)?;
+            let _actor = (*self.runtime).actors.get(&self.actor_id)?;
             let header = &*crate::runtime::heap::ActorHeap::header_of(ptr);
             if header.type_tag == crate::runtime::heap::TypeTag::Array {
                 let payload_size = header.size.saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);

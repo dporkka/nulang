@@ -343,7 +343,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> io::Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap();
         let payload_json = serde_json::to_string(&entry.payload)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         conn.execute(
@@ -406,7 +406,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM snapshots WHERE actor_id = ?1", [actor_id as i64])
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         conn.execute("DELETE FROM journal WHERE actor_id = ?1", [actor_id as i64])

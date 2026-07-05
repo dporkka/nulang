@@ -817,6 +817,7 @@ mod escape_analysis_tests {
     // -- Test helpers --------------------------------------------------------
 
     /// Build a single instruction with opcode and up to 3 operands.
+    #[allow(dead_code)]
     fn i0(op: OpCode) -> Instruction {
         Instruction::new0(op)
     }
@@ -908,7 +909,7 @@ mod escape_analysis_tests {
         // r1 = new record        (to be stored in array)
         // r0[idx] = r1           → r1 escapes into heap
         // ret
-        let code = vec![
+        let _code = vec![
             i2(OpCode::ArrAlloc, 0, 0), // r0 = new array (size in r0... use r0 as size for test)
             // Actually we need a size. Let's use r5 for size, r0 for array.
         ];

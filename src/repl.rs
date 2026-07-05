@@ -6,7 +6,7 @@
 //! - `:commands` for introspection
 //! - Graceful error handling
 
-use crate::ast::{AstModule, Decl, Expr, Literal};
+use crate::ast::{AstModule, Decl, Expr};
 use crate::compiler::Compiler;
 use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
 use crate::lexer::Lexer;
@@ -221,7 +221,7 @@ impl Repl {
         let value = self.vm.run()?;
 
         // Print results
-        if let Some(ref expr) = main_expr {
+        if let Some(ref _expr) = main_expr {
             let val_str = value_to_pretty_string(&value);
             let ty_str = type_to_string(&module_type);
             println!("{} : {}", val_str, ty_str);

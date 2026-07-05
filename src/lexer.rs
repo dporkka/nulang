@@ -654,10 +654,6 @@ impl<'a> Lexer<'a> {
             false
         }
     }
-
-    fn span_at(&self, start: usize) -> Span {
-        Span::new(start, self.pos, self.line, self.column)
-    }
 }
 
 // ---------------------------------------------------------------------------

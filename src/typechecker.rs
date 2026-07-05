@@ -454,7 +454,7 @@ impl TypeChecker {
             } => {
                 // Create fresh type variables for parameters
                 let mut param_types = vec![];
-                for (param_name, param_ty) in params {
+                for (_param_name, param_ty) in params {
                     let pty = match param_ty {
                         Some(t) => t.clone(),
                         None => Type::Var(TypeVar::fresh()),
@@ -702,7 +702,7 @@ impl TypeChecker {
             }
 
             // Capability annotation
-            Expr::CapAnnotate { expr, cap, span } => {
+            Expr::CapAnnotate { expr, cap, span: _ } => {
                 let (s, ty) = self.infer_expr(ctx, expr)?;
                 // Wrap in reference type with the given capability
                 let ref_ty = Type::Reference {
@@ -802,7 +802,7 @@ impl TypeChecker {
     // -----------------------------------------------------------------------
 
     /// Infer the type of a literal.
-    fn infer_literal(&mut self, lit: &Literal, span: Span) -> NuResult<(Substitution, Type)> {
+    fn infer_literal(&mut self, lit: &Literal, _span: Span) -> NuResult<(Substitution, Type)> {
         let ty = match lit {
             Literal::Int(_) => Type::int(),
             Literal::Float(_) => Type::float(),
@@ -1695,9 +1695,9 @@ impl TypeChecker {
     }
 
     /// Get free type variables from the context.
-    fn get_ctx_free_vars(&self, ctx: &TypeContext) -> HashSet<TypeVar> {
+    fn get_ctx_free_vars(&self, _ctx: &TypeContext) -> HashSet<TypeVar> {
         // Combine tracked context vars with any vars we can discover
-        let mut vars = self.ctx_free_vars.clone();
+        let vars = self.ctx_free_vars.clone();
         // We can't iterate TypeContext directly, so we rely on the tracked set
         // The tracked set is updated when we add bindings
         vars

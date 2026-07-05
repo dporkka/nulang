@@ -20,9 +20,9 @@
 //! | Other Python | `TAG_PYTHON` | Stored as opaque Python object |
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple, PyDictMethods, PyListMethods};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
-use crate::python::bridge::{register_object, get_object, PythonObjectId, PyBridge};
+use crate::python::bridge::{register_object, get_object, PythonObjectId, PyBridge, TAG_PYTHON};
 use crate::vm::Value;
 
 // ---------------------------------------------------------------------------
@@ -30,16 +30,12 @@ use crate::vm::Value;
 // ---------------------------------------------------------------------------
 
 // These constants must stay in sync with the NaN-boxing layout in src/vm.rs.
+// `TAG_PYTHON` is defined in src/python/bridge.rs and imported here so the
+// canonical value is not duplicated.
 const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
-const TAG_NIL: u64 = 0x7FF8_0000_0000_0000;
-const TAG_UNIT: u64 = 0x7FF9_0000_0000_0000;
-const TAG_BOOL: u64 = 0x7FFA_0000_0000_0000;
-const TAG_INT: u64 = 0x7FFB_0000_0000_0000;
 const TAG_PTR: u64 = 0x7FFC_0000_0000_0000;
 const TAG_ACTOR: u64 = 0x7FFD_0000_0000_0000;
 const TAG_STRING: u64 = 0x7FFE_0000_0000_0000;
-const TAG_PYTHON: u64 = 0x7FF7_0000_0000_0000;
-const TAG_CLOSURE: u64 = 0x7FF7_0000_0000_0000;
 
 // ---------------------------------------------------------------------------
 // Nulang → Python
@@ -115,7 +111,7 @@ pub fn nulang_to_python(value: Value) -> Result<Py<PyAny>, String> {
         let py_id = PythonObjectId(obj_id);
         get_object(py_id)
             .ok_or_else(|| format!("TAG_PYTHON object with ID {} not found in registry", obj_id))
-    } else if tag == TAG_PTR || tag == TAG_ACTOR || tag == TAG_CLOSURE {
+    } else if tag == TAG_PTR || tag == TAG_ACTOR {
         // Opaque references → None
         Ok(Python::attach(|py| py.None()))
     } else {
@@ -280,7 +276,7 @@ pub fn python_object_to_value(obj_id: PythonObjectId, _bridge: &PyBridge) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::python::bridge::{PyBridge, register_object, unregister_object};
+    use crate::python::bridge::{register_object, unregister_object};
 
     // Helper: ensure Python is initialized
     fn ensure_python() {
@@ -583,5 +579,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // NaN-tag collision regression tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_python_tag_no_collision() {
+        ensure_python();
+
+        // These must match the tags defined in src/vm.rs.
+        const VM_TAG_CLOSURE: u64 = 0x7FF7_0000_0000_0000;
+        const VM_TAG_STRING: u64 = 0x7FFE_0000_0000_0000;
+
+        // TAG_PYTHON must not collide with closure or string tags.
+        assert_ne!(TAG_PYTHON, VM_TAG_CLOSURE,
+                   "TAG_PYTHON collides with TAG_CLOSURE");
+        assert_ne!(TAG_PYTHON, VM_TAG_STRING,
+                   "TAG_PYTHON collides with TAG_STRING");
+
+        // Converting a Python object must produce a value with TAG_PYTHON.
+        let py_id = Python::attach(|py| {
+            let obj: Py<PyAny> = "opaque".into_pyobject(py).unwrap().unbind().into_any();
+            register_object(obj)
+        });
+        let val = Value::from_raw(TAG_PYTHON | py_id.0);
+        assert_eq!(
+            val.as_raw() & TAG_MASK,
+            TAG_PYTHON,
+            "Python object value should carry TAG_PYTHON"
+        );
+        assert_ne!(
+            val.as_raw() & TAG_MASK,
+            VM_TAG_CLOSURE,
+            "Python object value should not be tagged as a closure"
+        );
+
+        unregister_object(py_id);
     }
 }

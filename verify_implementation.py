@@ -4,6 +4,10 @@ import re
 import sys
 import subprocess
 
+# Target: keep the crate warning-free. Increase only temporarily and document
+# the reason if a batch of warnings cannot be immediately fixed.
+WARNINGS_BASELINE = 0
+
 def run_tests():
     print("Running cargo test...")
     res = subprocess.run(["cargo", "test"], capture_output=True, text=True)
@@ -15,6 +19,47 @@ def run_tests():
         print(res.stderr)
         return False
     print("Success: All tests passed!")
+    return True
+
+def check_warnings():
+    """Run cargo check --tests and fail if compiler warnings exceed WARNINGS_BASELINE."""
+    print("Running cargo check --tests to count compiler warnings...")
+    res = subprocess.run(
+        ["cargo", "check", "--tests", "--message-format=short"],
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        print("Error: cargo check --tests failed.")
+        print("STDOUT:")
+        print(res.stdout)
+        print("STDERR:")
+        print(res.stderr)
+        return False
+
+    # Count individual warning lines, excluding cargo's summary lines.
+    count = len(
+        [
+            line
+            for line in res.stderr.splitlines()
+            if line.startswith("warning:")
+            and "generated" not in line
+            and "warnings" not in line
+        ]
+    )
+
+    print(f"cargo check --tests warning count: {count} (baseline: {WARNINGS_BASELINE}).")
+
+    if count > WARNINGS_BASELINE:
+        print(
+            f"Error: cargo check --tests produced {count} warning(s), exceeding the baseline of {WARNINGS_BASELINE}."
+        )
+        print("Fix the warnings or document the reason for raising the baseline.")
+        print("cargo check --tests output:")
+        print(res.stderr)
+        return False
+
+    print("Success: cargo check --tests warning count is within baseline.")
     return True
 
 def verify_files():
@@ -129,7 +174,7 @@ def verify_files():
     return True
 
 if __name__ == "__main__":
-    if verify_files() and run_tests():
+    if verify_files() and run_tests() and check_warnings():
         sys.exit(0)
     else:
         sys.exit(1)
