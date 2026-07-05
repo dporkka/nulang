@@ -258,7 +258,7 @@ let processed =
 | `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~490 |
 | `main` | CLI entry point (run, repl, eval, check modes) | ~450 |
 
-**Total: ~33,000 lines of Rust across 37 source files with 540+ tests.**
+**Total: ~33,000 lines of Rust across 37 source files with 590+ tests.**
 
 ---
 
@@ -521,7 +521,7 @@ This is an active implementation with the following components functional:
 | v0.11 | SIMD vectorization (auto-vectorize array loops) | Completed |
 | v0.12 | Architectural audit & corrections (reverted nursery, bounded mailbox, deep Python) | Completed |
 | v0.13 | Python interop (Native Actor) + stress tests + AI ecosystem design foundation | Completed |
-| v1.0 | Production release — requires: chaos test suite passing, scheduler profiled, cycle detector intra-node only | Planned |
+| v1.0 | Production release — requires: chaos test suite passing ✅, scheduler profiled ✅, cycle detector intra-node only ✅ | Planned |
 
 ---
 

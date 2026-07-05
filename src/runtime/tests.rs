@@ -1075,3 +1075,46 @@ fn test_persistent_counter_milestone_1000_messages() {
         Some(1001)
     );
 }
+
+/// Verify that the runtime restricts the cycle detector to local actors
+/// and that the restriction is updated before each detection step.
+#[test]
+fn test_runtime_cycle_detector_intra_node_restriction() {
+    let mut rt = Runtime::new();
+    let a1 = rt.spawn_actor(Box::new(|| vec![("x".to_string(), Value::int(0))]));
+    let a2 = rt.spawn_actor(Box::new(|| vec![("y".to_string(), Value::int(0))]));
+
+    // Force enough detection epochs for the local-actor set to be applied.
+    for _ in 0..15 {
+        rt.process_gc_ops();
+    }
+
+    let local = rt.cycle_detector.local_actors();
+    assert!(local.is_some(), "local-actor restriction should be set by Runtime");
+    let set = local.unwrap();
+    assert!(set.contains(&a1), "actor a1 should be considered local");
+    assert!(set.contains(&a2), "actor a2 should be considered local");
+}
+
+/// Verify that scheduler profiling counters are exposed through the Runtime.
+#[test]
+fn test_runtime_scheduler_stats() {
+    let mut rt = Runtime::new();
+    rt.reset_scheduler_stats();
+
+    let a1 = rt.spawn_actor(Box::new(|| vec![("counter".to_string(), Value::int(0))]));
+    let a2 = rt.spawn_actor(Box::new(|| vec![("counter".to_string(), Value::int(0))]));
+    rt.send_message(a1, "add", &[Value::int(10)]);
+    rt.send_message(a2, "add", &[Value::int(20)]);
+    rt.run_scheduler();
+
+    let stats = rt.scheduler_stats();
+    assert_eq!(stats.total_tasks_processed, 4, "spawn + send should produce four actor tasks");
+    assert_eq!(stats.empty_polls, 1, "scheduler should poll empty once after draining");
+
+    rt.reset_scheduler_stats();
+    let cleared = rt.scheduler_stats();
+    assert_eq!(cleared.total_tasks_processed, 0);
+    assert_eq!(cleared.empty_polls, 0);
+}
+

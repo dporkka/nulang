@@ -61,7 +61,7 @@ use super::Runtime;
 // OrcaHeap is part of the public API surface but not directly used in this module.
 // It is re-exported here for downstream consumers who may need it.
 use crate::runtime::gc::{ForeignRefOp, GcColor, OrcaHeader, SizeClass, TypeTag};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -286,6 +286,12 @@ pub struct CycleDetector {
     /// multiple times within the same pass and to age out old suspects.
     epoch: u64,
 
+    /// Set of actor IDs that are local to this node. When `Some`, the
+    /// detector only processes suspects and references belonging to local
+    /// actors, keeping it strictly intra-node. `None` disables filtering
+    /// (used in unit tests with mock runtimes).
+    local_actors: Option<HashSet<u64>>,
+
     /// Threshold for flagging objects as suspects.
     ///
     /// Objects with `weight <= suspect_threshold` are enqueued for deeper
@@ -330,9 +336,37 @@ impl CycleDetector {
             epoch: 0,
             suspect_threshold: 1,
             detection_interval: 10,
+            local_actors: None,
             cycles_found: AtomicU64::new(0),
             objects_reclaimed: AtomicU64::new(0),
             thread_running: AtomicBool::new(false),
+        }
+    }
+
+    /// Restrict cycle detection to the given set of local actor IDs.
+    ///
+    /// When called with a non-empty set, the detector ignores any foreign
+    /// reference whose target actor is not in the set, and skips suspects
+    /// owned by non-local actors. This satisfies the v1.0 requirement that
+    /// the centralized cycle detector operate intra-node only.
+    pub fn set_local_actors(&mut self, local_actor_ids: HashSet<u64>) {
+        self.local_actors = Some(local_actor_ids);
+    }
+
+    /// Remove the local-actor restriction.
+    pub fn clear_local_actors(&mut self) {
+        self.local_actors = None;
+    }
+
+    /// Return the current local-actor restriction, if any.
+    pub fn local_actors(&self) -> Option<&HashSet<u64>> {
+        self.local_actors.as_ref()
+    }
+
+    fn is_local(&self, actor_id: u64) -> bool {
+        match &self.local_actors {
+            Some(set) => set.contains(&actor_id),
+            None => true,
         }
     }
 
@@ -366,6 +400,14 @@ impl CycleDetector {
         // Ignore self-references within the same actor — these are not
         // *foreign* references and cannot participate in cross-actor cycles.
         if from_actor == to_actor {
+            return;
+        }
+        // When restricted to local actors, ignore edges that target (or originate from)
+        // remote actors. This keeps the centralized detector intra-node only.
+        if !self.is_local(to_actor) {
+            return;
+        }
+        if self.local_actors.is_some() && !self.is_local(from_actor) {
             return;
         }
 
@@ -504,6 +546,14 @@ impl CycleDetector {
         for key in keys {
             // Use get_mut because compute_weight needs a mutable borrow for
             // the node to update its weight field.
+            let is_local = if let Some(node) = self.graph.get(&key) {
+                self.is_local(node.actor_id)
+            } else {
+                true
+            };
+            if !is_local {
+                continue;
+            }
             if let Some(node) = self.graph.get_mut(&key) {
                 // SAFETY: We check that the header pointer still points to
                 // a live object before dereferencing. If the object has been
@@ -604,6 +654,9 @@ impl CycleDetector {
     /// Dereferences `suspect.object_header` and potentially other headers
     /// during DFS. All headers are checked for liveness before dereferencing.
     unsafe fn process_suspect<R>(&mut self, suspect: &Suspect, runtime: &mut R) {
+        if !self.is_local(suspect.actor_id) {
+            return;
+        }
         // Verify the suspect object is still alive.
         let key = (suspect.actor_id, suspect.object_header as usize);
         let Some(start_node) = self.graph.get(&key) else {
@@ -663,6 +716,10 @@ impl CycleDetector {
         object: *mut OrcaHeader,
         path: &mut Vec<(u64, *mut OrcaHeader)>,
     ) -> Option<Vec<(u64, *mut OrcaHeader)>> {
+        // Only follow edges within the local node set when restricted.
+        if !self.is_local(actor_id) {
+            return None;
+        }
         let key = (actor_id, object as usize);
 
         // If the node is not in our graph, dead end.
@@ -696,6 +753,10 @@ impl CycleDetector {
 
         // Explore each outgoing edge.
         for edge in &edges {
+            // Do not follow edges to remote actors when restricted to intra-node.
+            if !self.is_local(edge.target_actor) {
+                continue;
+            }
             let child_key = (edge.target_actor, edge.target_object as usize);
 
             // Check if the child node exists in our graph.
@@ -1540,6 +1601,51 @@ mod tests {
         unsafe {
             runtime.free_object(obj_a);
             runtime.free_object(obj_b);
+        }
+    }
+
+    /// Verify that the intra-node restriction prevents the detector from
+    /// following edges to remote actors.
+    #[test]
+    fn test_intra_node_restriction_skips_remote_actors() {
+        let mut detector = CycleDetector::new();
+        let mut runtime = MockRuntime::new();
+
+        let obj_a = runtime.create_object(1, 0, 1); // no local refs, 1 foreign ref
+        let obj_b = runtime.create_object(2, 0, 1);
+
+        // Cycle: A <-> B
+        detector.register_foreign_ref(1, obj_a, 2, obj_b);
+        detector.register_foreign_ref(2, obj_b, 1, obj_a);
+
+        // Without the restriction, the cycle would be reclaimed.
+        detector.detect_cycles(&mut runtime);
+        let (cycles_before, reclaimed_before) = detector.stats();
+        assert_eq!(cycles_before, 1, "cycle should be found without restriction");
+        assert_eq!(reclaimed_before, 2, "both objects should be reclaimed without restriction");
+
+        // Create a fresh detector and restrict to actor 1 only.
+        let mut detector2 = CycleDetector::new();
+        let mut runtime2 = MockRuntime::new();
+        let obj_a2 = runtime2.create_object(1, 0, 1);
+        let obj_b2 = runtime2.create_object(2, 0, 1);
+        detector2.register_foreign_ref(1, obj_a2, 2, obj_b2);
+        detector2.register_foreign_ref(2, obj_b2, 1, obj_a2);
+
+        let mut local = std::collections::HashSet::new();
+        local.insert(1);
+        detector2.set_local_actors(local);
+
+        detector2.detect_cycles(&mut runtime2);
+        let (cycles_after, reclaimed_after) = detector2.stats();
+        assert_eq!(cycles_after, 0, "remote actor should be excluded from detection");
+        assert_eq!(reclaimed_after, 0, "remote objects should not be reclaimed");
+
+        unsafe {
+            runtime.free_object(obj_a);
+            runtime.free_object(obj_b);
+            runtime2.free_object(obj_a2);
+            runtime2.free_object(obj_b2);
         }
     }
 }

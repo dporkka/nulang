@@ -77,28 +77,52 @@ def verify_files():
         print("Error: src/runtime/distributed.rs does not exist.")
         return False
 
-    # 6. Check main.rs or compiler.rs for JIT/Escape Analysis integration
-    # We want to verify that escape_analysis and JIT are actually used.
-    integrated_escape = False
+    # 6. Check main.rs / compiler.rs / vm.rs for JIT integration.
+    # Escape analysis was intentionally reverted in v0.12 (per AGENTS.md and
+    # README.md); it must remain dead code and not be wired into the
+    # compiler/runtime pipeline.
     integrated_jit = False
+    escape_analysis_dead = True
     for filename in ["src/main.rs", "src/compiler.rs", "src/vm.rs"]:
         if os.path.exists(filename):
             with open(filename, "r", encoding="utf-8") as f:
                 content = f.read()
-                if "EscapeAnalyzer" in content or "escape_analysis" in content:
-                    integrated_escape = True
-                if "tiered_execute_step" in content or "jit" in content:
-                    # check if JIT is wired in VM loop/main
+                if "tiered_execute_step" in content or "jit_session" in content:
                     integrated_jit = True
-                    
-    # Wait, we need the team to integrate it, so let's check for these integration keywords.
-    # Note: We'll make sure the agent integrates them.
-    # If not integrated, print warning or error
-    if not integrated_escape:
-        print("Error: EscapeAnalyzer is not integrated into compiler/runtime pipeline.")
-        return False
+                if "EscapeAnalyzer" in content or "escape_analysis" in content:
+                    # Any import/use in the main pipeline means it is wired.
+                    escape_analysis_dead = False
+
     if not integrated_jit:
         print("Error: JIT/tiered_execute_step is not integrated into compiler/runtime pipeline.")
+        return False
+
+    if not escape_analysis_dead:
+        print("Error: EscapeAnalyzer is referenced in the compiler/runtime pipeline; it should remain dead code after v0.12 revert.")
+        return False
+
+    # 7. Verify scheduler profiling is wired through the Runtime.
+    scheduler_wired = False
+    if os.path.exists("src/runtime/mod.rs"):
+        with open("src/runtime/mod.rs", "r", encoding="utf-8") as f:
+            content = f.read()
+            if "scheduler_stats" in content and "reset_scheduler_stats" in content:
+                scheduler_wired = True
+    if not scheduler_wired:
+        print("Error: Scheduler profiling statistics are not exposed through Runtime.")
+        return False
+
+    # 8. Verify cycle detector intra-node restriction is wired.
+    intra_node_wired = False
+    if os.path.exists("src/runtime/mod.rs") and os.path.exists("src/runtime/orca_cycle.rs"):
+        with open("src/runtime/mod.rs", "r", encoding="utf-8") as f:
+            rt_content = f.read()
+        with open("src/runtime/orca_cycle.rs", "r", encoding="utf-8") as f:
+            cd_content = f.read()
+        if "set_local_actors" in cd_content and "set_local_actors" in rt_content:
+            intra_node_wired = True
+    if not intra_node_wired:
+        print("Error: Cycle detector intra-node restriction is not wired in Runtime.")
         return False
 
     print("Success: All files passed implementation checks!")

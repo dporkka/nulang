@@ -14,9 +14,67 @@
 //! Based on the Chase-Lev algorithm (PPoPP 2005) as implemented by
 //! crossbeam::deque.
 
-use crossbeam::deque::{Injector, Stealer, Worker};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crossbeam::deque::{Injector, Steal, Stealer, Worker};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
+
+/// Lightweight, atomics-based profiling metrics for the scheduler.
+///
+/// All counters are monotonically increasing unless reset via
+/// [`Scheduler::reset_stats`]. They are snapshots of the underlying
+/// atomic counters and are therefore not guaranteed to be mutually
+/// consistent in a concurrent execution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchedulerStats {
+    /// Total tasks successfully retrieved by any worker (local, global, or stolen).
+    pub total_tasks_processed: u64,
+    /// Tasks retrieved from the calling worker's own local deque.
+    pub tasks_from_local_queue: u64,
+    /// Tasks retrieved from the global injector queue.
+    pub tasks_from_global_queue: u64,
+    /// Tasks stolen from another worker's deque.
+    pub tasks_from_steal: u64,
+    /// Individual `steal()` calls against another worker's deque.
+    pub steal_attempts: u64,
+    /// `steal()` calls that returned a task.
+    pub steal_successes: u64,
+    /// Times `next_task` or `steal_one` found no work anywhere.
+    pub empty_polls: u64,
+}
+
+struct SchedulerStatsInternal {
+    total_tasks_processed: AtomicU64,
+    tasks_from_local_queue: AtomicU64,
+    tasks_from_global_queue: AtomicU64,
+    tasks_from_steal: AtomicU64,
+    steal_attempts: AtomicU64,
+    steal_successes: AtomicU64,
+    empty_polls: AtomicU64,
+}
+
+impl SchedulerStatsInternal {
+    fn snapshot(&self) -> SchedulerStats {
+        SchedulerStats {
+            total_tasks_processed: self.total_tasks_processed.load(Ordering::Relaxed),
+            tasks_from_local_queue: self.tasks_from_local_queue.load(Ordering::Relaxed),
+            tasks_from_global_queue: self.tasks_from_global_queue.load(Ordering::Relaxed),
+            tasks_from_steal: self.tasks_from_steal.load(Ordering::Relaxed),
+            steal_attempts: self.steal_attempts.load(Ordering::Relaxed),
+            steal_successes: self.steal_successes.load(Ordering::Relaxed),
+            empty_polls: self.empty_polls.load(Ordering::Relaxed),
+        }
+    }
+
+    fn reset(&self) {
+        self.total_tasks_processed.store(0, Ordering::Relaxed);
+        self.tasks_from_local_queue.store(0, Ordering::Relaxed);
+        self.tasks_from_global_queue.store(0, Ordering::Relaxed);
+        self.tasks_from_steal.store(0, Ordering::Relaxed);
+        self.steal_attempts.store(0, Ordering::Relaxed);
+        self.steal_successes.store(0, Ordering::Relaxed);
+        self.empty_polls.store(0, Ordering::Relaxed);
+    }
+}
 
 /// A work-stealing scheduler with Chase-Lev deques.
 ///
@@ -41,6 +99,9 @@ pub struct Scheduler {
 
     /// Total number of actors processed (statistics).
     processed_count: AtomicUsize,
+
+    /// Lightweight profiling counters.
+    stats: SchedulerStatsInternal,
 }
 
 impl Scheduler {
@@ -64,6 +125,15 @@ impl Scheduler {
             stealers,
             worker_count,
             processed_count: AtomicUsize::new(0),
+            stats: SchedulerStatsInternal {
+                total_tasks_processed: AtomicU64::new(0),
+                tasks_from_local_queue: AtomicU64::new(0),
+                tasks_from_global_queue: AtomicU64::new(0),
+                tasks_from_steal: AtomicU64::new(0),
+                steal_attempts: AtomicU64::new(0),
+                steal_successes: AtomicU64::new(0),
+                empty_polls: AtomicU64::new(0),
+            },
         }
     }
 
@@ -105,12 +175,16 @@ impl Scheduler {
         // 1. Try local deque first (LIFO — cache hot)
         if worker_idx < self.workers.len() {
             if let Some(task) = self.workers[worker_idx].pop() {
+                self.stats.total_tasks_processed.fetch_add(1, Ordering::Relaxed);
+                self.stats.tasks_from_local_queue.fetch_add(1, Ordering::Relaxed);
                 return Some(task);
             }
         }
 
         // 2. Try the global injector
-        if let crossbeam::deque::Steal::Success(task) = self.global.steal() {
+        if let Steal::Success(task) = self.global.steal() {
+            self.stats.total_tasks_processed.fetch_add(1, Ordering::Relaxed);
+            self.stats.tasks_from_global_queue.fetch_add(1, Ordering::Relaxed);
             return Some(task);
         }
 
@@ -118,16 +192,24 @@ impl Scheduler {
         //    We iterate in a different order per worker to reduce
         //    contention (each worker starts stealing from a different
         //    neighbor).
+        let mut steal_attempts: u64 = 0;
         for i in 0..self.stealers.len() {
             let steal_idx = (worker_idx + i + 1) % self.stealers.len();
             if steal_idx == worker_idx {
                 continue; // Don't steal from self
             }
-            if let crossbeam::deque::Steal::Success(task) = self.stealers[steal_idx].steal() {
+            steal_attempts += 1;
+            if let Steal::Success(task) = self.stealers[steal_idx].steal() {
+                self.stats.total_tasks_processed.fetch_add(1, Ordering::Relaxed);
+                self.stats.tasks_from_steal.fetch_add(1, Ordering::Relaxed);
+                self.stats.steal_successes.fetch_add(1, Ordering::Relaxed);
+                self.stats.steal_attempts.fetch_add(steal_attempts, Ordering::Relaxed);
                 return Some(task);
             }
         }
 
+        self.stats.empty_polls.fetch_add(1, Ordering::Relaxed);
+        self.stats.steal_attempts.fetch_add(steal_attempts, Ordering::Relaxed);
         None
     }
 
@@ -144,15 +226,25 @@ impl Scheduler {
     /// grab work but don't have a dedicated worker thread.
     pub fn steal_one(&self) -> Option<u64> {
         // Try global first
-        if let crossbeam::deque::Steal::Success(task) = self.global.steal() {
+        if let Steal::Success(task) = self.global.steal() {
+            self.stats.total_tasks_processed.fetch_add(1, Ordering::Relaxed);
+            self.stats.tasks_from_global_queue.fetch_add(1, Ordering::Relaxed);
             return Some(task);
         }
         // Try any worker
+        let mut steal_attempts: u64 = 0;
         for stealer in &self.stealers {
-            if let crossbeam::deque::Steal::Success(task) = stealer.steal() {
+            steal_attempts += 1;
+            if let Steal::Success(task) = stealer.steal() {
+                self.stats.total_tasks_processed.fetch_add(1, Ordering::Relaxed);
+                self.stats.tasks_from_steal.fetch_add(1, Ordering::Relaxed);
+                self.stats.steal_successes.fetch_add(1, Ordering::Relaxed);
+                self.stats.steal_attempts.fetch_add(steal_attempts, Ordering::Relaxed);
                 return Some(task);
             }
         }
+        self.stats.empty_polls.fetch_add(1, Ordering::Relaxed);
+        self.stats.steal_attempts.fetch_add(steal_attempts, Ordering::Relaxed);
         None
     }
 
@@ -226,6 +318,16 @@ impl Scheduler {
     /// Reset the processed count to zero.
     pub fn reset_processed_count(&self) {
         self.processed_count.store(0, Ordering::Relaxed);
+    }
+
+    /// Snapshot the current scheduler profiling metrics.
+    pub fn stats(&self) -> SchedulerStats {
+        self.stats.snapshot()
+    }
+
+    /// Reset all scheduler profiling metrics to zero.
+    pub fn reset_stats(&self) {
+        self.stats.reset();
     }
 }
 
@@ -309,5 +411,90 @@ mod scheduler_tests {
             s.run_one(0, move |_id| { c.fetch_add(1, Ordering::Relaxed); });
         }
         assert_eq!(count.load(Ordering::Relaxed), 400);
+    }
+
+    #[test]
+    fn test_stats_local_queue() {
+        let s = Scheduler::new(2);
+        s.enqueue_local(0, 42);
+        s.run_one(0, |_id| {});
+        let stats = s.stats();
+        assert_eq!(stats.total_tasks_processed, 1);
+        assert_eq!(stats.tasks_from_local_queue, 1);
+        assert_eq!(stats.tasks_from_global_queue, 0);
+        assert_eq!(stats.tasks_from_steal, 0);
+        assert_eq!(stats.steal_attempts, 0);
+        assert_eq!(stats.steal_successes, 0);
+        assert_eq!(stats.empty_polls, 0);
+    }
+
+    #[test]
+    fn test_stats_global_queue() {
+        let s = Scheduler::new(2);
+        s.enqueue(42);
+        s.run_one(0, |_id| {});
+        let stats = s.stats();
+        assert_eq!(stats.total_tasks_processed, 1);
+        assert_eq!(stats.tasks_from_local_queue, 0);
+        assert_eq!(stats.tasks_from_global_queue, 1);
+        assert_eq!(stats.tasks_from_steal, 0);
+        assert_eq!(stats.steal_attempts, 0);
+        assert_eq!(stats.steal_successes, 0);
+        assert_eq!(stats.empty_polls, 0);
+    }
+
+    #[test]
+    fn test_stats_steal() {
+        let s = Scheduler::new(2);
+        s.enqueue_local(0, 42);
+        // Worker 1 has no local work and no global work, so it steals from worker 0.
+        assert_eq!(s.next_task(1).unwrap(), 42);
+        let stats = s.stats();
+        assert_eq!(stats.total_tasks_processed, 1);
+        assert_eq!(stats.tasks_from_local_queue, 0);
+        assert_eq!(stats.tasks_from_global_queue, 0);
+        assert_eq!(stats.tasks_from_steal, 1);
+        assert_eq!(stats.steal_successes, 1);
+        assert!(stats.steal_attempts >= 1);
+        assert_eq!(stats.empty_polls, 0);
+    }
+
+    #[test]
+    fn test_stats_empty_poll() {
+        let s = Scheduler::new(1);
+        assert!(s.next_task(0).is_none());
+        let stats = s.stats();
+        assert_eq!(stats.empty_polls, 1);
+        assert_eq!(stats.total_tasks_processed, 0);
+        assert_eq!(stats.steal_attempts, 0); // no other workers to attempt stealing from
+    }
+
+    #[test]
+    fn test_stats_steal_one_empty() {
+        let s = Scheduler::new(1);
+        assert!(s.steal_one().is_none());
+        let stats = s.stats();
+        assert_eq!(stats.empty_polls, 1);
+        assert_eq!(stats.total_tasks_processed, 0);
+        // steal_one probes every stealer, including the single worker's own deque.
+        assert_eq!(stats.steal_attempts, 1);
+    }
+
+    #[test]
+    fn test_stats_reset() {
+        let s = Scheduler::new(1);
+        s.enqueue(1);
+        s.run_one(0, |_id| {});
+        assert_eq!(s.stats().total_tasks_processed, 1);
+        s.reset_stats();
+        let stats = s.stats();
+        assert_eq!(stats.total_tasks_processed, 0);
+        assert_eq!(stats.tasks_from_local_queue, 0);
+        assert_eq!(stats.tasks_from_global_queue, 0);
+        assert_eq!(stats.tasks_from_steal, 0);
+        assert_eq!(stats.steal_attempts, 0);
+        assert_eq!(stats.steal_successes, 0);
+        assert_eq!(stats.empty_polls, 0);
+        assert_eq!(s.processed_count(), 1); // existing API unaffected
     }
 }

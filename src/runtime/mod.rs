@@ -250,12 +250,24 @@ impl Runtime {
         }
         let should_detect = self.cycle_detector.should_detect();
         if should_detect {
+            let local_ids: std::collections::HashSet<u64> = self.actors.keys().copied().collect();
+            self.cycle_detector.set_local_actors(local_ids);
             let rt = self as *mut Runtime;
             let detector = &mut self.cycle_detector;
             unsafe {
                 detector.incremental_detect(&mut *rt);
             }
         }
+    }
+
+    /// Return a snapshot of scheduler profiling statistics.
+    pub fn scheduler_stats(&self) -> SchedulerStats {
+        self.scheduler.stats()
+    }
+
+    /// Reset scheduler profiling statistics to zero.
+    pub fn reset_scheduler_stats(&self) {
+        self.scheduler.reset_stats()
     }
 
     pub fn gc_stats(&self) -> GcStats {
