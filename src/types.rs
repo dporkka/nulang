@@ -173,6 +173,7 @@ pub enum Effect {
     LLM,
     Cost,
     Event,
+    FFI,
     UserDefined(String),
 }
 
@@ -463,6 +464,7 @@ pub enum NuError {
     /// Linear type violation: a linear value was used more than once,
     /// not consumed, or otherwise violated linearity constraints.
     LinearTypeError { msg: String, span: Span },
+    FFIError { msg: String, span: Span },
     RuntimeError(String),
     VMError(String),
     PythonError(String), // Python interop error
@@ -492,6 +494,9 @@ impl std::fmt::Display for NuError {
                     "Linear type error at {}:{}: {}",
                     span.line, span.column, msg
                 )
+            }
+            NuError::FFIError { msg, span } => {
+                write!(f, "FFI error at {}:{}: {}", span.line, span.column, msg)
             }
             NuError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             NuError::VMError(msg) => write!(f, "VM error: {}", msg),

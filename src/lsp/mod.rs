@@ -1,7 +1,6 @@
 //! LSP (Language Server Protocol) server for Nulang.
 //!
-//! Provides inlay hints showing inferred types, capability annotations,
-//! and effect rows inline in the source code.
+//! Provides inlay hints, completion, and diagnostics.
 //!
 //! Run with: `nulang --lsp` (starts stdin/stdout JSON-RPC server)
 //!
@@ -9,10 +8,9 @@
 //!
 //! | Feature | Description |
 //! |---------|-------------|
+//! | `textDocument/diagnostic` | Parse/type/effect/capability diagnostics |
 //! | `textDocument/inlayHint` | Show inferred types after bindings |
-//! | Type inlays | `let x = 42` shows `: Int` after `x` |
-//! | Capability inlays | `let y: iso String` shows `: iso` |
-//! | Effect inlays | `fun f() ! IO` shows `[IO]` |
+//! | `textDocument/completion` | Keyword/effect/function completion |
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -20,6 +18,12 @@ use std::sync::Mutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
+
+use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
+use crate::lexer::Lexer;
+use crate::parser::Parser;
+use crate::typechecker::TypeChecker;
+use crate::types::NuError;
 
 // ---------------------------------------------------------------------------
 // LSP Server
@@ -72,6 +76,14 @@ impl LanguageServer for NulangLanguageServer {
                         save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions::default())),
                     },
                 )),
+                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
+                    DiagnosticOptions {
+                        identifier: Some("nulang".to_string()),
+                        inter_file_dependencies: false,
+                        workspace_diagnostics: false,
+                        work_done_progress_options: WorkDoneProgressOptions::default(),
+                    },
+                )),
                 ..ServerCapabilities::default()
             },
             ..InitializeResult::default()
@@ -89,24 +101,49 @@ impl LanguageServer for NulangLanguageServer {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let mut docs = self.documents.lock().unwrap();
-        docs.insert(
-            params.text_document.uri,
-            DocumentState {
-                version: params.text_document.version,
-                source: params.text_document.text,
-            },
-        );
+        let uri = params.text_document.uri.clone();
+        let version = params.text_document.version;
+        let source = params.text_document.text.clone();
+
+        {
+            let mut docs = self.documents.lock().unwrap();
+            docs.insert(
+                params.text_document.uri,
+                DocumentState {
+                    version,
+                    source: source.clone(),
+                },
+            );
+        }
+
+        let diagnostics = self.compute_diagnostics(&source);
+        self.client
+            .publish_diagnostics(uri, diagnostics, Some(version))
+            .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let mut docs = self.documents.lock().unwrap();
-        if let Some(doc) = docs.get_mut(&params.text_document.uri) {
-            if let Some(change) = params.content_changes.into_iter().next() {
-                doc.version = params.text_document.version;
-                doc.source = change.text;
+        let uri = params.text_document.uri.clone();
+        let version = params.text_document.version;
+        let source = params
+            .content_changes
+            .into_iter()
+            .next()
+            .map(|c| c.text)
+            .unwrap_or_default();
+
+        {
+            let mut docs = self.documents.lock().unwrap();
+            if let Some(doc) = docs.get_mut(&uri) {
+                doc.version = version;
+                doc.source = source.clone();
             }
         }
+
+        let diagnostics = self.compute_diagnostics(&source);
+        self.client
+            .publish_diagnostics(uri, diagnostics, Some(version))
+            .await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -138,6 +175,124 @@ impl LanguageServer for NulangLanguageServer {
         let engine = CompletionEngine::new(&source);
         let items = engine.complete(params.text_document_position.position);
         Ok(Some(CompletionResponse::Array(items)))
+    }
+}
+
+impl NulangLanguageServer {
+    /// Run the compiler frontend on `source` and return LSP diagnostics.
+    ///
+    /// This is intentionally tolerant: each stage is tried in order, and the
+    /// first fatal error in a stage is reported. Effect and capability checks
+    /// also report accumulated warnings from their internal diagnostic lists.
+    fn compute_diagnostics(&self, source: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+
+        // Lex
+        let tokens = match Lexer::new(source).lex() {
+            Ok(t) => t,
+            Err(e) => {
+                diagnostics.push(nu_error_to_diagnostic(e));
+                return diagnostics;
+            }
+        };
+
+        // Parse
+        let ast = match Parser::new(tokens).parse_module() {
+            Ok(a) => a,
+            Err(e) => {
+                diagnostics.push(nu_error_to_diagnostic(e));
+                return diagnostics;
+            }
+        };
+
+        // Type check
+        if let Err(e) = TypeChecker::new().check_module(&ast) {
+            diagnostics.push(nu_error_to_diagnostic(e));
+            return diagnostics;
+        }
+
+        // Effect check
+        let mut effect_checker = EffectChecker::new();
+        let effect_ctx = EffectContext::empty();
+        for decl in &ast.decls {
+            if let crate::ast::Decl::Function { body, .. } = decl {
+                if let Err(e) = effect_checker.infer_effects(&effect_ctx, body) {
+                    diagnostics.push(nu_error_to_diagnostic(e));
+                }
+            }
+        }
+        for msg in &effect_checker.diagnostics {
+            diagnostics.push(Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: None,
+                code_description: None,
+                source: Some("nulang-effect".to_string()),
+                message: msg.clone(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+
+        // Capability analysis
+        let mut cap_analyzer = CapabilityAnalyzer::new();
+        let cap_ctx = CapContext::new();
+        for decl in &ast.decls {
+            if let crate::ast::Decl::Function { body, .. } = decl {
+                if let Err(e) = cap_analyzer.infer_cap(&cap_ctx, body) {
+                    diagnostics.push(nu_error_to_diagnostic(e));
+                }
+            }
+        }
+        for msg in &cap_analyzer.diagnostics {
+            diagnostics.push(Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+                severity: Some(DiagnosticSeverity::WARNING),
+                code: None,
+                code_description: None,
+                source: Some("nulang-capability".to_string()),
+                message: msg.clone(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+
+        diagnostics
+    }
+}
+
+/// Convert a `NuError` into an LSP `Diagnostic`.
+fn nu_error_to_diagnostic(err: NuError) -> Diagnostic {
+    let (message, line, column) = match err {
+        NuError::LexError { msg, span }
+        | NuError::ParseError { msg, span }
+        | NuError::TypeError { msg, span }
+        | NuError::EffectError { msg, span }
+        | NuError::CapError { msg, span }
+        | NuError::LinearTypeError { msg, span }
+        | NuError::FFIError { msg, span } => (msg, span.line, span.column),
+        NuError::RuntimeError(msg) | NuError::VMError(msg) | NuError::PythonError(msg) => {
+            (msg, 1, 1)
+        }
+    };
+
+    // Lines/columns in the Span are 1-based; LSP uses 0-based.
+    let line0 = line.saturating_sub(1) as u32;
+    let col0 = column.saturating_sub(1) as u32;
+    let pos = Position::new(line0, col0);
+
+    Diagnostic {
+        range: Range::new(pos, pos),
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: None,
+        code_description: None,
+        source: Some("nulang".to_string()),
+        message,
+        related_information: None,
+        tags: None,
+        data: None,
     }
 }
 

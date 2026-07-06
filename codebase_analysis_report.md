@@ -27,7 +27,7 @@ vm.load_module(code)?;
 vm.run()
 ```
 
-All phases are wired together. `src/escape_analysis.rs` exists and has unit tests, but it is intentionally not part of the production pipeline; it should only be re-integrated alongside a correct nursery implementation.
+All phases are wired together. The previous escape-analysis module was dead code and has been removed; heap allocation elision will be revisited alongside a correct nursery implementation.
 
 ### 1.2 Typechecker (`src/typechecker.rs`)
 
@@ -141,7 +141,7 @@ This removes the previous stringly-typed lookup and the associated typo/panic ri
 ### 2.6 Remaining Optimization Concerns
 
 * **Typed and SIMD JIT compilers** (`src/jit/typed_compiler.rs`, `src/jit/simd_compiler.rs`) are exercised only indirectly. Without dedicated stress tests, the hot-path benefit of the JIT tier is unquantified.
-* **`src/escape_analysis.rs` is dead code.** Keeping it outside the pipeline means heap allocation elision is not yet realized.
+* **Escape analysis was removed.** The previous escape-analysis module was dead code and has been deleted; heap allocation elision is not yet realized and will be revisited with a correct nursery implementation.
 
 ---
 
@@ -169,7 +169,7 @@ The following items from earlier reports are now idiomatic and should not be re-
 
 `cargo check` currently reports approximately 79 warnings. The majority are:
 
-* Unused constants in `src/python/marshal.rs` and `src/python/native_actor.rs`.
+* Unused constants in `src/python/marshal.rs`.
 * Dead fields such as `NativeActorPool.size` and `NativeActorPool.interpreters`.
 * Unused imports and helper functions across the parser and runtime.
 
@@ -190,10 +190,10 @@ These warnings do not break the build, but they obscure new warnings and indicat
 ### 4.1 Current Test Inventory
 
 * `src/integration_tests.rs`: ~52 end-to-end pipeline tests.
-* `src/stress_tests.rs`: 10 actor/supervision/scheduler chaos tests.
+* `src/stress_tests.rs`: 29 actor/supervision/scheduler/runtime chaos tests.
 * `src/runtime/tests.rs`: 110 runtime unit tests.
 * `src/jit/tests.rs`: 18 JIT tests.
-* Inline `mod tests` in lexer, parser, compiler, typechecker, effect checker, escape analysis, and others.
+* Inline `mod tests` in lexer, parser, compiler, typechecker, effect checker, and others.
 
 ### 4.2 Coverage Gaps
 
@@ -276,5 +276,5 @@ Priority 4: Begin specification-driven subsystems
 - [ ] Add unit tests for `src/runtime/dual_heap.rs` promotion and alignment.
 - [ ] Add mock-network convergence tests for `src/runtime/crdt_manager.rs`.
 - [ ] Reduce `cargo check` warnings from ~79 toward zero.
-- [ ] Remove or complete `src/python/native_actor.rs` scaffolding.
+- [ ] Remove or complete Python native actor scaffolding.
 - [ ] Decide whether to implement or defer each design-document subsystem.

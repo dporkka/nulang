@@ -132,6 +132,7 @@ impl Parser {
                 }
             }
             TokenKind::Effect => self.parse_effect_decl(),
+            TokenKind::Extern => self.parse_extern(public),
             TokenKind::Import => self.parse_import(),
             TokenKind::Module => {
                 self.advance(); // consume 'module'
@@ -396,6 +397,78 @@ impl Parser {
         let items = Vec::new();
         self.skip_newlines_semicolons();
         Ok(Decl::Import { path, items, span })
+    }
+
+    fn parse_extern(&mut self, _public: bool) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance(); // consume 'extern'
+
+        let library = match self.peek_kind().clone() {
+            TokenKind::StringLit(s) => {
+                let s = s.clone();
+                self.advance();
+                s
+            }
+            other => {
+                return Err(NuError::ParseError {
+                    msg: format!("Expected string literal for library path, found {:?}", other),
+                    span: self.current_span(),
+                })
+            }
+        };
+
+        self.expect(TokenKind::LBrace)?;
+
+        let mut funcs = Vec::new();
+        self.skip_newlines();
+        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.match_token(&TokenKind::RBrace) {
+                break;
+            }
+
+            let func_span = self.current_span();
+            self.expect(TokenKind::Fn)?;
+            let name = self.expect_ident("function name")?;
+            self.expect(TokenKind::LParen)?;
+            let raw_params = self.parse_params()?;
+            self.expect(TokenKind::RParen)?;
+
+            // Extern parameters must have explicit types.
+            let mut params = Vec::new();
+            for (param_name, param_ty) in raw_params {
+                match param_ty {
+                    Some(ty) => params.push((param_name, ty)),
+                    None => {
+                        return Err(NuError::ParseError {
+                            msg: format!(
+                                "Extern function '{}' parameter '{}' requires an explicit type",
+                                name, param_name
+                            ),
+                            span: func_span,
+                        })
+                    }
+                }
+            }
+
+            self.expect(TokenKind::Arrow)?;
+            let ret = self.parse_type()?;
+
+            funcs.push(ExternFunc {
+                name,
+                params,
+                ret,
+                span: func_span,
+            });
+            self.skip_newlines_semicolons();
+        }
+
+        self.expect(TokenKind::RBrace)?;
+        Ok(Decl::Extern {
+            library,
+            funcs,
+            span,
+        })
     }
 
     // === Behaviors ===
@@ -2000,5 +2073,45 @@ mod tests {
     fn test_parse_error_missing_arrow_in_effect() {
         let result = parse("effect E { op: Int }");
         assert!(result.is_err(), "Expected parse error for effect op missing arrow");
+    }
+
+    #[test]
+    fn test_parse_extern_block() {
+        let ast = parse(r#"extern "libm.so.6" { fn sqrt(x: Float) -> Float fn pow(x: Float, y: Float) -> Float }"#).unwrap();
+        assert_eq!(ast.decls.len(), 1);
+        match &ast.decls[0] {
+            Decl::Extern { library, funcs, .. } => {
+                assert_eq!(library, "libm.so.6");
+                assert_eq!(funcs.len(), 2);
+                assert_eq!(funcs[0].name, "sqrt");
+                assert_eq!(funcs[0].params, vec![("x".to_string(), Type::float())]);
+                assert_eq!(funcs[0].ret, Type::float());
+                assert_eq!(funcs[1].name, "pow");
+                assert_eq!(
+                    funcs[1].params,
+                    vec![("x".to_string(), Type::float()), ("y".to_string(), Type::float())]
+                );
+                assert_eq!(funcs[1].ret, Type::float());
+            }
+            _ => panic!("Expected extern declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_extern_empty_block() {
+        let ast = parse(r#"extern "empty" {}"#).unwrap();
+        match &ast.decls[0] {
+            Decl::Extern { library, funcs, .. } => {
+                assert_eq!(library, "empty");
+                assert!(funcs.is_empty());
+            }
+            _ => panic!("Expected extern declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_extern_missing_param_type_errors() {
+        let result = parse(r#"extern "lib" { fn f(x) -> Int }"#);
+        assert!(result.is_err(), "Expected parse error for missing parameter type in extern");
     }
 }

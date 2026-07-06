@@ -25,7 +25,10 @@
 //! payload of an f64. This gives us 51 bits of payload space for
 //! pointers, integers, and type tags.
 
+use std::ffi::{c_char, CStr, CString};
+
 use crate::bytecode::{CodeModule, Constant, OpCode};
+use crate::ffi::{call_native, CType, Signature, FFI_REGISTRY};
 use crate::jit::{self, JitSession, TieredAction};
 use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
 use crate::types::{NuError, NuResult, Span};
@@ -197,18 +200,10 @@ pub struct Value {
     raw: u64,
 }
 
-/// Value type tags (stored in the upper 16 bits).
-const TAG_MASK:    u64 = 0xFFFF_0000_0000_0000;
-const TAG_NIL:     u64 = 0x7FF8_0000_0000_0000;
-const TAG_UNIT:    u64 = 0x7FF9_0000_0000_0000;
-const TAG_BOOL:    u64 = 0x7FFA_0000_0000_0000;
-const TAG_INT:     u64 = 0x7FFB_0000_0000_0000;
-const TAG_PTR:     u64 = 0x7FFC_0000_0000_0000;
-const TAG_ACTOR:   u64 = 0x7FFD_0000_0000_0000;
-const TAG_STRING:  u64 = 0x7FFE_0000_0000_0000;
-const TAG_CLOSURE: u64 = 0x7FF7_0000_0000_0000;
-
-const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+use crate::value_layout::{
+    sext48, TAG_MASK, TAG_NIL, TAG_UNIT, TAG_BOOL, TAG_INT, TAG_PTR, TAG_ACTOR, TAG_STRING,
+    TAG_CLOSURE, PAYLOAD_MASK,
+};
 
 impl Value {
     /// Create a nil value.
@@ -267,13 +262,7 @@ impl Value {
 
     pub fn as_int(&self) -> Option<i64> {
         if (self.raw & TAG_MASK) == TAG_INT {
-            let bits = self.raw & PAYLOAD_MASK;
-            // Sign-extend from 48 bits
-            Some(if bits & 0x0000_8000_0000_0000 != 0 {
-                (bits | 0xFFFF_0000_0000_0000) as i64
-            } else {
-                bits as i64
-            })
+            Some(sext48(self.raw & PAYLOAD_MASK))
         } else {
             None
         }
@@ -627,6 +616,50 @@ impl VM {
         self.jit_constants.push(bits);
     }
 
+    /// Copy the payload of a string-like value into a `Vec<u8>`.
+    ///
+    /// Used by the FFI call path to build temporary `CString` arguments.
+    ///
+    /// # Safety
+    /// Pointer values must point to a valid heap object or a C string borrowed
+    /// for the duration of this call.
+    unsafe fn value_to_bytes(&self, module_idx: usize, value: Value) -> Option<Vec<u8>> {
+        if let Some(id) = value.as_string_id() {
+            self.modules.get(module_idx)
+                .and_then(|m| m.constants.get(id as usize))
+                .and_then(|c| match c {
+                    Constant::String(s) => Some(s.as_bytes().to_vec()),
+                    _ => None,
+                })
+        } else if let Some(ptr) = value.as_ptr() {
+            // SAFETY: ptr must point to a heap object with an OrcaHeader.
+            let header = unsafe { &*ActorHeap::header_of(ptr) };
+            let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+            // SAFETY: payload_size bytes follow the header.
+            Some(unsafe { std::slice::from_raw_parts(ptr, payload_size) }.to_vec())
+        } else {
+            None
+        }
+    }
+
+    /// Copy a C string return value into the actor heap and free the temporary.
+    fn copy_cstr_return(&mut self, value: Value) -> NuResult<Value> {
+        let ptr = value.as_ptr().ok_or_else(|| NuError::VMError("FFI C string return was not a pointer".to_string()))?;
+        // SAFETY: ptr is a valid null-terminated C string from cstr_to_value.
+        let bytes = unsafe { CStr::from_ptr(ptr as *const c_char).to_bytes() };
+        let len = bytes.len();
+        let heap_ptr = self.actor_callbacks.alloc(len + 1, HeapTypeTag::String)
+            .ok_or_else(|| NuError::VMError("FFI C string heap allocation failed".to_string()))?;
+        // SAFETY: heap_ptr points to len+1 bytes of freshly allocated memory.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), heap_ptr, len);
+            *heap_ptr.add(len) = 0;
+        }
+        // SAFETY: value was produced by cstr_to_value.
+        unsafe { crate::ffi::marshal::free_cstr_value(value); }
+        Ok(Value::ptr(heap_ptr))
+    }
+
     /// Get a constant string from a module's constant pool.
     fn module_const_string(&self, module_idx: usize, const_idx: usize) -> String {
         self.modules.get(module_idx)
@@ -846,6 +879,64 @@ impl VM {
                 new_frame.closure_env = closure_env;
                 self.frames.push(new_frame);
                 self.current_frame_idx = Some(self.frames.len() - 1);
+                return Ok(());
+            }
+            OpCode::FFICall => {
+                let func_idx = instr.imm16() as usize;
+                let dst = instr.op3;
+                let (def, module_idx) = self.modules.get(module_idx)
+                    .and_then(|m| m.foreign_functions.get(func_idx).map(|d| (d.clone(), module_idx)))
+                    .ok_or_else(|| NuError::VMError(format!("Foreign function {} not found", func_idx)))?;
+
+                let params: Vec<CType> = def.params.iter()
+                    .map(|p| crate::ffi::marshal::ffi_type_to_ctype(p))
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| NuError::VMError(format!("Unsupported FFI parameter type in {}", def.symbol)))?;
+                let ret = crate::ffi::marshal::ffi_type_to_ctype(&def.ret)
+                    .ok_or_else(|| NuError::VMError(format!("Unsupported FFI return type in {:?}", def.ret)))?;
+                let signature = Signature::new(params.clone(), ret);
+
+                // Build argument values. For CStr parameters we copy Nulang
+                // string values into temporary CString buffers whose pointers
+                // remain valid for the duration of the native call.
+                let mut cstrings: Vec<CString> = Vec::new();
+                let mut args: Vec<Value> = Vec::with_capacity(def.params.len());
+                for (i, param_ctype) in params.iter().enumerate() {
+                    let src = self.frames[frame_idx].regs[i];
+                    if *param_ctype == CType::CStr {
+                        let bytes = unsafe { self.value_to_bytes(module_idx, src) }
+                            .ok_or_else(|| NuError::VMError(format!("FFI argument {} for {} is not a string", i, def.symbol)))?;
+                        let cstring = CString::new(bytes)
+                            .map_err(|e| NuError::VMError(format!("FFI argument {} contains null byte: {}", i, e)))?;
+                        args.push(Value::ptr(cstring.as_ptr() as *mut u8));
+                        cstrings.push(cstring);
+                    } else {
+                        args.push(src);
+                    }
+                }
+
+                let func = {
+                    // SAFETY: caller ensures the named library is a valid shared
+                    // library. Do not hold the lock across the native call.
+                    let registry = FFI_REGISTRY.get_or_init(|| std::sync::Mutex::new(crate::ffi::native::FfiRegistry::new()));
+                    let mut reg = registry.lock()
+                        .map_err(|e| NuError::VMError(format!("FFI registry lock failed: {}", e)))?;
+                    // SAFETY: resolve_or_load opens the library if needed.
+                    unsafe { reg.resolve_or_load(&def.library, &def.symbol, signature) }
+                        .map_err(|e| NuError::VMError(format!("FFI resolve/load failed for {}: {}", def.symbol, e)))?
+                };
+
+                // SAFETY: func.ptr points to a function whose ABI matches signature.
+                let mut result = unsafe { call_native(&func, &args) }
+                    .map_err(|e| NuError::VMError(format!("FFI call {} failed: {}", def.symbol, e)))?;
+
+                // C string returns are temporary; copy them into the actor heap
+                // and free the temporary CString from cstr_to_value.
+                if ret == CType::CStr {
+                    result = self.copy_cstr_return(result)?;
+                }
+
+                self.frames[frame_idx].regs[dst as usize] = result;
                 return Ok(());
             }
             OpCode::Panic => {
@@ -1412,7 +1503,7 @@ impl VM {
     fn resolve_function(&self, func_val: Value, _module_idx: usize) -> NuResult<(usize, Option<Value>)> {
         if let Some(func_idx) = func_val.as_int() {
             Ok((func_idx as usize, None))
-        } else if (func_val.raw & 0xFFFF_0000_0000_0000) == TAG_CLOSURE {
+        } else if (func_val.raw & TAG_MASK) == TAG_CLOSURE {
             let closure_id = func_val.raw & 0x0000_7FFF_FFFF_FFFF;
             // For closures, the closure_id IS the function index (MVP).
             // In a full implementation, we'd look up the closure env.
@@ -2089,5 +2180,38 @@ mod vm_tests {
         assert_eq!(cb.migrations, &[(5, 11)]);
         assert_eq!(cb.asks, &[(5, "echo".to_string())]);
         assert_eq!(cb.gossips, &["sync".to_string()]);
+    }
+
+    /// Test 23: FFI call to libm sqrt (skipped if libm cannot be opened).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_ffi_call_libm_sqrt() {
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::compiler::Compiler;
+
+        let source = r#"
+            extern "libm.so.6" {
+                fn sqrt(x: Float) -> Float
+            }
+            sqrt(4.0)
+        "#;
+        let tokens = Lexer::new(source).lex().expect("lex");
+        let ast = Parser::new(tokens).parse_module().expect("parse");
+        let mut compiler = Compiler::new("test");
+        let module = compiler.compile_module(&ast).expect("compile").clone();
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        match vm.run() {
+            Ok(result) => {
+                let f = result.as_float().expect("float result");
+                assert!((f - 2.0).abs() < 1e-12, "sqrt(4.0) should be 2.0, got {}", f);
+            }
+            Err(crate::types::NuError::VMError(msg)) if msg.contains("open") || msg.contains("load failed") => {
+                eprintln!("warning: could not open libm.so.6, skipping test: {}", msg);
+            }
+            Err(e) => panic!("unexpected FFI error: {}", e),
+        }
     }
 }

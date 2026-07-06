@@ -5,7 +5,7 @@
 
 ## Project Overview
 
-**Nulang** is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system (Hindley-Milner inference + reference capabilities + row-polymorphic algebraic effects), a register-based bytecode VM, a Cranelift JIT, BEAM/OTP primitives, CRDTs, location-transparent distribution, SQLite/JSON persistence, and PyO3 Python interop. Status: Alpha; ~590+ tests pass (`cargo test`). License: Apache-2.0.
+**Nulang** is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system (Hindley-Milner inference + reference capabilities + row-polymorphic algebraic effects), a register-based bytecode VM, a Cranelift JIT, BEAM/OTP primitives, CRDTs, location-transparent distribution, SQLite/JSON persistence, PyO3 Python interop, and a C-compatible FFI layer. Status: Alpha; ~590+ tests pass (`cargo test`). License: Apache-2.0.
 
 ## Architecture & Data Flow
 
@@ -26,7 +26,7 @@ source &str
 
 ### Backend representation
 - **Value** (`src/vm.rs`): NaN-boxed `u64` (`raw`), 48-bit payload, 16-bit type tag in the quiet-NaN bits. Tags: `TAG_NIL 0x7FF8`, `TAG_UNIT 0x7FF9`, `TAG_BOOL 0x7FFA`, `TAG_INT 0x7FFB`, `TAG_PTR 0x7FFC`, `TAG_ACTOR 0x7FFD`, `TAG_STRING 0x7FFE`, `TAG_CLOSURE 0x7FF7`.
-- **Instruction** (`src/bytecode.rs`): 32-bit fixed-width `{opcode:u8, op1:u8, op2:u8, op3:u8}`; helpers `new0/1/2/3`, `imm16()`, `simm16()`, `offset16()`. ~91 opcodes across 10 categories (Special, Stack/Locals, IntArith, FloatArith, Compare/Logic, Control, Closures, Memory/Objects, Actor, Effects, Python, Capabilities, Distribution, String/IO, Debug).
+- **Instruction** (`src/bytecode.rs`): 32-bit fixed-width `{opcode:u8, op1:u8, op2:u8, op3:u8}`; helpers `new0/1/2/3`, `imm16()`, `simm16()`, `offset16()`. ~92 opcodes across 11 categories (Special, Stack/Locals, IntArith, FloatArith, Compare/Logic, Control, Closures, Memory/Objects, Actor, Effects, Python, Capabilities, FFI, Distribution, String/IO, Debug).
 - **Frames**: 256 registers each; flat `Vec<Frame>` with `caller_idx` links; closures carry `closure_env`.
 
 ### Effects & capabilities at runtime
@@ -52,6 +52,7 @@ Custom TCP wire protocol (`src/runtime/network.rs`): length-prefixed frames, mag
 - `src/jit/` — Cranelift JIT: `mod.rs` (`JitSession`, `tiered_execute_step`, hot counters), `compiler.rs` (scalar CLIF), `typed_compiler.rs`, `simd_analyzer.rs`/`simd_compiler.rs`, `runtime.rs` (extern-C helpers), `tests.rs`.
 - `src/lsp/` — `tower-lsp` language server (single `mod.rs`).
 - `src/python/` — PyO3 interop: `bridge.rs` (GIL + `PythonRegistry`), `marshal.rs` (Value↔Py).
+- `src/ffi/` — C-compatible FFI layer: `mod.rs` (module root + Rust registration API), `native.rs` (dynamic library registry), `marshal.rs` (Value↔C ABI), `c_api.rs` (stable C embedder API).
 - `.cargo/` — `config.toml` (bfd linker + PyO3 abi3 env), `audit.toml` (one ignored advisory).
 - `build.rs` — Fedora libpython symlink workaround for PyO3 linking.
 - `.agents/` — orchestration scratch/handoff artifacts from a prior multi-agent analysis run; **not language source**.
@@ -94,7 +95,7 @@ python3 verify_report.py                          # gate: validates codebase_ana
 - `src/bytecode.rs` — `OpCode` (~91), `Instruction` (32-bit), `Constant`, `CodeModule`, handler/behavior/actor tables.
 - `src/vm.rs` — NaN-boxed `Value`, `Frame`, `VM`, `step`/`run`, effect `handler_stack`/`Continuation`, JIT hook, callback traits.
 - `src/runtime/mod.rs` — `Runtime` god-object; spawn/send/step/schedule/GC/supervision/distribution/persistence/CRDT orchestration.
-- `Cargo.toml` — single crate, no workspace, no features; deps: mimalloc, crossbeam, serde+serde_json, cranelift 0.132, tower-lsp 0.20, tokio (full), pyo3 0.29, rusqlite 0.40 (bundled).
+- `Cargo.toml` — single crate, no workspace, no features; deps: mimalloc, crossbeam, serde+serde_json, cranelift 0.132, tower-lsp 0.20, tokio (full), pyo3 0.29, rusqlite 0.40 (bundled), libloading 0.8. `[lib]` produces both `rlib` and `cdylib`.
 
 ## Runtime/Tooling Preferences
 

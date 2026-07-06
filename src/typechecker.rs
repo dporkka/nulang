@@ -432,6 +432,24 @@ impl TypeChecker {
                 Decl::Actor { name, .. } => {
                     ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
                 }
+                Decl::Extern { funcs, .. } => {
+                    for func in funcs {
+                        let param_types: Vec<Type> =
+                            func.params.iter().map(|(_, t)| t.clone()).collect();
+                        let param_ty = if param_types.len() == 1 {
+                            param_types[0].clone()
+                        } else {
+                            Type::Tuple(param_types)
+                        };
+                        let func_ty = Type::Function {
+                            param: Box::new(param_ty),
+                            ret: Box::new(func.ret.clone()),
+                            effect: EffectRow::singleton(Effect::FFI),
+                            cap: Capability::Ref,
+                        };
+                        ctx.bind(func.name.clone(), func_ty, Capability::Ref);
+                    }
+                }
 
                 _ => {}
             }
@@ -529,6 +547,15 @@ impl TypeChecker {
             Decl::EffectDecl { .. } => Ok((vec![], Type::unit())),
             Decl::Actor { name, behaviors, span, .. } => {
                 self.infer_actor_decl(ctx, name, behaviors, *span)
+            }
+            Decl::Extern { funcs, span, .. } => {
+                for func in funcs {
+                    for (_name, ty) in &func.params {
+                        self.validate_ffi_type(ty, *span)?;
+                    }
+                    self.validate_ffi_type(&func.ret, *span)?;
+                }
+                Ok((vec![], Type::unit()))
             }
 
             Decl::Module { decls, .. } => {
@@ -1678,6 +1705,25 @@ impl TypeChecker {
     // Generalization with tracked context vars
     // -----------------------------------------------------------------------
 
+    /// Validate that a type is usable as an FFI parameter/return type in the MVP.
+    /// Only primitive Int, Float, Bool, String, and Unit are supported.
+    fn validate_ffi_type(&self, ty: &Type, span: Span) -> NuResult<()> {
+        match ty {
+            Type::Primitive(PrimitiveType::Int)
+            | Type::Primitive(PrimitiveType::Float)
+            | Type::Primitive(PrimitiveType::Bool)
+            | Type::Primitive(PrimitiveType::String)
+            | Type::Primitive(PrimitiveType::Unit) => Ok(()),
+            _ => Err(NuError::TypeError {
+                msg: format!(
+                    "Unsupported FFI type: {:?}. Only Int, Float, Bool, String, and Unit are allowed in this MVP.",
+                    ty
+                ),
+                span,
+            }),
+        }
+    }
+
     /// Generalize a type by abstracting over free variables not in the context.
     fn do_generalize(&self, ctx: &TypeContext, ty: &Type) -> Type {
         let ty_fv: HashSet<TypeVar> = ty.free_vars().into_iter().collect();
@@ -2648,5 +2694,122 @@ mod tests {
             span: sp(),
         };
         assert!(tc.infer_expr(&ctx, &handle_bad).is_err());
+    }
+
+    #[test]
+    fn test_extern_function_available_with_ffi_effect() {
+        let module = AstModule {
+            name: "main".to_string(),
+            decls: vec![
+                Decl::Extern {
+                    library: "libm.so.6".to_string(),
+                    funcs: vec![ExternFunc {
+                        name: "sqrt".to_string(),
+                        params: vec![("x".to_string(), Type::float())],
+                        ret: Type::float(),
+                        span: sp(),
+                    }],
+                    span: sp(),
+                },
+                Decl::Function {
+                    name: "use_sqrt".to_string(),
+                    type_params: vec![],
+                    params: vec![],
+                    ret_type: None,
+                    effect: None,
+                    cap: None,
+                    body: Expr::App {
+                        func: Box::new(Expr::Var("sqrt".to_string(), sp())),
+                        args: vec![Expr::Literal(Literal::Float(4.0), sp())],
+                        span: sp(),
+                    },
+                    public: false,
+                    span: sp(),
+                },
+            ],
+        };
+        let mut tc = TypeChecker::new();
+        let ty = tc.check_module(&module).unwrap();
+        // use_sqrt is a parameterless function returning Float.
+        match ty {
+            Type::Function { param, ret, .. } => {
+                assert_eq!(*param, Type::Tuple(vec![]));
+                assert_eq!(*ret, Type::float());
+            }
+            other => panic!("Expected function type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extern_function_type_has_ffi_effect() {
+        let mut tc = TypeChecker::new();
+        let mut ctx = TypeContext::new();
+        let extern_ty = Type::Function {
+            param: Box::new(Type::float()),
+            ret: Box::new(Type::float()),
+            effect: EffectRow::singleton(Effect::FFI),
+            cap: Capability::Ref,
+        };
+        ctx.bind("sqrt", extern_ty, Capability::Ref);
+        let (_s, ty) = tc.infer_expr(&ctx, &var("sqrt")).unwrap();
+        match ty {
+            Type::Function { effect, .. } => {
+                assert!(effect.contains(&Effect::FFI));
+            }
+            other => panic!("Expected function type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extern_unsupported_param_type_errors() {
+        let module = AstModule {
+            name: "main".to_string(),
+            decls: vec![Decl::Extern {
+                library: "lib".to_string(),
+                funcs: vec![ExternFunc {
+                    name: "bad".to_string(),
+                    params: vec![("x".to_string(), Type::Array(Box::new(Type::int())))],
+                    ret: Type::int(),
+                    span: sp(),
+                }],
+                span: sp(),
+            }],
+        };
+        let mut tc = TypeChecker::new();
+        let result = tc.check_module(&module);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NuError::TypeError { msg, .. } => {
+                assert!(msg.contains("Unsupported FFI type"));
+                assert!(msg.contains("Array"));
+            }
+            other => panic!("Expected TypeError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_extern_unsupported_return_type_errors() {
+        let module = AstModule {
+            name: "main".to_string(),
+            decls: vec![Decl::Extern {
+                library: "lib".to_string(),
+                funcs: vec![ExternFunc {
+                    name: "bad".to_string(),
+                    params: vec![("x".to_string(), Type::int())],
+                    ret: Type::Record(vec![("a".to_string(), Type::int())]),
+                    span: sp(),
+                }],
+                span: sp(),
+            }],
+        };
+        let mut tc = TypeChecker::new();
+        let result = tc.check_module(&module);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NuError::TypeError { msg, .. } => {
+                assert!(msg.contains("Unsupported FFI type"));
+            }
+            other => panic!("Expected TypeError, got {:?}", other),
+        }
     }
 }

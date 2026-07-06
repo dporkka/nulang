@@ -79,6 +79,7 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "LLM" => Effect::LLM,
         "Cost" => Effect::Cost,
         "Event" => Effect::Event,
+        "FFI" => Effect::FFI,
         other => Effect::UserDefined(other.to_string()),
     }
 }
@@ -1313,6 +1314,11 @@ mod tests {
             parse_effect_name("MyEffect"),
             Effect::UserDefined("MyEffect".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_effect_name_ffi() {
+        assert_eq!(parse_effect_name("FFI"), Effect::FFI);
     }
 
     // -----------------------------------------------------------------------

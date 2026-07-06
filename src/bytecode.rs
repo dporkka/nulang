@@ -135,6 +135,9 @@ pub enum OpCode {
     CapDown = 0xA2, // Capability downgrade (ref -> box)
     CapSend = 0xA3, // Mark value as sendable (check iso/val/tag)
 
+    // == FFI (0xB0-0xBF) ==
+    FFICall = 0xB0, // Call foreign function (func_idx high, func_idx low, dst)
+
     // == Distribution (0xD0-0xDF) ==
     NodeId  = 0xD0, // Get current node id (dst)
     Migrate = 0xD1, // Migrate actor (addr_reg, node_id_reg, dst)
@@ -203,6 +206,7 @@ impl OpCode {
             0x9A => Some(PyFromNu), 0x9B => Some(PyRelease),
             0xA0 => Some(CapChk), 0xA1 => Some(CapUp), 0xA2 => Some(CapDown),
             0xA3 => Some(CapSend),
+            0xB0 => Some(FFICall),
             0xD0 => Some(NodeId), 0xD1 => Some(Migrate), 0xD2 => Some(RSend),
             0xD3 => Some(RAsk), 0xD4 => Some(RSpawn), 0xD5 => Some(Gossip),
             0xE0 => Some(SConcat), 0xE1 => Some(SPrint), 0xE2 => Some(SRead),
@@ -367,6 +371,30 @@ impl ActorMeta {
 }
 
 // ---------------------------------------------------------------------------
+// FFI Function Definition
+// ---------------------------------------------------------------------------
+
+/// FFI primitive types supported by the bytecode compiler and VM.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FfiType {
+    Int,
+    Float,
+    Bool,
+    String,
+    Unit,
+    Pointer,
+}
+
+/// A foreign function declared in an `extern "lib" { ... }` block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignFunctionDef {
+    pub library: String,
+    pub symbol: String,
+    pub params: Vec<FfiType>,
+    pub ret: FfiType,
+}
+
+// ---------------------------------------------------------------------------
 // Code Module
 // ---------------------------------------------------------------------------
 
@@ -385,6 +413,8 @@ pub struct CodeModule {
     pub handler_tables: Vec<HandlerTable>,
     /// Actor metadata for durable execution (v0.7).
     pub actor_metadata: Vec<ActorMeta>,
+    /// Foreign function definitions from `extern` blocks.
+    pub foreign_functions: Vec<ForeignFunctionDef>,
 }
 
 impl CodeModule {
@@ -399,6 +429,7 @@ impl CodeModule {
             entry_point: None,
             handler_tables: Vec::new(),
             actor_metadata: Vec::new(),
+            foreign_functions: Vec::new(),
         }
     }
 

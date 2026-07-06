@@ -334,6 +334,21 @@ pub enum Decl {
         items: Vec<String>,
         span: Span,
     },
+    /// Foreign function interface block: extern "lib" { fn f(x: T) -> R }
+    Extern {
+        library: String,
+        funcs: Vec<ExternFunc>,
+        span: Span,
+    },
+}
+
+/// Foreign function declaration inside an `extern` block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternFunc {
+    pub name: String,
+    pub params: Vec<(String, Type)>,
+    pub ret: Type,
+    pub span: Span,
 }
 
 // ---------------------------------------------------------------------------

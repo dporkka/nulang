@@ -26,16 +26,12 @@ use crate::python::bridge::{register_object, get_object, PythonObjectId, PyBridg
 use crate::vm::Value;
 
 // ---------------------------------------------------------------------------
-// Constants (mirrored from vm.rs for local use)
+// Constants (from src/value_layout.rs)
 // ---------------------------------------------------------------------------
 
-// These constants must stay in sync with the NaN-boxing layout in src/vm.rs.
 // `TAG_PYTHON` is defined in src/python/bridge.rs and imported here so the
 // canonical value is not duplicated.
-const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
-const TAG_PTR: u64 = 0x7FFC_0000_0000_0000;
-const TAG_ACTOR: u64 = 0x7FFD_0000_0000_0000;
-const TAG_STRING: u64 = 0x7FFE_0000_0000_0000;
+use crate::value_layout::{TAG_MASK, TAG_PTR, TAG_ACTOR, TAG_STRING};
 
 // ---------------------------------------------------------------------------
 // Nulang → Python

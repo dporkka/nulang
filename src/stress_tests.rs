@@ -5,11 +5,13 @@
 //! scheduler fairness under load.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::runtime::*;
-use crate::vm::Value;
 use crate::types::ExitReason;
+use crate::vm::{Value, VM};
 
 // ---------------------------------------------------------------------------
 // Helper: TestContext
@@ -657,4 +659,677 @@ fn stress_supervisor_crash_during_recovery() {
         "at least root should remain, got {} actors",
         post_count
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test 11 — Registry High Churn
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_registry_high_churn() {
+    let mut rt = Runtime::new();
+    const N: usize = 500;
+    let mut ids = Vec::with_capacity(N);
+
+    for i in 0..N {
+        let id = rt.spawn_actor(Box::new(move || vec![
+            ("name".into(), Value::int(200 + i as i64)),
+        ]));
+        ids.push(id);
+        let name = format!("worker_{}", i);
+        rt.registry.register(&name, id).unwrap();
+    }
+
+    assert_eq!(rt.registry.registered().len(), N);
+
+    for i in 0..N {
+        let name = format!("worker_{}", i);
+        assert_eq!(rt.registry.whereis(&name), Some(ids[i]));
+    }
+
+    for i in (0..N).step_by(2) {
+        let name = format!("worker_{}", i);
+        rt.registry.unregister(&name).unwrap();
+    }
+
+    assert_eq!(rt.registry.registered().len(), N / 2);
+    rt.run_scheduler();
+
+    for i in 0..N {
+        let name = format!("worker_{}", i);
+        if i % 2 == 0 {
+            assert_eq!(rt.registry.whereis(&name), None);
+        } else {
+            assert_eq!(rt.registry.whereis(&name), Some(ids[i]));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 12 — Process Groups Membership Churn
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_process_groups_membership_churn() {
+    let mut rt = Runtime::new();
+    const N: usize = 200;
+    let mut ids = Vec::with_capacity(N);
+
+    for i in 0..N {
+        let id = rt.spawn_actor(Box::new(move || vec![
+            ("name".into(), Value::int(300 + i as i64)),
+        ]));
+        ids.push(id);
+    }
+
+    for (i, id) in ids.iter().enumerate() {
+        let group = format!("group_{}", i % 10);
+        rt.process_groups.join(&group, *id).unwrap();
+    }
+
+    for g in 0..10 {
+        let group = format!("group_{}", g);
+        assert_eq!(rt.process_groups.member_count(&group), N / 10);
+    }
+
+    for (i, id) in ids.iter().enumerate() {
+        if i % 3 == 0 {
+            let group = format!("group_{}", i % 10);
+            assert!(rt.process_groups.leave(&group, *id));
+        }
+    }
+
+    for g in 0..10 {
+        let group = format!("group_{}", g);
+        let remaining = rt.process_groups.member_count(&group);
+        assert!(remaining > 0);
+        assert!(remaining <= N / 10);
+    }
+
+    let victim = ids[1];
+    rt.exit_actor(victim, ExitReason::Error("pg_exit".into()));
+    rt.run_scheduler();
+
+    for g in 0..10 {
+        let group = format!("group_{}", g);
+        assert!(!rt.process_groups.is_member(&group, victim));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 13 — Timer Wheel Overload
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_timer_wheel_overload() {
+    let mut rt = Runtime::new();
+    let actor = rt.spawn_actor(Box::new(|| vec![
+        ("name".into(), Value::int(400)),
+    ]));
+
+    let mut ids = Vec::new();
+    for i in 0..5_000 {
+        let delay = std::time::Duration::from_nanos((i % 100 + 1) as u64);
+        let id = rt.timer_wheel.send_after(delay, actor, 1, vec![Value::int(i as i64)]);
+        ids.push(id);
+    }
+
+    assert_eq!(rt.timer_wheel.len(), 5_000);
+
+    for i in (0..5_000).step_by(2) {
+        assert!(rt.timer_wheel.cancel(ids[i]));
+    }
+
+    assert_eq!(rt.timer_wheel.len(), 2_500);
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let fired = rt.timer_wheel.tick(std::time::Instant::now());
+    assert!(!fired.is_empty(), "some timers should have fired");
+}
+
+// ---------------------------------------------------------------------------
+// Test 14 — Persistent Actor Checkpoint / Recovery
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_persistent_actor_checkpoint_recovery() {
+    let mut rt = Runtime::new();
+    let mut models = HashMap::new();
+    models.insert("counter".to_string(), StateModel::Durable);
+    models.insert("scratch".to_string(), StateModel::Local);
+
+    let actor_id = rt.spawn_persistent_actor(Box::new(|| vec![
+        ("counter".into(), Value::int(0)),
+        ("scratch".into(), Value::int(0)),
+    ]), models);
+
+    if let Some(actor) = rt.actors.get_mut(&actor_id) {
+        actor.set_state_field("counter", Value::int(42));
+        actor.set_state_field("scratch", Value::int(99));
+    }
+
+    rt.checkpoint_actor(actor_id);
+    assert_eq!(rt.persistence.latest_sequence(actor_id), 1);
+
+    rt.actors.remove(&actor_id);
+    let recovered = rt.recover_actor(actor_id);
+    assert_eq!(recovered, Some(actor_id));
+
+    let counter = rt.actors.get(&actor_id)
+        .and_then(|a| a.get_state_field("counter"))
+        .and_then(|v| v.as_int());
+    assert_eq!(counter, Some(42));
+
+    let scratch = rt.actors.get(&actor_id)
+        .and_then(|a| a.get_state_field("scratch"));
+    assert_eq!(scratch, None, "Local fields should not survive recovery");
+}
+
+// ---------------------------------------------------------------------------
+// Test 15 — CRDT Counter Merge Stress
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_crdt_counter_merge_stress() {
+    let mut counter_a = GCounter::new(1);
+    let mut counter_b = GCounter::new(2);
+
+    for _ in 0..1_000 {
+        counter_a.increment();
+    }
+    for _ in 0..750 {
+        counter_b.increment();
+    }
+
+    counter_a.merge(&counter_b);
+    assert_eq!(counter_a.value(), 1_750);
+
+    counter_b.merge(&counter_a);
+    assert_eq!(counter_b.value(), 1_750);
+}
+
+// ---------------------------------------------------------------------------
+// Test 16 — CRDT Manager Sync Ops
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_crdt_manager_sync_ops() {
+    let mut manager = CrdtManager::new(1);
+    let (id, _) = manager.create_gcounter();
+
+    for _ in 0..100 {
+        if let Some(c) = manager.get_gcounter_mut(id) {
+            c.increment();
+        }
+    }
+
+    let ops = manager.generate_sync_ops();
+    assert!(!ops.is_empty(), "sync ops should be generated");
+
+    for op in ops {
+        assert_eq!(op.crdt_type, CrdtType::GCounter);
+        assert_eq!(op.crdt_id, id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 17 — Monitor Spawn Storm
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_monitor_spawn_storm() {
+    let mut rt = Runtime::new();
+    let watcher = rt.spawn_actor(Box::new(|| vec![
+        ("name".into(), Value::int(500)),
+    ]));
+
+    let mut ids = Vec::with_capacity(100);
+    for i in 0..100 {
+        let id = rt.spawn_actor(Box::new(move || vec![
+            ("name".into(), Value::int(600 + i as i64)),
+        ]));
+        rt.monitor(watcher, id);
+        ids.push(id);
+    }
+
+    for id in &ids {
+        rt.exit_actor(*id, ExitReason::Error("storm".into()));
+    }
+    rt.run_scheduler();
+
+    for id in &ids {
+        assert!(!rt.actors.contains_key(id));
+    }
+    assert!(rt.actors.contains_key(&watcher), "watcher should survive");
+}
+
+// ---------------------------------------------------------------------------
+// Test 18 — JIT Hot Loop Matches Interpreter
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_jit_hot_loop_then_cold_fallback() {
+    let mut module = CodeModule::new("jit_stress");
+
+    // r0 = sum, r1 = i, r2 = limit, r3 = 1, r4 = condition
+    module.emit(Instruction::new1(OpCode::Const0, 0)); // sum = 0
+    module.emit(Instruction::new1(OpCode::Const0, 1)); // i = 0
+
+    let limit_const = module.add_constant(Constant::Int(100));
+    module.emit(Instruction::new3(OpCode::ConstU,
+        ((limit_const >> 8) & 0xFF) as u8,
+        (limit_const & 0xFF) as u8,
+        2)); // r2 = 100
+
+    module.emit(Instruction::new1(OpCode::Const1, 3)); // r3 = 1
+
+    let loop_start = module.current_offset();
+    module.emit(Instruction::new3(OpCode::ICmpLt, 1, 2, 4)); // r4 = i < limit
+    let jmpf_idx = module.current_offset();
+    module.emit(Instruction::new2(OpCode::JmpF, 4, 0)); // exit if false
+    module.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0)); // sum += i
+    module.emit(Instruction::new3(OpCode::IAdd, 1, 3, 1)); // i += 1
+    let jmp_back_idx = module.current_offset();
+    let back_offset = loop_start as i64 - jmp_back_idx as i64;
+    module.emit(Instruction::new3(OpCode::Jmp,
+        ((back_offset as i16 >> 8) & 0xFF) as u8,
+        (back_offset as i16 & 0xFF) as u8,
+        0));
+
+    let after_loop = module.current_offset();
+    if let Some(instr) = module.instructions.get_mut(jmpf_idx) {
+        let forward_offset = after_loop as i64 - jmpf_idx as i64;
+        instr.op2 = ((forward_offset as i16 >> 8) & 0xFF) as u8;
+        instr.op3 = (forward_offset as i16 & 0xFF) as u8;
+    }
+    module.emit(Instruction::new0(OpCode::Halt));
+    module.entry_point = Some(0);
+
+    crate::jit::reset_hot_counters();
+    let mut vm = VM::new();
+    vm.load_module(module.clone());
+    let cold_result = vm.run_from(0, 0).unwrap();
+    assert_eq!(cold_result.as_int(), Some(4950), "sum 0..100 should be 4950");
+
+    // Heat the entry region until it is JIT-compiled.
+    crate::jit::reset_hot_counters();
+    for _ in 0..2_000 {
+        let _ = vm.run_from(0, 0);
+    }
+
+    let hot_result = vm.run_from(0, 0).unwrap();
+    assert_eq!(hot_result.as_int(), cold_result.as_int(),
+        "JIT hot loop should match interpreter");
+    assert_eq!(hot_result.as_int(), Some(4950));
+
+    // A fresh VM with reset counters should still compute the same value.
+    crate::jit::reset_hot_counters();
+    let mut fresh_vm = VM::new();
+    fresh_vm.load_module(module);
+    let fallback = fresh_vm.run_from(0, 0).unwrap();
+    assert_eq!(fallback.as_int(), Some(4950));
+}
+
+// ---------------------------------------------------------------------------
+// Test 19 — Remote Actor Cache LRU Eviction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_remote_actor_cache_lru_eviction() {
+    let mut cache = RemoteActorCache::new(100);
+    let node = NodeId(7);
+
+    for i in 0..500u64 {
+        cache.put(node, i);
+    }
+
+    assert_eq!(cache.len(), 100, "cache should not exceed capacity");
+
+    for i in 400..500 {
+        assert!(
+            cache.get(node, i).is_some(),
+            "recently inserted entries should remain"
+        );
+    }
+
+    for i in 0..400 {
+        assert!(
+            cache.get(node, i).is_none(),
+            "least-recently-used entries should be evicted"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 20 — Supervisor Restart Intensity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_supervisor_restart_intensity() {
+    let mut rt = Runtime::new();
+    let sup = rt.create_supervisor("intense", RestartStrategy::OneForOne);
+
+    let mut children = Vec::new();
+    for i in 0..50 {
+        let child = rt.spawn_actor(Box::new(move || vec![
+            ("name".into(), Value::int(700 + i as i64)),
+        ]));
+        let spec = ChildSpec::new(format!("child_{}", i), RestartPolicy::Permanent);
+        rt.supervise_child(sup, spec, child);
+        children.push(child);
+    }
+
+    for child in &children {
+        rt.exit_actor(*child, ExitReason::Error("intensity_crash".into()));
+    }
+    rt.run_scheduler();
+
+    assert!(rt.actors.contains_key(&sup), "supervisor should survive");
+    if let Some(supervisor) = rt.supervisors.get(&sup) {
+        assert!(supervisor.child_count() >= 50, "all children should be restarted");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 21 — GC Foreign Reference Churn
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_gc_foreign_ref_churn() {
+    let mut rt = Runtime::new();
+    let source = rt.spawn_actor(Box::new(|| vec![
+        ("name".into(), Value::int(800)),
+    ]));
+    let target = rt.spawn_actor(Box::new(|| vec![
+        ("name".into(), Value::int(801)),
+    ]));
+
+    rt.current_actor = Some(source);
+
+    let mut ptrs: Vec<*mut u8> = Vec::with_capacity(500);
+    if let Some(actor) = rt.actors.get_mut(&source) {
+        for _ in 0..500 {
+            if let Some(ptr) = actor.heap.alloc(16, TypeTag::Raw) {
+                ptrs.push(ptr);
+            }
+        }
+    }
+
+    for ptr in &ptrs {
+        rt.send_message(target, "ref", &[Value::ptr(*ptr)]);
+    }
+
+    let stats = rt.gc_stats();
+    assert!(
+        stats.foreign_refs_sent.load(Ordering::Relaxed) >= 500,
+        "foreign refs should be sent"
+    );
+
+    // Process the delivered ops repeatedly; the stress goal is to exercise
+    // the coordinator/cycle-detector path without panicking.
+    for _ in 0..5 {
+        rt.process_gc_ops();
+    }
+
+    assert!(rt.actors.contains_key(&target));
+    assert!(rt.actors.contains_key(&source));
+}
+
+// ---------------------------------------------------------------------------
+// Test 22 — Distribution Local Fallback When Disabled
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_distribution_local_fallback_when_disabled() {
+    let mut rt = Runtime::new();
+    let actor = rt.spawn_actor(Box::new(|| vec![
+        ("name".into(), Value::int(900)),
+    ]));
+
+    assert!(!rt.distributed_enabled);
+
+    let local_addr = ActorAddress::local(actor);
+    rt.send_distributed(local_addr, "ping", &[Value::int(1)]);
+
+    assert!(
+        rt.actors.get(&actor).map(|a| !a.mailbox.is_empty()).unwrap_or(false),
+        "message should be delivered locally"
+    );
+
+    rt.run_scheduler();
+    assert!(rt.actors.contains_key(&actor));
+}
+
+// ---------------------------------------------------------------------------
+// Test 23 — Reduction Yield Under Pressure
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_reduction_yield_under_pressure() {
+    let mut rt = Runtime::new();
+    let mut actors = Vec::new();
+
+    for i in 0..50 {
+        let id = rt.spawn_actor(Box::new(move || vec![
+            ("name".into(), Value::int(1000 + i as i64)),
+            ("quota".into(), Value::int(5)),
+        ]));
+        actors.push(id);
+    }
+
+    for id in &actors {
+        for i in 0..100 {
+            rt.send_message(*id, "work", &[Value::int(i)]);
+        }
+    }
+
+    rt.run_scheduler();
+
+    let total_reductions: u32 = actors.iter()
+        .filter_map(|id| rt.actors.get(id).map(|a| a.reduction_count))
+        .sum();
+    assert!(total_reductions > 0, "some work should have been performed");
+
+    for id in &actors {
+        if let Some(actor) = rt.actors.get(id) {
+            assert!(actor.mailbox.is_empty(), "all mailboxes should be drained");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 24 — Actor Heap Allocation Pressure
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_actor_heap_allocation_pressure() {
+    let mut rt = Runtime::new();
+    let actor = rt.spawn_actor(Box::new(|| vec![
+        ("name".into(), Value::int(1100)),
+    ]));
+
+    let allocated = {
+        let mut count = 0;
+        if let Some(a) = rt.actors.get_mut(&actor) {
+            for _ in 0..2_000 {
+                if a.heap.alloc(64, TypeTag::Raw).is_some() {
+                    count += 1;
+                }
+            }
+        }
+        count
+    };
+
+    assert!(allocated > 0, "some objects should allocate");
+    assert!(rt.actors.get(&actor).map(|a| a.heap.used() > 0).unwrap_or(false));
+}
+
+// ---------------------------------------------------------------------------
+// Test 25 — Cascading Supervisor Shutdown
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_cascading_supervisor_shutdown() {
+    let mut rt = Runtime::new();
+    let root = rt.create_supervisor("root", RestartStrategy::OneForAll);
+
+    let mut supervisors = Vec::new();
+    for i in 0..5 {
+        let sup = rt.create_supervisor(&format!("sub_{}", i), RestartStrategy::OneForOne);
+        rt.supervise_child(root, ChildSpec::new(format!("sub_{}", i), RestartPolicy::Permanent), sup);
+        supervisors.push(sup);
+
+        for j in 0..5 {
+            let leaf = rt.spawn_actor(Box::new(move || vec![
+                ("name".into(), Value::int(1200 + i * 10 + j as i64)),
+            ]));
+            rt.supervise_child(sup, ChildSpec::new(format!("leaf_{}_{}", i, j), RestartPolicy::Permanent), leaf);
+        }
+    }
+
+    let pre_count = rt.actors.len();
+    assert!(pre_count > 25);
+
+    rt.exit_actor(root, ExitReason::Error("root_shutdown".into()));
+    rt.run_scheduler();
+
+    assert!(!rt.actors.contains_key(&root), "root supervisor should be removed");
+    let post_count = rt.actors.len();
+    assert!(post_count < pre_count, "supervisor tree should shrink");
+}
+
+// ---------------------------------------------------------------------------
+// Test 26 — Persistence Journal Replay Ordering
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_persistence_journal_replay_ordering() {
+    let mut rt = Runtime::new();
+    let actor_id = 42u64;
+
+    for seq in 1..=20 {
+        rt.persistence.append_journal(actor_id, JournalEntry {
+            sequence: seq,
+            behavior_id: (seq % 3) as u16,
+            payload: vec![PersistedValue::from_value(&Value::int(seq as i64))],
+        }).unwrap();
+    }
+
+    let journal = rt.persistence.read_journal(actor_id);
+    assert_eq!(journal.len(), 20);
+
+    for (i, entry) in journal.iter().enumerate() {
+        assert_eq!(entry.sequence, (i + 1) as u64);
+        assert_eq!(entry.payload, vec![PersistedValue::Int((i + 1) as i64)]);
+    }
+
+    assert_eq!(rt.persistence.latest_sequence(actor_id), 20);
+}
+
+// ---------------------------------------------------------------------------
+// Test 27 — Cycle Detector Epoch Gating
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_cycle_detector_epoch_gating() {
+    let mut rt = Runtime::new();
+    let initial_epoch = rt.cycle_detector.current_epoch();
+
+    for _ in 0..25 {
+        rt.process_gc_ops();
+    }
+
+    assert!(
+        rt.cycle_detector.current_epoch() > initial_epoch,
+        "cycle detector epoch should advance"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 28 — Mailbox System Priority Preservation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_mailbox_system_priority_preservation() {
+    let mut rt = Runtime::new();
+    let actor = rt.spawn_actor(Box::new(|| vec![
+        ("name".into(), Value::int(1400)),
+    ]));
+
+    for i in 0..1_000 {
+        let msg = Message {
+            behavior_id: 1,
+            payload: vec![Value::int(i)],
+            sender: 0,
+            priority: MessagePriority::Normal,
+        };
+        if let Some(a) = rt.actors.get_mut(&actor) {
+            let _ = a.mailbox.push(msg);
+        }
+    }
+
+    for i in 0..10 {
+        let msg = Message {
+            behavior_id: 0,
+            payload: vec![Value::int(1000 + i)],
+            sender: 0,
+            priority: MessagePriority::System,
+        };
+        if let Some(a) = rt.actors.get_mut(&actor) {
+            let _ = a.mailbox.push(msg);
+        }
+    }
+
+    let mut system_seen = 0;
+    let mut normal_seen = 0;
+    if let Some(a) = rt.actors.get_mut(&actor) {
+        while let Some(msg) = a.mailbox.pop() {
+            match msg.priority {
+                MessagePriority::System => system_seen += 1,
+                MessagePriority::Normal => normal_seen += 1,
+                MessagePriority::Bulk => {}
+            }
+        }
+    }
+
+    assert_eq!(system_seen, 10, "all system messages should be preserved");
+    assert_eq!(normal_seen, 1_000, "all normal messages should be preserved");
+}
+
+// ---------------------------------------------------------------------------
+// Test 29 — Trap Exit With Monitor Storm
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_trap_exit_with_monitor_storm() {
+    let mut rt = Runtime::new();
+    let trapper = rt.spawn_actor(Box::new(|| vec![
+        ("name".into(), Value::int(1500)),
+    ]));
+
+    if let Some(actor) = rt.actors.get_mut(&trapper) {
+        actor.trap_exits = true;
+    }
+
+    let mut ids = Vec::with_capacity(100);
+    for i in 0..100 {
+        let id = rt.spawn_actor(Box::new(move || vec![
+            ("name".into(), Value::int(1600 + i as i64)),
+        ]));
+        rt.monitor(trapper, id);
+        ids.push(id);
+    }
+
+    for id in &ids {
+        rt.exit_actor(*id, ExitReason::Error("monitored".into()));
+    }
+    rt.run_scheduler();
+
+    assert!(rt.actors.contains_key(&trapper), "trapper should survive");
+    if let Some(actor) = rt.actors.get(&trapper) {
+        assert!(
+            actor.mailbox.len() > 0 || actor.reduction_count > 0,
+            "trapper should have received exit/DOWN messages"
+        );
+    }
 }

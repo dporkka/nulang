@@ -1,6 +1,6 @@
 [package]
 name = "nulang"
-version = "0.1.0"
+version = "0.13.0-alpha.1"
 edition = "2021"
 authors = ["David Porkka"]
 license = "Apache-2.0"
@@ -32,8 +32,12 @@ pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"] }
 # SQLite persistence backend
 rusqlite = { version = "0.40", features = ["bundled"] }
 
+# Native library loading
+libloading = "0.8"
+
 [lib]
 name = "nulang"
+crate-type = ["rlib", "cdylib"]
 path = "src/lib.rs"
 
 [[bin]]

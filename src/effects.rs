@@ -129,6 +129,7 @@ fn format_effect(eff: &Effect) -> String {
         Effect::LLM => "LLM".to_string(),
         Effect::Cost => "Cost".to_string(),
         Effect::Event => "Event".to_string(),
+        Effect::FFI => "FFI".to_string(),
         Effect::UserDefined(s) => s.clone(),
     }
 }

@@ -1,90 +1,75 @@
 //! Runtime helper functions callable from JIT-compiled code.
 
 use crate::vm::Value;
-
-const TAG_INT: u64 = 0x7FFB_0000_0000_0000;
-
-#[inline]
-fn sext48(bits: u64) -> i64 {
-    if bits & 0x0000800000000000 != 0 {
-        (bits | 0xFFFF000000000000) as i64
-    } else {
-        bits as i64
-    }
-}
-
-#[inline]
-fn tag_int(n: i64) -> u64 {
-    TAG_INT | ((n as u64) & 0x0000FFFFFFFFFFFF)
-}
+use crate::value_layout::{sext48, tag_int, PAYLOAD_MASK};
 
 #[no_mangle]
 pub extern "C" fn nulang_iadd(a: u64, b: u64) -> u64 {
-    tag_int(sext48(a & 0x0000FFFFFFFFFFFF) + sext48(b & 0x0000FFFFFFFFFFFF))
+    tag_int(sext48(a & PAYLOAD_MASK) + sext48(b & PAYLOAD_MASK))
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_isub(a: u64, b: u64) -> u64 {
-    tag_int(sext48(a & 0x0000FFFFFFFFFFFF) - sext48(b & 0x0000FFFFFFFFFFFF))
+    tag_int(sext48(a & PAYLOAD_MASK) - sext48(b & PAYLOAD_MASK))
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_imul(a: u64, b: u64) -> u64 {
-    tag_int(sext48(a & 0x0000FFFFFFFFFFFF) * sext48(b & 0x0000FFFFFFFFFFFF))
+    tag_int(sext48(a & PAYLOAD_MASK) * sext48(b & PAYLOAD_MASK))
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_idiv(a: u64, b: u64) -> u64 {
-    let bv = sext48(b & 0x0000FFFFFFFFFFFF);
+    let bv = sext48(b & PAYLOAD_MASK);
     if bv == 0 { return Value::nil().as_raw(); }
-    tag_int(sext48(a & 0x0000FFFFFFFFFFFF) / bv)
+    tag_int(sext48(a & PAYLOAD_MASK) / bv)
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_imod(a: u64, b: u64) -> u64 {
-    let bv = sext48(b & 0x0000FFFFFFFFFFFF);
+    let bv = sext48(b & PAYLOAD_MASK);
     if bv == 0 { return Value::nil().as_raw(); }
-    tag_int(sext48(a & 0x0000FFFFFFFFFFFF) % bv)
+    tag_int(sext48(a & PAYLOAD_MASK) % bv)
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_ineg(a: u64) -> u64 {
-    tag_int(-sext48(a & 0x0000FFFFFFFFFFFF))
+    tag_int(-sext48(a & PAYLOAD_MASK))
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_iinc(a: u64) -> u64 {
-    tag_int(sext48(a & 0x0000FFFFFFFFFFFF) + 1)
+    tag_int(sext48(a & PAYLOAD_MASK) + 1)
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_idec(a: u64) -> u64 {
-    tag_int(sext48(a & 0x0000FFFFFFFFFFFF) - 1)
+    tag_int(sext48(a & PAYLOAD_MASK) - 1)
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_eq(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) == sext48(b & 0x0000FFFFFFFFFFFF)).as_raw()
+    Value::bool(sext48(a & PAYLOAD_MASK) == sext48(b & PAYLOAD_MASK)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_lt(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) < sext48(b & 0x0000FFFFFFFFFFFF)).as_raw()
+    Value::bool(sext48(a & PAYLOAD_MASK) < sext48(b & PAYLOAD_MASK)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_gt(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) > sext48(b & 0x0000FFFFFFFFFFFF)).as_raw()
+    Value::bool(sext48(a & PAYLOAD_MASK) > sext48(b & PAYLOAD_MASK)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_le(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) <= sext48(b & 0x0000FFFFFFFFFFFF)).as_raw()
+    Value::bool(sext48(a & PAYLOAD_MASK) <= sext48(b & PAYLOAD_MASK)).as_raw()
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_ge(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & 0x0000FFFFFFFFFFFF) >= sext48(b & 0x0000FFFFFFFFFFFF)).as_raw()
+    Value::bool(sext48(a & PAYLOAD_MASK) >= sext48(b & PAYLOAD_MASK)).as_raw()
 }
 
 #[no_mangle]
@@ -143,7 +128,7 @@ pub extern "C" fn nulang_or(a: u64, b: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn nulang_itof(a: u64) -> u64 {
-    Value::float(sext48(a & 0x0000FFFFFFFFFFFF) as f64).as_raw()
+    Value::float(sext48(a & PAYLOAD_MASK) as f64).as_raw()
 }
 
 #[no_mangle]

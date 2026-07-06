@@ -4,7 +4,7 @@
 
 use crate::ast::*;
 use crate::bytecode::*;
-use crate::types::{NuResult, Span, Type};
+use crate::types::{NuError, NuResult, PrimitiveType, Span, Type};
 
 /// Workaround for the `Self` opcode (0x83) which conflicts with the Rust keyword.
 fn op_self() -> OpCode {
@@ -31,6 +31,19 @@ fn pattern_bindings(pat: &Pattern, out: &mut std::collections::HashSet<String>) 
         }
         Pattern::Variant(_, Some(inner)) => pattern_bindings(inner, out),
         Pattern::Variant(_, None) => {}
+    }
+}
+
+/// Map a Nulang primitive type to its FFI representation.
+fn nulang_type_to_ffi_type(ty: &Type) -> Option<FfiType> {
+    match ty {
+        Type::Primitive(PrimitiveType::Int) => Some(FfiType::Int),
+        Type::Primitive(PrimitiveType::Float) => Some(FfiType::Float),
+        Type::Primitive(PrimitiveType::Bool) => Some(FfiType::Bool),
+        Type::Primitive(PrimitiveType::String) => Some(FfiType::String),
+        Type::Primitive(PrimitiveType::Unit) => Some(FfiType::Unit),
+        Type::Primitive(PrimitiveType::Address) => Some(FfiType::Pointer),
+        _ => None,
     }
 }
 
@@ -148,6 +161,8 @@ pub struct Compiler {
     next_field_id: u8,
     /// Map function names to function_table indices.
     func_map: std::collections::HashMap<String, usize>,
+    /// Map foreign function names to foreign_functions indices.
+    extern_func_map: std::collections::HashMap<String, usize>,
     /// Dedicated high-register allocator for let-bound values, so closures
     /// and other multi-use bindings survive argument/dst register churn.
     binding_reg: u8,
@@ -162,6 +177,7 @@ impl Compiler {
             field_map: std::collections::HashMap::new(),
             next_field_id: 0,
             func_map: std::collections::HashMap::new(),
+            extern_func_map: std::collections::HashMap::new(),
             binding_reg: 240,
         }
     }
@@ -192,6 +208,42 @@ impl Compiler {
                     let func_idx = self.module.function_table.len();
                     self.module.function_table.push(0); // placeholder
                     self.func_map.insert(name.clone(), func_idx);
+                }
+                Decl::Extern { library, funcs, .. } => {
+                    for ef in funcs {
+                        let params = ef
+                            .params
+                            .iter()
+                            .map(|(_, ty)| nulang_type_to_ffi_type(ty))
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or_else(|| {
+                                NuError::FFIError {
+                                    msg: format!(
+                                        "unsupported parameter type in extern function {}",
+                                        ef.name
+                                    ),
+                                    span: ef.span,
+                                }
+                            })?;
+                        let ret = nulang_type_to_ffi_type(&ef.ret).ok_or_else(|| {
+                            NuError::FFIError {
+                                msg: format!(
+                                    "unsupported return type in extern function {}",
+                                    ef.name
+                                ),
+                                span: ef.span,
+                            }
+                        })?;
+                        let def = ForeignFunctionDef {
+                            library: library.clone(),
+                            symbol: ef.name.clone(),
+                            params,
+                            ret,
+                        };
+                        let idx = self.module.foreign_functions.len();
+                        self.module.foreign_functions.push(def);
+                        self.extern_func_map.insert(ef.name.clone(), idx);
+                    }
                 }
                 Decl::Module { decls: subdecls, .. } => {
                     self.collect_functions(subdecls)?;
@@ -394,6 +446,47 @@ impl Compiler {
     fn compile_app(&mut self, func: &Expr, args: &[Expr]) -> NuResult<u8> {
         const FUNC_VALUE_REG: u8 = 254;
         let saved_next_reg = self.next_reg;
+
+        // Direct extern function call: no function value needed.
+        if let Expr::Var(name, span) = func {
+            if let Some(&extern_idx) = self.extern_func_map.get(name) {
+                let def = &self.module.foreign_functions[extern_idx];
+                if def.params.len() != args.len() {
+                    return Err(NuError::FFIError {
+                        msg: format!(
+                            "extern function {} expects {} arguments, got {}",
+                            name,
+                            def.params.len(),
+                            args.len()
+                        ),
+                        span: *span,
+                    });
+                }
+
+                // Compile arguments into consecutive registers r0..rN.
+                self.next_reg = 0;
+                let mut arg_regs = Vec::new();
+                for arg in args {
+                    let arg_reg = self.compile_expr(arg)?;
+                    arg_regs.push(arg_reg);
+                }
+                for (i, &arg_reg) in arg_regs.iter().enumerate() {
+                    if arg_reg != i as u8 {
+                        self.emit(Instruction::new2(OpCode::Move, arg_reg, i as u8));
+                    }
+                }
+
+                let dst = self.alloc_reg();
+                self.emit(Instruction::new3(
+                    OpCode::FFICall,
+                    ((extern_idx >> 8) & 0xFF) as u8,
+                    (extern_idx & 0xFF) as u8,
+                    dst,
+                ));
+                self.next_reg = saved_next_reg.max(dst + 1);
+                return Ok(dst);
+            }
+        }
 
         // Compile the function reference first using normal allocation, then
         // stash the value in a high fixed register. This guarantees argument
@@ -1223,7 +1316,8 @@ impl Compiler {
             | Decl::RecordType { .. }
             | Decl::VariantType { .. }
             | Decl::EffectDecl { .. }
-            | Decl::Import { .. } => {}
+            | Decl::Import { .. }
+            | Decl::Extern { .. } => {}
             Decl::Module { decls, .. } => {
                 for subdecl in decls {
                     self.compile_decl(subdecl)?;

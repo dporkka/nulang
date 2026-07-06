@@ -17,11 +17,11 @@
 //! # NaN Tag Layout (from vm.rs)
 //!
 //! ```text
-//! TAG_INT     = 0x7FF9_0000_0000_0000  (quiet NaN + int tag)
-//! TAG_SPECIAL = 0x7FFC_0000_0000_0000  (true, false, unit, nil)
+//! TAG_INT  = 0x7FFB_0000_0000_0000  (quiet NaN + int tag)
+//! TAG_BOOL = 0x7FFA_0000_0000_0000  (true=1, false=0)
 //! PAYLOAD_MASK = 0x0000_FFFF_FFFF_FFFF
-//! SIGN_BIT    = 0x0000_8000_0000_0000
-//! SIGN_EXT    = 0xFFFF_0000_0000_0000
+//! SIGN_BIT     = 0x0000_8000_0000_0000
+//! SIGN_EXT     = 0xFFFF_0000_0000_0000
 //! ```
 
 use cranelift::prelude::*;
@@ -36,16 +36,16 @@ use crate::bytecode::{Instruction, OpCode};
 use crate::jit::compiler::CompileError;
 
 // ---------------------------------------------------------------------------
-// NaN-tag constants (mirrored from vm.rs / runtime.rs)
+// NaN-tag constants (from src/value_layout.rs)
 // ---------------------------------------------------------------------------
 
-const TAG_INT: i64 = 0x7FF9_0000_0000_0000;
-const TAG_SPECIAL: i64 = 0x7FFC_0000_0000_0000;
-const PAYLOAD_MASK: i64 = 0x0000_FFFF_FFFF_FFFF;
-const SIGN_BIT: i64 = 0x0000_8000_0000_0000;
+use crate::value_layout::{TAG_BOOL, TAG_INT, PAYLOAD_MASK, SIGN_BIT};
+
+const TAG_INT_I64: i64 = TAG_INT as i64;
+const TAG_BOOL_I64: i64 = TAG_BOOL as i64;
+const PAYLOAD_MASK_I64: i64 = PAYLOAD_MASK as i64;
+const SIGN_BIT_I64: i64 = SIGN_BIT as i64;
 const SIGN_EXTEND: i64 = 0xFFFF_0000_0000_0000u64 as i64;
-const SPECIAL_TRUE: i64 = 1;
-const SPECIAL_FALSE: i64 = 2;
 
 // ---------------------------------------------------------------------------
 // TypeMetadata & KnownType
@@ -164,8 +164,8 @@ fn emit_const(
     dst: usize,
     value: i64,
 ) {
-    let tag = builder.ins().iconst(types::I64, TAG_INT);
-    let masked = value & PAYLOAD_MASK;
+    let tag = builder.ins().iconst(types::I64, TAG_INT_I64);
+    let masked = value & PAYLOAD_MASK_I64;
     let val_part = builder.ins().iconst(types::I64, masked);
     let tagged = builder.ins().bor(tag, val_part);
     store_reg(builder, regs_ptr, dst, tagged);
@@ -238,7 +238,7 @@ fn make_unary_sig<M: Module>(module: &M) -> Signature {
 ///
 /// Emits: `band(raw, 0x0000FFFFFFFFFFFF)` — zeroes out the upper 16 tag bits.
 pub(crate) fn emit_extract_payload(builder: &mut FunctionBuilder, raw: Value) -> Value {
-    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK);
+    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK_I64);
     builder.ins().band(raw, mask)
 }
 
@@ -257,7 +257,7 @@ pub(crate) fn emit_extract_payload(builder: &mut FunctionBuilder, raw: Value) ->
 /// extension happens inline with ~5 CLIF instructions.
 pub(crate) fn emit_sext48(builder: &mut FunctionBuilder, raw: Value) -> Value {
     let payload = emit_extract_payload(builder, raw);
-    let sign_mask = builder.ins().iconst(types::I64, SIGN_BIT);
+    let sign_mask = builder.ins().iconst(types::I64, SIGN_BIT_I64);
     let sign_bit = builder.ins().band(raw, sign_mask);
     let zero = builder.ins().iconst(types::I64, 0);
     let is_negative = builder.ins().icmp(IntCC::NotEqual, sign_bit, zero);
@@ -268,10 +268,10 @@ pub(crate) fn emit_sext48(builder: &mut FunctionBuilder, raw: Value) -> Value {
 
 /// Re-tag an i64 value into a NaN-tagged integer.
 ///
-/// Emits: `bor(TAG_INT, band(value, PAYLOAD_MASK))`
+/// Emits: `bor(TAG_INT_I64, band(value, PAYLOAD_MASK_I64))`
 fn emit_tag_int(builder: &mut FunctionBuilder, value: Value) -> Value {
-    let tag = builder.ins().iconst(types::I64, TAG_INT);
-    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK);
+    let tag = builder.ins().iconst(types::I64, TAG_INT_I64);
+    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK_I64);
     let masked = builder.ins().band(value, mask);
     builder.ins().bor(tag, masked)
 }
@@ -288,10 +288,10 @@ fn emit_bitcast_f64_to_i64(builder: &mut FunctionBuilder, val: Value) -> Value {
 
 /// Tag a boolean comparison result (i8 from icmp/fcmp) as a NaN-tagged Bool value.
 ///
-/// Emits: `select cond, TAG_SPECIAL|TRUE, TAG_SPECIAL|FALSE`
+/// Emits: `select cond, TAG_BOOL_I64|TRUE, TAG_BOOL_I64|FALSE`
 fn emit_tag_bool(builder: &mut FunctionBuilder, cond: Value) -> Value {
-    let true_val = builder.ins().iconst(types::I64, TAG_SPECIAL | SPECIAL_TRUE);
-    let false_val = builder.ins().iconst(types::I64, TAG_SPECIAL | SPECIAL_FALSE);
+    let true_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 1);
+    let false_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 0);
     builder.ins().select(cond, true_val, false_val)
 }
 
@@ -499,9 +499,9 @@ fn emit_typed_logic(
         let b_raw = load_reg(builder, regs_ptr, op2);
 
         // Check truthy: compare against tagged false
-        let false_val = builder.ins().iconst(types::I64, TAG_SPECIAL | SPECIAL_FALSE);
+        let false_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 0);
         let nil_val = builder.ins().iconst(types::I64, 0); // nil is 0 for MVP
-        let zero_int = builder.ins().iconst(types::I64, TAG_INT); // tagged 0
+        let zero_int = builder.ins().iconst(types::I64, TAG_INT_I64); // tagged 0
 
         let a_is_false = builder.ins().icmp(IntCC::Equal, a_raw, false_val);
         let a_is_nil = builder.ins().icmp(IntCC::Equal, a_raw, nil_val);
