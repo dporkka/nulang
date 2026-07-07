@@ -32,6 +32,8 @@ use crate::vm::Value;
 // `TAG_PYTHON` is defined in src/python/bridge.rs and imported here so the
 // canonical value is not duplicated.
 use crate::value_layout::{TAG_MASK, TAG_PTR, TAG_ACTOR, TAG_STRING};
+#[cfg(test)]
+use crate::value_layout::TAG_CLOSURE;
 
 // ---------------------------------------------------------------------------
 // Nulang → Python
@@ -585,14 +587,10 @@ mod tests {
     fn test_python_tag_no_collision() {
         ensure_python();
 
-        // These must match the tags defined in src/vm.rs.
-        const VM_TAG_CLOSURE: u64 = 0x7FF7_0000_0000_0000;
-        const VM_TAG_STRING: u64 = 0x7FFE_0000_0000_0000;
-
         // TAG_PYTHON must not collide with closure or string tags.
-        assert_ne!(TAG_PYTHON, VM_TAG_CLOSURE,
+        assert_ne!(TAG_PYTHON, TAG_CLOSURE,
                    "TAG_PYTHON collides with TAG_CLOSURE");
-        assert_ne!(TAG_PYTHON, VM_TAG_STRING,
+        assert_ne!(TAG_PYTHON, TAG_STRING,
                    "TAG_PYTHON collides with TAG_STRING");
 
         // Converting a Python object must produce a value with TAG_PYTHON.
@@ -608,7 +606,7 @@ mod tests {
         );
         assert_ne!(
             val.as_raw() & TAG_MASK,
-            VM_TAG_CLOSURE,
+            TAG_CLOSURE,
             "Python object value should not be tagged as a closure"
         );
 

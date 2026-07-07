@@ -1333,3 +1333,87 @@ fn stress_trap_exit_with_monitor_storm() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Test 30 — GC Cycle Detector Under Foreign Reference Load
+// ---------------------------------------------------------------------------
+
+#[test]
+fn stress_gc_cycle_detector_under_foreign_ref_load() {
+    let mut rt = Runtime::new();
+    const N: usize = 20;
+    const REFS_PER_ACTOR: usize = 50;
+
+    let mut actors: Vec<u64> = Vec::with_capacity(N);
+    for i in 0..N {
+        let id = rt.spawn_actor(Box::new(move || vec![
+            ("name".into(), Value::int(1700 + i as i64)),
+        ]));
+        actors.push(id);
+    }
+
+    // Each actor allocates objects and sends references to its neighbors,
+    // creating a dense graph of foreign references for the cycle detector.
+    let mut ptrs: Vec<Vec<*mut u8>> = vec![Vec::new(); N];
+    for (i, &actor_id) in actors.iter().enumerate() {
+        rt.current_actor = Some(actor_id);
+        if let Some(actor) = rt.actors.get_mut(&actor_id) {
+            for _ in 0..REFS_PER_ACTOR {
+                if let Some(ptr) = actor.heap.alloc(16, TypeTag::Raw) {
+                    ptrs[i].push(ptr);
+                }
+            }
+        }
+    }
+
+    // Forward ring references + backward cross-references to stress the graph.
+    for (i, &actor_id) in actors.iter().enumerate() {
+        rt.current_actor = Some(actor_id);
+        let next = actors[(i + 1) % N];
+        let prev = actors[(i + N - 1) % N];
+
+        for &ptr in &ptrs[i] {
+            rt.send_message_by_id(next, 0, &[Value::ptr(ptr)]);
+            rt.send_message_by_id(prev, 0, &[Value::ptr(ptr)]);
+        }
+    }
+
+    let initial_epoch = rt.cycle_detector.current_epoch();
+    let initial_graph_size = rt.cycle_detector.graph_size();
+    assert!(
+        initial_graph_size > 0,
+        "cycle detector should have tracked foreign-reference sentinels"
+    );
+
+    // Repeatedly process GC ops and run the scheduler to exercise ORCA
+    // reference counting, foreign-op draining, and incremental cycle detection.
+    for _ in 0..50 {
+        rt.process_gc_ops();
+    }
+    rt.run_scheduler();
+    for _ in 0..25 {
+        rt.process_gc_ops();
+    }
+
+    // The detector should have advanced at least one epoch.
+    assert!(
+        rt.cycle_detector.current_epoch() > initial_epoch,
+        "cycle detector epoch should advance under foreign-ref load"
+    );
+
+    // All actors must remain consistent (no panic / no corruption).
+    for &actor_id in &actors {
+        assert!(
+            rt.actors.contains_key(&actor_id),
+            "actor {} should survive GC/cycle-detector stress",
+            actor_id
+        );
+    }
+
+    // Foreign ref accounting should reflect the traffic we injected.
+    let stats = rt.gc_stats();
+    assert!(
+        stats.foreign_refs_sent.load(Ordering::Relaxed) >= (N * REFS_PER_ACTOR * 2) as u64,
+        "foreign refs sent should match injected cross-actor references"
+    );
+}
