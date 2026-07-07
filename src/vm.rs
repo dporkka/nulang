@@ -850,8 +850,13 @@ impl VM {
                     self.frames[caller_idx].regs[dst as usize] = ret_val;
                     self.frames.pop();
                     self.current_frame_idx = Some(caller_idx);
+                    return Ok(());
                 }
-                return Ok(());
+                // No caller frame: halt so that run/run_from stop at the end
+                // of a top-level behavior handler instead of falling through
+                // into the next compiled code region.
+                self.frames[frame_idx].regs[0] = ret_val;
+                return Err(NuError::VMError("Halt".to_string()));
             }
             OpCode::RetVal => {
                 let ret_val = self.frames[frame_idx].regs[instr.op1 as usize];
@@ -860,10 +865,13 @@ impl VM {
                     self.frames[caller_idx].regs[dst as usize] = ret_val;
                     self.frames.pop();
                     self.current_frame_idx = Some(caller_idx);
-                } else {
-                    self.frames[frame_idx].regs[0] = ret_val;
+                    return Ok(());
                 }
-                return Ok(());
+                // No caller frame: halt so that run/run_from stop at the end
+                // of a top-level behavior handler instead of falling through
+                // into the next compiled code region.
+                self.frames[frame_idx].regs[0] = ret_val;
+                return Err(NuError::VMError("Halt".to_string()));
             }
             OpCode::ClosureCall => {
                 let closure_val = self.frames[frame_idx].regs[instr.op1 as usize];

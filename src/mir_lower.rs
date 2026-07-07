@@ -103,8 +103,11 @@ fn lower_stmt(stmt: &hir::Stmt, b: &mut mir::FunctionBuilder) {
             let _ = lower_operand(value, b);
         }
         hir::Stmt::Emit { event, args, .. } => {
-            let _ = event;
-            let _ = args.iter().map(|a| lower_operand(a, b)).collect::<Vec<_>>();
+            let arg_ids: Vec<_> = args.iter().map(|a| lower_operand(a, b)).collect();
+            b.emit(mir::Stmt::Emit {
+                event: event.clone(),
+                args: arg_ids,
+            });
         }
     }
 }

@@ -167,21 +167,7 @@ The following items from earlier reports are now idiomatic and should not be re-
 
 ### 3.2 Outstanding Technical Debt
 
-`cargo check` currently reports approximately 79 warnings. The majority are:
-
-* Unused constants in `src/python/marshal.rs`.
-* Dead fields such as `NativeActorPool.size` and `NativeActorPool.interpreters`.
-* Unused imports and helper functions across the parser and runtime.
-
-These warnings do not break the build, but they obscure new warnings and indicate partially abandoned scaffolding (especially in `src/python/` after the v0.14 Python removal). A cleanup pass is recommended:
-
-```diff
-- pub struct NativeActorPool {
--     size: usize,
--     interpreters: Mutex<Vec<()>>, // Placeholder for Python interpreters
-- }
-+ // NativeActorPool removed — Python interop was dropped in v0.14.
-```
+`cargo check` currently reports 0 warnings. A recent cleanup pass removed dead scaffolding (including the previously referenced `NativeActorPool` structure) and resolved unused constants and imports across the parser, runtime, and Python modules. The `src/python/bridge.rs` and `src/python/marshal.rs` modules are active, tested PyO3 code rather than abandoned scaffolding. Going forward, the project should keep `cargo check` warning-free.
 
 ---
 
@@ -256,9 +242,9 @@ Priority 2: Increase unit-test coverage
   - src/runtime/dual_heap.rs: nursery/tenured promotion tests
   - src/runtime/crdt_manager.rs: mock-network convergence tests
 
-Priority 3: Reduce compiler warnings
-  - Remove or use dead Python-interop scaffolding in src/python/
-  - Address unused constants and dead fields flagged by cargo
+Priority 3: Maintain zero compiler warnings
+  - Cleanup is complete: `cargo check` reports 0 warnings.
+  - `NativeActorPool` was removed and `src/python/bridge.rs` / `src/python/marshal.rs` are active, tested PyO3 code.
 
 Priority 4: Begin specification-driven subsystems
   - DESIGN_AI_SDK.md
@@ -275,6 +261,6 @@ Priority 4: Begin specification-driven subsystems
 - [x] Add regression tests for `src/jit/typed_compiler.rs` and `src/jit/simd_compiler.rs`.
 - [x] Add unit tests for `src/runtime/dual_heap.rs` promotion and alignment.
 - [x] Add mock-network convergence tests for `src/runtime/crdt_manager.rs`.
-- [x] Reduce `cargo check` warnings from ~79 toward zero.
-- [ ] Remove or complete Python native actor scaffolding.
-- [x] Seed the v0.8 Workflow SDK syntax (`workflow`, `step`, `parallel`, `compensate`, `await`, `subworkflow`) in lexer/parser/AST; runtime deferred.
+- [x] Reduce `cargo check` warnings to zero.
+- [x] Remove Python native actor scaffolding (`NativeActorPool`) and verify `src/python/bridge.rs` / `src/python/marshal.rs` are active, tested PyO3 code.
+- [x] Seed the v0.8 Workflow SDK syntax (`workflow`, `step`, `parallel`, `compensate`, `await`, `subworkflow`, `emit`) in lexer/parser/AST; runtime deferred.

@@ -356,6 +356,8 @@ pub struct ActorMeta {
     pub state_defaults: Vec<(String, Constant)>,
     /// Indices into the behavior table that belong to this actor.
     pub behavior_indices: Vec<usize>,
+    /// True if this actor was generated from a `workflow` declaration.
+    pub is_workflow: bool,
 }
 
 impl ActorMeta {
@@ -366,6 +368,7 @@ impl ActorMeta {
             state_models: Vec::new(),
             state_defaults: Vec::new(),
             behavior_indices: Vec::new(),
+            is_workflow: false,
         }
     }
 }

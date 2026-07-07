@@ -4,7 +4,7 @@
 
 use crate::ast::*;
 use crate::bytecode::*;
-use crate::types::{NuError, NuResult, PrimitiveType, Span, Type};
+use crate::types::{Capability, NuError, NuResult, PrimitiveType, Span, Type};
 
 /// Workaround for the `Self` opcode (0x83) which conflicts with the Rust keyword.
 fn op_self() -> OpCode {
@@ -1309,7 +1309,7 @@ impl Compiler {
                 init,
                 ..
             } => {
-                self.compile_actor(name, *persistent, state_fields, behaviors, init)?;
+                self.compile_actor(name, *persistent, state_fields, behaviors, init, false)?;
             }
 
             Decl::TypeAlias { .. }
@@ -1323,11 +1323,8 @@ impl Compiler {
                     self.compile_decl(subdecl)?;
                 }
             }
-            Decl::Workflow { name, span, .. } => {
-                return Err(NuError::NotYetImplemented {
-                    feature: format!("workflow runtime for '{}'", name),
-                    span: *span,
-                });
+            Decl::Workflow { name, steps, span, .. } => {
+                self.compile_workflow(name, steps, *span)?;
             }
         }
         Ok(())
@@ -1391,6 +1388,7 @@ impl Compiler {
         state_fields: &[(String, StateModel, Type, Expr)],
         behaviors: &[Behavior],
         init: &[(String, Expr)],
+        is_workflow: bool,
     ) -> NuResult<()> {
         for (_field_name, expr) in init {
             let _ = self.compile_expr(expr)?;
@@ -1421,9 +1419,46 @@ impl Compiler {
             state_models,
             state_defaults,
             behavior_indices,
+            is_workflow,
         };
         self.module.add_actor_meta(meta);
         Ok(())
+    }
+
+    fn compile_workflow(
+        &mut self,
+        name: &str,
+        steps: &[WorkflowStep],
+        span: Span,
+    ) -> NuResult<()> {
+        // A workflow is a persistent actor with one behavior per step plus a
+        // durable step_index so the runtime can resume sequential execution.
+        let state_fields: Vec<(String, StateModel, Type, Expr)> = vec![
+            (
+                "step_index".to_string(),
+                StateModel::Durable,
+                Type::int(),
+                Expr::Literal(Literal::Int(0), span),
+            ),
+            (
+                "workflow_name".to_string(),
+                StateModel::Durable,
+                Type::string(),
+                Expr::Literal(Literal::String(name.to_string()), span),
+            ),
+        ];
+        let behaviors: Vec<Behavior> = steps
+            .iter()
+            .map(|s| Behavior {
+                name: s.name.clone(),
+                params: Vec::new(),
+                body: s.body.clone(),
+                effect: None,
+                cap: Capability::Ref,
+                span: s.span,
+            })
+            .collect();
+        self.compile_actor(name, true, &state_fields, &behaviors, &[], true)
     }
 
     fn compile_behavior(&mut self, b: &Behavior, actor_name: &str) -> NuResult<()> {

@@ -80,7 +80,7 @@ pub enum Stmt {
     StoreField { obj: LocalId, field: u8, src: LocalId },
     ArrayStore { arr: LocalId, idx: LocalId, src: LocalId },
     StateSet { field_idx: usize, src: LocalId },
-    Emit { event_idx: usize, args: Vec<LocalId> },
+    Emit { event: String, args: Vec<LocalId> },
 }
 
 #[derive(Debug, Clone, PartialEq)]

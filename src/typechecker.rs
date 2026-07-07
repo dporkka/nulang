@@ -450,6 +450,9 @@ impl TypeChecker {
                         ctx.bind(func.name.clone(), func_ty, Capability::Ref);
                     }
                 }
+                Decl::Workflow { name, .. } => {
+                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                }
 
                 _ => {}
             }
@@ -571,10 +574,29 @@ impl TypeChecker {
                 Ok((all_subst, last))
             }
             Decl::Import { .. } => Ok((vec![], Type::unit())),
-            Decl::Workflow { name, span, .. } => Err(NuError::NotYetImplemented {
-                feature: format!("workflow runtime for '{}'", name),
-                span: *span,
-            }),
+            Decl::Workflow {
+                name: _,
+                input,
+                steps,
+                span: _,
+                ..
+            } => {
+                // A workflow declaration is an opaque module-level binding with a
+                // synthetic actor type. Each step body is type-checked in a context
+                // extended with the workflow input, if one is declared.
+                let mut workflow_ctx = ctx.clone();
+                if let Some((input_name, input_ty)) = input {
+                    workflow_ctx.bind(input_name.clone(), input_ty.clone(), Capability::Ref);
+                }
+                for step in steps {
+                    let (_s, _body_ty) = self.infer_expr(&workflow_ctx, &step.body)?;
+                }
+                let workflow_ty = Type::Actor {
+                    state: Box::new(Type::Var(TypeVar::fresh())),
+                    behavior: Box::new(Type::Var(TypeVar::fresh())),
+                };
+                Ok((vec![], workflow_ty))
+            }
         }
     }
 

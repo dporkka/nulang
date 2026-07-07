@@ -38,6 +38,7 @@ pub enum PersistedValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    String(String),
     Nil,
     Unit,
     Actor(u64),
@@ -58,18 +59,21 @@ impl PersistedValue {
         } else if let Some(a) = v.as_actor_id() {
             PersistedValue::Actor(a)
         } else {
+            // Pointers and string references cannot be safely restored without
+            // the owning heap / constant pool, so they normalize to nil.
             PersistedValue::Nil
         }
     }
 
     pub fn to_value(&self) -> Value {
-        match *self {
-            PersistedValue::Int(i) => Value::int(i),
-            PersistedValue::Float(f) => Value::float(f),
-            PersistedValue::Bool(b) => Value::bool(b),
+        match self {
+            PersistedValue::Int(i) => Value::int(*i),
+            PersistedValue::Float(f) => Value::float(*f),
+            PersistedValue::Bool(b) => Value::bool(*b),
+            PersistedValue::String(_) => Value::nil(),
             PersistedValue::Nil => Value::nil(),
             PersistedValue::Unit => Value::unit(),
-            PersistedValue::Actor(a) => Value::actor_ref(a),
+            PersistedValue::Actor(a) => Value::actor_ref(*a),
         }
     }
 }
@@ -90,6 +94,14 @@ pub struct JournalEntry {
     pub payload: Vec<PersistedValue>,
 }
 
+/// A workflow event records a durable, replayable step in a workflow actor.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowEvent {
+    pub sequence: u64,
+    pub name: String,
+    pub args: Vec<PersistedValue>,
+}
+
 /// Persistence backend trait. Implementations may be in-memory or disk-backed.
 pub trait PersistenceStore: Send + Sync {
     /// Persist a snapshot of durable actor state.
@@ -104,6 +116,12 @@ pub trait PersistenceStore: Send + Sync {
     /// Read all journal entries for an actor in order.
     fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry>;
 
+    /// Append a workflow event to the actor's event journal.
+    fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()>;
+
+    /// Read all workflow events for an actor in order.
+    fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent>;
+
     /// Highest sequence number known for the actor.
     fn latest_sequence(&self, actor_id: u64) -> u64;
 
@@ -116,6 +134,7 @@ pub trait PersistenceStore: Send + Sync {
 pub struct MemoryStore {
     snapshots: HashMap<u64, ActorSnapshot>,
     journals: HashMap<u64, Vec<JournalEntry>>,
+    workflow_events: HashMap<u64, Vec<WorkflowEvent>>,
 }
 
 impl MemoryStore {
@@ -143,28 +162,39 @@ impl PersistenceStore for MemoryStore {
         self.journals.get(&actor_id).cloned().unwrap_or_default()
     }
 
+    fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
+        self.workflow_events.entry(actor_id).or_default().push(event);
+        Ok(())
+    }
+
+    fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+        self.workflow_events.get(&actor_id).cloned().unwrap_or_default()
+    }
+
     fn latest_sequence(&self, actor_id: u64) -> u64 {
-        self.snapshots
+        let snapshot_seq = self.snapshots.get(&actor_id).map(|s| s.sequence).unwrap_or(0);
+        let journal_seq = self.journals
             .get(&actor_id)
-            .map(|s| s.sequence)
-            .unwrap_or(0)
-            .max(
-                self.journals
-                    .get(&actor_id)
-                    .and_then(|j| j.last().map(|e| e.sequence))
-                    .unwrap_or(0),
-            )
+            .and_then(|j| j.last().map(|e| e.sequence))
+            .unwrap_or(0);
+        let event_seq = self.workflow_events
+            .get(&actor_id)
+            .and_then(|e| e.last().map(|ev| ev.sequence))
+            .unwrap_or(0);
+        snapshot_seq.max(journal_seq).max(event_seq)
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
         self.snapshots.remove(&actor_id);
         self.journals.remove(&actor_id);
+        self.workflow_events.remove(&actor_id);
         Ok(())
     }
 }
 
 /// File-backed persistence store using JSON.
-/// Each actor gets `<base_dir>/<actor_id>/snapshot.json` and `journal.jsonl`.
+/// Each actor gets `<base_dir>/<actor_id>/snapshot.json`, `journal.jsonl`,
+/// and `workflow_events.jsonl`.
 #[derive(Debug, Clone)]
 pub struct JsonFileStore {
     base_dir: PathBuf,
@@ -187,6 +217,10 @@ impl JsonFileStore {
 
     fn journal_path(&self, actor_id: u64) -> PathBuf {
         self.actor_dir(actor_id).join("journal.jsonl")
+    }
+
+    fn workflow_events_path(&self, actor_id: u64) -> PathBuf {
+        self.actor_dir(actor_id).join("workflow_events.jsonl")
     }
 }
 
@@ -230,16 +264,39 @@ impl PersistenceStore for JsonFileStore {
             .collect()
     }
 
+    fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
+        let dir = self.actor_dir(actor_id);
+        fs::create_dir_all(&dir)?;
+        let path = self.workflow_events_path(actor_id);
+        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let json = serde_json::to_string(&event)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        writeln!(file, "{}", json)?;
+        Ok(())
+    }
+
+    fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+        let path = self.workflow_events_path(actor_id);
+        let data = match fs::read_to_string(path) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        data.lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
     fn latest_sequence(&self, actor_id: u64) -> u64 {
-        self.load_snapshot(actor_id)
-            .map(|s| s.sequence)
-            .unwrap_or(0)
-            .max(
-                self.read_journal(actor_id)
-                    .last()
-                    .map(|e| e.sequence)
-                    .unwrap_or(0),
-            )
+        let snapshot_seq = self.load_snapshot(actor_id).map(|s| s.sequence).unwrap_or(0);
+        let journal_seq = self.read_journal(actor_id)
+            .last()
+            .map(|e| e.sequence)
+            .unwrap_or(0);
+        let event_seq = self.read_workflow_events(actor_id)
+            .last()
+            .map(|e| e.sequence)
+            .unwrap_or(0);
+        snapshot_seq.max(journal_seq).max(event_seq)
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
@@ -285,6 +342,17 @@ impl SqliteStore {
                 sequence INTEGER NOT NULL,
                 behavior_id INTEGER NOT NULL,
                 payload TEXT NOT NULL,
+                PRIMARY KEY (actor_id, sequence)
+            )",
+            [],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_events (
+                actor_id INTEGER NOT NULL,
+                sequence INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                args TEXT NOT NULL,
                 PRIMARY KEY (actor_id, sequence)
             )",
             [],
@@ -386,6 +454,50 @@ impl PersistenceStore for SqliteStore {
         }
     }
 
+    fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let args_json = serde_json::to_string(&event.args)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        conn.execute(
+            "INSERT INTO workflow_events (actor_id, sequence, name, args) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![actor_id as i64, event.sequence as i64, event.name, args_json],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        Ok(())
+    }
+
+    fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT sequence, name, args FROM workflow_events
+             WHERE actor_id = ?1 ORDER BY sequence ASC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows = stmt.query_map([actor_id as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        });
+        match rows {
+            Ok(iter) => iter
+                .filter_map(|r| {
+                    let (seq, name, args_json) = r.ok()?;
+                    let args: Vec<PersistedValue> = serde_json::from_str(&args_json).ok()?;
+                    Some(WorkflowEvent {
+                        sequence: seq as u64,
+                        name,
+                        args,
+                    })
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     fn latest_sequence(&self, actor_id: u64) -> u64 {
         let conn = self.conn.lock().unwrap();
         let snapshot_seq: Option<i64> = conn
@@ -402,7 +514,14 @@ impl PersistenceStore for SqliteStore {
                 |row| row.get(0),
             )
             .ok();
-        snapshot_seq.unwrap_or(0).max(journal_seq.unwrap_or(0)) as u64
+        let event_seq: Option<i64> = conn
+            .query_row(
+                "SELECT sequence FROM workflow_events WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                [actor_id as i64],
+                |row| row.get(0),
+            )
+            .ok();
+        snapshot_seq.unwrap_or(0).max(journal_seq.unwrap_or(0)).max(event_seq.unwrap_or(0)) as u64
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
@@ -410,6 +529,8 @@ impl PersistenceStore for SqliteStore {
         conn.execute("DELETE FROM snapshots WHERE actor_id = ?1", [actor_id as i64])
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         conn.execute("DELETE FROM journal WHERE actor_id = ?1", [actor_id as i64])
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        conn.execute("DELETE FROM workflow_events WHERE actor_id = ?1", [actor_id as i64])
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(())
     }

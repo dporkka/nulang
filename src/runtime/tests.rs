@@ -795,6 +795,7 @@ fn test_vm_spawn_creates_persistent_actor() {
         state_models: vec![("balance".to_string(), crate::ast::StateModel::Durable)],
         state_defaults: vec![("balance".to_string(), Constant::Int(100))],
         behavior_indices: vec![0],
+        is_workflow: false,
     });
     module.add_behavior(BehaviorTableEntry {
         name: "Account.get".to_string(),
@@ -837,6 +838,7 @@ fn test_vm_spawn_creates_non_persistent_actor() {
         state_models: vec![("count".to_string(), crate::ast::StateModel::Local)],
         state_defaults: vec![("count".to_string(), Constant::Int(0))],
         behavior_indices: vec![0],
+        is_workflow: false,
     });
     module.add_behavior(BehaviorTableEntry {
         name: "Counter.inc".to_string(),
@@ -1177,4 +1179,119 @@ fn test_cycle_detector_accumulates_edge_ref_count() {
     // Both pending ops are drained in one call, so the edge ref_count drops
     // from 2 to 0 and the node is removed.
     assert_eq!(rt.cycle_detector.graph_size(), 0);
+}
+
+// ========================================================================
+// v0.8 Workflow Runtime Tests
+// ========================================================================
+
+#[test]
+fn test_workflow_actor_emits_started_event() {
+    let mut rt = Runtime::new();
+    let mut models = HashMap::new();
+    models.insert("step_index".to_string(), StateModel::Durable);
+    let actor_id = rt.spawn_workflow_actor(
+        "CounterWorkflow",
+        Box::new(|| vec![("step_index".to_string(), Value::int(0))]),
+        models,
+    );
+
+    let events = rt.persistence.read_workflow_events(actor_id);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].name, "WorkflowStarted");
+    assert_eq!(events[0].args.get(0), Some(&PersistedValue::String("CounterWorkflow".to_string())));
+
+    let snapshot = rt.persistence.load_snapshot(actor_id).unwrap();
+    assert_eq!(snapshot.state.get("step_index"), Some(&PersistedValue::Int(0)));
+}
+
+#[test]
+fn test_workflow_actor_step_event_and_checkpoint() {
+    let mut rt = Runtime::new();
+    let mut models = HashMap::new();
+    models.insert("step_index".to_string(), StateModel::Durable);
+    let actor_id = rt.spawn_workflow_actor(
+        "CounterWorkflow",
+        Box::new(|| vec![("step_index".to_string(), Value::int(0))]),
+        models,
+    );
+
+    rt.actors
+        .get_mut(&actor_id)
+        .unwrap()
+        .register_behavior("next", |actor, _args| {
+            if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
+                actor.set_state_field("step_index", Value::int(n + 1));
+            }
+        });
+
+    rt.send_message(actor_id, "next", &[]);
+    rt.step_actor(actor_id);
+
+    let events = rt.persistence.read_workflow_events(actor_id);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].name, "StepCompleted");
+
+    let snapshot = rt.persistence.load_snapshot(actor_id).unwrap();
+    assert_eq!(snapshot.state.get("step_index"), Some(&PersistedValue::Int(1)));
+}
+
+#[test]
+fn test_workflow_actor_recovery_replays_step_index() {
+    let mut rt = Runtime::new();
+    let mut models = HashMap::new();
+    models.insert("step_index".to_string(), StateModel::Durable);
+    let actor_id = rt.spawn_workflow_actor(
+        "CounterWorkflow",
+        Box::new(|| vec![("step_index".to_string(), Value::int(0))]),
+        models,
+    );
+
+    rt.actors
+        .get_mut(&actor_id)
+        .unwrap()
+        .register_behavior("next", |actor, _args| {
+            if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
+                actor.set_state_field("step_index", Value::int(n + 1));
+            }
+        });
+
+    for _ in 0..3 {
+        rt.send_message(actor_id, "next", &[]);
+        rt.step_actor(actor_id);
+    }
+
+    // Simulate node restart: drop the actor from memory but keep the store.
+    rt.actors.remove(&actor_id);
+
+    rt.recover_actor(actor_id).unwrap();
+    rt.actors
+        .get_mut(&actor_id)
+        .unwrap()
+        .register_behavior("next", |actor, _args| {
+            if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
+                actor.set_state_field("step_index", Value::int(n + 1));
+            }
+        });
+
+    let step_index = rt
+        .actors
+        .get(&actor_id)
+        .unwrap()
+        .get_state_field("step_index")
+        .and_then(|v| v.as_int())
+        .unwrap();
+    assert_eq!(step_index, 3);
+
+    // The actor should still be able to advance.
+    rt.send_message(actor_id, "next", &[]);
+    rt.step_actor(actor_id);
+    let step_index = rt
+        .actors
+        .get(&actor_id)
+        .unwrap()
+        .get_state_field("step_index")
+        .and_then(|v| v.as_int())
+        .unwrap();
+    assert_eq!(step_index, 4);
 }

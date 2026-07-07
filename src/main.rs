@@ -331,6 +331,14 @@ fn check_source(source: &str, verbose: bool) -> NuResult<()> {
 }
 
 fn compile_with_new_pipeline(ast: &nulang::ast::AstModule, name: &str) -> NuResult<nulang::bytecode::CodeModule> {
+    // Workflow lowering is implemented in the legacy compiler; force fallback
+    // so the CLI continues to use the bytecode actor path for workflow sources.
+    if ast.decls.iter().any(|d| matches!(d, nulang::ast::Decl::Workflow { .. })) {
+        return Err(NuError::NotYetImplemented {
+            feature: "workflow via HIR/MIR pipeline".to_string(),
+            span: nulang::types::Span::default(),
+        });
+    }
     let hir = nulang::hir_lower::lower_module(ast);
     let mir = nulang::mir_lower::lower_module(&hir);
     nulang::mir_codegen::compile_mir(&mir, name)

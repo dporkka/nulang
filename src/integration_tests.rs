@@ -13,7 +13,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
-    use crate::runtime::{Runtime, RuntimeVmCallbacks, MemoryStore, PersistenceStore, ActorSnapshot, JournalEntry};
+    use crate::runtime::{Runtime, RuntimeVmCallbacks, MemoryStore, PersistenceStore, ActorSnapshot, JournalEntry, WorkflowEvent};
 
     /// Thread-safe, shareable in-memory persistence store for tests that need
     /// to simulate a runtime restart while keeping the same underlying storage.
@@ -41,6 +41,12 @@ mod tests {
         }
         fn latest_sequence(&self, actor_id: u64) -> u64 {
             self.0.lock().unwrap().latest_sequence(actor_id)
+        }
+        fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> std::io::Result<()> {
+            self.0.lock().unwrap().append_workflow_event(actor_id, event)
+        }
+        fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+            self.0.lock().unwrap().read_workflow_events(actor_id)
         }
         fn clear(&mut self, actor_id: u64) -> std::io::Result<()> {
             self.0.lock().unwrap().clear(actor_id)
@@ -826,16 +832,107 @@ mod tests {
     }
 
     #[test]
-    fn test_workflow_rejected_with_not_yet_implemented() {
+    fn test_workflow_lowers_to_persistent_actor() {
         let source = "workflow PurchaseOrder { step validate { 1 } }";
-        let result = run_source(source);
-        assert!(result.is_err(), "workflow declarations should be rejected until runtime support lands");
-        match result.unwrap_err() {
-            NuError::NotYetImplemented { feature, .. } => {
-                assert!(feature.contains("workflow"));
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let meta = module
+            .actor_metadata
+            .iter()
+            .find(|m| m.name == "PurchaseOrder")
+            .expect("workflow should produce actor metadata");
+        assert!(meta.is_workflow, "workflow metadata should be flagged");
+        assert!(meta.persistent, "workflows should be persistent actors");
+        assert_eq!(meta.behavior_indices.len(), 1, "one behavior per step");
+
+        let behavior = &module.behaviors[meta.behavior_indices[0]];
+        assert_eq!(behavior.name, "PurchaseOrder.validate");
+    }
+
+    #[test]
+    fn test_workflow_survives_node_restart() {
+        // A two-step workflow that emits durable events and advances its
+        // step_index in each step.  We run the first step, simulate a node
+        // restart by loading the actor into a fresh runtime sharing the same
+        // persistence store, then run the second step and verify final state.
+        let source = r#"
+            workflow Counter {
+                step start { (emit Started(0), self.step_index = self.step_index + 1) }
+                step second { (emit Incremented(1), self.step_index = self.step_index + 1) }
             }
-            other => panic!("Expected NotYetImplemented error, got {:?}", other),
+            let c = spawn Counter {} in { c }
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+            }
         }
+
+        // First runtime: spawn, advance the first step, and run scheduler.
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt1.borrow_mut().send_message(actor_id, "start", &[]);
+        rt1.borrow_mut().run_scheduler();
+
+        assert_eq!(
+            rt1.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(1),
+            "first step should advance step_index to 1"
+        );
+
+        let events_before = store.read_workflow_events(actor_id);
+        assert!(events_before.iter().any(|e| e.name == "WorkflowStarted"));
+        assert!(events_before.iter().any(|e| e.name == "Started"));
+        assert!(events_before.iter().any(|e| e.name == "StepCompleted"));
+
+        // Simulate a node restart: new runtime sharing the same store,
+        // register the bytecode module, then recover the workflow actor.
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(actor_id, module.clone(), offsets.clone());
+        rt2.borrow_mut().recover_actor(actor_id);
+
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(1),
+            "recovered workflow should resume at step_index 1"
+        );
+
+        // Continue execution on the recovered runtime: advance the second step.
+        // Bytecode-only workflow actors have an empty behavior_table, so route
+        // by explicit behavior id (1 is the second step).
+        rt2.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt2.borrow_mut().run_scheduler();
+
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(2),
+            "final step_index should be 2 after second step"
+        );
+
+        let events_after = store.read_workflow_events(actor_id);
+        assert_eq!(
+            events_after.iter().filter(|e| e.name == "StepCompleted").count(),
+            2,
+            "two StepCompleted events should be persisted"
+        );
+        assert!(events_after.iter().any(|e| e.name == "Incremented"));
     }
 
     // -----------------------------------------------------------------------

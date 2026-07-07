@@ -162,10 +162,22 @@ impl MirCodegen {
                     src_reg,
                 ));
             }
-            mir::Stmt::Emit { event_idx, args } => {
-                let _ = event_idx;
-                let _ = args;
-                // TODO: emit Emit opcode.
+            mir::Stmt::Emit { event, args } => {
+                // Place event arguments in the low registers expected by the VM.
+                for (i, arg) in args.iter().enumerate().take(256) {
+                    let src = local_reg[arg];
+                    let dst = i as u8;
+                    if src != dst {
+                        self.emit(Instruction::new2(OpCode::Move, src, dst));
+                    }
+                }
+                let event_idx = self.module.add_constant(Constant::String(event.clone()));
+                self.emit(Instruction::new3(
+                    OpCode::Emit,
+                    ((event_idx >> 8) & 0xFF) as u8,
+                    (event_idx & 0xFF) as u8,
+                    args.len() as u8,
+                ));
             }
         }
         Ok(())

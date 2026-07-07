@@ -134,7 +134,7 @@ impl Runtime {
         &mut self,
         init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
     ) -> u64 {
-        self.spawn_actor_with_models(init, HashMap::new(), false)
+        self.spawn_actor_with_models(init, HashMap::new(), false, None)
     }
 
     pub fn spawn_persistent_actor(
@@ -142,7 +142,19 @@ impl Runtime {
         init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
         state_models: HashMap<String, StateModel>,
     ) -> u64 {
-        self.spawn_actor_with_models(init, state_models, true)
+        self.spawn_actor_with_models(init, state_models, true, None)
+    }
+
+    /// Spawn a durable workflow actor.  Workflows are always persistent and
+    /// keep an append-only event journal in addition to snapshots.
+    pub fn spawn_workflow_actor(
+        &mut self,
+        name: &str,
+        init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
+        state_models: HashMap<String, StateModel>,
+    ) -> u64 {
+        let id = self.spawn_actor_with_models(init, state_models, true, Some(name));
+        id
     }
 
     fn spawn_actor_with_models(
@@ -150,6 +162,7 @@ impl Runtime {
         init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
         state_models: HashMap<String, StateModel>,
         persistent: bool,
+        workflow: Option<&str>,
     ) -> u64 {
         let id = fresh_actor_id();
         let mut actor = Actor::new(id, format!("actor_{}", id), 256);
@@ -159,8 +172,39 @@ impl Runtime {
         }
         actor.state_models = state_models;
         actor.persistent = persistent;
+        let workflow_name = workflow.map(|n| n.to_string());
+        if let Some(name) = workflow {
+            actor.is_workflow = true;
+            actor.name = name.to_string();
+        }
         actor.state = ActorState::Running;
         self.actors.insert(id, actor);
+        if workflow.is_some() {
+            // Seed the workflow event journal with a WorkflowStarted event.
+            let seq = self.next_sequence(id);
+            let args = {
+                let actor = self.actors.get(&id).unwrap();
+                let mut args = vec![PersistedValue::String(
+                    workflow_name.as_ref().unwrap().clone(),
+                )];
+                for (field_name, value) in &actor.state_data {
+                    let model = actor.state_models.get(field_name).copied().unwrap_or(StateModel::Local);
+                    if model.is_persistent() {
+                        args.push(PersistedValue::from_value(value));
+                    }
+                }
+                args
+            };
+            let _ = self.persistence.append_workflow_event(
+                id,
+                WorkflowEvent {
+                    sequence: seq,
+                    name: "WorkflowStarted".to_string(),
+                    args,
+                },
+            );
+            self.checkpoint_actor(id);
+        }
         self.scheduler.enqueue(id);
         id
     }
@@ -179,7 +223,14 @@ impl Runtime {
 
     /// Record an emitted event on an actor.  For the event-sourced MVP, each
     /// event also increments every `event_sourced` integer counter by one.
+    /// For workflow actors the event is also appended to the durable workflow
+    /// journal and a checkpoint is forced.
     pub fn emit_event(&mut self, actor_id: u64, event: &str, args: &[crate::vm::Value]) {
+        let is_workflow = self
+            .actors
+            .get(&actor_id)
+            .map(|a| a.is_workflow)
+            .unwrap_or(false);
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.event_log.push((event.to_string(), args.to_vec()));
             // MVP: increment all event_sourced Int state fields.
@@ -194,6 +245,19 @@ impl Runtime {
                     actor.set_state_field(name, crate::vm::Value::int(n + 1));
                 }
             }
+        }
+        if is_workflow {
+            let seq = self.next_sequence(actor_id);
+            let payload: Vec<PersistedValue> = args.iter().map(PersistedValue::from_value).collect();
+            let _ = self.persistence.append_workflow_event(
+                actor_id,
+                WorkflowEvent {
+                    sequence: seq,
+                    name: event.to_string(),
+                    args: payload,
+                },
+            );
+            self.checkpoint_actor(actor_id);
         }
     }
 
@@ -376,6 +440,7 @@ impl Runtime {
                     None
                 }
             };
+            let mut processed = false;
             if let Some(handler) = handler_fn {
                 // Journal the message before handling so recovery can replay it.
                 if self.actor_is_persistent(actor_id) {
@@ -400,6 +465,7 @@ impl Runtime {
                 handler(actor, &msg.payload);
                 // Snapshot durable state after the message is processed.
                 self.checkpoint_actor(actor_id);
+                processed = true;
             } else if self.has_bytecode_handler(actor_id, behavior_idx) {
                 // Journal before executing bytecode as well.
                 if self.actor_is_persistent(actor_id) {
@@ -416,6 +482,20 @@ impl Runtime {
                 }
                 let payload = msg.payload.clone();
                 let _result = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
+                self.checkpoint_actor(actor_id);
+                processed = true;
+            }
+            if processed && self.actor_is_workflow(actor_id) {
+                let seq = self.next_sequence(actor_id);
+                let step_name = format!("step_{}", behavior_idx);
+                let _ = self.persistence.append_workflow_event(
+                    actor_id,
+                    WorkflowEvent {
+                        sequence: seq,
+                        name: "StepCompleted".to_string(),
+                        args: vec![PersistedValue::String(step_name)],
+                    },
+                );
                 self.checkpoint_actor(actor_id);
             }
             let actor = match self.actors.get_mut(&actor_id) {
@@ -445,6 +525,13 @@ impl Runtime {
         self.actors
             .get(&actor_id)
             .map(|a| a.persistent)
+            .unwrap_or(false)
+    }
+
+    fn actor_is_workflow(&self, actor_id: u64) -> bool {
+        self.actors
+            .get(&actor_id)
+            .map(|a| a.is_workflow)
             .unwrap_or(false)
     }
 
@@ -539,11 +626,22 @@ impl Runtime {
     }
 
     /// Recover a persistent actor from the latest snapshot and replay the journal.
+    ///
+    /// For workflow actors the durable workflow event journal is replayed
+    /// instead of the message journal, restoring the current step index and
+    /// any other state captured in workflow events.
     pub fn recover_actor(&mut self, actor_id: u64) -> Option<u64> {
         let snapshot = self.persistence.load_snapshot(actor_id)?;
-        let journal = self.persistence.read_journal(actor_id);
+        let workflow_events = self.persistence.read_workflow_events(actor_id);
+        let is_workflow = self
+            .recovery_modules
+            .get(&actor_id)
+            .map(|(m, _)| m.actor_metadata.iter().any(|meta| meta.is_workflow))
+            .unwrap_or(!workflow_events.is_empty());
+
         let mut actor = Actor::new(actor_id, format!("actor_{}", actor_id), 256);
         actor.persistent = true;
+        actor.is_workflow = is_workflow;
         actor.sequence = snapshot.sequence;
         for (name, value) in snapshot.state {
             actor.set_state_field(name, value.to_value());
@@ -555,34 +653,71 @@ impl Runtime {
         }
         self.actors.insert(actor_id, actor);
 
-        // Replay journal entries that arrived after the snapshot.
-        let entries_to_replay: Vec<_> = journal
-            .iter()
-            .filter(|e| e.sequence > snapshot.sequence)
-            .cloned()
-            .collect();
-        for entry in entries_to_replay {
-            let behavior_idx = entry.behavior_id as usize;
-            let payload: Vec<Value> = entry.payload.iter().map(|p| p.to_value()).collect();
-            if self.has_native_handler(actor_id, behavior_idx) {
-                let handler = self.actors.get(&actor_id)
-                    .and_then(|a| a.behavior_table.get(behavior_idx))
-                    .map(|b| b.handler_fn)?;
+        if is_workflow {
+            // Replay workflow events that arrived after the snapshot.
+            let events_to_replay: Vec<_> = workflow_events
+                .iter()
+                .filter(|e| e.sequence > snapshot.sequence)
+                .cloned()
+                .collect();
+            for event in events_to_replay {
                 if let Some(actor) = self.actors.get_mut(&actor_id) {
-                    handler(actor, &payload);
-                    actor.sequence = entry.sequence;
+                    Self::apply_workflow_event(actor, &event);
+                    actor.sequence = event.sequence;
                 }
-            } else if self.has_bytecode_handler(actor_id, behavior_idx) {
-                self.current_actor = Some(actor_id);
-                let _ = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
-                self.current_actor = None;
-                if let Some(actor) = self.actors.get_mut(&actor_id) {
-                    actor.sequence = entry.sequence;
+            }
+        } else {
+            // Replay journal entries that arrived after the snapshot.
+            let journal = self.persistence.read_journal(actor_id);
+            let entries_to_replay: Vec<_> = journal
+                .iter()
+                .filter(|e| e.sequence > snapshot.sequence)
+                .cloned()
+                .collect();
+            for entry in entries_to_replay {
+                let behavior_idx = entry.behavior_id as usize;
+                let payload: Vec<Value> = entry.payload.iter().map(|p| p.to_value()).collect();
+                if self.has_native_handler(actor_id, behavior_idx) {
+                    let handler = self.actors.get(&actor_id)
+                        .and_then(|a| a.behavior_table.get(behavior_idx))
+                        .map(|b| b.handler_fn)?;
+                    if let Some(actor) = self.actors.get_mut(&actor_id) {
+                        handler(actor, &payload);
+                        actor.sequence = entry.sequence;
+                    }
+                } else if self.has_bytecode_handler(actor_id, behavior_idx) {
+                    self.current_actor = Some(actor_id);
+                    let _ = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
+                    self.current_actor = None;
+                    if let Some(actor) = self.actors.get_mut(&actor_id) {
+                        actor.sequence = entry.sequence;
+                    }
                 }
             }
         }
         self.scheduler.enqueue(actor_id);
         Some(actor_id)
+    }
+
+    /// Apply a single workflow event to an actor's state.  Used during recovery
+    /// replay to restore step index and accumulated event-sourced state.
+    fn apply_workflow_event(actor: &mut Actor, event: &WorkflowEvent) {
+        match event.name.as_str() {
+            "WorkflowStarted" => {
+                if actor.get_state_field("step_index").is_some() {
+                    actor.set_state_field("step_index", Value::int(0));
+                }
+            }
+            "StepCompleted" => {
+                if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
+                    actor.set_state_field("step_index", Value::int(n + 1));
+                }
+            }
+            _ => {
+                let args: Vec<Value> = event.args.iter().map(|a| a.to_value()).collect();
+                actor.event_log.push((event.name.clone(), args));
+            }
+        }
     }
 
     fn has_native_handler(&self, actor_id: u64, behavior_idx: usize) -> bool {
@@ -1031,6 +1166,11 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 }),
                 state_models,
                 meta.persistent,
+                if meta.is_workflow {
+                    Some(meta.name.as_str())
+                } else {
+                    None
+                },
             )
         } else {
             rt.spawn_actor(Box::new(move || init))
