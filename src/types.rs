@@ -465,6 +465,8 @@ pub enum NuError {
     /// not consumed, or otherwise violated linearity constraints.
     LinearTypeError { msg: String, span: Span },
     FFIError { msg: String, span: Span },
+    /// Feature is parsed/typed correctly but has no runtime implementation yet.
+    NotYetImplemented { feature: String, span: Span },
     RuntimeError(String),
     VMError(String),
     PythonError(String), // Python interop error
@@ -497,6 +499,9 @@ impl std::fmt::Display for NuError {
             }
             NuError::FFIError { msg, span } => {
                 write!(f, "FFI error at {}:{}: {}", span.line, span.column, msg)
+            }
+            NuError::NotYetImplemented { feature, span } => {
+                write!(f, "Not yet implemented at {}:{}: {}", span.line, span.column, feature)
             }
             NuError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             NuError::VMError(msg) => write!(f, "VM error: {}", msg),

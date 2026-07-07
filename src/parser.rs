@@ -118,6 +118,7 @@ impl Parser {
         match self.peek_kind().clone() {
             TokenKind::Fn => self.parse_function(public),
             TokenKind::Actor | TokenKind::Persistent => self.parse_actor(),
+            TokenKind::Workflow => self.parse_workflow(),
             TokenKind::Type => {
                 self.advance(); // consume 'type'
                 self.skip_newlines();
@@ -293,6 +294,87 @@ impl Parser {
             }
             _ => StateModel::Local,
         }
+    }
+
+    fn parse_workflow(&mut self) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance(); // consume 'workflow'
+        let name = self.expect_ident("workflow name")?;
+        self.expect(TokenKind::LBrace)?;
+
+        let mut steps = Vec::new();
+        let mut parallel = Vec::new();
+        let mut compensate = None;
+
+        self.skip_newlines();
+        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.match_token(&TokenKind::RBrace) {
+                break;
+            }
+            match self.peek_kind().clone() {
+                TokenKind::Step => {
+                    steps.push(self.parse_workflow_step()?);
+                }
+                TokenKind::Parallel => {
+                    self.advance(); // 'parallel'
+                    self.expect(TokenKind::LBrace)?;
+                    let mut branch = Vec::new();
+                    self.skip_newlines();
+                    while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.match_token(&TokenKind::RBrace) {
+                            break;
+                        }
+                        branch.push(self.parse_workflow_step()?);
+                        self.skip_newlines_semicolons();
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                    parallel.push(branch);
+                    self.skip_newlines_semicolons();
+                }
+                TokenKind::Compensate => {
+                    self.advance(); // 'compensate'
+                    self.expect(TokenKind::LBrace)?;
+                    self.skip_newlines();
+                    compensate = Some(self.parse_expr()?);
+                    self.skip_newlines();
+                    self.expect(TokenKind::RBrace)?;
+                    self.skip_newlines_semicolons();
+                }
+                _ => {
+                    return Err(NuError::ParseError {
+                        msg: format!(
+                            "Expected 'step', 'parallel', or 'compensate' in workflow body, got {:?}",
+                            self.peek_kind()
+                        ),
+                        span: self.current_span(),
+                    });
+                }
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+
+        Ok(Decl::Workflow {
+            name,
+            input: None,
+            steps,
+            parallel,
+            compensate,
+            span,
+        })
+    }
+
+    fn parse_workflow_step(&mut self) -> NuResult<WorkflowStep> {
+        let span = self.current_span();
+        self.expect(TokenKind::Step)?;
+        let name = self.expect_ident("step name")?;
+        self.expect(TokenKind::LBrace)?;
+        self.skip_newlines();
+        let body = self.parse_expr()?;
+        self.skip_newlines();
+        self.expect(TokenKind::RBrace)?;
+        Ok(WorkflowStep { name, body, span })
     }
 
     fn parse_type_alias(&mut self, public: bool) -> NuResult<Decl> {
@@ -2113,5 +2195,41 @@ mod tests {
     fn test_parse_extern_missing_param_type_errors() {
         let result = parse(r#"extern "lib" { fn f(x) -> Int }"#);
         assert!(result.is_err(), "Expected parse error for missing parameter type in extern");
+    }
+
+    #[test]
+    fn test_parse_workflow_with_steps() {
+        let ast = parse("workflow PurchaseOrder { step validate { 1 } step charge { 2 } }").unwrap();
+        assert_eq!(ast.decls.len(), 1);
+        match &ast.decls[0] {
+            Decl::Workflow { name, steps, parallel, compensate, .. } => {
+                assert_eq!(name, "PurchaseOrder");
+                assert_eq!(steps.len(), 2);
+                assert_eq!(steps[0].name, "validate");
+                assert_eq!(steps[1].name, "charge");
+                assert!(parallel.is_empty());
+                assert!(compensate.is_none());
+            }
+            _ => panic!("Expected workflow declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_workflow_with_parallel_and_compensate() {
+        let ast = parse("workflow Booking { parallel { step a { 1 } step b { 2 } } compensate { 0 } }").unwrap();
+        match &ast.decls[0] {
+            Decl::Workflow { parallel, compensate, .. } => {
+                assert_eq!(parallel.len(), 1);
+                assert_eq!(parallel[0].len(), 2);
+                assert!(compensate.is_some());
+            }
+            _ => panic!("Expected workflow declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_workflow_invalid_body_errors() {
+        let result = parse("workflow W { fn f() -> Int { 1 } }");
+        assert!(result.is_err(), "Expected parse error for invalid workflow body");
     }
 }

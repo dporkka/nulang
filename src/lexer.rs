@@ -22,6 +22,7 @@ pub enum TokenKind {
     Fn, Let, Rec, In, If, Then, Else, Match, With, Case,
     Actor, Behavior, State, SelfKw, Spawn, Send, Ask,
     Persistent, Local, Durable, EventSourced, Crdt, Emit,
+    Workflow, Step, Parallel, Compensate, Await, Subworkflow,
     Effect, Perform, Handle, Resume,
     Extern,
     Module, Import, Pub, Priv, Where,
@@ -682,6 +683,12 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "event_sourced" => Some(TokenKind::EventSourced),
         "crdt" => Some(TokenKind::Crdt),
         "emit" => Some(TokenKind::Emit),
+        "workflow" => Some(TokenKind::Workflow),
+        "step" => Some(TokenKind::Step),
+        "parallel" => Some(TokenKind::Parallel),
+        "compensate" => Some(TokenKind::Compensate),
+        "await" => Some(TokenKind::Await),
+        "subworkflow" => Some(TokenKind::Subworkflow),
         "self" => Some(TokenKind::SelfKw),
         "spawn" => Some(TokenKind::Spawn),
         "send" => Some(TokenKind::Send),
@@ -940,5 +947,24 @@ mod tests {
         let mut lexer = Lexer::new("α");
         let err = lexer.lex().unwrap_err();
         assert!(matches!(err, NuError::LexError { .. }));
+    }
+
+    #[test]
+    fn test_workflow_keywords() {
+        let mut lexer = Lexer::new("workflow step parallel compensate await subworkflow");
+        let tokens = lexer.lex().unwrap();
+        let kinds: Vec<_> = tokens.iter().map(|t| t.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Workflow,
+                TokenKind::Step,
+                TokenKind::Parallel,
+                TokenKind::Compensate,
+                TokenKind::Await,
+                TokenKind::Subworkflow,
+                TokenKind::Eof,
+            ]
+        );
     }
 }

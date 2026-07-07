@@ -272,7 +272,8 @@ fn nu_error_to_diagnostic(err: NuError) -> Diagnostic {
         | NuError::EffectError { msg, span }
         | NuError::CapError { msg, span }
         | NuError::LinearTypeError { msg, span }
-        | NuError::FFIError { msg, span } => (msg, span.line, span.column),
+        | NuError::FFIError { msg, span }
+        | NuError::NotYetImplemented { feature: msg, span } => (msg, span.line, span.column),
         NuError::RuntimeError(msg) | NuError::VMError(msg) | NuError::PythonError(msg) => {
             (msg, 1, 1)
         }

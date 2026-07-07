@@ -1323,6 +1323,12 @@ impl Compiler {
                     self.compile_decl(subdecl)?;
                 }
             }
+            Decl::Workflow { name, span, .. } => {
+                return Err(NuError::NotYetImplemented {
+                    feature: format!("workflow runtime for '{}'", name),
+                    span: *span,
+                });
+            }
         }
         Ok(())
     }

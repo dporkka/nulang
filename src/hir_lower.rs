@@ -162,6 +162,10 @@ fn lower_decl(decl: &Decl) -> hir::Decl {
             items: items.clone(),
             span: *span,
         },
+        Decl::Workflow { name, span, .. } => hir::Decl::Workflow {
+            name: name.clone(),
+            span: *span,
+        },
     }
 }
 

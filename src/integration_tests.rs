@@ -825,6 +825,19 @@ mod tests {
         assert_eq!(actor.event_log[0].0, "Incremented");
     }
 
+    #[test]
+    fn test_workflow_rejected_with_not_yet_implemented() {
+        let source = "workflow PurchaseOrder { step validate { 1 } }";
+        let result = run_source(source);
+        assert!(result.is_err(), "workflow declarations should be rejected until runtime support lands");
+        match result.unwrap_err() {
+            NuError::NotYetImplemented { feature, .. } => {
+                assert!(feature.contains("workflow"));
+            }
+            other => panic!("Expected NotYetImplemented error, got {:?}", other),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // v0.2 HIR/MIR pipeline smoke tests
     // -----------------------------------------------------------------------

@@ -66,6 +66,10 @@ pub enum Decl {
         funcs: Vec<ExternFunc>,
         span: Span,
     },
+    Workflow {
+        name: String,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

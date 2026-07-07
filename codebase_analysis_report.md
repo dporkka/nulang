@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-05  
 **Commit context:** Current working tree  
-**Test status:** `cargo test` passes with 589 tests  
+**Test status:** `cargo test` passes with 639 tests  
 
 This report evaluates the Nulang compiler, VM, runtime, and supporting design documents. It recognizes the fixes that have already landed and documents the remaining architectural gaps, coverage holes, and technical debt that should be addressed before the next milestone.
 
@@ -269,12 +269,12 @@ Priority 4: Begin specification-driven subsystems
 
 ### 5.4 Actionable Checklist
 
-- [ ] Verify `cargo test` continues to pass (currently 589 tests).
-- [ ] Wire runtime GC foreign-ref operations into `src/runtime/orca_cycle.rs`.
-- [ ] Add unit tests for `src/lexer.rs`, `src/parser.rs`, and `src/compiler.rs`.
-- [ ] Add regression tests for `src/jit/typed_compiler.rs` and `src/jit/simd_compiler.rs`.
-- [ ] Add unit tests for `src/runtime/dual_heap.rs` promotion and alignment.
-- [ ] Add mock-network convergence tests for `src/runtime/crdt_manager.rs`.
-- [ ] Reduce `cargo check` warnings from ~79 toward zero.
+- [x] Verify `cargo test` continues to pass (currently 639 tests; release profile also green).
+- [x] Wire runtime GC foreign-ref operations into `src/runtime/orca_cycle.rs`.
+- [x] Add unit tests for `src/lexer.rs`, `src/parser.rs`, and `src/compiler.rs`.
+- [x] Add regression tests for `src/jit/typed_compiler.rs` and `src/jit/simd_compiler.rs`.
+- [x] Add unit tests for `src/runtime/dual_heap.rs` promotion and alignment.
+- [x] Add mock-network convergence tests for `src/runtime/crdt_manager.rs`.
+- [x] Reduce `cargo check` warnings from ~79 toward zero.
 - [ ] Remove or complete Python native actor scaffolding.
-- [ ] Decide whether to implement or defer each design-document subsystem.
+- [x] Seed the v0.8 Workflow SDK syntax (`workflow`, `step`, `parallel`, `compensate`, `await`, `subworkflow`) in lexer/parser/AST; runtime deferred.

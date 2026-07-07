@@ -571,6 +571,10 @@ impl TypeChecker {
                 Ok((all_subst, last))
             }
             Decl::Import { .. } => Ok((vec![], Type::unit())),
+            Decl::Workflow { name, span, .. } => Err(NuError::NotYetImplemented {
+                feature: format!("workflow runtime for '{}'", name),
+                span: *span,
+            }),
         }
     }
 

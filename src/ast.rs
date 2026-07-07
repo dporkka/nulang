@@ -340,6 +340,23 @@ pub enum Decl {
         funcs: Vec<ExternFunc>,
         span: Span,
     },
+    /// Workflow declaration (v0.8): workflow Name { step name { body } ... }
+    Workflow {
+        name: String,
+        input: Option<(String, Type)>,
+        steps: Vec<WorkflowStep>,
+        parallel: Vec<Vec<WorkflowStep>>,
+        compensate: Option<Expr>,
+        span: Span,
+    },
+}
+
+/// A single step inside a `workflow` declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowStep {
+    pub name: String,
+    pub body: Expr,
+    pub span: Span,
 }
 
 /// Foreign function declaration inside an `extern` block.
