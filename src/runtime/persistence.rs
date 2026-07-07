@@ -80,10 +80,15 @@ impl PersistedValue {
 
 /// A serializable snapshot of an actor's durable state.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ActorSnapshot {
     pub actor_id: u64,
     pub sequence: u64,
     pub state: HashMap<String, PersistedValue>,
+    /// For workflow actors, the name of the signal the current step is
+    /// suspended waiting for, if any.  This is part of the snapshot so that
+    /// recovery can decide whether the in-flight step must be re-triggered.
+    pub waiting_signal: Option<String>,
 }
 
 /// A journal entry records a message delivered to an actor.
@@ -96,10 +101,62 @@ pub struct JournalEntry {
 
 /// A workflow event records a durable, replayable step in a workflow actor.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct WorkflowEvent {
-    pub sequence: u64,
-    pub name: String,
-    pub args: Vec<PersistedValue>,
+#[serde(tag = "tag", content = "value")]
+pub enum WorkflowEvent {
+    /// Workflow instance started. `state` captures durable fields at creation.
+    WorkflowStarted {
+        sequence: u64,
+        name: String,
+        state: Vec<PersistedValue>,
+    },
+    /// A workflow step completed successfully.
+    StepCompleted {
+        sequence: u64,
+        step_name: String,
+    },
+    /// A timer was set for a workflow.
+    TimerSet {
+        sequence: u64,
+        name: String,
+        duration_ms: u64,
+    },
+    /// A previously set timer fired.
+    TimerFired {
+        sequence: u64,
+        name: String,
+    },
+    /// An external signal was delivered to the workflow.
+    SignalReceived {
+        sequence: u64,
+        name: String,
+        payload: Option<String>,
+    },
+    /// A saga step was compensated after failure.
+    SagaCompensated {
+        sequence: u64,
+        step_name: String,
+    },
+    /// Any other event emitted by a workflow handler.
+    Custom {
+        sequence: u64,
+        name: String,
+        args: Vec<PersistedValue>,
+    },
+}
+
+impl WorkflowEvent {
+    /// Return the sequence number of this event.
+    pub fn sequence(&self) -> u64 {
+        match self {
+            WorkflowEvent::WorkflowStarted { sequence, .. }
+            | WorkflowEvent::StepCompleted { sequence, .. }
+            | WorkflowEvent::TimerSet { sequence, .. }
+            | WorkflowEvent::TimerFired { sequence, .. }
+            | WorkflowEvent::SignalReceived { sequence, .. }
+            | WorkflowEvent::SagaCompensated { sequence, .. }
+            | WorkflowEvent::Custom { sequence, .. } => *sequence,
+        }
+    }
 }
 
 /// Persistence backend trait. Implementations may be in-memory or disk-backed.
@@ -121,6 +178,97 @@ pub trait PersistenceStore: Send + Sync {
 
     /// Read all workflow events for an actor in order.
     fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent>;
+
+    /// Append a `TimerSet` workflow event.
+    fn append_timer_set(
+        &mut self,
+        actor_id: u64,
+        sequence: u64,
+        name: String,
+        duration_ms: u64,
+    ) -> io::Result<()> {
+        self.append_workflow_event(
+            actor_id,
+            WorkflowEvent::TimerSet {
+                sequence,
+                name,
+                duration_ms,
+            },
+        )
+    }
+
+    /// Append a `TimerFired` workflow event.
+    fn append_timer_fired(
+        &mut self,
+        actor_id: u64,
+        sequence: u64,
+        name: String,
+    ) -> io::Result<()> {
+        self.append_workflow_event(actor_id, WorkflowEvent::TimerFired { sequence, name })
+    }
+
+    /// Append a `SignalReceived` workflow event.
+    fn append_signal_received(
+        &mut self,
+        actor_id: u64,
+        sequence: u64,
+        name: String,
+        payload: Option<String>,
+    ) -> io::Result<()> {
+        self.append_workflow_event(
+            actor_id,
+            WorkflowEvent::SignalReceived {
+                sequence,
+                name,
+                payload,
+            },
+        )
+    }
+
+    /// Append a `SagaCompensated` workflow event.
+    fn append_saga_compensated(
+        &mut self,
+        actor_id: u64,
+        sequence: u64,
+        step_name: String,
+    ) -> io::Result<()> {
+        self.append_workflow_event(
+            actor_id,
+            WorkflowEvent::SagaCompensated {
+                sequence,
+                step_name,
+            },
+        )
+    }
+
+    /// Read timer-related workflow events (`TimerSet` and `TimerFired`).
+    fn read_timer_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+        self.read_workflow_events(actor_id)
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    WorkflowEvent::TimerSet { .. } | WorkflowEvent::TimerFired { .. }
+                )
+            })
+            .collect()
+    }
+
+    /// Read `SignalReceived` workflow events.
+    fn read_signal_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+        self.read_workflow_events(actor_id)
+            .into_iter()
+            .filter(|e| matches!(e, WorkflowEvent::SignalReceived { .. }))
+            .collect()
+    }
+
+    /// Read `SagaCompensated` workflow events.
+    fn read_saga_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+        self.read_workflow_events(actor_id)
+            .into_iter()
+            .filter(|e| matches!(e, WorkflowEvent::SagaCompensated { .. }))
+            .collect()
+    }
 
     /// Highest sequence number known for the actor.
     fn latest_sequence(&self, actor_id: u64) -> u64;
@@ -179,7 +327,7 @@ impl PersistenceStore for MemoryStore {
             .unwrap_or(0);
         let event_seq = self.workflow_events
             .get(&actor_id)
-            .and_then(|e| e.last().map(|ev| ev.sequence))
+            .and_then(|e| e.last().map(|ev| ev.sequence()))
             .unwrap_or(0);
         snapshot_seq.max(journal_seq).max(event_seq)
     }
@@ -294,7 +442,7 @@ impl PersistenceStore for JsonFileStore {
             .unwrap_or(0);
         let event_seq = self.read_workflow_events(actor_id)
             .last()
-            .map(|e| e.sequence)
+            .map(|e| e.sequence())
             .unwrap_or(0);
         snapshot_seq.max(journal_seq).max(event_seq)
     }
@@ -331,11 +479,18 @@ impl SqliteStore {
             "CREATE TABLE IF NOT EXISTS snapshots (
                 actor_id INTEGER PRIMARY KEY,
                 sequence INTEGER NOT NULL,
-                state TEXT NOT NULL
+                state TEXT NOT NULL,
+                waiting_signal TEXT
             )",
             [],
         )
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        // Migrate existing databases that were created without the
+        // waiting_signal column.
+        let _ = conn.execute(
+            "ALTER TABLE snapshots ADD COLUMN waiting_signal TEXT",
+            [],
+        );
         conn.execute(
             "CREATE TABLE IF NOT EXISTS journal (
                 actor_id INTEGER NOT NULL,
@@ -351,8 +506,7 @@ impl SqliteStore {
             "CREATE TABLE IF NOT EXISTS workflow_events (
                 actor_id INTEGER NOT NULL,
                 sequence INTEGER NOT NULL,
-                name TEXT NOT NULL,
-                args TEXT NOT NULL,
+                event TEXT NOT NULL,
                 PRIMARY KEY (actor_id, sequence)
             )",
             [],
@@ -383,9 +537,9 @@ impl PersistenceStore for SqliteStore {
         let tx = conn.transaction()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         tx.execute(
-            "INSERT INTO snapshots (actor_id, sequence, state) VALUES (?1, ?2, ?3)
-             ON CONFLICT(actor_id) DO UPDATE SET sequence=excluded.sequence, state=excluded.state",
-            rusqlite::params![snapshot.actor_id as i64, snapshot.sequence as i64, state_json],
+            "INSERT INTO snapshots (actor_id, sequence, state, waiting_signal) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(actor_id) DO UPDATE SET sequence=excluded.sequence, state=excluded.state, waiting_signal=excluded.waiting_signal",
+            rusqlite::params![snapshot.actor_id as i64, snapshot.sequence as i64, state_json, snapshot.waiting_signal.as_ref()],
         )
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         tx.commit()
@@ -395,11 +549,11 @@ impl PersistenceStore for SqliteStore {
 
     fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
         let conn = self.conn.lock().unwrap();
-        let (sequence, state_json): (i64, String) = conn
+        let (sequence, state_json, waiting_signal): (i64, String, Option<String>) = conn
             .query_row(
-                "SELECT sequence, state FROM snapshots WHERE actor_id = ?1",
+                "SELECT sequence, state, waiting_signal FROM snapshots WHERE actor_id = ?1",
                 [actor_id as i64],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .ok()?;
         let state: HashMap<String, PersistedValue> = serde_json::from_str(&state_json).ok()?;
@@ -407,6 +561,7 @@ impl PersistenceStore for SqliteStore {
             actor_id,
             sequence: sequence as u64,
             state,
+            waiting_signal,
         })
     }
 
@@ -456,11 +611,11 @@ impl PersistenceStore for SqliteStore {
 
     fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
         let conn = self.conn.lock().unwrap();
-        let args_json = serde_json::to_string(&event.args)
+        let event_json = serde_json::to_string(&event)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         conn.execute(
-            "INSERT INTO workflow_events (actor_id, sequence, name, args) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![actor_id as i64, event.sequence as i64, event.name, args_json],
+            "INSERT INTO workflow_events (actor_id, sequence, event) VALUES (?1, ?2, ?3)",
+            rusqlite::params![actor_id as i64, event.sequence() as i64, event_json],
         )
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(())
@@ -469,29 +624,20 @@ impl PersistenceStore for SqliteStore {
     fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
-            "SELECT sequence, name, args FROM workflow_events
+            "SELECT event FROM workflow_events
              WHERE actor_id = ?1 ORDER BY sequence ASC",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
         let rows = stmt.query_map([actor_id as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
+            Ok(row.get::<_, String>(0)?)
         });
         match rows {
             Ok(iter) => iter
                 .filter_map(|r| {
-                    let (seq, name, args_json) = r.ok()?;
-                    let args: Vec<PersistedValue> = serde_json::from_str(&args_json).ok()?;
-                    Some(WorkflowEvent {
-                        sequence: seq as u64,
-                        name,
-                        args,
-                    })
+                    let event_json = r.ok()?;
+                    serde_json::from_str(&event_json).ok()
                 })
                 .collect(),
             Err(_) => Vec::new(),

@@ -594,6 +594,7 @@ fn test_memory_store_latest_sequence() {
         actor_id: 1,
         sequence: 5,
         state: HashMap::new(),
+        waiting_signal: None,
     };
     store.save_snapshot(snapshot).unwrap();
     store
@@ -618,6 +619,7 @@ fn test_sqlite_store_save_load_snapshot() {
         actor_id: 1,
         sequence: 3,
         state,
+        waiting_signal: None,
     };
     store.save_snapshot(snapshot).unwrap();
 
@@ -666,6 +668,7 @@ fn test_sqlite_store_latest_sequence() {
             actor_id: 1,
             sequence: 5,
             state: HashMap::new(),
+            waiting_signal: None,
         })
         .unwrap();
     store
@@ -689,6 +692,7 @@ fn test_sqlite_store_clear() {
             actor_id: 1,
             sequence: 1,
             state: HashMap::new(),
+            waiting_signal: None,
         })
         .unwrap();
     store
@@ -721,6 +725,7 @@ fn test_sqlite_store_persists_to_disk() {
                 actor_id: 1,
                 sequence: 1,
                 state,
+                waiting_signal: None,
             })
             .unwrap();
         store
@@ -803,6 +808,7 @@ fn test_vm_spawn_creates_persistent_actor() {
         code_offset: 0,
         local_count: 1,
         effect_mask: 0,
+        compensate_offset: None,
     });
     module.emit(Instruction::new3(OpCode::Spawn, 0, 0, 0));
     module.emit(Instruction::new0(OpCode::Halt));
@@ -846,6 +852,7 @@ fn test_vm_spawn_creates_non_persistent_actor() {
         code_offset: 0,
         local_count: 1,
         effect_mask: 0,
+        compensate_offset: None,
     });
     module.emit(Instruction::new3(OpCode::Spawn, 0, 0, 0));
     module.emit(Instruction::new0(OpCode::Halt));
@@ -1198,8 +1205,9 @@ fn test_workflow_actor_emits_started_event() {
 
     let events = rt.persistence.read_workflow_events(actor_id);
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].name, "WorkflowStarted");
-    assert_eq!(events[0].args.get(0), Some(&PersistedValue::String("CounterWorkflow".to_string())));
+    assert!(
+        matches!(&events[0], WorkflowEvent::WorkflowStarted { name, .. } if name == "CounterWorkflow")
+    );
 
     let snapshot = rt.persistence.load_snapshot(actor_id).unwrap();
     assert_eq!(snapshot.state.get("step_index"), Some(&PersistedValue::Int(0)));
@@ -1230,7 +1238,7 @@ fn test_workflow_actor_step_event_and_checkpoint() {
 
     let events = rt.persistence.read_workflow_events(actor_id);
     assert_eq!(events.len(), 2);
-    assert_eq!(events[1].name, "StepCompleted");
+    assert!(matches!(&events[1], WorkflowEvent::StepCompleted { .. }));
 
     let snapshot = rt.persistence.load_snapshot(actor_id).unwrap();
     assert_eq!(snapshot.state.get("step_index"), Some(&PersistedValue::Int(1)));
@@ -1294,4 +1302,133 @@ fn test_workflow_actor_recovery_replays_step_index() {
         .and_then(|v| v.as_int())
         .unwrap();
     assert_eq!(step_index, 4);
+}
+
+
+// ---------------------------------------------------------------------------
+// Workflow event journal foundation tests (timer / signal / saga)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_memory_store_append_read_timer_events() {
+    let mut store = MemoryStore::new();
+    store.append_timer_set(1, 1, "t1".to_string(), 100).unwrap();
+    store.append_timer_fired(1, 2, "t1".to_string()).unwrap();
+
+    let timers = store.read_timer_events(1);
+    assert_eq!(timers.len(), 2);
+    assert!(matches!(&timers[0], WorkflowEvent::TimerSet { name, duration_ms, .. } if name == "t1" && *duration_ms == 100));
+    assert!(matches!(&timers[1], WorkflowEvent::TimerFired { name, .. } if name == "t1"));
+}
+
+#[test]
+fn test_memory_store_append_read_signal_event() {
+    let mut store = MemoryStore::new();
+    store
+        .append_signal_received(1, 1, "resume".to_string(), Some("go".to_string()))
+        .unwrap();
+
+    let signals = store.read_signal_events(1);
+    assert_eq!(signals.len(), 1);
+    assert!(
+        matches!(&signals[0], WorkflowEvent::SignalReceived { name, payload, .. } if name == "resume" && payload == &Some("go".to_string()))
+    );
+}
+
+#[test]
+fn test_memory_store_append_read_saga_event() {
+    let mut store = MemoryStore::new();
+    store
+        .append_saga_compensated(1, 1, "charge_card".to_string())
+        .unwrap();
+
+    let sagas = store.read_saga_events(1);
+    assert_eq!(sagas.len(), 1);
+    assert!(
+        matches!(&sagas[0], WorkflowEvent::SagaCompensated { step_name, .. } if step_name == "charge_card")
+    );
+}
+
+#[test]
+fn test_sqlite_store_append_read_new_workflow_events() {
+    let mut store = SqliteStore::in_memory().unwrap();
+    store.append_timer_set(1, 1, "t1".to_string(), 200).unwrap();
+    store
+        .append_signal_received(1, 2, "cancel".to_string(), None)
+        .unwrap();
+    store
+        .append_saga_compensated(1, 3, "reserve".to_string())
+        .unwrap();
+
+    let all = store.read_workflow_events(1);
+    assert_eq!(all.len(), 3);
+    assert!(matches!(&all[0], WorkflowEvent::TimerSet { .. }));
+    assert!(matches!(&all[1], WorkflowEvent::SignalReceived { .. }));
+    assert!(matches!(&all[2], WorkflowEvent::SagaCompensated { .. }));
+
+    assert_eq!(store.read_timer_events(1).len(), 1);
+    assert_eq!(store.read_signal_events(1).len(), 1);
+    assert_eq!(store.read_saga_events(1).len(), 1);
+    assert_eq!(store.latest_sequence(1), 3);
+}
+
+#[test]
+fn test_runtime_append_workflow_timer_signal_saga_events() {
+    let mut rt = Runtime::new();
+    let mut models = HashMap::new();
+    models.insert("step_index".to_string(), StateModel::Durable);
+    let actor_id = rt.spawn_workflow_actor(
+        "OrderWorkflow",
+        Box::new(|| vec![("step_index".to_string(), Value::int(0))]),
+        models,
+    );
+
+    rt.append_timer_set(actor_id, "payment_timeout", 5000).unwrap();
+    rt.append_timer_fired(actor_id, "payment_timeout").unwrap();
+    rt.append_signal_received(actor_id, "cancel", Some("user_123".to_string()))
+        .unwrap();
+    rt.append_saga_compensated(actor_id, "authorize_payment").unwrap();
+
+    let events = rt.persistence.read_workflow_events(actor_id);
+    assert_eq!(events.len(), 5); // WorkflowStarted + 4 new events
+    assert!(matches!(&events[1], WorkflowEvent::TimerSet { name, duration_ms, .. } if name == "payment_timeout" && *duration_ms == 5000));
+    assert!(matches!(&events[2], WorkflowEvent::TimerFired { name, .. } if name == "payment_timeout"));
+    assert!(
+        matches!(&events[3], WorkflowEvent::SignalReceived { name, payload, .. } if name == "cancel" && payload == &Some("user_123".to_string()))
+    );
+    assert!(
+        matches!(&events[4], WorkflowEvent::SagaCompensated { step_name, .. } if step_name == "authorize_payment")
+    );
+}
+
+#[test]
+fn test_workflow_recovery_handles_new_event_variants() {
+    let mut rt = Runtime::new();
+    let mut models = HashMap::new();
+    models.insert("step_index".to_string(), StateModel::Durable);
+    let actor_id = rt.spawn_workflow_actor(
+        "OrderWorkflow",
+        Box::new(|| vec![("step_index".to_string(), Value::int(0))]),
+        models,
+    );
+
+    rt.append_timer_set(actor_id, "t1", 100).unwrap();
+    rt.append_signal_received(actor_id, "s1", Some("payload".to_string()))
+        .unwrap();
+    rt.append_saga_compensated(actor_id, "step_a").unwrap();
+
+    rt.actors.remove(&actor_id);
+    rt.recover_actor(actor_id).unwrap();
+
+    let step_index = rt
+        .actors
+        .get(&actor_id)
+        .unwrap()
+        .get_state_field("step_index")
+        .and_then(|v| v.as_int())
+        .unwrap();
+    assert_eq!(step_index, 0);
+
+    let events = rt.persistence.read_workflow_events(actor_id);
+    assert_eq!(events.len(), 4);
 }

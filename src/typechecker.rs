@@ -590,6 +590,9 @@ impl TypeChecker {
                 }
                 for step in steps {
                     let (_s, _body_ty) = self.infer_expr(&workflow_ctx, &step.body)?;
+                    if let Some(comp_expr) = &step.compensate {
+                        let (_s, _comp_ty) = self.infer_expr(&workflow_ctx, comp_expr)?;
+                    }
                 }
                 let workflow_ty = Type::Actor {
                     state: Box::new(Type::Var(TypeVar::fresh())),

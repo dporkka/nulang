@@ -356,6 +356,8 @@ pub enum Decl {
 pub struct WorkflowStep {
     pub name: String,
     pub body: Expr,
+    /// Optional saga compensation expression run when a later step fails.
+    pub compensate: Option<Expr>,
     pub span: Span,
 }
 

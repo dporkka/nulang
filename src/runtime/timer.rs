@@ -26,6 +26,13 @@ pub enum TimerMessage {
         behavior_id: u16,
         payload: Vec<Value>,
     },
+    /// Send a behavior message with an opaque context string (used by durable
+    /// workflow timers to carry the timer name through to the fire handler).
+    SendWithContext {
+        behavior_id: u16,
+        payload: Vec<Value>,
+        context: String,
+    },
     /// Exit the target actor with a reason.
     Exit {
         reason: String,
@@ -104,15 +111,31 @@ impl TimerWheel {
         behavior_id: u16,
         payload: Vec<Value>,
     ) -> TimerId {
+        self.send_after_with_context(delay, target_actor, behavior_id, payload, String::new())
+    }
+
+    /// Schedule a message to be sent to an actor after a delay, carrying an
+    /// opaque context string through to the fire handler.
+    ///
+    /// Returns the `TimerId` which can be used to cancel the timer.
+    pub fn send_after_with_context(
+        &self,
+        delay: Duration,
+        target_actor: u64,
+        behavior_id: u16,
+        payload: Vec<Value>,
+        context: String,
+    ) -> TimerId {
         let id = TimerId(self.next_id.fetch_add(1, Ordering::SeqCst));
         let fire_at = Instant::now() + delay;
 
         let entry = TimerEntry {
             id,
             target_actor,
-            message: TimerMessage::Send {
+            message: TimerMessage::SendWithContext {
                 behavior_id,
                 payload,
+                context,
             },
             fire_at,
             cancelled: AtomicBool::new(false),

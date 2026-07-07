@@ -33,6 +33,11 @@ pub struct Actor {
     /// Bytecode behavior offsets by behavior_id. Empty entries mean no bytecode
     /// handler for that behavior (native handler or missing).
     pub bytecode_offsets: Vec<usize>,
+    /// Saga compensation code offsets by behavior_id. `None` means the step has
+    /// no compensation expression.
+    pub compensation_offsets: Vec<Option<usize>>,
+    /// Names of steps already compensated (used during recovery replay).
+    pub compensated_steps: Vec<String>,
     /// Bytecode module used by this actor's bytecode behaviors.
     pub bytecode_module: Option<crate::bytecode::CodeModule>,
     /// Index of the loaded bytecode module in the runtime VM.
@@ -48,6 +53,20 @@ pub struct Actor {
     /// Sentinel heap object used by the cycle detector to represent this
     /// actor as a holder of foreign references.
     cycle_sentinel: Option<*mut OrcaHeader>,
+    /// Suspended VM state for a workflow step waiting on a signal.
+    pub suspended_execution: Option<SuspendedExecution>,
+    /// Name of the signal this workflow actor is currently waiting for, if any.
+    pub waiting_signal: Option<String>,
+    /// Signals that have been received by this workflow actor (name, payload).
+    pub received_signals: Vec<(String, Option<String>)>,
+}
+
+/// Captured VM state plus metadata for resuming a workflow step.
+#[derive(Debug)]
+pub struct SuspendedExecution {
+    pub vm_state: crate::vm::SuspendedVmState,
+    pub behavior_idx: usize,
+    pub step_name: String,
 }
 
 /// A behavior entry: maps behavior name to handler.
@@ -76,6 +95,8 @@ impl Actor {
             is_workflow: false,
             behavior_table: Vec::new(),
             bytecode_offsets: Vec::new(),
+            compensation_offsets: Vec::new(),
+            compensated_steps: Vec::new(),
             bytecode_module: None,
             bytecode_module_idx: None,
             parent: None,
@@ -87,6 +108,9 @@ impl Actor {
             max_reductions: 1000,
             sequence: 0,
             cycle_sentinel: None,
+            suspended_execution: None,
+            waiting_signal: None,
+            received_signals: Vec::new(),
         }
     }
 

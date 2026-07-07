@@ -59,6 +59,24 @@ pub fn fresh_actor_id() -> u64 {
     ACTOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Native handler for durable workflow timer-fired messages.
+///
+/// Advances the workflow's step_index so the workflow can proceed past the
+/// step that was waiting on the timer.
+fn timer_fired_handler(actor: &mut Actor, _args: &[Value]) {
+    if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
+        actor.set_state_field("step_index", Value::int(n + 1));
+    }
+}
+
+/// Placeholder native handler for bytecode workflow steps.
+///
+/// Workflow steps are dispatched via `bytecode_offsets`, but the behavior-id
+/// space is shared with native handlers. Empty-name placeholders reserve the
+/// step ids so internal runtime behaviors (e.g. `__timer_fired`) can live at
+/// higher indices without colliding.
+fn bytecode_step_placeholder(_actor: &mut Actor, _args: &[Value]) {}
+
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
@@ -98,8 +116,9 @@ pub struct Runtime {
     vm: Option<crate::vm::VM>,
 
     // Bytecode modules for actors that may need to be recovered after a
-    // runtime restart.  Maps actor_id -> (bytecode_module, behavior_offsets).
-    recovery_modules: HashMap<u64, (crate::bytecode::CodeModule, Vec<usize>)>,
+    // runtime restart.  Maps actor_id -> (bytecode_module, behavior_offsets,
+    // compensation_offsets).
+    recovery_modules: HashMap<u64, (crate::bytecode::CodeModule, Vec<usize>, Vec<Option<usize>>)>,
 }
 
 impl Runtime {
@@ -176,31 +195,30 @@ impl Runtime {
         if let Some(name) = workflow {
             actor.is_workflow = true;
             actor.name = name.to_string();
+            actor.register_behavior("__timer_fired", timer_fired_handler);
         }
         actor.state = ActorState::Running;
         self.actors.insert(id, actor);
         if workflow.is_some() {
             // Seed the workflow event journal with a WorkflowStarted event.
             let seq = self.next_sequence(id);
-            let args = {
+            let state = {
                 let actor = self.actors.get(&id).unwrap();
-                let mut args = vec![PersistedValue::String(
-                    workflow_name.as_ref().unwrap().clone(),
-                )];
+                let mut state = Vec::new();
                 for (field_name, value) in &actor.state_data {
                     let model = actor.state_models.get(field_name).copied().unwrap_or(StateModel::Local);
                     if model.is_persistent() {
-                        args.push(PersistedValue::from_value(value));
+                        state.push(PersistedValue::from_value(value));
                     }
                 }
-                args
+                state
             };
             let _ = self.persistence.append_workflow_event(
                 id,
-                WorkflowEvent {
+                WorkflowEvent::WorkflowStarted {
                     sequence: seq,
-                    name: "WorkflowStarted".to_string(),
-                    args,
+                    name: workflow_name.as_ref().unwrap().clone(),
+                    state,
                 },
             );
             self.checkpoint_actor(id);
@@ -210,15 +228,18 @@ impl Runtime {
     }
 
     /// Register bytecode metadata so that a persistent actor can be recovered
-    /// after a runtime restart.  The runtime stores the module and behavior
-    /// offsets; `recover_actor` will restore them on the recreated actor.
+    /// after a runtime restart.  The runtime stores the module, behavior
+    /// offsets, and saga compensation offsets; `recover_actor` will restore
+    /// them on the recreated actor.
     pub fn register_recovery_module(
         &mut self,
         actor_id: u64,
         module: crate::bytecode::CodeModule,
         offsets: Vec<usize>,
+        compensation_offsets: Vec<Option<usize>>,
     ) {
-        self.recovery_modules.insert(actor_id, (module, offsets));
+        self.recovery_modules
+            .insert(actor_id, (module, offsets, compensation_offsets));
     }
 
     /// Record an emitted event on an actor.  For the event-sourced MVP, each
@@ -251,13 +272,136 @@ impl Runtime {
             let payload: Vec<PersistedValue> = args.iter().map(PersistedValue::from_value).collect();
             let _ = self.persistence.append_workflow_event(
                 actor_id,
-                WorkflowEvent {
+                WorkflowEvent::Custom {
                     sequence: seq,
                     name: event.to_string(),
                     args: payload,
                 },
             );
             self.checkpoint_actor(actor_id);
+        }
+    }
+
+    /// Append a `TimerSet` workflow event and checkpoint the actor.
+    pub fn append_timer_set(&mut self, actor_id: u64, name: &str, duration_ms: u64) -> std::io::Result<()> {
+        let seq = self.next_sequence(actor_id);
+        self.persistence
+            .append_timer_set(actor_id, seq, name.to_string(), duration_ms)?;
+        self.checkpoint_actor(actor_id);
+        Ok(())
+    }
+
+    /// Append a `TimerFired` workflow event and checkpoint the actor.
+    pub fn append_timer_fired(&mut self, actor_id: u64, name: &str) -> std::io::Result<()> {
+        let seq = self.next_sequence(actor_id);
+        self.persistence
+            .append_timer_fired(actor_id, seq, name.to_string())?;
+        self.checkpoint_actor(actor_id);
+        Ok(())
+    }
+
+    /// Append a `SignalReceived` workflow event and checkpoint the actor.
+    pub fn append_signal_received(
+        &mut self,
+        actor_id: u64,
+        name: &str,
+        payload: Option<String>,
+    ) -> std::io::Result<()> {
+        let seq = self.next_sequence(actor_id);
+        self.persistence
+            .append_signal_received(actor_id, seq, name.to_string(), payload)?;
+        self.checkpoint_actor(actor_id);
+        Ok(())
+    }
+
+    /// Append a `SagaCompensated` workflow event and checkpoint the actor.
+    pub fn append_saga_compensated(&mut self, actor_id: u64, step_name: &str) -> std::io::Result<()> {
+        let seq = self.next_sequence(actor_id);
+        self.persistence
+            .append_saga_compensated(actor_id, seq, step_name.to_string())?;
+        self.checkpoint_actor(actor_id);
+        Ok(())
+    }
+
+    /// Send a named signal to a workflow actor.
+    ///
+    /// The signal is appended to the durable workflow journal and, if the actor
+    /// is currently suspended waiting for this signal, its execution is resumed.
+    pub fn signal_workflow(&mut self, actor_id: u64, name: &str, payload: Option<String>) {
+        let _ = self.append_signal_received(actor_id, name, payload.clone());
+
+        let should_resume = {
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.received_signals.push((name.to_string(), payload));
+                actor.waiting_signal.as_ref().map(|s| s == name).unwrap_or(false)
+            } else {
+                false
+            }
+        };
+
+        if should_resume {
+            self.resume_suspended_workflow_step(actor_id);
+        }
+    }
+
+    /// Resume a workflow actor that is suspended waiting for a signal.
+    fn resume_suspended_workflow_step(&mut self, actor_id: u64) {
+        let suspended = match self.actors.get_mut(&actor_id) {
+            Some(actor) => actor.suspended_execution.take(),
+            None => return,
+        };
+        let Some(suspended) = suspended else { return };
+
+        let vm = match self.vm.as_mut() {
+            Some(vm) => vm,
+            None => {
+                // No VM available; put the suspension back so a later message
+                // can re-trigger the step.
+                if let Some(actor) = self.actors.get_mut(&actor_id) {
+                    actor.suspended_execution = Some(suspended);
+                }
+                return;
+            }
+        };
+
+        vm.restore_suspended_state(suspended.vm_state);
+        let behavior_idx = suspended.behavior_idx;
+        let step_name = suspended.step_name;
+        let result = vm.resume();
+
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.waiting_signal = None;
+        }
+
+        match result {
+            Ok(_) => {
+                if self.actor_is_workflow(actor_id) {
+                    if let Some(actor) = self.actors.get_mut(&actor_id) {
+                        if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
+                            actor.set_state_field("step_index", Value::int(n + 1));
+                        }
+                    }
+                    let seq = self.next_sequence(actor_id);
+                    let _ = self.persistence.append_workflow_event(
+                        actor_id,
+                        WorkflowEvent::StepCompleted {
+                            sequence: seq,
+                            step_name,
+                        },
+                    );
+                    self.checkpoint_actor(actor_id);
+                }
+            }
+            Err(crate::types::NuError::VMError(ref msg)) if msg == "SignalWait:suspend" => {
+                // Suspended again for another signal; state has already been
+                // captured by the callback.
+            }
+            Err(_) => {
+                // Step failed after resumption: run saga compensations.
+                if self.actor_is_workflow(actor_id) {
+                    self.run_saga_compensation(actor_id, behavior_idx);
+                }
+            }
         }
     }
 
@@ -400,6 +544,7 @@ impl Runtime {
 
     pub fn run_scheduler(&mut self) {
         while let Some(actor_id) = self.scheduler.dequeue() {
+            self.tick_timers();
             self.step_actor(actor_id);
         }
     }
@@ -441,32 +586,41 @@ impl Runtime {
                 }
             };
             let mut processed = false;
+            let is_placeholder = self
+                .actors
+                .get(&actor_id)
+                .and_then(|a| a.behavior_table.get(behavior_idx))
+                .map(|e| e.name.is_empty())
+                .unwrap_or(false);
             if let Some(handler) = handler_fn {
-                // Journal the message before handling so recovery can replay it.
-                if self.actor_is_persistent(actor_id) {
-                    let seq = self.next_sequence(actor_id);
-                    let payload = msg.payload.iter().map(PersistedValue::from_value).collect();
-                    let _ = self.persistence.append_journal(
-                        actor_id,
-                        JournalEntry {
-                            sequence: seq,
-                            behavior_id: msg.behavior_id,
-                            payload,
-                        },
-                    );
-                }
-                let actor = match self.actors.get_mut(&actor_id) {
-                    Some(a) => a,
-                    None => {
-                        self.current_actor = None;
-                        return;
+                if !is_placeholder {
+                    // Journal the message before handling so recovery can replay it.
+                    if self.actor_is_persistent(actor_id) {
+                        let seq = self.next_sequence(actor_id);
+                        let payload = msg.payload.iter().map(PersistedValue::from_value).collect();
+                        let _ = self.persistence.append_journal(
+                            actor_id,
+                            JournalEntry {
+                                sequence: seq,
+                                behavior_id: msg.behavior_id,
+                                payload,
+                            },
+                        );
                     }
-                };
-                handler(actor, &msg.payload);
-                // Snapshot durable state after the message is processed.
-                self.checkpoint_actor(actor_id);
-                processed = true;
-            } else if self.has_bytecode_handler(actor_id, behavior_idx) {
+                    let actor = match self.actors.get_mut(&actor_id) {
+                        Some(a) => a,
+                        None => {
+                            self.current_actor = None;
+                            return;
+                        }
+                    };
+                    handler(actor, &msg.payload);
+                    // Snapshot durable state after the message is processed.
+                    self.checkpoint_actor(actor_id);
+                    processed = true;
+                }
+            }
+            if !processed && self.has_bytecode_handler(actor_id, behavior_idx) {
                 // Journal before executing bytecode as well.
                 if self.actor_is_persistent(actor_id) {
                     let seq = self.next_sequence(actor_id);
@@ -481,19 +635,33 @@ impl Runtime {
                     );
                 }
                 let payload = msg.payload.clone();
-                let _result = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
+                let result = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
                 self.checkpoint_actor(actor_id);
-                processed = true;
+                match result {
+                    Ok(_) => processed = true,
+                    Err(crate::types::NuError::VMError(ref msg)) if msg == "SignalWait:suspend" => {
+                        // The step yielded waiting for a signal. Do not mark it
+                        // completed and do not run compensations.
+                        processed = false;
+                    }
+                    Err(_) => {
+                        // A workflow step failed: run saga compensations for previously
+                        // completed steps in reverse order.
+                        if self.actor_is_workflow(actor_id) {
+                            self.run_saga_compensation(actor_id, behavior_idx);
+                        }
+                        processed = false;
+                    }
+                }
             }
-            if processed && self.actor_is_workflow(actor_id) {
+            if processed && self.actor_is_workflow(actor_id) && !self.is_internal_behavior(actor_id, behavior_idx) {
                 let seq = self.next_sequence(actor_id);
-                let step_name = format!("step_{}", behavior_idx);
+                let step_name = self.step_name_for(actor_id, behavior_idx);
                 let _ = self.persistence.append_workflow_event(
                     actor_id,
-                    WorkflowEvent {
+                    WorkflowEvent::StepCompleted {
                         sequence: seq,
-                        name: "StepCompleted".to_string(),
-                        args: vec![PersistedValue::String(step_name)],
+                        step_name,
                     },
                 );
                 self.checkpoint_actor(actor_id);
@@ -541,13 +709,65 @@ impl Runtime {
             .map(|a| {
                 a.bytecode_module.is_some()
                     && behavior_idx < a.bytecode_offsets.len()
-                    && a.bytecode_offsets[behavior_idx] > 0
             })
             .unwrap_or(false)
     }
 
     fn next_sequence(&self, actor_id: u64) -> u64 {
         self.persistence.latest_sequence(actor_id) + 1
+    }
+
+    /// Schedule a durable timer for a workflow actor.
+    ///
+    /// Appends a `TimerSet` event, checkpoints state, and arms the runtime's
+    /// timer wheel. When the timer fires the runtime will append a
+    /// `TimerFired` event and deliver a `__timer_fired` message to the actor.
+    pub fn schedule_workflow_timer(&mut self, actor_id: u64, name: &str, duration_ms: u64) {
+        if self.actor_is_workflow(actor_id) {
+            let _ = self.append_timer_set(actor_id, name, duration_ms);
+        }
+        self.rearm_timer(actor_id, name, duration_ms);
+    }
+
+    /// Re-arm a timer from the durable journal without appending a new event.
+    /// Used during recovery to restore timers that have not yet fired.
+    fn rearm_timer(&mut self, actor_id: u64, name: &str, duration_ms: u64) {
+        let behavior_id = self.behavior_id_for(actor_id, "__timer_fired").unwrap_or(0);
+        self.timer_wheel.send_after_with_context(
+            std::time::Duration::from_millis(duration_ms),
+            actor_id,
+            behavior_id,
+            vec![],
+            name.to_string(),
+        );
+    }
+
+    /// Tick the timer wheel and deliver any fired timers.
+    pub fn tick_timers(&mut self) {
+        self.tick_timers_at(std::time::Instant::now());
+    }
+
+    fn tick_timers_at(&mut self, now: std::time::Instant) {
+        let fired = self.timer_wheel.tick(now);
+        for (target_actor, message) in fired {
+            match message {
+                TimerMessage::SendWithContext { behavior_id, payload, context } => {
+                    if self.actor_is_workflow(target_actor) {
+                        let _ = self.append_timer_fired(target_actor, &context);
+                    }
+                    self.send_message_by_id(target_actor, behavior_id, &payload);
+                }
+                TimerMessage::Send { behavior_id, payload } => {
+                    self.send_message_by_id(target_actor, behavior_id, &payload);
+                }
+                TimerMessage::Exit { reason } => {
+                    self.exit_actor(target_actor, ExitReason::Error(reason));
+                }
+                TimerMessage::Kill => {
+                    self.kill_actor(target_actor);
+                }
+            }
+        }
     }
 
     /// Snapshot durable fields of an actor to the persistence store.
@@ -567,10 +787,39 @@ impl Runtime {
                 state.insert(name.clone(), PersistedValue::from_value(value));
             }
         }
-        let snapshot = ActorSnapshot { actor_id, sequence: seq, state };
+        let snapshot = ActorSnapshot {
+            actor_id,
+            sequence: seq,
+            state,
+            waiting_signal: actor.waiting_signal.clone(),
+        };
         let _ = self.persistence.save_snapshot(snapshot);
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.sequence = seq;
+        }
+    }
+
+    /// Lay out a workflow actor's native behavior table so that bytecode step
+    /// ids (0..n-1) do not collide with internal runtime behaviors such as
+    /// `__timer_fired`.
+    fn layout_workflow_behavior_table(&mut self, actor_id: u64) {
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            if !actor.is_workflow {
+                return;
+            }
+            let step_count = actor.bytecode_offsets.len();
+            // Strip any previously registered runtime placeholders/internal
+            // behaviors; we'll rebuild them below.
+            actor
+                .behavior_table
+                .retain(|e| !e.name.is_empty() && e.name != "__timer_fired");
+            for _ in 0..step_count {
+                actor.behavior_table.push(BehaviorEntry {
+                    name: String::new(),
+                    handler_fn: bytecode_step_placeholder,
+                });
+            }
+            actor.register_behavior("__timer_fired", timer_fired_handler);
         }
     }
 
@@ -580,18 +829,63 @@ impl Runtime {
         actor_id: u64,
         behavior_idx: usize,
         args: &[Value],
-    ) -> Value {
-        let (module, code_offset) = {
+    ) -> crate::types::NuResult<Value> {
+        let code_offset = {
             let actor = match self.actors.get(&actor_id) {
                 Some(a) => a,
-                None => return Value::nil(),
+                None => return Ok(Value::nil()),
             };
-            let module = match actor.bytecode_module.clone() {
+            actor.bytecode_offsets.get(behavior_idx).copied().unwrap_or(0)
+        };
+        let result = self.run_bytecode_at_offset(actor_id, code_offset, args);
+        // If the step suspended waiting for a signal, record which behavior
+        // and step name it was executing so recovery/resumption can continue.
+        if let Err(crate::types::NuError::VMError(ref msg)) = result {
+            if msg == "SignalWait:suspend" {
+                let step_name = self.step_name_for(actor_id, behavior_idx);
+                if let Some(actor) = self.actors.get_mut(&actor_id) {
+                    if let Some(ref mut suspended) = actor.suspended_execution {
+                        suspended.behavior_idx = behavior_idx;
+                        suspended.step_name = step_name;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Execute a saga compensation expression for a completed workflow step.
+    fn run_compensation(
+        &mut self,
+        actor_id: u64,
+        behavior_idx: usize,
+    ) -> crate::types::NuResult<Value> {
+        let code_offset = {
+            let actor = match self.actors.get(&actor_id) {
+                Some(a) => a,
+                None => return Ok(Value::nil()),
+            };
+            match actor.compensation_offsets.get(behavior_idx).copied().flatten() {
+                Some(offset) => offset,
+                None => return Ok(Value::nil()),
+            }
+        };
+        self.run_bytecode_at_offset(actor_id, code_offset, &[])
+    }
+
+    /// Execute bytecode at a specific code offset for an actor.
+    fn run_bytecode_at_offset(
+        &mut self,
+        actor_id: u64,
+        code_offset: usize,
+        args: &[Value],
+    ) -> crate::types::NuResult<Value> {
+        let module = match self.actors.get(&actor_id) {
+            Some(a) => match a.bytecode_module.clone() {
                 Some(m) => m,
-                None => return Value::nil(),
-            };
-            let offset = actor.bytecode_offsets.get(behavior_idx).copied().unwrap_or(0);
-            (module, offset)
+                None => return Ok(Value::nil()),
+            },
+            None => return Ok(Value::nil()),
         };
 
         let self_ptr: *mut Runtime = self;
@@ -621,8 +915,101 @@ impl Runtime {
             }
             vm.set_current_frame(frame);
 
-            vm.run_from(module_idx, code_offset).unwrap_or(Value::nil())
+            let result = vm.run_from(module_idx, code_offset);
+            // Capture VM state for a workflow signal wait. Doing this here
+            // avoids aliasing the Runtime through the callback while the VM
+            // borrow is active.
+            if let Err(crate::types::NuError::VMError(ref msg)) = result {
+                if msg == "SignalWait:suspend" {
+                    if let Some(vm_state) = vm.take_suspended_state() {
+                        let signal_name = vm.suspended_signal_name.take();
+                        if let Some(actor) = self.actors.get_mut(&actor_id) {
+                            actor.waiting_signal = signal_name;
+                            actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
+                                vm_state,
+                                behavior_idx: 0,
+                                step_name: String::new(),
+                            });
+                        }
+                    }
+                }
+            }
+            result
         }
+    }
+
+    /// Run saga compensations for a workflow step that failed.
+    /// Walks backwards through completed steps and executes each compensation
+    /// expression in reverse order, skipping steps already marked compensated.
+    fn run_saga_compensation(&mut self, actor_id: u64, _failed_behavior_idx: usize) {
+        let step_index = self
+            .actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("step_index").and_then(|v| v.as_int()))
+            .unwrap_or(0) as usize;
+
+        for behavior_idx in (0..step_index).rev() {
+            let already_compensated = {
+                let actor = match self.actors.get(&actor_id) {
+                    Some(a) => a,
+                    None => return,
+                };
+                let step_name = self.step_name_for(actor_id, behavior_idx);
+                actor.compensated_steps.contains(&step_name)
+            };
+            if already_compensated {
+                continue;
+            }
+
+            let result = self.run_compensation(actor_id, behavior_idx);
+            let step_name = self.step_name_for(actor_id, behavior_idx);
+            if result.is_err() {
+                // Compensation failed: do not record it as completed.
+                continue;
+            }
+            let _ = self.append_saga_compensated(actor_id, &step_name);
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                if !actor.compensated_steps.contains(&step_name) {
+                    actor.compensated_steps.push(step_name);
+                }
+            }
+        }
+    }
+
+    /// Return the step name for a workflow behavior index.
+    fn step_name_for(&self, actor_id: u64, behavior_idx: usize) -> String {
+        if let Some(actor) = self.actors.get(&actor_id) {
+            // Prefer real behavior names; skip placeholder entries used to
+            // reserve step ids in workflow actors.
+            if let Some(entry) = actor.behavior_table.get(behavior_idx) {
+                if !entry.name.is_empty() {
+                    if let Some(pos) = entry.name.rfind('.') {
+                        return entry.name[pos + 1..].to_string();
+                    }
+                    return entry.name.clone();
+                }
+            }
+            if let Some(module) = &actor.bytecode_module {
+                if let Some(entry) = module.behaviors.get(behavior_idx) {
+                    if let Some(pos) = entry.name.rfind('.') {
+                        return entry.name[pos + 1..].to_string();
+                    }
+                    return entry.name.clone();
+                }
+            }
+        }
+        format!("step_{}", behavior_idx)
+    }
+
+    /// Return true if the behavior index belongs to an internal runtime behavior
+    /// (not a user-defined workflow step). Internal behaviors do not generate
+    /// `StepCompleted` events.
+    fn is_internal_behavior(&self, actor_id: u64, behavior_idx: usize) -> bool {
+        self.actors
+            .get(&actor_id)
+            .and_then(|a| a.behavior_table.get(behavior_idx))
+            .map(|entry| entry.name == "__timer_fired")
+            .unwrap_or(false)
     }
 
     /// Recover a persistent actor from the latest snapshot and replay the journal.
@@ -636,34 +1023,98 @@ impl Runtime {
         let is_workflow = self
             .recovery_modules
             .get(&actor_id)
-            .map(|(m, _)| m.actor_metadata.iter().any(|meta| meta.is_workflow))
+            .map(|(m, _, _)| m.actor_metadata.iter().any(|meta| meta.is_workflow))
             .unwrap_or(!workflow_events.is_empty());
 
         let mut actor = Actor::new(actor_id, format!("actor_{}", actor_id), 256);
         actor.persistent = true;
         actor.is_workflow = is_workflow;
         actor.sequence = snapshot.sequence;
+        actor.waiting_signal = snapshot.waiting_signal;
         for (name, value) in snapshot.state {
             actor.set_state_field(name, value.to_value());
         }
         // Restore bytecode metadata registered for recovery.
-        if let Some((module, offsets)) = self.recovery_modules.get(&actor_id) {
+        if let Some((module, offsets, comp_offsets)) = self.recovery_modules.get(&actor_id) {
             actor.bytecode_module = Some(module.clone());
             actor.bytecode_offsets = offsets.clone();
+            actor.compensation_offsets = comp_offsets.clone();
         }
-        self.actors.insert(actor_id, actor);
+        if is_workflow {
+            self.actors.insert(actor_id, actor);
+            self.layout_workflow_behavior_table(actor_id);
+        } else {
+            self.actors.insert(actor_id, actor);
+        }
 
         if is_workflow {
             // Replay workflow events that arrived after the snapshot.
             let events_to_replay: Vec<_> = workflow_events
                 .iter()
-                .filter(|e| e.sequence > snapshot.sequence)
+                .filter(|e| e.sequence() > snapshot.sequence)
                 .cloned()
                 .collect();
-            for event in events_to_replay {
+            let mut fired_timer_names: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for event in &events_to_replay {
+                if let WorkflowEvent::TimerFired { name, .. } = event {
+                    fired_timer_names.insert(name.clone());
+                }
+            }
+            for event in &events_to_replay {
                 if let Some(actor) = self.actors.get_mut(&actor_id) {
-                    Self::apply_workflow_event(actor, &event);
-                    actor.sequence = event.sequence;
+                    Self::apply_workflow_event(actor, event);
+                    actor.sequence = event.sequence();
+                }
+            }
+            // Re-arm timers that were set before the snapshot/replay but have
+            // not yet fired. Timers are reconstructed from the full durable
+            // journal, not just events after the snapshot, because snapshots do
+            // not capture pending timers.
+            let all_timer_events = self.persistence.read_timer_events(actor_id);
+            let mut fired_timer_names: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for event in &all_timer_events {
+                if let WorkflowEvent::TimerFired { name, .. } = event {
+                    fired_timer_names.insert(name.clone());
+                }
+            }
+            for event in &all_timer_events {
+                if let WorkflowEvent::TimerSet {
+                    name,
+                    duration_ms,
+                    ..
+                } = event
+                {
+                    if !fired_timer_names.contains(name) {
+                        self.rearm_timer(actor_id, name, *duration_ms);
+                    }
+                }
+            }
+            // If the workflow was in the middle of a step waiting on a signal,
+            // re-trigger that step so it can resume from replayed events. We
+            // use step_index as the behavior id because each step is compiled
+            // to a behavior at the same index.
+            let should_resume = self
+                .actors
+                .get(&actor_id)
+                .map(|a| a.waiting_signal.is_some() || a.suspended_execution.is_some())
+                .unwrap_or(false);
+            if should_resume {
+                let current_step = self
+                    .actors
+                    .get(&actor_id)
+                    .and_then(|a| a.get_state_field("step_index"))
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0) as u16;
+                let has_behavior = self
+                    .actors
+                    .get(&actor_id)
+                    .and_then(|a| a.bytecode_module.as_ref())
+                    .map(|m| (current_step as usize) < m.behaviors.len())
+                    .unwrap_or(false);
+                if has_behavior {
+                    self.send_message_by_id(actor_id, current_step, &[]);
                 }
             }
         } else {
@@ -702,20 +1153,33 @@ impl Runtime {
     /// Apply a single workflow event to an actor's state.  Used during recovery
     /// replay to restore step index and accumulated event-sourced state.
     fn apply_workflow_event(actor: &mut Actor, event: &WorkflowEvent) {
-        match event.name.as_str() {
-            "WorkflowStarted" => {
+        match event {
+            WorkflowEvent::WorkflowStarted { .. } => {
                 if actor.get_state_field("step_index").is_some() {
                     actor.set_state_field("step_index", Value::int(0));
                 }
             }
-            "StepCompleted" => {
+            WorkflowEvent::StepCompleted { .. } => {
                 if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
                     actor.set_state_field("step_index", Value::int(n + 1));
                 }
             }
-            _ => {
-                let args: Vec<Value> = event.args.iter().map(|a| a.to_value()).collect();
-                actor.event_log.push((event.name.clone(), args));
+            WorkflowEvent::SagaCompensated { step_name, .. } => {
+                // Replay marks the step as already compensated so the runtime
+                // does not run its compensation expression again.
+                if !actor.compensated_steps.contains(step_name) {
+                    actor.compensated_steps.push(step_name.clone());
+                }
+            }
+            // Foundation: timer events are persisted but their runtime
+            // scheduling is handled by the timer feature scope.
+            WorkflowEvent::TimerSet { .. } | WorkflowEvent::TimerFired { .. } => {}
+            WorkflowEvent::SignalReceived { name, payload, .. } => {
+                actor.received_signals.push((name.clone(), payload.clone()));
+            }
+            WorkflowEvent::Custom { name, args, .. } => {
+                let values: Vec<Value> = args.iter().map(|a| a.to_value()).collect();
+                actor.event_log.push((name.clone(), values));
             }
         }
     }
@@ -723,7 +1187,8 @@ impl Runtime {
     fn has_native_handler(&self, actor_id: u64, behavior_idx: usize) -> bool {
         self.actors
             .get(&actor_id)
-            .map(|a| behavior_idx < a.behavior_table.len())
+            .and_then(|a| a.behavior_table.get(behavior_idx))
+            .map(|e| !e.name.is_empty())
             .unwrap_or(false)
     }
 
@@ -1177,19 +1642,25 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         };
         // Record bytecode behavior offsets so the runtime can execute bytecode handlers.
         let mut offsets = vec![0; module.behaviors.len()];
+        let mut compensation_offsets: Vec<Option<usize>> = vec![None; module.behaviors.len()];
         if let Some(meta) = meta {
             for &idx in &meta.behavior_indices {
                 if let Some(entry) = module.behaviors.get(idx) {
                     offsets[idx] = entry.code_offset;
+                    compensation_offsets[idx] = entry.compensate_offset;
                 }
             }
         }
         if let Some(actor) = rt.actors.get_mut(&id) {
             actor.bytecode_module = Some(module.clone());
             actor.bytecode_offsets = offsets.clone();
+            actor.compensation_offsets = compensation_offsets.clone();
+        }
+        if meta.map(|m| m.is_workflow).unwrap_or(false) {
+            rt.layout_workflow_behavior_table(id);
         }
         // Keep a copy for recovery after a runtime restart.
-        rt.register_recovery_module(id, module.clone(), offsets);
+        rt.register_recovery_module(id, module.clone(), offsets, compensation_offsets);
         crate::vm::Value::actor_ref(id)
     }
 
@@ -1231,6 +1702,26 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         if let Some(actor_id) = rt.current_actor {
             rt.emit_event(actor_id, event, args);
         }
+    }
+
+    fn perform_effect(&mut self, effect_name: &str, regs: &[crate::vm::Value]) -> Option<crate::vm::Value> {
+        if effect_name != "Timer" {
+            return None;
+        }
+        let mut rt = self.runtime.borrow_mut();
+        let actor_id = rt.current_actor?;
+        if !rt.actor_is_workflow(actor_id) {
+            return None;
+        }
+        let name = {
+            let vm = rt.vm.as_mut()?;
+            let module_idx = vm.current_module_idx()?;
+            let string_id = regs.get(0)?.as_string_id()?;
+            vm.constant_string(module_idx, string_id)?
+        };
+        let duration_ms = regs.get(1)?.as_int()? as u64;
+        rt.schedule_workflow_timer(actor_id, &name, duration_ms);
+        Some(crate::vm::Value::unit())
     }
 }
 
@@ -1312,6 +1803,42 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
     fn emit_event(&mut self, event: &str, args: &[crate::vm::Value]) {
         unsafe {
             (*self.runtime).emit_event(self.actor_id, event, args);
+        }
+    }
+
+    fn wait_signal(&mut self, name: &str) -> crate::vm::SignalWaitResult {
+        unsafe {
+            if let Some(actor) = (*self.runtime).actors.get(&self.actor_id) {
+                if actor.received_signals.iter().any(|(n, _)| n == name) {
+                    return crate::vm::SignalWaitResult::Ready(crate::vm::Value::unit());
+                }
+            }
+            crate::vm::SignalWaitResult::NotReady
+        }
+    }
+
+    fn suspend_for_signal(&mut self, _name: &str, _vm_state: Option<crate::vm::SuspendedVmState>) {
+        // State capture is handled by run_bytecode_at_offset after run_from
+        // returns, avoiding aliasing the Runtime through this raw-pointer
+        // callback while the VM borrow is active.
+    }
+
+    fn perform_effect(&mut self, effect_name: &str, regs: &[crate::vm::Value]) -> Option<crate::vm::Value> {
+        unsafe {
+            if effect_name != "Timer" {
+                return None;
+            }
+            let actor = (*self.runtime).actors.get(&self.actor_id)?;
+            if !actor.is_workflow {
+                return None;
+            }
+            let vm = (*self.runtime).vm.as_mut()?;
+            let module_idx = vm.current_module_idx()?;
+            let string_id = regs.get(0)?.as_string_id()?;
+            let name = vm.constant_string(module_idx, string_id)?;
+            let duration_ms = regs.get(1)?.as_int()? as u64;
+            (*self.runtime).schedule_workflow_timer(self.actor_id, &name, duration_ms);
+            Some(crate::vm::Value::unit())
         }
     }
 }

@@ -742,9 +742,11 @@ mod tests {
         let (module, _ty) = compile_source(source).unwrap();
         let meta = module.actor_metadata.first().unwrap();
         let mut offsets = vec![0; module.behaviors.len()];
+        let mut comp_offsets: Vec<Option<usize>> = vec![None; module.behaviors.len()];
         for &idx in &meta.behavior_indices {
             if let Some(entry) = module.behaviors.get(idx) {
                 offsets[idx] = entry.code_offset;
+                comp_offsets[idx] = entry.compensate_offset;
             }
         }
 
@@ -772,7 +774,12 @@ mod tests {
         // register the bytecode module, then recover.
         let rt2 = Rc::new(RefCell::new(Runtime::new()));
         rt2.borrow_mut().persistence = Box::new(store.clone());
-        rt2.borrow_mut().register_recovery_module(actor_id, module.clone(), offsets.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            vec![None; module.behaviors.len()],
+        );
         rt2.borrow_mut().recover_actor(actor_id);
 
         assert_eq!(
@@ -895,15 +902,20 @@ mod tests {
         );
 
         let events_before = store.read_workflow_events(actor_id);
-        assert!(events_before.iter().any(|e| e.name == "WorkflowStarted"));
-        assert!(events_before.iter().any(|e| e.name == "Started"));
-        assert!(events_before.iter().any(|e| e.name == "StepCompleted"));
+        assert!(events_before.iter().any(|e| matches!(e, WorkflowEvent::WorkflowStarted { .. })));
+        assert!(events_before.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "Started")));
+        assert!(events_before.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { .. })));
 
         // Simulate a node restart: new runtime sharing the same store,
         // register the bytecode module, then recover the workflow actor.
         let rt2 = Rc::new(RefCell::new(Runtime::new()));
         rt2.borrow_mut().persistence = Box::new(store.clone());
-        rt2.borrow_mut().register_recovery_module(actor_id, module.clone(), offsets.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            vec![None; module.behaviors.len()],
+        );
         rt2.borrow_mut().recover_actor(actor_id);
 
         assert_eq!(
@@ -928,11 +940,261 @@ mod tests {
 
         let events_after = store.read_workflow_events(actor_id);
         assert_eq!(
-            events_after.iter().filter(|e| e.name == "StepCompleted").count(),
+            events_after.iter().filter(|e| matches!(e, WorkflowEvent::StepCompleted { .. })).count(),
             2,
             "two StepCompleted events should be persisted"
         );
-        assert!(events_after.iter().any(|e| e.name == "Incremented"));
+        assert!(events_after.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "Incremented")));
+    }
+
+    #[test]
+    fn test_workflow_signal_wait_and_resume_after_restart() {
+        // A workflow step waits for a named signal. The step suspends until
+        // the signal is delivered, and after a simulated restart the signal
+        // is replayed from the journal so the workflow advances.
+        let source = r#"
+            workflow Signaled {
+                step wait_for_go {
+                    perform Signal.wait("go")
+                }
+            }
+            let c = spawn Signaled {} in { c }
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+            }
+        }
+
+        // First runtime: spawn and start the waiting step.
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt1.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt1.borrow_mut().run_scheduler();
+
+        // Step has not completed yet; it is suspended waiting for the signal.
+        assert_eq!(
+            rt1.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(0),
+            "step should not advance before signal is received"
+        );
+        assert!(
+            rt1.borrow().actors.get(&actor_id).unwrap().suspended_execution.is_some(),
+            "actor should have a suspended execution waiting for the signal"
+        );
+
+        // Simulate a runtime restart: drop the actor and recover from the store.
+        rt1.borrow_mut().actors.remove(&actor_id);
+
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            vec![None; module.behaviors.len()],
+        );
+        rt2.borrow_mut().recover_actor(actor_id);
+        // Recovery detects the waiting signal and re-triggers the step; it
+        // suspends again until the signal arrives.
+        rt2.borrow_mut().run_scheduler();
+
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(0),
+            "step should still be waiting after recovery"
+        );
+
+        // Send the signal. The runtime appends SignalReceived and resumes the step.
+        rt2.borrow_mut().signal_workflow(actor_id, "go", None);
+
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(1),
+            "workflow should advance after the signal is received"
+        );
+
+        let events = store.read_workflow_events(actor_id);
+        assert!(
+            events.iter().any(|e| matches!(e, WorkflowEvent::SignalReceived { name, .. } if name == "go")),
+            "SignalReceived event should be persisted"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "wait_for_go")),
+            "StepCompleted event should be persisted after the signal"
+        );
+    }
+
+    #[test]
+    fn test_saga_compensation_runs_in_reverse_order() {
+        // A three-step saga where the third step fails. The first two steps
+        // have per-step compensations that must run in reverse order (b, then a).
+        let source = r#"
+            workflow SagaTest {
+                step a {
+                    (self.step_index = self.step_index + 1, self.a_done = 1, emit A_Done())
+                } compensate {
+                    self.comp_order = self.comp_order * 10 + 1
+                }
+                step b {
+                    (self.step_index = self.step_index + 1, self.b_done = 1, emit B_Done())
+                } compensate {
+                    self.comp_order = self.comp_order * 10 + 2
+                }
+                step c {
+                    perform Fail.now()
+                }
+            }
+            let c = spawn SagaTest {} in { c }
+        "#;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return actor reference");
+
+        // Run steps sequentially. The third step fails and triggers compensation.
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 2, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(actor.get_state_field("a_done").and_then(|v| v.as_int()), Some(1));
+            assert_eq!(actor.get_state_field("b_done").and_then(|v| v.as_int()), Some(1));
+            assert_eq!(
+                actor.get_state_field("comp_order").and_then(|v| v.as_int()),
+                Some(21),
+                "compensations should run in reverse order (b then a)"
+            );
+        }
+
+        let events = rt.borrow().persistence.read_workflow_events(actor_id);
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, WorkflowEvent::StepCompleted { .. })).count(),
+            2,
+            "only the first two steps should record StepCompleted"
+        );
+        let saga_events: Vec<_> = events.iter().filter(|e| matches!(e, WorkflowEvent::SagaCompensated { .. })).collect();
+        assert_eq!(saga_events.len(), 2);
+        assert!(
+            matches!(&saga_events[0], WorkflowEvent::SagaCompensated { step_name, .. } if step_name == "b")
+        );
+        assert!(
+            matches!(&saga_events[1], WorkflowEvent::SagaCompensated { step_name, .. } if step_name == "a")
+        );
+    }
+
+    #[test]
+    fn test_workflow_durable_timer_recovery() {
+        // A workflow step sets a durable timer. After a simulated restart the
+        // timer is re-armed from the journal and, once it fires, the workflow
+        // advances past the timer step.
+        let source = r#"
+            workflow TimerWorkflow {
+                step wait { perform Timer.sleep("timeout1", 1) }
+            }
+            spawn TimerWorkflow {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        let mut compensation_offsets: Vec<Option<usize>> = vec![None; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+                compensation_offsets[idx] = entry.compensate_offset;
+            }
+        }
+
+        // First runtime: spawn the workflow and run the timer step.
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt1.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt1.borrow_mut().run_scheduler();
+
+        let events_before = store.read_workflow_events(actor_id);
+        assert!(
+            events_before.iter().any(|e| matches!(e, WorkflowEvent::TimerSet { name, .. } if name == "timeout1")),
+            "TimerSet event should be persisted"
+        );
+        assert_eq!(
+            rt1.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(0),
+            "step body does not increment step_index; the runtime records StepCompleted instead"
+        );
+
+        // Simulate a node restart: recover the workflow into a fresh runtime.
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            compensation_offsets.clone(),
+        );
+        rt2.borrow_mut().recover_actor(actor_id);
+
+        assert_eq!(
+            rt2.borrow().timer_wheel.len(),
+            1,
+            "timer should be re-armed after recovery"
+        );
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(0),
+            "recovered workflow should resume at the snapshot step_index"
+        );
+
+        // Let the timer fire and process the resulting message.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        rt2.borrow_mut().tick_timers();
+        rt2.borrow_mut().run_scheduler();
+
+        let events_after = store.read_workflow_events(actor_id);
+        assert!(
+            events_after.iter().any(|e| matches!(e, WorkflowEvent::TimerFired { name, .. } if name == "timeout1")),
+            "TimerFired event should be persisted after the timer fires"
+        );
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(1),
+            "workflow should advance to step_index 1 after the timer fires"
+        );
     }
 
     // -----------------------------------------------------------------------

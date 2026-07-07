@@ -112,6 +112,7 @@ pub enum OpCode {
     StateGet = 0x8B, // Load current actor state field by name (field_const_idx, dst)
     StateSet = 0x8C, // Store to current actor state field by name (val_reg, field_const_idx)
     Emit     = 0x8D, // Emit event (event_name_const_idx, arg_count)
+    SignalWait = 0x8E, // Workflow signal wait (signal_name_const_idx, dst)
 
     // == Effects (0x90-0x93) ==
     Perform = 0x90, // Perform effect operation (eff_id, op_id, args, dst)
@@ -199,6 +200,7 @@ impl OpCode {
             0x86 => Some(Demon), 0x87 => Some(Link), 0x88 => Some(Unlink),
             0x89 => Some(Exit), 0x8A => Some(Yield),
             0x8B => Some(StateGet), 0x8C => Some(StateSet), 0x8D => Some(Emit),
+            0x8E => Some(SignalWait),
             0x90 => Some(Perform), 0x91 => Some(Handle), 0x92 => Some(Resume),
             0x93 => Some(Unwind),
             0x94 => Some(PyImport), 0x95 => Some(PyGetAttr), 0x96 => Some(PyCall),
@@ -343,6 +345,8 @@ pub struct BehaviorTableEntry {
     pub code_offset: usize,    // Offset into bytecode
     pub local_count: usize,    // Number of local registers needed
     pub effect_mask: u32,      // Which effects this behavior may perform (bitmap)
+    /// Optional code offset for the saga compensation expression of this step.
+    pub compensate_offset: Option<usize>,
 }
 
 /// Actor metadata for durable execution.

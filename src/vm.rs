@@ -82,6 +82,15 @@ pub trait DistributedVmCallbacks: std::any::Any + std::fmt::Debug {
 // allocations through the current actor's heap.
 // ---------------------------------------------------------------------------
 
+/// Result of querying whether a workflow signal has been received.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SignalWaitResult {
+    /// The signal has been received; resume with this value.
+    Ready(Value),
+    /// The signal has not been received; the runtime should suspend the step.
+    NotReady,
+}
+
 /// Callback interface that supplies real actor-runtime behavior for the VM's
 /// `Spawn`, `ArrAlloc`, `SConcat`, `SRead`, and `Drop` opcodes.
 pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
@@ -133,6 +142,25 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
 
     /// Emit an event in the current actor.  Default is a no-op.
     fn emit_event(&mut self, _event: &str, _args: &[Value]) {}
+
+    /// Handle a built-in effect performed without an explicit handler.
+    ///
+    /// The callback receives the effect name and the current frame registers
+    /// (args are placed in r0..rn by the compiler). If it returns `Some`, the
+    /// VM resumes with that value; otherwise the effect is unhandled and the
+    /// VM errors.
+    fn perform_effect(&mut self, _effect_name: &str, _regs: &[Value]) -> Option<Value> { None }
+
+    /// Check whether a workflow signal has been received.
+    /// Default returns `Ready(unit)` so un-wired signal waits do not block.
+    fn wait_signal(&mut self, _name: &str) -> SignalWaitResult {
+        SignalWaitResult::Ready(Value::unit())
+    }
+
+    /// Suspend the current workflow step waiting for a signal.
+    /// The callback receives the captured VM state so it can store it on the
+    /// actor and resume execution when the signal arrives.
+    fn suspend_for_signal(&mut self, _name: &str, _vm_state: Option<SuspendedVmState>) {}
 }
 
 /// Standalone callbacks used when the VM runs without an actor runtime.
@@ -515,6 +543,17 @@ fn clone_frame(frame: &Frame) -> Frame {
     }
 }
 
+/// Captured VM state for a suspended workflow step (e.g. waiting on a signal).
+/// The runtime can extract this state from the VM, store it on the actor, and
+/// restore it later when the signal arrives.
+#[derive(Debug)]
+pub struct SuspendedVmState {
+    pub frames: Vec<Frame>,
+    pub current_frame_idx: Option<usize>,
+    pub handler_stack: Vec<HandlerFrame>,
+    pub step_count: usize,
+}
+
 /// Register-based bytecode virtual machine.
 ///
 /// Executes Nulang bytecode modules with:
@@ -546,6 +585,10 @@ pub struct VM {
     /// Gossip messages recorded by the `Gossip` opcode when no runtime
     /// callback is installed.
     gossip_log: Vec<String>,
+    /// Name of the signal that caused the most recent workflow suspension.
+    /// Filled by `SignalWait` and consumed by the runtime after `run`/`run_from`
+    /// returns a suspend error.
+    pub suspended_signal_name: Option<String>,
     /// Optional distributed runtime callbacks for remote operations.
     distributed_callbacks: Option<Box<dyn DistributedVmCallbacks>>,
     /// Actor-runtime callbacks: heap allocation, drop, spawn.
@@ -568,6 +611,7 @@ impl VM {
             node_id: 0,
             pending_migrations: Vec::new(),
             gossip_log: Vec::new(),
+            suspended_signal_name: None,
             distributed_callbacks: None,
             actor_callbacks: Box::new(StandaloneVmCallbacks::new()),
         }
@@ -591,12 +635,52 @@ impl VM {
         self.actor_callbacks = callbacks;
     }
 
+    /// Capture the current VM execution state so a workflow step can be
+    /// suspended (e.g. while waiting for a signal) and resumed later.
+    pub fn take_suspended_state(&mut self) -> Option<SuspendedVmState> {
+        if self.current_frame_idx.is_none() {
+            return None;
+        }
+        Some(SuspendedVmState {
+            frames: std::mem::take(&mut self.frames),
+            current_frame_idx: self.current_frame_idx.take(),
+            handler_stack: std::mem::take(&mut self.handler_stack),
+            step_count: self.step_count,
+        })
+    }
+
+    /// Restore a previously captured VM execution state.
+    pub fn restore_suspended_state(&mut self, state: SuspendedVmState) {
+        self.frames = state.frames;
+        self.current_frame_idx = state.current_frame_idx;
+        self.handler_stack = state.handler_stack;
+        self.step_count = state.step_count;
+    }
+
     /// Set the current execution frame. Used by the runtime to execute actor
     /// bytecode behavior handlers.
     pub fn set_current_frame(&mut self, frame: Frame) {
         self.frames.clear();
         self.frames.push(frame);
         self.current_frame_idx = Some(0);
+    }
+
+    /// Return the module index of the currently executing frame, if any.
+    pub fn current_module_idx(&self) -> Option<usize> {
+        self.current_frame_idx
+            .and_then(|idx| self.frames.get(idx))
+            .map(|frame| frame.module_idx)
+    }
+
+    /// Resolve a string-pool value to its contents using the current module's
+    /// constant pool.
+    pub fn constant_string(&self, module_idx: usize, string_id: u32) -> Option<String> {
+        self.modules.get(module_idx)
+            .and_then(|m| m.constants.get(string_id as usize))
+            .and_then(|c| match c {
+                Constant::String(s) => Some(s.clone()),
+                _ => None,
+            })
     }
 
     /// Take a snapshot of recorded migration requests.
@@ -728,6 +812,40 @@ impl VM {
         self.frames.push(frame);
         self.current_frame_idx = Some(0);
 
+        loop {
+            if let Some(idx) = self.current_frame_idx {
+                let m_idx = self.frames[idx].module_idx;
+                let pc = self.frames[idx].pc;
+                if let Some(module) = self.modules.get(m_idx) {
+                    if pc >= module.instructions.len() {
+                        return Ok(self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                    }
+                    if module.instructions.get(pc).map(|i| i.opcode == OpCode::Halt).unwrap_or(false) {
+                        self.frames[idx].pc += 1;
+                        return Ok(self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                    }
+                } else {
+                    return Ok(Value::unit());
+                }
+            } else {
+                return Ok(Value::unit());
+            }
+
+            match self.step() {
+                Ok(()) => {},
+                Err(NuError::VMError(msg)) if msg == "Halt" => {
+                    return Ok(self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Resume a previously suspended execution.
+    ///
+    /// Continues from the current frame state (set by `restore_suspended_state`)
+    /// until the program halts, yields again, or errors.
+    pub fn resume(&mut self) -> NuResult<Value> {
         loop {
             if let Some(idx) = self.current_frame_idx {
                 let m_idx = self.frames[idx].module_idx;
@@ -1029,6 +1147,24 @@ impl VM {
                     .map(|i| self.frames[frame_idx].regs[i])
                     .collect();
                 self.actor_callbacks.emit_event(&event, &args);
+            }
+            OpCode::SignalWait => {
+                let name_idx = instr.imm16() as usize;
+                let name = self.module_const_string(module_idx, name_idx);
+                let dst = instr.op3;
+                match self.actor_callbacks.wait_signal(&name) {
+                    SignalWaitResult::Ready(v) => {
+                        self.frames[frame_idx].regs[dst as usize] = v;
+                    }
+                    SignalWaitResult::NotReady => {
+                        self.suspended_signal_name = Some(name.clone());
+                        // Leave the PC pointing at the SignalWait instruction so
+                        // resumption re-executes it and can write the result into
+                        // the destination register once the signal is received.
+                        self.frames[frame_idx].pc -= 1;
+                        return Err(NuError::VMError("SignalWait:suspend".into()));
+                    }
+                }
             }
             OpCode::RSend => {
                 return Ok(());
@@ -1352,13 +1488,22 @@ impl VM {
                         ))?;
                     self.handler_stack[hf_idx].captured_continuation = Some(cont);
                 } else {
-                    return Err(NuError::EffectError {
-                        msg: format!("Unhandled effect: '{}'", effect_name),
-                        span: Span::default(),
-                    });
+                    // No handler and no fallback: give the runtime callback a
+                    // chance to handle built-in effects (e.g. Timer.sleep in
+                    // workflow steps). Args are in r0..rn.
+                    if let Some(result) = self.actor_callbacks.perform_effect(&effect_name, &self.frames[frame_idx].regs) {
+                        self.frames[frame_idx].regs[dst_reg as usize] = result;
+                    } else {
+                        return Err(NuError::EffectError {
+                            msg: format!("Unhandled effect: '{}'", effect_name),
+                            span: Span::default(),
+                        });
+                    }
                 }
 
-                self.frames[frame_idx].pc = target_offset.unwrap();
+                if let Some(offset) = target_offset {
+                    self.frames[frame_idx].pc = offset;
+                }
             }
             OpCode::Resume => {
                 let val = self.frames[frame_idx].regs[instr.op1 as usize];

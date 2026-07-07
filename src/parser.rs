@@ -374,7 +374,22 @@ impl Parser {
         let body = self.parse_expr()?;
         self.skip_newlines();
         self.expect(TokenKind::RBrace)?;
-        Ok(WorkflowStep { name, body, span })
+        let compensate = if self.consume_if(&TokenKind::Compensate) {
+            self.expect(TokenKind::LBrace)?;
+            self.skip_newlines();
+            let expr = self.parse_expr()?;
+            self.skip_newlines();
+            self.expect(TokenKind::RBrace)?;
+            Some(expr)
+        } else {
+            None
+        };
+        Ok(WorkflowStep {
+            name,
+            body,
+            compensate,
+            span,
+        })
     }
 
     fn parse_type_alias(&mut self, public: bool) -> NuResult<Decl> {

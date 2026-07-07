@@ -1006,9 +1006,32 @@ impl Compiler {
     }
 
     fn compile_perform(&mut self, effect: &str, op: &str, args: &[Expr]) -> NuResult<u8> {
-        for arg in args {
-            let _r = self.compile_expr(arg)?;
+        // Special-case workflow signal waits: compile to a dedicated opcode
+        // that the runtime can suspend and resume.
+        if effect == "Signal" && op == "wait" {
+            if let Some(Expr::Literal(Literal::String(name), _)) = args.get(0) {
+                let name_idx = self.add_const(Constant::String(name.clone()));
+                let dst = self.alloc_reg();
+                self.emit(Instruction::new3(OpCode::SignalWait,
+                    ((name_idx >> 8) & 0xFF) as u8,
+                    (name_idx & 0xFF) as u8,
+                    dst));
+                return Ok(dst);
+            }
         }
+
+        // Place effect arguments in consecutive registers r0..rn to match the
+        // handler convention and to make them easy for runtime callbacks to
+        // locate (e.g. Timer.sleep name/duration_ms).
+        let saved_next_reg = self.next_reg;
+        self.next_reg = 0;
+        for (i, arg) in args.iter().enumerate().take(256) {
+            let reg = self.compile_expr(arg)?;
+            if reg != i as u8 {
+                self.emit(Instruction::new2(OpCode::Move, reg, i as u8));
+            }
+        }
+        self.next_reg = saved_next_reg;
         let eff_idx = self.add_const(Constant::String(effect.to_string()));
         let _op_idx = self.add_const(Constant::String(op.to_string()));
         let dst = self.alloc_reg();
@@ -1458,7 +1481,46 @@ impl Compiler {
                 span: s.span,
             })
             .collect();
-        self.compile_actor(name, true, &state_fields, &behaviors, &[], true)
+        self.compile_actor(name, true, &state_fields, &behaviors, &[], true)?;
+
+        // Compile per-step saga compensation expressions and patch the
+        // corresponding behavior table entries with their code offsets.
+        let behavior_indices = self
+            .module
+            .actor_metadata
+            .last()
+            .map(|m| m.behavior_indices.clone())
+            .unwrap_or_default();
+        for (i, step) in steps.iter().enumerate() {
+            if let Some(comp_expr) = &step.compensate {
+                let behavior_idx = behavior_indices.get(i).copied().unwrap_or(i);
+                let comp_offset = self.compile_compensation(comp_expr)?;
+                if let Some(entry) = self.module.behaviors.get_mut(behavior_idx) {
+                    entry.compensate_offset = Some(comp_offset);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Compile a saga compensation expression as a standalone code block.
+    /// Returns the code offset of the compensation body.
+    fn compile_compensation(&mut self, expr: &Expr) -> NuResult<usize> {
+        let saved_locals = std::mem::replace(&mut self.locals, vec![ScopeFrame::new()]);
+        let saved_next_reg = self.next_reg;
+        self.next_reg = 0;
+
+        let self_reg = self.alloc_reg();
+        self.emit(Instruction::new1(op_self(), self_reg));
+        self.define_local("self", self_reg);
+
+        let start_offset = self.module.current_offset();
+        let body_reg = self.compile_expr(expr)?;
+        self.emit(Instruction::new1(OpCode::RetVal, body_reg));
+
+        self.locals = saved_locals;
+        self.next_reg = saved_next_reg;
+        Ok(start_offset)
     }
 
     fn compile_behavior(&mut self, b: &Behavior, actor_name: &str) -> NuResult<()> {
@@ -1485,6 +1547,7 @@ impl Compiler {
             code_offset: start_offset,
             local_count: self.next_reg as usize,
             effect_mask: 0,
+            compensate_offset: None,
         };
         self.module.add_behavior(entry);
 
