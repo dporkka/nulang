@@ -179,7 +179,7 @@ view UserView {
   }
 }
 
-// HTML Template (templates/users/index.html.nl)
+// HTML Template (templates/users/index.html.nula)
 @template UsersIndex {
   <div class="users-list">
     <h1>Users</h1>
@@ -925,7 +925,7 @@ channel MyChannel {
 #### 3.4.1 Template Syntax
 
 ```nulang
-// templates/layout.html.nl
+// templates/layout.html.nula
 @template AppLayout {
   <!DOCTYPE html>
   <html lang="en">
@@ -960,7 +960,7 @@ channel MyChannel {
   </html>
 }
 
-// templates/users/index.html.nl
+// templates/users/index.html.nula
 @template UsersIndex, layout: AppLayout {
   <div class="users-page">
     <h1>Users ({@users |> length()})</h1>
@@ -1013,7 +1013,7 @@ channel MyChannel {
   </div>
 }
 
-// templates/users/show.html.nl
+// templates/users/show.html.nula
 @template UsersShow, layout: AppLayout {
   <div class="user-profile">
     <img src={@user.avatar_url} alt={@user.name} class="avatar-large" />
@@ -1034,7 +1034,7 @@ channel MyChannel {
 #### 3.4.2 Components
 
 ```nulang
-// components/pagination.nl
+// components/pagination.nula
 component Pagination {
   props: {
     page: Int,
@@ -1075,7 +1075,7 @@ component Pagination {
   }
 }
 
-// components/modal.nl
+// components/modal.nula
 component Modal {
   props: {
     id: String,
@@ -1570,51 +1570,51 @@ end)
 ```
 phoenix-nl/
 ├── core/
-│   ├── endpoint.nl       # Endpoint definition and HTTP server
-│   ├── router.nl         # Route matching and dispatch
-│   ├── controller.nl     # Controller base and helpers
-│   ├── conn.nl           # Connection struct and API
-│   └── types.nl          # Core type definitions
+│   ├── endpoint.nula       # Endpoint definition and HTTP server
+│   ├── router.nula         # Route matching and dispatch
+│   ├── controller.nula     # Controller base and helpers
+│   ├── conn.nula           # Connection struct and API
+│   └── types.nula          # Core type definitions
 ├── channels/
-│   ├── channel.nl        # Channel behavior and callbacks
-│   ├── socket.nl         # Socket connection management
-│   ├── pubsub.nl         # Pub/Sub message bus
-│   └── presence.nl       # Presence tracking
+│   ├── channel.nula        # Channel behavior and callbacks
+│   ├── socket.nula         # Socket connection management
+│   ├── pubsub.nula         # Pub/Sub message bus
+│   └── presence.nula       # Presence tracking
 ├── live/
-│   ├── live_view.nl      # LiveView behavior
-│   ├── diff_engine.nl    # HTML diff calculation
-│   ├── js_commands.nl    # Client-side JS commands
-│   └── uploads.nl        # Live upload handling
+│   ├── live_view.nula      # LiveView behavior
+│   ├── diff_engine.nula    # HTML diff calculation
+│   ├── js_commands.nula    # Client-side JS commands
+│   └── uploads.nula        # Live upload handling
 ├── templates/
-│   ├── engine.nl         # Template compilation
-│   ├── syntax.nl         # Template syntax parser
-│   ├── components.nl     # Component system
-│   └── helpers.nl        # Template helpers
+│   ├── engine.nula         # Template compilation
+│   ├── syntax.nula         # Template syntax parser
+│   ├── components.nula     # Component system
+│   └── helpers.nula        # Template helpers
 ├── plugs/
-│   ├── cors.nl           # CORS handling
-│   ├── auth.nl           # Authentication
-│   ├── rate_limit.nl     # Rate limiting
-│   ├── body_parser.nl    # Request body parsing
-│   ├── session.nl        # Session management
-│   ├── security.nl       # Security headers
-│   └── logger.nl         # Request logging
+│   ├── cors.nula           # CORS handling
+│   ├── auth.nula           # Authentication
+│   ├── rate_limit.nula     # Rate limiting
+│   ├── body_parser.nula    # Request body parsing
+│   ├── session.nula        # Session management
+│   ├── security.nula       # Security headers
+│   └── logger.nula         # Request logging
 ├── db/
-│   ├── repo.nl           # Repository pattern
-│   ├── schema.nl         # Schema definitions
-│   ├── query.nl          # Query DSL
-│   └── migration.nl      # Database migrations
+│   ├── repo.nula           # Repository pattern
+│   ├── schema.nula         # Schema definitions
+│   ├── query.nula          # Query DSL
+│   └── migration.nula      # Database migrations
 ├── static/
-│   ├── file_server.nl    # Static file serving
-│   ├── asset_pipeline.nl # Asset compilation
-│   └── cache.nl          # Static asset caching
+│   ├── file_server.nula    # Static file serving
+│   ├── asset_pipeline.nula # Asset compilation
+│   └── cache.nula          # Static asset caching
 ├── pubsub/
-│   ├── adapter.nl        # Pub/Sub adapter behavior
-│   ├── pg2.nl            # PG2-based adapter
-│   └── redis.nl          # Redis adapter
+│   ├── adapter.nula        # Pub/Sub adapter behavior
+│   ├── pg2.nula            # PG2-based adapter
+│   └── redis.nula          # Redis adapter
 └── observability/
-    ├── tracing.nl        # Request tracing
-    ├── metrics.nl        # Metrics collection
-    └── logging.nl        # Structured logging
+    ├── tracing.nula        # Request tracing
+    ├── metrics.nula        # Metrics collection
+    └── logging.nula        # Structured logging
 ```
 
 ### 4.2 Core Types

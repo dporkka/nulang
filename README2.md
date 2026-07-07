@@ -134,7 +134,7 @@ cd hello-world
 ### 2. Write your first actor
 
 ```nulang
-// src/hello.nu
+// src/hello.nula
 persistent actor Greeter {
   state greetings: Int = 0
 

@@ -30,7 +30,7 @@ For 50-year relevance the compiler should accept programs from many surfaces and
 
 | Frontend | Conversion step |
 |----------|-----------------|
-| Handwritten `.nl` | Lexer + Parser (`src/main.rs:174-185`) |
+| Handwritten `.nula` | Lexer + Parser (`src/main.rs:174-185`) |
 | Natural language | NL frontend → Intent IR → AST builder |
 | Visual programming | Blocks → Intent IR → AST builder |
 | JSON API | JSON → Intent IR → AST builder |

@@ -150,7 +150,7 @@ These estimates are shown inline or in the architecture graph.
 
 #### Deployment preview
 
-From `cloud.nl` / `DESIGN_CLOUD.md` the IDE renders the regional deployment: actors, scaling policies, bindings, routes, and migrations. It can simulate traffic and show expected instance counts, latency, and cost before `nu cloud deploy`.
+From `cloud.nula` / `DESIGN_CLOUD.md` the IDE renders the regional deployment: actors, scaling policies, bindings, routes, and migrations. It can simulate traffic and show expected instance counts, latency, and cost before `nula cloud deploy`.
 
 ---
 
@@ -161,7 +161,7 @@ From `cloud.nl` / `DESIGN_CLOUD.md` the IDE renders the regional deployment: act
 | 1 | Real semantic LSP | Hover, diagnostics, goto, refs, refactoring | 4 | 3 | `src/lsp/mod.rs`, `src/typechecker.rs`, `src/effect_checker.rs`, `src/compiler.rs` |
 | 2 | Incremental compiler database (`CompileDb`) | Sub-100 ms IDE feedback for large codebases | 5 | 4 | `src/parser.rs`, `src/typechecker.rs`, `src/ast.rs` |
 | 3 | Source maps + bytecode-to-AST mapping | Debugging, profiling, explainability, deployment preview | 3 | 2 | `src/compiler.rs`, `src/bytecode.rs:401`, `src/vm.rs` |
-| 4 | Package manager implementation (`nu`) | Reproducible builds, versioning, migrations | 4 | 4 | new `src/nu/` or separate crate, `DESIGN_PACKAGE_MANAGER.md` |
+| 4 | Package manager implementation (`nula`) | Reproducible builds, versioning, migrations | 4 | 4 | new `src/nula/` or separate crate, `DESIGN_PACKAGE_MANAGER.md` |
 | 5 | Web framework runtime bindings (`phoenix-nl`) | Channels, LiveView, HTTP routing on the actor runtime | 4 | 3 | new `src/web/`, `DESIGN_WEB_FRAMEWORK.md` |
 
 **Rationale.** The semantic LSP is the user-visible gateway: without it the IDE cannot exist. The incremental compiler database is the enabling substrate; it is hard but pays off across every other feature. Source maps are cheap and immediately unlock debugging and explainability. The package manager and web framework are ecosystem prerequisites for adoption.
@@ -248,7 +248,7 @@ The IDE:
 ### 5.1 Reproducible builds
 
 - **Lockfile content-addressed checksums**: the resolver must verify them on every build and reject any mismatch, including for path and git dependencies.
-- **Vendoring / offline mode**: `nu --offline build` must work from a committed `vendor/` directory.
+- **Vendoring / offline mode**: `nula --offline build` must work from a committed `vendor/` directory.
 - **Deterministic resolver test corpus**: pathological dependency graphs (diamonds, conflicts, yanked versions) that the SAT-style resolver must solve identically on every platform.
 - **Reproducible build environment**: record compiler version, OS, linker, and native-library versions in build artifact metadata.
 
@@ -256,7 +256,7 @@ The IDE:
 
 - **SemVer policy enforcement**: the registry must reject breaking changes in patch/minor versions by running API-diff against the previous published version.
 - **Yanked packages**: a yank mechanism that leaves the package in the lockfile but warns/errors on new resolves.
-- **Edition migration**: when `edition` changes, the package manager should offer an automated `nu migrate` that rewrites source constructs.
+- **Edition migration**: when `edition` changes, the package manager should offer an automated `nula migrate` that rewrites source constructs.
 
 ### 5.3 Migrations
 
@@ -359,7 +359,7 @@ To make Nulang a 50-year-relevant platform, the tooling must be as intentional a
 1. **Replace the MVP LSP with a real semantic server** built on a typed-AST query API.
 2. **Add source maps** so bytecode, VM state, and runtime telemetry can be shown at the source level.
 3. **Implement an incremental compiler database** (`CompileDb`) that powers diagnostics, hover, goto, refactoring, and intent preview.
-4. **Build `nu` package manager** with reproducible lockfiles, state-schema migrations, and workspace support.
+4. **Build `nula` package manager** with reproducible lockfiles, state-schema migrations, and workspace support.
 5. **Land the web framework runtime** (`phoenix-nl`) by compiling channels and LiveViews to supervised actors and binding HTTP to the actor runtime.
 6. **Add OpenTelemetry tracing and a source-level debugger** to close the observability loop.
 

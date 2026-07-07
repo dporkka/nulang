@@ -75,10 +75,10 @@ cargo run -- --repl
 
 ```bash
 # Compile and run a file
-cargo run -- myprogram.nl
+cargo run -- myprogram.nula
 
 # Type-check only
-cargo run -- --check myprogram.nl
+cargo run -- --check myprogram.nula
 
 # Evaluate a string
 cargo run -- --eval 'perform IO.print("Hello")'

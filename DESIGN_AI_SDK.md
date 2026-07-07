@@ -941,44 +941,44 @@ println(agent.usage.estimated_cost)
 ```
 nulang-ai/
 ├── core/
-│   ├── agent.nl          # Agent definition DSL and runtime
-│   ├── conversation.nl   # Conversation management
-│   ├── message.nl        # Message types and serialization
-│   └── types.nl          # Core type definitions
+│   ├── agent.nula          # Agent definition DSL and runtime
+│   ├── conversation.nula   # Conversation management
+│   ├── message.nula        # Message types and serialization
+│   └── types.nula          # Core type definitions
 ├── llm/
-│   ├── client.nl         # LLM client abstraction
+│   ├── client.nula         # LLM client abstraction
 │   ├── providers/
-│   │   ├── openai.nl     # OpenAI API client
-│   │   ├── anthropic.nl  # Anthropic API client
-│   │   ├── ollama.nl     # Ollama local client
-│   │   ├── llama_cpp.nl  # llama.cpp bindings
-│   │   └── azure.nl      # Azure OpenAI client
-│   ├── streaming.nl      # Streaming response handling
-│   └── tokenizer.nl      # Token counting utilities
+│   │   ├── openai.nula     # OpenAI API client
+│   │   ├── anthropic.nula  # Anthropic API client
+│   │   ├── ollama.nula     # Ollama local client
+│   │   ├── llama_cpp.nula  # llama.cpp bindings
+│   │   └── azure.nula      # Azure OpenAI client
+│   ├── streaming.nula      # Streaming response handling
+│   └── tokenizer.nula      # Token counting utilities
 ├── tools/
-│   ├── registry.nl       # Tool registration and discovery
-│   ├── schema.nl         # JSON Schema generation
-│   ├── execution.nl      # Tool execution engine
-│   └── decorators.nl     # @tool macro and friends
+│   ├── registry.nula       # Tool registration and discovery
+│   ├── schema.nula         # JSON Schema generation
+│   ├── execution.nula      # Tool execution engine
+│   └── decorators.nula     # @tool macro and friends
 ├── memory/
-│   ├── episodic.nl       # Conversation history
-│   ├── semantic.nl       # Vector search memory
-│   ├── procedural.nl     # Learned patterns
-│   └── composite.nl      # Unified memory interface
+│   ├── episodic.nula       # Conversation history
+│   ├── semantic.nula       # Vector search memory
+│   ├── procedural.nula     # Learned patterns
+│   └── composite.nula      # Unified memory interface
 ├── orchestration/
-│   ├── supervisor.nl     # Supervisor pattern
-│   ├── pipeline.nl       # Pipeline pattern
-│   ├── network.nl        # Peer-to-peer messaging
-│   └── debate.nl         # Debate pattern
+│   ├── supervisor.nula     # Supervisor pattern
+│   ├── pipeline.nula       # Pipeline pattern
+│   ├── network.nula        # Peer-to-peer messaging
+│   └── debate.nula         # Debate pattern
 ├── observability/
-│   ├── tracing.nl        # OpenTelemetry integration
-│   ├── metrics.nl        # Usage metrics
-│   └── logging.nl        # Structured logging
+│   ├── tracing.nula        # OpenTelemetry integration
+│   ├── metrics.nula        # Usage metrics
+│   └── logging.nula        # Structured logging
 └── utils/
-    ├── retry.nl          # Retry logic
-    ├── circuit_breaker.nl # Circuit breaker
-    ├── rate_limiter.nl   # Rate limiting
-    └── token_counter.nl  # Token counting
+    ├── retry.nula          # Retry logic
+    ├── circuit_breaker.nula # Circuit breaker
+    ├── rate_limiter.nula   # Rate limiting
+    └── token_counter.nula  # Token counting
 ```
 
 ### 4.2 Core Types

@@ -56,7 +56,7 @@ A **Deployment Unit** is the atomic unit of deployment. It maps to a Nulang modu
 - Resource specifications
 
 ```nulang
-// cloud.nl — Deployment manifest
+// cloud.nula — Deployment manifest
 cloud {
   name: "chat-app",
   version: "1.2.3",
@@ -175,10 +175,10 @@ The **Event Mesh** is a global, serverless message bus that connects all actors 
 |  |   Developer      |  |   Control        |  |   Observability         |  |
 |  |   Interface      |  |   Plane          |  |   Stack                 |  |
 |  |                  |  |                  |  |                         |  |
-|  |  nu cloud deploy |  |  - Scheduler     |  |  - Distributed tracing  |  |
-|  |  nu cloud logs   |  |  - Provisioner   |  |  - Metrics (Prometheus) |  |
-|  |  nu cloud scale  |  |  - Router        |  |  - Logs (Loki)          |  |
-|  |  nu cloud config |  |  - Migrator      |  |  - Alerts (Alertmanager)|  |
+|  |  nula cloud deploy |  |  - Scheduler     |  |  - Distributed tracing  |  |
+|  |  nula cloud logs   |  |  - Provisioner   |  |  - Metrics (Prometheus) |  |
+|  |  nula cloud scale  |  |  - Router        |  |  - Logs (Loki)          |  |
+|  |  nula cloud config |  |  - Migrator      |  |  - Alerts (Alertmanager)|  |
 |  |                  |  |  - Auto-scaler   |  |  - Dashboard (Grafana)  |  |
 |  +--------+---------+  +--------+---------+  +-------------------------+  |
 |           |                      |                                         |
@@ -320,7 +320,7 @@ The **Event Mesh** is a global, serverless message bus that connects all actors 
 #### 3.1.1 Basic Deployment
 
 ```nulang
-// cloud.nl — Deployment configuration
+// cloud.nula — Deployment configuration
 cloud {
   name: "my-api",
   version: "1.0.0",
@@ -549,12 +549,12 @@ cloud {
 
 ```bash
 # Initialize a new cloud project
-$ nu cloud init
-  Created cloud.nl
+$ nula cloud init
+  Created cloud.nula
   Created .nulang-cloud/
 
 # Deploy to cloud
-$ nu cloud deploy
+$ nula cloud deploy
   Building project...
   Uploading (12.4 MB)...
   Deploying to us-east, eu-west...
@@ -562,21 +562,21 @@ $ nu cloud deploy
   URL: https://my-api.nulang.cloud
 
 # Deploy specific environment
-$ nu cloud deploy --staging
-$ nu cloud deploy --production
+$ nula cloud deploy --staging
+$ nula cloud deploy --production
 
 # Deploy with canary rollout
-$ nu cloud deploy --canary 10%    # 10% traffic
-$ nu cloud deploy --canary 50%
-$ nu cloud deploy --promote       # Promote canary to 100%
+$ nula cloud deploy --canary 10%    # 10% traffic
+$ nula cloud deploy --canary 50%
+$ nula cloud deploy --promote       # Promote canary to 100%
 
 # Rollback
-$ nu cloud rollback
-$ nu cloud rollback v1.0.2
-$ nu cloud rollback --to 30m      # Rollback to 30 min ago
+$ nula cloud rollback
+$ nula cloud rollback v1.0.2
+$ nula cloud rollback --to 30m      # Rollback to 30 min ago
 
 # Status
-$ nu cloud status
+$ nula cloud status
   my-api v1.0.3
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Region    Instances  CPU    Memory  Requests/s
@@ -587,18 +587,18 @@ $ nu cloud status
   Total: 10 instances, 2,653 req/s
 
 # Scale manually
-$ nu cloud scale GameRoom --instances 20
-$ nu cloud scale --auto GameRoom    # Re-enable auto-scaling
+$ nula cloud scale GameRoom --instances 20
+$ nula cloud scale --auto GameRoom    # Re-enable auto-scaling
 
 # SSH into a running instance (debugging)
-$ nu cloud ssh --actor GameRoom --instance abc123
+$ nula cloud ssh --actor GameRoom --instance abc123
 ```
 
 #### 3.2.2 Development Commands
 
 ```bash
 # Local cloud simulation
-$ nu cloud dev
+$ nula cloud dev
   Starting local cloud runtime...
   ✓ API server: http://localhost:8080
   ✓ Actor runtime: 3 actor types running
@@ -608,33 +608,33 @@ $ nu cloud dev
   Hot reload enabled. Press r to reload, q to quit.
 
 # Test with cloud bindings
-$ nu cloud test
+$ nula cloud test
   Running tests with cloud bindings...
   ✓ All 45 tests passed
 
 # Inspect logs
-$ nu cloud logs
+$ nula cloud logs
   2024-06-20T10:23:45Z  INFO  Request: GET /users
   2024-06-20T10:23:45Z  DEBUG Cache hit: users:list
   2024-06-20T10:23:46Z  INFO  Request: POST /users
   2024-06-20T10:23:46Z  INFO  User created: id=123
 
 # Follow logs
-$ nu cloud logs --follow
+$ nula cloud logs --follow
 
 # Filter logs
-$ nu cloud logs --actor GameRoom --level error
-$ nu cloud logs --since 1h --json
+$ nula cloud logs --actor GameRoom --level error
+$ nula cloud logs --since 1h --json
 
 # Metrics
-$ nu cloud metrics
+$ nula cloud metrics
   Requests/sec: 2,456
   Latency p50: 12ms, p99: 89ms
   Error rate: 0.02%
   CPU: 34%, Memory: 42%
 
 # Tracing
-$ nu cloud trace --request-id abc-123
+$ nula cloud trace --request-id abc-123
   [10:23:45.123] → GET /api/users
   [10:23:45.125] → Actor: UserService.get_users()
   [10:23:45.126] → Cache.get("users:list")
@@ -646,23 +646,23 @@ $ nu cloud trace --request-id abc-123
 
 ```bash
 # Set environment variables
-$ nu cloud env set DATABASE_URL "postgres://..."
-$ nu cloud env set API_KEY --secret  # Encrypted
+$ nula cloud env set DATABASE_URL "postgres://..."
+$ nula cloud env set API_KEY --secret  # Encrypted
 
 # Get environment variables
-$ nu cloud env get DATABASE_URL
-$ nu cloud env list
+$ nula cloud env get DATABASE_URL
+$ nula cloud env list
 
 # Secrets rotation
-$ nu cloud secrets rotate API_KEY
+$ nula cloud secrets rotate API_KEY
 
 # Update bindings
-$ nu cloud binding add queue MessageQueue
-$ nu cloud binding update db --plan standard-8
+$ nula cloud binding add queue MessageQueue
+$ nula cloud binding update db --plan standard-8
 
 # Config validation
-$ nu cloud config validate
-  ✓ cloud.nl is valid
+$ nula cloud config validate
+  ✓ cloud.nula is valid
   ✓ All bindings resolve
   ✓ Environment variables set
 ```
@@ -912,59 +912,59 @@ cloud::health_check("database", || {
 ```
 nulang-cloud/
 ├── cli/
-│   ├── main.nl           # CLI entry point
+│   ├── main.nula           # CLI entry point
 │   ├── commands/
-│   │   ├── init.nl       # `nu cloud init`
-│   │   ├── deploy.nl     # `nu cloud deploy`
-│   │   ├── rollback.nl   # `nu cloud rollback`
-│   │   ├── status.nl     # `nu cloud status`
-│   │   ├── logs.nl       # `nu cloud logs`
-│   │   ├── metrics.nl    # `nu cloud metrics`
-│   │   ├── scale.nl      # `nu cloud scale`
-│   │   ├── config.nl     # `nu cloud config`
-│   │   ├── ssh.nl        # `nu cloud ssh`
-│   │   └── dev.nl        # `nu cloud dev`
-│   └── output.nl         # Terminal output
+│   │   ├── init.nula       # `nula cloud init`
+│   │   ├── deploy.nula     # `nula cloud deploy`
+│   │   ├── rollback.nula   # `nula cloud rollback`
+│   │   ├── status.nula     # `nula cloud status`
+│   │   ├── logs.nula       # `nula cloud logs`
+│   │   ├── metrics.nula    # `nula cloud metrics`
+│   │   ├── scale.nula      # `nula cloud scale`
+│   │   ├── config.nula     # `nula cloud config`
+│   │   ├── ssh.nula        # `nula cloud ssh`
+│   │   └── dev.nula        # `nula cloud dev`
+│   └── output.nula         # Terminal output
 ├── runtime/
-│   ├── actor_host.nl     # Actor hosting engine
-│   ├── wasm_runtime.nl   # WebAssembly runtime
-│   ├── sandbox.nl        # Security sandbox
-│   ├── scheduler.nl      # Actor scheduler
-│   ├── migrator.nl       # State migration
-│   └── hibernation.nl    # Actor hibernation/resume
+│   ├── actor_host.nula     # Actor hosting engine
+│   ├── wasm_runtime.nula   # WebAssembly runtime
+│   ├── sandbox.nula        # Security sandbox
+│   ├── scheduler.nula      # Actor scheduler
+│   ├── migrator.nula       # State migration
+│   └── hibernation.nula    # Actor hibernation/resume
 ├── control/
-│   ├── provisioner.nl    # Resource provisioning
-│   ├── router.nl         # Global request router
-│   ├── autoscaler.nl     # Auto-scaling engine
-│   ├── deployer.nl       # Deployment orchestrator
-│   └── health.nl         # Health monitoring
+│   ├── provisioner.nula    # Resource provisioning
+│   ├── router.nula         # Global request router
+│   ├── autoscaler.nula     # Auto-scaling engine
+│   ├── deployer.nula       # Deployment orchestrator
+│   └── health.nula         # Health monitoring
 ├── storage/
-│   ├── object_store.nl   # S3-compatible object storage
-│   ├── kv_store.nl       # Distributed key-value store
-│   ├── database.nl       # Managed database interface
-│   └── event_store.nl    # Event sourcing storage
+│   ├── object_store.nula   # S3-compatible object storage
+│   ├── kv_store.nula       # Distributed key-value store
+│   ├── database.nula       # Managed database interface
+│   └── event_store.nula    # Event sourcing storage
 ├── networking/
-│   ├── load_balancer.nl  # Global load balancing
-│   ├── service_mesh.nl   # Inter-service communication
-│   ├── gateway.nl        # API gateway
-│   └── edge_cache.nl     # Edge caching layer
+│   ├── load_balancer.nula  # Global load balancing
+│   ├── service_mesh.nula   # Inter-service communication
+│   ├── gateway.nula        # API gateway
+│   └── edge_cache.nula     # Edge caching layer
 ├── observability/
-│   ├── logging.nl        # Centralized logging
-│   ├── metrics.nl        # Metrics collection
-│   ├── tracing.nl        # Distributed tracing
-│   ├── alerting.nl       # Alert management
-│   └── dashboard.nl      # Dashboard API
+│   ├── logging.nula        # Centralized logging
+│   ├── metrics.nula        # Metrics collection
+│   ├── tracing.nula        # Distributed tracing
+│   ├── alerting.nula       # Alert management
+│   └── dashboard.nula      # Dashboard API
 ├── security/
-│   ├── iam.nl            # Identity and access management
-│   ├── secrets.nl        # Secrets management
-│   ├── tls.nl            # Certificate management
-│   └── firewall.nl       # Network firewall
+│   ├── iam.nula            # Identity and access management
+│   ├── secrets.nula        # Secrets management
+│   ├── tls.nula            # Certificate management
+│   └── firewall.nula       # Network firewall
 └── bindings/
-    ├── postgres.nl       # PostgreSQL binding
-    ├── redis.nl          # Redis binding
-    ├── s3.nl             # S3-compatible binding
-    ├── elasticsearch.nl  # OpenSearch binding
-    └── kafka.nl          # Kafka binding
+    ├── postgres.nula       # PostgreSQL binding
+    ├── redis.nula          # Redis binding
+    ├── s3.nula             # S3-compatible binding
+    ├── elasticsearch.nula  # OpenSearch binding
+    └── kafka.nula          # Kafka binding
 ```
 
 ### 4.2 Core Types
@@ -1126,7 +1126,7 @@ Milestone: v0.1.0 — "Host"
 +---------------------+--------------------+-------------------+
 | WASM runtime        | Actor scheduler    | Sandbox           |
 |                     |                    |                   |
-| - Compile .nl to    | - Message queue    | - Resource limits |
+| - Compile .nula to    | - Message queue    | - Resource limits |
 |   WASM              |   per actor        | - Memory isolation|
 | - WASI interface    | - Fair scheduling  | - Network policy  |
 | - Module loading    | - Priority queues  | - File system     |
@@ -1136,7 +1136,7 @@ Milestone: v0.1.0 — "Host"
 | - Request routing   | - Actor lifecycle  |                   |
 | - TLS termination   |   (spawn/kill)     | Local dev server  |
 +---------------------+--------------------+-------------------+
-| Deliverable: Local dev server (`nu cloud dev`)               |
+| Deliverable: Local dev server (`nula cloud dev`)               |
 | Tests: WASM execution, actor scheduling, sandbox isolation    |
 +---------------------------------------------------------------+
 ```
@@ -1264,7 +1264,7 @@ Milestone: v1.0.0 — "Production"
 | Edge nodes | 300+ | 35 | 30+ | 300+ (planned) |
 | Cold start | ~0ms | ~0ms | ~300ms | ~0ms (hibernation) |
 | Auto-migration | No | No | Yes | Yes (transparent) |
-| Local dev | Wrangler | CLI | Flyctl | `nu cloud dev` |
+| Local dev | Wrangler | CLI | Flyctl | `nula cloud dev` |
 | Cost model | Per request | Per request | Per VM | Per actor-sec |
 
 ### 6.2 Pricing Model

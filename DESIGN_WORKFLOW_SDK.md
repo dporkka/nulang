@@ -1240,52 +1240,52 @@ fn on_kafka_message(message: KafkaMessage) {
 ```
 nulang-workflow/
 ├── core/
-│   ├── workflow.nl       # Workflow definition DSL
-│   ├── activity.nl       # Activity definition and execution
-│   ├── saga.nl           # Saga pattern implementation
-│   ├── step.nl           # Step types and execution
-│   └── types.nl          # Core type definitions
+│   ├── workflow.nula       # Workflow definition DSL
+│   ├── activity.nula       # Activity definition and execution
+│   ├── saga.nula           # Saga pattern implementation
+│   ├── step.nula           # Step types and execution
+│   └── types.nula          # Core type definitions
 ├── runtime/
-│   ├── engine.nl         # Workflow execution engine
-│   ├── replayer.nl       # Event journal replay
-│   ├── checkpoint.nl     # State checkpointing
-│   ├── state_machine.nl  # Workflow state machine
-│   └── context.nl        # Execution context
+│   ├── engine.nula         # Workflow execution engine
+│   ├── replayer.nula       # Event journal replay
+│   ├── checkpoint.nula     # State checkpointing
+│   ├── state_machine.nula  # Workflow state machine
+│   └── context.nula        # Execution context
 ├── journal/
-│   ├── writer.nl         # Journal append
-│   ├── reader.nl         # Journal read/replay
-│   ├── snapshot.nl       # State snapshots
+│   ├── writer.nula         # Journal append
+│   ├── reader.nula         # Journal read/replay
+│   ├── snapshot.nula       # State snapshots
 │   └── storage/
-│       ├── sqlite.nl     # SQLite backend
-│       ├── postgres.nl   # PostgreSQL backend
-│       └── kafka.nl      # Kafka backend
+│       ├── sqlite.nula     # SQLite backend
+│       ├── postgres.nula   # PostgreSQL backend
+│       └── kafka.nula      # Kafka backend
 ├── workers/
-│   ├── pool.nl           # Worker pool management
-│   ├── dispatcher.nl     # Task dispatch
-│   ├── heartbeat.nl      # Heartbeat monitoring
-│   └── routing.nl        # Task routing
+│   ├── pool.nula           # Worker pool management
+│   ├── dispatcher.nula     # Task dispatch
+│   ├── heartbeat.nula      # Heartbeat monitoring
+│   └── routing.nula        # Task routing
 ├── signals/
-│   ├── router.nl         # Signal routing
-│   ├── handler.nl        # Signal handler dispatch
-│   └── delivery.nl       # At-least-once delivery
+│   ├── router.nula         # Signal routing
+│   ├── handler.nula        # Signal handler dispatch
+│   └── delivery.nula       # At-least-once delivery
 ├── timers/
-│   ├── scheduler.nl      # Timer scheduling
-│   ├── persistence.nl    # Timer persistence
-│   └── firing.nl         # Timer firing
+│   ├── scheduler.nula      # Timer scheduling
+│   ├── persistence.nula    # Timer persistence
+│   └── firing.nula         # Timer firing
 ├── queries/
-│   ├── handler.nl        # Query handler dispatch
-│   └── validation.nl     # Query validation
+│   ├── handler.nula        # Query handler dispatch
+│   └── validation.nula     # Query validation
 ├── child/
-│   ├── parent.nl         # Parent workflow coordination
-│   └── cancellation.nl   # Cancellation propagation
+│   ├── parent.nula         # Parent workflow coordination
+│   └── cancellation.nula   # Cancellation propagation
 ├── observability/
-│   ├── tracing.nl        # Distributed tracing
-│   ├── metrics.nl        # Workflow metrics
-│   └── logging.nl        # Structured logging
+│   ├── tracing.nula        # Distributed tracing
+│   ├── metrics.nula        # Workflow metrics
+│   └── logging.nula        # Structured logging
 └── testing/
-    ├── test_runtime.nl   # In-memory test runtime
-    ├── assertions.nl     # Workflow assertions
-    └── mocking.nl        # Activity mocking
+    ├── test_runtime.nula   # In-memory test runtime
+    ├── assertions.nula     # Workflow assertions
+    └── mocking.nula        # Activity mocking
 ```
 
 ### 4.2 Core Types

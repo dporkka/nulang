@@ -12,7 +12,7 @@ This diagram shows the proposed pipeline from multiple frontends through Intent 
 ```mermaid
 flowchart TB
     subgraph Inputs
-        I1[.nl source]
+        I1[.nula source]
         I2[Natural language]
         I3[Visual blocks]
         I4[JSON API]

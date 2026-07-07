@@ -243,14 +243,14 @@ Nulang's design synthesizes ideas from several language families:
 
 ## 2.1 Source Files and Encoding
 
-Nulang source files use the `.nu` extension. A source file is a sequence of Unicode code points encoded in UTF-8. The UTF-8 Byte Order Mark (U+FEFF) at the beginning of a file is recognized and ignored, though its use is discouraged.
+Nulang source files use the `.nula` extension. A source file is a sequence of Unicode code points encoded in UTF-8. The UTF-8 Byte Order Mark (U+FEFF) at the beginning of a file is recognized and ignored, though its use is discouraged.
 
 A source file consists of a sequence of declarations: functions, type definitions, actor definitions, effect definitions, and module-level expressions. Declarations are separated by whitespace; there is no statement terminator. The parser uses an indentation-sensitive grammar where indentation determines block structure (see Section 2.8).
 
 A minimal Nulang program is a single module file that need not contain a `main` function. Module-level expressions are evaluated in order when the program starts, and any spawned actors continue running:
 
 ```nulang
--- hello.nu: a minimal Nulang program
+-- hello.nula: a minimal Nulang program
 let greeting = "Hello, World!"
 perform io.println(greeting)
 ```
@@ -1635,10 +1635,10 @@ Imports are resolved at compile time and have no runtime cost.
 
 ## 7.7 Module Structure
 
-A Nulang module is a file with the `.nu` extension. The module name is derived from the file name. A module exports all top-level declarations by default.
+A Nulang module is a file with the `.nula` extension. The module name is derived from the file name. A module exports all top-level declarations by default.
 
 ```nulang
--- math.nu
+-- math.nula
 let pi = 3.14159
 
 let circumference = (radius: Float) -> Float {
@@ -2773,7 +2773,7 @@ Configuration is provided through a hierarchy of sources, with later sources ove
 5. Runtime API calls
 
 ```nulang
--- config.nu
+-- config.nula
 config app {
   port = env("PORT", 8080)
   database_url = env("DATABASE_URL")

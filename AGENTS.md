@@ -66,10 +66,10 @@ cargo test                       # run all ~590+ tests (test profile: no LTO, 16
 cargo test --release             # run tests under the release profile
 cargo run -- --repl              # interactive REPL (prompt `nulang>`)
 cargo run -- --eval 'perform IO.print("Hello")'   # evaluate a string
-cargo run -- --check myprogram.nl                 # type+effect+cap check only (no run)
-cargo run -- myprogram.nl                          # compile and run a file
+cargo run -- --check myprogram.nula                 # type+effect+cap check only (no run)
+cargo run -- myprogram.nula                          # compile and run a file
 cargo run -- --lsp                                 # start the LSP server on stdin/stdout
-cargo run -- -v myprogram.nl                       # verbose: print AST/bytecode/inferred type
+cargo run -- -v myprogram.nula                       # verbose: print AST/bytecode/inferred type
 python3 verify_implementation.py                  # gate: cargo test + forbidden-pattern scans + integration checks
 python3 verify_report.py                          # gate: validates codebase_analysis_report.md structure
 ```

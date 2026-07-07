@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Nulang Package Manager (`nu`) is the official package management and build tool for the Nulang programming language. Modeled after Rust's Cargo, Node's npm, and Elixir's Mix, `nu` provides a unified interface for project creation, dependency management, compilation, testing, and publishing. It is deeply integrated with Nulang's module system, compiler, and standard library, providing a seamless developer experience from project scaffolding to production deployment.
+The Nulang Package Manager (`nula`) is the official package management and build tool for the Nulang programming language. Modeled after Rust's Cargo, Node's npm, and Elixir's Mix, `nula` provides a unified interface for project creation, dependency management, compilation, testing, and publishing. It is deeply integrated with Nulang's module system, compiler, and standard library, providing a seamless developer experience from project scaffolding to production deployment.
 
 **Version:** 1.0.0  
 **Status:** Design Complete — Ready for Implementation  
@@ -33,18 +33,18 @@ my-package/
 ├── Nulang.toml          # Package manifest
 ├── Nulang.lock          # Dependency lock file
 ├── src/
-│   ├── main.nl          # Library entry point (for executables)
-│   ├── lib.nl           # Library root (for libraries)
+│   ├── main.nula          # Library entry point (for executables)
+│   ├── lib.nula           # Library root (for libraries)
 │   └── internal/
-│       └── helpers.nl   # Private modules
+│       └── helpers.nula   # Private modules
 ├── tests/
-│   ├── unit_tests.nl    # Unit tests
-│   └── integration.nl   # Integration tests
+│   ├── unit_tests.nula    # Unit tests
+│   └── integration.nula   # Integration tests
 ├── benches/
-│   └── benchmark.nl     # Performance benchmarks
+│   └── benchmark.nula     # Performance benchmarks
 ├── examples/
-│   ├── basic.nl         # Usage examples
-│   └── advanced.nl
+│   ├── basic.nula         # Usage examples
+│   └── advanced.nula
 ├── docs/
 │   ├── guide.md         # Documentation
 │   └── api/
@@ -94,12 +94,12 @@ compression = ["async-runtime/compression"]
 full = ["json", "compression"]
 
 [scripts]
-build = "nu build --release"
-test = "nu test --all-features"
-lint = "nu check && nu clippy"
-doc = "nu doc --open"
-fmt = "nu fmt"
-pre-commit = "nu fmt && nu check && nu test"
+build = "nula build --release"
+test = "nula test --all-features"
+lint = "nula check && nula clippy"
+doc = "nula doc --open"
+fmt = "nula fmt"
+pre-commit = "nula fmt && nula check && nula test"
 
 [profile.release]
 opt_level = 3
@@ -232,11 +232,11 @@ The **Registry** is the central package index at `registry.nulang.org`. It store
 |  +------------------+  +------------------+  +-------------------------+  |
 |  |   CLI Interface  |  |   Commands       |  |   Output                |  |
 |  |                  |  |                  |  |                         |  |
-|  |  nu new          |  |  - new           |  |  - Console output        |  |
-|  |  nu build        |  |  - build         |  |  - Progress bars         |  |
-|  |  nu test         |  |  - test          |  |  - Error formatting      |  |
-|  |  nu add          |  |  - add/remove    |  |  - JSON output (--json)  |  |
-|  |  nu publish      |  |  - publish       |  |  - Colored output        |  |
+|  |  nula new          |  |  - new           |  |  - Console output        |  |
+|  |  nula build        |  |  - build         |  |  - Progress bars         |  |
+|  |  nula test         |  |  - test          |  |  - Error formatting      |  |
+|  |  nula add          |  |  - add/remove    |  |  - JSON output (--json)  |  |
+|  |  nula publish      |  |  - publish       |  |  - Colored output        |  |
 |  |  ...             |  |  - run           |  |                         |  |
 |  +--------+---------+  +--------+---------+  +-------------------------+  |
 |           |                     |                                         |
@@ -282,7 +282,7 @@ The **Registry** is the central package index at `registry.nulang.org`. It store
 |     |                                                                |
 |     v                                                                |
 |  +------------------+                                                |
-|  | 1. Parse         |  Parse .nl files into AST                      |
+|  | 1. Parse         |  Parse .nula files into AST                      |
 |  |    Manifest      |  Read Nulang.toml for config                    |
 |  +--------+---------+                                                |
 |           |                                                          |
@@ -340,31 +340,31 @@ The **Registry** is the central package index at `registry.nulang.org`. It store
 
 ### 3.1 Command Reference
 
-#### 3.1.1 `nu new` — Create New Project
+#### 3.1.1 `nula new` — Create New Project
 
 ```bash
 # Create a new binary (executable) project
-$ nu new my-app
+$ nula new my-app
     Created binary (application) `my-app` package
     my-app/
     ├── Nulang.toml
     ├── src/
-    │   └── main.nl
+    │   └── main.nula
     └── tests/
-        └── main_test.nl
+        └── main_test.nula
 
 # Create a new library project
-$ nu new my-library --lib
+$ nula new my-library --lib
     Created library `my-library` package
     my-library/
     ├── Nulang.toml
     ├── src/
-    │   └── lib.nl
+    │   └── lib.nula
     └── tests/
-        └── lib_test.nl
+        └── lib_test.nula
 
 # Create a workspace project
-$ nu new my-monorepo --workspace
+$ nula new my-monorepo --workspace
     Created workspace `my-monorepo`
     my-monorepo/
     ├── Nulang.toml
@@ -372,59 +372,59 @@ $ nu new my-monorepo --workspace
     └── src/
 
 # Create with specific edition
-$ nu new my-app --edition 2024
+$ nula new my-app --edition 2024
 
 # Create in existing directory
-$ nu init --lib
+$ nula init --lib
 ```
 
-#### 3.1.2 `nu build` — Build Project
+#### 3.1.2 `nula build` — Build Project
 
 ```bash
 # Debug build (default)
-$ nu build
+$ nula build
    Compiling my-app v0.1.0 (/home/dev/my-app)
     Finished `dev` profile [unoptimized] target(s) in 1.23s
 
 # Release build
-$ nu build --release
+$ nula build --release
    Compiling my-app v0.1.0 (/home/dev/my-app)
     Finished `release` profile [optimized] target(s) in 8.45s
 
 # Build specific package in workspace
-$ nu build -p http-client
+$ nula build -p http-client
 
 # Build all packages
-$ nu build --workspace
+$ nula build --workspace
 
 # Build with specific features
-$ nu build --features "json compression"
-$ nu build --all-features
-$ nu build --no-default-features
+$ nula build --features "json compression"
+$ nula build --all-features
+$ nula build --no-default-features
 
 # Build specific target
-$ nu build --target wasm32-unknown-nulang
-$ nu build --target x86_64-unknown-linux-gnu
+$ nula build --target wasm32-unknown-nulang
+$ nula build --target x86_64-unknown-linux-gnu
 
 # Incremental build (default in dev)
-$ nu build --incremental
+$ nula build --incremental
 
 # Verbose output
-$ nu build -v
-$ nu build -vv  # Very verbose
+$ nula build -v
+$ nula build -vv  # Very verbose
 
 # Dry run (show what would be built)
-$ nu build --dry-run
+$ nula build --dry-run
 
 # JSON output for tooling integration
-$ nu build --message-format=json
+$ nula build --message-format=json
 ```
 
-#### 3.1.3 `nu test` — Run Tests
+#### 3.1.3 `nula test` — Run Tests
 
 ```bash
 # Run all tests
-$ nu test
+$ nula test
    Compiling my-app v0.1.0
     Running 15 tests
 
@@ -437,152 +437,152 @@ test integration::api::create_user ... ok
 test result: ok. 15 passed; 0 failed; 0 ignored
 
 # Run specific test
-$ nu test math::add
-$ nu test --test unit_tests
+$ nula test math::add
+$ nula test --test unit_tests
 
 # Run with filter
-$ nu test --filter "user"
+$ nula test --filter "user"
 
 # Run ignored tests
-$ nu test --ignored
-$ nu test --include-ignored
+$ nula test --ignored
+$ nula test --include-ignored
 
 # Run with all features
-$ nu test --all-features
+$ nula test --all-features
 
 # Run with coverage
-$ nu test --coverage
+$ nula test --coverage
    Coverage: 87.3% (142/163 lines)
-   Missing: src/auth.nl:45-52, src/db.nl:12-15
+   Missing: src/auth.nula:45-52, src/db.nula:12-15
 
 # Run benchmarks
-$ nu bench
-$ nu bench --filter "sorting"
+$ nula bench
+$ nula bench --filter "sorting"
 
 # Run in release mode
-$ nu test --release
+$ nula test --release
 
 # Number of parallel jobs
-$ nu test -j 8
+$ nula test -j 8
 
 # Show test output
-$ nu test --nocapture
+$ nula test --nocapture
 
 # Watch mode
-$ nu test --watch
+$ nula test --watch
 ```
 
-#### 3.1.4 `nu add` — Add Dependencies
+#### 3.1.4 `nula add` — Add Dependencies
 
 ```bash
 # Add a dependency from the registry
-$ nu add http
+$ nula add http
     Adding http ^3.2.0 to dependencies
 
 # Add with version constraint
-$ nu add http@"^2.0"
-$ nu add http@">=1.0, <3.0"
-$ nu add http@"=1.5.2"
+$ nula add http@"^2.0"
+$ nula add http@">=1.0, <3.0"
+$ nula add http@"=1.5.2"
 
 # Add a dev dependency
-$ nu add test-framework --dev
+$ nula add test-framework --dev
 
 # Add a build dependency
-$ nu add protoc --build
+$ nula add protoc --build
 
 # Add from git repository
-$ nu add ai-sdk --git https://github.com/nulang/ai-sdk
-$ nu add ai-sdk --git https://github.com/nulang/ai-sdk --branch main
-$ nu add ai-sdk --git https://github.com/nulang/ai-sdk --tag v1.0.0
-$ nu add ai-sdk --git https://github.com/nulang/ai-sdk --rev abc1234
+$ nula add ai-sdk --git https://github.com/nulang/ai-sdk
+$ nula add ai-sdk --git https://github.com/nulang/ai-sdk --branch main
+$ nula add ai-sdk --git https://github.com/nulang/ai-sdk --tag v1.0.0
+$ nula add ai-sdk --git https://github.com/nulang/ai-sdk --rev abc1234
 
 # Add from local path
-$ nu add database --path ../database
+$ nula add database --path ../database
 
 # Add with features
-$ nu add tls --features "rustls"
-$ nu add tls --features "rustls,http2"
-$ nu add tls --all-features
+$ nula add tls --features "rustls"
+$ nula add tls --features "rustls,http2"
+$ nula add tls --all-features
 
 # Add and update lock file
-$ nu add http --update
+$ nula add http --update
 
 # Remove a dependency
-$ nu remove http
-$ nu rm http
+$ nula remove http
+$ nula rm http
 
 # Update dependencies
-$ nu update                    # Update all
-$ nu update http               # Update specific package
-$ nu update http@"^3.0"        # Update with new constraint
+$ nula update                    # Update all
+$ nula update http               # Update specific package
+$ nula update http@"^3.0"        # Update with new constraint
 ```
 
-#### 3.1.5 `nu run` — Run Project
+#### 3.1.5 `nula run` — Run Project
 
 ```bash
 # Run the main binary
-$ nu run
+$ nula run
    Compiling my-app v0.1.0
     Running `target/debug/my-app`
 Hello, World!
 
 # Run with arguments
-$ nu run -- --port 8080 --verbose
+$ nula run -- --port 8080 --verbose
 
 # Run in release mode
-$ nu run --release
+$ nula run --release
 
 # Run specific binary
-$ nu run --bin my-app
-$ nu run --bin cli-tool
+$ nula run --bin my-app
+$ nula run --bin cli-tool
 
 # Run example
-$ nu run --example basic
+$ nula run --example basic
 
 # Run tests continuously
-$ nu run --watch
+$ nula run --watch
 
 # Environment variables
-$ NU_LOG=debug nu run
+$ NU_LOG=debug nula run
 ```
 
-#### 3.1.6 `nu publish` — Publish Package
+#### 3.1.6 `nula publish` — Publish Package
 
 ```bash
 # Publish to registry
-$ nu publish
+$ nula publish
     Packaging my-library v1.0.0
     Verifying package
     Uploading to registry.nulang.org
     Published my-library v1.0.0
 
 # Dry run (verify without publishing)
-$ nu publish --dry-run
+$ nula publish --dry-run
 
 # Publish to alternative registry
-$ nu publish --registry https://internal.registry.company.com
+$ nula publish --registry https://internal.registry.company.com
 
 # Publish with specific token
-$ nu publish --token $NULANG_REGISTRY_TOKEN
+$ nula publish --token $NULANG_REGISTRY_TOKEN
 
 # Allow dirty working directory
-$ nu publish --allow-dirty
+$ nula publish --allow-dirty
 
 # Skip verification
-$ nu publish --no-verify
+$ nula publish --no-verify
 ```
 
-#### 3.1.7 `nu search` — Search Packages
+#### 3.1.7 `nula search` — Search Packages
 
 ```bash
 # Search for packages
-$ nu search http
+$ nula search http
     http (3.2.0) - High-performance HTTP client/server
     http-client (2.1.0) - HTTP client library
     http-server (1.5.0) - HTTP server framework
 
 # Detailed search
-$ nu search http --detailed
+$ nula search http --detailed
     http v3.2.0
     =============
     HTTP client and server implementation
@@ -590,11 +590,11 @@ $ nu search http --detailed
     https://nulang.org/packages/http
 
 # Search with filters
-$ nu search json --min-downloads 10000
-$ nu search web --category networking
+$ nula search json --min-downloads 10000
+$ nula search web --category networking
 
 # List versions
-$ nu show http
+$ nula show http
     http = "3.2.0"
         Features: json, compression, http2, websocket
         Dependencies: async-runtime, tls, serde
@@ -603,122 +603,122 @@ $ nu show http
     http = "3.0.0" ...
 
 # Show full manifest
-$ nu show http --manifest
+$ nula show http --manifest
 ```
 
-#### 3.1.8 `nu doc` — Documentation
+#### 3.1.8 `nula doc` — Documentation
 
 ```bash
 # Generate documentation
-$ nu doc
+$ nula doc
  Documenting my-app v0.1.0
     Finished docs for 15 modules
 
 # Open in browser
-$ nu doc --open
+$ nula doc --open
 
 # Generate for dependencies too
-$ nu doc --document-private-items
+$ nula doc --document-private-items
 
 # Serve docs locally
-$ nu doc --serve --port 3000
+$ nula doc --serve --port 3000
 
 # Check documentation coverage
-$ nu doc --check-coverage
+$ nula doc --check-coverage
    Missing docs: 3 public items
-   - src/auth.nl:fn authenticate/2
-   - src/db.nl:type ConnectionConfig
-   - src/http.nl:module middleware
+   - src/auth.nula:fn authenticate/2
+   - src/db.nula:type ConnectionConfig
+   - src/http.nula:module middleware
 ```
 
-#### 3.1.9 `nu check` — Static Analysis
+#### 3.1.9 `nula check` — Static Analysis
 
 ```bash
 # Type check
-$ nu check
+$ nula check
     Checking my-app v0.1.0
     Finished: 0 errors, 2 warnings
 
 # With warnings as errors
-$ nu check --deny-warnings
+$ nula check --deny-warnings
 
 # Check specific package
-$ nu check -p http-client
+$ nula check -p http-client
 
 # Format check
-$ nu fmt --check
+$ nula fmt --check
 
 # Run linter
-$ nu lint
+$ nula lint
    Checking style...
    Checking common mistakes...
    Checking security...
 
 # Security audit
-$ nu audit
+$ nula audit
    Scanning 25 dependencies...
    No known vulnerabilities found.
 
-$ nu audit --json
+$ nula audit --json
 ```
 
-#### 3.1.10 `nu clean` — Clean Build Artifacts
+#### 3.1.10 `nula clean` — Clean Build Artifacts
 
 ```bash
 # Clean build directory
-$ nu clean
+$ nula clean
    Removed target/debug/
    Removed target/release/
 
 # Clean everything including cache
-$ nu clean --all
+$ nula clean --all
    Removed target/
    Removed ~/.nulang/cache/
 
 # Clean specific package
-$ nu clean -p http-client
+$ nula clean -p http-client
 ```
 
 ### 3.2 Global Options
 
 ```bash
 # Verbose output
-$ nu -v <command>
-$ nu -vv <command>  # Very verbose
+$ nula -v <command>
+$ nula -vv <command>  # Very verbose
 
 # Quiet mode
-$ nu -q <command>
+$ nula -q <command>
 
 # Specify manifest
-$ nu --manifest path/to/Nulang.toml build
+$ nula --manifest path/to/Nulang.toml build
 
 # Color output control
-$ nu --color always test
-$ nu --color never test
-$ nu --color auto test   # Default
+$ nula --color always test
+$ nula --color never test
+$ nula --color auto test   # Default
 
 # JSON output
-$ nu --json test
+$ nula --json test
 
 # No progress bars
-$ nu --no-progress build
+$ nula --no-progress build
 
 # Specify jobs (parallelism)
-$ nu -j 16 build
+$ nula -j 16 build
 
 # Specify target directory
-$ nu --target-dir /tmp/build build
+$ nula --target-dir /tmp/build build
 
 # Offline mode (use only cached packages)
-$ nu --offline build
+$ nula --offline build
 
 # Show version
-$ nu --version
-nu 1.0.0 (2024-06-15)
+$ nula --version
+nula 1.0.0 (2024-06-15)
 
 # Show help
-$ nu --help
-$ nu <command> --help
+$ nula --help
+$ nula <command> --help
 ```
 
 ---
@@ -753,7 +753,7 @@ type = "lib"                             # "lib" | "bin" | "cdylib" | "staticlib
 autoexamples = true
 autotests = true
 autobenches = true
-build = "build.nl"                       # Custom build script
+build = "build.nula"                       # Custom build script
 links = "native-lib"                     # Link to native library
 
 # Exclusion patterns
@@ -936,13 +936,13 @@ features = ["rustls"]
 ### 4.4 Build Script API
 
 ```nulang
-// build.nl — Custom build script
-use nu::build;
+// build.nula — Custom build script
+use nula::build;
 
 fn main() {
   // Rerun if these files change
   build::rerun_if_changed("src/schema.proto");
-  build::rerun_if_changed("build.nl");
+  build::rerun_if_changed("build.nula");
   
   // Set compile-time environment variables
   build::set_env("GIT_COMMIT", build::command("git", ["rev-parse", "HEAD"]));
@@ -957,7 +957,7 @@ fn main() {
   
   // Generate code
   let out_dir = build::env("OUT_DIR");
-  generate_version_file("{out_dir}/version.nl");
+  generate_version_file("{out_dir}/version.nula");
   
   // Link to native library
   build::link_lib("ssl");
@@ -991,7 +991,7 @@ fn generate_version_file(path: String) {
 
 ```nulang
 // Programmatic access to package configuration
-use nu::manifest;
+use nula::manifest;
 
 fn read_manifest() {
   // Parse Nulang.toml
@@ -1031,69 +1031,69 @@ fn read_manifest() {
 ### 5.1 Module Hierarchy
 
 ```
-nu/
+nula/
 ├── cli/
-│   ├── main.nl           # CLI entry point
+│   ├── main.nula           # CLI entry point
 │   ├── commands/
-│   │   ├── new.nl        # `nu new` command
-│   │   ├── build.nl      # `nu build` command
-│   │   ├── test.nl       # `nu test` command
-│   │   ├── add.nl        # `nu add` command
-│   │   ├── remove.nl     # `nu remove` command
-│   │   ├── run.nl        # `nu run` command
-│   │   ├── publish.nl    # `nu publish` command
-│   │   ├── search.nl     # `nu search` command
-│   │   ├── doc.nl        # `nu doc` command
-│   │   ├── check.nl      # `nu check` command
-│   │   ├── clean.nl      # `nu clean` command
-│   │   └── fmt.nl        # `nu fmt` command
-│   ├── args.nl           # Argument parsing
-│   ├── output.nl         # Terminal output formatting
-│   └── progress.nl       # Progress bars
+│   │   ├── new.nula        # `nula new` command
+│   │   ├── build.nula      # `nula build` command
+│   │   ├── test.nula       # `nula test` command
+│   │   ├── add.nula        # `nula add` command
+│   │   ├── remove.nula     # `nula remove` command
+│   │   ├── run.nula        # `nula run` command
+│   │   ├── publish.nula    # `nula publish` command
+│   │   ├── search.nula     # `nula search` command
+│   │   ├── doc.nula        # `nula doc` command
+│   │   ├── check.nula      # `nula check` command
+│   │   ├── clean.nula      # `nula clean` command
+│   │   └── fmt.nula        # `nula fmt` command
+│   ├── args.nula           # Argument parsing
+│   ├── output.nula         # Terminal output formatting
+│   └── progress.nula       # Progress bars
 ├── core/
-│   ├── manifest.nl       # Nulang.toml parser
-│   ├── lockfile.nl       # Nulang.lock parser/writer
-│   ├── package.nl        # Package representation
-│   ├── project.nl        # Project discovery
-│   └── workspace.nl      # Workspace management
+│   ├── manifest.nula       # Nulang.toml parser
+│   ├── lockfile.nula       # Nulang.lock parser/writer
+│   ├── package.nula        # Package representation
+│   ├── project.nula        # Project discovery
+│   └── workspace.nula      # Workspace management
 ├── resolver/
-│   ├── sat_solver.nl     # SAT-based resolution
-│   ├── version.nl        # Version parsing/comparison
-│   ├── constraints.nl    # Constraint satisfaction
-│   ├── conflict.nl       # Conflict detection/reporting
-│   └── graph.nl          # Dependency graph
+│   ├── sat_solver.nula     # SAT-based resolution
+│   ├── version.nula        # Version parsing/comparison
+│   ├── constraints.nula    # Constraint satisfaction
+│   ├── conflict.nula       # Conflict detection/reporting
+│   └── graph.nula          # Dependency graph
 ├── registry/
-│   ├── client.nl         # HTTP client for registry
-│   ├── auth.nl           # Authentication
-│   ├── download.nl       # Package download
-│   ├── upload.nl         # Package upload
-│   ├── search.nl         # Search API
-│   └── cache.nl          # Local package cache
+│   ├── client.nula         # HTTP client for registry
+│   ├── auth.nula           # Authentication
+│   ├── download.nula       # Package download
+│   ├── upload.nula         # Package upload
+│   ├── search.nula         # Search API
+│   └── cache.nula          # Local package cache
 ├── build/
-│   ├── compiler.nl       # Compiler interface
-│   ├── linker.nl         # Linker interface
-│   ├── cache.nl          # Build artifact cache
-│   ├── parallel.nl       # Parallel job execution
-│   ├── profiles.nl       # Build profiles
-│   └── targets.nl        # Target platform management
+│   ├── compiler.nula       # Compiler interface
+│   ├── linker.nula         # Linker interface
+│   ├── cache.nula          # Build artifact cache
+│   ├── parallel.nula       # Parallel job execution
+│   ├── profiles.nula       # Build profiles
+│   └── targets.nula        # Target platform management
 ├── test/
-│   ├── runner.nl         # Test runner
-│   ├── discovery.nl      # Test discovery
-│   ├── harness.nl        # Test harness
-│   ├── reporter.nl       # Test result reporter
-│   ├── coverage.nl       # Coverage collection
-│   └── snapshot.nl       # Snapshot testing
+│   ├── runner.nula         # Test runner
+│   ├── discovery.nula      # Test discovery
+│   ├── harness.nula        # Test harness
+│   ├── reporter.nula       # Test result reporter
+│   ├── coverage.nula       # Coverage collection
+│   └── snapshot.nula       # Snapshot testing
 ├── quality/
-│   ├── linter.nl         # Linting engine
-│   ├── formatter.nl      # Code formatter
-│   ├── audit.nl          # Security auditing
-│   └── doc_gen.nl        # Documentation generation
+│   ├── linter.nula         # Linting engine
+│   ├── formatter.nula      # Code formatter
+│   ├── audit.nula          # Security auditing
+│   └── doc_gen.nula        # Documentation generation
 └── util/
-    ├── toml.nl           # TOML parsing
-    ├── semver.nl         # Semantic versioning
-    ├── hash.nl           # Hashing utilities
-    ├── archive.nl        # Archive (tar/zip) handling
-    └── fs.nl             # Filesystem utilities
+    ├── toml.nula           # TOML parsing
+    ├── semver.nula         # Semantic versioning
+    ├── hash.nula           # Hashing utilities
+    ├── archive.nula        # Archive (tar/zip) handling
+    └── fs.nula             # Filesystem utilities
 ```
 
 ### 5.2 Core Types
@@ -1262,7 +1262,7 @@ Milestone: v0.1.0 — "Bootstrap"
 | - Tables            | - Git init                              |
 | - Spinners          | - README/license templates              |
 +---------------------+-----------------------------------------+
-| Deliverable: nu new, nu --version, nu --help working          |
+| Deliverable: nula new, nula --version, nula --help working          |
 | Tests: CLI argument parsing, project template generation      |
 +---------------------------------------------------------------+
 ```
@@ -1272,7 +1272,7 @@ Milestone: v0.1.0 — "Bootstrap"
 - [ ] Implement command routing
 - [ ] Create TOML manifest parser
 - [ ] Build manifest validation
-- [ ] Implement project scaffolding (nu new)
+- [ ] Implement project scaffolding (nula new)
 - [ ] Create project templates (lib, bin, workspace)
 - [ ] Add terminal output formatting
 - [ ] Write comprehensive tests
@@ -1298,7 +1298,7 @@ Milestone: v0.2.0 — "Resolve"
 | - Local cache       | - Lock file validation                  |
 | - Index update      | - Lock file update (conservative)       |
 +---------------------+-----------------------------------------+
-| Deliverable: nu add working with lock file generation         |
+| Deliverable: nula add working with lock file generation         |
 | Tests: Resolver unit tests, integration with mock registry    |
 +---------------------------------------------------------------+
 ```

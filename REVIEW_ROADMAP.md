@@ -70,7 +70,7 @@ The roadmap below re-buckets the existing `ROADMAP.md` phases into four concrete
 4. **Basic workflow DSL.** `workflow`, `step`, `parallel`, `compensate`, `signal`, `timer`, `query`. Compile to an actor graph; sagas in reverse-order compensation.
 5. **`LLM` capability effect.** Provider abstraction (OpenAI, Anthropic, Ollama, Azure), token/cost tracking, retry/circuit-breaker as effect handlers.
 6. **Typed tool binding.** `@tool` decorator generating JSON Schema from Nulang behavior signatures; tool calls are effects so they are mockable in tests.
-7. **Package manager MVP (`nu`).** `Nulang.toml`, resolver, lockfile, local/git/registry dependencies, `nu build/test/run/add/publish`. The registry can be a static file store at this stage.
+7. **Package manager MVP (`nula`).** `Nulang.toml`, resolver, lockfile, local/git/registry dependencies, `nula build/test/run/add/publish`. The registry can be a static file store at this stage.
 
 **Explicit cuts**
 - **No managed cloud.** `DESIGN_CLOUD.md` remains design-only.
@@ -85,7 +85,7 @@ The roadmap below re-buckets the existing `ROADMAP.md` phases into four concrete
 - A `Counter` actor created, sent 1,000 increments, killed with `kill -9`, restarts, and resumes with `count == 1000`.
 - A `PurchaseOrder` workflow survives a node restart mid-workflow and resumes exactly where it left off.
 - An AI agent workflow researches a topic, uses tools, and persists state across restarts.
-- `nu` can resolve a small multi-package workspace and run its tests.
+- `nula` can resolve a small multi-package workspace and run its tests.
 
 **Estimated effort:** 9–12 engineer-months.
 
@@ -123,7 +123,7 @@ The roadmap below re-buckets the existing `ROADMAP.md` phases into four concrete
 **Success criteria**
 - First production deployment by an external team.
 - 100+ packages in the registry.
-- `cargo test` / `nu test` passes with >1,000 tests including Jepsen-style partition tests.
+- `cargo test` / `nula test` passes with >1,000 tests including Jepsen-style partition tests.
 - Documented migration path from v0.x to v1.0.
 
 **Estimated effort:** 12–18 engineer-months on top of v0.5.
@@ -235,7 +235,7 @@ This model balances open-source evolution (community RFCs + TSC) with commercial
 ### 5.3 Migration strategy
 
 - **Within an edition:** automatic, with deprecation warnings.
-- **Across editions:** `nu migrate --edition 2030` applies mechanical rewrites (e.g., keyword changes, stdlib renames).
+- **Across editions:** `nula migrate --edition 2030` applies mechanical rewrites (e.g., keyword changes, stdlib renames).
 - **State migration for durable actors:** the runtime supports schema-evolution hooks. On actor activation, if the stored state schema differs from the current code, a user-supplied `migrate(old_state) -> new_state` function runs before the actor processes messages.
 - **No silent breaking changes.** All breaking changes require an RFC and a migration guide.
 
@@ -255,7 +255,7 @@ Nulang’s security rests on three layers:
 2. **Runtime capability tokens.** Cross-actor messages carry signed JWT capability tokens. Revocation is lazy via a revocation list; time-limited capabilities expire automatically.
 3. **Sandboxing.** Actor code runs inside WASM linear memory with no ambient authority. The runtime is the only entity that can perform IO, access secrets, or spawn processes.
 4. **Secrets.** Secrets are injected as capabilities (`capability Secret { name: "DATABASE_URL" }`), never read from environment variables inside actor code.
-5. **Supply chain.** The package manager verifies package checksums, supports reproducible builds, and includes `nu audit` for known vulnerabilities.
+5. **Supply chain.** The package manager verifies package checksums, supports reproducible builds, and includes `nula audit` for known vulnerabilities.
 
 ---
 
