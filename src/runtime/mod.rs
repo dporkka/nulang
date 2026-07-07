@@ -269,17 +269,53 @@ impl Runtime {
         }
         if is_workflow {
             let seq = self.next_sequence(actor_id);
-            let payload: Vec<PersistedValue> = args.iter().map(PersistedValue::from_value).collect();
-            let _ = self.persistence.append_workflow_event(
-                actor_id,
-                WorkflowEvent::Custom {
-                    sequence: seq,
-                    name: event.to_string(),
-                    args: payload,
-                },
-            );
+            if event == "ParallelBranchCompleted" && args.len() == 2 {
+                let parallel_step_name =
+                    self.resolve_string_constant(actor_id, &args[0]).unwrap_or_default();
+                let branch_name =
+                    self.resolve_string_constant(actor_id, &args[1]).unwrap_or_default();
+                let _ = self.persistence.append_parallel_branch_completed(
+                    actor_id,
+                    seq,
+                    parallel_step_name,
+                    branch_name,
+                );
+                // Persist the progress counter so the snapshot captures which
+                // branches have already completed.
+                if let Some(actor) = self.actors.get_mut(&actor_id) {
+                    let current = actor
+                        .get_state_field("parallel_progress")
+                        .and_then(|v| v.as_int())
+                        .unwrap_or(0);
+                    actor.set_state_field("parallel_progress", Value::int(current + 1));
+                }
+            } else {
+                let payload: Vec<PersistedValue> =
+                    args.iter().map(PersistedValue::from_value).collect();
+                let _ = self.persistence.append_workflow_event(
+                    actor_id,
+                    WorkflowEvent::Custom {
+                        sequence: seq,
+                        name: event.to_string(),
+                        args: payload,
+                    },
+                );
+            }
             self.checkpoint_actor(actor_id);
         }
+    }
+
+    /// Resolve a string-id value to the original string using the actor's
+    /// bytecode module constant pool.  Used when persisting emitted events
+    /// that carry string metadata (e.g. `ParallelBranchCompleted`).
+    fn resolve_string_constant(&self, actor_id: u64, value: &crate::vm::Value) -> Option<String> {
+        let string_id = value.as_string_id()?;
+        let actor = self.actors.get(&actor_id)?;
+        let module = actor.bytecode_module.as_ref()?;
+        module.constants.get(string_id as usize).and_then(|c| match c {
+            crate::bytecode::Constant::String(s) => Some(s.clone()),
+            _ => None,
+        })
     }
 
     /// Append a `TimerSet` workflow event and checkpoint the actor.
@@ -664,6 +700,16 @@ impl Runtime {
                         step_name,
                     },
                 );
+                // Synthetic parallel steps do not increment step_index in their
+                // bytecode (so signal-waiting branches do not double-increment);
+                // advance it here when the step completes.
+                if self.is_parallel_step(actor_id, behavior_idx) {
+                    if let Some(actor) = self.actors.get_mut(&actor_id) {
+                        if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
+                            actor.set_state_field("step_index", Value::int(n + 1));
+                        }
+                    }
+                }
                 self.checkpoint_actor(actor_id);
             }
             let actor = match self.actors.get_mut(&actor_id) {
@@ -1012,6 +1058,18 @@ impl Runtime {
             .unwrap_or(false)
     }
 
+    /// Return true if the workflow behavior at `behavior_idx` is a synthetic
+    /// parallel step.  Parallel steps advance step_index in the runtime rather
+    /// than in their bytecode.
+    fn is_parallel_step(&self, actor_id: u64, behavior_idx: usize) -> bool {
+        self.actors
+            .get(&actor_id)
+            .and_then(|a| a.bytecode_module.as_ref())
+            .and_then(|m| m.behaviors.get(behavior_idx))
+            .map(|entry| entry.parallel_branches.is_some())
+            .unwrap_or(false)
+    }
+
     /// Recover a persistent actor from the latest snapshot and replay the journal.
     ///
     /// For workflow actors the durable workflow event journal is replayed
@@ -1163,6 +1221,9 @@ impl Runtime {
                 if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
                     actor.set_state_field("step_index", Value::int(n + 1));
                 }
+                // A completed step (sequential or parallel) clears any stale
+                // parallel-progress counter.
+                actor.set_state_field("parallel_progress", Value::int(0));
             }
             WorkflowEvent::SagaCompensated { step_name, .. } => {
                 // Replay marks the step as already compensated so the runtime
@@ -1176,6 +1237,13 @@ impl Runtime {
             WorkflowEvent::TimerSet { .. } | WorkflowEvent::TimerFired { .. } => {}
             WorkflowEvent::SignalReceived { name, payload, .. } => {
                 actor.received_signals.push((name.clone(), payload.clone()));
+            }
+            WorkflowEvent::ParallelBranchCompleted { .. } => {
+                let current = actor
+                    .get_state_field("parallel_progress")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0);
+                actor.set_state_field("parallel_progress", Value::int(current + 1));
             }
             WorkflowEvent::Custom { name, args, .. } => {
                 let values: Vec<Value> = args.iter().map(|a| a.to_value()).collect();

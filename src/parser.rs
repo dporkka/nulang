@@ -302,8 +302,7 @@ impl Parser {
         let name = self.expect_ident("workflow name")?;
         self.expect(TokenKind::LBrace)?;
 
-        let mut steps = Vec::new();
-        let mut parallel = Vec::new();
+        let mut items = Vec::new();
         let mut compensate = None;
 
         self.skip_newlines();
@@ -314,7 +313,7 @@ impl Parser {
             }
             match self.peek_kind().clone() {
                 TokenKind::Step => {
-                    steps.push(self.parse_workflow_step()?);
+                    items.push(WorkflowItem::Step(self.parse_workflow_step()?));
                 }
                 TokenKind::Parallel => {
                     self.advance(); // 'parallel'
@@ -330,7 +329,7 @@ impl Parser {
                         self.skip_newlines_semicolons();
                     }
                     self.expect(TokenKind::RBrace)?;
-                    parallel.push(branch);
+                    items.push(WorkflowItem::Parallel(branch));
                     self.skip_newlines_semicolons();
                 }
                 TokenKind::Compensate => {
@@ -358,8 +357,7 @@ impl Parser {
         Ok(Decl::Workflow {
             name,
             input: None,
-            steps,
-            parallel,
+            items,
             compensate,
             span,
         })
@@ -2217,12 +2215,16 @@ mod tests {
         let ast = parse("workflow PurchaseOrder { step validate { 1 } step charge { 2 } }").unwrap();
         assert_eq!(ast.decls.len(), 1);
         match &ast.decls[0] {
-            Decl::Workflow { name, steps, parallel, compensate, .. } => {
+            Decl::Workflow { name, items, compensate, .. } => {
                 assert_eq!(name, "PurchaseOrder");
-                assert_eq!(steps.len(), 2);
-                assert_eq!(steps[0].name, "validate");
-                assert_eq!(steps[1].name, "charge");
-                assert!(parallel.is_empty());
+                assert_eq!(items.len(), 2);
+                match (&items[0], &items[1]) {
+                    (WorkflowItem::Step(a), WorkflowItem::Step(b)) => {
+                        assert_eq!(a.name, "validate");
+                        assert_eq!(b.name, "charge");
+                    }
+                    _ => panic!("Expected two sequential steps"),
+                }
                 assert!(compensate.is_none());
             }
             _ => panic!("Expected workflow declaration"),
@@ -2233,9 +2235,14 @@ mod tests {
     fn test_parse_workflow_with_parallel_and_compensate() {
         let ast = parse("workflow Booking { parallel { step a { 1 } step b { 2 } } compensate { 0 } }").unwrap();
         match &ast.decls[0] {
-            Decl::Workflow { parallel, compensate, .. } => {
-                assert_eq!(parallel.len(), 1);
-                assert_eq!(parallel[0].len(), 2);
+            Decl::Workflow { items, compensate, .. } => {
+                assert_eq!(items.len(), 1);
+                match &items[0] {
+                    WorkflowItem::Parallel(branches) => {
+                        assert_eq!(branches.len(), 2);
+                    }
+                    _ => panic!("Expected parallel block"),
+                }
                 assert!(compensate.is_some());
             }
             _ => panic!("Expected workflow declaration"),

@@ -136,6 +136,12 @@ pub enum WorkflowEvent {
         sequence: u64,
         step_name: String,
     },
+    /// A branch of a synthetic parallel step completed.
+    ParallelBranchCompleted {
+        sequence: u64,
+        parallel_step_name: String,
+        branch_name: String,
+    },
     /// Any other event emitted by a workflow handler.
     Custom {
         sequence: u64,
@@ -154,6 +160,7 @@ impl WorkflowEvent {
             | WorkflowEvent::TimerFired { sequence, .. }
             | WorkflowEvent::SignalReceived { sequence, .. }
             | WorkflowEvent::SagaCompensated { sequence, .. }
+            | WorkflowEvent::ParallelBranchCompleted { sequence, .. }
             | WorkflowEvent::Custom { sequence, .. } => *sequence,
         }
     }
@@ -267,6 +274,32 @@ pub trait PersistenceStore: Send + Sync {
         self.read_workflow_events(actor_id)
             .into_iter()
             .filter(|e| matches!(e, WorkflowEvent::SagaCompensated { .. }))
+            .collect()
+    }
+
+    /// Append a `ParallelBranchCompleted` workflow event.
+    fn append_parallel_branch_completed(
+        &mut self,
+        actor_id: u64,
+        sequence: u64,
+        parallel_step_name: String,
+        branch_name: String,
+    ) -> io::Result<()> {
+        self.append_workflow_event(
+            actor_id,
+            WorkflowEvent::ParallelBranchCompleted {
+                sequence,
+                parallel_step_name,
+                branch_name,
+            },
+        )
+    }
+
+    /// Read `ParallelBranchCompleted` workflow events.
+    fn read_parallel_branch_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+        self.read_workflow_events(actor_id)
+            .into_iter()
+            .filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. }))
             .collect()
     }
 

@@ -1346,8 +1346,8 @@ impl Compiler {
                     self.compile_decl(subdecl)?;
                 }
             }
-            Decl::Workflow { name, steps, span, .. } => {
-                self.compile_workflow(name, steps, *span)?;
+            Decl::Workflow { name, items, span, .. } => {
+                self.compile_workflow(name, items, *span)?;
             }
         }
         Ok(())
@@ -1451,11 +1451,116 @@ impl Compiler {
     fn compile_workflow(
         &mut self,
         name: &str,
-        steps: &[WorkflowStep],
+        items: &[WorkflowItem],
         span: Span,
     ) -> NuResult<()> {
-        // A workflow is a persistent actor with one behavior per step plus a
-        // durable step_index so the runtime can resume sequential execution.
+        // Flatten the ordered workflow items into a list of sequential behaviors.
+        // Each `parallel` block becomes a synthetic step whose body runs branches
+        // sequentially and emits a durable `ParallelBranchCompleted` event after
+        // each branch.  A durable `parallel_progress` counter lets recovery skip
+        // branches that already completed before a crash.
+        let mut flattened_steps: Vec<WorkflowStep> = Vec::new();
+        let mut parallel_branches: std::collections::HashMap<usize, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut parallel_counter = 0usize;
+
+        for item in items {
+            match item {
+                WorkflowItem::Step(step) => {
+                    flattened_steps.push(step.clone());
+                }
+                WorkflowItem::Parallel(branches) => {
+                    let parallel_name = format!("parallel_{}", parallel_counter);
+                    parallel_counter += 1;
+
+                    let progress_expr = Expr::FieldAccess {
+                        expr: Box::new(Expr::SelfRef(span)),
+                        field: "parallel_progress".to_string(),
+                        span,
+                    };
+                    let mut body_exprs: Vec<Expr> = Vec::with_capacity(branches.len() + 1);
+
+                    for (branch_idx, branch) in branches.iter().enumerate() {
+                        let threshold = (branch_idx + 1) as i64;
+                        let guard = Expr::Binary {
+                            op: BinOp::Lt,
+                            left: Box::new(progress_expr.clone()),
+                            right: Box::new(Expr::Literal(Literal::Int(threshold), span)),
+                            span,
+                        };
+                        let branch_block = Expr::Block {
+                            exprs: vec![
+                                branch.body.clone(),
+                                Expr::Emit {
+                                    event: "ParallelBranchCompleted".to_string(),
+                                    args: vec![
+                                        Expr::Literal(
+                                            Literal::String(parallel_name.clone()),
+                                            span,
+                                        ),
+                                        Expr::Literal(
+                                            Literal::String(branch.name.clone()),
+                                            span,
+                                        ),
+                                    ],
+                                    span,
+                                },
+                            ],
+                            span,
+                        };
+                        body_exprs.push(Expr::If {
+                            cond: Box::new(guard),
+                            then_branch: Box::new(branch_block),
+                            else_branch: None,
+                            span,
+                        });
+                    }
+
+                    // Reset the parallel-progress counter once every branch has
+                    // finished.  The runtime advances step_index when it records
+                    // StepCompleted so that signal-waiting branches do not
+                    // double-increment.
+                    body_exprs.push(Expr::Assign {
+                        target: Box::new(progress_expr.clone()),
+                        value: Box::new(Expr::Literal(Literal::Int(0), span)),
+                        span,
+                    });
+
+                    let combined_compensate = {
+                        let comp_exprs: Vec<Expr> = branches
+                            .iter()
+                            .rev()
+                            .filter_map(|b| b.compensate.clone())
+                            .collect();
+                        if comp_exprs.is_empty() {
+                            None
+                        } else {
+                            Some(Expr::Block {
+                                exprs: comp_exprs,
+                                span,
+                            })
+                        }
+                    };
+
+                    flattened_steps.push(WorkflowStep {
+                        name: parallel_name.clone(),
+                        body: Expr::Block {
+                            exprs: body_exprs,
+                            span,
+                        },
+                        compensate: combined_compensate,
+                        span,
+                    });
+                    parallel_branches.insert(
+                        flattened_steps.len() - 1,
+                        branches.iter().map(|b| b.name.clone()).collect(),
+                    );
+                }
+            }
+        }
+
+        // A workflow is a persistent actor with one behavior per flattened step
+        // plus durable step_index and parallel_progress counters.
         let state_fields: Vec<(String, StateModel, Type, Expr)> = vec![
             (
                 "step_index".to_string(),
@@ -1469,8 +1574,14 @@ impl Compiler {
                 Type::string(),
                 Expr::Literal(Literal::String(name.to_string()), span),
             ),
+            (
+                "parallel_progress".to_string(),
+                StateModel::Durable,
+                Type::int(),
+                Expr::Literal(Literal::Int(0), span),
+            ),
         ];
-        let behaviors: Vec<Behavior> = steps
+        let behaviors: Vec<Behavior> = flattened_steps
             .iter()
             .map(|s| Behavior {
                 name: s.name.clone(),
@@ -1481,19 +1592,20 @@ impl Compiler {
                 span: s.span,
             })
             .collect();
+        let first_behavior_idx = self.module.behaviors.len();
         self.compile_actor(name, true, &state_fields, &behaviors, &[], true)?;
 
-        // Compile per-step saga compensation expressions and patch the
-        // corresponding behavior table entries with their code offsets.
-        let behavior_indices = self
-            .module
-            .actor_metadata
-            .last()
-            .map(|m| m.behavior_indices.clone())
-            .unwrap_or_default();
-        for (i, step) in steps.iter().enumerate() {
+        // Patch parallel-branch metadata and per-step saga compensation offsets.
+        let behavior_indices: Vec<usize> =
+            (first_behavior_idx..self.module.behaviors.len()).collect();
+        for (i, step) in flattened_steps.iter().enumerate() {
+            let behavior_idx = behavior_indices.get(i).copied().unwrap_or(first_behavior_idx + i);
+            if let Some(entry) = self.module.behaviors.get_mut(behavior_idx) {
+                if let Some(branches) = parallel_branches.get(&i) {
+                    entry.parallel_branches = Some(branches.clone());
+                }
+            }
             if let Some(comp_expr) = &step.compensate {
-                let behavior_idx = behavior_indices.get(i).copied().unwrap_or(i);
                 let comp_offset = self.compile_compensation(comp_expr)?;
                 if let Some(entry) = self.module.behaviors.get_mut(behavior_idx) {
                     entry.compensate_offset = Some(comp_offset);
@@ -1548,6 +1660,7 @@ impl Compiler {
             local_count: self.next_reg as usize,
             effect_mask: 0,
             compensate_offset: None,
+            parallel_branches: None,
         };
         self.module.add_behavior(entry);
 

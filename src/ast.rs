@@ -344,11 +344,18 @@ pub enum Decl {
     Workflow {
         name: String,
         input: Option<(String, Type)>,
-        steps: Vec<WorkflowStep>,
-        parallel: Vec<Vec<WorkflowStep>>,
+        items: Vec<WorkflowItem>,
         compensate: Option<Expr>,
         span: Span,
     },
+}
+
+/// A single item inside a `workflow` declaration, preserving the original
+/// source order of sequential steps and parallel blocks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkflowItem {
+    Step(WorkflowStep),
+    Parallel(Vec<WorkflowStep>),
 }
 
 /// A single step inside a `workflow` declaration.

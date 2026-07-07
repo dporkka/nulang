@@ -809,6 +809,7 @@ fn test_vm_spawn_creates_persistent_actor() {
         local_count: 1,
         effect_mask: 0,
         compensate_offset: None,
+        parallel_branches: None,
     });
     module.emit(Instruction::new3(OpCode::Spawn, 0, 0, 0));
     module.emit(Instruction::new0(OpCode::Halt));
@@ -853,6 +854,7 @@ fn test_vm_spawn_creates_non_persistent_actor() {
         local_count: 1,
         effect_mask: 0,
         compensate_offset: None,
+        parallel_branches: None,
     });
     module.emit(Instruction::new3(OpCode::Spawn, 0, 0, 0));
     module.emit(Instruction::new0(OpCode::Halt));

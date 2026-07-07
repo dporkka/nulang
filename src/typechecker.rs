@@ -577,7 +577,7 @@ impl TypeChecker {
             Decl::Workflow {
                 name: _,
                 input,
-                steps,
+                items,
                 span: _,
                 ..
             } => {
@@ -588,10 +588,22 @@ impl TypeChecker {
                 if let Some((input_name, input_ty)) = input {
                     workflow_ctx.bind(input_name.clone(), input_ty.clone(), Capability::Ref);
                 }
-                for step in steps {
-                    let (_s, _body_ty) = self.infer_expr(&workflow_ctx, &step.body)?;
-                    if let Some(comp_expr) = &step.compensate {
-                        let (_s, _comp_ty) = self.infer_expr(&workflow_ctx, comp_expr)?;
+                for item in items {
+                    match item {
+                        crate::ast::WorkflowItem::Step(step) => {
+                            let (_s, _body_ty) = self.infer_expr(&workflow_ctx, &step.body)?;
+                            if let Some(comp_expr) = &step.compensate {
+                                let (_s, _comp_ty) = self.infer_expr(&workflow_ctx, comp_expr)?;
+                            }
+                        }
+                        crate::ast::WorkflowItem::Parallel(branches) => {
+                            for step in branches {
+                                let (_s, _body_ty) = self.infer_expr(&workflow_ctx, &step.body)?;
+                                if let Some(comp_expr) = &step.compensate {
+                                    let (_s, _comp_ty) = self.infer_expr(&workflow_ctx, comp_expr)?;
+                                }
+                            }
+                        }
                     }
                 }
                 let workflow_ty = Type::Actor {

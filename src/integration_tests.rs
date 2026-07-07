@@ -1197,6 +1197,200 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_workflow_parallel_branches_normal() {
+        // A simple parallel block with no suspension: both branches run in one
+        // synthetic step and the workflow continues to the next sequential step.
+        let source = r#"
+            workflow ParallelNormal {
+                step before { (emit BeforeDone(), self.step_index = self.step_index + 1) }
+                parallel {
+                    step branch_a { emit BranchA_Done() }
+                    step branch_b { emit BranchB_Done() }
+                }
+                step after { (emit AfterDone(), self.step_index = self.step_index + 1) }
+            }
+            spawn ParallelNormal {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 2, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        assert_eq!(
+            rt.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(3),
+            "workflow should advance through before, parallel, and after"
+        );
+
+        let events = store.read_workflow_events(actor_id);
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. })).count(),
+            2,
+            "both branches should emit ParallelBranchCompleted"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "parallel_0")),
+            "parallel_0 should record StepCompleted"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "AfterDone")),
+            "AfterDone should be persisted"
+        );
+    }
+
+    #[test]
+    fn test_workflow_parallel_branches_and_recovery() {
+        // A workflow with a sequential step, a parallel block of two branches,
+        // and a final sequential step.  Branch b suspends on a signal so we can
+        // simulate a restart after branch a has already completed; recovery
+        // replays the ParallelBranchCompleted event and skips branch a.
+        let source = r#"
+            workflow ParallelTest {
+                step before { (emit BeforeDone(), self.step_index = self.step_index + 1) }
+                parallel {
+                    step branch_a { emit BranchA_Done() }
+                    step branch_b { (perform Signal.wait("continue"), emit BranchB_Done()) }
+                }
+                step after { (emit AfterDone(), self.step_index = self.step_index + 1) }
+            }
+            spawn ParallelTest {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        let mut compensation_offsets: Vec<Option<usize>> = vec![None; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+                compensation_offsets[idx] = entry.compensate_offset;
+            }
+        }
+
+        // First runtime: run the sequential "before" step, then start the
+        // parallel block.  Branch a completes; branch b suspends waiting for
+        // the signal.
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt1.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt1.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt1.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(1),
+            "before step should advance step_index to 1"
+        );
+
+        rt1.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt1.borrow_mut().run_scheduler();
+
+        let events_mid = store.read_workflow_events(actor_id);
+        assert_eq!(
+            events_mid.iter().filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { branch_name, .. } if branch_name == "branch_a")).count(),
+            1,
+            "branch_a should have completed"
+        );
+        assert_eq!(
+            events_mid.iter().filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { branch_name, .. } if branch_name == "branch_b")).count(),
+            0,
+            "branch_b should still be waiting"
+        );
+        assert_eq!(
+            rt1.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("parallel_progress").and_then(|v| v.as_int()),
+            Some(1),
+            "parallel_progress should reflect one completed branch"
+        );
+
+        // Simulate a node restart mid-parallel-block: drop the actor and
+        // recover from the shared store.  Recovery replays the durable branch
+        // event so branch a is skipped when the synthetic parallel step runs.
+        rt1.borrow_mut().actors.remove(&actor_id);
+
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            compensation_offsets.clone(),
+        );
+        rt2.borrow_mut().recover_actor(actor_id);
+        rt2.borrow_mut().run_scheduler();
+
+        let events_after_recovery = store.read_workflow_events(actor_id);
+        assert_eq!(
+            events_after_recovery.iter().filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { branch_name, .. } if branch_name == "branch_a")).count(),
+            1,
+            "branch_a should not be re-run after recovery"
+        );
+
+        // Deliver the signal so branch b can finish.
+        rt2.borrow_mut().signal_workflow(actor_id, "continue", None);
+        rt2.borrow_mut().run_scheduler();
+
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(2),
+            "parallel block should advance step_index to 2"
+        );
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("parallel_progress").and_then(|v| v.as_int()),
+            Some(0),
+            "parallel_progress should be reset after the block completes"
+        );
+
+        let events_after_signal = store.read_workflow_events(actor_id);
+        assert_eq!(
+            events_after_signal.iter().filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. })).count(),
+            2,
+            "both branches should have ParallelBranchCompleted events"
+        );
+        assert!(
+            events_after_signal.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "parallel_0")),
+            "parallel_0 should record StepCompleted"
+        );
+
+        // Run the final sequential step.
+        rt2.borrow_mut().send_message_by_id(actor_id, 2, &[]);
+        rt2.borrow_mut().run_scheduler();
+
+        assert_eq!(
+            rt2.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(3),
+            "after step should advance step_index to 3"
+        );
+        let events_final = store.read_workflow_events(actor_id);
+        assert!(
+            events_final.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "AfterDone")),
+            "AfterDone event should be persisted"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // v0.2 HIR/MIR pipeline smoke tests
     // -----------------------------------------------------------------------

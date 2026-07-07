@@ -347,6 +347,9 @@ pub struct BehaviorTableEntry {
     pub effect_mask: u32,      // Which effects this behavior may perform (bitmap)
     /// Optional code offset for the saga compensation expression of this step.
     pub compensate_offset: Option<usize>,
+    /// For synthetic parallel steps: the ordered names of the branches.
+    /// `None` for normal sequential steps.
+    pub parallel_branches: Option<Vec<String>>,
 }
 
 /// Actor metadata for durable execution.
