@@ -211,9 +211,15 @@ impl Repl {
             let _cap = cap_analyzer.infer_cap(&cap_ctx, expr)?;
         }
 
-        // Compile the combined module
-        let mut compiler = Compiler::new("repl");
-        let code_module = compiler.compile_module(&combined_module)?.clone();
+        // Compile the combined module (try new HIR/MIR pipeline first).
+        let code_module = match compile_with_new_pipeline(&combined_module, "repl") {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("HIR/MIR pipeline failed (falling back): {}", e);
+                let mut compiler = Compiler::new("repl");
+                compiler.compile_module(&combined_module)?.clone()
+            }
+        };
         self.last_bytecode = Some(disassemble_module(&code_module));
 
         // Load and execute
@@ -331,6 +337,14 @@ impl Default for Repl {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Try the new HIR/MIR pipeline; on failure the caller can fall back to the
+/// legacy compiler.
+fn compile_with_new_pipeline(ast: &AstModule, name: &str) -> NuResult<crate::bytecode::CodeModule> {
+    let hir = crate::hir_lower::lower_module(ast);
+    let mir = crate::mir_lower::lower_module(&hir);
+    crate::mir_codegen::compile_mir(&mir, name)
+}
 
 /// Parse source code into an AST module.
 fn parse_source(source: &str) -> NuResult<AstModule> {

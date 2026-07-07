@@ -226,14 +226,28 @@ fn run_source(source: &str, verbose: bool) -> NuResult<()> {
         }
     }
 
-    // 6. Compile
-    let mut compiler = Compiler::new("main");
-    let code_module = compiler.compile_module(&ast)?.clone();
-
-    if verbose {
-        println!("=== Bytecode ===");
-        println!("{}", disassemble(&code_module));
-    }
+    // 6. Compile (try new HIR/MIR pipeline first; fall back to legacy compiler).
+    let code_module = match compile_with_new_pipeline(&ast, "main") {
+        Ok(m) => {
+            if verbose {
+                println!("=== Bytecode (HIR/MIR pipeline) ===");
+                println!("{}", disassemble(&m));
+            }
+            m
+        }
+        Err(e) => {
+            if verbose {
+                eprintln!("HIR/MIR pipeline failed (falling back): {}", e);
+            }
+            let mut compiler = Compiler::new("main");
+            let m = compiler.compile_module(&ast)?.clone();
+            if verbose {
+                println!("=== Bytecode (legacy compiler) ===");
+                println!("{}", disassemble(&m));
+            }
+            m
+        }
+    };
 
     // 7. Execute
     let mut vm = VM::new();
@@ -314,6 +328,12 @@ fn check_source(source: &str, verbose: bool) -> NuResult<()> {
     }
 
     Ok(())
+}
+
+fn compile_with_new_pipeline(ast: &nulang::ast::AstModule, name: &str) -> NuResult<nulang::bytecode::CodeModule> {
+    let hir = nulang::hir_lower::lower_module(ast);
+    let mir = nulang::mir_lower::lower_module(&hir);
+    nulang::mir_codegen::compile_mir(&mir, name)
 }
 
 fn type_to_string(ty: &Type) -> String {

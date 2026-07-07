@@ -824,4 +824,75 @@ mod tests {
         assert_eq!(actor.event_log.len(), 3, "three events should be logged");
         assert_eq!(actor.event_log[0].0, "Incremented");
     }
+
+    // -----------------------------------------------------------------------
+    // v0.2 HIR/MIR pipeline smoke tests
+    // -----------------------------------------------------------------------
+
+    fn run_source_new(source: &str) -> Result<Value, NuError> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module()?;
+
+        // Type check (required before lowering)
+        let mut type_checker = TypeChecker::new();
+        let _ = type_checker.check_module(&ast)?;
+
+        // New HIR -> MIR -> bytecode pipeline
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir);
+        let module = crate::mir_codegen::compile_mir(&mir, "test")?;
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.run()
+    }
+
+    fn assert_int_new(source: &str, expected: i64) {
+        let value = run_source_new(source).unwrap();
+        assert_eq!(value.as_int(), Some(expected), "new pipeline expected integer for: {}", source);
+    }
+
+    #[test]
+    fn test_new_pipeline_literal_int() {
+        assert_int_new("42", 42);
+    }
+
+    #[test]
+    fn test_new_pipeline_arithmetic_add() {
+        assert_int_new("1 + 2", 3);
+    }
+
+    #[test]
+    fn test_new_pipeline_let_binding() {
+        assert_int_new("let x = 10 in x + 5", 15);
+    }
+
+    #[test]
+    fn test_new_pipeline_if_then_else() {
+        assert_int_new("if true then 1 else 2", 1);
+        assert_int_new("if false then 1 else 2", 2);
+    }
+
+    #[test]
+    fn test_new_pipeline_function_call() {
+        let source = r#"
+            fn add(x: Int, y: Int) -> Int { x + y }
+            add(3, 4)
+        "#;
+        assert_int_new(source, 7);
+    }
+
+    #[test]
+    fn test_new_pipeline_match_literal() {
+        let source = r#"
+            match 2 {
+                case 1 => 10
+                case 2 => 20
+                case _ => 30
+            }
+        "#;
+        assert_int_new(source, 20);
+    }
 }
