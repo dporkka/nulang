@@ -18,7 +18,7 @@
 | **Actor Model** | Lightweight green-thread actors with M:N scheduling, work-stealing queues, and supervision trees |
 | **Algebraic Effects** | First-class effect system with `perform`/`handle`/`resume` semantics |
 | **Capability System** | Fine-grained reference permissions (iso/trn/ref/val/box/tag) for memory safety |
-| **AI Capabilities** | LLM access through the capability/effect system (agent DSL removed in v0.7) |
+| **AI Agents** | First-class `agent` declarations with LLM clients (OpenAI, Ollama), episodic/semantic/procedural memory, pipelines, debates, and supervisor teams |
 | **Distributed Runtime** | Location-transparent actor messaging across nodes with TCP transport |
 | **ORCA GC** | Per-actor concurrent garbage collection with cycle detection |
 | **CRDTs** | 8 conflict-free replicated data types for shared distributed state |
@@ -34,13 +34,14 @@
 ### Current Status
 
 - ✅ Builds with `cargo build`
-- ✅ All 508 unit tests pass with `cargo test`
+- ✅ All 740 tests pass with `cargo test`
 - ✅ NaN-boxed `Value` representation with distinct high-16 type tags
 - ✅ 91-opcode bytecode ISA (arithmetic, control flow, closures, arrays, effects, actors, capabilities, distribution)
 - ✅ Hindley-Milner type inference with algebraic effects
 - ✅ Actor runtime: spawn, send, receive, monitors, links, supervision, timers, registry, process groups
 - ✅ ORCA-style per-actor GC with cycle detection
-- ⚠️ AI agent DSL removed; LLM integration planned via capability-based effects
+- ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams
+- ✅ Durable workflow runtime: `workflow` declarations with steps, timers, signals, saga compensation
 
 ---
 
@@ -48,7 +49,8 @@
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (stable channel, 1.70+)
+- [Rust](https://rustup.rs/) (stable channel, 1.95+)
+- Python 3 development headers (for the PyO3 interop module)
 - Linux or macOS (Windows support planned)
 
 ### Building
@@ -82,6 +84,16 @@ cargo run -- --check myprogram.nula
 
 # Evaluate a string
 cargo run -- --eval 'perform IO.print("Hello")'
+```
+
+### Examples
+
+Runnable programs live in [`examples/`](examples/):
+
+```bash
+cargo run -- examples/fibonacci.nu       # closures + recursion
+cargo run -- examples/effects.nu         # algebraic effect handlers
+cargo run -- examples/counter_actor.nu   # actor declaration + spawn
 ```
 
 ---
@@ -125,19 +137,13 @@ let result = handle compute() with
 ### AI Agents
 
 ```nulang
-agent CodeReviewer {
-  llm "gpt-4",
-      "You are a senior code reviewer.",
-      0.7
-
-  tool analyze: SyntaxAnalysis,
-       "Perform syntax analysis on the given code"
-
-  behavior review(code: String) =
-    let analysis = perform SyntaxAnalysis.analyze(code)
-    let review = perform LLM.generate(analysis)
-    review
+agent Assistant = {
+    model: "gpt-4o",
+    system_prompt: "You are helpful.",
+    memory: { max_turns: 10 }
 }
+let a = spawn Assistant {} in
+ask a ask("What is an actor model?")
 ```
 
 ### Pattern Matching
@@ -258,7 +264,7 @@ let processed =
 | `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~490 |
 | `main` | CLI entry point (run, repl, eval, check modes) | ~450 |
 
-**Total: ~33,000 lines of Rust across 37 source files with 590+ tests.**
+**Total: ~52,000 lines of Rust across 70+ source files with 740 tests.**
 
 ---
 
@@ -439,12 +445,10 @@ perform IO.print(result)  -- marshaled Float value: 6.0
 | `stress_effect_resume_after_mailbox_pressure` | Effect yield → flood → resume → drain |
 | `stress_supervisor_crash_during_effect_recovery` | Supervisor crashes mid-effect-recovery |
 
-**Design documents created:**
-- [DESIGN_AI_SDK.md](DESIGN_AI_SDK.md) — OpenAI SDK equivalent (1,309 lines)
-- [DESIGN_WORKFLOW_SDK.md](DESIGN_WORKFLOW_SDK.md) — Temporal SDK equivalent (1,774 lines)
-- [DESIGN_WEB_FRAMEWORK.md](DESIGN_WEB_FRAMEWORK.md) — Phoenix Framework equivalent (1,978 lines)
-- [DESIGN_PACKAGE_MANAGER.md](DESIGN_PACKAGE_MANAGER.md) — Cargo-equivalent package manager (1,627 lines)
-- [DESIGN_CLOUD.md](DESIGN_CLOUD.md) — Nulang Cloud platform architecture (1,738 lines)
+**Design documents** (see [`docs/archive/`](docs/archive/)):
+- `DESIGN_AI_SDK.md` — AI SDK design (partially implemented in v0.9)
+- `DESIGN_WORKFLOW_SDK.md` — workflow SDK design (partially implemented in v0.8)
+- `DESIGN_WEB_FRAMEWORK.md`, `DESIGN_PACKAGE_MANAGER.md`, `DESIGN_CLOUD.md` — design-only, not implemented
 
 ---
 
@@ -517,13 +521,17 @@ This is an active implementation with the following components functional:
 | v0.11 | SIMD vectorization (auto-vectorize array loops) | Completed |
 | v0.12 | Architectural audit & corrections (reverted nursery, bounded mailbox, deep Python) | Completed |
 | v0.13 | Python interop (Native Actor) + stress tests + AI ecosystem design foundation | Completed |
+| — | Durable workflow runtime (steps, timers, signals, saga compensation) | Completed |
+| — | AI runtime (`agent` keyword, LLM providers, memory, pipeline/debate/supervisor patterns) | Completed |
 | v1.0 | Production release — requires: chaos test suite passing ✅, scheduler profiled ✅, cycle detector intra-node only ✅ | Planned |
 
 ---
 
 ## Documentation
 
-- **[SPEC.md](SPEC.md)** — Complete 60,000-word language specification covering syntax, semantics, type system, runtime, and standard library
+- **[SPEC2.md](SPEC2.md)** — Language specification covering syntax, semantics, type system, runtime, and standard library
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — Implementation architecture notes
+- **[docs/archive/](docs/archive/)** — Historical specs, roadmaps, design documents, and review reports
 
 ---
 
