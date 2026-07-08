@@ -1440,3 +1440,41 @@ fn test_workflow_recovery_handles_new_event_variants() {
     let events = rt.persistence.read_workflow_events(actor_id);
     assert_eq!(events.len(), 4);
 }
+
+// ---------------------------------------------------------------------------
+// Pipeline Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pipeline_runtime_api() {
+    use crate::ai::PipelineRuntime;
+
+    let mut rt = Runtime::new();
+
+    // Create a pipeline through the runtime API.
+    let id = rt.pipeline_new();
+    assert!(rt.pipelines.contains_key(&id));
+
+    // Add a stage.
+    let result = rt.pipeline_stage(id, "summarize", 42, "Summarize: {input}");
+    assert_eq!(result, Ok(id));
+    assert_eq!(rt.pipelines[&id].stages.len(), 1);
+    assert_eq!(rt.pipelines[&id].stages[0].name, "summarize");
+    assert_eq!(rt.pipelines[&id].stages[0].agent_id, 42);
+    assert_eq!(
+        rt.pipelines[&id].stages[0].prompt_template,
+        "Summarize: {input}"
+    );
+
+    // Run the stored pipeline against a mock runtime to avoid spinning up
+    // real actors/LLM clients in this unit test.
+    struct MockRuntime;
+    impl PipelineRuntime for MockRuntime {
+        fn ask_agent(&mut self, agent_id: u64, prompt: &str) -> Result<String, String> {
+            Ok(format!("agent {} got {}", agent_id, prompt))
+        }
+    }
+    let pipeline = rt.pipelines[&id].clone();
+    let output = pipeline.run(&mut MockRuntime, "hello world").unwrap();
+    assert_eq!(output, "agent 42 got Summarize: hello world");
+}

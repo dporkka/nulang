@@ -169,6 +169,21 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// client is configured, return `None` and the VM will leave the result
     /// register as `nil`.
     fn complete_llm(&mut self, _model: &str, _prompt: &str) -> Option<String> { None }
+
+    /// Create a new pipeline and return its runtime ID.
+    fn pipeline_new(&mut self) -> i64 { 0 }
+
+    /// Add a stage to an existing pipeline and return its ID.
+    fn pipeline_stage(
+        &mut self,
+        _id: i64,
+        _name: &str,
+        _actor_id: u64,
+        _template: &str,
+    ) -> i64 { -1 }
+
+    /// Run a pipeline and return its final output string.
+    fn pipeline_run(&mut self, _id: i64, _input: &str) -> Option<String> { None }
 }
 
 /// Standalone callbacks used when the VM runs without an actor runtime.
@@ -1719,6 +1734,36 @@ impl VM {
                     None => Value::nil(),
                 };
                 self.frames[frame_idx].regs[prompt_reg] = value;
+            }
+
+            // -- Pipeline (v0.9 AI Runtime) --
+            OpCode::PipelineNew => {
+                let dst = instr.op1;
+                let id = self.actor_callbacks.pipeline_new();
+                self.frames[frame_idx].regs[dst as usize] = Value::int(id);
+            }
+            OpCode::PipelineStage => {
+                let dst = instr.op1;
+                let regs = &self.frames[frame_idx].regs;
+                let id = regs[0].as_int().unwrap_or(0);
+                let name = self.value_to_string(module_idx, regs[1]);
+                let actor_id = regs[2].as_actor_id().unwrap_or(0);
+                let template = self.value_to_string(module_idx, regs[3]);
+                let result = self
+                    .actor_callbacks
+                    .pipeline_stage(id, &name, actor_id, &template);
+                self.frames[frame_idx].regs[dst as usize] = Value::int(result);
+            }
+            OpCode::PipelineRun => {
+                let dst = instr.op1;
+                let regs = &self.frames[frame_idx].regs;
+                let id = regs[0].as_int().unwrap_or(0);
+                let input = self.value_to_string(module_idx, regs[1]);
+                let value = match self.actor_callbacks.pipeline_run(id, &input) {
+                    Some(content) => self.add_runtime_string(module_idx, content),
+                    None => Value::nil(),
+                };
+                self.frames[frame_idx].regs[dst as usize] = value;
             }
 
             // -- Reference counting / deallocation --

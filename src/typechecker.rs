@@ -1336,6 +1336,53 @@ impl TypeChecker {
         field: &str,
         span: Span,
     ) -> NuResult<(Substitution, Type)> {
+        // Pipeline built-in namespace: Pipeline.new / Pipeline.stage.
+        if let Expr::Var(base, _) = expr {
+            if base == "Pipeline" {
+                if field == "new" {
+                    let func_ty = Type::Function {
+                        param: Box::new(Type::Tuple(vec![])),
+                        ret: Box::new(Type::int()),
+                        effect: EffectRow::empty(),
+                        cap: Capability::Ref,
+                    };
+                    return Ok((vec![], func_ty));
+                }
+                if field == "stage" {
+                    let actor_ty = Type::Actor {
+                        state: Box::new(Type::Var(TypeVar::fresh())),
+                        behavior: Box::new(Type::Var(TypeVar::fresh())),
+                    };
+                    let func_ty = Type::Function {
+                        param: Box::new(Type::Tuple(vec![
+                            Type::int(),
+                            Type::string(),
+                            actor_ty,
+                            Type::string(),
+                        ])),
+                        ret: Box::new(Type::int()),
+                        effect: EffectRow::empty(),
+                        cap: Capability::Ref,
+                    };
+                    return Ok((vec![], func_ty));
+                }
+            }
+        }
+
+        // Pipeline instance method: <pipeline-id>.run(input)
+        if field == "run" {
+            let (s1, receiver_ty) = self.infer_expr(ctx, expr)?;
+            let s_receiver = mgu(&apply_subst(&receiver_ty, &s1), &Type::int(), span)?;
+            let final_subst = compose_subst(&s_receiver, &s1);
+            let func_ty = Type::Function {
+                param: Box::new(Type::string()),
+                ret: Box::new(Type::string()),
+                effect: EffectRow::empty(),
+                cap: Capability::Ref,
+            };
+            return Ok((final_subst, func_ty));
+        }
+
         let (s1, record_ty) = self.infer_expr(ctx, expr)?;
         let record_ty_resolved = apply_subst(&record_ty, &s1);
 

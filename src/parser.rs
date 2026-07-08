@@ -36,7 +36,7 @@ fn prefix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
 fn infix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
     let (prec, right_assoc) = match op {
         TokenKind::Assign | TokenKind::PlusAssign | TokenKind::MinusAssign => (PREC_ASSIGN, true),
-        TokenKind::PipeOp => (PREC_PIPE, true),
+        TokenKind::PipeOp => (PREC_PIPE, false),
         TokenKind::Or => (PREC_OR, false),
         TokenKind::And => (PREC_AND, false),
         TokenKind::Eq | TokenKind::Ne => (PREC_EQ, false),

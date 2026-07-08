@@ -470,6 +470,53 @@ impl Compiler {
         const FUNC_VALUE_REG: u8 = 254;
         let saved_next_reg = self.next_reg;
 
+        // Pipeline built-in method calls. These are wired directly to runtime
+        // opcodes rather than going through the function table or FFI layer.
+        if let Expr::FieldAccess { expr, field, .. } = func {
+            if let Expr::Var(base, _) = expr.as_ref() {
+                if base == "Pipeline" {
+                    if field == "new" && args.is_empty() {
+                        let dst = self.alloc_reg();
+                        self.emit(Instruction::new1(OpCode::PipelineNew, dst));
+                        return Ok(dst);
+                    }
+                    if field == "stage" && args.len() == 4 {
+                        self.next_reg = 0;
+                        let mut arg_regs = Vec::new();
+                        for arg in args {
+                            let arg_reg = self.compile_expr(arg)?;
+                            arg_regs.push(arg_reg);
+                        }
+                        for (i, &arg_reg) in arg_regs.iter().enumerate() {
+                            if arg_reg != i as u8 {
+                                self.emit(Instruction::new2(OpCode::Move, arg_reg, i as u8));
+                            }
+                        }
+                        let dst = self.alloc_reg();
+                        self.emit(Instruction::new1(OpCode::PipelineStage, dst));
+                        self.next_reg = saved_next_reg.max(dst + 1);
+                        return Ok(dst);
+                    }
+                }
+                if field == "run" && args.len() == 1 {
+                    // Instance method: receiver is the pipeline id variable.
+                    self.next_reg = 0;
+                    let receiver_reg = self.compile_expr(expr)?;
+                    if receiver_reg != 0 {
+                        self.emit(Instruction::new2(OpCode::Move, receiver_reg, 0));
+                    }
+                    let arg_reg = self.compile_expr(&args[0])?;
+                    if arg_reg != 1 {
+                        self.emit(Instruction::new2(OpCode::Move, arg_reg, 1));
+                    }
+                    let dst = self.alloc_reg();
+                    self.emit(Instruction::new1(OpCode::PipelineRun, dst));
+                    self.next_reg = saved_next_reg.max(dst + 1);
+                    return Ok(dst);
+                }
+            }
+        }
+
         // Direct extern function call: no function value needed.
         if let Expr::Var(name, span) = func {
             if let Some(&extern_idx) = self.extern_func_map.get(name) {
@@ -1379,6 +1426,19 @@ impl Compiler {
                     self.emit(Instruction::new2(OpCode::Move, body_reg, 0));
                 }
                 self.emit(Instruction::new0(OpCode::Halt));
+            }
+            Decl::Function {
+                name,
+                params,
+                ret_type,
+                body,
+                annotations,
+                ..
+            } if name == "main" => {
+                // Treat `fn main()` as the module entry point when there is no
+                // synthetic __main wrapper.
+                self.module.entry_point = Some(self.module.current_offset());
+                self.compile_function(name, params, ret_type.as_ref(), body, annotations)?;
             }
             Decl::Function {
                 name,

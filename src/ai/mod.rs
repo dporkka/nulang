@@ -6,6 +6,7 @@
 pub mod client;
 pub mod memory;
 pub mod mock;
+pub mod pipeline;
 pub mod providers;
 pub mod request;
 pub mod response;
@@ -14,6 +15,7 @@ pub mod semantic_memory;
 pub mod usage;
 
 pub use client::{complete_sync, LlmClient};
+pub use pipeline::{Pipeline, PipelineRuntime, PipelineStage};
 pub use memory::{EpisodicMemory, Turn};
 pub use mock::MockLlmClient;
 pub use providers::ollama::OllamaClient;

@@ -45,7 +45,7 @@ pub use registry::*;
 pub use process_groups::*;
 pub use persistence::*;
 
-use crate::ai::{complete_sync, LlmClient, LlmMessage, LlmRequest, LlmResponse};
+use crate::ai::{complete_sync, LlmClient, LlmMessage, LlmRequest, LlmResponse, Pipeline, PipelineStage};
 use crate::types::ExitReason;
 use crate::vm::Value;
 
@@ -123,6 +123,10 @@ pub struct Runtime {
     // runtime restart.  Maps actor_id -> (bytecode_module, behavior_offsets,
     // compensation_offsets).
     recovery_modules: HashMap<u64, (crate::bytecode::CodeModule, Vec<usize>, Vec<Option<usize>>)>,
+
+    // Pipelines (v0.9 AI Runtime)
+    pub next_pipeline_id: u64,
+    pub pipelines: HashMap<u64, Pipeline>,
 }
 
 impl Runtime {
@@ -151,6 +155,8 @@ impl Runtime {
             vm: None,
             llm_client: None,
             recovery_modules: HashMap::new(),
+            next_pipeline_id: 1,
+            pipelines: HashMap::new(),
         }
     }
 
@@ -250,6 +256,45 @@ impl Runtime {
     /// Install an LLM client for `perform LLM.ask(...)` calls.
     pub fn set_llm_client(&mut self, client: Box<dyn LlmClient>) {
         self.llm_client = Some(client);
+    }
+
+    /// Create a new empty pipeline and return its ID.
+    pub fn pipeline_new(&mut self) -> u64 {
+        let id = self.next_pipeline_id;
+        self.next_pipeline_id = self.next_pipeline_id.wrapping_add(1);
+        self.pipelines.insert(id, Pipeline::new());
+        id
+    }
+
+    /// Add a stage to an existing pipeline. Returns the same pipeline ID on
+    /// success so fluent construction can continue.
+    pub fn pipeline_stage(
+        &mut self,
+        id: u64,
+        name: &str,
+        agent_id: u64,
+        template: &str,
+    ) -> Result<u64, String> {
+        let pipeline = self
+            .pipelines
+            .get_mut(&id)
+            .ok_or_else(|| format!("Pipeline {} not found", id))?;
+        pipeline.stages.push(PipelineStage {
+            name: name.to_string(),
+            agent_id,
+            prompt_template: template.to_string(),
+        });
+        Ok(id)
+    }
+
+    /// Run a pipeline, returning the output of the final stage.
+    pub fn pipeline_run(&mut self, id: u64, input: &str) -> Result<String, String> {
+        let pipeline = self
+            .pipelines
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| format!("Pipeline {} not found", id))?;
+        pipeline.run(self, input)
     }
 
     /// Convert a VM value to a Rust string using the actor's bytecode module
@@ -2424,6 +2469,22 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         };
         rt.complete_llm_request(request, Vec::new()).ok()?.content
     }
+
+    fn pipeline_new(&mut self) -> i64 {
+        self.runtime.borrow_mut().pipeline_new() as i64
+    }
+
+    fn pipeline_stage(&mut self, id: i64, name: &str, actor_id: u64, template: &str) -> i64 {
+        self.runtime
+            .borrow_mut()
+            .pipeline_stage(id as u64, name, actor_id, template)
+            .map(|id| id as i64)
+            .unwrap_or(-1)
+    }
+
+    fn pipeline_run(&mut self, id: i64, input: &str) -> Option<String> {
+        self.runtime.borrow_mut().pipeline_run(id as u64, input).ok()
+    }
 }
 
 /// Raw-pointer callbacks used when the runtime itself executes an actor's
@@ -2566,6 +2627,23 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             };
             rt.complete_llm_with_tools(request, Vec::new(), &module).ok()?.content
         }
+    }
+
+    fn pipeline_new(&mut self) -> i64 {
+        unsafe { (*self.runtime).pipeline_new() as i64 }
+    }
+
+    fn pipeline_stage(&mut self, id: i64, name: &str, actor_id: u64, template: &str) -> i64 {
+        unsafe {
+            (*self.runtime)
+                .pipeline_stage(id as u64, name, actor_id, template)
+                .map(|id| id as i64)
+                .unwrap_or(-1)
+        }
+    }
+
+    fn pipeline_run(&mut self, id: i64, input: &str) -> Option<String> {
+        unsafe { (*self.runtime).pipeline_run(id as u64, input).ok() }
     }
 }
 
