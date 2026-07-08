@@ -759,14 +759,11 @@ fn actor_name_from_expr(expr: &Expr) -> Option<String> {
     }
 }
 
-static mut TEMP_COUNTER: u32 = 0;
+static TEMP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn fresh_temp_name() -> String {
-    unsafe {
-        let n = TEMP_COUNTER;
-        TEMP_COUNTER += 1;
-        format!("__tmp{}", n)
-    }
+    let n = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("__tmp{}", n)
 }
 
 fn free_vars(_expr: &Expr) -> Vec<String> {
