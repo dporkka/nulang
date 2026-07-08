@@ -1157,7 +1157,7 @@ mod tests {
             Value::int(-1),
             Value::int(i64::MAX),
             Value::int(i64::MIN),
-            Value::float(3.14159),
+            Value::float(std::f64::consts::PI),
             Value::float(f64::NAN),
             Value::float(f64::INFINITY),
             Value::bool(true),

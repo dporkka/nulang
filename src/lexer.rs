@@ -814,8 +814,8 @@ mod tests {
 
     #[test]
     fn test_float_variants() {
-        let kinds = lex("3.14 1e3 2.5e-2");
-        assert!(matches!(kinds[0], TokenKind::FloatLit(v) if (v - 3.14).abs() < 1e-9));
+        let kinds = lex("3.5 1e3 2.5e-2");
+        assert!(matches!(kinds[0], TokenKind::FloatLit(v) if (v - 3.5).abs() < 1e-9));
         assert!(matches!(kinds[1], TokenKind::FloatLit(v) if (v - 1000.0).abs() < 1e-9));
         assert!(matches!(kinds[2], TokenKind::FloatLit(v) if (v - 0.025).abs() < 1e-9));
     }

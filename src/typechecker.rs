@@ -2079,7 +2079,7 @@ mod tests {
     fn test_infer_float_literal() {
         let mut tc = TypeChecker::new();
         let ctx = TypeContext::new();
-        let expr = Expr::Literal(Literal::Float(3.14), sp());
+        let expr = Expr::Literal(Literal::Float(2.5), sp());
         let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
         assert!(s.is_empty());
         assert_eq!(ty, Type::float());

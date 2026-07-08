@@ -2101,8 +2101,8 @@ mod vm_tests {
         assert_eq!(v_int.as_int(), Some(42));
         assert!(v_int.is_int());
 
-        let v_float = Value::float(3.14);
-        assert!((v_float.as_float().unwrap() - 3.14).abs() < 0.001);
+        let v_float = Value::float(2.5);
+        assert!((v_float.as_float().unwrap() - 2.5).abs() < 0.001);
 
         let v_bool = Value::bool(true);
         assert_eq!(v_bool.as_bool(), Some(true));
@@ -2203,13 +2203,13 @@ mod vm_tests {
     #[test]
     fn test_float_operations() {
         let mut module = CodeModule::new("test_float");
-        let c3_14 = module.add_constant(Constant::Float(3.14));
+        let c3_5 = module.add_constant(Constant::Float(3.5));
         let c2_0 = module.add_constant(Constant::Float(2.0));
         module.emit(Instruction::new3(OpCode::ConstU,
-            ((c3_14 >> 8) & 0xFF) as u8, (c3_14 & 0xFF) as u8, 0)); // r0 = 3.14
+            ((c3_5 >> 8) & 0xFF) as u8, (c3_5 & 0xFF) as u8, 0)); // r0 = 3.5
         module.emit(Instruction::new3(OpCode::ConstU,
             ((c2_0 >> 8) & 0xFF) as u8, (c2_0 & 0xFF) as u8, 1));  // r1 = 2.0
-        module.emit(Instruction::new3(OpCode::FAdd, 0, 1, 2)); // r2 = 5.14
+        module.emit(Instruction::new3(OpCode::FAdd, 0, 1, 2)); // r2 = 5.5
         module.emit(Instruction::new2(OpCode::Move, 2, 0));
         module.emit(Instruction::new0(OpCode::Halt));
         module.entry_point = Some(0);
@@ -2219,7 +2219,7 @@ mod vm_tests {
         let result = vm.run();
         assert!(result.is_ok(), "Float ops should work: {:?}", result.err());
         let f = result.unwrap().as_float().unwrap();
-        assert!((f - 5.14).abs() < 0.01, "3.14 + 2.0 = 5.14, got {}", f);
+        assert!((f - 5.5).abs() < 0.01, "3.5 + 2.0 = 5.5, got {}", f);
     }
 
     /// Test 10: Perform + Resume with handler.
