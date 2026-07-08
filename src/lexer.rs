@@ -23,6 +23,7 @@ pub enum TokenKind {
     Actor, Behavior, State, SelfKw, Spawn, Send, Ask,
     Persistent, Local, Durable, EventSourced, Crdt, Emit,
     Workflow, Step, Parallel, Compensate, Await, Subworkflow,
+    Agent,
     Effect, Perform, Handle, Resume,
     Extern,
     Module, Import, Pub, Priv, Where,
@@ -729,6 +730,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "not" => Some(TokenKind::Not),
         "unit" => Some(TokenKind::UnitLit),
         "tool" => Some(TokenKind::Tool),
+        "agent" => Some(TokenKind::Agent),
         _ => None,
     }
 }
@@ -984,6 +986,25 @@ mod tests {
                 TokenKind::Colon,
                 TokenKind::StringLit("Adds two integers.".to_string()),
                 TokenKind::RParen,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_agent_keyword() {
+        let kinds = lex("agent MyAgent = { model: \"gpt-4o\" }");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Agent,
+                TokenKind::UpperIdent("MyAgent".to_string()),
+                TokenKind::Assign,
+                TokenKind::LBrace,
+                TokenKind::Ident("model".to_string()),
+                TokenKind::Colon,
+                TokenKind::StringLit("gpt-4o".to_string()),
+                TokenKind::RBrace,
                 TokenKind::Eof,
             ]
         );

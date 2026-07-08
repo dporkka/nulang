@@ -453,6 +453,9 @@ impl TypeChecker {
                 Decl::Workflow { name, .. } => {
                     ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
                 }
+                Decl::Agent { name, .. } => {
+                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                }
 
                 _ => {}
             }
@@ -550,6 +553,15 @@ impl TypeChecker {
             Decl::EffectDecl { .. } => Ok((vec![], Type::unit())),
             Decl::Actor { name, behaviors, span, .. } => {
                 self.infer_actor_decl(ctx, name, behaviors, *span)
+            }
+            Decl::Agent { .. } => {
+                // An agent declaration is an opaque module-level binding with a
+                // synthetic actor type, just like actors and workflows.
+                let agent_ty = Type::Actor {
+                    state: Box::new(Type::Var(TypeVar::fresh())),
+                    behavior: Box::new(Type::Var(TypeVar::fresh())),
+                };
+                Ok((vec![], agent_ty))
             }
             Decl::Extern { funcs, span, .. } => {
                 for func in funcs {

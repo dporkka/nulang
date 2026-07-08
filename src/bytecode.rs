@@ -368,6 +368,10 @@ pub struct ActorMeta {
     pub behavior_indices: Vec<usize>,
     /// True if this actor was generated from a `workflow` declaration.
     pub is_workflow: bool,
+    /// True if this actor was generated from an `agent` declaration.
+    pub is_agent: bool,
+    /// Tool schemas exposed to this agent actor.
+    pub tools: Vec<ToolSchema>,
 }
 
 impl ActorMeta {
@@ -379,6 +383,8 @@ impl ActorMeta {
             state_defaults: Vec::new(),
             behavior_indices: Vec::new(),
             is_workflow: false,
+            is_agent: false,
+            tools: Vec::new(),
         }
     }
 }

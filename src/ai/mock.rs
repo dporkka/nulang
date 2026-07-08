@@ -1,20 +1,27 @@
 //! Mock LLM client for tests.
 
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 
 use crate::ai::client::LlmClient;
 use crate::ai::request::LlmRequest;
 use crate::ai::response::{LlmResponse, ToolCall};
 
-/// A test client that always returns a fixed response.
+/// A test client that always returns a fixed response and optionally records
+/// the requests it receives.
 #[derive(Debug, Clone)]
 pub struct MockLlmClient {
     response: LlmResponse,
+    calls: Arc<Mutex<Vec<LlmRequest>>>,
 }
 
 #[async_trait]
 impl LlmClient for MockLlmClient {
-    async fn complete(&self, _request: LlmRequest) -> Result<LlmResponse, String> {
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, String> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(request);
+        }
         Ok(self.response.clone())
     }
 }
@@ -22,7 +29,10 @@ impl LlmClient for MockLlmClient {
 impl MockLlmClient {
     /// Create a mock client that returns the given response.
     pub fn new(response: LlmResponse) -> Self {
-        Self { response }
+        Self {
+            response,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
     /// Create a mock client that returns a plain text response.
@@ -50,5 +60,10 @@ impl MockLlmClient {
             model: "mock".to_string(),
             finish_reason: "tool_calls".to_string(),
         })
+    }
+
+    /// Return the requests recorded by this mock client.
+    pub fn recorded_calls(&self) -> Vec<LlmRequest> {
+        self.calls.lock().map_or_else(|_| Vec::new(), |g| g.clone())
     }
 }

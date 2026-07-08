@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A single chat-completion request to an LLM provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct LlmRequest {
     /// Model identifier used by the provider.
     pub model: String,
@@ -11,6 +11,8 @@ pub struct LlmRequest {
     pub messages: Vec<LlmMessage>,
     /// Tool schemas the model may invoke.
     pub tools: Vec<ToolSchema>,
+    /// Episodic memory messages prepended to `messages` before sending.
+    pub memory: Vec<LlmMessage>,
 }
 
 /// A chat message exchanged with an LLM.

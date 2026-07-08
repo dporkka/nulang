@@ -274,6 +274,15 @@ pub enum FunctionAnnotation {
 }
 
 // ---------------------------------------------------------------------------
+// Agent memory configuration
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentMemoryConfig {
+    pub max_turns: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
 
@@ -357,6 +366,15 @@ pub enum Decl {
         input: Option<(String, Type)>,
         items: Vec<WorkflowItem>,
         compensate: Option<Expr>,
+        span: Span,
+    },
+    /// Agent declaration (v0.9): agent Name = { model: "...", system_prompt: "...", tools: [...], memory: { max_turns: N } }
+    Agent {
+        name: String,
+        model: String,
+        system_prompt: Option<String>,
+        tools: Vec<String>,
+        memory: Option<AgentMemoryConfig>,
         span: Span,
     },
 }

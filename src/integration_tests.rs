@@ -1480,4 +1480,54 @@ mod tests {
         let content = vm.constant_string(module_idx, string_id).unwrap();
         assert_eq!(content, "world");
     }
+
+    #[test]
+    fn test_agent_ask_uses_memory() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                memory: { max_turns: 10 }
+            }
+            let a = spawn Agent {} in
+            let r1 = ask a ask("hello") in
+            let r2 = ask a ask("world") in
+            r1
+        "#;
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let client = crate::ai::MockLlmClient::text("world");
+        rt.borrow_mut().set_llm_client(Box::new(client.clone()));
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt)));
+
+        let result = vm.run().unwrap();
+
+        let calls = client.recorded_calls();
+        assert_eq!(calls.len(), 2, "expected two LLM calls");
+
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.value_to_string(module_idx, result);
+        assert_eq!(content, "world");
+
+        // First turn: system prompt + user prompt.
+        assert_eq!(calls[0].messages.len(), 2);
+        assert_eq!(calls[0].messages[0].role, "system");
+        assert_eq!(calls[0].messages[0].content, "You are helpful.");
+        assert_eq!(calls[0].messages[1].role, "user");
+        assert_eq!(calls[0].messages[1].content, "hello");
+
+        // Second turn includes the previous user/assistant exchange from memory.
+        assert_eq!(calls[1].messages.len(), 4);
+        assert_eq!(calls[1].messages[0].role, "system");
+        assert_eq!(calls[1].messages[1].role, "user");
+        assert_eq!(calls[1].messages[1].content, "hello");
+        assert_eq!(calls[1].messages[2].role, "assistant");
+        assert_eq!(calls[1].messages[2].content, "world");
+        assert_eq!(calls[1].messages[3].role, "user");
+        assert_eq!(calls[1].messages[3].content, "world");
+    }
 }

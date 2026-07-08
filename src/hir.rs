@@ -70,6 +70,10 @@ pub enum Decl {
         name: String,
         span: Span,
     },
+    Agent {
+        name: String,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

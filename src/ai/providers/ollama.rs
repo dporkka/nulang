@@ -24,9 +24,14 @@ impl LlmClient for OllamaClient {
         } else {
             request.model
         };
+        let messages: Vec<LlmMessage> = request
+            .memory
+            .into_iter()
+            .chain(request.messages)
+            .collect();
         let body = OllamaChatRequest {
             model,
-            messages: request.messages,
+            messages,
             tools: request.tools.into_iter().map(into_ollama_tool).collect(),
             stream: false,
         };

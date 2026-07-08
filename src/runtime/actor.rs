@@ -59,6 +59,8 @@ pub struct Actor {
     pub waiting_signal: Option<String>,
     /// Signals that have been received by this workflow actor (name, payload).
     pub received_signals: Vec<(String, Option<String>)>,
+    /// True if this actor was generated from an `agent` declaration.
+    pub is_agent: bool,
 }
 
 /// Captured VM state plus metadata for resuming a workflow step.
@@ -111,6 +113,7 @@ impl Actor {
             suspended_execution: None,
             waiting_signal: None,
             received_signals: Vec::new(),
+            is_agent: false,
         }
     }
 
@@ -186,5 +189,21 @@ impl Actor {
     /// Increment the reduction count.
     pub fn increment_reductions(&mut self, count: u32) {
         self.reduction_count += count;
+    }
+
+    /// Allocate a null-terminated string on the actor heap and return a pointer
+    /// value. Returns nil if allocation fails.
+    pub fn allocate_string(&mut self, s: &str) -> Value {
+        let bytes = s.as_bytes();
+        match self.heap.alloc(bytes.len() + 1, TypeTag::String) {
+            Some(ptr) => {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                    *ptr.add(bytes.len()) = 0;
+                }
+                Value::ptr(ptr)
+            }
+            None => Value::nil(),
+        }
     }
 }

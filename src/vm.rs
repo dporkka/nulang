@@ -864,13 +864,21 @@ impl VM {
         }
     }
 
-    /// Run with a specific entry point (for testing).
+    /// Run with a specific entry point. If the VM already has a current frame
+    /// (e.g. set by the actor runtime with pre-populated argument registers),
+    /// reuse it; otherwise create a fresh frame. This lets actor behavior
+    /// handlers receive their arguments.
     pub fn run_from(&mut self, module_idx: usize, pc: usize) -> NuResult<Value> {
-        let mut frame = Frame::new(None, module_idx);
-        frame.pc = pc;
-        self.frames.clear();
-        self.frames.push(frame);
-        self.current_frame_idx = Some(0);
+        if self.frames.is_empty() {
+            let mut frame = Frame::new(None, module_idx);
+            frame.pc = pc;
+            self.frames.push(frame);
+            self.current_frame_idx = Some(0);
+        } else if let Some(frame) = self.frames.get_mut(0) {
+            frame.pc = pc;
+            frame.module_idx = module_idx;
+            self.current_frame_idx = Some(0);
+        }
 
         loop {
             if let Some(idx) = self.current_frame_idx {
@@ -878,11 +886,13 @@ impl VM {
                 let pc = self.frames[idx].pc;
                 if let Some(module) = self.modules.get(m_idx) {
                     if pc >= module.instructions.len() {
-                        return Ok(self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                        let v = self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit());
+                        return Ok(v);
                     }
                     if module.instructions.get(pc).map(|i| i.opcode == OpCode::Halt).unwrap_or(false) {
                         self.frames[idx].pc += 1;
-                        return Ok(self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit()));
+                        let v = self.current_frame_idx.and_then(|i| self.frames.get(i)).map(|f| f.regs[0]).unwrap_or(Value::unit());
+                        return Ok(v);
                     }
                 } else {
                     return Ok(Value::unit());
@@ -1159,7 +1169,7 @@ impl VM {
             }
             OpCode::Send => {
                 let actor_val = self.frames[frame_idx].regs[instr.op1 as usize];
-                let behavior_idx = instr.imm16() as usize;
+                let behavior_idx = (((instr.op2 as u16) << 8) | (instr.op3 as u16)) as usize;
                 let (param_count, behavior_id) = self.modules.get(module_idx)
                     .and_then(|m| m.behaviors.get(behavior_idx))
                     .map(|b| (b.param_count, behavior_idx as u16))
@@ -1172,7 +1182,7 @@ impl VM {
             }
             OpCode::Ask => {
                 let actor_val = self.frames[frame_idx].regs[instr.op1 as usize];
-                let behavior_idx = instr.imm16() as usize;
+                let behavior_idx = (((instr.op2 as u16) << 8) | (instr.op3 as u16)) as usize;
                 let (param_count, behavior_id) = self.modules.get(module_idx)
                     .and_then(|m| m.behaviors.get(behavior_idx))
                     .map(|b| (b.param_count, behavior_idx as u16))
@@ -1181,7 +1191,7 @@ impl VM {
                     .map(|i| self.frames[frame_idx].regs[i])
                     .collect();
                 let result = self.actor_callbacks.ask_actor(actor_val, behavior_id, &args);
-                self.frames[frame_idx].regs[instr.op3 as usize] = result;
+                self.frames[frame_idx].regs[instr.op1 as usize] = result;
                 return Ok(());
             }
             OpCode::SelfOp => {
@@ -1704,10 +1714,11 @@ impl VM {
                 let prompt_value = self.frames[frame_idx].regs[prompt_reg];
                 let prompt = self.value_to_string(module_idx, prompt_value);
                 let result = self.actor_callbacks.complete_llm(&model, &prompt);
-                self.frames[frame_idx].regs[prompt_reg] = match result {
-                    Some(content) => self.add_runtime_string(module_idx, content),
+                let value = match result {
+                    Some(ref content) => self.add_runtime_string(module_idx, content.clone()),
                     None => Value::nil(),
                 };
+                self.frames[frame_idx].regs[prompt_reg] = value;
             }
 
             // -- Reference counting / deallocation --

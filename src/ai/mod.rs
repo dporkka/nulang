@@ -4,6 +4,7 @@
 //! client trait, a synchronous wrapper, and concrete provider implementations.
 
 pub mod client;
+pub mod memory;
 pub mod mock;
 pub mod providers;
 pub mod request;
@@ -11,6 +12,7 @@ pub mod response;
 pub mod schema;
 
 pub use client::{complete_sync, LlmClient};
+pub use memory::{EpisodicMemory, Turn};
 pub use mock::MockLlmClient;
 pub use providers::ollama::OllamaClient;
 pub use request::{LlmMessage, LlmRequest, ToolSchema};

@@ -167,6 +167,10 @@ fn lower_decl(decl: &Decl) -> hir::Decl {
             name: name.clone(),
             span: *span,
         },
+        Decl::Agent { name, span, .. } => hir::Decl::Agent {
+            name: name.clone(),
+            span: *span,
+        },
     }
 }
 

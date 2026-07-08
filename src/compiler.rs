@@ -2,6 +2,8 @@
 //!
 //! Compiles Nulang AST into bytecode modules for the VM.
 
+use crate::ai::memory::EpisodicMemory;
+use crate::ai::request::ToolSchema;
 use crate::ai::schema::function_to_tool_schema;
 use crate::ast::*;
 use crate::bytecode::*;
@@ -205,10 +207,30 @@ impl Compiler {
     fn collect_functions(&mut self, decls: &[Decl]) -> NuResult<()> {
         for decl in decls {
             match decl {
-                Decl::Function { name, .. } if name != "__main" => {
+                Decl::Function { name, params, ret_type, annotations, .. } if name != "__main" => {
                     let func_idx = self.module.function_table.len();
                     self.module.function_table.push(0); // placeholder
                     self.func_map.insert(name.clone(), func_idx);
+
+                    // Collect tool schemas early so agent declarations can
+                    // resolve tool names regardless of source order.
+                    if let Some(FunctionAnnotation::Tool { description }) = annotations.iter().find(|a| matches!(a, FunctionAnnotation::Tool { .. })) {
+                        let mut typed_params = Vec::with_capacity(params.len());
+                        let mut all_typed = true;
+                        for (param_name, param_ty) in params {
+                            if let Some(ty) = param_ty {
+                                typed_params.push((param_name.clone(), ty.clone()));
+                            } else {
+                                all_typed = false;
+                                break;
+                            }
+                        }
+                        if all_typed {
+                            let ret = ret_type.clone().unwrap_or_else(Type::unit);
+                            let schema = function_to_tool_schema(name, description, &typed_params, &ret);
+                            self.module.tools.push(schema);
+                        }
+                    }
                 }
                 Decl::Extern { library, funcs, .. } => {
                     for ef in funcs {
@@ -967,6 +989,16 @@ impl Compiler {
             .behaviors
             .iter()
             .position(|b| b.name == full_name)
+            .or_else(|| {
+                // The actor value may be stored in a variable whose name does not
+                // match the actor type (e.g. `let a = spawn Agent {}`). Fall back
+                // to matching any behavior with the requested suffix.
+                let suffix = format!(".{}", behavior);
+                self.module
+                    .behaviors
+                    .iter()
+                    .position(|b| b.name.ends_with(&suffix))
+            })
             .unwrap_or(self.module.behaviors.len())
     }
 
@@ -986,10 +1018,18 @@ impl Compiler {
     }
 
     fn compile_ask(&mut self, actor: &Expr, behavior: &str, args: &[Expr]) -> NuResult<u8> {
-        let addr_reg = self.compile_expr(actor)?;
-        for arg in args {
-            let _r = self.compile_expr(arg)?;
+        // Ask arguments are passed in registers r0..rn, matching the VM convention.
+        let saved_next_reg = self.next_reg;
+        self.next_reg = 0;
+        for (i, arg) in args.iter().enumerate().take(256) {
+            let reg = self.compile_expr(arg)?;
+            if reg != i as u8 {
+                self.emit(Instruction::new2(OpCode::Move, reg, i as u8));
+            }
         }
+        self.next_reg = saved_next_reg;
+
+        let addr_reg = self.compile_expr(actor)?;
         let actor_name = actor_name_from_expr(actor).unwrap_or_default();
         let behavior_idx = self.behavior_table_index(&actor_name, behavior);
         let dst = self.alloc_reg();
@@ -1358,7 +1398,10 @@ impl Compiler {
                 init,
                 ..
             } => {
-                self.compile_actor(name, *persistent, state_fields, behaviors, init, false)?;
+                self.compile_actor(name, *persistent, state_fields, behaviors, init, false, false, &[])?;
+            }
+            Decl::Agent { .. } => {
+                self.compile_agent(decl)?;
             }
 
             Decl::TypeAlias { .. }
@@ -1383,33 +1426,25 @@ impl Compiler {
         &mut self,
         name: &str,
         params: &[(String, Option<crate::types::Type>)],
-        ret_type: Option<&Type>,
+        _ret_type: Option<&Type>,
         body: &Expr,
         annotations: &[FunctionAnnotation],
     ) -> NuResult<()> {
-        // Generate a ToolSchema for `@tool`-annotated functions before compiling
-        // the body, so the schema is available in the module metadata.
-        if let Some(FunctionAnnotation::Tool { description }) = annotations.iter().find(|a| {
-            matches!(a, FunctionAnnotation::Tool { .. })
-        }) {
-            let mut typed_params = Vec::with_capacity(params.len());
+        // Tool schemas for `@tool`-annotated functions are collected in
+        // `collect_functions()` so they are available before agent declarations
+        // are compiled.  We still validate the annotation here.
+        if annotations.iter().any(|a| matches!(a, FunctionAnnotation::Tool { .. })) {
             for (param_name, param_ty) in params {
-                match param_ty {
-                    Some(ty) => typed_params.push((param_name.clone(), ty.clone())),
-                    None => {
-                        return Err(NuError::ParseError {
-                            msg: format!(
-                                "@tool function '{}' parameter '{}' requires an explicit type",
-                                name, param_name
-                            ),
-                            span: Span::default(),
-                        });
-                    }
+                if param_ty.is_none() {
+                    return Err(NuError::ParseError {
+                        msg: format!(
+                            "@tool function '{}' parameter '{}' requires an explicit type",
+                            name, param_name
+                        ),
+                        span: Span::default(),
+                    });
                 }
             }
-            let ret = ret_type.cloned().unwrap_or_else(Type::unit);
-            let schema = function_to_tool_schema(name, description, &typed_params, &ret);
-            self.module.tools.push(schema);
         }
 
         let saved_locals = std::mem::replace(&mut self.locals, vec![ScopeFrame::new()]);
@@ -1470,6 +1505,8 @@ impl Compiler {
         behaviors: &[Behavior],
         init: &[(String, Expr)],
         is_workflow: bool,
+        is_agent: bool,
+        tools: &[ToolSchema],
     ) -> NuResult<()> {
         for (_field_name, expr) in init {
             let _ = self.compile_expr(expr)?;
@@ -1501,9 +1538,122 @@ impl Compiler {
             state_defaults,
             behavior_indices,
             is_workflow,
+            is_agent,
+            tools: tools.to_vec(),
         };
         self.module.add_actor_meta(meta);
         Ok(())
+    }
+
+    fn compile_agent(&mut self, agent: &Decl) -> NuResult<()> {
+        // Extract fields from the agent declaration.  This pattern is irrefutable
+        // because the caller already matched on Decl::Agent.
+        let (name, model, system_prompt, tool_names, memory, span) = match agent {
+            Decl::Agent {
+                name,
+                model,
+                system_prompt,
+                tools,
+                memory,
+                span,
+            } => (name, model, system_prompt, tools, memory, *span),
+            _ => unreachable!(),
+        };
+
+        let max_turns = memory.as_ref().map(|m| m.max_turns).unwrap_or(50);
+        let initial_memory = serde_json::to_string(&EpisodicMemory::new(max_turns))
+            .unwrap_or_else(|_| "{}".to_string());
+
+        // Agent actors keep their configuration in durable state.
+        let state_fields: Vec<(String, StateModel, Type, Expr)> = vec![
+            (
+                "model".to_string(),
+                StateModel::Durable,
+                Type::string(),
+                Expr::Literal(Literal::String(model.clone()), span),
+            ),
+            (
+                "system_prompt".to_string(),
+                StateModel::Durable,
+                Type::string(),
+                Expr::Literal(
+                    Literal::String(system_prompt.clone().unwrap_or_default()),
+                    span,
+                ),
+            ),
+            (
+                "episodic_memory".to_string(),
+                StateModel::Durable,
+                Type::string(),
+                Expr::Literal(Literal::String(initial_memory), span),
+            ),
+        ];
+
+        // Generated ask behavior reads agent state and performs the LLM ask.
+        // The parser accepts `ask` as a behavior name after the `ask` keyword,
+        // so agent actors can be invoked as `ask a ask("...")`.
+        // The runtime recognizes agent actors and wires model/system/memory.
+        let behavior = Behavior {
+            name: "ask".to_string(),
+            params: vec![("prompt".to_string(), Some(Type::string()))],
+            body: Expr::Block {
+                exprs: vec![
+                    Expr::FieldAccess {
+                        expr: Box::new(Expr::SelfRef(span)),
+                        field: "model".to_string(),
+                        span,
+                    },
+                    Expr::FieldAccess {
+                        expr: Box::new(Expr::SelfRef(span)),
+                        field: "system_prompt".to_string(),
+                        span,
+                    },
+                    Expr::FieldAccess {
+                        expr: Box::new(Expr::SelfRef(span)),
+                        field: "episodic_memory".to_string(),
+                        span,
+                    },
+                    Expr::Perform {
+                        effect: "LLM".to_string(),
+                        op: "ask".to_string(),
+                        args: vec![Expr::Var("prompt".to_string(), span)],
+                        span,
+                    },
+                ],
+                span,
+            },
+            effect: None,
+            cap: Capability::Ref,
+            span,
+        };
+
+        // Resolve tool names against the module's tool schemas.
+        let mut resolved_tools = Vec::new();
+        for tool_name in tool_names {
+            match self.module.tools.iter().find(|t| &t.name == tool_name) {
+                Some(schema) => resolved_tools.push(schema.clone()),
+                None => {
+                    return Err(NuError::ParseError {
+                        msg: format!(
+                            "Agent '{}' references unknown tool '{}' (missing @tool annotation?)",
+                            name, tool_name
+                        ),
+                        span,
+                    });
+                }
+            }
+        }
+
+        self.compile_actor(
+            name,
+            true,
+            &state_fields,
+            &[behavior],
+            &[],
+            false,
+            true,
+            &resolved_tools,
+        )
     }
 
     fn compile_workflow(
@@ -1651,7 +1801,7 @@ impl Compiler {
             })
             .collect();
         let first_behavior_idx = self.module.behaviors.len();
-        self.compile_actor(name, true, &state_fields, &behaviors, &[], true)?;
+        self.compile_actor(name, true, &state_fields, &behaviors, &[], true, false, &[])?;
 
         // Patch parallel-branch metadata and per-step saga compensation offsets.
         let behavior_indices: Vec<usize> =
@@ -1945,5 +2095,49 @@ mod tests {
         assert_eq!(tool.parameters["properties"]["y"], serde_json::json!({"type": "integer"}));
         assert!(tool.parameters["required"].as_array().unwrap().contains(&serde_json::json!("x")));
         assert!(tool.parameters["required"].as_array().unwrap().contains(&serde_json::json!("y")));
+    }
+
+    #[test]
+    fn test_compile_agent_lowers_to_durable_actor() {
+        let source = r#"
+            @tool(description: "Adds two integers.")
+            fn add(x: Int, y: Int) -> Int { x + y }
+
+            agent MyAgent = {
+                model: "gpt-4o",
+                system_prompt: "You are helpful.",
+                tools: [add],
+                memory: { max_turns: 10 }
+            }
+        "#;
+        let module = compile_source(source);
+        assert_eq!(module.actor_metadata.len(), 1);
+        let meta = &module.actor_metadata[0];
+        assert_eq!(meta.name, "MyAgent");
+        assert!(meta.persistent);
+        assert!(meta.is_agent);
+        assert!(!meta.is_workflow);
+        assert_eq!(meta.state_models.len(), 3);
+        assert!(meta.state_models.iter().all(|(_, m)| *m == StateModel::Durable));
+        assert_eq!(meta.behavior_indices.len(), 1);
+        let behavior = &module.behaviors[meta.behavior_indices[0]];
+        assert_eq!(behavior.name, "MyAgent.ask");
+        assert_eq!(behavior.param_count, 1);
+        assert_eq!(meta.tools.len(), 1);
+        assert_eq!(meta.tools[0].name, "add");
+    }
+
+    #[test]
+    fn test_compile_agent_unknown_tool_errors() {
+        let source = r#"
+            agent MyAgent = {
+                model: "gpt-4o",
+                tools: [nonexistent]
+            }
+        "#;
+        let tokens = Lexer::new(source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut compiler = Compiler::new("test");
+        assert!(compiler.compile_module(&ast).is_err());
     }
 }

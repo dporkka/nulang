@@ -252,8 +252,100 @@ impl Runtime {
         self.llm_client = Some(client);
     }
 
+    /// Convert a VM value to a Rust string using the actor's bytecode module
+    /// constant pool for string-id values and reading pointer payloads as
+    /// null-terminated UTF-8.
+    fn vm_value_to_string(
+        value: &crate::vm::Value,
+        module: Option<&crate::bytecode::CodeModule>,
+    ) -> Option<String> {
+        if let Some(id) = value.as_string_id() {
+            module
+                .and_then(|m| m.constants.get(id as usize))
+                .and_then(|c| match c {
+                    crate::bytecode::Constant::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+        } else if let Some(ptr) = value.as_ptr() {
+            if ptr.is_null() {
+                Some(String::new())
+            } else {
+                Some(unsafe {
+                    std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Execute an LLM request for an agent actor, reading the agent's model,
+    /// system prompt, and episodic memory from durable state. The memory is
+    /// updated with the user prompt and assistant response before being saved
+    /// back to state.
+    pub fn complete_agent_llm(&mut self, actor_id: u64, prompt: &str) -> Option<String> {
+        let (model, system_prompt, memory_json, module) = {
+            let actor = self.actors.get(&actor_id)?;
+            let module = actor.bytecode_module.clone()?;
+            let model = Self::vm_value_to_string(&actor.get_state_field("model")?, Some(&module))?;
+            let system_prompt = Self::vm_value_to_string(
+                &actor.get_state_field("system_prompt")?,
+                Some(&module),
+            )?;
+            let memory_json = Self::vm_value_to_string(
+                &actor.get_state_field("episodic_memory")?,
+                Some(&module),
+            )?;
+            (model, system_prompt, memory_json, module)
+        };
+
+        let mut memory: crate::ai::EpisodicMemory =
+            serde_json::from_str(&memory_json).unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
+
+        let mut messages = Vec::new();
+        if !system_prompt.is_empty() {
+            messages.push(crate::ai::LlmMessage {
+                role: "system".to_string(),
+                content: system_prompt,
+            });
+        }
+        messages.extend(memory.to_messages());
+        messages.push(crate::ai::LlmMessage {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        });
+
+        let request = crate::ai::LlmRequest {
+            model,
+            messages,
+            tools: Vec::new(),
+            memory: Vec::new(),
+        };
+        let response = self.complete_llm_with_tools(request, Vec::new(), &module).ok()?;
+        let content = response.content.clone().unwrap_or_default();
+
+        memory.add_turn("user", prompt);
+        memory.add_turn("assistant", &content);
+        let updated_memory = serde_json::to_string(&memory).ok()?;
+
+        let actor = self.actors.get_mut(&actor_id)?;
+        let ptr = actor.allocate_string(&updated_memory);
+        actor.set_state_field("episodic_memory", ptr);
+        Some(content)
+    }
+
     /// Execute a chat-completion request using the configured LLM client.
-    pub fn complete_llm_request(&self, request: LlmRequest) -> Result<LlmResponse, String> {
+    ///
+    /// The provided `memory` messages are stored on the request before it is
+    /// sent to the provider.
+    pub fn complete_llm_request(
+        &self,
+        mut request: LlmRequest,
+        memory: Vec<LlmMessage>,
+    ) -> Result<LlmResponse, String> {
+        request.memory = memory;
         let client = self
             .llm_client
             .as_ref()
@@ -267,13 +359,22 @@ impl Runtime {
     /// response contains tool calls, the named functions are looked up in the
     /// module exports, invoked with the provided JSON arguments, and the results
     /// are sent back to the model for a final response.
+    /// Execute an LLM request, optionally running tool calls from the response.
+    ///
+    /// The request's `tools` list is populated from `module.tools`. If the
+    /// response contains tool calls, the named functions are looked up in the
+    /// module exports, invoked with the provided JSON arguments, and the results
+    /// are sent back to the model for a final response. The supplied `memory`
+    /// messages are preserved across tool-call rounds.
     pub fn complete_llm_with_tools(
         &self,
         mut request: LlmRequest,
+        memory: Vec<LlmMessage>,
         module: &crate::bytecode::CodeModule,
     ) -> Result<LlmResponse, String> {
         request.tools = module.tools.clone();
-        let mut response = self.complete_llm_request(request.clone())?;
+        request.memory = memory.clone();
+        let mut response = self.complete_llm_request(request.clone(), memory.clone())?;
 
         for _ in 0..3 {
             if response.tool_calls.is_empty() {
@@ -293,7 +394,7 @@ impl Runtime {
                 });
             }
 
-            response = self.complete_llm_request(request.clone())?;
+            response = self.complete_llm_request(request.clone(), memory.clone())?;
         }
 
         Ok(response)
@@ -555,6 +656,49 @@ impl Runtime {
     pub fn send_message(&mut self, target_id: u64, behavior: &str, args: &[Value]) {
         let behavior_id = self.behavior_id_for(target_id, behavior).unwrap_or(0);
         self.send_message_by_id(target_id, behavior_id, args);
+    }
+
+    /// Synchronously run a single behavior on an actor and return its result.
+    /// Used by the VM's `Ask` opcode when a real runtime is attached.
+    pub fn ask_actor_sync(
+        &mut self,
+        actor_id: u64,
+        behavior_id: u16,
+        args: &[Value],
+    ) -> crate::types::NuResult<Value> {
+        let behavior_idx = behavior_id as usize;
+        let is_native = self
+            .actors
+            .get(&actor_id)
+            .and_then(|a| a.behavior_table.get(behavior_idx))
+            .map(|e| !e.name.is_empty())
+            .unwrap_or(false);
+        if is_native {
+            let handler = self.actors.get(&actor_id).unwrap().behavior_table[behavior_idx].handler_fn;
+            self.current_actor = Some(actor_id);
+            if self.actor_is_persistent(actor_id) {
+                let seq = self.next_sequence(actor_id);
+                let payload = args.iter().map(PersistedValue::from_value).collect();
+                let _ = self.persistence.append_journal(
+                    actor_id,
+                    JournalEntry {
+                        sequence: seq,
+                        behavior_id,
+                        payload,
+                    },
+                );
+            }
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                handler(actor, args);
+            }
+            self.checkpoint_actor(actor_id);
+            self.current_actor = None;
+            return Ok(Value::nil());
+        }
+        if self.has_bytecode_handler(actor_id, behavior_idx) {
+            return self.run_bytecode_behavior(actor_id, behavior_idx, args);
+        }
+        Ok(Value::nil())
     }
 
     fn behavior_id_for(&self, target_id: u64, behavior: &str) -> Option<u16> {
@@ -1091,7 +1235,24 @@ impl Runtime {
                     }
                 }
             }
-            result
+            // String-id values index into this runtime VM's constant pool. When
+            // the result is returned to a different VM (e.g. the top-level VM
+            // that invoked `ask`), the id is meaningless there. Convert string
+            // results to heap-allocated pointers so they remain valid.
+            match result {
+                Ok(value) => {
+                    if let Some(id) = value.as_string_id() {
+                        if let Some(s) = vm.constant_string(module_idx, id) {
+                            Ok(vm.allocate_string(&s))
+                        } else {
+                            Ok(value)
+                        }
+                    } else {
+                        Ok(value)
+                    }
+                }
+                Err(e) => Err(e),
+            }
         }
     }
 
@@ -1834,6 +1995,20 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             actor.bytecode_module = Some(module.clone());
             actor.bytecode_offsets = offsets.clone();
             actor.compensation_offsets = compensation_offsets.clone();
+            if let Some(meta) = meta {
+                if meta.is_agent {
+                    actor.is_agent = true;
+                }
+                // `constant_to_value` turns Constant::String into nil. Rehydrate
+                // string defaults by allocating them on the actor heap so state
+                // fields like `model` and `system_prompt` are readable strings.
+                for (name, c) in &meta.state_defaults {
+                    if let crate::bytecode::Constant::String(s) = c {
+                        let ptr = actor.allocate_string(s);
+                        actor.set_state_field(name, ptr);
+                    }
+                }
+            }
         }
         if meta.map(|m| m.is_workflow).unwrap_or(false) {
             rt.layout_workflow_behavior_table(id);
@@ -1851,9 +2026,13 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     }
 
     fn ask_actor(&mut self, target: crate::vm::Value, behavior_id: u16, args: &[crate::vm::Value]) -> crate::vm::Value {
-        // Synchronous request/response requires a response mailbox and
-        // dedicated ask protocol; for now treat ask as fire-and-forget.
-        self.send_message(target, behavior_id, args);
+        if let Some(actor_id) = target.as_actor_id() {
+            let mut rt = self.runtime.borrow_mut();
+            match rt.ask_actor_sync(actor_id, behavior_id, args) {
+                Ok(value) => return value,
+                Err(_) => {}
+            }
+        }
         crate::vm::Value::nil()
     }
 
@@ -1904,7 +2083,14 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     }
 
     fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
-        let rt = self.runtime.borrow();
+        let mut rt = self.runtime.borrow_mut();
+        if let Some(actor_id) = rt.current_actor {
+            if rt.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false) {
+                return rt.complete_agent_llm(actor_id, prompt);
+            }
+        }
+        // Top-level (non-actor) LLM ask: issue a direct request without
+        // agent state or memory handling.
         let request = LlmRequest {
             model: model.to_string(),
             messages: vec![LlmMessage {
@@ -1912,8 +2098,9 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 content: prompt.to_string(),
             }],
             tools: Vec::new(),
+            memory: Vec::new(),
         };
-        rt.complete_llm_request(request).ok()?.content
+        rt.complete_llm_request(request, Vec::new()).ok()?.content
     }
 }
 
@@ -2036,7 +2223,10 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
 
     fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
         unsafe {
-            let rt = &*self.runtime;
+            let rt = &mut *self.runtime;
+            if rt.actors.get(&self.actor_id).map(|a| a.is_agent).unwrap_or(false) {
+                return rt.complete_agent_llm(self.actor_id, prompt);
+            }
             let module = rt
                 .actors
                 .get(&self.actor_id)?
@@ -2049,8 +2239,9 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     content: prompt.to_string(),
                 }],
                 tools: module.tools.clone(),
+                memory: Vec::new(),
             };
-            rt.complete_llm_with_tools(request, &module).ok()?.content
+            rt.complete_llm_with_tools(request, Vec::new(), &module).ok()?.content
         }
     }
 }

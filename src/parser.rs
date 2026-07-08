@@ -120,6 +120,7 @@ impl Parser {
         match self.peek_kind().clone() {
             TokenKind::Fn => self.parse_function(public, annotations),
             TokenKind::Actor | TokenKind::Persistent => self.parse_actor(),
+            TokenKind::Agent => self.parse_agent(),
             TokenKind::Workflow => self.parse_workflow(),
             TokenKind::Type => {
                 self.advance(); // consume 'type'
@@ -324,6 +325,114 @@ impl Parser {
             state_fields,
             behaviors,
             init: vec![],
+            span,
+        })
+    }
+
+    fn parse_agent(&mut self) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance(); // consume 'agent'
+        let name = self.expect_ident("agent name")?;
+        self.expect(TokenKind::Assign)?;
+        self.expect(TokenKind::LBrace)?;
+
+        let mut model: Option<String> = None;
+        let mut system_prompt: Option<String> = None;
+        let mut tools: Vec<String> = Vec::new();
+        let mut memory: Option<AgentMemoryConfig> = None;
+
+        self.skip_newlines();
+        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.match_token(&TokenKind::RBrace) {
+                break;
+            }
+            let field_name = self.expect_ident("agent field name")?;
+            self.expect(TokenKind::Colon)?;
+            match field_name.as_str() {
+                "model" => {
+                    model = Some(self.expect_string("agent model")?);
+                }
+                "system_prompt" => {
+                    system_prompt = Some(self.expect_string("agent system prompt")?);
+                }
+                "tools" => {
+                    self.expect(TokenKind::LBracket)?;
+                    self.skip_newlines();
+                    while !self.match_token(&TokenKind::RBracket) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.match_token(&TokenKind::RBracket) {
+                            break;
+                        }
+                        tools.push(self.expect_ident("tool name")?);
+                        self.skip_newlines();
+                        if !self.consume_if(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RBracket)?;
+                }
+                "memory" => {
+                    self.expect(TokenKind::LBrace)?;
+                    self.skip_newlines();
+                    let mut max_turns: Option<usize> = None;
+                    while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.match_token(&TokenKind::RBrace) {
+                            break;
+                        }
+                        let mem_field = self.expect_ident("memory field name")?;
+                        self.expect(TokenKind::Colon)?;
+                        match mem_field.as_str() {
+                            "max_turns" => {
+                                let n = self.expect_int("max_turns")?;
+                                max_turns = Some(n as usize);
+                            }
+                            other => {
+                                return Err(NuError::ParseError {
+                                    msg: format!("Unknown memory field: {}", other),
+                                    span: self.current_span(),
+                                });
+                            }
+                        }
+                        self.skip_newlines();
+                        if !self.consume_if(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                    memory = Some(AgentMemoryConfig {
+                        max_turns: max_turns.unwrap_or(50),
+                    });
+                }
+                other => {
+                    return Err(NuError::ParseError {
+                        msg: format!("Unknown agent field: {}", other),
+                        span: self.current_span(),
+                    });
+                }
+            }
+            self.skip_newlines();
+            if !self.consume_if(&TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        self.expect(TokenKind::RBrace)?;
+
+        let model = model.ok_or_else(|| NuError::ParseError {
+            msg: "Agent declaration requires a 'model' field".to_string(),
+            span,
+        })?;
+
+        Ok(Decl::Agent {
+            name,
+            model,
+            system_prompt,
+            tools,
+            memory: memory.or(Some(AgentMemoryConfig { max_turns: 50 })),
             span,
         })
     }
@@ -1176,7 +1285,15 @@ impl Parser {
         let span = self.current_span();
         self.advance(); // consume 'ask'
         let actor = self.parse_expr()?;
-        let behavior = self.expect_ident("behavior name")?;
+        // Allow the behavior name to be `ask` itself so agent actors can expose
+        // an `ask(prompt)` behavior callable as `ask a ask("...")`.
+        let behavior = match self.peek_kind() {
+            TokenKind::Ask => {
+                self.advance();
+                "ask".to_string()
+            }
+            _ => self.expect_ident("behavior name")?,
+        };
         self.expect(TokenKind::LParen)?;
         let args = self.parse_arg_list()?;
         Ok(Expr::Ask {
@@ -1299,6 +1416,21 @@ impl Parser {
             }
             _ => Err(NuError::ParseError {
                 msg: format!("Expected {}, found {:?}", msg, current_kind),
+                span: self.current_span(),
+            }),
+        }
+    }
+
+    fn expect_int(&mut self, msg: &str) -> NuResult<i64> {
+        let current_kind = self.peek_kind();
+        match current_kind {
+            TokenKind::IntLit(n) => {
+                let n = *n;
+                self.advance();
+                Ok(n)
+            }
+            _ => Err(NuError::ParseError {
+                msg: format!("Expected integer {}, found {:?}", msg, current_kind),
                 span: self.current_span(),
             }),
         }
@@ -2355,5 +2487,71 @@ mod tests {
             }
             _ => panic!("Expected function declaration with tool annotation"),
         }
+    }
+
+    #[test]
+    fn test_parse_agent_full() {
+        let source = r#"
+            agent MyAgent = {
+                model: "gpt-4o",
+                system_prompt: "You are helpful.",
+                tools: [add, subtract],
+                memory: { max_turns: 100 }
+            }
+        "#;
+        let ast = parse(source).unwrap();
+        assert_eq!(ast.decls.len(), 1);
+        match &ast.decls[0] {
+            Decl::Agent {
+                name,
+                model,
+                system_prompt,
+                tools,
+                memory,
+                ..
+            } => {
+                assert_eq!(name, "MyAgent");
+                assert_eq!(model, "gpt-4o");
+                assert_eq!(system_prompt.as_deref(), Some("You are helpful."));
+                assert_eq!(tools, &["add".to_string(), "subtract".to_string()]);
+                assert_eq!(memory.as_ref().unwrap().max_turns, 100);
+            }
+            _ => panic!("Expected agent declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_agent_minimal() {
+        let source = r#"agent MyAgent = { model: "gpt-4o" }"#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Agent {
+                name,
+                model,
+                system_prompt,
+                tools,
+                memory,
+                ..
+            } => {
+                assert_eq!(name, "MyAgent");
+                assert_eq!(model, "gpt-4o");
+                assert!(system_prompt.is_none());
+                assert!(tools.is_empty());
+                assert_eq!(memory.as_ref().unwrap().max_turns, 50);
+            }
+            _ => panic!("Expected agent declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_agent_missing_model_errors() {
+        let result = parse("agent MyAgent = { system_prompt: \"hi\" }");
+        assert!(result.is_err(), "Expected parse error for agent missing model");
+    }
+
+    #[test]
+    fn test_parse_agent_unknown_field_errors() {
+        let result = parse("agent MyAgent = { model: \"x\", unknown: 1 }");
+        assert!(result.is_err(), "Expected parse error for unknown agent field");
     }
 }
