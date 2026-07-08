@@ -489,6 +489,15 @@ impl PersistenceStore for JsonFileStore {
     }
 }
 
+/// Acquire a mutex, recovering the guard even if a previous holder panicked.
+///
+/// A panic in one thread holding the connection lock must not cascade
+/// panics into every other thread that touches the store; the SQLite
+/// connection stays usable across panics, so poisoning is ignored.
+fn lock_ignore_poison<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// SQLite-backed persistence store.
 ///
 /// Each actor gets one row in the `snapshots` table and zero or more rows in
@@ -564,7 +573,7 @@ impl SqliteStore {
 
 impl PersistenceStore for SqliteStore {
     fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = lock_ignore_poison(&self.conn);
         let state_json = serde_json::to_string(&snapshot.state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let tx = conn.transaction()
@@ -581,7 +590,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let (sequence, state_json, waiting_signal): (i64, String, Option<String>) = conn
             .query_row(
                 "SELECT sequence, state, waiting_signal FROM snapshots WHERE actor_id = ?1",
@@ -599,7 +608,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> io::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let payload_json = serde_json::to_string(&entry.payload)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         conn.execute(
@@ -611,7 +620,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let mut stmt = match conn.prepare(
             "SELECT sequence, behavior_id, payload FROM journal
              WHERE actor_id = ?1 ORDER BY sequence ASC",
@@ -643,7 +652,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let event_json = serde_json::to_string(&event)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         conn.execute(
@@ -655,7 +664,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let mut stmt = match conn.prepare(
             "SELECT event FROM workflow_events
              WHERE actor_id = ?1 ORDER BY sequence ASC",
@@ -678,7 +687,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn latest_sequence(&self, actor_id: u64) -> u64 {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let snapshot_seq: Option<i64> = conn
             .query_row(
                 "SELECT sequence FROM snapshots WHERE actor_id = ?1",
@@ -704,7 +713,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         conn.execute("DELETE FROM snapshots WHERE actor_id = ?1", [actor_id as i64])
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         conn.execute("DELETE FROM journal WHERE actor_id = ?1", [actor_id as i64])
