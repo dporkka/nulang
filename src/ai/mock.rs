@@ -1,5 +1,6 @@
 //! Mock LLM client for tests.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -8,11 +9,13 @@ use crate::ai::client::LlmClient;
 use crate::ai::request::LlmRequest;
 use crate::ai::response::{LlmResponse, TokenUsage, ToolCall};
 
-/// A test client that always returns a fixed response and optionally records
-/// the requests it receives.
+/// A test client that returns a fixed response, a sequence of responses, or
+/// tool calls, and optionally records the requests it receives.
 #[derive(Debug, Clone)]
 pub struct MockLlmClient {
     response: LlmResponse,
+    responses: Vec<LlmResponse>,
+    index: Arc<AtomicUsize>,
     calls: Arc<Mutex<Vec<LlmRequest>>>,
 }
 
@@ -22,7 +25,12 @@ impl LlmClient for MockLlmClient {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(request);
         }
-        Ok(self.response.clone())
+        let idx = self.index.fetch_add(1, Ordering::SeqCst);
+        if idx < self.responses.len() {
+            Ok(self.responses[idx].clone())
+        } else {
+            Ok(self.response.clone())
+        }
     }
 }
 
@@ -31,6 +39,8 @@ impl MockLlmClient {
     pub fn new(response: LlmResponse) -> Self {
         Self {
             response,
+            responses: Vec::new(),
+            index: Arc::new(AtomicUsize::new(0)),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -76,6 +86,22 @@ impl MockLlmClient {
             finish_reason: "tool_calls".to_string(),
             usage,
         })
+    }
+
+    /// Create a mock client that returns each response in order.
+    pub fn sequence(responses: Vec<LlmResponse>) -> Self {
+        Self {
+            response: LlmResponse {
+                content: None,
+                tool_calls: Vec::new(),
+                model: "mock".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: TokenUsage::default(),
+            },
+            responses,
+            index: Arc::new(AtomicUsize::new(0)),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 
     /// Return the requests recorded by this mock client.

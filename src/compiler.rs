@@ -1398,7 +1398,7 @@ impl Compiler {
                 init,
                 ..
             } => {
-                self.compile_actor(name, *persistent, state_fields, behaviors, init, false, false, &[])?;
+                self.compile_actor(name, *persistent, state_fields, behaviors, init, false, false, &[], None)?;
             }
             Decl::Agent { .. } => {
                 self.compile_agent(decl)?;
@@ -1507,6 +1507,7 @@ impl Compiler {
         is_workflow: bool,
         is_agent: bool,
         tools: &[ToolSchema],
+        semantic_memory_dimensions: Option<usize>,
     ) -> NuResult<()> {
         for (_field_name, expr) in init {
             let _ = self.compile_expr(expr)?;
@@ -1540,6 +1541,7 @@ impl Compiler {
             is_workflow,
             is_agent,
             tools: tools.to_vec(),
+            semantic_memory_dimensions,
         };
         self.module.add_actor_meta(meta);
         Ok(())
@@ -1548,16 +1550,17 @@ impl Compiler {
     fn compile_agent(&mut self, agent: &Decl) -> NuResult<()> {
         // Extract fields from the agent declaration.  This pattern is irrefutable
         // because the caller already matched on Decl::Agent.
-        let (name, model, system_prompt, tool_names, memory, pricing, span) = match agent {
+        let (name, model, system_prompt, tool_names, memory, semantic_memory, pricing, span) = match agent {
             Decl::Agent {
                 name,
                 model,
                 system_prompt,
                 tools,
                 memory,
+                semantic_memory,
                 pricing,
                 span,
-            } => (name, model, system_prompt, tools, memory, *pricing, *span),
+            } => (name, model, system_prompt, tools, memory, semantic_memory, *pricing, *span),
             _ => unreachable!(),
         };
 
@@ -1570,8 +1573,15 @@ impl Compiler {
         let initial_memory = serde_json::to_string(&EpisodicMemory::new(max_turns))
             .unwrap_or_else(|_| "{}".to_string());
 
+        let semantic_memory_dimensions = semantic_memory.as_ref().map(|m| m.dimensions);
+        let initial_semantic_memory = semantic_memory_dimensions
+            .map(|dimensions| {
+                serde_json::to_string(&crate::ai::SemanticMemory::new(dimensions, None))
+                    .unwrap_or_else(|_| "{}".to_string())
+            });
+
         // Agent actors keep their configuration in durable state.
-        let state_fields: Vec<(String, StateModel, Type, Expr)> = vec![
+        let mut state_fields: Vec<(String, StateModel, Type, Expr)> = vec![
             (
                 "model".to_string(),
                 StateModel::Durable,
@@ -1624,6 +1634,15 @@ impl Compiler {
                 Expr::Literal(Literal::Float(agent_pricing.output), span),
             ),
         ];
+
+        if let Some(json) = initial_semantic_memory {
+            state_fields.push((
+                "semantic_memory".to_string(),
+                StateModel::Durable,
+                Type::string(),
+                Expr::Literal(Literal::String(json), span),
+            ));
+        }
 
         // Generated ask behavior reads agent state and performs the LLM ask.
         // The parser accepts `ask` as a behavior name after the `ask` keyword,
@@ -1695,6 +1714,34 @@ impl Compiler {
             span,
         };
 
+        // Generated semantic-memory behaviors.  The bodies are placeholders;
+        // the runtime intercepts these behaviors and implements store/recall
+        // directly against the agent's durable `semantic_memory` state field.
+        let semantic_memory_behavior = if semantic_memory_dimensions.is_some() {
+            let store_fact_behavior = Behavior {
+                name: "store_fact".to_string(),
+                params: vec![("content".to_string(), Some(Type::string()))],
+                body: Expr::Literal(Literal::Unit, span),
+                effect: None,
+                cap: Capability::Ref,
+                span,
+            };
+            let recall_behavior = Behavior {
+                name: "recall".to_string(),
+                params: vec![
+                    ("query".to_string(), Some(Type::string())),
+                    ("top_k".to_string(), Some(Type::int())),
+                ],
+                body: Expr::Literal(Literal::Unit, span),
+                effect: None,
+                cap: Capability::Ref,
+                span,
+            };
+            Some((store_fact_behavior, recall_behavior))
+        } else {
+            None
+        };
+
         // Resolve tool names against the module's tool schemas.
         let mut resolved_tools = Vec::new();
         for tool_name in tool_names {
@@ -1712,15 +1759,22 @@ impl Compiler {
             }
         }
 
+        let mut behaviors: Vec<Behavior> = vec![ask_behavior, usage_behavior];
+        if let Some((store_fact, recall)) = semantic_memory_behavior {
+            behaviors.push(store_fact);
+            behaviors.push(recall);
+        }
+
         self.compile_actor(
             name,
             true,
             &state_fields,
-            &[ask_behavior, usage_behavior],
+            &behaviors,
             &[],
             false,
             true,
             &resolved_tools,
+            semantic_memory_dimensions,
         )
     }
 
@@ -1869,7 +1923,7 @@ impl Compiler {
             })
             .collect();
         let first_behavior_idx = self.module.behaviors.len();
-        self.compile_actor(name, true, &state_fields, &behaviors, &[], true, false, &[])?;
+        self.compile_actor(name, true, &state_fields, &behaviors, &[], true, false, &[], None)?;
 
         // Patch parallel-branch metadata and per-step saga compensation offsets.
         let behavior_indices: Vec<usize> =

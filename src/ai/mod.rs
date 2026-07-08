@@ -10,6 +10,7 @@ pub mod providers;
 pub mod request;
 pub mod response;
 pub mod schema;
+pub mod semantic_memory;
 pub mod usage;
 
 pub use client::{complete_sync, LlmClient};
@@ -19,4 +20,5 @@ pub use providers::ollama::OllamaClient;
 pub use request::{LlmMessage, LlmRequest, ModelPricing, ToolSchema};
 pub use response::{LlmResponse, TokenUsage, ToolCall};
 pub use schema::{function_to_tool_schema, type_to_json_schema};
+pub use semantic_memory::{Document, SemanticMemory};
 pub use usage::{estimated_cost, UsageSummary};

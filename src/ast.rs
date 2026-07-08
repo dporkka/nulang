@@ -289,6 +289,12 @@ pub struct AgentPricing {
     pub output: f64,
 }
 
+/// Semantic-memory configuration for an agent declaration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AgentSemanticMemoryConfig {
+    pub dimensions: usize,
+}
+
 // ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
@@ -375,13 +381,14 @@ pub enum Decl {
         compensate: Option<Expr>,
         span: Span,
     },
-    /// Agent declaration (v0.9): agent Name = { model: "...", system_prompt: "...", tools: [...], memory: { max_turns: N } }
+    /// Agent declaration (v0.9): agent Name = { model: "...", system_prompt: "...", tools: [...], memory: { max_turns: N }, semantic_memory: { dimensions: D } }
     Agent {
         name: String,
         model: String,
         system_prompt: Option<String>,
         tools: Vec<String>,
         memory: Option<AgentMemoryConfig>,
+        semantic_memory: Option<AgentSemanticMemoryConfig>,
         pricing: Option<AgentPricing>,
         span: Span,
     },

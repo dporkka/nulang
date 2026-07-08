@@ -286,6 +286,16 @@ impl Runtime {
     /// updated with the user prompt and assistant response before being saved
     /// back to state.
     pub fn complete_agent_llm(&mut self, actor_id: u64, prompt: &str) -> Option<String> {
+        let prev_current_actor = self.current_actor;
+        self.current_actor = Some(actor_id);
+
+        let result = self.complete_agent_llm_inner(actor_id, prompt);
+
+        self.current_actor = prev_current_actor;
+        result
+    }
+
+    fn complete_agent_llm_inner(&mut self, actor_id: u64, prompt: &str) -> Option<String> {
         let (model, system_prompt, memory_json, pricing, usage_prompt, usage_completion, usage_cost, module) = {
             let actor = self.actors.get(&actor_id)?;
             let module = actor.bytecode_module.clone()?;
@@ -396,7 +406,7 @@ impl Runtime {
     /// are sent back to the model for a final response. The supplied `memory`
     /// messages are preserved across tool-call rounds.
     pub fn complete_llm_with_tools(
-        &self,
+        &mut self,
         mut request: LlmRequest,
         memory: Vec<LlmMessage>,
         module: &crate::bytecode::CodeModule,
@@ -405,28 +415,94 @@ impl Runtime {
         request.memory = memory.clone();
         let mut response = self.complete_llm_request(request.clone(), memory.clone())?;
 
-        for _ in 0..3 {
-            if response.tool_calls.is_empty() {
-                break;
-            }
-
+        if !response.tool_calls.is_empty() {
             let mut results = Vec::new();
             for call in &response.tool_calls {
-                let result = self.invoke_tool_function(module, &call.name, &call.arguments)?;
+                let result = self.invoke_agent_tool_function(module, &call.name, &call.arguments)?;
                 results.push((call.name.clone(), result));
             }
 
-            for (name, result) in results {
+            for (name, result) in &results {
                 request.messages.push(LlmMessage {
                     role: "tool".to_string(),
                     content: format!("{}: {}", name, result),
                 });
             }
 
-            response = self.complete_llm_request(request.clone(), memory.clone())?;
+            // For agent workflows, return the tool results directly so the
+            // caller can decide whether to continue the conversation. Preserve
+            // the original tool_calls and usage while surfacing a synthesized
+            // content string for memory/logging.
+            let result_content = results
+                .iter()
+                .map(|(name, result)| format!("{}: {}", name, result))
+                .collect::<Vec<_>>()
+                .join("\n");
+            response.content = Some(result_content);
         }
 
         Ok(response)
+    }
+
+    /// Invoke a tool for an agent, routing semantic-memory behaviors to the
+    /// agent's durable `semantic_memory` state and falling back to the module's
+    /// exported function for other tools.
+    fn invoke_agent_tool_function(
+        &mut self,
+        module: &crate::bytecode::CodeModule,
+        name: &str,
+        arguments: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String> {
+        if let Some(actor_id) = self.current_actor {
+            if self.actor_is_agent(actor_id) && self.is_semantic_memory_behavior(name) {
+                return self.invoke_semantic_memory_tool(actor_id, name, arguments);
+            }
+        }
+        self.invoke_tool_function(module, name, arguments)
+    }
+
+    /// Execute a semantic-memory tool call against the current agent.
+    fn invoke_semantic_memory_tool(
+        &mut self,
+        actor_id: u64,
+        name: &str,
+        arguments: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String> {
+        if name == "store_fact" {
+            let content = arguments
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut metadata = std::collections::HashMap::new();
+            if let Some(topic) = arguments.get("topic").and_then(|v| v.as_str()) {
+                metadata.insert("topic".to_string(), topic.to_string());
+            }
+            let id = self.semantic_memory_store_with_metadata(actor_id, &content, metadata);
+            Ok(format!("stored: {}", self.vm_value_to_string_or_default(actor_id, &id)))
+        } else if name == "recall" {
+            let query = arguments
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let top_k = arguments
+                .get("top_k")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1) as usize;
+            let value = self.semantic_memory_recall(actor_id, &query, top_k);
+            Ok(self.vm_value_to_string_or_default(actor_id, &value))
+        } else {
+            Err(format!("Unknown semantic-memory tool '{}'", name))
+        }
+    }
+
+    /// Convert a VM value into a Rust string, returning a default for missing actors.
+    fn vm_value_to_string_or_default(&self, actor_id: u64, value: &crate::vm::Value) -> String {
+        self.actors
+            .get(&actor_id)
+            .and_then(|actor| self.vm_value_to_string_in_actor(value, actor))
+            .unwrap_or_default()
     }
 
     /// Look up a tool by name and invoke the corresponding exported function.
@@ -696,6 +772,41 @@ impl Runtime {
         args: &[Value],
     ) -> crate::types::NuResult<Value> {
         let behavior_idx = behavior_id as usize;
+
+        // Intercept semantic-memory behaviors generated by compile_agent.  These
+        // are bytecode behaviors at compile time, but their semantics are
+        // implemented directly by the runtime so they can mutate and read the
+        // durable `semantic_memory` JSON field.
+        let behavior_name = self.step_name_for(actor_id, behavior_idx);
+        if self.actor_is_agent(actor_id) && self.is_semantic_memory_behavior(&behavior_name) {
+            self.current_actor = Some(actor_id);
+            let result = if behavior_name == "store_fact" {
+                let content = args
+                    .get(0)
+                    .and_then(|v| {
+                        self.actors
+                            .get(&actor_id)
+                            .and_then(|actor| self.vm_value_to_string_in_actor(v, actor))
+                    })
+                    .unwrap_or_default();
+                self.semantic_memory_store(actor_id, &content)
+            } else {
+                let query = args
+                    .get(0)
+                    .and_then(|v| {
+                        self.actors
+                            .get(&actor_id)
+                            .and_then(|actor| self.vm_value_to_string_in_actor(v, actor))
+                    })
+                    .unwrap_or_default();
+                let top_k = args.get(1).and_then(|v| v.as_int()).unwrap_or(1) as usize;
+                self.semantic_memory_recall(actor_id, &query, top_k)
+            };
+            self.checkpoint_actor(actor_id);
+            self.current_actor = None;
+            return Ok(result);
+        }
+
         let is_native = self
             .actors
             .get(&actor_id)
@@ -725,12 +836,16 @@ impl Runtime {
             return Ok(Value::nil());
         }
         if self.has_bytecode_handler(actor_id, behavior_idx) {
-            return self.run_bytecode_behavior(actor_id, behavior_idx, args);
+            let result = self.run_bytecode_behavior(actor_id, behavior_idx, args);
+            self.checkpoint_actor(actor_id);
+            self.current_actor = None;
+            return result;
         }
+        self.current_actor = None;
         Ok(Value::nil())
     }
 
-    fn behavior_id_for(&self, target_id: u64, behavior: &str) -> Option<u16> {
+    pub fn behavior_id_for(&self, target_id: u64, behavior: &str) -> Option<u16> {
         let actor = self.actors.get(&target_id)?;
         let suffix = format!(".{}", behavior);
         actor
@@ -891,6 +1006,45 @@ impl Runtime {
         };
         let should_requeue = if let Some(msg) = msg_opt {
             let behavior_idx = msg.behavior_id as usize;
+
+            // Intercept semantic-memory behaviors generated by compile_agent.
+            // They are bytecode behaviors but are implemented directly by the
+            // runtime against the durable `semantic_memory` state field.
+            let behavior_name = self.step_name_for(actor_id, behavior_idx);
+            if self.actor_is_agent(actor_id) && self.is_semantic_memory_behavior(&behavior_name) {
+                if self.actor_is_persistent(actor_id) {
+                    let seq = self.next_sequence(actor_id);
+                    let payload = msg.payload.iter().map(PersistedValue::from_value).collect();
+                    let _ = self.persistence.append_journal(
+                        actor_id,
+                        JournalEntry {
+                            sequence: seq,
+                            behavior_id: msg.behavior_id,
+                            payload,
+                        },
+                    );
+                }
+                let content = msg
+                    .payload
+                    .get(0)
+                    .and_then(|v| {
+                        self.actors
+                            .get(&actor_id)
+                            .and_then(|actor| self.vm_value_to_string_in_actor(v, actor))
+                    })
+                    .unwrap_or_default();
+                if behavior_name == "store_fact" {
+                    self.semantic_memory_store(actor_id, &content);
+                } else {
+                    let query = content;
+                    let top_k = msg.payload.get(1).and_then(|v| v.as_int()).unwrap_or(1) as usize;
+                    self.semantic_memory_recall(actor_id, &query, top_k);
+                }
+                self.checkpoint_actor(actor_id);
+                self.current_actor = None;
+                return;
+            }
+
             let handler_fn: Option<fn(&mut Actor, &[Value])> = {
                 let actor = match self.actors.get(&actor_id) {
                     Some(a) => a,
@@ -1033,6 +1187,120 @@ impl Runtime {
             .unwrap_or(false)
     }
 
+    fn actor_is_agent(&self, actor_id: u64) -> bool {
+        self.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false)
+    }
+
+    /// Return true if the behavior name is a semantic-memory behavior generated
+    /// by `compile_agent` for agents configured with `semantic_memory`.
+    fn is_semantic_memory_behavior(&self, name: &str) -> bool {
+        name == "store_fact" || name == "recall"
+    }
+
+    /// Read an agent's durable `semantic_memory` state field as a `SemanticMemory`.
+    fn read_semantic_memory(&self, actor: &Actor) -> Option<crate::ai::SemanticMemory> {
+        let value = actor.get_state_field("semantic_memory")?;
+        let ptr = value.as_ptr()?;
+        if ptr.is_null() {
+            return None;
+        }
+        let json = unsafe {
+            std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char)
+                .to_string_lossy()
+                .into_owned()
+        };
+        serde_json::from_str(&json).ok()
+    }
+
+    /// Write a `SemanticMemory` back to an agent's durable `semantic_memory` state field.
+    fn write_semantic_memory(actor: &mut Actor, memory: &crate::ai::SemanticMemory) {
+        if let Ok(json) = serde_json::to_string(memory) {
+            let ptr = actor.allocate_string(&json);
+            actor.set_state_field("semantic_memory", ptr);
+        }
+    }
+
+    /// Convert a VM value into a Rust string, reading pointer payloads as
+    /// null-terminated UTF-8 and string-id values via the actor's bytecode module.
+    fn vm_value_to_string_in_actor(
+        &self,
+        value: &crate::vm::Value,
+        actor: &Actor,
+    ) -> Option<String> {
+        if let Some(id) = value.as_string_id() {
+            actor
+                .bytecode_module
+                .as_ref()
+                .and_then(|m| m.constants.get(id as usize))
+                .and_then(|c| match c {
+                    crate::bytecode::Constant::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+        } else if let Some(ptr) = value.as_ptr() {
+            if ptr.is_null() {
+                Some(String::new())
+            } else {
+                Some(unsafe {
+                    std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Store a fact in an agent's semantic memory and return the document id.
+    fn semantic_memory_store(&mut self, actor_id: u64, content: &str) -> crate::vm::Value {
+        self.semantic_memory_store_with_metadata(actor_id, content, std::collections::HashMap::new())
+    }
+
+    /// Store a fact with metadata in an agent's semantic memory and return the document id.
+    fn semantic_memory_store_with_metadata(
+        &mut self,
+        actor_id: u64,
+        content: &str,
+        metadata: std::collections::HashMap<String, String>,
+    ) -> crate::vm::Value {
+        let memory_opt = if let Some(actor) = self.actors.get(&actor_id) {
+            self.read_semantic_memory(actor)
+        } else {
+            None
+        };
+        let mut memory = memory_opt.unwrap_or_else(|| crate::ai::SemanticMemory::new(64, None));
+        let id = memory.store(content, metadata);
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            Self::write_semantic_memory(actor, &memory);
+            return actor.allocate_string(&id);
+        }
+        crate::vm::Value::nil()
+    }
+
+    /// Search an agent's semantic memory and return the top result's content.
+    fn semantic_memory_recall(
+        &mut self,
+        actor_id: u64,
+        query: &str,
+        top_k: usize,
+    ) -> crate::vm::Value {
+        let content = if let Some(actor) = self.actors.get(&actor_id) {
+            self.read_semantic_memory(actor)
+                .and_then(|memory| {
+                    let results = memory.search(query, top_k);
+                    results.first().map(|(doc, _)| doc.content.clone())
+                })
+        } else {
+            None
+        };
+        if let Some(content) = content {
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                return actor.allocate_string(&content);
+            }
+        }
+        crate::vm::Value::nil()
+    }
+
     fn has_bytecode_handler(&self, actor_id: u64, behavior_idx: usize) -> bool {
         self.actors
             .get(&actor_id)
@@ -1114,7 +1382,16 @@ impl Runtime {
         for (name, value) in &actor.state_data {
             let model = actor.state_models.get(name).copied().unwrap_or(StateModel::Local);
             if model.is_persistent() {
-                state.insert(name.clone(), PersistedValue::from_value(value));
+                // Serialize the semantic_memory JSON pointer to a string so it
+                // survives node restarts.
+                let persisted = if name == "semantic_memory" {
+                    self.vm_value_to_string_in_actor(value, actor)
+                        .map(PersistedValue::String)
+                        .unwrap_or_else(|| PersistedValue::from_value(value))
+                } else {
+                    PersistedValue::from_value(value)
+                };
+                state.insert(name.clone(), persisted);
             }
         }
         let snapshot = ActorSnapshot {
@@ -1384,13 +1661,28 @@ impl Runtime {
             .get(&actor_id)
             .map(|(m, _, _)| m.actor_metadata.iter().any(|meta| meta.is_workflow))
             .unwrap_or(!workflow_events.is_empty());
+        let is_agent = self
+            .recovery_modules
+            .get(&actor_id)
+            .map(|(m, _, _)| m.actor_metadata.iter().any(|meta| meta.is_agent))
+            .unwrap_or(false);
 
         let mut actor = Actor::new(actor_id, format!("actor_{}", actor_id), 256);
         actor.persistent = true;
         actor.is_workflow = is_workflow;
+        actor.is_agent = is_agent;
         actor.sequence = snapshot.sequence;
         actor.waiting_signal = snapshot.waiting_signal;
         for (name, value) in snapshot.state {
+            // Rehydrate the semantic_memory JSON string by allocating it on the
+            // actor heap so runtime helpers can read it as a pointer value.
+            if name == "semantic_memory" {
+                if let PersistedValue::String(json) = &value {
+                    let ptr = actor.allocate_string(json);
+                    actor.set_state_field(name, ptr);
+                    continue;
+                }
+            }
             actor.set_state_field(name, value.to_value());
         }
         // Restore bytecode metadata registered for recovery.

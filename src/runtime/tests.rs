@@ -803,6 +803,7 @@ fn test_vm_spawn_creates_persistent_actor() {
         is_workflow: false,
         is_agent: false,
         tools: vec![],
+        semantic_memory_dimensions: None,
     });
     module.add_behavior(BehaviorTableEntry {
         name: "Account.get".to_string(),
@@ -850,6 +851,7 @@ fn test_vm_spawn_creates_non_persistent_actor() {
         is_workflow: false,
         is_agent: false,
         tools: vec![],
+        semantic_memory_dimensions: None,
     });
     module.add_behavior(BehaviorTableEntry {
         name: "Counter.inc".to_string(),

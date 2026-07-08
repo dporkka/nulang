@@ -372,6 +372,8 @@ pub struct ActorMeta {
     pub is_agent: bool,
     /// Tool schemas exposed to this agent actor.
     pub tools: Vec<ToolSchema>,
+    /// Semantic-memory vector dimensions, if configured for this agent.
+    pub semantic_memory_dimensions: Option<usize>,
 }
 
 impl ActorMeta {
@@ -385,6 +387,7 @@ impl ActorMeta {
             is_workflow: false,
             is_agent: false,
             tools: Vec::new(),
+            semantic_memory_dimensions: None,
         }
     }
 }

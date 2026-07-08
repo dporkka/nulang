@@ -340,6 +340,7 @@ impl Parser {
         let mut system_prompt: Option<String> = None;
         let mut tools: Vec<String> = Vec::new();
         let mut memory: Option<AgentMemoryConfig> = None;
+        let mut semantic_memory: Option<AgentSemanticMemoryConfig> = None;
         let mut pricing: Option<AgentPricing> = None;
 
         self.skip_newlines();
@@ -408,6 +409,40 @@ impl Parser {
                         max_turns: max_turns.unwrap_or(50),
                     });
                 }
+                "semantic_memory" => {
+                    self.expect(TokenKind::LBrace)?;
+                    self.skip_newlines();
+                    let mut dimensions: Option<usize> = None;
+                    while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.match_token(&TokenKind::RBrace) {
+                            break;
+                        }
+                        let sm_field = self.expect_ident("semantic memory field name")?;
+                        self.expect(TokenKind::Colon)?;
+                        match sm_field.as_str() {
+                            "dimensions" => {
+                                let n = self.expect_int("dimensions")?;
+                                dimensions = Some(n as usize);
+                            }
+                            other => {
+                                return Err(NuError::ParseError {
+                                    msg: format!("Unknown semantic_memory field: {}", other),
+                                    span: self.current_span(),
+                                });
+                            }
+                        }
+                        self.skip_newlines();
+                        if !self.consume_if(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                    semantic_memory = Some(AgentSemanticMemoryConfig {
+                        dimensions: dimensions.unwrap_or(64),
+                    });
+                }
                 "pricing" => {
                     self.expect(TokenKind::LBrace)?;
                     self.skip_newlines();
@@ -472,6 +507,7 @@ impl Parser {
             system_prompt,
             tools,
             memory: memory.or(Some(AgentMemoryConfig { max_turns: 50 })),
+            semantic_memory,
             pricing,
             span,
         })

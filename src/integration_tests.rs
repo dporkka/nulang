@@ -1619,4 +1619,257 @@ mod tests {
         // 1000 * 0.01 / 1000 + 500 * 0.02 / 1000 = 0.01 + 0.01 = 0.02
         assert!((cost - 0.02).abs() < 1e-9, "cost: {}", cost);
     }
+
+    #[test]
+    fn test_agent_semantic_memory_store_and_recall() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                semantic_memory: { dimensions: 32 }
+            }
+            let a = spawn Agent {} in
+            let _ = ask a store_fact("hello world") in
+            ask a recall("hello", 1)
+        "#;
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+
+        let result = vm.run().unwrap();
+
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.value_to_string(module_idx, result);
+        assert_eq!(content, "hello world");
+
+        // The durable semantic_memory field should contain one document.
+        let rt = rt.borrow();
+        let actor = rt.actors.values().next().expect("expected one actor");
+        let memory_json = actor.get_state_field("semantic_memory").unwrap();
+        let memory_json_str = vm.value_to_string(module_idx, memory_json);
+        let memory: crate::ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
+        assert_eq!(memory.len(), 1);
+        assert_eq!(memory.documents[0].content, "hello world");
+    }
+
+    #[test]
+    fn test_agent_workflow_researches_and_reports() {
+        // v0.9 milestone: agent researches a topic, uses a tool, stores the
+        // fact in semantic memory, and synthesizes a report.
+        let source = r#"
+            @tool(description: "Store a research fact tagged with a topic.")
+            fn store_fact(content: String, topic: String) -> String { content }
+
+            agent Researcher = {
+                model: "llama3.1",
+                system_prompt: "You are a research assistant.",
+                pricing: { input: 0.0, output: 0.0 },
+                tools: [store_fact],
+                memory: { max_turns: 10 },
+                semantic_memory: { dimensions: 64 }
+            }
+
+            let researcher = spawn Researcher {} in
+            let _ = ask researcher ask("Research CRDTs") in
+            let report = ask researcher ask("Synthesize a report on CRDTs") in
+            report
+        "#;
+
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+
+        let mut store_args = serde_json::Map::new();
+        store_args.insert(
+            "content".to_string(),
+            serde_json::Value::String(
+                "CRDTs are conflict-free replicated data types.".to_string(),
+            ),
+        );
+        store_args.insert(
+            "topic".to_string(),
+            serde_json::Value::String("CRDTs".to_string()),
+        );
+
+        let client = crate::ai::MockLlmClient::sequence(vec![
+            crate::ai::LlmResponse {
+                content: None,
+                tool_calls: vec![crate::ai::ToolCall {
+                    id: String::new(),
+                    name: "store_fact".to_string(),
+                    arguments: store_args,
+                }],
+                model: "mock".to_string(),
+                finish_reason: "tool_calls".to_string(),
+                usage: crate::ai::TokenUsage::default(),
+            },
+            crate::ai::LlmResponse {
+                content: Some(
+                    "CRDTs enable strong eventual consistency without coordination.".to_string(),
+                ),
+                tool_calls: Vec::new(),
+                model: "mock".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: crate::ai::TokenUsage::default(),
+            },
+        ]);
+        let client_ref = client.clone();
+        rt.borrow_mut().set_llm_client(Box::new(client));
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+
+        let result = vm.run().unwrap();
+
+        let module_idx = vm.modules.len() - 1;
+        let report = vm.value_to_string(module_idx, result);
+        assert_eq!(
+            report,
+            "CRDTs enable strong eventual consistency without coordination."
+        );
+
+        // The LLM client should have been asked twice.
+        let calls = client_ref.recorded_calls();
+        assert_eq!(calls.len(), 2, "expected two LLM calls");
+
+        // The first request should have exposed the store_fact tool.
+        assert_eq!(calls[0].tools.len(), 1);
+        assert_eq!(calls[0].tools[0].name, "store_fact");
+
+        // The fact should be persisted in durable semantic memory.
+        let rt = rt.borrow();
+        let actor = rt.actors.values().next().expect("expected one actor");
+        let memory_json = actor.get_state_field("semantic_memory").unwrap();
+        let memory_json_str = vm.value_to_string(module_idx, memory_json);
+        let memory: crate::ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
+        assert_eq!(memory.len(), 1);
+        assert_eq!(
+            memory.documents[0].content,
+            "CRDTs are conflict-free replicated data types."
+        );
+        assert_eq!(
+            memory.documents[0].metadata.get("topic"),
+            Some(&"CRDTs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_agent_workflow_recovers_semantic_memory_after_restart() {
+        // v0.9 milestone: after a research agent stores a fact, simulating a
+        // node restart with the same persistence store preserves the semantic
+        // memory and the recovered agent can recall it.
+        let source = r#"
+            @tool(description: "Store a research fact tagged with a topic.")
+            fn store_fact(content: String, topic: String) -> String { content }
+
+            agent Researcher = {
+                model: "llama3.1",
+                system_prompt: "You are a research assistant.",
+                pricing: { input: 0.0, output: 0.0 },
+                tools: [store_fact],
+                memory: { max_turns: 10 },
+                semantic_memory: { dimensions: 64 }
+            }
+
+            let researcher = spawn Researcher {} in
+            let _ = ask researcher ask("Research CRDTs") in
+            researcher
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+            }
+        }
+
+        let mut store_args = serde_json::Map::new();
+        store_args.insert(
+            "content".to_string(),
+            serde_json::Value::String(
+                "CRDTs are conflict-free replicated data types.".to_string(),
+            ),
+        );
+        store_args.insert(
+            "topic".to_string(),
+            serde_json::Value::String("CRDTs".to_string()),
+        );
+
+        let client = crate::ai::MockLlmClient::sequence(vec![
+            crate::ai::LlmResponse {
+                content: None,
+                tool_calls: vec![crate::ai::ToolCall {
+                    id: String::new(),
+                    name: "store_fact".to_string(),
+                    arguments: store_args,
+                }],
+                model: "mock".to_string(),
+                finish_reason: "tool_calls".to_string(),
+                usage: crate::ai::TokenUsage::default(),
+            },
+        ]);
+
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().set_llm_client(Box::new(client));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        // The fact was stored during the first (and only) ask.
+        {
+            let rt1_ref = rt1.borrow();
+            let actor = rt1_ref.actors.get(&actor_id).unwrap();
+            let memory_json = actor.get_state_field("semantic_memory").unwrap();
+            let memory_json_str = VM::new().value_to_string(0, memory_json);
+            let memory: crate::ai::SemanticMemory =
+                serde_json::from_str(&memory_json_str).unwrap();
+            assert_eq!(memory.len(), 1);
+        }
+
+        // Simulate a node restart: new runtime sharing the same store,
+        // register the bytecode module, then recover the agent.
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            vec![None; module.behaviors.len()],
+        );
+        rt2.borrow_mut().recover_actor(actor_id);
+
+        // Recall the stored fact from the recovered agent. Agent behaviors are
+        // laid out as ask(0), usage(1), store_fact(2), recall(3).
+        let recall_behavior_id = 3u16;
+        let query = {
+            let mut rt2_ref = rt2.borrow_mut();
+            let actor = rt2_ref.actors.get_mut(&actor_id).unwrap();
+            actor.allocate_string("CRDTs")
+        };
+        let top_k = Value::int(1);
+        let recalled = rt2
+            .borrow_mut()
+            .ask_actor_sync(actor_id, recall_behavior_id, &[query, top_k])
+            .unwrap();
+
+        let module_idx = 0;
+        let recalled_content = VM::new().value_to_string(module_idx, recalled);
+        assert_eq!(
+            recalled_content,
+            "CRDTs are conflict-free replicated data types.",
+            "recovered agent should recall the stored fact"
+        );
+    }
 }
