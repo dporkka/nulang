@@ -649,7 +649,25 @@ pub struct VM {
     ///
     /// Defaults to a standalone heap so the VM is usable without a runtime.
     actor_callbacks: Box<dyn ActorVmCallbacks>,
+    /// Capture environments for closures that captured enclosing locals.
+    /// Indexed by the payload of env-flagged closure values. Environments are
+    /// never reclaimed for the lifetime of the VM (known limitation — closure
+    /// envs are not yet traced by the GC).
+    closure_envs: Vec<ClosureEnv>,
 }
+
+/// Captured environment of a closure: the lifted function it wraps plus the
+/// values captured (by value) from the enclosing scope at creation time.
+#[derive(Debug, Clone)]
+struct ClosureEnv {
+    func_idx: usize,
+    captures: Vec<Value>,
+}
+
+/// Payload bit distinguishing env-carrying closures (index into
+/// `VM::closure_envs`) from immediate closures (payload = function index).
+const CLOSURE_ENV_FLAG: u64 = 0x0000_4000_0000_0000;
+const CLOSURE_ENV_IDX_MASK: u64 = CLOSURE_ENV_FLAG - 1;
 
 impl VM {
     /// Create a new VM.
@@ -668,6 +686,7 @@ impl VM {
             suspended_signal_name: None,
             distributed_callbacks: None,
             actor_callbacks: Box::new(StandaloneVmCallbacks::new()),
+            closure_envs: Vec::new(),
         }
     }
 
@@ -1314,9 +1333,68 @@ impl VM {
                 let func_idx = instr.imm16() as u64;
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::closure(func_idx);
             }
-            OpCode::CapLoad | OpCode::CapStore | OpCode::FreeVar => {
-                // Captures are not yet implemented at runtime; these opcodes are
-                // no-ops so that simple capture-free closures still work.
+            OpCode::CapStore => {
+                // op1 = register holding the closure, op2 = capture slot,
+                // op3 = source register. The first store upgrades the closure
+                // from the immediate form (payload = function index) to the
+                // env-carrying form (payload = env index).
+                let closure_reg = instr.op1 as usize;
+                let slot = instr.op2 as usize;
+                let src = self.frames[frame_idx].regs[instr.op3 as usize];
+                let val = self.frames[frame_idx].regs[closure_reg];
+                if (val.raw & TAG_MASK) != TAG_CLOSURE {
+                    return Err(NuError::VMError(format!(
+                        "CapStore target is not a closure: {}",
+                        val.to_string_repr()
+                    )));
+                }
+                let payload = val.raw & PAYLOAD_MASK;
+                let env_idx = if payload & CLOSURE_ENV_FLAG != 0 {
+                    (payload & CLOSURE_ENV_IDX_MASK) as usize
+                } else {
+                    let idx = self.closure_envs.len();
+                    self.closure_envs.push(ClosureEnv {
+                        func_idx: payload as usize,
+                        captures: Vec::new(),
+                    });
+                    self.frames[frame_idx].regs[closure_reg] = Value {
+                        raw: TAG_CLOSURE | CLOSURE_ENV_FLAG | (idx as u64 & CLOSURE_ENV_IDX_MASK),
+                    };
+                    idx
+                };
+                let env = &mut self.closure_envs[env_idx];
+                if env.captures.len() <= slot {
+                    env.captures.resize(slot + 1, Value::nil());
+                }
+                env.captures[slot] = src;
+            }
+            OpCode::CapLoad => {
+                // op1 = capture slot, op2 = destination register. Reads from
+                // the closure environment of the currently executing frame.
+                let slot = instr.op1 as usize;
+                let dst = instr.op2 as usize;
+                let env_val = self.frames[frame_idx].closure_env.ok_or_else(|| {
+                    NuError::VMError("CapLoad outside a closure call".to_string())
+                })?;
+                let payload = env_val.raw & PAYLOAD_MASK;
+                if payload & CLOSURE_ENV_FLAG == 0 {
+                    return Err(NuError::VMError(
+                        "CapLoad in a closure without captures".to_string(),
+                    ));
+                }
+                let env_idx = (payload & CLOSURE_ENV_IDX_MASK) as usize;
+                let value = self
+                    .closure_envs
+                    .get(env_idx)
+                    .and_then(|env| env.captures.get(slot))
+                    .copied()
+                    .ok_or_else(|| {
+                        NuError::VMError(format!("CapLoad of missing capture slot {}", slot))
+                    })?;
+                self.frames[frame_idx].regs[dst] = value;
+            }
+            OpCode::FreeVar => {
+                // Nothing emits FreeVar; keep it a no-op.
             }
 
             // -- Arithmetic --
@@ -2029,10 +2107,22 @@ impl VM {
         if let Some(func_idx) = func_val.as_int() {
             Ok((func_idx as usize, None))
         } else if (func_val.raw & TAG_MASK) == TAG_CLOSURE {
-            let closure_id = func_val.raw & 0x0000_7FFF_FFFF_FFFF;
-            // For closures, the closure_id IS the function index (MVP).
-            // In a full implementation, we'd look up the closure env.
-            Ok((closure_id as usize, Some(func_val)))
+            let payload = func_val.raw & PAYLOAD_MASK;
+            if payload & CLOSURE_ENV_FLAG != 0 {
+                // Env-carrying closure: the function index lives in the env.
+                let env_idx = (payload & CLOSURE_ENV_IDX_MASK) as usize;
+                let func_idx = self
+                    .closure_envs
+                    .get(env_idx)
+                    .map(|env| env.func_idx)
+                    .ok_or_else(|| {
+                        NuError::VMError(format!("Dangling closure environment {}", env_idx))
+                    })?;
+                Ok((func_idx, Some(func_val)))
+            } else {
+                // Immediate closure: the payload is the function index.
+                Ok((payload as usize, Some(func_val)))
+            }
         } else {
             Err(NuError::VMError(format!("Not a function: {}", func_val.to_string_repr())))
         }
@@ -2612,6 +2702,61 @@ mod vm_tests {
             assert_eq!(result.as_int(), Some(4950),
                 "JIT-compiled loop with early-exit branch must match interpreter");
         }
+    }
+
+    /// Closure capture environments: Closure + CapStore then Call + CapLoad
+    /// round-trips the captured value into the callee frame.
+    #[test]
+    fn test_closure_capture_env_roundtrip() {
+        let mut module = CodeModule::new("test_capture");
+        let c41_idx = module.add_constant(Constant::Int(41));
+
+        // Entry: build a closure over function 0 capturing 41, call it.
+        // main:
+        //   0: ConstU 41 -> r1
+        //   1: Closure #0 -> r2
+        //   2: CapStore r2[0] = r1
+        //   3: Move r2 -> r3
+        //   4: Call r3, 0 args, dst r0
+        //   5: Halt
+        // fn0 (at offset 6):
+        //   6: CapLoad [0] -> r4
+        //   7: Const1 r5
+        //   8: IAdd r4, r5, r6
+        //   9: RetVal r6
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c41_idx >> 8) & 0xFF) as u8, (c41_idx & 0xFF) as u8, 1)); // 0
+        module.emit(Instruction::new3(OpCode::Closure, 0, 0, 2));       // 1
+        module.emit(Instruction::new3(OpCode::CapStore, 2, 0, 1));      // 2
+        module.emit(Instruction::new2(OpCode::Move, 2, 3));             // 3
+        module.emit(Instruction::new3(OpCode::Call, 3, 0, 0));          // 4
+        module.emit(Instruction::new0(OpCode::Halt));                   // 5
+        let fn0_offset = module.current_offset();
+        module.emit(Instruction::new3(OpCode::CapLoad, 0, 4, 0));       // 6
+        module.emit(Instruction::new1(OpCode::Const1, 5));              // 7
+        module.emit(Instruction::new3(OpCode::IAdd, 4, 5, 6));          // 8
+        module.emit(Instruction::new1(OpCode::RetVal, 6));              // 9
+        module.function_table.push(fn0_offset);
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run().unwrap();
+        assert_eq!(result.as_int(), Some(42), "captured 41 + 1 should be 42");
+    }
+
+    /// CapLoad without a closure environment must error, not silently no-op.
+    #[test]
+    fn test_capload_outside_closure_errors() {
+        let mut module = CodeModule::new("test_capload_err");
+        module.emit(Instruction::new3(OpCode::CapLoad, 0, 1, 0));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_err(), "CapLoad outside a closure call should error");
     }
 
     /// Test 17: NodeId returns the configured local node ID.
