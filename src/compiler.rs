@@ -2,6 +2,7 @@
 //!
 //! Compiles Nulang AST into bytecode modules for the VM.
 
+use crate::ai::schema::function_to_tool_schema;
 use crate::ast::*;
 use crate::bytecode::*;
 use crate::types::{Capability, NuError, NuResult, PrimitiveType, Span, Type};
@@ -1020,6 +1021,24 @@ impl Compiler {
             }
         }
 
+        // Special-case LLM.ask: compile to a dedicated opcode wired to the
+        // runtime's configured LLM client.
+        if effect == "LLM" && op == "ask" {
+            let prompt_reg = if let Some(arg) = args.get(0) {
+                self.compile_expr(arg)?
+            } else {
+                let r = self.alloc_reg();
+                self.emit(Instruction::new1(OpCode::Const0, r));
+                r
+            };
+            let model_idx = self.add_const(Constant::String("".to_string()));
+            self.emit(Instruction::new3(OpCode::LlmAsk,
+                ((model_idx >> 8) & 0xFF) as u8,
+                (model_idx & 0xFF) as u8,
+                prompt_reg));
+            return Ok(prompt_reg);
+        }
+
         // Place effect arguments in consecutive registers r0..rn to match the
         // handler convention and to make them easy for runtime callbacks to
         // locate (e.g. Timer.sleep name/duration_ms).
@@ -1321,8 +1340,15 @@ impl Compiler {
                 }
                 self.emit(Instruction::new0(OpCode::Halt));
             }
-            Decl::Function { name, params, body, .. } => {
-                self.compile_function(name, params, body)?;
+            Decl::Function {
+                name,
+                params,
+                ret_type,
+                body,
+                annotations,
+                ..
+            } => {
+                self.compile_function(name, params, ret_type.as_ref(), body, annotations)?;
             }
             Decl::Actor {
                 name,
@@ -1353,7 +1379,39 @@ impl Compiler {
         Ok(())
     }
 
-    fn compile_function(&mut self, name: &str, params: &[(String, Option<crate::types::Type>)], body: &Expr) -> NuResult<()> {
+    fn compile_function(
+        &mut self,
+        name: &str,
+        params: &[(String, Option<crate::types::Type>)],
+        ret_type: Option<&Type>,
+        body: &Expr,
+        annotations: &[FunctionAnnotation],
+    ) -> NuResult<()> {
+        // Generate a ToolSchema for `@tool`-annotated functions before compiling
+        // the body, so the schema is available in the module metadata.
+        if let Some(FunctionAnnotation::Tool { description }) = annotations.iter().find(|a| {
+            matches!(a, FunctionAnnotation::Tool { .. })
+        }) {
+            let mut typed_params = Vec::with_capacity(params.len());
+            for (param_name, param_ty) in params {
+                match param_ty {
+                    Some(ty) => typed_params.push((param_name.clone(), ty.clone())),
+                    None => {
+                        return Err(NuError::ParseError {
+                            msg: format!(
+                                "@tool function '{}' parameter '{}' requires an explicit type",
+                                name, param_name
+                            ),
+                            span: Span::default(),
+                        });
+                    }
+                }
+            }
+            let ret = ret_type.cloned().unwrap_or_else(Type::unit);
+            let schema = function_to_tool_schema(name, description, &typed_params, &ret);
+            self.module.tools.push(schema);
+        }
+
         let saved_locals = std::mem::replace(&mut self.locals, vec![ScopeFrame::new()]);
         let saved_next_reg = self.next_reg;
         self.next_reg = 0;
@@ -1869,5 +1927,23 @@ mod tests {
         assert_eq!(module.actor_metadata.len(), 1);
         let meta = &module.actor_metadata[0];
         assert_eq!(meta.behavior_indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_compile_tool_annotation_generates_schema() {
+        let source = r#"
+            @tool(description: "Adds two integers.")
+            pub fn add(x: Int, y: Int) -> Int { x + y }
+        "#;
+        let module = compile_source(source);
+        assert_eq!(module.tools.len(), 1);
+        let tool = &module.tools[0];
+        assert_eq!(tool.name, "add");
+        assert_eq!(tool.description, "Adds two integers.");
+        assert_eq!(tool.parameters["type"], "object");
+        assert_eq!(tool.parameters["properties"]["x"], serde_json::json!({"type": "integer"}));
+        assert_eq!(tool.parameters["properties"]["y"], serde_json::json!({"type": "integer"}));
+        assert!(tool.parameters["required"].as_array().unwrap().contains(&serde_json::json!("x")));
+        assert!(tool.parameters["required"].as_array().unwrap().contains(&serde_json::json!("y")));
     }
 }

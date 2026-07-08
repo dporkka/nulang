@@ -45,6 +45,7 @@ pub use registry::*;
 pub use process_groups::*;
 pub use persistence::*;
 
+use crate::ai::{complete_sync, LlmClient, LlmMessage, LlmRequest, LlmResponse};
 use crate::types::ExitReason;
 use crate::vm::Value;
 
@@ -115,6 +116,9 @@ pub struct Runtime {
     // VM used to execute bytecode behavior handlers.
     vm: Option<crate::vm::VM>,
 
+    // LLM client for the v0.9 AI Runtime.
+    llm_client: Option<Box<dyn LlmClient>>,
+
     // Bytecode modules for actors that may need to be recovered after a
     // runtime restart.  Maps actor_id -> (bytecode_module, behavior_offsets,
     // compensation_offsets).
@@ -145,6 +149,7 @@ impl Runtime {
             process_groups: ProcessGroups::new(),
             persistence: Box::new(MemoryStore::new()),
             vm: None,
+            llm_client: None,
             recovery_modules: HashMap::new(),
         }
     }
@@ -240,6 +245,112 @@ impl Runtime {
     ) {
         self.recovery_modules
             .insert(actor_id, (module, offsets, compensation_offsets));
+    }
+
+    /// Install an LLM client for `perform LLM.ask(...)` calls.
+    pub fn set_llm_client(&mut self, client: Box<dyn LlmClient>) {
+        self.llm_client = Some(client);
+    }
+
+    /// Execute a chat-completion request using the configured LLM client.
+    pub fn complete_llm_request(&self, request: LlmRequest) -> Result<LlmResponse, String> {
+        let client = self
+            .llm_client
+            .as_ref()
+            .ok_or_else(|| "No LLM client configured".to_string())?;
+        complete_sync(client.as_ref(), request)
+    }
+
+    /// Execute an LLM request, optionally running tool calls from the response.
+    ///
+    /// The request's `tools` list is populated from `module.tools`. If the
+    /// response contains tool calls, the named functions are looked up in the
+    /// module exports, invoked with the provided JSON arguments, and the results
+    /// are sent back to the model for a final response.
+    pub fn complete_llm_with_tools(
+        &self,
+        mut request: LlmRequest,
+        module: &crate::bytecode::CodeModule,
+    ) -> Result<LlmResponse, String> {
+        request.tools = module.tools.clone();
+        let mut response = self.complete_llm_request(request.clone())?;
+
+        for _ in 0..3 {
+            if response.tool_calls.is_empty() {
+                break;
+            }
+
+            let mut results = Vec::new();
+            for call in &response.tool_calls {
+                let result = self.invoke_tool_function(module, &call.name, &call.arguments)?;
+                results.push((call.name.clone(), result));
+            }
+
+            for (name, result) in results {
+                request.messages.push(LlmMessage {
+                    role: "tool".to_string(),
+                    content: format!("{}: {}", name, result),
+                });
+            }
+
+            response = self.complete_llm_request(request.clone())?;
+        }
+
+        Ok(response)
+    }
+
+    /// Look up a tool by name and invoke the corresponding exported function.
+    fn invoke_tool_function(
+        &self,
+        module: &crate::bytecode::CodeModule,
+        name: &str,
+        arguments: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String, String> {
+        let tool = module
+            .tools
+            .iter()
+            .find(|t| t.name == name)
+            .ok_or_else(|| format!("Tool '{}' not found", name))?;
+
+        let export_idx = module
+            .exports
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, idx)| *idx)
+            .ok_or_else(|| format!("Tool function '{}' is not exported", name))?;
+
+        let func_idx = match module.constants.get(export_idx) {
+            Some(crate::bytecode::Constant::FunctionRef(idx)) => *idx,
+            _ => return Err(format!("Export '{}' is not a function reference", name)),
+        };
+
+        let offset = *module
+            .function_table
+            .get(func_idx)
+            .ok_or_else(|| format!("Function table missing entry for '{}'", name))?;
+
+        let properties = tool
+            .parameters
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| format!("Tool '{}' has no parameter schema", name))?;
+
+        let mut vm = crate::vm::VM::new();
+        vm.load_module(module.clone());
+        let module_idx = 0;
+        let mut frame = crate::vm::Frame::new(None, module_idx);
+        frame.pc = offset;
+
+        for (i, (param_name, _)) in properties.iter().enumerate().take(256) {
+            let json_val = arguments.get(param_name).cloned().unwrap_or(serde_json::Value::Null);
+            frame.regs[i] = json_to_vm_value(&mut vm, json_val)?;
+        }
+
+        vm.set_current_frame(frame);
+        let result = vm
+            .run_from(module_idx, offset)
+            .map_err(|e| format!("Tool '{}' execution failed: {}", name, e))?;
+        Ok(vm.value_to_string(module_idx, result))
     }
 
     /// Record an emitted event on an actor.  For the event-sourced MVP, each
@@ -1791,6 +1902,19 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         rt.schedule_workflow_timer(actor_id, &name, duration_ms);
         Some(crate::vm::Value::unit())
     }
+
+    fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
+        let rt = self.runtime.borrow();
+        let request = LlmRequest {
+            model: model.to_string(),
+            messages: vec![LlmMessage {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            }],
+            tools: Vec::new(),
+        };
+        rt.complete_llm_request(request).ok()?.content
+    }
 }
 
 /// Raw-pointer callbacks used when the runtime itself executes an actor's
@@ -1909,6 +2033,26 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             Some(crate::vm::Value::unit())
         }
     }
+
+    fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
+        unsafe {
+            let rt = &*self.runtime;
+            let module = rt
+                .actors
+                .get(&self.actor_id)?
+                .bytecode_module
+                .clone()?;
+            let request = LlmRequest {
+                model: model.to_string(),
+                messages: vec![LlmMessage {
+                    role: "user".to_string(),
+                    content: prompt.to_string(),
+                }],
+                tools: module.tools.clone(),
+            };
+            rt.complete_llm_with_tools(request, &module).ok()?.content
+        }
+    }
 }
 
 fn map_ast_state_model(model: crate::ast::StateModel) -> crate::runtime::persistence::StateModel {
@@ -1919,6 +2063,26 @@ fn map_ast_state_model(model: crate::ast::StateModel) -> crate::runtime::persist
         AstModel::Durable => RuntimeModel::Durable,
         AstModel::EventSourced => RuntimeModel::EventSourced,
         AstModel::Crdt => RuntimeModel::Crdt,
+    }
+}
+
+/// Convert a JSON value into a Nulang VM value for tool-call arguments.
+fn json_to_vm_value(
+    vm: &mut crate::vm::VM,
+    value: serde_json::Value,
+) -> Result<crate::vm::Value, String> {
+    match value {
+        serde_json::Value::Null => Ok(crate::vm::Value::nil()),
+        serde_json::Value::Bool(b) => Ok(crate::vm::Value::bool(b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(crate::vm::Value::int(i))
+            } else {
+                Ok(crate::vm::Value::float(n.as_f64().unwrap_or(0.0)))
+            }
+        }
+        serde_json::Value::String(s) => Ok(vm.allocate_string(&s)),
+        _ => Err("Unsupported tool argument type".to_string()),
     }
 }
 

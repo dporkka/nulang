@@ -1,5 +1,7 @@
 //! Bytecode ISA, instruction encoding, and module format for the Nulang VM.
 
+use crate::ai::request::ToolSchema;
+
 // ---------------------------------------------------------------------------
 // Opcodes (91 total across 10 categories)
 // ---------------------------------------------------------------------------
@@ -129,6 +131,7 @@ pub enum OpCode {
     PyToNu    = 0x99, // Convert Python object to Nulang Value (py_val_reg, dst_reg, _)
     PyFromNu  = 0x9A, // Convert Nulang Value to Python object (nu_val_reg, dst_reg, _)
     PyRelease = 0x9B, // Decrement Python object reference count (py_val_reg, _, _)
+    LlmAsk    = 0x9C, // LLM ask (model_const_idx in op1+op2, prompt/dst reg in op3)
 
     // == Capabilities (0xA0-0xAF) ==
     CapChk  = 0xA0, // Capability check (required_cap, fail_label)
@@ -205,7 +208,7 @@ impl OpCode {
             0x93 => Some(Unwind),
             0x94 => Some(PyImport), 0x95 => Some(PyGetAttr), 0x96 => Some(PyCall),
             0x97 => Some(PyCallKw), 0x98 => Some(PySetAttr), 0x99 => Some(PyToNu),
-            0x9A => Some(PyFromNu), 0x9B => Some(PyRelease),
+            0x9A => Some(PyFromNu), 0x9B => Some(PyRelease), 0x9C => Some(LlmAsk),
             0xA0 => Some(CapChk), 0xA1 => Some(CapUp), 0xA2 => Some(CapDown),
             0xA3 => Some(CapSend),
             0xB0 => Some(FFICall),
@@ -425,6 +428,8 @@ pub struct CodeModule {
     pub actor_metadata: Vec<ActorMeta>,
     /// Foreign function definitions from `extern` blocks.
     pub foreign_functions: Vec<ForeignFunctionDef>,
+    /// Tool schemas for functions annotated with `@tool(description: "...")`.
+    pub tools: Vec<ToolSchema>,
 }
 
 impl CodeModule {
@@ -440,6 +445,7 @@ impl CodeModule {
             handler_tables: Vec::new(),
             actor_metadata: Vec::new(),
             foreign_functions: Vec::new(),
+            tools: Vec::new(),
         }
     }
 

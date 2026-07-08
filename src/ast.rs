@@ -264,6 +264,16 @@ impl Default for StateModel {
 }
 
 // ---------------------------------------------------------------------------
+// Function annotations
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FunctionAnnotation {
+    /// `@tool(description: "...")` marks a function as an LLM-callable tool.
+    Tool { description: String },
+}
+
+// ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
 
@@ -278,6 +288,7 @@ pub enum Decl {
         effect: Option<EffectRow>,
         cap: Option<Capability>,
         body: Expr,
+        annotations: Vec<FunctionAnnotation>,
         public: bool,
         span: Span,
     },

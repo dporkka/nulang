@@ -26,6 +26,10 @@ cranelift-frontend = "0.132"
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["full"] }
 
+# HTTP client for AI provider integrations
+reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"
+
 # Python interop (PyO3)
 pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"] }
 

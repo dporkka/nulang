@@ -27,6 +27,7 @@ fn lower_decl(decl: &Decl) -> hir::Decl {
             effect,
             cap,
             body,
+            annotations: _,
             public,
             span,
         } => hir::Decl::Function(hir::FunctionDef {
@@ -785,6 +786,7 @@ mod tests {
                 effect: None,
                 cap: None,
                 body: Expr::Literal(Literal::Int(42), Span::default()),
+                annotations: vec![],
                 public: true,
                 span: Span::default(),
             }],

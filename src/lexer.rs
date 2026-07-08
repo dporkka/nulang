@@ -31,6 +31,7 @@ pub enum TokenKind {
     Type, Alias,
     Iso, Trn, Ref, Val, Box, Tag,
     True, False, Unit,
+    Tool,
 
     // Identifiers
     Ident(String),
@@ -727,6 +728,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "or" => Some(TokenKind::Or),
         "not" => Some(TokenKind::Not),
         "unit" => Some(TokenKind::UnitLit),
+        "tool" => Some(TokenKind::Tool),
         _ => None,
     }
 }
@@ -963,6 +965,25 @@ mod tests {
                 TokenKind::Compensate,
                 TokenKind::Await,
                 TokenKind::Subworkflow,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tool_annotation_tokens() {
+        let source = r#"@tool(description: "Adds two integers.")"#;
+        let kinds = lex(source);
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::At,
+                TokenKind::Tool,
+                TokenKind::LParen,
+                TokenKind::Ident("description".to_string()),
+                TokenKind::Colon,
+                TokenKind::StringLit("Adds two integers.".to_string()),
+                TokenKind::RParen,
                 TokenKind::Eof,
             ]
         );

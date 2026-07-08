@@ -161,6 +161,14 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// The callback receives the captured VM state so it can store it on the
     /// actor and resume execution when the signal arrives.
     fn suspend_for_signal(&mut self, _name: &str, _vm_state: Option<SuspendedVmState>) {}
+
+    /// Execute an LLM request synchronously and return the response content.
+    ///
+    /// The VM extracts the prompt as a string and passes it to the callback
+    /// along with the model constant from the `LlmAsk` instruction. If no
+    /// client is configured, return `None` and the VM will leave the result
+    /// register as `nil`.
+    fn complete_llm(&mut self, _model: &str, _prompt: &str) -> Option<String> { None }
 }
 
 /// Standalone callbacks used when the VM runs without an actor runtime.
@@ -754,6 +762,58 @@ impl VM {
                 _ => format!("{:?}", c),
             })
             .unwrap_or_else(|| format!("#const{}", const_idx))
+    }
+
+    /// Convert a runtime value into a plain Rust string.
+    ///
+    /// String-id values are resolved through the module's constant pool.
+    /// Pointer values are read as null-terminated UTF-8.
+    pub fn value_to_string(&self, module_idx: usize, value: Value) -> String {
+        if let Some(id) = value.as_string_id() {
+            self.constant_string(module_idx, id).unwrap_or_default()
+        } else if let Some(ptr) = value.as_ptr() {
+            if ptr.is_null() {
+                String::new()
+            } else {
+                // SAFETY: the pointer was allocated by this VM's allocator and
+                // is expected to be null-terminated for string payloads.
+                unsafe {
+                    CStr::from_ptr(ptr as *const c_char)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            }
+        } else {
+            value.to_string_repr()
+        }
+    }
+
+    /// Allocate a fresh heap string and return it as a pointer value.
+    pub fn allocate_string(&mut self, s: &str) -> Value {
+        let bytes = s.as_bytes();
+        if let Some(ptr) = self.actor_callbacks.alloc(bytes.len() + 1, HeapTypeTag::String) {
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                *ptr.add(bytes.len()) = 0;
+            }
+            Value::ptr(ptr)
+        } else {
+            Value::nil()
+        }
+    }
+
+    /// Add a runtime string to a module's constant pool and return its string-id value.
+    fn add_runtime_string(&mut self, module_idx: usize, s: String) -> Value {
+        let idx = self.modules.get(module_idx)
+            .map(|m| m.constants.len())
+            .unwrap_or(0);
+        if let Some(module) = self.modules.get_mut(module_idx) {
+            module.constants.push(Constant::String(s));
+        }
+        if let Some(bits) = self.jit_constants.get_mut(module_idx) {
+            bits.push(Value::nil().to_bits());
+        }
+        Value::string(idx as u32)
     }
 
     /// Run the loaded program starting from the entry point of the last module.
@@ -1635,6 +1695,20 @@ impl VM {
             }
             OpCode::MetaType => { self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(0); }
             OpCode::MetaCap => { self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(0); }
+
+            // -- LLM effect (v0.9 AI Runtime) --
+            OpCode::LlmAsk => {
+                let model_idx = instr.imm16() as usize;
+                let prompt_reg = instr.op3 as usize;
+                let model = self.module_const_string(module_idx, model_idx);
+                let prompt_value = self.frames[frame_idx].regs[prompt_reg];
+                let prompt = self.value_to_string(module_idx, prompt_value);
+                let result = self.actor_callbacks.complete_llm(&model, &prompt);
+                self.frames[frame_idx].regs[prompt_reg] = match result {
+                    Some(content) => self.add_runtime_string(module_idx, content),
+                    None => Value::nil(),
+                };
+            }
 
             // -- Reference counting / deallocation --
             OpCode::Drop => {

@@ -94,6 +94,7 @@ impl Parser {
                         effect: None,
                         cap: None,
                         body: expr,
+                        annotations: vec![],
                         public: false,
                         span: Span::new(0, 0, 0, 0),
                     });
@@ -112,11 +113,12 @@ impl Parser {
     fn parse_decl(&mut self) -> NuResult<Decl> {
         self.local_type_params.clear();
         let _span = self.current_span();
+        let annotations = self.parse_function_annotations()?;
+        self.skip_newlines();
         let public = self.consume_if(&TokenKind::Pub);
-
         self.skip_newlines();
         match self.peek_kind().clone() {
-            TokenKind::Fn => self.parse_function(public),
+            TokenKind::Fn => self.parse_function(public, annotations),
             TokenKind::Actor | TokenKind::Persistent => self.parse_actor(),
             TokenKind::Workflow => self.parse_workflow(),
             TokenKind::Type => {
@@ -168,7 +170,58 @@ impl Parser {
         }
     }
 
-    fn parse_function(&mut self, public: bool) -> NuResult<Decl> {
+    fn parse_function_annotations(&mut self) -> NuResult<Vec<FunctionAnnotation>> {
+        let mut annotations = Vec::new();
+        while self.consume_if(&TokenKind::At) {
+            let name = match self.peek_kind() {
+                TokenKind::Tool => {
+                    self.advance();
+                    "tool".to_string()
+                }
+                TokenKind::Ident(s) => {
+                    let s = s.clone();
+                    self.advance();
+                    s
+                }
+                other => {
+                    return Err(NuError::ParseError {
+                        msg: format!("Expected annotation name, found {:?}", other),
+                        span: self.current_span(),
+                    });
+                }
+            };
+            self.expect(TokenKind::LParen)?;
+            let mut fields: HashMap<String, String> = HashMap::new();
+            self.skip_newlines();
+            while !self.match_token(&TokenKind::RParen) && !self.is_at_end() {
+                let field_name = self.expect_ident("annotation field name")?;
+                self.expect(TokenKind::Colon)?;
+                let field_value = self.expect_string("annotation field value")?;
+                fields.insert(field_name, field_value);
+                self.skip_newlines();
+                if !self.consume_if(&TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines();
+            }
+            self.expect(TokenKind::RParen)?;
+            match name.as_str() {
+                "tool" => {
+                    let description = fields.remove("description").unwrap_or_default();
+                    annotations.push(FunctionAnnotation::Tool { description });
+                }
+                _ => {
+                    return Err(NuError::ParseError {
+                        msg: format!("Unknown function annotation: @{}", name),
+                        span: self.current_span(),
+                    });
+                }
+            }
+        }
+        Ok(annotations)
+    }
+
+    fn parse_function(&mut self, public: bool, annotations: Vec<FunctionAnnotation>) -> NuResult<Decl> {
         let span = self.current_span();
         self.advance(); // consume 'fn'
         let name = self.expect_ident("function name")?;
@@ -210,6 +263,7 @@ impl Parser {
             effect,
             cap,
             body,
+            annotations,
             public,
             span,
         })
@@ -1138,7 +1192,13 @@ impl Parser {
         self.advance(); // consume 'perform'
         let effect = self.expect_ident("effect name")?;
         self.expect(TokenKind::Dot)?;
-        let op = self.expect_ident("operation name")?;
+        let op = match self.peek_kind() {
+            TokenKind::Ask => {
+                self.advance();
+                "ask".to_string()
+            }
+            _ => self.expect_ident("operation name")?,
+        };
         self.expect(TokenKind::LParen)?;
         let args = self.parse_arg_list()?;
         Ok(Expr::Perform {
@@ -1218,6 +1278,21 @@ impl Parser {
         let current_kind = self.peek_kind();
         match current_kind {
             TokenKind::Ident(s) | TokenKind::UpperIdent(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
+            _ => Err(NuError::ParseError {
+                msg: format!("Expected {}, found {:?}", msg, current_kind),
+                span: self.current_span(),
+            }),
+        }
+    }
+
+    fn expect_string(&mut self, msg: &str) -> NuResult<String> {
+        let current_kind = self.peek_kind();
+        match current_kind {
+            TokenKind::StringLit(s) => {
                 let s = s.clone();
                 self.advance();
                 Ok(s)
@@ -2253,5 +2328,32 @@ mod tests {
     fn test_parse_workflow_invalid_body_errors() {
         let result = parse("workflow W { fn f() -> Int { 1 } }");
         assert!(result.is_err(), "Expected parse error for invalid workflow body");
+    }
+
+    #[test]
+    fn test_parse_tool_annotation() {
+        let source = r#"@tool(description: "Adds two integers.")
+        pub fn add(x: Int, y: Int) -> Int { x + y }"#;
+        let ast = parse(source).unwrap();
+        assert_eq!(ast.decls.len(), 1);
+        match &ast.decls[0] {
+            Decl::Function {
+                name,
+                annotations,
+                public,
+                ..
+            } => {
+                assert_eq!(name, "add");
+                assert!(*public);
+                assert_eq!(annotations.len(), 1);
+                assert_eq!(
+                    annotations[0],
+                    FunctionAnnotation::Tool {
+                        description: "Adds two integers.".to_string(),
+                    }
+                );
+            }
+            _ => panic!("Expected function declaration with tool annotation"),
+        }
     }
 }

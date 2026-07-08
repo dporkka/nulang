@@ -24,5 +24,6 @@ pub mod jit;
 pub use crate::jit::reset_hot_counters;
 pub mod python;
 pub mod ffi;
+pub mod ai;
 #[cfg(test)]
 pub mod stress_tests;

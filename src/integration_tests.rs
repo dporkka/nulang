@@ -1461,4 +1461,23 @@ mod tests {
         "#;
         assert_int_new(source, 20);
     }
+
+    #[test]
+    fn test_llm_ask_mock_client() {
+        let source = r#"perform LLM.ask("hello")"#;
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt)));
+
+        let result = vm.run().unwrap();
+        let string_id = result.as_string_id().expect("expected string result");
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.constant_string(module_idx, string_id).unwrap();
+        assert_eq!(content, "world");
+    }
 }

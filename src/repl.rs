@@ -178,6 +178,7 @@ impl Repl {
                 effect: None,
                 cap: None,
                 body: expr.clone(),
+                annotations: vec![],
                 public: false,
                 span: Span::default(),
             });
@@ -275,6 +276,7 @@ impl Repl {
             effect: None,
             cap: None,
             body: expr,
+            annotations: vec![],
             public: false,
             span: Span::default(),
         });
