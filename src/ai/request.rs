@@ -13,6 +13,17 @@ pub struct LlmRequest {
     pub tools: Vec<ToolSchema>,
     /// Episodic memory messages prepended to `messages` before sending.
     pub memory: Vec<LlmMessage>,
+    /// Optional per-model pricing information for cost estimation.
+    pub pricing: Option<ModelPricing>,
+}
+
+/// Pricing rates for a model, expressed as cost per 1k tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct ModelPricing {
+    /// Cost in USD per 1k prompt/input tokens.
+    pub input_cost_per_1k: f64,
+    /// Cost in USD per 1k completion/output tokens.
+    pub output_cost_per_1k: f64,
 }
 
 /// A chat message exchanged with an LLM.

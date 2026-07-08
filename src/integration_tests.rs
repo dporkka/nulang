@@ -1530,4 +1530,93 @@ mod tests {
         assert_eq!(calls[1].messages[3].role, "user");
         assert_eq!(calls[1].messages[3].content, "world");
     }
+
+    #[test]
+    fn test_agent_ask_tracks_usage_and_cost() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                pricing: { input: 0.01, output: 0.02 }
+            }
+            let a = spawn Agent {} in
+            ask a ask("hello")
+        "#;
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let client = crate::ai::MockLlmClient::with_usage(
+            "world",
+            crate::ai::TokenUsage::new(1000, 500),
+        );
+        let client_ref = client.clone();
+        rt.borrow_mut().set_llm_client(Box::new(client));
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+
+        let result = vm.run().unwrap();
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.value_to_string(module_idx, result);
+        assert_eq!(content, "world");
+
+        let rt = rt.borrow();
+        let actor = rt.actors.values().next().expect("expected one actor");
+        assert_eq!(actor.get_state_field("usage_prompt").unwrap().as_int(), Some(1000));
+        assert_eq!(
+            actor.get_state_field("usage_completion").unwrap().as_int(),
+            Some(500)
+        );
+        // 1000 * 0.01 / 1000 + 500 * 0.02 / 1000 = 0.01 + 0.01 = 0.02
+        let cost = actor.get_state_field("usage_cost").unwrap().as_float().unwrap();
+        assert!((cost - 0.02).abs() < 1e-9);
+
+        // Pricing should be forwarded on the request.
+        let calls = client_ref.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].pricing.as_ref().unwrap().input_cost_per_1k, 0.01);
+        assert_eq!(calls[0].pricing.as_ref().unwrap().output_cost_per_1k, 0.02);
+    }
+
+    #[test]
+    fn test_agent_usage_behavior() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                pricing: { input: 0.01, output: 0.02 }
+            }
+            let a = spawn Agent {} in
+            let _ = ask a ask("hello") in
+            ask a usage()
+        "#;
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let client = crate::ai::MockLlmClient::with_usage(
+            "world",
+            crate::ai::TokenUsage::new(1000, 500),
+        );
+        rt.borrow_mut().set_llm_client(Box::new(client));
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+
+        let result = vm.run().unwrap();
+
+        // The usage behavior returns an array [prompt_tokens, completion_tokens, cost].
+        // Records and tuples are not yet supported by the interpreter, so the
+        // actor-allocated array is inspected directly in Rust.
+        let ptr = result
+            .as_ptr()
+            .expect("usage() should return an array pointer");
+        let usage = unsafe { std::slice::from_raw_parts(ptr as *const Value, 3) };
+        assert_eq!(usage[0].as_int(), Some(1000), "prompt tokens");
+        assert_eq!(usage[1].as_int(), Some(500), "completion tokens");
+        let cost = usage[2].as_float().expect("cost should be a float");
+        // 1000 * 0.01 / 1000 + 500 * 0.02 / 1000 = 0.01 + 0.01 = 0.02
+        assert!((cost - 0.02).abs() < 1e-9, "cost: {}", cost);
+    }
 }

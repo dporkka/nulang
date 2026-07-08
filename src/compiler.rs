@@ -1548,17 +1548,23 @@ impl Compiler {
     fn compile_agent(&mut self, agent: &Decl) -> NuResult<()> {
         // Extract fields from the agent declaration.  This pattern is irrefutable
         // because the caller already matched on Decl::Agent.
-        let (name, model, system_prompt, tool_names, memory, span) = match agent {
+        let (name, model, system_prompt, tool_names, memory, pricing, span) = match agent {
             Decl::Agent {
                 name,
                 model,
                 system_prompt,
                 tools,
                 memory,
+                pricing,
                 span,
-            } => (name, model, system_prompt, tools, memory, *span),
+            } => (name, model, system_prompt, tools, memory, *pricing, *span),
             _ => unreachable!(),
         };
+
+        let agent_pricing = pricing.unwrap_or(crate::ast::AgentPricing {
+            input: 0.0,
+            output: 0.0,
+        });
 
         let max_turns = memory.as_ref().map(|m| m.max_turns).unwrap_or(50);
         let initial_memory = serde_json::to_string(&EpisodicMemory::new(max_turns))
@@ -1587,13 +1593,43 @@ impl Compiler {
                 Type::string(),
                 Expr::Literal(Literal::String(initial_memory), span),
             ),
+            (
+                "usage_prompt".to_string(),
+                StateModel::Durable,
+                Type::int(),
+                Expr::Literal(Literal::Int(0), span),
+            ),
+            (
+                "usage_completion".to_string(),
+                StateModel::Durable,
+                Type::int(),
+                Expr::Literal(Literal::Int(0), span),
+            ),
+            (
+                "usage_cost".to_string(),
+                StateModel::Durable,
+                Type::float(),
+                Expr::Literal(Literal::Float(0.0), span),
+            ),
+            (
+                "pricing_input".to_string(),
+                StateModel::Durable,
+                Type::float(),
+                Expr::Literal(Literal::Float(agent_pricing.input), span),
+            ),
+            (
+                "pricing_output".to_string(),
+                StateModel::Durable,
+                Type::float(),
+                Expr::Literal(Literal::Float(agent_pricing.output), span),
+            ),
         ];
 
         // Generated ask behavior reads agent state and performs the LLM ask.
         // The parser accepts `ask` as a behavior name after the `ask` keyword,
         // so agent actors can be invoked as `ask a ask("...")`.
         // The runtime recognizes agent actors and wires model/system/memory.
-        let behavior = Behavior {
+        let ask_behavior = Behavior {
             name: "ask".to_string(),
             params: vec![("prompt".to_string(), Some(Type::string()))],
             body: Expr::Block {
@@ -1627,6 +1663,38 @@ impl Compiler {
             span,
         };
 
+        // Generated usage behavior returns cumulative usage/cost state as an
+        // array [prompt_tokens, completion_tokens, cost]. Records and tuples
+        // are not yet supported by the bytecode interpreter, so an array is the
+        // portable composite value available today.
+        let usage_behavior = Behavior {
+            name: "usage".to_string(),
+            params: vec![],
+            body: Expr::Array(
+                vec![
+                    Expr::FieldAccess {
+                        expr: Box::new(Expr::SelfRef(span)),
+                        field: "usage_prompt".to_string(),
+                        span,
+                    },
+                    Expr::FieldAccess {
+                        expr: Box::new(Expr::SelfRef(span)),
+                        field: "usage_completion".to_string(),
+                        span,
+                    },
+                    Expr::FieldAccess {
+                        expr: Box::new(Expr::SelfRef(span)),
+                        field: "usage_cost".to_string(),
+                        span,
+                    },
+                ],
+                span,
+            ),
+            effect: None,
+            cap: Capability::Ref,
+            span,
+        };
+
         // Resolve tool names against the module's tool schemas.
         let mut resolved_tools = Vec::new();
         for tool_name in tool_names {
@@ -1648,7 +1716,7 @@ impl Compiler {
             name,
             true,
             &state_fields,
-            &[behavior],
+            &[ask_behavior, usage_behavior],
             &[],
             false,
             true,
@@ -2117,12 +2185,28 @@ mod tests {
         assert!(meta.persistent);
         assert!(meta.is_agent);
         assert!(!meta.is_workflow);
-        assert_eq!(meta.state_models.len(), 3);
+        assert_eq!(meta.state_models.len(), 8);
         assert!(meta.state_models.iter().all(|(_, m)| *m == StateModel::Durable));
-        assert_eq!(meta.behavior_indices.len(), 1);
-        let behavior = &module.behaviors[meta.behavior_indices[0]];
-        assert_eq!(behavior.name, "MyAgent.ask");
-        assert_eq!(behavior.param_count, 1);
+        let field_names: std::collections::HashSet<&str> = meta
+            .state_models
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(field_names.contains("model"));
+        assert!(field_names.contains("system_prompt"));
+        assert!(field_names.contains("episodic_memory"));
+        assert!(field_names.contains("usage_prompt"));
+        assert!(field_names.contains("usage_completion"));
+        assert!(field_names.contains("usage_cost"));
+        assert!(field_names.contains("pricing_input"));
+        assert!(field_names.contains("pricing_output"));
+        assert_eq!(meta.behavior_indices.len(), 2);
+        let ask_behavior = &module.behaviors[meta.behavior_indices[0]];
+        assert_eq!(ask_behavior.name, "MyAgent.ask");
+        assert_eq!(ask_behavior.param_count, 1);
+        let usage_behavior = &module.behaviors[meta.behavior_indices[1]];
+        assert_eq!(usage_behavior.name, "MyAgent.usage");
+        assert_eq!(usage_behavior.param_count, 0);
         assert_eq!(meta.tools.len(), 1);
         assert_eq!(meta.tools[0].name, "add");
     }

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use crate::ai::client::LlmClient;
 use crate::ai::request::LlmRequest;
-use crate::ai::response::{LlmResponse, ToolCall};
+use crate::ai::response::{LlmResponse, TokenUsage, ToolCall};
 
 /// A test client that always returns a fixed response and optionally records
 /// the requests it receives.
@@ -37,11 +37,17 @@ impl MockLlmClient {
 
     /// Create a mock client that returns a plain text response.
     pub fn text(content: impl Into<String>) -> Self {
+        Self::with_usage(content, TokenUsage::default())
+    }
+
+    /// Create a mock client that returns a plain text response with usage.
+    pub fn with_usage(content: impl Into<String>, usage: TokenUsage) -> Self {
         Self::new(LlmResponse {
             content: Some(content.into()),
             tool_calls: Vec::new(),
             model: "mock".to_string(),
             finish_reason: "stop".to_string(),
+            usage,
         })
     }
 
@@ -49,6 +55,15 @@ impl MockLlmClient {
     pub fn tool_call(
         name: impl Into<String>,
         arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        Self::tool_call_with_usage(name, arguments, TokenUsage::default())
+    }
+
+    /// Create a mock client that returns a single tool call with usage.
+    pub fn tool_call_with_usage(
+        name: impl Into<String>,
+        arguments: serde_json::Map<String, serde_json::Value>,
+        usage: TokenUsage,
     ) -> Self {
         Self::new(LlmResponse {
             content: None,
@@ -59,6 +74,7 @@ impl MockLlmClient {
             }],
             model: "mock".to_string(),
             finish_reason: "tool_calls".to_string(),
+            usage,
         })
     }
 

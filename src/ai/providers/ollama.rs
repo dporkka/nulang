@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::client::LlmClient;
 use crate::ai::request::{LlmMessage, LlmRequest, ToolSchema};
-use crate::ai::response::{LlmResponse, ToolCall};
+use crate::ai::response::{LlmResponse, TokenUsage, ToolCall};
 
 /// Client for the Ollama HTTP API.
 #[derive(Debug, Clone)]
@@ -68,11 +68,15 @@ impl LlmClient for OllamaClient {
             })
             .collect();
 
+        let prompt_tokens = response.prompt_eval_count.unwrap_or(0);
+        let completion_tokens = response.eval_count.unwrap_or(0);
+
         Ok(LlmResponse {
             content,
             tool_calls,
             model: response.model,
             finish_reason: response.done_reason.unwrap_or_default(),
+            usage: TokenUsage::new(prompt_tokens, completion_tokens),
         })
     }
 }
@@ -140,6 +144,10 @@ struct OllamaChatResponse {
     model: String,
     message: OllamaMessage,
     done_reason: Option<String>,
+    /// Number of tokens evaluated for the prompt, if reported by Ollama.
+    prompt_eval_count: Option<u32>,
+    /// Number of tokens generated for the completion, if reported by Ollama.
+    eval_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

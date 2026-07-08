@@ -282,6 +282,13 @@ pub struct AgentMemoryConfig {
     pub max_turns: usize,
 }
 
+/// Per-token pricing configuration for an agent declaration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AgentPricing {
+    pub input: f64,
+    pub output: f64,
+}
+
 // ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
@@ -375,6 +382,7 @@ pub enum Decl {
         system_prompt: Option<String>,
         tools: Vec<String>,
         memory: Option<AgentMemoryConfig>,
+        pricing: Option<AgentPricing>,
         span: Span,
     },
 }

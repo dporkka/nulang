@@ -340,6 +340,7 @@ impl Parser {
         let mut system_prompt: Option<String> = None;
         let mut tools: Vec<String> = Vec::new();
         let mut memory: Option<AgentMemoryConfig> = None;
+        let mut pricing: Option<AgentPricing> = None;
 
         self.skip_newlines();
         while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
@@ -407,6 +408,44 @@ impl Parser {
                         max_turns: max_turns.unwrap_or(50),
                     });
                 }
+                "pricing" => {
+                    self.expect(TokenKind::LBrace)?;
+                    self.skip_newlines();
+                    let mut input_cost: Option<f64> = None;
+                    let mut output_cost: Option<f64> = None;
+                    while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.match_token(&TokenKind::RBrace) {
+                            break;
+                        }
+                        let price_field = self.expect_ident("pricing field name")?;
+                        self.expect(TokenKind::Colon)?;
+                        match price_field.as_str() {
+                            "input" => {
+                                input_cost = Some(self.expect_float("pricing input")?);
+                            }
+                            "output" => {
+                                output_cost = Some(self.expect_float("pricing output")?);
+                            }
+                            other => {
+                                return Err(NuError::ParseError {
+                                    msg: format!("Unknown pricing field: {}", other),
+                                    span: self.current_span(),
+                                });
+                            }
+                        }
+                        self.skip_newlines();
+                        if !self.consume_if(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                    pricing = Some(AgentPricing {
+                        input: input_cost.unwrap_or(0.0),
+                        output: output_cost.unwrap_or(0.0),
+                    });
+                }
                 other => {
                     return Err(NuError::ParseError {
                         msg: format!("Unknown agent field: {}", other),
@@ -433,6 +472,7 @@ impl Parser {
             system_prompt,
             tools,
             memory: memory.or(Some(AgentMemoryConfig { max_turns: 50 })),
+            pricing,
             span,
         })
     }
@@ -1431,6 +1471,21 @@ impl Parser {
             }
             _ => Err(NuError::ParseError {
                 msg: format!("Expected integer {}, found {:?}", msg, current_kind),
+                span: self.current_span(),
+            }),
+        }
+    }
+
+    fn expect_float(&mut self, msg: &str) -> NuResult<f64> {
+        let current_kind = self.peek_kind();
+        match current_kind {
+            TokenKind::FloatLit(f) => {
+                let f = *f;
+                self.advance();
+                Ok(f)
+            }
+            _ => Err(NuError::ParseError {
+                msg: format!("Expected float {}, found {:?}", msg, current_kind),
                 span: self.current_span(),
             }),
         }

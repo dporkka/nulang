@@ -286,7 +286,7 @@ impl Runtime {
     /// updated with the user prompt and assistant response before being saved
     /// back to state.
     pub fn complete_agent_llm(&mut self, actor_id: u64, prompt: &str) -> Option<String> {
-        let (model, system_prompt, memory_json, module) = {
+        let (model, system_prompt, memory_json, pricing, usage_prompt, usage_completion, usage_cost, module) = {
             let actor = self.actors.get(&actor_id)?;
             let module = actor.bytecode_module.clone()?;
             let model = Self::vm_value_to_string(&actor.get_state_field("model")?, Some(&module))?;
@@ -298,7 +298,23 @@ impl Runtime {
                 &actor.get_state_field("episodic_memory")?,
                 Some(&module),
             )?;
-            (model, system_prompt, memory_json, module)
+            let pricing = crate::ai::ModelPricing {
+                input_cost_per_1k: actor.get_state_field("pricing_input")?.as_float()?,
+                output_cost_per_1k: actor.get_state_field("pricing_output")?.as_float()?,
+            };
+            let usage_prompt = actor.get_state_field("usage_prompt")?.as_int()? as u32;
+            let usage_completion = actor.get_state_field("usage_completion")?.as_int()? as u32;
+            let usage_cost = actor.get_state_field("usage_cost")?.as_float()?;
+            (
+                model,
+                system_prompt,
+                memory_json,
+                pricing,
+                usage_prompt,
+                usage_completion,
+                usage_cost,
+                module,
+            )
         };
 
         let mut memory: crate::ai::EpisodicMemory =
@@ -322,9 +338,16 @@ impl Runtime {
             messages,
             tools: Vec::new(),
             memory: Vec::new(),
+            pricing: Some(pricing),
         };
         let response = self.complete_llm_with_tools(request, Vec::new(), &module).ok()?;
         let content = response.content.clone().unwrap_or_default();
+
+        // Accumulate token usage and cost into durable state.
+        let new_cost = crate::ai::estimated_cost(&response.usage, &pricing);
+        let updated_prompt = usage_prompt.saturating_add(response.usage.prompt);
+        let updated_completion = usage_completion.saturating_add(response.usage.completion);
+        let updated_cost = usage_cost + new_cost;
 
         memory.add_turn("user", prompt);
         memory.add_turn("assistant", &content);
@@ -333,6 +356,12 @@ impl Runtime {
         let actor = self.actors.get_mut(&actor_id)?;
         let ptr = actor.allocate_string(&updated_memory);
         actor.set_state_field("episodic_memory", ptr);
+        actor.set_state_field("usage_prompt", crate::vm::Value::int(updated_prompt as i64));
+        actor.set_state_field(
+            "usage_completion",
+            crate::vm::Value::int(updated_completion as i64),
+        );
+        actor.set_state_field("usage_cost", crate::vm::Value::float(updated_cost));
         Some(content)
     }
 
@@ -2099,6 +2128,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             }],
             tools: Vec::new(),
             memory: Vec::new(),
+            pricing: None,
         };
         rt.complete_llm_request(request, Vec::new()).ok()?.content
     }
@@ -2240,6 +2270,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 }],
                 tools: module.tools.clone(),
                 memory: Vec::new(),
+                pricing: None,
             };
             rt.complete_llm_with_tools(request, Vec::new(), &module).ok()?.content
         }
