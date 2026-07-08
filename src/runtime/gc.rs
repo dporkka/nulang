@@ -44,9 +44,10 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::runtime::heap::{OrcaHeader, TypeTag};
+
 // ---------------------------------------------------------------------------
-// Forward declarations — these types are defined in heap.rs and are being
-// rewritten in parallel.  The types below are the interface we expect.
+// OrcaHeap trait
 // ---------------------------------------------------------------------------
 
 /// Trait abstracting over the per-actor heap so that `OrcaGc` can be tested
@@ -56,6 +57,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub trait OrcaHeap {
     /// Allocate `payload_size` bytes for user data, preceded by an
     /// `OrcaHeader`.  Returns a pointer to the **payload** (not the header).
+    ///
+    /// The implementation must fully initialise the [`OrcaHeader`] so that
+    /// `header_ptr` returns a valid header.
     fn alloc_payload(&mut self, payload_size: usize) -> Option<*mut u8>;
 
     /// Deallocate a block previously returned by `alloc_payload`.
@@ -70,92 +74,6 @@ pub trait OrcaHeap {
     /// # Safety
     /// `payload_ptr` must be a valid payload pointer from this heap.
     unsafe fn header_ptr(&self, payload_ptr: *mut u8) -> *mut OrcaHeader;
-}
-
-/// Header that precedes every heap object in Nulang.
-///
-/// Lives **immediately before** the payload in memory:
-/// ```text
-/// [ OrcaHeader | payload data … ]
-/// ^ header_ptr   ^ payload_ptr
-/// ```
-#[repr(C)]
-pub struct OrcaHeader {
-    /// Number of references held by the **owning** actor.
-    pub local_count: std::sync::atomic::AtomicU32,
-    /// Number of references held by **other** actors (or in-flight).
-    pub foreign_count: std::sync::atomic::AtomicU32,
-    /// If `true`, the object is immortal (never collected).
-    pub sticky: std::sync::atomic::AtomicBool,
-    /// The actor that owns this object.
-    pub actor_id: u64,
-    /// Size class of the object (used by the allocator).
-    pub size_class: SizeClass,
-    /// Tricolor marker for cycle detection.
-    pub gc_color: std::sync::atomic::AtomicU8,
-    /// Discriminant indicating what kind of payload follows.
-    pub type_tag: TypeTag,
-    /// Size of the payload in bytes.
-    pub payload_size: usize,
-}
-
-/// Size-classification used by the bump allocator / free lists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum SizeClass {
-    Tiny = 0,    // ≤ 64 bytes
-    Small = 1,   // ≤ 256 bytes
-    Medium = 2,  // ≤ 1 KiB
-    Large = 3,   // ≤ 4 KiB
-    Huge = 4,    // > 4 KiB
-}
-
-/// Discriminant for the runtime type of a heap object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum TypeTag {
-    ActorRef = 0,
-    Array = 1,
-    String = 2,
-    Record = 3,
-    Closure = 4,
-    Map = 5,
-    Tuple = 6,
-    Raw = 7,
-}
-
-impl OrcaHeader {
-    /// Create a new header for an object owned by `actor_id`.
-    pub fn new(actor_id: u64, payload_size: usize, type_tag: TypeTag) -> Self {
-        OrcaHeader {
-            local_count: std::sync::atomic::AtomicU32::new(1), // creator holds one local ref
-            foreign_count: std::sync::atomic::AtomicU32::new(0),
-            sticky: std::sync::atomic::AtomicBool::new(false),
-            actor_id,
-            size_class: classify_size(payload_size),
-            gc_color: std::sync::atomic::AtomicU8::new(GcColor::White as u8),
-            type_tag,
-            payload_size,
-        }
-    }
-}
-
-/// ORCA object color: White objects are candidates for collection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum GcColor {
-    White = 0,
-}
-
-/// Classify a payload size into a size class.
-fn classify_size(size: usize) -> SizeClass {
-    match size {
-        0..=64 => SizeClass::Tiny,
-        65..=256 => SizeClass::Small,
-        257..=1024 => SizeClass::Medium,
-        1025..=4096 => SizeClass::Large,
-        _ => SizeClass::Huge,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -313,11 +231,14 @@ impl OrcaGc {
 
         let payload_ptr = heap.alloc_payload(payload_size)?;
 
-        // SAFETY: `alloc_payload` guarantees that the header is writable and
-        // properly aligned immediately before the payload.
+        // `alloc_payload` initialises the whole header.  We only need to
+        // correct the actor_id (the heap may not know it yet in tests) and
+        // set the real type tag (alloc_payload uses TypeTag::Raw as a
+        // placeholder).
         unsafe {
-            let header_ptr = heap.header_ptr(payload_ptr);
-            std::ptr::write(header_ptr, OrcaHeader::new(self.actor_id, payload_size, type_tag));
+            let header = &mut *heap.header_ptr(payload_ptr);
+            header.actor_id = self.actor_id;
+            header.type_tag = type_tag;
         }
 
         self.stats
@@ -349,7 +270,7 @@ impl OrcaGc {
         );
 
         header
-            .local_count
+            .ref_count
             .fetch_add(1, Ordering::Relaxed);
         self.stats
             .local_refs_created
@@ -383,7 +304,7 @@ impl OrcaGc {
         );
 
         let prev = header
-            .local_count
+            .ref_count
             .fetch_sub(1, Ordering::Release);
 
         self.stats
@@ -476,7 +397,7 @@ impl OrcaGc {
 
         // We now hold a local reference.
         header
-            .local_count
+            .ref_count
             .fetch_add(1, Ordering::Relaxed);
 
         self.stats
@@ -523,7 +444,7 @@ impl OrcaGc {
         // If foreign count reached zero and local count is also zero, free.
         let prev_foreign_for_check = prev_foreign;
         if prev_foreign_for_check == 0 {
-            let local = header.local_count.load(Ordering::Acquire);
+            let local = header.ref_count.load(Ordering::Acquire);
             let is_sticky = header.sticky.load(Ordering::Relaxed);
             if local == 0 && !is_sticky {
                 // We need the payload pointer to free.  Compute it from the
@@ -581,7 +502,7 @@ impl OrcaGc {
             // SAFETY: header_ptr came from a valid payload pointer and the
             // object is still alive (otherwise it wouldn't be in the list).
             let header = unsafe { &*header_ptr };
-            let local = header.local_count.load(Ordering::Acquire);
+            let local = header.ref_count.load(Ordering::Acquire);
             let foreign = header.foreign_count.load(Ordering::Acquire);
             let is_sticky = header.sticky.load(Ordering::Relaxed);
 
@@ -618,6 +539,14 @@ impl OrcaGc {
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
+
+    /// Remove `header` from the deferred-decrement list.
+    ///
+    /// Called by the cycle detector before it reclaims an object, so that a
+    /// later `process_deferred` pass does not touch freed memory.
+    pub fn remove_deferred(&mut self, header: *mut OrcaHeader) {
+        self.deferred_decrements.retain(|&h| h != header);
+    }
 
     /// Free an object and update statistics.
     ///
@@ -847,10 +776,13 @@ mod tests {
                 return None;
             }
 
-            // Zero the whole block to avoid uninit reads in tests.
-            // SAFETY: base..base+total is writable.
+            // Initialise the header so that OrcaGc can operate on it directly.
+            // SAFETY: base..base+total is writable and properly aligned.
             unsafe {
-                std::ptr::write_bytes(base, 0, total);
+                std::ptr::write(
+                    base as *mut OrcaHeader,
+                    OrcaHeader::new(0, TypeTag::Raw, total, payload_size),
+                );
             }
 
             let payload_ptr = unsafe { base.add(header_size) };
@@ -886,7 +818,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     fn local_count(header: &OrcaHeader) -> u32 {
-        header.local_count.load(Ordering::Relaxed)
+        header.ref_count.load(Ordering::Relaxed)
     }
 
     fn foreign_count(header: &OrcaHeader) -> u32 {

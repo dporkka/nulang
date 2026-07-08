@@ -55,7 +55,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::heap::{ActorHeap, GcColor, OrcaHeader, SizeClass, TypeTag};
 use super::gc::OrcaHeap as OrcaHeapTrait;
-use super::gc::OrcaHeader as GcOrcaHeader;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -949,12 +948,12 @@ impl OrcaHeapTrait for DualHeap {
     ///
     /// # Safety
     /// `payload_ptr` must be a valid payload pointer from this heap.
-    unsafe fn header_ptr(&self, payload_ptr: *mut u8) -> *mut GcOrcaHeader {
+    unsafe fn header_ptr(&self, payload_ptr: *mut u8) -> *mut OrcaHeader {
         if self.ptr_in_nursery(payload_ptr) {
             let nobj_ptr = NurseryRegion::nursery_object_of(payload_ptr);
-            &mut (*nobj_ptr).header as *mut OrcaHeader as *mut GcOrcaHeader
+            &mut (*nobj_ptr).header as *mut OrcaHeader
         } else {
-            ActorHeap::header_of(payload_ptr) as *mut GcOrcaHeader
+            ActorHeap::header_of(payload_ptr)
         }
     }
 }
@@ -1226,14 +1225,10 @@ mod dual_heap_tests {
         assert!(!p.is_null());
         assert!(heap.ptr_in_nursery(p), "should be in nursery");
 
-        // header_ptr — returns a gc::OrcaHeader pointer.
-        // The first 3 fields (local_count, foreign_count, sticky) are at
-        // compatible offsets with heap::OrcaHeader (ref_count, foreign_count,
-        // sticky).  actor_id and type_tag are NOT at compatible offsets.
+        // header_ptr — returns the unified OrcaHeader pointer.
         unsafe {
             let header = &*heap.header_ptr(p);
-            // local_count in gc header maps to ref_count in heap header (offset 0).
-            assert_eq!(header.local_count.load(Ordering::Relaxed), 1);
+            assert_eq!(header.ref_count.load(Ordering::Relaxed), 1);
             // foreign_count is at compatible offset 4.
             assert_eq!(header.foreign_count.load(Ordering::Relaxed), 0);
             // sticky is at compatible offset 8.
@@ -1270,7 +1265,7 @@ mod dual_heap_tests {
             assert!(!heap.ptr_in_nursery(tp), "should be in tenured");
             unsafe {
                 let header_before = &*heap.header_ptr(tp);
-                assert_eq!(header_before.local_count.load(Ordering::Relaxed), 1);
+                assert_eq!(header_before.ref_count.load(Ordering::Relaxed), 1);
                 heap.free_payload(tp);
             }
             // After freeing the tenured object, the live count should drop.

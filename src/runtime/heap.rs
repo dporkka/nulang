@@ -142,11 +142,12 @@ pub enum TypeTag {
 ///   11    | type_tag       (TypeTag     u8)
 ///   12    | _pad           ([u8; 4]) — aligns actor_id to 8 bytes
 ///   16    | actor_id       (u64)
-///   24    | size           (usize — total bytes, header + payload)
-///   32    | live_next      (*mut OrcaHeader)
-///   40    | live_prev      (*mut OrcaHeader)
+///   24    | size           (usize — total bytes, header + aligned payload)
+///   32    | payload_size   (usize — requested payload bytes)
+///   40    | live_next      (*mut OrcaHeader)
+///   48    | live_prev      (*mut OrcaHeader)
 ///  -------+---------------
-///   48    | TOTAL
+///   56    | TOTAL
 /// ```
 #[repr(C)]
 pub struct OrcaHeader {
@@ -171,6 +172,8 @@ pub struct OrcaHeader {
     pub actor_id: u64,
     /// Total bytes allocated for this object (header + aligned payload).
     pub size: usize,
+    /// Requested payload size in bytes (as passed to `alloc`).
+    pub payload_size: usize,
     /// Intrusive next pointer for the live-object doubly-linked list.
     /// This is internal to the allocator and not part of the public ORCA spec.
     pub(crate) live_next: *mut OrcaHeader,
@@ -184,12 +187,13 @@ impl OrcaHeader {
     /// # Safety
     /// The returned value must be copied into heap-backed storage (via
     /// `ptr::write`) before any other thread can observe it.
-    fn new(
+    pub(crate) fn new(
         actor_id: u64,
-        size_class: SizeClass,
         type_tag: TypeTag,
         total_size: usize,
+        payload_size: usize,
     ) -> Self {
+        let (size_class, _) = classify_total_size(total_size);
         OrcaHeader {
             ref_count: AtomicU32::new(1),
             foreign_count: AtomicU32::new(0),
@@ -200,6 +204,7 @@ impl OrcaHeader {
             _pad: [0; 4],
             actor_id,
             size: total_size,
+            payload_size,
             live_next: std::ptr::null_mut(),
             live_prev: std::ptr::null_mut(),
         }
@@ -366,7 +371,7 @@ impl ActorHeap {
                     // our backing block.
                     std::ptr::write(
                         header_ptr,
-                        OrcaHeader::new(self.actor_id, size_class, type_tag, total_size),
+                        OrcaHeader::new(self.actor_id, type_tag, total_size, payload_size),
                     );
 
                     self.add_to_live_list(header_ptr);
@@ -392,7 +397,7 @@ impl ActorHeap {
             // Initialise the header in place.
             std::ptr::write(
                 header_ptr,
-                OrcaHeader::new(self.actor_id, size_class, type_tag, total_size),
+                OrcaHeader::new(self.actor_id, type_tag, total_size, payload_size),
             );
 
             self.add_to_live_list(header_ptr);
@@ -444,7 +449,7 @@ impl ActorHeap {
             //
             // SAFETY: the payload is at least 8 bytes for every size class
             // except Tiny, and Tiny is never actually used because the header
-            // alone is 48 bytes. Therefore we always have room for a pointer.
+            // alone is 56 bytes. Therefore we always have room for a pointer.
             *(payload_ptr as *mut *mut u8) = self.free_lists[sc_idx];
             self.free_lists[sc_idx] = payload_ptr;
         }
@@ -467,7 +472,7 @@ impl ActorHeap {
     /// because of the `#[repr(C)]` layout.
     pub unsafe fn header_of(payload_ptr: *mut u8) -> *mut OrcaHeader {
         // Cast to *mut OrcaHeader and offset by -1.  Because OrcaHeader is
-        // 48 bytes, this subtracts 48 bytes from the address, landing exactly
+        // 56 bytes, this subtracts 56 bytes from the address, landing exactly
         // on the header that was laid out immediately before the payload.
         (payload_ptr as *mut OrcaHeader).offset(-1)
     }
@@ -616,17 +621,10 @@ impl ActorHeap {
 }
 
 // ---------------------------------------------------------------------------
-// OrcaHeap trait implementation — bridges ActorHeap with the ORCA GC
+// OrcaHeap trait implementation
 // ---------------------------------------------------------------------------
 
 use super::gc::OrcaHeap;
-// Alias the gc::OrcaHeader to avoid conflict with heap::OrcaHeader.
-// Both are #[repr(C)] headers that precede the payload.  The first three
-// fields (local_count/ref_count, foreign_count, sticky) are at compatible
-// offsets, so the OrcaGc engine can safely operate on ActorHeap-allocated
-// objects through this bridge.  A future refactoring should unify the two
-// header types into one.
-use super::gc::OrcaHeader as GcOrcaHeader;
 
 impl OrcaHeap for ActorHeap {
     /// Allocate payload bytes with the Raw type tag.
@@ -649,18 +647,12 @@ impl OrcaHeap for ActorHeap {
         self.free(payload_ptr);
     }
 
-    /// Recover the GC header pointer from a payload pointer.
-    ///
-    /// Returns a pointer typed as `gc::OrcaHeader` so that the ORCA GC
-    /// engine can operate on ActorHeap-allocated objects.  The pointer is
-    /// cast from `heap::OrcaHeader` — the two headers have compatible
-    /// layouts for the first three fields (ref_count, foreign_count, sticky)
-    /// which is sufficient for the MVP integration.
+    /// Recover the [`OrcaHeader`] pointer from a payload pointer.
     ///
     /// # Safety
     /// `payload_ptr` must be a valid payload pointer from this heap.
-    unsafe fn header_ptr(&self, payload_ptr: *mut u8) -> *mut GcOrcaHeader {
-        ActorHeap::header_of(payload_ptr) as *mut GcOrcaHeader
+    unsafe fn header_ptr(&self, payload_ptr: *mut u8) -> *mut OrcaHeader {
+        ActorHeap::header_of(payload_ptr)
     }
 }
 
@@ -751,13 +743,13 @@ fn test_size_classes() {
     // HEADER_SIZE = 48, ALIGN = 8.
     // total = 48 + align_up(payload)
     let cases: Vec<(usize, SizeClass)> = vec![
-        (1,   SizeClass::Small),   // total = 56 → Small (33-64)
-        (16,  SizeClass::Small),   // total = 64 → Small
-        (17,  SizeClass::Medium),  // total = 72 → Medium (65-128)
-        (80,  SizeClass::Medium),  // total = 128 → Medium
-        (81,  SizeClass::Large),   // total = 136 → Large (129-256)
+        (1,   SizeClass::Small),   // total = 64 → Small (33-64)
+        (16,  SizeClass::Medium),  // total = 72 → Medium (65-128)
+        (17,  SizeClass::Medium),  // total = 80 → Medium
+        (80,  SizeClass::Large),   // total = 136 → Large (129-256)
+        (81,  SizeClass::Large),   // total = 144 → Large
         (200, SizeClass::Large),   // total = 256 → Large
-        (210, SizeClass::Huge),    // total = 264 → Huge (257+)
+        (210, SizeClass::Huge),    // total = 272 → Huge (257+)
     ];
 
     for (payload_size, expected_class) in cases {
@@ -962,10 +954,10 @@ fn test_alignment() {
 }
 
 #[test]
-fn test_header_size_is_48() {
-    // The whole design assumes HEADER_SIZE == 48. If this ever changes,
+fn test_header_size_is_56() {
+    // The whole design assumes HEADER_SIZE == 56. If this ever changes,
     // classify_total_size and the memory layout comments must be updated.
-    assert_eq!(ActorHeap::HEADER_SIZE, 48);
+    assert_eq!(ActorHeap::HEADER_SIZE, 56);
 }
 
 #[test]

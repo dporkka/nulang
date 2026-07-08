@@ -77,6 +77,7 @@ use crate::jit::typed_compiler::{
     emit_sext48, emit_extract_payload, load_reg,
 };
 use crate::jit::compiler::CompileError;
+use crate::value_layout::{PAYLOAD_MASK, TAG_INT};
 
 // ---------------------------------------------------------------------------
 // SIMD Operation Enum (internal to the compiler)
@@ -709,8 +710,8 @@ fn emit_scalar_store(
 
 /// Re-tag an i64 value into a NaN-tagged integer (for scalar stores).
 fn emit_tag_int_scalar(builder: &mut FunctionBuilder, value: Value) -> Value {
-    let tag = builder.ins().iconst(types::I64, 0x7FF9_0000_0000_0000i64);
-    let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFi64);
+    let tag = builder.ins().iconst(types::I64, TAG_INT as i64);
+    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
     let masked = builder.ins().band(value, mask);
     builder.ins().bor(tag, masked)
 }

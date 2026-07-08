@@ -47,7 +47,7 @@ Custom TCP wire protocol (`src/runtime/network.rs`): length-prefixed frames, mag
 
 ## Key Directories
 
-- `src/` — language frontend + backend: `lexer.rs`, `parser.rs`, `ast.rs`, `typechecker.rs`, `types.rs`, `effect_checker.rs`, `effects.rs`, `capabilities.rs`, `compiler.rs`, `bytecode.rs`, `vm.rs`, `escape_analysis.rs`, `repl.rs`, `main.rs`, `lib.rs`, plus `integration_tests.rs` & `stress_tests.rs` (test-only).
+- `src/` — language frontend + backend: `lexer.rs`, `parser.rs`, `ast.rs`, `typechecker.rs`, `types.rs`, `effect_checker.rs`, `effects.rs`, `capabilities.rs`, `compiler.rs`, `bytecode.rs`, `vm.rs`, `repl.rs`, `main.rs`, `lib.rs`, plus `integration_tests.rs` & `stress_tests.rs` (test-only).
 - `src/runtime/` — actor runtime: `mod.rs` (`Runtime` god-object), `actor.rs`, `scheduler.rs`, `mailbox.rs`, `heap.rs`, `dual_heap.rs`, `gc.rs`, `orca_cycle.rs`, `supervisor.rs`, `registry.rs`, `process_groups.rs`, `timer.rs`, `cluster.rs`, `network.rs`, `distributed.rs`, `crdt.rs`/`crdt_reg.rs`/`crdt_manager.rs`, `persistence.rs`, `tests.rs`.
 - `src/jit/` — Cranelift JIT: `mod.rs` (`JitSession`, `tiered_execute_step`, hot counters), `compiler.rs` (scalar CLIF), `typed_compiler.rs`, `simd_analyzer.rs`/`simd_compiler.rs`, `runtime.rs` (extern-C helpers), `tests.rs`.
 - `src/lsp/` — `tower-lsp` language server (single `mod.rs`).
@@ -108,17 +108,17 @@ python3 verify_report.py                          # gate: validates codebase_ana
 ## Testing & QA
 
 - **Framework**: standard Rust `#[test]` + `#[cfg(test)]`. No proptest/quickcheck/criterion. No `#[ignore]`/`#[should_panic]`/async tests.
-- **Organization**: two styles — (a) inline `mod tests` at file foot (`compiler.rs`, `lexer.rs`, `parser.rs`, `typechecker.rs`, `effect_checker.rs`, `escape_analysis.rs`, most `runtime/*.rs`, `jit/simd_*`, `python/*`, `lsp/mod.rs`); (b) dedicated test files (`src/integration_tests.rs`, `src/stress_tests.rs`, `src/runtime/tests.rs`, `src/jit/tests.rs`).
+- **Organization**: two styles — (a) inline `mod tests` at file foot (`compiler.rs`, `lexer.rs`, `parser.rs`, `typechecker.rs`, `effect_checker.rs`, most `runtime/*.rs`, `jit/simd_*`, `python/*`, `lsp/mod.rs`); (b) dedicated test files (`src/integration_tests.rs`, `src/stress_tests.rs`, `src/runtime/tests.rs`, `src/jit/tests.rs`).
 - **Naming**: `test_<subject>` (unit/integration), `stress_<scenario>` (chaos).
 - **Counts**: `integration_tests.rs` ~52 (end-to-end pipeline via `run_source`/`assert_int`/`run_source_with_runtime`), `stress_tests.rs` exactly 10 (actor lifecycle/supervision/scheduler fairness under load), `runtime/tests.rs` 110 (83 pre-v0.7 + 24 v0.7 BEAM primitives + 3 v1.0 scheduler/cycle-detector checks), `jit/tests.rs` 18.
 - **Helpers/fixtures**: `run_source`/`compile_source`/`assert_int` + `SharedMemoryStore` (`Arc<Mutex<MemoryStore>>` impl `PersistenceStore`) for restart simulation (`integration_tests.rs`); `TestContext {counters, log}` (`stress_tests.rs`); `make_jit()` (`jit/tests.rs`).
 - **Run**: `cargo test` (test profile: LTO off, 16 codegen-units for fast parallel builds). `cargo test --release` for optimized runs.
-- **Gate scripts**: `verify_implementation.py` (runs `cargo test` + forbidden-pattern scans for known anti-patterns + asserts `EscapeAnalyzer`/JIT integration) and `verify_report.py` (validates `codebase_analysis_report.md`). Exits 0 only on full pass.
+- **Gate scripts**: `verify_implementation.py` (runs `cargo test` + forbidden-pattern scans for known anti-patterns + asserts JIT integration) and `verify_report.py` (validates `codebase_analysis_report.md`). Exits 0 only on full pass.
 - **Audit**: `.cargo/audit.toml` ignores `RUSTSEC-2026-0186` (memmap2 unsound; vulnerable APIs unused; upgrade blocked on cranelift-jit).
 
 ## Known Hazards (for assistants)
 
-- `src/escape_analysis.rs` is **dead code** — unit-tested but never imported by `compiler.rs`/`vm.rs`/`jit/`; do not assume it affects codegen.
+- The `escape_analysis.rs` module was removed; its former tests and references have been cleaned up.
 - NaN-tag constants are **duplicated** between `src/vm.rs`, `src/jit/runtime.rs`, `src/jit/typed_compiler.rs`, and `src/python/marshal.rs`. `marshal.rs` imports `TAG_PYTHON` from `bridge.rs` (`0x7FF6`) so it does not collide with `TAG_CLOSURE` (`0x7FF7`) or `TAG_STRING` (`0x7FFE`).
 - Remote actor messages send `behavior_id=0` as a placeholder (remote side resolves the name) — a known stub in the distributed trait API.
 - `LamportTime`/`LamportClock` is defined twice (`crdt.rs` ~line 470 and `crdt_reg.rs` ~line 19) — potential dedup target.

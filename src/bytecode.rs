@@ -38,6 +38,11 @@ pub enum OpCode {
     IInc    = 0x26, // Increment register by 1
     IDec    = 0x27, // Decrement register by 1
     IPow    = 0x28, // Integer power
+    Xor     = 0x29, // Bitwise xor
+    Shl     = 0x2A, // Bitwise shift left
+    Shr     = 0x2B, // Bitwise shift right
+    BitAnd  = 0x2C, // Bitwise and
+    BitOr   = 0x2D, // Bitwise or
 
     // == Arithmetic - Float (0x30-0x3F) ==
     FAdd    = 0x30, // Float add
@@ -193,6 +198,8 @@ impl OpCode {
             0x20 => Some(IAdd), 0x21 => Some(ISub), 0x22 => Some(IMul),
             0x23 => Some(IDiv), 0x24 => Some(IMod), 0x25 => Some(INeg),
             0x26 => Some(IInc), 0x27 => Some(IDec), 0x28 => Some(IPow),
+            0x29 => Some(Xor), 0x2A => Some(Shl), 0x2B => Some(Shr),
+            0x2C => Some(BitAnd), 0x2D => Some(BitOr),
             0x30 => Some(FAdd), 0x31 => Some(FSub), 0x32 => Some(FMul),
             0x33 => Some(FDiv), 0x34 => Some(FNeg), 0x35 => Some(FMod),
             0x36 => Some(IToF), 0x37 => Some(FToI), 0x38 => Some(FToS),

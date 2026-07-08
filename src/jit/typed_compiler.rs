@@ -39,10 +39,11 @@ use crate::jit::compiler::CompileError;
 // NaN-tag constants (from src/value_layout.rs)
 // ---------------------------------------------------------------------------
 
-use crate::value_layout::{TAG_BOOL, TAG_INT, PAYLOAD_MASK, SIGN_BIT};
+use crate::value_layout::{TAG_BOOL, TAG_INT, TAG_NIL, PAYLOAD_MASK, SIGN_BIT};
 
 const TAG_INT_I64: i64 = TAG_INT as i64;
 const TAG_BOOL_I64: i64 = TAG_BOOL as i64;
+const TAG_NIL_I64: i64 = TAG_NIL as i64;
 const PAYLOAD_MASK_I64: i64 = PAYLOAD_MASK as i64;
 const SIGN_BIT_I64: i64 = SIGN_BIT as i64;
 const SIGN_EXTEND: i64 = 0xFFFF_0000_0000_0000u64 as i64;
@@ -498,9 +499,9 @@ fn emit_typed_logic(
         let a_raw = load_reg(builder, regs_ptr, op1);
         let b_raw = load_reg(builder, regs_ptr, op2);
 
-        // Check truthy: compare against tagged false
+        // Check truthy: compare against tagged false, nil, and tagged 0.
         let false_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 0);
-        let nil_val = builder.ins().iconst(types::I64, 0); // nil is 0 for MVP
+        let nil_val = builder.ins().iconst(types::I64, TAG_NIL_I64);
         let zero_int = builder.ins().iconst(types::I64, TAG_INT_I64); // tagged 0
 
         let a_is_false = builder.ins().icmp(IntCC::Equal, a_raw, false_val);
@@ -665,7 +666,7 @@ pub fn compile_bytecode_region_typed(
 
     // Extract parameters
     let regs_ptr = builder.block_params(entry_block)[0];
-    let _consts_ptr = builder.block_params(entry_block)[1];
+    let consts_ptr = builder.block_params(entry_block)[1];
 
     // Register runtime helpers (always needed for fallback)
     let helpers = register_runtime_helpers(module, &mut builder);
@@ -713,8 +714,17 @@ pub fn compile_bytecode_region_typed(
                 emit_const(&mut builder, &helpers, regs_ptr, instr.op1 as usize, -1);
             }
             OpCode::ConstU => {
-                let idx = instr.imm16() as i64;
-                emit_const(&mut builder, &helpers, regs_ptr, instr.op1 as usize, idx);
+                let idx = instr.imm16() as usize;
+                let offset = (idx * 8) as i32;
+                let addr = if offset == 0 {
+                    consts_ptr
+                } else {
+                    let off = builder.ins().iconst(types::I64, offset as i64);
+                    builder.ins().iadd(consts_ptr, off)
+                };
+                let val = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
+                store_reg(&mut builder, regs_ptr, instr.op1 as usize, val);
+                meta.set_type(instr.op1 as usize, KnownType::Unknown);
             }
 
             // -- Register --

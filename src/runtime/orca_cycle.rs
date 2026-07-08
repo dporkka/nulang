@@ -65,6 +65,23 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::AtomicBool;
 
 // ---------------------------------------------------------------------------
+//  CycleRuntime trait
+// ---------------------------------------------------------------------------
+
+/// Runtime capability required by the cycle detector to reclaim garbage cycles.
+///
+/// The cycle detector is intentionally decoupled from [`Runtime`](super::Runtime);
+/// this trait is the only bridge it needs to free objects on the correct actor
+/// heap and to drop any pending deferred-decrement entries for those objects.
+pub trait CycleRuntime {
+    /// Free the object identified by `header` on `actor_id`'s heap.
+    ///
+    /// # Safety
+    /// `header` must point to a live object owned by `actor_id`.
+    unsafe fn free_object(&mut self, actor_id: u64, header: *mut OrcaHeader);
+}
+
+// ---------------------------------------------------------------------------
 //  Data Structures
 // ---------------------------------------------------------------------------
 
@@ -502,7 +519,7 @@ impl CycleDetector {
     ///
     /// - `runtime` — The runtime context, used to send trial decrements
     ///   and reclaim objects.
-    pub fn incremental_detect<R>(&mut self, runtime: &mut R) {
+    pub fn incremental_detect<R: CycleRuntime>(&mut self, runtime: &mut R) {
         self.epoch += 1;
 
         if self.epoch % self.detection_interval == 0 {
@@ -605,7 +622,7 @@ impl CycleDetector {
     ///
     /// - `runtime` — Mutable reference to the runtime for sending operations
     ///   and reclaiming objects.
-    pub fn detect_cycles<R>(&mut self, runtime: &mut R) {
+    pub fn detect_cycles<R: CycleRuntime>(&mut self, runtime: &mut R) {
         self.epoch += 1;
         self.refresh_suspects(runtime);
 
@@ -646,7 +663,7 @@ impl CycleDetector {
     ///
     /// Dereferences `suspect.object_header` and potentially other headers
     /// during DFS. All headers are checked for liveness before dereferencing.
-    unsafe fn process_suspect<R>(&mut self, suspect: &Suspect, runtime: &mut R) {
+    unsafe fn process_suspect<R: CycleRuntime>(&mut self, suspect: &Suspect, runtime: &mut R) {
         if !self.is_local(suspect.actor_id) {
             return;
         }
@@ -802,7 +819,7 @@ impl CycleDetector {
             // The header pointer is validated before any decrement is applied.
             let op = ForeignRefOp {
                 target_actor: to_actor,
-                object_header: to_object as *mut crate::runtime::gc::OrcaHeader,
+                object_header: to_object as *mut crate::runtime::OrcaHeader,
                 delta: -1,
             };
             ops.push(op);
@@ -866,7 +883,7 @@ impl CycleDetector {
     ///
     /// - `cycle` — The confirmed garbage cycle.
     /// - `runtime` — The runtime context for freeing objects.
-    fn confirm_and_reclaim<R>(&mut self, cycle: &[(u64, *mut OrcaHeader)], _runtime: &mut R) {
+    fn confirm_and_reclaim<R: CycleRuntime>(&mut self, cycle: &[(u64, *mut OrcaHeader)], runtime: &mut R) {
         self.cycles_found
             .fetch_add(1, Ordering::Relaxed);
         self.objects_reclaimed
@@ -878,10 +895,9 @@ impl CycleDetector {
             // Remove the node from the graph.
             self.graph.remove(&key);
 
-            // In a full implementation, we would also free the object here:
-            // unsafe { runtime.free_object(actor_id, object); }
-            // For the MVP, we just remove it from the graph; the per-actor
-            // GC will notice the zero count and free it on the next collection.
+            // SAFETY: `object` was verified alive during DFS and the trial
+            // decrements proved it has no remaining references.
+            unsafe { runtime.free_object(actor_id, object); }
         }
     }
 
@@ -1100,6 +1116,15 @@ mod mock {
     impl Default for MockRuntime {
         fn default() -> Self {
             Self::new()
+        }
+    }
+
+    impl CycleRuntime for MockRuntime {
+        unsafe fn free_object(&mut self, actor_id: u64, header: *mut OrcaHeader) {
+            let header_actor = unsafe { (*header).actor_id };
+            assert_eq!(header_actor, actor_id, "free_object actor_id mismatch");
+            self.reclaimed.push(header);
+            unsafe { self.free_object(header) };
         }
     }
 }
@@ -1364,11 +1389,7 @@ mod tests {
         // Graph should be empty after reclamation.
         assert_eq!(detector.graph_size(), 0);
 
-        unsafe {
-            runtime.free_object(obj1);
-            runtime.free_object(obj2);
-            runtime.free_object(obj3);
-        }
+        // Objects were reclaimed by the detector; do not free them again.
     }
 
     // ------------------------------------------------------------------
@@ -1425,12 +1446,7 @@ mod tests {
         assert_eq!(cycles, 1, "should find one 4-actor cycle");
         assert_eq!(reclaimed, 4, "should reclaim all 4 objects");
 
-        unsafe {
-            runtime.free_object(obj1);
-            runtime.free_object(obj2);
-            runtime.free_object(obj3);
-            runtime.free_object(obj4);
-        }
+        // Objects were reclaimed by the detector; do not free them again.
     }
 
     // ------------------------------------------------------------------
@@ -1638,8 +1654,8 @@ mod tests {
         assert_eq!(reclaimed_after, 0, "remote objects should not be reclaimed");
 
         unsafe {
-            runtime.free_object(obj_a);
-            runtime.free_object(obj_b);
+            // runtime objects were reclaimed by the detector.
+            // runtime2 objects were not reclaimed, so free them manually.
             runtime2.free_object(obj_a2);
             runtime2.free_object(obj_b2);
         }

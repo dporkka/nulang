@@ -1231,6 +1231,7 @@ impl Runtime {
             // The object_header points to the source actor's heap object.
             let source_header = op.object_header as *mut crate::runtime::heap::OrcaHeader;
             let source_actor = unsafe { (*source_header).actor_id };
+
             // Remove the edge from the cycle detector graph before applying the
             // ORCA decrement so the graph stays consistent with the ref count.
             if let Some(target_actor) = self.actors.get_mut(&op.target_actor) {
@@ -1242,7 +1243,15 @@ impl Runtime {
                         source_header,
                     );
                 }
-                target_actor.orca_gc.process_foreign_op(&mut target_actor.heap, op);
+            }
+
+            // The ORCA operation must be applied on the *owning* actor's heap,
+            // because that is where the object (and its header) lives.  Freeing
+            // on the target actor's heap would corrupt the wrong allocator.
+            if let Some(source_actor_ref) = self.actors.get_mut(&source_actor) {
+                source_actor_ref
+                    .orca_gc
+                    .process_foreign_op(&mut source_actor_ref.heap, op);
             }
         }
         let should_detect = self.cycle_detector.should_detect();
@@ -2746,6 +2755,24 @@ impl Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// CycleRuntime implementation
+// ---------------------------------------------------------------------------
+
+impl crate::runtime::orca_cycle::CycleRuntime for Runtime {
+    unsafe fn free_object(&mut self, actor_id: u64, header: *mut crate::runtime::heap::OrcaHeader) {
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            // Remove from deferred-decrement list first so a later
+            // `process_deferred` pass does not touch freed memory.
+            actor.orca_gc.remove_deferred(header);
+
+            // Compute the payload pointer and free on the owning actor's heap.
+            let header_size = std::mem::size_of::<crate::runtime::heap::OrcaHeader>();
+            let payload_ptr = (header as *mut u8).add(header_size);
+            actor.heap.free(payload_ptr);
+        }
+    }
+}
+
 // VM runtime callbacks
 // ---------------------------------------------------------------------------
 

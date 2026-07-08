@@ -28,6 +28,7 @@ use cranelift_module::{Linkage, Module};
 use cranelift_jit::JITModule;
 
 use crate::bytecode::{Instruction, OpCode};
+use crate::value_layout::{PAYLOAD_MASK, TAG_INT};
 
 // ---------------------------------------------------------------------------
 // Opcode Support Matrix
@@ -174,7 +175,7 @@ pub fn compile_bytecode_region(
     builder.seal_block(entry_block);
 
     let regs_ptr = builder.block_params(entry_block)[0];
-    let _consts_ptr = builder.block_params(entry_block)[1];
+    let consts_ptr = builder.block_params(entry_block)[1];
 
     let helpers = register_runtime_helpers(module, &mut builder);
 
@@ -203,7 +204,18 @@ pub fn compile_bytecode_region(
             OpCode::Const1 => { emit_const(&mut builder, regs_ptr, instr.op1 as usize, 1); }
             OpCode::Const2 => { emit_const(&mut builder, regs_ptr, instr.op1 as usize, 2); }
             OpCode::ConstM1 => { emit_const(&mut builder, regs_ptr, instr.op1 as usize, -1); }
-            OpCode::ConstU => { emit_const(&mut builder, regs_ptr, instr.op1 as usize, instr.imm16() as i64); }
+            OpCode::ConstU => {
+                let idx = instr.imm16() as usize;
+                let offset = (idx * 8) as i32;
+                let addr = if offset == 0 {
+                    consts_ptr
+                } else {
+                    let off = builder.ins().iconst(types::I64, offset as i64);
+                    builder.ins().iadd(consts_ptr, off)
+                };
+                let val = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
+                store_reg(&mut builder, regs_ptr, instr.op1 as usize, val);
+            }
 
             OpCode::Move => { let v = load_reg(&mut builder, regs_ptr, instr.op1 as usize); store_reg(&mut builder, regs_ptr, instr.op2 as usize, v); }
             OpCode::Dup => { let v = load_reg(&mut builder, regs_ptr, instr.op1 as usize); store_reg(&mut builder, regs_ptr, instr.op2 as usize, v); }
@@ -341,8 +353,8 @@ fn store_reg(builder: &mut FunctionBuilder, regs_ptr: Value, idx: usize, val: Va
 }
 
 fn emit_const(builder: &mut FunctionBuilder, regs_ptr: Value, dst: usize, value: i64) {
-    let tag = builder.ins().iconst(types::I64, 0x7FFB_0000_0000_0000i64);
-    let masked = value & 0x0000FFFFFFFFFFFFi64;
+    let tag = builder.ins().iconst(types::I64, TAG_INT as i64);
+    let masked = value & (PAYLOAD_MASK as i64);
     let val_part = builder.ins().iconst(types::I64, masked);
     let tagged = builder.ins().bor(tag, val_part);
     store_reg(builder, regs_ptr, dst, tagged);

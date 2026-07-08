@@ -42,7 +42,7 @@ pub enum TokenKind {
     Plus, Minus, Star, Slash, Percent,       // + - * / %
     Eq, Ne, Lt, Le, Gt, Ge,                 // == != < <= > >=
     And, Or, Not,                            // && || !
-    Ampersand, Pipe, PipeOp, Caret, Tilde,  // & | |> ^ ~
+    Ampersand, Pipe, PipeOp, Pipe3, Caret, Tilde,  // & | |> ||| ^ ~
     Shl, Shr,                               // << >>
     Assign, PlusAssign, MinusAssign,        // = += -=
     Arrow, FatArrow, ThinArrow,             // -> => <-
@@ -595,7 +595,11 @@ impl<'a> Lexer<'a> {
             }
             b'|' => {
                 if self.match_char(b'|') {
-                    TokenKind::Or
+                    if self.match_char(b'|') {
+                        TokenKind::Pipe3
+                    } else {
+                        TokenKind::Or
+                    }
                 } else if self.match_char(b'>') {
                     TokenKind::PipeOp
                 } else {

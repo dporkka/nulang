@@ -334,14 +334,15 @@ pub(crate) fn find_compilable_region(
         if !compiler::is_opcode_compilable(instructions[i].opcode) {
             break;
         }
-        len += 1;
-        // Stop at return instructions
+        // Stop *before* return instructions so the VM still executes the
+        // return and pops the frame correctly after the JIT region.
         if matches!(
             instructions[i].opcode,
             crate::bytecode::OpCode::Ret | crate::bytecode::OpCode::RetVal
         ) {
             break;
         }
+        len += 1;
     }
     len
 }
@@ -353,8 +354,6 @@ pub enum TieredAction {
     Interpret,
     /// JIT-compiled code was executed.
     RanJit,
-    /// The region was JIT compiled and then executed (scalar).
-    CompiledAndRan,
     /// The region was SIMD-vectorized, compiled, and executed.
     CompiledSimdAndRan,
 }

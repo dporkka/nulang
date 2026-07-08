@@ -165,6 +165,17 @@ mod tests {
     }
 
     #[test]
+    fn test_bitwise_operators() {
+        assert_int("6 & 3", 2);
+        // Single `|` is reserved as a match-arm separator, so bitwise OR uses
+        // the `|||` token.
+        assert_int("6 ||| 3", 7);
+        assert_int("6 ^ 3", 5);
+        assert_int("1 << 3", 8);
+        assert_int("16 >> 2", 4);
+    }
+
+    #[test]
     fn test_arithmetic_precedence() {
         assert_int("1 + 2 * 3", 7);   // mul before add
         assert_int("(1 + 2) * 3", 9); // parens override
@@ -174,6 +185,19 @@ mod tests {
     fn test_let_binding() {
         let source = "let x = 10 in x + 5";
         assert_int(source, 15);
+    }
+
+    #[test]
+    fn test_local_assignment() {
+        // `&` creates a ref cell; `*` dereferences it. Assignment mutates the ref.
+        let source = "let x = &10 in { x = 3; *x }";
+        assert_int(source, 3);
+    }
+
+    #[test]
+    fn test_record_field_access() {
+        let source = "let r = { x: 1, y: 2 } in r.x + r.y";
+        assert_int(source, 3);
     }
 
     #[test]
@@ -724,6 +748,74 @@ mod tests {
             actor.get_state_field("count").and_then(|v| v.as_int()),
             Some(2),
             "counter should be 2 after two inc messages"
+        );
+    }
+
+    #[test]
+    fn test_send_with_arguments() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+
+        let source = r#"
+            actor Counter {
+                state count: Int = 0
+                behavior add(n: Int) { self.count = self.count + n }
+                behavior get() { self.count }
+            }
+            let c = spawn Counter {} in {
+                send c add(5)
+                send c add(7)
+                c
+            }
+        "#;
+
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("count").and_then(|v| v.as_int()),
+            Some(12),
+            "counter should be 12 after adding 5 and 7"
+        );
+    }
+
+    #[test]
+    fn test_ask_with_arguments() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+
+        let source = r#"
+            actor Calculator {
+                behavior add(a: Int, b: Int) { a + b }
+            }
+            let calc = spawn Calculator {} in
+                ask calc add(10, 20)
+        "#;
+
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        assert_eq!(value.as_int(), Some(30), "ask add(10, 20) should return 30");
+    }
+
+    #[test]
+    fn test_register_overflow_errors() {
+        // 20 nested let bindings exhaust the 240..254 binding-register range.
+        let source = r#"
+            let a0 = 0 in let a1 = 1 in let a2 = 2 in let a3 = 3 in let a4 = 4 in
+            let a5 = 5 in let a6 = 6 in let a7 = 7 in let a8 = 8 in let a9 = 9 in
+            let a10 = 10 in let a11 = 11 in let a12 = 12 in let a13 = 13 in let a14 = 14 in
+            let a15 = 15 in let a16 = 16 in let a17 = 17 in let a18 = 18 in let a19 = 19 in
+            a19
+        "#;
+
+        let result = run_source(source);
+        assert!(result.is_err(), "deeply nested lets should trigger register overflow error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("register allocation overflow"),
+            "error should mention register overflow: {}",
+            err
         );
     }
 
@@ -1460,6 +1552,17 @@ mod tests {
             }
         "#;
         assert_int_new(source, 20);
+    }
+
+    #[test]
+    fn test_new_pipeline_bitwise_or() {
+        assert_int_new("6 ||| 3", 7);
+    }
+
+    #[test]
+    fn test_new_pipeline_inequality() {
+        let value = run_source_new("1 != 2").unwrap();
+        assert_eq!(value.as_bool(), Some(true));
     }
 
     #[test]

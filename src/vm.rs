@@ -1344,6 +1344,33 @@ impl VM {
                 let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(1);
                 self.frames[frame_idx].regs[instr.op3 as usize] = if b != 0 { Value::int(a % b) } else { Value::nil() };
             }
+            OpCode::Xor => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a ^ b);
+            }
+            OpCode::Shl => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                let shift = (b as u64) & 0x3f;
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a << shift);
+            }
+            OpCode::Shr => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                let shift = (b as u64) & 0x3f;
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a >> shift);
+            }
+            OpCode::BitAnd => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a & b);
+            }
+            OpCode::BitOr => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a | b);
+            }
             OpCode::INeg => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
                 self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(-a);
@@ -1471,6 +1498,120 @@ impl VM {
                     0
                 };
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(len);
+            }
+
+            // -- Records (flat array indexed by module field id) --
+            OpCode::RecMk => {
+                let slot_count = instr.op1 as usize;
+                let size = slot_count.checked_mul(std::mem::size_of::<Value>()).unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op2 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(size, HeapTypeTag::Record) {
+                    unsafe {
+                        let slots = std::slice::from_raw_parts_mut(ptr as *mut Value, slot_count);
+                        for slot in slots.iter_mut() {
+                            *slot = Value::nil();
+                        }
+                    }
+                    Value::ptr(ptr)
+                } else {
+                    Value::nil()
+                };
+            }
+            OpCode::RecS => {
+                let rec_ptr = self.frames[frame_idx].regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
+                let field_id = instr.op2 as usize;
+                let val = self.frames[frame_idx].regs[instr.op3 as usize];
+                if !rec_ptr.is_null() {
+                    unsafe {
+                        let header = &*ActorHeap::header_of(rec_ptr);
+                        if header.type_tag == HeapTypeTag::Record {
+                            let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                            let len = payload_size / std::mem::size_of::<Value>();
+                            if field_id < len {
+                                *((rec_ptr as *mut Value).add(field_id)) = val;
+                            }
+                        }
+                    }
+                }
+            }
+            OpCode::RecL => {
+                let rec_ptr = self.frames[frame_idx].regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
+                let field_id = instr.op2 as usize;
+                let val = if !rec_ptr.is_null() {
+                    unsafe {
+                        let header = &*ActorHeap::header_of(rec_ptr);
+                        if header.type_tag == HeapTypeTag::Record {
+                            let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                            let len = payload_size / std::mem::size_of::<Value>();
+                            if field_id < len {
+                                *((rec_ptr as *const Value).add(field_id))
+                            } else {
+                                Value::nil()
+                            }
+                        } else {
+                            Value::nil()
+                        }
+                    }
+                } else {
+                    Value::nil()
+                };
+                self.frames[frame_idx].regs[instr.op3 as usize] = val;
+            }
+
+            // -- Tuples (heap-backed fixed-size arrays) --
+            OpCode::TupleMk => {
+                let count = instr.op1 as usize;
+                let size = count.checked_mul(std::mem::size_of::<Value>()).unwrap_or(0);
+                self.frames[frame_idx].regs[instr.op2 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(size, HeapTypeTag::Tuple) {
+                    unsafe {
+                        let slots = std::slice::from_raw_parts_mut(ptr as *mut Value, count);
+                        for slot in slots.iter_mut() {
+                            *slot = Value::nil();
+                        }
+                    }
+                    Value::ptr(ptr)
+                } else {
+                    Value::nil()
+                };
+            }
+            OpCode::FieldS => {
+                let tup_ptr = self.frames[frame_idx].regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
+                let idx = instr.op2 as usize;
+                let val = self.frames[frame_idx].regs[instr.op3 as usize];
+                if !tup_ptr.is_null() {
+                    unsafe {
+                        let header = &*ActorHeap::header_of(tup_ptr);
+                        if header.type_tag == HeapTypeTag::Tuple {
+                            let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                            let len = payload_size / std::mem::size_of::<Value>();
+                            if idx < len {
+                                *((tup_ptr as *mut Value).add(idx)) = val;
+                            }
+                        }
+                    }
+                }
+            }
+            OpCode::FieldL => {
+                let tup_ptr = self.frames[frame_idx].regs[instr.op1 as usize].as_ptr().unwrap_or(std::ptr::null_mut());
+                let idx = instr.op2 as usize;
+                let val = if !tup_ptr.is_null() {
+                    unsafe {
+                        let header = &*ActorHeap::header_of(tup_ptr);
+                        if header.type_tag == HeapTypeTag::Tuple {
+                            let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                            let len = payload_size / std::mem::size_of::<Value>();
+                            if idx < len {
+                                *((tup_ptr as *const Value).add(idx))
+                            } else {
+                                Value::nil()
+                            }
+                        } else {
+                            Value::nil()
+                        }
+                    }
+                } else {
+                    Value::nil()
+                };
+                self.frames[frame_idx].regs[instr.op3 as usize] = val;
             }
 
             // -- Boolean logic --
@@ -1870,7 +2011,12 @@ impl VM {
             }
 
             // All other opcodes are not yet implemented in the interpreter.
-            _ => {}
+            _ => {
+                return Err(NuError::VMError(format!(
+                    "unimplemented opcode {:?}",
+                    instr.opcode
+                )));
+            }
         }
         Ok(())
     }

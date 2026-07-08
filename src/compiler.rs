@@ -169,6 +169,8 @@ pub struct Compiler {
     /// Dedicated high-register allocator for let-bound values, so closures
     /// and other multi-use bindings survive argument/dst register churn.
     binding_reg: u8,
+    /// Set to true if register allocation exceeds the available register file.
+    reg_overflow: bool,
 }
 
 impl Compiler {
@@ -182,6 +184,7 @@ impl Compiler {
             func_map: std::collections::HashMap::new(),
             extern_func_map: std::collections::HashMap::new(),
             binding_reg: 240,
+            reg_overflow: false,
         }
     }
 
@@ -200,6 +203,11 @@ impl Compiler {
         // If no __main inline body was emitted, add a halt
         if self.module.instructions.is_empty() {
             self.emit(Instruction::new0(OpCode::Halt));
+        }
+        if self.reg_overflow {
+            return Err(NuError::VMError(
+                "register allocation overflow: expression requires more than 240 temporary registers or more than 15 active let bindings".to_string()
+            ));
         }
         Ok(&self.module)
     }
@@ -701,6 +709,10 @@ impl Compiler {
         // This prevents later argument/sub-expression compilation from
         // overwriting the binding (critical when the value is a closure used
         // multiple times, e.g. `let id = fn(x) x in (id(1), id(true))`).
+        const MAX_BINDING_REG: u8 = 254;
+        if self.binding_reg > MAX_BINDING_REG {
+            self.reg_overflow = true;
+        }
         let bound_reg = self.binding_reg;
         self.binding_reg = self.binding_reg.saturating_add(1);
         self.emit(Instruction::new2(OpCode::Move, val_reg, bound_reg));
@@ -983,11 +995,11 @@ impl Compiler {
             BinOp::Ge => { self.emit(Instruction::new3(OpCode::ICmpGe, r1_save, r2, dst)); }
             BinOp::And => { self.emit(Instruction::new3(OpCode::And, r1_save, r2, dst)); }
             BinOp::Or => { self.emit(Instruction::new3(OpCode::Or, r1_save, r2, dst)); }
-            BinOp::BitAnd => { self.emit(Instruction::new3(OpCode::And, r1_save, r2, dst)); }
-            BinOp::BitOr => { self.emit(Instruction::new3(OpCode::Or, r1_save, r2, dst)); }
-            BinOp::BitXor => { self.emit(Instruction::new3(OpCode::And, r1_save, r2, dst)); }
-            BinOp::Shl => { self.emit(Instruction::new3(OpCode::And, r1_save, r2, dst)); }
-            BinOp::Shr => { self.emit(Instruction::new3(OpCode::And, r1_save, r2, dst)); }
+            BinOp::BitAnd => { self.emit(Instruction::new3(OpCode::BitAnd, r1_save, r2, dst)); }
+            BinOp::BitOr => { self.emit(Instruction::new3(OpCode::BitOr, r1_save, r2, dst)); }
+            BinOp::BitXor => { self.emit(Instruction::new3(OpCode::Xor, r1_save, r2, dst)); }
+            BinOp::Shl => { self.emit(Instruction::new3(OpCode::Shl, r1_save, r2, dst)); }
+            BinOp::Shr => { self.emit(Instruction::new3(OpCode::Shr, r1_save, r2, dst)); }
             BinOp::Assign => {
                 // Assignment to `self.field` writes actor state rather than a local register.
                 let is_self_field = matches!(left, Expr::FieldAccess { expr, .. }
@@ -1049,16 +1061,24 @@ impl Compiler {
             let r = self.compile_expr(expr)?;
             field_regs.push(r);
         }
-        let dst = self.alloc_reg();
-        self.emit(Instruction::new2(OpCode::RecMk, fields.len() as u8, dst));
-        // Register field names for later lookup
-        for (i, (name, _)) in fields.iter().enumerate() {
+        // Assign a stable module-wide field id to every field name.  Records are
+        // laid out as a flat array indexed by these ids, so field access does not
+        // need to know the concrete record literal that created the value.
+        let mut max_field_id: u8 = 0;
+        for (name, _) in fields.iter() {
             if !self.field_map.contains_key(name) {
                 let id = self.next_field_id;
                 self.next_field_id = self.next_field_id.saturating_add(1);
                 self.field_map.insert(name.clone(), id);
             }
-            self.emit(Instruction::new3(OpCode::RecS, dst, i as u8, field_regs[i]));
+            max_field_id = max_field_id.max(self.field_map[name]);
+        }
+        let slot_count = max_field_id.saturating_add(1);
+        let dst = self.alloc_reg();
+        self.emit(Instruction::new2(OpCode::RecMk, slot_count, dst));
+        for (i, (name, _)) in fields.iter().enumerate() {
+            let field_id = self.field_map[name];
+            self.emit(Instruction::new3(OpCode::RecS, dst, field_id, field_regs[i]));
         }
         Ok(dst)
     }
@@ -1080,16 +1100,17 @@ impl Compiler {
         }
         let obj_reg = self.compile_expr(expr)?;
         let dst = self.alloc_reg();
-        // Use RecL with field name constant pool index
-        let field_idx = self.add_const(Constant::String(field.to_string()));
-        self.emit(Instruction::new3(OpCode::RecL, obj_reg,
-            ((field_idx >> 8) & 0xFF) as u8,
-            (field_idx & 0xFF) as u8));
-        // The VM is expected to place the result in a designated register;
-        // for now we assume dst will contain the result via convention.
-        // Emit a move from obj_reg to dst as placeholder since RecL's
-        // exact encoding is VM-dependent.
-        self.emit(Instruction::new2(OpCode::Move, obj_reg, dst));
+        // Field access is positional, keyed by the module-wide field id.
+        let field_id = self.field_map.get(field).copied().unwrap_or_else(|| {
+            // Field name has not been seen in any record literal yet.  Assign a
+            // fresh id so that future record literals using this name share the
+            // same slot.  Accessing such a field will yield nil until then.
+            let id = self.next_field_id;
+            self.next_field_id = self.next_field_id.saturating_add(1);
+            self.field_map.insert(field.to_string(), id);
+            id
+        });
+        self.emit(Instruction::new3(OpCode::RecL, obj_reg, field_id, dst));
         Ok(dst)
     }
 
@@ -1137,25 +1158,21 @@ impl Compiler {
     }
 
     fn compile_send(&mut self, actor: &Expr, behavior: &str, args: &[Expr]) -> NuResult<u8> {
-        let addr_reg = self.compile_expr(actor)?;
-        for arg in args {
-            let _r = self.compile_expr(arg)?;
+        if args.len() > 255 {
+            return Err(NuError::VMError("send has more than 255 arguments".to_string()));
         }
-        let actor_name = actor_name_from_expr(actor).unwrap_or_default();
-        let behavior_idx = self.behavior_table_index(&actor_name, behavior);
-        let dst = self.alloc_reg();
-        self.emit(Instruction::new3(OpCode::Send, addr_reg,
-            ((behavior_idx >> 8) & 0xFF) as u8,
-            (behavior_idx & 0xFF) as u8));
-        self.emit(Instruction::new1(OpCode::Const0, dst));
-        Ok(dst)
-    }
-
-    fn compile_ask(&mut self, actor: &Expr, behavior: &str, args: &[Expr]) -> NuResult<u8> {
-        // Ask arguments are passed in registers r0..rn, matching the VM convention.
         let saved_next_reg = self.next_reg;
+        // Reserve r0..r(n-1) for arguments and r_n for the receiver address.
+        let receiver_reg = args.len() as u8;
+        self.next_reg = receiver_reg + 1;
+        let actual_receiver_reg = self.compile_expr(actor)?;
+        if actual_receiver_reg != receiver_reg {
+            self.emit(Instruction::new2(OpCode::Move, actual_receiver_reg, receiver_reg));
+        }
+        // Compile arguments into r0..r(n-1).  They cannot clobber receiver_reg
+        // because that register is >= n.
         self.next_reg = 0;
-        for (i, arg) in args.iter().enumerate().take(256) {
+        for (i, arg) in args.iter().enumerate() {
             let reg = self.compile_expr(arg)?;
             if reg != i as u8 {
                 self.emit(Instruction::new2(OpCode::Move, reg, i as u8));
@@ -1163,14 +1180,47 @@ impl Compiler {
         }
         self.next_reg = saved_next_reg;
 
-        let addr_reg = self.compile_expr(actor)?;
         let actor_name = actor_name_from_expr(actor).unwrap_or_default();
         let behavior_idx = self.behavior_table_index(&actor_name, behavior);
         let dst = self.alloc_reg();
-        self.emit(Instruction::new3(OpCode::Ask, addr_reg,
+        self.emit(Instruction::new3(OpCode::Send, receiver_reg,
             ((behavior_idx >> 8) & 0xFF) as u8,
             (behavior_idx & 0xFF) as u8));
-        self.emit(Instruction::new2(OpCode::Move, addr_reg, dst));
+        self.emit(Instruction::new1(OpCode::Const0, dst));
+        Ok(dst)
+    }
+
+    fn compile_ask(&mut self, actor: &Expr, behavior: &str, args: &[Expr]) -> NuResult<u8> {
+        if args.len() > 255 {
+            return Err(NuError::VMError("ask has more than 255 arguments".to_string()));
+        }
+        let saved_next_reg = self.next_reg;
+        // Reserve r0..r(n-1) for arguments and r_n for the receiver address.
+        // The VM stores the ask result in the receiver register, so that slot is
+        // also the destination.
+        let receiver_reg = args.len() as u8;
+        self.next_reg = receiver_reg + 1;
+        let actual_receiver_reg = self.compile_expr(actor)?;
+        if actual_receiver_reg != receiver_reg {
+            self.emit(Instruction::new2(OpCode::Move, actual_receiver_reg, receiver_reg));
+        }
+        // Compile arguments into r0..r(n-1).
+        self.next_reg = 0;
+        for (i, arg) in args.iter().enumerate() {
+            let reg = self.compile_expr(arg)?;
+            if reg != i as u8 {
+                self.emit(Instruction::new2(OpCode::Move, reg, i as u8));
+            }
+        }
+        self.next_reg = saved_next_reg;
+
+        let actor_name = actor_name_from_expr(actor).unwrap_or_default();
+        let behavior_idx = self.behavior_table_index(&actor_name, behavior);
+        let dst = self.alloc_reg();
+        self.emit(Instruction::new3(OpCode::Ask, receiver_reg,
+            ((behavior_idx >> 8) & 0xFF) as u8,
+            (behavior_idx & 0xFF) as u8));
+        self.emit(Instruction::new2(OpCode::Move, receiver_reg, dst));
         Ok(dst)
     }
 
@@ -2236,6 +2286,10 @@ impl Compiler {
     // ========================================================================
 
     fn alloc_reg(&mut self) -> u8 {
+        const MAX_TEMP_REG: u8 = 239;
+        if self.next_reg > MAX_TEMP_REG {
+            self.reg_overflow = true;
+        }
         let reg = self.next_reg;
         self.next_reg = self.next_reg.saturating_add(1);
         reg

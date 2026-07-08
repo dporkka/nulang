@@ -6,9 +6,16 @@
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::mir;
-use crate::types::NuResult;
+use crate::types::{NuError, NuResult, Span};
 
 const FUNC_VALUE_REG: u8 = 254;
+
+fn not_yet_implemented(feature: &str) -> NuError {
+    NuError::NotYetImplemented {
+        feature: feature.to_string(),
+        span: Span::new(0, 0, 0, 0),
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum JumpKind {
@@ -220,8 +227,14 @@ impl MirCodegen {
             mir::RValue::Binary(op, l, r) => {
                 let lr = local_reg[l];
                 let rr = local_reg[r];
-                let opcode = binary_opcode(op);
-                self.emit(Instruction::new3(opcode, lr, rr, dst));
+                if *op == crate::ast::BinOp::Ne {
+                    let tmp = self.alloc_reg();
+                    self.emit(Instruction::new3(OpCode::ICmpEq, lr, rr, tmp));
+                    self.emit(Instruction::new2(OpCode::Not, tmp, dst));
+                } else {
+                    let opcode = binary_opcode(op)?;
+                    self.emit(Instruction::new3(opcode, lr, rr, dst));
+                }
             }
             mir::RValue::Call { func, args } => {
                 // Move arguments into the low registers expected by the callee.
@@ -265,33 +278,20 @@ impl MirCodegen {
                 let len_reg = local_reg[len];
                 self.emit(Instruction::new2(OpCode::ArrAlloc, len_reg, dst));
             }
-            mir::RValue::Spawn { behavior_idx, init } => {
-                let _ = behavior_idx;
-                let _ = init;
-                self.emit(Instruction::new1(OpCode::Const0, dst));
+            mir::RValue::Spawn { .. } => {
+                return Err(not_yet_implemented("spawn in HIR/MIR pipeline"));
             }
-            mir::RValue::Send { actor, behavior_id, args } => {
-                let _ = actor;
-                let _ = behavior_id;
-                let _ = args;
-                self.emit(Instruction::new1(OpCode::Const0, dst));
+            mir::RValue::Send { .. } => {
+                return Err(not_yet_implemented("send in HIR/MIR pipeline"));
             }
-            mir::RValue::Ask { actor, behavior_id, args } => {
-                let _ = actor;
-                let _ = behavior_id;
-                let _ = args;
-                self.emit(Instruction::new1(OpCode::Const0, dst));
+            mir::RValue::Ask { .. } => {
+                return Err(not_yet_implemented("ask in HIR/MIR pipeline"));
             }
-            mir::RValue::Perform { effect_id, op_id, args } => {
-                let _ = effect_id;
-                let _ = op_id;
-                let _ = args;
-                self.emit(Instruction::new1(OpCode::Const0, dst));
+            mir::RValue::Perform { .. } => {
+                return Err(not_yet_implemented("perform in HIR/MIR pipeline"));
             }
-            mir::RValue::FFICall { idx, args } => {
-                let _ = idx;
-                let _ = args;
-                self.emit(Instruction::new1(OpCode::Const0, dst));
+            mir::RValue::FFICall { .. } => {
+                return Err(not_yet_implemented("FFI call in HIR/MIR pipeline"));
             }
             mir::RValue::SelfRef => {
                 self.emit(Instruction::new1(OpCode::SelfOp, dst));
@@ -304,7 +304,7 @@ impl MirCodegen {
                 self.emit(Instruction::new1(OpCode::Const1, dst)); // true
             }
             mir::RValue::Closure { .. } => {
-                self.emit(Instruction::new1(OpCode::Const0, dst));
+                return Err(not_yet_implemented("closure in HIR/MIR pipeline"));
             }
         }
         Ok(())
@@ -384,14 +384,13 @@ impl MirCodegen {
                 }
             }
             mir::Terminator::Switch { .. } => {
-                // TODO: implement Switch opcode.
-                self.emit(Instruction::new0(OpCode::Ret));
+                return Err(not_yet_implemented("switch terminator in HIR/MIR pipeline"));
             }
             mir::Terminator::Handle { .. } => {
-                self.emit(Instruction::new0(OpCode::Ret));
+                return Err(not_yet_implemented("effect handler terminator in HIR/MIR pipeline"));
             }
             mir::Terminator::Unwind => {
-                self.emit(Instruction::new0(OpCode::Ret));
+                return Err(not_yet_implemented("unwind terminator in HIR/MIR pipeline"));
             }
         }
         Ok(())
@@ -439,19 +438,26 @@ impl MirCodegen {
     }
 }
 
-fn binary_opcode(op: &crate::ast::BinOp) -> OpCode {
+fn binary_opcode(op: &crate::ast::BinOp) -> NuResult<OpCode> {
     match op {
-        crate::ast::BinOp::Add => OpCode::IAdd,
-        crate::ast::BinOp::Sub => OpCode::ISub,
-        crate::ast::BinOp::Mul => OpCode::IMul,
-        crate::ast::BinOp::Div => OpCode::IDiv,
-        crate::ast::BinOp::Mod => OpCode::IMod,
-        crate::ast::BinOp::Eq => OpCode::ICmpEq,
-        crate::ast::BinOp::Lt => OpCode::ICmpLt,
-        crate::ast::BinOp::Gt => OpCode::ICmpGt,
-        crate::ast::BinOp::Le => OpCode::ICmpLe,
-        crate::ast::BinOp::Ge => OpCode::ICmpGe,
-        _ => OpCode::IAdd,
+        crate::ast::BinOp::Add => Ok(OpCode::IAdd),
+        crate::ast::BinOp::Sub => Ok(OpCode::ISub),
+        crate::ast::BinOp::Mul => Ok(OpCode::IMul),
+        crate::ast::BinOp::Div => Ok(OpCode::IDiv),
+        crate::ast::BinOp::Mod => Ok(OpCode::IMod),
+        crate::ast::BinOp::Eq => Ok(OpCode::ICmpEq),
+        crate::ast::BinOp::Lt => Ok(OpCode::ICmpLt),
+        crate::ast::BinOp::Gt => Ok(OpCode::ICmpGt),
+        crate::ast::BinOp::Le => Ok(OpCode::ICmpLe),
+        crate::ast::BinOp::Ge => Ok(OpCode::ICmpGe),
+        crate::ast::BinOp::And => Ok(OpCode::And),
+        crate::ast::BinOp::Or => Ok(OpCode::Or),
+        crate::ast::BinOp::BitAnd => Ok(OpCode::BitAnd),
+        crate::ast::BinOp::BitOr => Ok(OpCode::BitOr),
+        crate::ast::BinOp::BitXor => Ok(OpCode::Xor),
+        crate::ast::BinOp::Shl => Ok(OpCode::Shl),
+        crate::ast::BinOp::Shr => Ok(OpCode::Shr),
+        other => Err(not_yet_implemented(&format!("binary operator {:?}", other))),
     }
 }
 
@@ -459,4 +465,61 @@ pub fn compile_mir(mir: &mir::Module, module_name: impl Into<String>) -> NuResul
     let mut codegen = MirCodegen::new(module_name);
     codegen.compile_module(mir)?;
     Ok(codegen.finish())
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    use crate::typechecker::TypeChecker;
+    use crate::vm::VM;
+
+    fn compile_mir_source(source: &str) -> NuResult<CodeModule> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module()?;
+
+        let mut type_checker = TypeChecker::new();
+        type_checker.check_module(&ast)?;
+
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir);
+        compile_mir(&mir, "test")
+    }
+
+    fn run_mir_source(source: &str) -> NuResult<crate::vm::Value> {
+        let module = compile_mir_source(source)?;
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.run()
+    }
+
+    #[test]
+    fn test_mir_codegen_simple_arithmetic() {
+        let value = run_mir_source("1 + 2 * 3").unwrap();
+        assert_eq!(value.as_int(), Some(7));
+    }
+
+    #[test]
+    fn test_mir_codegen_bitwise_or() {
+        let value = run_mir_source("6 ||| 3").unwrap();
+        assert_eq!(value.as_int(), Some(7));
+    }
+
+    #[test]
+    fn test_mir_codegen_not_yet_implemented_features() {
+        // Effects are not yet supported by the HIR/MIR pipeline.
+        let result = compile_mir_source("perform IO.print(\"hello\")");
+        assert!(
+            matches!(result, Err(NuError::NotYetImplemented { ref feature, .. }) if feature.contains("perform")),
+            "expected NotYetImplemented for perform, got {:?}",
+            result
+        );
+    }
 }

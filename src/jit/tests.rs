@@ -29,7 +29,8 @@ fn test_find_compilable_region() {
         Instruction::new3(OpCode::ISub, 0, 1, 2),
         Instruction::new0(OpCode::Ret),
     ];
-    assert_eq!(find_compilable_region(0, &instructions), 3);
+    // The region stops *before* Ret so the VM still executes the return.
+    assert_eq!(find_compilable_region(0, &instructions), 2);
 }
 
 #[test]
@@ -233,7 +234,6 @@ fn test_tiered_action_has_simd_variant() {
     let action = TieredAction::CompiledSimdAndRan;
     assert_ne!(action, TieredAction::Interpret);
     assert_ne!(action, TieredAction::RanJit);
-    assert_ne!(action, TieredAction::CompiledAndRan);
 }
 
 #[test]

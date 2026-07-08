@@ -7,8 +7,8 @@ use super::*;
 use std::time::{Duration, Instant};
 use std::sync::atomic::Ordering;
 use crate::vm::Frame;
-use crate::runtime::heap::ActorHeap;
-use crate::runtime::gc::{OrcaGc, TypeTag};
+use crate::runtime::heap::{ActorHeap, TypeTag};
+use crate::runtime::gc::OrcaGc;
 
 // ========================================================================
 // Core Runtime Tests
@@ -158,15 +158,15 @@ fn test_orca_ref_counting_basic() {
     assert!(obj.is_some());
     // local_count starts at 1 (creator holds one ref)
     let header_ptr = unsafe { heap.header_ptr(obj.unwrap()) };
-    let local_count = unsafe { (*header_ptr).local_count.load(Ordering::Relaxed) };
+    let local_count = unsafe { (*header_ptr).ref_count.load(Ordering::Relaxed) };
     assert_eq!(local_count, 1);
 
     unsafe { gc.local_ref(&heap, obj.unwrap()) };
-    let local_count2 = unsafe { (*header_ptr).local_count.load(Ordering::Relaxed) };
+    let local_count2 = unsafe { (*header_ptr).ref_count.load(Ordering::Relaxed) };
     assert_eq!(local_count2, 2);
 
     unsafe { gc.drop_local_ref(&mut heap, obj.unwrap()) };
-    let local_count3 = unsafe { (*header_ptr).local_count.load(Ordering::Relaxed) };
+    let local_count3 = unsafe { (*header_ptr).ref_count.load(Ordering::Relaxed) };
     assert_eq!(local_count3, 1);
 }
 
@@ -193,8 +193,8 @@ fn test_orca_cycle_detection() {
     // Verify both objects are alive with ref count 1 each
     let header_a = unsafe { &*heap.header_ptr(a.unwrap()) };
     let header_b = unsafe { &*heap.header_ptr(b.unwrap()) };
-    assert_eq!(header_a.local_count.load(Ordering::Relaxed), 1);
-    assert_eq!(header_b.local_count.load(Ordering::Relaxed), 1);
+    assert_eq!(header_a.ref_count.load(Ordering::Relaxed), 1);
+    assert_eq!(header_b.ref_count.load(Ordering::Relaxed), 1);
 }
 
 // ========================================================================
@@ -1196,6 +1196,43 @@ fn test_cycle_detector_accumulates_edge_ref_count() {
     // Both pending ops are drained in one call, so the edge ref_count drops
     // from 2 to 0 and the node is removed.
     assert_eq!(rt.cycle_detector.graph_size(), 0);
+}
+
+#[test]
+fn test_cross_actor_send_foreign_count_lifecycle() {
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    rt.current_actor = Some(a);
+
+    let ptr = rt.actors.get_mut(&a).unwrap().heap.alloc(16, TypeTag::Raw).unwrap();
+    unsafe {
+        let header = &*ActorHeap::header_of(ptr);
+        assert_eq!(header.ref_count.load(Ordering::Relaxed), 1);
+        assert_eq!(header.foreign_count.load(Ordering::Relaxed), 0);
+    }
+
+    let v = Value::ptr(ptr);
+    rt.send_message_by_id(b, 0, &[v]);
+
+    unsafe {
+        let header = &*ActorHeap::header_of(ptr);
+        assert_eq!(header.ref_count.load(Ordering::Relaxed), 1);
+        assert_eq!(header.foreign_count.load(Ordering::Relaxed), 1, "foreign_count should increment when ref is sent");
+    }
+
+    rt.process_gc_ops();
+
+    unsafe {
+        let header = &*ActorHeap::header_of(ptr);
+        assert_eq!(header.ref_count.load(Ordering::Relaxed), 1);
+        assert_eq!(header.foreign_count.load(Ordering::Relaxed), 0, "foreign_count should decrement after op is processed on owning actor");
+    }
+
+    // Drop the local ref on the owning actor; object should be freed.
+    let actor = rt.actors.get_mut(&a).unwrap();
+    unsafe { actor.orca_gc.drop_local_ref(&mut actor.heap, ptr); }
+    assert_eq!(actor.heap.live_count(), 0, "object should be freed after local+foreign counts hit zero");
 }
 
 // ========================================================================

@@ -22,6 +22,9 @@ const PREC_CMP: u8 = 6;     // < <= > >=
 const PREC_TERM: u8 = 7;    // + -
 const PREC_FACTOR: u8 = 8;  // * / %
 const PREC_SHIFT: u8 = 9;   // << >>
+const PREC_BITAND: u8 = 10; // &
+const PREC_BITXOR: u8 = 11; // ^
+const PREC_BITOR: u8 = 12;  // |
 const PREC_PREFIX: u8 = 10; // ! - & (prefix)
 
 fn prefix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
@@ -44,6 +47,11 @@ fn infix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
         TokenKind::Plus | TokenKind::Minus => (PREC_TERM, false),
         TokenKind::Star | TokenKind::Slash | TokenKind::Percent => (PREC_FACTOR, false),
         TokenKind::Shl | TokenKind::Shr => (PREC_SHIFT, false),
+        TokenKind::Ampersand => (PREC_BITAND, false),
+        TokenKind::Caret => (PREC_BITXOR, false),
+        TokenKind::Pipe3 => (PREC_BITOR, false),
+        // NOTE: single `|` is intentionally omitted. It is used as a match-arm
+        // separator and function-type delimiter, so bitwise OR uses `|||`.
         _ => return None,
     };
     Some((prec, right_assoc))
@@ -2185,6 +2193,7 @@ fn token_to_binop(kind: &TokenKind) -> Option<BinOp> {
         TokenKind::Or => Some(BinOp::Or),
         TokenKind::Ampersand => Some(BinOp::BitAnd),
         TokenKind::Pipe => Some(BinOp::BitOr),
+        TokenKind::Pipe3 => Some(BinOp::BitOr),
         TokenKind::Caret => Some(BinOp::BitXor),
         TokenKind::Shl => Some(BinOp::Shl),
         TokenKind::Shr => Some(BinOp::Shr),
