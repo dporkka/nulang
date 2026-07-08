@@ -1397,15 +1397,62 @@ impl TypeChecker {
                     return Ok((vec![], func_ty));
                 }
             }
+            // Debate built-in namespace: Debate.new / Debate.participant.
+            if base == "Debate" {
+                if field == "new" {
+                    let func_ty = Type::Function {
+                        param: Box::new(Type::Tuple(vec![
+                            Type::string(),
+                            Type::int(),
+                            Type::float(),
+                        ])),
+                        ret: Box::new(Type::int()),
+                        effect: EffectRow::empty(),
+                        cap: Capability::Ref,
+                    };
+                    return Ok((vec![], func_ty));
+                }
+                if field == "participant" {
+                    let actor_ty = Type::Actor {
+                        state: Box::new(Type::Var(TypeVar::fresh())),
+                        behavior: Box::new(Type::Var(TypeVar::fresh())),
+                    };
+                    let func_ty = Type::Function {
+                        param: Box::new(Type::Tuple(vec![
+                            Type::int(),
+                            Type::string(),
+                            Type::string(),
+                            actor_ty,
+                        ])),
+                        ret: Box::new(Type::int()),
+                        effect: EffectRow::empty(),
+                        cap: Capability::Ref,
+                    };
+                    return Ok((vec![], func_ty));
+                }
+            }
         }
 
-        // Pipeline instance method: <pipeline-id>.run(input)
+        // Pipeline / Supervisor / Debate instance method: <id>.run(...)
         if field == "run" {
             let (s1, receiver_ty) = self.infer_expr(ctx, expr)?;
             let s_receiver = mgu(&apply_subst(&receiver_ty, &s1), &Type::int(), span)?;
             let final_subst = compose_subst(&s_receiver, &s1);
+            // Debate.run() takes no arguments; Pipeline/Supervisor.run() take a
+            // single string input.  We use the receiver variable name as a v0.9
+            // MVP heuristic, matching the compiler disambiguation.
+            let param_ty = if let Expr::Var(receiver_name, _) = expr {
+                let lowered = receiver_name.to_lowercase();
+                if lowered == "debate" || lowered.contains("debate") {
+                    Type::Tuple(vec![])
+                } else {
+                    Type::string()
+                }
+            } else {
+                Type::string()
+            };
             let func_ty = Type::Function {
-                param: Box::new(Type::string()),
+                param: Box::new(param_ty),
                 ret: Box::new(Type::string()),
                 effect: EffectRow::empty(),
                 cap: Capability::Ref,

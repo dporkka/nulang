@@ -522,16 +522,54 @@ impl Compiler {
                         return Ok(dst);
                     }
                 }
-                if field == "run" && args.len() == 1 {
-                    // Instance method: receiver is the pipeline/supervisor id variable.
+                if base == "Debate" {
+                    if field == "new" && args.len() == 3 {
+                        self.next_reg = 0;
+                        let mut arg_regs = Vec::new();
+                        for arg in args {
+                            let arg_reg = self.compile_expr(arg)?;
+                            arg_regs.push(arg_reg);
+                        }
+                        for (i, &arg_reg) in arg_regs.iter().enumerate() {
+                            if arg_reg != i as u8 {
+                                self.emit(Instruction::new2(OpCode::Move, arg_reg, i as u8));
+                            }
+                        }
+                        let dst = self.alloc_reg();
+                        self.emit(Instruction::new1(OpCode::DebateNew, dst));
+                        self.next_reg = saved_next_reg.max(dst + 1);
+                        return Ok(dst);
+                    }
+                    if field == "participant" && args.len() == 4 {
+                        self.next_reg = 0;
+                        let mut arg_regs = Vec::new();
+                        for arg in args {
+                            let arg_reg = self.compile_expr(arg)?;
+                            arg_regs.push(arg_reg);
+                        }
+                        for (i, &arg_reg) in arg_regs.iter().enumerate() {
+                            if arg_reg != i as u8 {
+                                self.emit(Instruction::new2(OpCode::Move, arg_reg, i as u8));
+                            }
+                        }
+                        let dst = self.alloc_reg();
+                        self.emit(Instruction::new1(OpCode::DebateParticipant, dst));
+                        self.next_reg = saved_next_reg.max(dst + 1);
+                        return Ok(dst);
+                    }
+                }
+                if field == "run" && (args.len() == 1 || args.is_empty()) {
+                    // Instance method: receiver is the pipeline/supervisor/debate id variable.
                     self.next_reg = 0;
                     let receiver_reg = self.compile_expr(expr)?;
                     if receiver_reg != 0 {
                         self.emit(Instruction::new2(OpCode::Move, receiver_reg, 0));
                     }
-                    let arg_reg = self.compile_expr(&args[0])?;
-                    if arg_reg != 1 {
-                        self.emit(Instruction::new2(OpCode::Move, arg_reg, 1));
+                    if !args.is_empty() {
+                        let arg_reg = self.compile_expr(&args[0])?;
+                        if arg_reg != 1 {
+                            self.emit(Instruction::new2(OpCode::Move, arg_reg, 1));
+                        }
                     }
                     let dst = self.alloc_reg();
                     // Choose the opcode based on the receiver type.  The parser
@@ -541,8 +579,9 @@ impl Compiler {
                     // is "Supervisor"; otherwise PipelineRun.
                     // Heuristic disambiguation: instance `.run()` is a pipeline
                     // run unless the receiver variable name clearly refers to a
-                    // supervisor team.  In the v0.9 MVP, name your supervisor
-                    // variable `team` or `supervisor`.
+                    // supervisor team or debate.  In the v0.9 MVP, name your
+                    // supervisor variable `team`/`supervisor` and your debate
+                    // variable `debate`.
                     let opcode = if let Expr::Var(receiver_name, _) = expr.as_ref() {
                         let lowered = receiver_name.to_lowercase();
                         if lowered == "team"
@@ -550,6 +589,8 @@ impl Compiler {
                             || lowered.contains("supervisor")
                         {
                             OpCode::SupervisorRun
+                        } else if lowered == "debate" || lowered.contains("debate") {
+                            OpCode::DebateRun
                         } else {
                             OpCode::PipelineRun
                         }

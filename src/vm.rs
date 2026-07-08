@@ -199,6 +199,21 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
 
     /// Run a supervisor team and return its final output string.
     fn supervisor_run(&mut self, _id: i64, _task: &str) -> Option<String> { None }
+
+    /// Create a new debate and return its runtime ID.
+    fn debate_new(&mut self, _topic: &str, _rounds: i64, _threshold: f64) -> i64 { 0 }
+
+    /// Add a participant to an existing debate and return its ID.
+    fn debate_participant(
+        &mut self,
+        _id: i64,
+        _name: &str,
+        _stance: &str,
+        _actor_id: u64,
+    ) -> i64 { -1 }
+
+    /// Run a debate and return its final output string.
+    fn debate_run(&mut self, _id: i64) -> Option<String> { None }
 }
 
 /// Standalone callbacks used when the VM runs without an actor runtime.
@@ -1805,6 +1820,41 @@ impl VM {
                 let id = regs[0].as_int().unwrap_or(0);
                 let task = self.value_to_string(module_idx, regs[1]);
                 let value = match self.actor_callbacks.supervisor_run(id, &task) {
+                    Some(content) => self.add_runtime_string(module_idx, content),
+                    None => Value::nil(),
+                };
+                self.frames[frame_idx].regs[dst as usize] = value;
+            }
+
+            // -- Debate (v0.9 AI Runtime) --
+            OpCode::DebateNew => {
+                let dst = instr.op1;
+                let regs = &self.frames[frame_idx].regs;
+                let topic = self.value_to_string(module_idx, regs[0]);
+                let rounds = regs[1].as_int().unwrap_or(1);
+                let threshold = regs[2].as_float().unwrap_or(0.5);
+                let id = self
+                    .actor_callbacks
+                    .debate_new(&topic, rounds, threshold);
+                self.frames[frame_idx].regs[dst as usize] = Value::int(id);
+            }
+            OpCode::DebateParticipant => {
+                let dst = instr.op1;
+                let regs = &self.frames[frame_idx].regs;
+                let id = regs[0].as_int().unwrap_or(0);
+                let name = self.value_to_string(module_idx, regs[1]);
+                let stance = self.value_to_string(module_idx, regs[2]);
+                let actor_id = regs[3].as_actor_id().unwrap_or(0);
+                let result = self
+                    .actor_callbacks
+                    .debate_participant(id, &name, &stance, actor_id);
+                self.frames[frame_idx].regs[dst as usize] = Value::int(result);
+            }
+            OpCode::DebateRun => {
+                let dst = instr.op1;
+                let regs = &self.frames[frame_idx].regs;
+                let id = regs[0].as_int().unwrap_or(0);
+                let value = match self.actor_callbacks.debate_run(id) {
                     Some(content) => self.add_runtime_string(module_idx, content),
                     None => Value::nil(),
                 };

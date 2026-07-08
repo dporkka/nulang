@@ -2129,4 +2129,80 @@ mod tests {
         let result = vm.value_to_string(module_idx, value);
         assert_eq!(result, "final article");
     }
+
+    #[test]
+    fn test_debate_source_end_to_end() {
+        let source = r#"
+            agent ProAgent = {
+                model: "llama3.1",
+                system_prompt: "Argue in favor.",
+                pricing: { input: 0.0, output: 0.0 }
+            }
+            agent ConAgent = {
+                model: "llama3.1",
+                system_prompt: "Argue against.",
+                pricing: { input: 0.0, output: 0.0 }
+            }
+            agent Moderator = {
+                model: "llama3.1",
+                system_prompt: "Synthesize.",
+                pricing: { input: 0.0, output: 0.0 }
+            }
+
+            fn main() {
+                let pro = spawn ProAgent {} in
+                let con = spawn ConAgent {} in
+                let moderator = spawn Moderator {} in
+                let debate = Debate.new("microservices vs monolith", 1, 0.8)
+                    |> Debate.participant("pro", "pro", pro)
+                    |> Debate.participant("con", "con", con)
+                    |> Debate.participant("moderator", "neutral", moderator)
+                in
+                debate.run()
+            }
+        "#;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let client = crate::ai::MockLlmClient::sequence(vec![
+            crate::ai::LlmResponse {
+                content: Some("pro argument".to_string()),
+                tool_calls: Vec::new(),
+                model: "mock".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: crate::ai::TokenUsage::default(),
+            },
+            crate::ai::LlmResponse {
+                content: Some("con argument".to_string()),
+                tool_calls: Vec::new(),
+                model: "mock".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: crate::ai::TokenUsage::default(),
+            },
+            crate::ai::LlmResponse {
+                content: Some("moderator observation".to_string()),
+                tool_calls: Vec::new(),
+                model: "mock".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: crate::ai::TokenUsage::default(),
+            },
+            crate::ai::LlmResponse {
+                content: Some("consensus reached".to_string()),
+                tool_calls: Vec::new(),
+                model: "mock".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: crate::ai::TokenUsage::default(),
+            },
+        ]);
+        rt.borrow_mut().set_llm_client(Box::new(client));
+
+        let (module, _ty) = compile_source(source).unwrap();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt)));
+        let value = vm.run().unwrap();
+
+        let module_idx = vm.modules.len() - 1;
+        let result = vm.value_to_string(module_idx, value);
+        assert_eq!(result, "consensus reached");
+    }
 }

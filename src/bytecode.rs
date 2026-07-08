@@ -150,6 +150,11 @@ pub enum OpCode {
     SupervisorWorker = 0xC1, // Add worker to team (reads r0=id, r1=name, r2=actor, r3=description; dst)
     SupervisorRun    = 0xC2, // Run supervisor team (reads r0=id, r1=task; dst)
 
+    // == Debate (0xC3-0xCF) ==
+    DebateNew        = 0xC3, // Create a new debate (reads r0=topic, r1=rounds, r2=threshold; dst)
+    DebateParticipant = 0xC4, // Add participant (reads r0=id, r1=name, r2=stance, r3=actor; dst)
+    DebateRun        = 0xC5, // Run debate (reads r0=id; dst)
+
     // == Distribution (0xD0-0xDF) ==
     NodeId  = 0xD0, // Get current node id (dst)
     Migrate = 0xD1, // Migrate actor (addr_reg, node_id_reg, dst)
@@ -222,6 +227,7 @@ impl OpCode {
             0xA3 => Some(CapSend),
             0xB0 => Some(FFICall),
             0xC0 => Some(SupervisorNew), 0xC1 => Some(SupervisorWorker), 0xC2 => Some(SupervisorRun),
+            0xC3 => Some(DebateNew), 0xC4 => Some(DebateParticipant), 0xC5 => Some(DebateRun),
             0xD0 => Some(NodeId), 0xD1 => Some(Migrate), 0xD2 => Some(RSend),
             0xD3 => Some(RAsk), 0xD4 => Some(RSpawn), 0xD5 => Some(Gossip),
             0xE0 => Some(SConcat), 0xE1 => Some(SPrint), 0xE2 => Some(SRead),

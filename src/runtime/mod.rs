@@ -45,7 +45,7 @@ pub use registry::*;
 pub use process_groups::*;
 pub use persistence::*;
 
-use crate::ai::{complete_sync, LlmClient, LlmMessage, LlmRequest, LlmResponse, Pipeline, PipelineStage, SupervisorTeam};
+use crate::ai::{complete_sync, Debate, LlmClient, LlmMessage, LlmRequest, LlmResponse, Pipeline, PipelineStage, SupervisorTeam};
 use crate::types::ExitReason;
 use crate::vm::Value;
 
@@ -131,6 +131,10 @@ pub struct Runtime {
     // Supervisor teams (v0.9 AI Runtime)
     pub next_supervisor_id: u64,
     pub supervisor_teams: HashMap<u64, SupervisorTeam>,
+
+    // Debates (v0.9 AI Runtime)
+    pub next_debate_id: u64,
+    pub debates: HashMap<u64, Debate>,
 }
 
 impl Runtime {
@@ -163,6 +167,8 @@ impl Runtime {
             pipelines: HashMap::new(),
             next_supervisor_id: 1,
             supervisor_teams: HashMap::new(),
+            next_debate_id: 1,
+            debates: HashMap::new(),
         }
     }
 
@@ -340,6 +346,44 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| format!("Supervisor team {} not found", id))?;
         team.run(self, task)
+    }
+
+    /// Create a new debate and return its ID.
+    pub fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> u64 {
+        let id = self.next_debate_id;
+        self.next_debate_id = self.next_debate_id.wrapping_add(1);
+        self.debates.insert(
+            id,
+            Debate::new(topic, rounds.max(1) as usize, threshold),
+        );
+        id
+    }
+
+    /// Add a participant to an existing debate. Returns the same debate ID on
+    /// success so fluent construction can continue.
+    pub fn debate_participant(
+        &mut self,
+        id: u64,
+        name: &str,
+        stance: &str,
+        agent_id: u64,
+    ) -> Result<u64, String> {
+        let debate = self
+            .debates
+            .get_mut(&id)
+            .ok_or_else(|| format!("Debate {} not found", id))?;
+        *debate = debate.clone().participant(name, stance, agent_id);
+        Ok(id)
+    }
+
+    /// Run a debate and return the moderator's synthesis.
+    pub fn debate_run(&mut self, id: u64) -> Result<String, String> {
+        let debate = self
+            .debates
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| format!("Debate {} not found", id))?;
+        debate.run(self)
     }
 
     /// Convert a VM value to a Rust string using the actor's bytecode module
@@ -2978,6 +3022,28 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     fn supervisor_run(&mut self, id: i64, task: &str) -> Option<String> {
         self.runtime.borrow_mut().supervisor_run(id as u64, task).ok()
     }
+
+    fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> i64 {
+        self.runtime.borrow_mut().debate_new(topic, rounds, threshold) as i64
+    }
+
+    fn debate_participant(
+        &mut self,
+        id: i64,
+        name: &str,
+        stance: &str,
+        actor_id: u64,
+    ) -> i64 {
+        self.runtime
+            .borrow_mut()
+            .debate_participant(id as u64, name, stance, actor_id)
+            .map(|id| id as i64)
+            .unwrap_or(-1)
+    }
+
+    fn debate_run(&mut self, id: i64) -> Option<String> {
+        self.runtime.borrow_mut().debate_run(id as u64).ok()
+    }
 }
 
 /// Raw-pointer callbacks used when the runtime itself executes an actor's
@@ -3160,6 +3226,29 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
 
     fn supervisor_run(&mut self, id: i64, task: &str) -> Option<String> {
         unsafe { (*self.runtime).supervisor_run(id as u64, task).ok() }
+    }
+
+    fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> i64 {
+        unsafe { (*self.runtime).debate_new(topic, rounds, threshold) as i64 }
+    }
+
+    fn debate_participant(
+        &mut self,
+        id: i64,
+        name: &str,
+        stance: &str,
+        actor_id: u64,
+    ) -> i64 {
+        unsafe {
+            (*self.runtime)
+                .debate_participant(id as u64, name, stance, actor_id)
+                .map(|id| id as i64)
+                .unwrap_or(-1)
+        }
+    }
+
+    fn debate_run(&mut self, id: i64) -> Option<String> {
+        unsafe { (*self.runtime).debate_run(id as u64).ok() }
     }
 }
 
