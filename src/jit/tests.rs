@@ -16,9 +16,11 @@ fn test_jit_session_creation() {
 #[test]
 fn test_hot_counter() {
     reset_hot_counters();
-    assert!(!record_and_check_hot(0));
-    for _ in 0..HOT_THRESHOLD { record_and_check_hot(42); }
-    assert!(record_and_check_hot(42));
+    assert!(!record_and_check_hot(0, 0));
+    for _ in 0..HOT_THRESHOLD { record_and_check_hot(0, 42); }
+    assert!(record_and_check_hot(0, 42));
+    // The same offset in a different module has its own independent counter.
+    assert!(!record_and_check_hot(1, 42));
     reset_hot_counters();
 }
 
