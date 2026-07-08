@@ -1458,7 +1458,7 @@ impl Compiler {
                 init,
                 ..
             } => {
-                self.compile_actor(name, *persistent, state_fields, behaviors, init, false, false, &[], None)?;
+                self.compile_actor(name, *persistent, state_fields, behaviors, init, false, false, &[], None, None)?;
             }
             Decl::Agent { .. } => {
                 self.compile_agent(decl)?;
@@ -1568,6 +1568,7 @@ impl Compiler {
         is_agent: bool,
         tools: &[ToolSchema],
         semantic_memory_dimensions: Option<usize>,
+        procedural_memory_namespace: Option<String>,
     ) -> NuResult<()> {
         for (_field_name, expr) in init {
             let _ = self.compile_expr(expr)?;
@@ -1602,6 +1603,7 @@ impl Compiler {
             is_agent,
             tools: tools.to_vec(),
             semantic_memory_dimensions,
+            procedural_memory_namespace,
         };
         self.module.add_actor_meta(meta);
         Ok(())
@@ -1610,7 +1612,7 @@ impl Compiler {
     fn compile_agent(&mut self, agent: &Decl) -> NuResult<()> {
         // Extract fields from the agent declaration.  This pattern is irrefutable
         // because the caller already matched on Decl::Agent.
-        let (name, model, system_prompt, tool_names, memory, semantic_memory, pricing, span) = match agent {
+        let (name, model, system_prompt, tool_names, memory, semantic_memory, procedural_memory, pricing, span) = match agent {
             Decl::Agent {
                 name,
                 model,
@@ -1618,9 +1620,10 @@ impl Compiler {
                 tools,
                 memory,
                 semantic_memory,
+                procedural_memory,
                 pricing,
                 span,
-            } => (name, model, system_prompt, tools, memory, semantic_memory, *pricing, *span),
+            } => (name, model, system_prompt, tools, memory, semantic_memory, procedural_memory, *pricing, *span),
             _ => unreachable!(),
         };
 
@@ -1637,6 +1640,14 @@ impl Compiler {
         let initial_semantic_memory = semantic_memory_dimensions
             .map(|dimensions| {
                 serde_json::to_string(&crate::ai::SemanticMemory::new(dimensions, None))
+                    .unwrap_or_else(|_| "{}".to_string())
+            });
+
+        let procedural_memory_namespace = procedural_memory.as_ref().map(|m| m.namespace.clone());
+        let initial_procedural_memory = procedural_memory_namespace
+            .as_ref()
+            .map(|namespace| {
+                serde_json::to_string(&crate::ai::ProceduralMemory::new(namespace.clone()))
                     .unwrap_or_else(|_| "{}".to_string())
             });
 
@@ -1698,6 +1709,15 @@ impl Compiler {
         if let Some(json) = initial_semantic_memory {
             state_fields.push((
                 "semantic_memory".to_string(),
+                StateModel::Durable,
+                Type::string(),
+                Expr::Literal(Literal::String(json), span),
+            ));
+        }
+
+        if let Some(json) = initial_procedural_memory {
+            state_fields.push((
+                "procedural_memory".to_string(),
                 StateModel::Durable,
                 Type::string(),
                 Expr::Literal(Literal::String(json), span),
@@ -1802,6 +1822,64 @@ impl Compiler {
             None
         };
 
+        // Generated procedural-memory behaviors.  The bodies are placeholders;
+        // the runtime intercepts these behaviors and implements store/retrieve
+        // directly against the agent's durable `procedural_memory` state field.
+        let procedural_memory_behavior = if procedural_memory_namespace.is_some() {
+            let store_pattern_behavior = Behavior {
+                name: "store_pattern".to_string(),
+                params: vec![
+                    ("key".to_string(), Some(Type::string())),
+                    ("input_pattern".to_string(), Some(Type::string())),
+                    ("output_template".to_string(), Some(Type::string())),
+                ],
+                body: Expr::Literal(Literal::Unit, span),
+                effect: None,
+                cap: Capability::Ref,
+                span,
+            };
+            let get_pattern_behavior = Behavior {
+                name: "get_pattern".to_string(),
+                params: vec![("key".to_string(), Some(Type::string()))],
+                body: Expr::Literal(Literal::Unit, span),
+                effect: None,
+                cap: Capability::Ref,
+                span,
+            };
+            let add_example_behavior = Behavior {
+                name: "add_example".to_string(),
+                params: vec![
+                    ("task".to_string(), Some(Type::string())),
+                    ("input".to_string(), Some(Type::string())),
+                    ("output".to_string(), Some(Type::string())),
+                ],
+                body: Expr::Literal(Literal::Unit, span),
+                effect: None,
+                cap: Capability::Ref,
+                span,
+            };
+            let get_examples_behavior = Behavior {
+                name: "get_examples".to_string(),
+                params: vec![
+                    ("task".to_string(), Some(Type::string())),
+                    ("query".to_string(), Some(Type::string())),
+                    ("top_k".to_string(), Some(Type::int())),
+                ],
+                body: Expr::Literal(Literal::Unit, span),
+                effect: None,
+                cap: Capability::Ref,
+                span,
+            };
+            Some((
+                store_pattern_behavior,
+                get_pattern_behavior,
+                add_example_behavior,
+                get_examples_behavior,
+            ))
+        } else {
+            None
+        };
+
         // Resolve tool names against the module's tool schemas.
         let mut resolved_tools = Vec::new();
         for tool_name in tool_names {
@@ -1824,6 +1902,12 @@ impl Compiler {
             behaviors.push(store_fact);
             behaviors.push(recall);
         }
+        if let Some((store_pattern, get_pattern, add_example, get_examples)) = procedural_memory_behavior {
+            behaviors.push(store_pattern);
+            behaviors.push(get_pattern);
+            behaviors.push(add_example);
+            behaviors.push(get_examples);
+        }
 
         self.compile_actor(
             name,
@@ -1835,6 +1919,7 @@ impl Compiler {
             true,
             &resolved_tools,
             semantic_memory_dimensions,
+            procedural_memory_namespace,
         )
     }
 
@@ -1983,7 +2068,7 @@ impl Compiler {
             })
             .collect();
         let first_behavior_idx = self.module.behaviors.len();
-        self.compile_actor(name, true, &state_fields, &behaviors, &[], true, false, &[], None)?;
+        self.compile_actor(name, true, &state_fields, &behaviors, &[], true, false, &[], None, None)?;
 
         // Patch parallel-branch metadata and per-step saga compensation offsets.
         let behavior_indices: Vec<usize> =

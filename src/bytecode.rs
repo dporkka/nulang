@@ -378,6 +378,8 @@ pub struct ActorMeta {
     pub tools: Vec<ToolSchema>,
     /// Semantic-memory vector dimensions, if configured for this agent.
     pub semantic_memory_dimensions: Option<usize>,
+    /// Procedural-memory namespace, if configured for this agent.
+    pub procedural_memory_namespace: Option<String>,
 }
 
 impl ActorMeta {
@@ -392,6 +394,7 @@ impl ActorMeta {
             is_agent: false,
             tools: Vec::new(),
             semantic_memory_dimensions: None,
+            procedural_memory_namespace: None,
         }
     }
 }

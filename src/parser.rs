@@ -341,6 +341,7 @@ impl Parser {
         let mut tools: Vec<String> = Vec::new();
         let mut memory: Option<AgentMemoryConfig> = None;
         let mut semantic_memory: Option<AgentSemanticMemoryConfig> = None;
+        let mut procedural_memory: Option<AgentProceduralMemoryConfig> = None;
         let mut pricing: Option<AgentPricing> = None;
 
         self.skip_newlines();
@@ -443,6 +444,39 @@ impl Parser {
                         dimensions: dimensions.unwrap_or(64),
                     });
                 }
+                "procedural_memory" => {
+                    self.expect(TokenKind::LBrace)?;
+                    self.skip_newlines();
+                    let mut namespace: Option<String> = None;
+                    while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.match_token(&TokenKind::RBrace) {
+                            break;
+                        }
+                        let pm_field = self.expect_ident("procedural memory field name")?;
+                        self.expect(TokenKind::Colon)?;
+                        match pm_field.as_str() {
+                            "namespace" => {
+                                namespace = Some(self.expect_string("namespace")?);
+                            }
+                            other => {
+                                return Err(NuError::ParseError {
+                                    msg: format!("Unknown procedural_memory field: {}", other),
+                                    span: self.current_span(),
+                                });
+                            }
+                        }
+                        self.skip_newlines();
+                        if !self.consume_if(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                    procedural_memory = Some(AgentProceduralMemoryConfig {
+                        namespace: namespace.unwrap_or_else(|| "default".to_string()),
+                    });
+                }
                 "pricing" => {
                     self.expect(TokenKind::LBrace)?;
                     self.skip_newlines();
@@ -508,6 +542,7 @@ impl Parser {
             tools,
             memory: memory.or(Some(AgentMemoryConfig { max_turns: 50 })),
             semantic_memory,
+            procedural_memory,
             pricing,
             span,
         })
@@ -2644,5 +2679,46 @@ mod tests {
     fn test_parse_agent_unknown_field_errors() {
         let result = parse("agent MyAgent = { model: \"x\", unknown: 1 }");
         assert!(result.is_err(), "Expected parse error for unknown agent field");
+    }
+
+    #[test]
+    fn test_parse_agent_procedural_memory() {
+        let source = r#"
+            agent MyAgent = {
+                model: "gpt-4o",
+                procedural_memory: { namespace: "my_app" }
+            }
+        "#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Agent {
+                procedural_memory,
+                ..
+            } => {
+                assert_eq!(
+                    procedural_memory.as_ref().map(|m| m.namespace.as_str()),
+                    Some("my_app")
+                );
+            }
+            _ => panic!("Expected agent declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_agent_procedural_memory_default_namespace() {
+        let source = r#"agent MyAgent = { model: "gpt-4o", procedural_memory: {} }"#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Agent {
+                procedural_memory,
+                ..
+            } => {
+                assert_eq!(
+                    procedural_memory.as_ref().map(|m| m.namespace.as_str()),
+                    Some("default")
+                );
+            }
+            _ => panic!("Expected agent declaration"),
+        }
     }
 }

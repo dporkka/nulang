@@ -295,6 +295,12 @@ pub struct AgentSemanticMemoryConfig {
     pub dimensions: usize,
 }
 
+/// Procedural-memory configuration for an agent declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentProceduralMemoryConfig {
+    pub namespace: String,
+}
+
 // ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
@@ -381,7 +387,7 @@ pub enum Decl {
         compensate: Option<Expr>,
         span: Span,
     },
-    /// Agent declaration (v0.9): agent Name = { model: "...", system_prompt: "...", tools: [...], memory: { max_turns: N }, semantic_memory: { dimensions: D } }
+    /// Agent declaration (v0.9): agent Name = { model: "...", system_prompt: "...", tools: [...], memory: { max_turns: N }, semantic_memory: { dimensions: D }, procedural_memory: { namespace: "..." } }
     Agent {
         name: String,
         model: String,
@@ -389,6 +395,7 @@ pub enum Decl {
         tools: Vec<String>,
         memory: Option<AgentMemoryConfig>,
         semantic_memory: Option<AgentSemanticMemoryConfig>,
+        procedural_memory: Option<AgentProceduralMemoryConfig>,
         pricing: Option<AgentPricing>,
         span: Span,
     },

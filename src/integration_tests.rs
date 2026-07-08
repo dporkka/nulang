@@ -1874,6 +1874,153 @@ mod tests {
     }
 
     #[test]
+    fn test_agent_procedural_memory_store_and_get_pattern() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                procedural_memory: { namespace: "my_app" }
+            }
+            let a = spawn Agent {} in
+            let _ = ask a store_pattern("format", "research_*", "{title}\\n{summary}") in
+            ask a get_pattern("format")
+        "#;
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+
+        let result = vm.run().unwrap();
+
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.value_to_string(module_idx, result);
+        assert_eq!(content, "{title}\\n{summary}");
+
+        let rt = rt.borrow();
+        let actor = rt.actors.values().next().expect("expected one actor");
+        let memory_json = actor.get_state_field("procedural_memory").unwrap();
+        let memory_json_str = vm.value_to_string(module_idx, memory_json);
+        let memory: crate::ai::ProceduralMemory = serde_json::from_str(&memory_json_str).unwrap();
+        assert_eq!(memory.len(), 1);
+        assert_eq!(memory.namespace, "my_app");
+        assert_eq!(memory.get_pattern("format").unwrap().output_template, "{title}\\n{summary}");
+    }
+
+    #[test]
+    fn test_agent_procedural_memory_add_and_get_examples() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                procedural_memory: { namespace: "code_review" }
+            }
+            let a = spawn Agent {} in
+            let _ = ask a add_example("review", "fn bad() { let x = 1; x }", "Unused variable") in
+            let _ = ask a add_example("review", "fn ok() { let x = 1; x + 1 }", "Good") in
+            ask a get_examples("review", "unused variable", 1)
+        "#;
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+
+        let result = vm.run().unwrap();
+
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.value_to_string(module_idx, result);
+        assert!(
+            content.contains("Unused variable"),
+            "expected matching example, got {}",
+            content
+        );
+
+        let rt = rt.borrow();
+        let actor = rt.actors.values().next().expect("expected one actor");
+        let memory_json = actor.get_state_field("procedural_memory").unwrap();
+        let memory_json_str = vm.value_to_string(module_idx, memory_json);
+        let memory: crate::ai::ProceduralMemory = serde_json::from_str(&memory_json_str).unwrap();
+        assert_eq!(memory.len(), 2);
+    }
+
+    #[test]
+    fn test_agent_procedural_memory_recovers_after_restart() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                procedural_memory: { namespace: "my_app" }
+            }
+
+            let a = spawn Agent {} in
+            a
+        "#;
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+            }
+        }
+
+        let store = SharedMemoryStore::new();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+
+        let mut vm = VM::new();
+        vm.load_module(module.clone());
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+        let value = vm.run().unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        let (key_arg, pattern_arg, template_arg) = {
+            let mut rt_ref = rt.borrow_mut();
+            let actor = rt_ref.actors.get_mut(&actor_id).unwrap();
+            (
+                actor.allocate_string("format"),
+                actor.allocate_string("research_*"),
+                actor.allocate_string("{title}"),
+            )
+        };
+        rt.borrow_mut()
+            .ask_actor_sync(actor_id, 2, &[key_arg, pattern_arg, template_arg])
+            .unwrap();
+
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            vec![None; module.behaviors.len()],
+        );
+        rt2.borrow_mut().recover_actor(actor_id);
+
+        let get_pattern_behavior_id = 3u16;
+        let key_arg = {
+            let mut rt2_ref = rt2.borrow_mut();
+            let actor = rt2_ref.actors.get_mut(&actor_id).unwrap();
+            actor.allocate_string("format")
+        };
+        let recalled = rt2
+            .borrow_mut()
+            .ask_actor_sync(actor_id, get_pattern_behavior_id, &[key_arg])
+            .unwrap();
+
+        let module_idx = 0;
+        let recalled_content = VM::new().value_to_string(module_idx, recalled);
+        assert_eq!(
+            recalled_content,
+            "{title}",
+            "recovered agent should return the stored pattern"
+        );
+    }
+
+    #[test]
     fn test_pipeline_source_end_to_end() {
         let source = r#"
             agent Researcher = {
