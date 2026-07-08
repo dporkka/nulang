@@ -496,6 +496,15 @@ fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_be_bytes(arr))
 }
 
+/// Acquire a mutex, recovering the guard even if a previous holder panicked.
+///
+/// Networking threads must keep running when one thread panics while holding
+/// a shared lock; the data protected by these mutexes stays structurally
+/// valid across panics, so poisoning is ignored rather than cascaded.
+fn lock_ignore_poison<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 // ---------------------------------------------------------------------------
 // TcpConnection
 // ---------------------------------------------------------------------------
@@ -642,7 +651,7 @@ impl NetworkTransport {
     pub fn connect(&mut self, node_id: NodeId, addr: SocketAddr) -> io::Result<()> {
         // Check if we already have a connection.
         {
-            let conns = self.connections.lock().unwrap();
+            let conns = lock_ignore_poison(&self.connections);
             if conns.contains_key(&node_id) {
                 return Ok(());
             }
@@ -679,7 +688,7 @@ impl NetworkTransport {
             last_activity: Instant::now(),
         };
 
-        let mut conns = self.connections.lock().unwrap();
+        let mut conns = lock_ignore_poison(&self.connections);
         conns.insert(node_id, conn);
         Ok(())
     }
@@ -745,7 +754,7 @@ impl NetworkTransport {
     ///
     /// Closes the TCP stream and removes the entry from the connection pool.
     pub fn disconnect(&mut self, node_id: NodeId) {
-        let mut conns = self.connections.lock().unwrap();
+        let mut conns = lock_ignore_poison(&self.connections);
         if let Some(conn) = conns.remove(&node_id) {
             let _ = conn.stream.shutdown(Shutdown::Both);
         }
@@ -764,7 +773,7 @@ impl NetworkTransport {
 
         // Close all connections so reader threads unblock.
         {
-            let conns = self.connections.lock().unwrap();
+            let conns = lock_ignore_poison(&self.connections);
             for (_, conn) in conns.iter() {
                 let _ = conn.stream.shutdown(Shutdown::Both);
             }
@@ -772,7 +781,7 @@ impl NetworkTransport {
 
         // Join all background threads.
         let handles: Vec<_> = {
-            let mut guard = self.threads.lock().unwrap();
+            let mut guard = lock_ignore_poison(&self.threads);
             guard.drain(..).collect()
         };
         for h in handles {
@@ -782,7 +791,7 @@ impl NetworkTransport {
 
     /// Get the number of active connections.
     pub fn connection_count(&self) -> usize {
-        let conns = self.connections.lock().unwrap();
+        let conns = lock_ignore_poison(&self.connections);
         conns.len()
     }
 }
@@ -868,7 +877,7 @@ fn connection_reader(
 
     // Register the connection.
     {
-        let mut conns = connections.lock().unwrap();
+        let mut conns = lock_ignore_poison(&connections);
         conns.insert(
             peer_id,
             TcpConnection {
@@ -908,7 +917,7 @@ fn connection_reader(
 
         // Update activity timestamp.
         {
-            let mut conns = connections.lock().unwrap();
+            let mut conns = lock_ignore_poison(&connections);
             if let Some(conn) = conns.get_mut(&peer_id) {
                 conn.last_activity = Instant::now();
             }
@@ -929,7 +938,7 @@ fn connection_reader(
 
     // Clean up: remove connection from pool.
     {
-        let mut conns = connections.lock().unwrap();
+        let mut conns = lock_ignore_poison(&connections);
         conns.remove(&peer_id);
     }
     let _ = stream.shutdown(Shutdown::Both);
@@ -962,7 +971,7 @@ fn sender_thread(
         // Look up connection.
         let mut needs_connect = false;
         {
-            let conns = connections.lock().unwrap();
+            let conns = lock_ignore_poison(&connections);
             if !conns.contains_key(&outgoing.to_node) {
                 needs_connect = true;
             }
@@ -985,7 +994,7 @@ fn sender_thread(
         let bytes = outgoing.packet.to_bytes(seq);
 
         let result = {
-            let mut conns = connections.lock().unwrap();
+            let mut conns = lock_ignore_poison(&connections);
             if let Some(conn) = conns.get_mut(&outgoing.to_node) {
                 conn.send_packet(&bytes)
             } else {
@@ -1001,7 +1010,7 @@ fn sender_thread(
                 "[nulang-net] Send to {:?} failed: {}; removing connection",
                 outgoing.to_node, e
             );
-            let mut conns = connections.lock().unwrap();
+            let mut conns = lock_ignore_poison(&connections);
             if let Some(conn) = conns.remove(&outgoing.to_node) {
                 let _ = conn.stream.shutdown(Shutdown::Both);
             }
@@ -1045,7 +1054,7 @@ fn connect_in_sender(
         last_activity: Instant::now(),
     };
 
-    let mut conns = connections.lock().unwrap();
+    let mut conns = lock_ignore_poison(connections);
     conns.insert(node_id, conn);
     Ok(())
 }
@@ -1157,7 +1166,7 @@ mod tests {
             Value::int(-1),
             Value::int(i64::MAX),
             Value::int(i64::MIN),
-            Value::float(3.14159),
+            Value::float(std::f64::consts::PI),
             Value::float(f64::NAN),
             Value::float(f64::INFINITY),
             Value::bool(true),

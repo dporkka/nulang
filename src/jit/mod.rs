@@ -54,16 +54,18 @@ use cranelift_module::Module;
 /// before it becomes eligible for JIT compilation.
 pub const HOT_THRESHOLD: u64 = 1000;
 
-static HOT_COUNTERS: OnceLock<Mutex<HashMap<usize, u64>>> = OnceLock::new();
+/// Hot counters keyed by `(module_idx, offset)` so identical offsets in
+/// different modules do not share (or pollute) each other's counts.
+static HOT_COUNTERS: OnceLock<Mutex<HashMap<(usize, usize), u64>>> = OnceLock::new();
 
-fn get_hot_counters() -> &'static Mutex<HashMap<usize, u64>> {
+fn get_hot_counters() -> &'static Mutex<HashMap<(usize, usize), u64>> {
     HOT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Record execution at offset. Returns true if region is hot.
-pub fn record_and_check_hot(offset: usize) -> bool {
+/// Record execution at `(module_idx, offset)`. Returns true if region is hot.
+pub fn record_and_check_hot(module_idx: usize, offset: usize) -> bool {
     let mut map = get_hot_counters().lock().unwrap();
-    let count = map.entry(offset).or_insert(0);
+    let count = map.entry((module_idx, offset)).or_insert(0);
     *count += 1;
     *count >= HOT_THRESHOLD
 }
@@ -82,12 +84,12 @@ pub fn reset_hot_counters() {
 ///
 /// - Creates and configures the `JITModule`
 /// - Compiles bytecode regions to native functions
-/// - Caches compiled function pointers by bytecode offset
+/// - Caches compiled function pointers by `(module_idx, bytecode offset)`
 pub struct JitSession {
     /// The Cranelift JIT module that owns compiled code memory.
     module: JITModule,
-    /// Map from bytecode offset → compiled function name → pointer.
-    compiled: HashMap<usize, *const u8>,
+    /// Map from `(module_idx, bytecode offset)` → compiled function pointer.
+    compiled: HashMap<(usize, usize), *const u8>,
     /// Reusable function builder context.
     builder_context: FunctionBuilderContext,
     /// Reusable codegen context.
@@ -169,7 +171,7 @@ impl JitSession {
         instructions: &[crate::bytecode::Instruction],
     ) -> Option<JitFunctionPtr> {
         // Check if already compiled
-        if let Some(&ptr) = self.compiled.get(&start_offset) {
+        if let Some(&ptr) = self.compiled.get(&(module_idx, start_offset)) {
             return Some(std::mem::transmute(ptr));
         }
 
@@ -186,22 +188,22 @@ impl JitSession {
             instructions,
         ) {
             Ok(ptr) => {
-                self.compiled.insert(start_offset, ptr);
+                self.compiled.insert((module_idx, start_offset), ptr);
                 Some(std::mem::transmute(ptr))
             }
             Err(_) => None,
         }
     }
 
-    /// Check if a bytecode offset has already been compiled.
-    pub fn is_compiled(&self, offset: usize) -> bool {
-        self.compiled.contains_key(&offset)
+    /// Check if a `(module_idx, offset)` region has already been compiled.
+    pub fn is_compiled(&self, module_idx: usize, offset: usize) -> bool {
+        self.compiled.contains_key(&(module_idx, offset))
     }
 
-    /// Get the compiled function pointer for an offset (if compiled).
-    pub fn get_compiled(&self, offset: usize) -> Option<JitFunctionPtr> {
+    /// Get the compiled function pointer for `(module_idx, offset)` (if compiled).
+    pub fn get_compiled(&self, module_idx: usize, offset: usize) -> Option<JitFunctionPtr> {
         self.compiled
-            .get(&offset)
+            .get(&(module_idx, offset))
             .map(|&ptr| unsafe { std::mem::transmute(ptr) })
     }
 
@@ -230,7 +232,7 @@ impl JitSession {
         use crate::jit::simd_compiler::{compile_simd_region, is_simd_supported};
 
         // Check if already compiled
-        if let Some(&ptr) = self.compiled.get(&start_offset) {
+        if let Some(&ptr) = self.compiled.get(&(module_idx, start_offset)) {
             return Some(std::mem::transmute(ptr));
         }
 
@@ -253,7 +255,7 @@ impl JitSession {
             &simd_region,
         ) {
             Ok(ptr) => {
-                self.compiled.insert(start_offset, ptr);
+                self.compiled.insert((module_idx, start_offset), ptr);
                 Some(std::mem::transmute(ptr))
             }
             Err(_) => self.compile_region(module_idx, start_offset, num_instrs, instructions),
@@ -299,14 +301,14 @@ pub fn tiered_execute_step(
     type_metadata: Option<&crate::jit::typed_compiler::TypeMetadata>,
 ) -> TieredAction {
     // Check if already compiled
-    if let Some(func) = jit.get_compiled(pc) {
+    if let Some(func) = jit.get_compiled(module_idx, pc) {
         // Execute JIT-compiled code
         func(regs.as_mut_ptr(), constants.as_ptr());
         return TieredAction::RanJit;
     }
 
     // Record execution for hotness
-    if record_and_check_hot(pc) {
+    if record_and_check_hot(module_idx, pc) {
         // Try to compile from PC to the end of the function or a unsupported opcode
         let region_len = find_compilable_region(pc, instructions);
         if region_len > 5 {

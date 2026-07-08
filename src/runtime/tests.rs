@@ -473,8 +473,8 @@ fn test_trap_exit_converts_to_message() {
 fn test_vm_value_nan_tagging() {
     let v = Value::int(42);
     assert_eq!(v.as_int(), Some(42));
-    let f = Value::float(3.14);
-    assert!((f.as_float().unwrap() - 3.14).abs() < 0.001);
+    let f = Value::float(2.5);
+    assert!((f.as_float().unwrap() - 2.5).abs() < 0.001);
     assert_eq!(Value::bool(true).as_bool(), Some(true));
     assert!(Value::unit().is_unit());
 }

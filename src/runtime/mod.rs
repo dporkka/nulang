@@ -2845,6 +2845,9 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         None
     }
 
+    // SAFETY: trait-impl signature is fixed; `ptr` always comes from the
+    // VM's own heap allocations (the current actor's ActorHeap).
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn drop_ref(&mut self, ptr: *mut u8) {
         let mut rt = self.runtime.borrow_mut();
         if let Some(actor_id) = rt.current_actor {
@@ -2857,6 +2860,9 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         }
     }
 
+    // SAFETY: trait-impl signature is fixed; `ptr` always comes from the
+    // VM's own heap allocations (the current actor's ActorHeap).
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn array_len(&self, ptr: *mut u8) -> Option<usize> {
         let rt = self.runtime.borrow();
         if let Some(actor_id) = rt.current_actor {

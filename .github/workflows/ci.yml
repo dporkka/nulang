@@ -47,13 +47,14 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # The codebase has not been rustfmt'd or clippy-cleaned yet; these run
+      # The codebase has not been rustfmt'd yet; the format check runs
       # non-blocking so CI reports drift without failing the build. Flip to
       # blocking once the existing findings are addressed.
       - name: Format check
         run: cargo fmt --check
         continue-on-error: true
 
+      # Clippy is blocking: deny-level errors have been fixed. Warnings are
+      # still reported but do not fail the build.
       - name: Clippy
         run: cargo clippy --all-targets
-        continue-on-error: true

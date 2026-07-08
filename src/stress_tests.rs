@@ -104,10 +104,12 @@ fn stress_slow_worker_with_mailbox_flood() {
         }
     }
 
-    // 1c. Memory sanity: no leaked runtime state.
+    // 1c. Memory sanity: no leaked runtime state. Terminated actors are
+    // reaped from the actor table by handle_actor_exit, so anything still
+    // registered must be in a live (non-Terminated) state.
     assert!(
-        rt.actors.values().all(|a| a.state != ActorState::Terminated || true),
-        "all remaining actors should be in valid states"
+        rt.actors.values().all(|a| a.state != ActorState::Terminated),
+        "terminated actors should have been reaped from the runtime"
     );
 }
 
