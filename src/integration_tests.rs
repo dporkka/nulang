@@ -319,6 +319,98 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Test: examples/*.nu run end-to-end through the full pipeline
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_example_fibonacci_runs() {
+        let source = include_str!("../examples/fibonacci.nu");
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(value.as_int(), Some(55), "fib(10) = 55");
+    }
+
+    #[test]
+    fn test_example_effects_runs() {
+        let source = include_str!("../examples/effects.nu");
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(value.as_int(), Some(42), "handler should resume with 42");
+    }
+
+    #[test]
+    fn test_example_counter_actor_runs() {
+        let source = include_str!("../examples/counter_actor.nu");
+        let (value, _ty) = run_source(source).unwrap();
+        assert!(value.as_actor_id().is_some(), "spawn should return an actor reference");
+    }
+
+    #[test]
+    fn test_declared_effect_annotation_rejects_undeclared_effects() {
+        // Mirrors the CLI frontend's enforcement: a function annotated with a
+        // declared effect row must not perform effects outside that row.
+        use crate::effect_checker::{EffectChecker, EffectContext};
+
+        let source = r#"
+            fn f() -> Unit ! {} {
+                perform IO.print("x")
+            }
+        "#;
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex().unwrap();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module().unwrap();
+
+        let mut checker = EffectChecker::new();
+        let ctx = EffectContext::empty();
+        let mut checked = false;
+        for decl in &ast.decls {
+            if let crate::ast::Decl::Function { name, body, effect: Some(declared), .. } = decl {
+                if name == "f" {
+                    checked = true;
+                    let result = checker.check_effects(&ctx, body, declared);
+                    assert!(
+                        result.is_err(),
+                        "function declared pure (`! {{}}`) but performing IO must be rejected"
+                    );
+                }
+            }
+        }
+        assert!(checked, "parser should surface the `! {{}}` annotation on fn f");
+    }
+
+    #[test]
+    fn test_declared_effect_annotation_accepts_matching_effects() {
+        use crate::effect_checker::{EffectChecker, EffectContext};
+
+        let source = r#"
+            fn f() -> Unit ! {IO} {
+                perform IO.print("x")
+            }
+        "#;
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex().unwrap();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module().unwrap();
+
+        let mut checker = EffectChecker::new();
+        let ctx = EffectContext::empty();
+        let mut checked = false;
+        for decl in &ast.decls {
+            if let crate::ast::Decl::Function { name, body, effect: Some(declared), .. } = decl {
+                if name == "f" {
+                    checked = true;
+                    let result = checker.check_effects(&ctx, body, declared);
+                    assert!(
+                        result.is_ok(),
+                        "function performing only its declared effects must pass: {:?}",
+                        result.err()
+                    );
+                }
+            }
+        }
+        assert!(checked, "parser should surface the `! {{IO}}` annotation on fn f");
+    }
+
     #[test]
     fn test_perform_effect_with_handler() {
         // perform with a handler that catches the effect.

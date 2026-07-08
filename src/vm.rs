@@ -223,13 +223,14 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
 #[derive(Debug)]
 struct StandaloneVmCallbacks {
     heap: ActorHeap,
+    gc: crate::runtime::OrcaGc,
 }
 
 impl StandaloneVmCallbacks {
     fn new() -> Self {
         let mut heap = ActorHeap::new(1024 * 1024);
         heap.set_actor_id(0);
-        Self { heap }
+        Self { heap, gc: crate::runtime::OrcaGc::new(0) }
     }
 }
 
@@ -240,7 +241,7 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
 
     fn drop_ref(&mut self, ptr: *mut u8) {
         unsafe {
-            self.heap.free(ptr);
+            self.gc.drop_local_ref(&mut self.heap, ptr);
         }
     }
 
@@ -2550,6 +2551,67 @@ mod vm_tests {
         assert_eq!(hot_result.as_int(), cold_result.as_int(),
             "JIT hot loop should match interpreter");
         assert_eq!(hot_result.as_int(), Some(6), "sum 0..4 = 6");
+    }
+
+    /// Regression test: a hot loop whose body is long enough to JIT and whose
+    /// header has an early-exit conditional must produce the exact interpreter
+    /// result. Guards the straight-line-region contract: compiled regions must
+    /// not contain branches, because the VM advances pc by the full region
+    /// length after a region runs.
+    #[test]
+    fn test_jit_hot_loop_with_early_exit_branch() {
+        let mut module = CodeModule::new("test_jit_early_exit");
+        let c100_idx = module.add_constant(Constant::Int(100));
+
+        // r0 = sum, r1 = i, r2 = limit, r3 = one, r4 = cond, r5 = pad
+        module.emit(Instruction::new1(OpCode::Const0, 0));               // 0
+        module.emit(Instruction::new1(OpCode::Const0, 1));               // 1
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c100_idx >> 8) & 0xFF) as u8, (c100_idx & 0xFF) as u8, 2)); // 2
+        module.emit(Instruction::new1(OpCode::Const1, 3));               // 3
+        module.emit(Instruction::new1(OpCode::Const0, 5));               // 4
+
+        let loop_check = module.current_offset();
+        module.emit(Instruction::new3(OpCode::ICmpLt, 1, 2, 4));         // 5
+        let jmpf_idx = module.current_offset();
+        module.emit(Instruction::new2(OpCode::JmpF, 4, 0));              // 6 (patched)
+        // Loop body: 7 straight-line instructions so it clears the JIT's
+        // minimum region size and actually gets compiled once hot.
+        module.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0));           // 7: sum += i
+        module.emit(Instruction::new3(OpCode::IAdd, 5, 3, 5));           // 8: pad
+        module.emit(Instruction::new3(OpCode::IAdd, 5, 3, 5));           // 9: pad
+        module.emit(Instruction::new3(OpCode::IAdd, 5, 3, 5));           // 10: pad
+        module.emit(Instruction::new3(OpCode::IAdd, 5, 3, 5));           // 11: pad
+        module.emit(Instruction::new3(OpCode::IAdd, 5, 3, 5));           // 12: pad
+        module.emit(Instruction::new3(OpCode::IAdd, 1, 3, 1));           // 13: i += 1
+        let jmp_back_idx = module.current_offset();
+        let back_offset = loop_check as i64 - jmp_back_idx as i64;
+        module.emit(Instruction::new3(OpCode::Jmp,
+            ((back_offset as i16 >> 8) & 0xFF) as u8,
+            (back_offset as i16 & 0xFF) as u8,
+            0));                                                          // 14
+        let after_loop = module.current_offset();
+        if let Some(instr) = module.instructions.get_mut(jmpf_idx) {
+            let forward_offset = after_loop as i64 - jmpf_idx as i64;
+            instr.op2 = ((forward_offset as i16 >> 8) & 0xFF) as u8;
+            instr.op3 = (forward_offset as i16 & 0xFF) as u8;
+        }
+        module.emit(Instruction::new0(OpCode::Halt));                    // 15
+        module.entry_point = Some(0);
+
+        crate::jit::reset_hot_counters();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let cold_result = vm.run_from(0, 0).unwrap();
+        assert_eq!(cold_result.as_int(), Some(4950), "sum 0..100 = 4950");
+
+        // Heat the loop body well past the hot threshold so it JIT-compiles,
+        // then verify the compiled path still takes the early exit correctly.
+        for _ in 0..50 {
+            let result = vm.run_from(0, 0).unwrap();
+            assert_eq!(result.as_int(), Some(4950),
+                "JIT-compiled loop with early-exit branch must match interpreter");
+        }
     }
 
     /// Test 17: NodeId returns the configured local node ID.

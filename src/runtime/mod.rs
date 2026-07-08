@@ -1258,11 +1258,12 @@ impl Runtime {
         if should_detect {
             let local_ids: std::collections::HashSet<u64> = self.actors.keys().copied().collect();
             self.cycle_detector.set_local_actors(local_ids);
-            let rt = self as *mut Runtime;
-            let detector = &mut self.cycle_detector;
-            unsafe {
-                detector.incremental_detect(&mut *rt);
-            }
+            // Take the detector out of `self` so it and the runtime are two
+            // disjoint &mut borrows; `incremental_detect` only touches
+            // `self.actors` via the CycleRuntime impl.
+            let mut detector = std::mem::take(&mut self.cycle_detector);
+            detector.incremental_detect(self);
+            self.cycle_detector = detector;
         }
     }
 
@@ -1307,9 +1308,35 @@ impl Runtime {
     }
 
     pub fn run_scheduler(&mut self) {
+        // How often (in scheduler ticks) deferred local decrements are
+        // retried while actors are still running.
+        const GC_PUMP_INTERVAL: u64 = 256;
+        let mut ticks: u64 = 0;
         while let Some(actor_id) = self.scheduler.dequeue() {
             self.tick_timers();
             self.step_actor(actor_id);
+            ticks += 1;
+            if ticks % GC_PUMP_INTERVAL == 0 {
+                // Safe at any cadence: process_deferred only frees objects
+                // whose local and foreign counts have already reached zero.
+                self.process_deferred_all();
+            }
+        }
+        // Deliver pending foreign-ref decrements and run cycle detection only
+        // once the run queue has drained. Applying the -1 ops mid-run could
+        // free an object whose pointer is still sitting in a mailbox, because
+        // the runtime never re-increments on message receipt. Note: an actor
+        // that yielded with a non-empty mailbox is re-enqueued, so a drained
+        // queue implies drained mailboxes for terminating programs.
+        self.process_gc_ops();
+        self.process_deferred_all();
+    }
+
+    /// Retry deferred local decrements on every actor's heap. Objects whose
+    /// `foreign_count` has since dropped to zero are freed.
+    fn process_deferred_all(&mut self) {
+        for actor in self.actors.values_mut() {
+            actor.orca_gc.process_deferred(&mut actor.heap);
         }
     }
 
@@ -2822,7 +2849,10 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         let mut rt = self.runtime.borrow_mut();
         if let Some(actor_id) = rt.current_actor {
             if let Some(actor) = rt.actors.get_mut(&actor_id) {
-                unsafe { actor.heap.free(ptr); }
+                // Route through ORCA so objects with outstanding foreign
+                // references are deferred instead of freed out from under
+                // other actors.
+                unsafe { actor.orca_gc.drop_local_ref(&mut actor.heap, ptr); }
             }
         }
     }
@@ -3102,7 +3132,10 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
     fn drop_ref(&mut self, ptr: *mut u8) {
         unsafe {
             if let Some(actor) = (*self.runtime).actors.get_mut(&self.actor_id) {
-                actor.heap.free(ptr);
+                // Route through ORCA so objects with outstanding foreign
+                // references are deferred instead of freed out from under
+                // other actors.
+                actor.orca_gc.drop_local_ref(&mut actor.heap, ptr);
             }
         }
     }

@@ -1235,6 +1235,82 @@ fn test_cross_actor_send_foreign_count_lifecycle() {
     assert_eq!(actor.heap.live_count(), 0, "object should be freed after local+foreign counts hit zero");
 }
 
+/// Regression test: the VM `Drop` callback must honor ORCA foreign counts.
+/// An object another actor still references must be deferred, not freed.
+#[test]
+fn test_vm_drop_ref_defers_object_with_foreign_refs() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use crate::vm::ActorVmCallbacks;
+
+    let rt = Rc::new(RefCell::new(Runtime::new()));
+    let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
+    rt.borrow_mut().current_actor = Some(actor_id);
+
+    let mut cb = RuntimeVmCallbacks::new(rt.clone());
+    let ptr = cb.alloc(16, TypeTag::Raw).unwrap();
+
+    // Simulate an in-flight foreign reference held by another actor.
+    unsafe {
+        (*ActorHeap::header_of(ptr)).foreign_count.store(1, Ordering::Relaxed);
+    }
+
+    cb.drop_ref(ptr);
+    assert_eq!(
+        rt.borrow().actors.get(&actor_id).unwrap().heap.live_count(),
+        1,
+        "object with a live foreign reference must not be freed by Drop"
+    );
+
+    // Once the foreign reference goes away, the deferred pass reclaims it.
+    unsafe {
+        (*ActorHeap::header_of(ptr)).foreign_count.store(0, Ordering::Relaxed);
+    }
+    {
+        let mut rt_mut = rt.borrow_mut();
+        let actor = rt_mut.actors.get_mut(&actor_id).unwrap();
+        actor.orca_gc.process_deferred(&mut actor.heap);
+    }
+    assert_eq!(
+        rt.borrow().actors.get(&actor_id).unwrap().heap.live_count(),
+        0,
+        "deferred object should be freed once foreign_count returns to zero"
+    );
+}
+
+/// Regression test: `run_scheduler` must pump the ORCA GC on its own.
+/// A cross-actor reference whose local ref was dropped is reclaimed by the
+/// scheduler without the embedder calling `process_gc_ops` manually.
+#[test]
+fn test_run_scheduler_pumps_gc() {
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    rt.current_actor = Some(a);
+
+    let ptr = rt.actors.get_mut(&a).unwrap().heap.alloc(16, TypeTag::Raw).unwrap();
+    let v = Value::ptr(ptr);
+    rt.send_message_by_id(b, 0, &[v]);
+
+    // Sender drops its local reference while foreign_count is still 1: the
+    // object must be deferred, not freed.
+    {
+        let actor = rt.actors.get_mut(&a).unwrap();
+        unsafe { actor.orca_gc.drop_local_ref(&mut actor.heap, ptr); }
+        assert_eq!(actor.heap.live_count(), 1, "object should be deferred while foreign ref is live");
+    }
+
+    // Draining the scheduler must deliver the pending foreign-ref decrement
+    // and retry deferred frees — no explicit process_gc_ops() call.
+    rt.run_scheduler();
+
+    assert_eq!(
+        rt.actors.get(&a).unwrap().heap.live_count(),
+        0,
+        "run_scheduler should reclaim the object once the foreign ref op is delivered"
+    );
+}
+
 // ========================================================================
 // v0.8 Workflow Runtime Tests
 // ========================================================================

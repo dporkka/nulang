@@ -67,6 +67,7 @@ async fn main() {
                 }
             }
             "--lsp" => opts.lsp = true,
+            "--experimental-mir" => opts.experimental_mir = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-h" | "--help" => {
                 print_help();
@@ -94,7 +95,7 @@ async fn main() {
     }
 
     if let Some(code) = opts.eval_code {
-        if let Err(e) = run_source(&code, opts.verbose) {
+        if let Err(e) = run_source(&code, opts.verbose, opts.experimental_mir) {
             print_error(&e);
             std::process::exit(1);
         }
@@ -127,7 +128,7 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) = run_source(&source, opts.verbose) {
+        if let Err(e) = run_source(&source, opts.verbose, opts.experimental_mir) {
             print_error(&e);
             std::process::exit(1);
         }
@@ -146,6 +147,7 @@ struct Options {
     check_file: Option<String>,
     lsp: bool,
     verbose: bool,
+    experimental_mir: bool,
 }
 
 fn print_help() {
@@ -160,6 +162,7 @@ fn print_help() {
     println!("  -e, --eval       Evaluate a code string");
     println!("  -c, --check      Type-check a file (don't run)");
     println!("  --lsp            Start Language Server (stdio)");
+    println!("  --experimental-mir  Compile via the experimental HIR/MIR pipeline");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  -h, --help       Show this help message");
 }
@@ -168,8 +171,9 @@ fn print_error(err: &NuError) {
     eprintln!("Error: {}", err);
 }
 
-/// Full pipeline: parse -> typecheck -> effect check -> compile -> vm.run()
-fn run_source(source: &str, verbose: bool) -> NuResult<()> {
+/// Shared frontend: lex -> parse -> typecheck -> effect check -> capability
+/// analysis. Returns the parsed module ready for compilation.
+fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule> {
     // 1. Lex
     let mut lexer = Lexer::new(source);
     let tokens = lexer.lex().map_err(|e| {
@@ -202,54 +206,149 @@ fn run_source(source: &str, verbose: bool) -> NuResult<()> {
         println!("{}\n", type_to_string(&module_type));
     }
 
-    // 4. Effect check
+    // 4. Effect check. Bodies with a declared effect row (`! E`) are enforced
+    // against it; un-annotated bodies are inference-only so existing programs
+    // keep working until interprocedural effect propagation lands.
     let mut effect_checker = EffectChecker::new();
     let effect_ctx = EffectContext::empty();
+    let check_body = |checker: &mut EffectChecker,
+                          body: &nulang::ast::Expr,
+                          declared: Option<&nulang::types::EffectRow>|
+     -> NuResult<()> {
+        match declared {
+            Some(allowed) => checker.check_effects(&effect_ctx, body, allowed),
+            None => checker.infer_effects(&effect_ctx, body).map(|_| ()),
+        }
+        .map_err(|e| {
+            eprintln!("Effect error: {}", e);
+            e
+        })
+    };
     for decl in &ast.decls {
-        if let nulang::ast::Decl::Function { body, .. } = decl {
-            effect_checker.infer_effects(&effect_ctx, body).map_err(|e| {
-                eprintln!("Effect error: {}", e);
-                e
-            })?;
+        match decl {
+            nulang::ast::Decl::Function { body, effect, .. } => {
+                check_body(&mut effect_checker, body, effect.as_ref())?;
+            }
+            nulang::ast::Decl::Actor { behaviors, state_fields, init, .. } => {
+                for b in behaviors {
+                    check_body(&mut effect_checker, &b.body, b.effect.as_ref())?;
+                }
+                for (_, _, _, default) in state_fields {
+                    check_body(&mut effect_checker, default, None)?;
+                }
+                for (_, expr) in init {
+                    check_body(&mut effect_checker, expr, None)?;
+                }
+            }
+            nulang::ast::Decl::Workflow { items, compensate, .. } => {
+                for item in items {
+                    let steps: &[nulang::ast::WorkflowStep] = match item {
+                        nulang::ast::WorkflowItem::Step(s) => std::slice::from_ref(s),
+                        nulang::ast::WorkflowItem::Parallel(steps) => steps,
+                    };
+                    for step in steps {
+                        check_body(&mut effect_checker, &step.body, None)?;
+                        if let Some(comp) = &step.compensate {
+                            check_body(&mut effect_checker, comp, None)?;
+                        }
+                    }
+                }
+                if let Some(comp) = compensate {
+                    check_body(&mut effect_checker, comp, None)?;
+                }
+            }
+            // Agent declarations carry only configuration, no expression bodies.
+            _ => {}
         }
     }
 
-    // 5. Capability analysis
+    // 5. Capability analysis over the same body set.
     let mut cap_analyzer = CapabilityAnalyzer::new();
     let cap_ctx = CapContext::new();
+    let cap_body = |analyzer: &mut CapabilityAnalyzer,
+                        body: &nulang::ast::Expr|
+     -> NuResult<()> {
+        analyzer.infer_cap(&cap_ctx, body).map(|_| ()).map_err(|e| {
+            eprintln!("Capability error: {}", e);
+            e
+        })
+    };
     for decl in &ast.decls {
-        if let nulang::ast::Decl::Function { body, .. } = decl {
-            cap_analyzer.infer_cap(&cap_ctx, body).map_err(|e| {
-                eprintln!("Capability error: {}", e);
-                e
-            })?;
+        match decl {
+            nulang::ast::Decl::Function { body, .. } => {
+                cap_body(&mut cap_analyzer, body)?;
+            }
+            nulang::ast::Decl::Actor { behaviors, state_fields, init, .. } => {
+                for b in behaviors {
+                    cap_body(&mut cap_analyzer, &b.body)?;
+                }
+                for (_, _, _, default) in state_fields {
+                    cap_body(&mut cap_analyzer, default)?;
+                }
+                for (_, expr) in init {
+                    cap_body(&mut cap_analyzer, expr)?;
+                }
+            }
+            nulang::ast::Decl::Workflow { items, compensate, .. } => {
+                for item in items {
+                    let steps: &[nulang::ast::WorkflowStep] = match item {
+                        nulang::ast::WorkflowItem::Step(s) => std::slice::from_ref(s),
+                        nulang::ast::WorkflowItem::Parallel(steps) => steps,
+                    };
+                    for step in steps {
+                        cap_body(&mut cap_analyzer, &step.body)?;
+                        if let Some(comp) = &step.compensate {
+                            cap_body(&mut cap_analyzer, comp)?;
+                        }
+                    }
+                }
+                if let Some(comp) = compensate {
+                    cap_body(&mut cap_analyzer, comp)?;
+                }
+            }
+            _ => {}
         }
     }
 
-    // 6. Compile (try new HIR/MIR pipeline first; fall back to legacy compiler).
-    let code_module = match compile_with_new_pipeline(&ast, "main") {
-        Ok(m) => {
-            if verbose {
-                println!("=== Bytecode (HIR/MIR pipeline) ===");
-                println!("{}", disassemble(&m));
+    Ok(ast)
+}
+
+fn compile_legacy(ast: &nulang::ast::AstModule, verbose: bool) -> NuResult<nulang::bytecode::CodeModule> {
+    let mut compiler = Compiler::new("main");
+    let m = compiler.compile_module(ast)?.clone();
+    if verbose {
+        println!("=== Bytecode ===");
+        println!("{}", disassemble(&m));
+    }
+    Ok(m)
+}
+
+/// Full pipeline: parse -> typecheck -> effect check -> compile -> vm.run()
+fn run_source(source: &str, verbose: bool, use_mir: bool) -> NuResult<()> {
+    let ast = run_frontend(source, verbose)?;
+
+    // Compile. The stable compiler is the default; the experimental HIR/MIR
+    // pipeline still miscompiles closures and effect handlers, so it is only
+    // used when explicitly requested, and falls back loudly.
+    let code_module = if use_mir {
+        match compile_with_new_pipeline(&ast, "main") {
+            Ok(m) => {
+                if verbose {
+                    println!("=== Bytecode (HIR/MIR pipeline) ===");
+                    println!("{}", disassemble(&m));
+                }
+                m
             }
-            m
+            Err(e) => {
+                eprintln!("warning: HIR/MIR pipeline failed ({}); falling back to stable compiler", e);
+                compile_legacy(&ast, verbose)?
+            }
         }
-        Err(e) => {
-            if verbose {
-                eprintln!("HIR/MIR pipeline failed (falling back): {}", e);
-            }
-            let mut compiler = Compiler::new("main");
-            let m = compiler.compile_module(&ast)?.clone();
-            if verbose {
-                println!("=== Bytecode (legacy compiler) ===");
-                println!("{}", disassemble(&m));
-            }
-            m
-        }
+    } else {
+        compile_legacy(&ast, verbose)?
     };
 
-    // 7. Execute
+    // Execute
     let mut vm = VM::new();
     vm.load_module(code_module);
     let value = vm.run().map_err(|e| {
@@ -266,61 +365,7 @@ fn run_source(source: &str, verbose: bool) -> NuResult<()> {
 }
 
 fn check_source(source: &str, verbose: bool) -> NuResult<()> {
-    // 1. Lex
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.lex().map_err(|e| {
-        eprintln!("Lex error: {}", e);
-        e
-    })?;
-
-    // 2. Parse
-    let mut parser = Parser::new(tokens);
-    let ast = parser.parse_module().map_err(|e| {
-        eprintln!("Parse error: {}", e);
-        e
-    })?;
-
-    if verbose {
-        println!("=== AST ===");
-        println!("{:#?}", ast);
-        println!();
-    }
-
-    // 3. Type check
-    let mut type_checker = TypeChecker::new();
-    let module_type = type_checker.check_module(&ast).map_err(|e| {
-        eprintln!("Type error: {}", e);
-        e
-    })?;
-
-    if verbose {
-        println!("=== Inferred Type ===");
-        println!("{}\n", type_to_string(&module_type));
-    }
-
-    // 4. Effect check
-    let mut effect_checker = EffectChecker::new();
-    let effect_ctx = EffectContext::empty();
-    for decl in &ast.decls {
-        if let nulang::ast::Decl::Function { body, .. } = decl {
-            effect_checker.infer_effects(&effect_ctx, body).map_err(|e| {
-                eprintln!("Effect error: {}", e);
-                e
-            })?;
-        }
-    }
-
-    // 5. Capability analysis
-    let mut cap_analyzer = CapabilityAnalyzer::new();
-    let cap_ctx = CapContext::new();
-    for decl in &ast.decls {
-        if let nulang::ast::Decl::Function { body, .. } = decl {
-            cap_analyzer.infer_cap(&cap_ctx, body).map_err(|e| {
-                eprintln!("Capability error: {}", e);
-                e
-            })?;
-        }
-    }
+    run_frontend(source, verbose)?;
 
     if verbose {
         println!("Effect check passed.");

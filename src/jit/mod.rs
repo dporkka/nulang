@@ -336,9 +336,21 @@ pub(crate) fn find_compilable_region(
         }
         // Stop *before* return instructions so the VM still executes the
         // return and pops the frame correctly after the JIT region.
+        //
+        // Also stop before any branch or halt: after a region runs, the VM
+        // unconditionally advances pc by the region length, so a compiled
+        // branch whose target lies outside the region would resume at the
+        // wrong instruction. Restricting regions to straight-line code keeps
+        // that pc-advance contract exact (branches themselves stay
+        // interpreted; loop *bodies* still get compiled).
         if matches!(
             instructions[i].opcode,
-            crate::bytecode::OpCode::Ret | crate::bytecode::OpCode::RetVal
+            crate::bytecode::OpCode::Ret
+                | crate::bytecode::OpCode::RetVal
+                | crate::bytecode::OpCode::Jmp
+                | crate::bytecode::OpCode::JmpT
+                | crate::bytecode::OpCode::JmpF
+                | crate::bytecode::OpCode::Halt
         ) {
             break;
         }

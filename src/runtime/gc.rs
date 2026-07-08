@@ -184,6 +184,7 @@ unsafe impl Send for ForeignRefOp {}
 /// `OrcaGc` is **not** `Send` nor `Sync`.  It should only be accessed from
 /// the thread that runs the owning actor.  Cross-actor communication happens
 /// via [`ForeignRefOp`] messages handled by the [`OrcaCoordinator`].
+#[derive(Debug)]
 pub struct OrcaGc {
     actor_id: u64,
     /// Objects whose `local_count` reached zero but which could not be freed
