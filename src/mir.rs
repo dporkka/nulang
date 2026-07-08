@@ -3,10 +3,14 @@
 //! MIR is a lower-level 3-address code with explicit basic blocks. It is
 //! target-independent and serves as the last IR before lowering to bytecode
 //! (or, in the future, Cranelift/LLVM/WASM).
+//!
+//! Every block carries an explicit terminator; `Terminator::Unterminated` is
+//! the builder's placeholder and reaching codegen with it is an internal
+//! error, never silent misbehavior.
 
-use crate::ast::{BinOp, Literal, UnOp};
+use crate::ast::{BinOp, UnOp};
 use crate::bytecode::Constant;
-use crate::types::{Capability, Type};
+use crate::types::Type;
 
 // ---------------------------------------------------------------------------
 // IDs and basic structures
@@ -33,7 +37,6 @@ pub struct Local {
 pub struct Module {
     pub name: String,
     pub functions: Vec<Function>,
-    pub actor_inits: Vec<ActorInit>,
     pub foreign_functions: Vec<ForeignFunction>,
 }
 
@@ -41,18 +44,16 @@ pub struct Module {
 pub struct Function {
     pub name: String,
     pub params: Vec<LocalId>,
+    /// Locals populated from the enclosing closure's capture slots, in slot
+    /// order. Codegen emits a `CapLoad` prologue for these.
+    pub captures: Vec<LocalId>,
     pub ret: Option<Type>,
     pub locals: Vec<Local>,
     pub blocks: Vec<Block>,
     pub entry: BlockId,
-    pub is_behavior: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ActorInit {
-    pub actor_name: String,
-    pub behavior_indices: Vec<usize>, // indices into module.functions
-    pub init_function: usize, // index into module.functions
+    /// Effect-handler tables installed by `Stmt::EnterHandle` in this
+    /// function. Offsets are resolved by codegen.
+    pub handler_tables: Vec<HandlerTableDef>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +62,22 @@ pub struct ForeignFunction {
     pub symbol: String,
     pub params: Vec<Type>,
     pub ret: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandlerTableDef {
+    pub bindings: Vec<HandlerBindingDef>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandlerBindingDef {
+    /// Effect name matched against `Perform` at runtime (e.g. "IO").
+    pub effect_name: String,
+    /// Handler parameters; the VM delivers arguments in r0..rN, and codegen
+    /// moves them into these locals at the handler block's start.
+    pub params: Vec<LocalId>,
+    /// Block containing the handler body; must end in `Terminator::Resume`.
+    pub body: BlockId,
 }
 
 // ---------------------------------------------------------------------------
@@ -77,9 +94,15 @@ pub struct Block {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Assign { dst: LocalId, op: RValue },
-    StoreField { obj: LocalId, field: u8, src: LocalId },
+    /// Store to a named record field (module-wide field id resolved by codegen).
+    StoreFieldNamed { obj: LocalId, field: String, src: LocalId },
+    /// Store to a positional tuple slot.
+    StoreTupleSlot { obj: LocalId, slot: u8, src: LocalId },
     ArrayStore { arr: LocalId, idx: LocalId, src: LocalId },
-    StateSet { field_idx: usize, src: LocalId },
+    /// Install handler table `table` (index into `Function::handler_tables`).
+    EnterHandle { table: usize },
+    /// Pop the innermost handler frame (bytecode `Unwind`).
+    PopHandler,
     Emit { event: String, args: Vec<LocalId> },
 }
 
@@ -87,29 +110,38 @@ pub enum Stmt {
 pub enum RValue {
     Const(Constant),
     Load(LocalId),
-    LoadField { obj: LocalId, field: u8 },
+    /// Read a named record field (module-wide field id resolved by codegen).
+    LoadFieldNamed { obj: LocalId, field: String },
     ArrayLoad { arr: LocalId, idx: LocalId },
+    ArrayLen(LocalId),
+    /// Array literal: allocate and fill.
+    ArrayLit(Vec<LocalId>),
     Unary(UnOp, LocalId),
     Binary(BinOp, LocalId, LocalId),
+    /// String equality (variant tag tests).
+    StringEq(LocalId, LocalId),
     Call { func: FuncRef, args: Vec<LocalId> },
-    Closure { func: FuncRef, captures: Vec<LocalId> },
+    /// Create a closure over module function `func` capturing `captures`.
+    Closure { func: usize, captures: Vec<LocalId> },
     Tuple(Vec<LocalId>),
     Record(Vec<(String, LocalId)>),
-    Array { len: LocalId },
-    Spawn { behavior_idx: usize, init: LocalId },
-    Send { actor: LocalId, behavior_id: u16, args: Vec<LocalId> },
-    Ask { actor: LocalId, behavior_id: u16, args: Vec<LocalId> },
-    Perform { effect_id: u16, op_id: u16, args: Vec<LocalId> },
+    Perform { effect: String, op: String, args: Vec<LocalId> },
+    /// `perform LLM.ask(prompt)` — wired to the runtime's LLM client.
+    LlmAsk { prompt: LocalId },
+    /// `perform Signal.wait("name")` — workflow signal wait.
+    SignalWait { name: String },
     FFICall { idx: usize, args: Vec<LocalId> },
+    Migrate { actor: LocalId, node: LocalId },
     SelfRef,
-    NodeId,
-    CapabilityCheck { val: LocalId, required: Capability },
+    CapabilityCheck { val: LocalId },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FuncRef {
-    Named(String),
+    /// Direct reference to a module function by index.
     Index(usize),
+    /// Call through a local holding a function value (closure or index).
+    Local(LocalId),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,18 +149,10 @@ pub enum Terminator {
     Return(Option<LocalId>),
     Jump(BlockId),
     Branch { cond: LocalId, then_: BlockId, else_: BlockId },
-    Switch { val: LocalId, cases: Vec<(Literal, BlockId)>, default: BlockId },
-    Handle { body: BlockId, handlers: Vec<Handler>, resume: BlockId },
-    Unwind,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Handler {
-    pub effect_id: u16,
-    pub op_id: u16,
-    pub params: Vec<LocalId>,
-    pub resume: bool,
-    pub body: BlockId,
+    /// Resume from an effect handler with a result (bytecode `Resume`).
+    Resume(LocalId),
+    /// Builder placeholder; reaching codegen with this is an internal error.
+    Unterminated,
 }
 
 // ---------------------------------------------------------------------------
@@ -138,13 +162,14 @@ pub struct Handler {
 pub struct FunctionBuilder {
     name: String,
     params: Vec<LocalId>,
+    captures: Vec<LocalId>,
     ret: Option<Type>,
     locals: Vec<Local>,
     blocks: Vec<Block>,
+    handler_tables: Vec<HandlerTableDef>,
     current: BlockId,
     next_local: u32,
     next_block: u32,
-    is_behavior: bool,
 }
 
 impl FunctionBuilder {
@@ -152,27 +177,28 @@ impl FunctionBuilder {
         let mut builder = FunctionBuilder {
             name: name.into(),
             params: Vec::new(),
+            captures: Vec::new(),
             ret,
             locals: Vec::new(),
             blocks: Vec::new(),
+            handler_tables: Vec::new(),
             current: BlockId(0),
             next_local: 0,
             next_block: 0,
-            is_behavior: false,
         };
         builder.create_block(); // entry block
         builder
     }
 
-    pub fn behavior(name: impl Into<String>, ret: Option<Type>) -> Self {
-        let mut b = Self::new(name, ret);
-        b.is_behavior = true;
-        b
-    }
-
     pub fn add_param(&mut self, name: impl Into<String>, ty: Type) -> LocalId {
         let id = self.add_local(name, ty);
         self.params.push(id);
+        id
+    }
+
+    pub fn add_capture(&mut self, name: impl Into<String>, ty: Type) -> LocalId {
+        let id = self.add_local(name, ty);
+        self.captures.push(id);
         id
     }
 
@@ -183,10 +209,6 @@ impl FunctionBuilder {
         id
     }
 
-    pub fn find_local(&self, name: &str) -> Option<LocalId> {
-        self.locals.iter().find(|l| l.name.as_deref() == Some(name)).map(|l| l.id)
-    }
-
     pub fn add_temp(&mut self, ty: Type) -> LocalId {
         let id = LocalId(self.next_local);
         self.next_local += 1;
@@ -194,10 +216,19 @@ impl FunctionBuilder {
         id
     }
 
+    pub fn add_handler_table(&mut self, table: HandlerTableDef) -> usize {
+        self.handler_tables.push(table);
+        self.handler_tables.len() - 1
+    }
+
+    pub fn handler_table_mut(&mut self, idx: usize) -> &mut HandlerTableDef {
+        &mut self.handler_tables[idx]
+    }
+
     pub fn create_block(&mut self) -> BlockId {
         let id = BlockId(self.next_block);
         self.next_block += 1;
-        self.blocks.push(Block { id, stmts: Vec::new(), terminator: Terminator::Unwind });
+        self.blocks.push(Block { id, stmts: Vec::new(), terminator: Terminator::Unterminated });
         id
     }
 
@@ -222,15 +253,23 @@ impl FunctionBuilder {
         self.blocks[idx].terminator = term;
     }
 
+    pub fn is_terminated(&self) -> bool {
+        !matches!(
+            self.blocks[self.current.0 as usize].terminator,
+            Terminator::Unterminated
+        )
+    }
+
     pub fn build(self) -> Function {
         Function {
             name: self.name,
             params: self.params,
+            captures: self.captures,
             ret: self.ret,
             locals: self.locals,
             blocks: self.blocks,
             entry: BlockId(0),
-            is_behavior: self.is_behavior,
+            handler_tables: self.handler_tables,
         }
     }
 }
@@ -240,7 +279,6 @@ impl Module {
         Module {
             name: name.into(),
             functions: Vec::new(),
-            actor_inits: Vec::new(),
             foreign_functions: Vec::new(),
         }
     }

@@ -1,3 +1,4 @@
 /target
 check_lib
 cargo_check.log
+.claude/

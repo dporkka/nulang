@@ -133,8 +133,16 @@ impl Default for Body {
     fn default() -> Self {
         Body {
             stmts: Vec::new(),
-            terminator: Terminator::Return(None),
+            terminator: Terminator::Yield(Operand::Unit),
         }
+    }
+}
+
+impl Body {
+    /// True once an explicit control-transfer terminator has been set;
+    /// statements lowered after this point are dead code and are dropped.
+    pub fn is_terminated(&self) -> bool {
+        matches!(self.terminator, Terminator::FnReturn(_) | Terminator::Break)
     }
 }
 
@@ -178,11 +186,21 @@ pub enum RValue {
     Unary(UnOp, Operand, Type),
     Call { func: Operand, args: Vec<Operand>, ty: Type },
     Closure { params: Vec<(String, Type)>, body: Box<Body>, captures: Vec<String>, ty: Type },
+    /// A recursive function binding (`let rec f = ...` / self-referencing
+    /// let-bound lambda). Unlike `Closure`, `name` is in scope inside `body`.
+    RecClosure { name: String, params: Vec<(String, Type)>, body: Box<Body>, ty: Type },
     Tuple(Vec<Operand>, Type),
     Record(Vec<(String, Operand)>, Type),
     Array(Vec<Operand>, Type),
     FieldAccess { base: Operand, field: String, ty: Type },
     Index { base: Operand, idx: Operand, ty: Type },
+    /// Expression-position conditional. Each branch body yields its value via
+    /// a `Yield` terminator; the whole rvalue evaluates to that value.
+    If { cond: Operand, then_body: Box<Body>, else_body: Option<Box<Body>>, ty: Type },
+    /// Expression-position match. Arm bodies yield their value via `Yield`.
+    Match { scrutinee: Operand, arms: Vec<(Pattern, Box<Body>)>, ty: Type },
+    /// Array iteration loop; evaluates to unit.
+    For { var: String, iterable: Operand, body: Box<Body> },
     Spawn { actor_type: String, init: Vec<(String, Operand)>, ty: Type },
     Send { actor: Operand, behavior: String, args: Vec<Operand>, ty: Type },
     Ask { actor: Operand, behavior: String, args: Vec<Operand>, ty: Type },
@@ -197,19 +215,14 @@ pub enum RValue {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Terminator {
-    Return(Option<Operand>),
-    If {
-        cond: Operand,
-        result: String,
-        then_body: Box<Body>,
-        else_body: Option<Box<Body>>,
-    },
-    Match {
-        scrutinee: Operand,
-        result: String,
-        arms: Vec<(Pattern, Box<Body>)>,
-    },
-    Block(Vec<Box<Body>>),
+    /// The body evaluates to this operand and control continues in the
+    /// enclosing context (function return for a top-level body, join block
+    /// for branch/arm/handler bodies). Synthesized by lowering.
+    Yield(Operand),
+    /// An explicit `return` expression: always returns from the enclosing
+    /// function, even inside a branch or loop body.
+    FnReturn(Option<Operand>),
+    /// An explicit `break` expression: exits the innermost loop.
     Break,
 }
 
@@ -263,11 +276,15 @@ impl RValue {
             RValue::Unary(_, _, ty) => ty.clone(),
             RValue::Call { ty, .. } => ty.clone(),
             RValue::Closure { ty, .. } => ty.clone(),
+            RValue::RecClosure { ty, .. } => ty.clone(),
             RValue::Tuple(_, ty) => ty.clone(),
             RValue::Record(_, ty) => ty.clone(),
             RValue::Array(_, ty) => ty.clone(),
             RValue::FieldAccess { ty, .. } => ty.clone(),
             RValue::Index { ty, .. } => ty.clone(),
+            RValue::If { ty, .. } => ty.clone(),
+            RValue::Match { ty, .. } => ty.clone(),
+            RValue::For { .. } => Type::unit(),
             RValue::Spawn { ty, .. } => ty.clone(),
             RValue::Send { ty, .. } => ty.clone(),
             RValue::Ask { ty, .. } => ty.clone(),

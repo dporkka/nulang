@@ -1591,7 +1591,7 @@ mod tests {
 
         // New HIR -> MIR -> bytecode pipeline
         let hir = crate::hir_lower::lower_module(&ast);
-        let mir = crate::mir_lower::lower_module(&hir);
+        let mir = crate::mir_lower::lower_module(&hir)?;
         let module = crate::mir_codegen::compile_mir(&mir, "test")?;
 
         let mut vm = VM::new();
@@ -1655,6 +1655,71 @@ mod tests {
     fn test_new_pipeline_inequality() {
         let value = run_source_new("1 != 2").unwrap();
         assert_eq!(value.as_bool(), Some(true));
+    }
+
+    /// Differential test: the legacy compiler and the HIR/MIR pipeline must
+    /// produce identical results over a corpus of pure programs.
+    #[test]
+    fn test_mir_and_legacy_pipelines_agree() {
+        let corpus: &[&str] = &[
+            // Arithmetic and precedence
+            "1 + 2 * 3 - 4",
+            "(1 + 2) * (3 + 4)",
+            "100 / 7 % 5",
+            // Let chains and shadowing
+            "let x = 5 in let y = x * 2 in x + y",
+            "let x = 1 in let x = x + 1 in x",
+            // Conditionals, including statements after an if
+            "if 1 < 2 then 10 else 20",
+            "let x = if false then 1 else 2 in x + 10",
+            "if true then (if false then 1 else 2) else 3",
+            // Match with literals, variable binding, and wildcard
+            "match 2 { case 1 => 10 case 2 => 20 case _ => 30 }",
+            "match 9 { case 1 => 10 case n => n * 2 }",
+            // Closures: capturing, recursive, higher-order
+            "let a = 40 in let add = fn(x) { x + a } in add(2)",
+            "let fib = fn(n) { if n <= 1 then n else fib(n - 1) + fib(n - 2) } in fib(10)",
+            "let twice = fn(f, x) { f(f(x)) } in let inc = fn(n) { n + 1 } in twice(inc, 5)",
+            // Top-level functions
+            "fn add(x: Int, y: Int) -> Int { x + y }\nadd(3, 4)",
+            "fn fact(n: Int) -> Int { if n == 0 then 1 else n * fact(n - 1) }\nfact(6)",
+            // Arrays, indexing, records
+            "[10, 20, 30][1]",
+            "let arr = [10, 20, 30] in arr[0] + arr[2]",
+            "let r = { x: 1, y: 41 } in r.x + r.y",
+            // For loops evaluate to unit
+            "for i in [1, 2, 3] { i }",
+            // Effect handlers, with and without a resumed value
+            "handle perform Math.getAnswer() { | Math.getAnswer() => 42 }",
+            "handle perform IO.print(\"hello\") { | IO.print(msg) => 7 }",
+            // Pipe operator
+            "let inc = fn(n) { n + 1 } in 41 |> inc",
+        ];
+        for src in corpus {
+            let legacy = run_source(src)
+                .map(|(v, _)| v.to_string_repr())
+                .unwrap_or_else(|e| panic!("legacy pipeline failed on {:?}: {}", src, e));
+            let mir = run_source_new(src)
+                .map(|v| v.to_string_repr())
+                .unwrap_or_else(|e| panic!("MIR pipeline failed on {:?}: {}", src, e));
+            assert_eq!(legacy, mir, "pipelines disagree on {:?}", src);
+        }
+    }
+
+    /// Regression: closures capturing enclosing locals must see the captured
+    /// values (CapStore/CapLoad used to be VM no-ops, yielding garbage).
+    #[test]
+    fn test_legacy_closure_capture() {
+        let source = "let a = 40 in let add = fn(x) { x + a } in add(2)";
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(value.as_int(), Some(42));
+    }
+
+    #[test]
+    fn test_legacy_closure_capture_two_vars() {
+        let source = "let a = 30 in let b = 10 in let f = fn(x) { a + b + x } in f(2)";
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(value.as_int(), Some(42));
     }
 
     #[test]

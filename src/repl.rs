@@ -344,7 +344,7 @@ impl Default for Repl {
 /// legacy compiler.
 fn compile_with_new_pipeline(ast: &AstModule, name: &str) -> NuResult<crate::bytecode::CodeModule> {
     let hir = crate::hir_lower::lower_module(ast);
-    let mir = crate::mir_lower::lower_module(&hir);
+    let mir = crate::mir_lower::lower_module(&hir)?;
     crate::mir_codegen::compile_mir(&mir, name)
 }
 

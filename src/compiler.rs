@@ -38,7 +38,8 @@ fn pattern_bindings(pat: &Pattern, out: &mut std::collections::HashSet<String>) 
 }
 
 /// Map a Nulang primitive type to its FFI representation.
-fn nulang_type_to_ffi_type(ty: &Type) -> Option<FfiType> {
+/// Shared with the MIR codegen, which registers the same foreign functions.
+pub(crate) fn nulang_type_to_ffi_type(ty: &Type) -> Option<FfiType> {
     match ty {
         Type::Primitive(PrimitiveType::Int) => Some(FfiType::Int),
         Type::Primitive(PrimitiveType::Float) => Some(FfiType::Float),
@@ -51,7 +52,8 @@ fn nulang_type_to_ffi_type(ty: &Type) -> Option<FfiType> {
 }
 
 /// Accumulate free variable names in `expr` that are not in `bound`.
-fn free_vars(expr: &Expr, bound: &std::collections::HashSet<String>, acc: &mut std::collections::HashSet<String>) {
+/// Shared with the HIR lowering pass, which needs the same capture analysis.
+pub(crate) fn free_vars(expr: &Expr, bound: &std::collections::HashSet<String>, acc: &mut std::collections::HashSet<String>) {
     match expr {
         Expr::Var(name, _) => {
             if !bound.contains(name) {
@@ -699,9 +701,17 @@ impl Compiler {
     fn compile_let(&mut self, name: &str, value: &Expr, body: &Expr) -> NuResult<u8> {
         // Let-bound lambdas that reference themselves (e.g. `let fac = fn(n) ...
         // fac(n-1) ... in ...`) are compiled as recursive functions so the
-        // self-reference resolves without capture support.
+        // self-reference resolves without capture support. Lambdas that do
+        // NOT reference their own name compile as ordinary closures so they
+        // can capture the enclosing scope.
         if let Expr::Lambda { params, body: lam_body, .. } = value {
-            return self.compile_let_rec(name, params, lam_body, body);
+            let param_set: std::collections::HashSet<String> =
+                params.iter().map(|(n, _)| n.clone()).collect();
+            let mut free = std::collections::HashSet::new();
+            free_vars(lam_body, &param_set, &mut free);
+            if free.contains(name) {
+                return self.compile_let_rec(name, params, lam_body, body);
+            }
         }
 
         let val_reg = self.compile_expr(value)?;

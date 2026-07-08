@@ -328,8 +328,8 @@ fn run_source(source: &str, verbose: bool, use_mir: bool) -> NuResult<()> {
     let ast = run_frontend(source, verbose)?;
 
     // Compile. The stable compiler is the default; the experimental HIR/MIR
-    // pipeline still miscompiles closures and effect handlers, so it is only
-    // used when explicitly requested, and falls back loudly.
+    // pipeline covers the functional core (closures, effects, control flow)
+    // but not actors/workflows/agents, so it is opt-in and falls back loudly.
     let code_module = if use_mir {
         match compile_with_new_pipeline(&ast, "main") {
             Ok(m) => {
@@ -376,16 +376,11 @@ fn check_source(source: &str, verbose: bool) -> NuResult<()> {
 }
 
 fn compile_with_new_pipeline(ast: &nulang::ast::AstModule, name: &str) -> NuResult<nulang::bytecode::CodeModule> {
-    // Workflow lowering is implemented in the legacy compiler; force fallback
-    // so the CLI continues to use the bytecode actor path for workflow sources.
-    if ast.decls.iter().any(|d| matches!(d, nulang::ast::Decl::Workflow { .. })) {
-        return Err(NuError::NotYetImplemented {
-            feature: "workflow via HIR/MIR pipeline".to_string(),
-            span: nulang::types::Span::default(),
-        });
-    }
+    // Actors, workflows, and agents are not yet lowered by this pipeline;
+    // mir_lower reports them as honest NotYetImplemented errors, which the
+    // caller turns into a loud fallback to the stable compiler.
     let hir = nulang::hir_lower::lower_module(ast);
-    let mir = nulang::mir_lower::lower_module(&hir);
+    let mir = nulang::mir_lower::lower_module(&hir)?;
     nulang::mir_codegen::compile_mir(&mir, name)
 }
 

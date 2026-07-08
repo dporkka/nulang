@@ -1,11 +1,18 @@
 //! AST -> HIR lowering.
 //!
 //! Converts the parsed, type-checked AST into the typed High-level IR.
-//! For v0.2, expression types fall back to `Type::unit()` when no explicit
-//! annotation is available; the structural pipeline is the primary goal.
+//! Expression types fall back to `Type::unit()` when no explicit annotation
+//! is available; the bytecode backend is dynamically typed, so structural
+//! fidelity (not type fidelity) is what matters here.
+//!
+//! Control flow in expression position (`if`, `match`, `for`) lowers to
+//! dedicated `RValue` variants whose sub-bodies end in a `Yield` terminator.
+//! This keeps evaluation order correct when statements follow the control
+//! flow expression — the old design stored `if` as a *body terminator*,
+//! which reordered any code lowered after it.
 
 use crate::ast;
-use crate::ast::{BinOp, Decl, Expr, Literal};
+use crate::ast::{Decl, Expr, Literal};
 use crate::hir;
 use crate::types::{Capability, EffectRow, Span, Type};
 
@@ -141,23 +148,12 @@ fn lower_decl(decl: &Decl) -> hir::Decl {
             exports,
             decls,
             span,
-        } => {
-            // Flatten module decls for now.
-            let mut module_decl = hir::Decl::Module {
-                name: name.clone(),
-                exports: exports.clone(),
-                decls: Vec::new(),
-                span: *span,
-            };
-            for d in decls {
-                if let hir::Decl::Module { .. } = module_decl {
-                    if let hir::Decl::Module { decls: ref mut inner, .. } = module_decl {
-                        inner.push(lower_decl(d));
-                    }
-                }
-            }
-            module_decl
-        }
+        } => hir::Decl::Module {
+            name: name.clone(),
+            exports: exports.clone(),
+            decls: decls.iter().map(lower_decl).collect(),
+            span: *span,
+        },
         Decl::Import { path, items, span } => hir::Decl::Import {
             path: path.clone(),
             items: items.clone(),
@@ -190,28 +186,23 @@ fn lower_behavior(b: &ast::Behavior) -> hir::BehaviorDef {
     }
 }
 
+/// Lower an expression into a fresh body that yields the expression's value.
 pub fn lower_body(expr: &Expr) -> hir::Body {
     let mut body = hir::Body::new();
     let op = lower_expr(expr, &mut body);
-    // If the expression did not already set a terminator (e.g. return/break),
-    // make the body's value the return value.
-    if matches!(body.terminator, hir::Terminator::Return(None)) {
-        if is_unit_operand(&op) {
-            body.set_terminator(hir::Terminator::Return(None));
-        } else {
-            body.set_terminator(hir::Terminator::Return(Some(op)));
-        }
+    if !body.is_terminated() {
+        body.set_terminator(hir::Terminator::Yield(op));
     }
     body
-}
-
-fn is_unit_operand(op: &hir::Operand) -> bool {
-    matches!(op, hir::Operand::Unit)
 }
 
 /// Lower an expression into a sequence of statements in `body`, returning an
 /// operand that represents the expression's value.
 pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
+    if body.is_terminated() {
+        // Dead code after an explicit `return`/`break`: don't lower it.
+        return hir::Operand::Unit;
+    }
     match expr {
         Expr::Literal(lit, _span) => {
             let ty = literal_type(lit);
@@ -219,27 +210,12 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         }
         Expr::Var(name, _span) => hir::Operand::Var(name.clone(), Type::unit()),
         Expr::SelfRef(_) => hir::Operand::Var("self".to_string(), Type::unit()),
-        Expr::TypeAnnotate { expr, ty, span } => {
-            let mut inner = hir::Body::new();
-            let op = lower_expr(expr, &mut inner);
-            for stmt in inner.stmts {
-                body.push(stmt);
-            }
-            body.set_terminator(inner.terminator);
-            let temp = fresh_temp_name();
-            body.push(hir::Stmt::Let {
-                name: temp.clone(),
-                ty: ty.clone(),
-                value: hir::RValue::Use(op),
-                span: *span,
-            });
-            hir::Operand::Var(temp, ty.clone())
-        }
+        Expr::TypeAnnotate { expr, .. } => lower_expr(expr, body),
         Expr::CapAnnotate { expr, .. } => lower_expr(expr, body),
         Expr::Lambda { params, body: lb, effect: _, span } => {
             let lambda_body = lower_body(lb);
             let ty = Type::unit();
-            let captures = free_vars(expr);
+            let captures = lambda_captures(params, lb);
             let temp = fresh_temp_name();
             body.push(hir::Stmt::Let {
                 name: temp.clone(),
@@ -275,6 +251,30 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             hir::Operand::Var(temp, ty)
         }
         Expr::Let { name, value, body: b, span } => {
+            // Let-bound lambdas may reference themselves (`let fac = fn(n) ...
+            // fac(n-1)`); lower them like `let rec` so the self-reference
+            // resolves. Non-self-referencing lambdas stay ordinary closures so
+            // they can capture the enclosing scope.
+            if let Expr::Lambda { params, body: lam_body, .. } = value.as_ref() {
+                if lambda_references(name, params, lam_body) {
+                    let func_body = lower_body(lam_body);
+                    body.push(hir::Stmt::Let {
+                        name: name.clone(),
+                        ty: Type::unit(),
+                        value: hir::RValue::RecClosure {
+                            name: name.clone(),
+                            params: params
+                                .iter()
+                                .map(|(n, t)| (n.clone(), resolve_type(t)))
+                                .collect(),
+                            body: Box::new(func_body),
+                            ty: Type::unit(),
+                        },
+                        span: *span,
+                    });
+                    return lower_expr(b, body);
+                }
+            }
             let vop = lower_expr(value, body);
             let ty = vop.ty();
             body.push(hir::Stmt::Let {
@@ -287,18 +287,17 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         }
         Expr::LetRec { name, params, value, body: b, span } => {
             let func_body = lower_body(value);
-            let ty = Type::unit();
             body.push(hir::Stmt::Let {
                 name: name.clone(),
-                ty: ty.clone(),
-                value: hir::RValue::Closure {
+                ty: Type::unit(),
+                value: hir::RValue::RecClosure {
+                    name: name.clone(),
                     params: params
                         .iter()
                         .map(|(n, t)| (n.clone(), resolve_type(t)))
                         .collect(),
                     body: Box::new(func_body),
-                    captures: Vec::new(),
-                    ty: ty.clone(),
+                    ty: Type::unit(),
                 },
                 span: *span,
             });
@@ -307,81 +306,48 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         Expr::If { cond, then_branch, else_branch, span } => {
             let cond_op = lower_expr(cond, body);
             let ty = Type::unit();
-            let result_name = fresh_temp_name();
+            let temp = fresh_temp_name();
+            let then_body = lower_body(then_branch);
+            let else_body = else_branch.as_ref().map(|e| Box::new(lower_body(e)));
             body.push(hir::Stmt::Let {
-                name: result_name.clone(),
+                name: temp.clone(),
                 ty: ty.clone(),
-                value: hir::RValue::Use(hir::Operand::Unit),
+                value: hir::RValue::If {
+                    cond: cond_op,
+                    then_body: Box::new(then_body),
+                    else_body,
+                    ty: ty.clone(),
+                },
                 span: *span,
             });
-
-            let mut then_body = hir::Body::new();
-            let then_op = lower_expr(then_branch, &mut then_body);
-            then_body.push(hir::Stmt::Assign {
-                target: hir::Place::Var(result_name.clone(), ty.clone()),
-                value: hir::RValue::Use(then_op),
-                span: *span,
-            });
-            then_body.set_terminator(hir::Terminator::Return(None));
-
-            let else_body = else_branch
-                .as_ref()
-                .map(|e| {
-                    let mut eb = hir::Body::new();
-                    let else_op = lower_expr(e, &mut eb);
-                    eb.push(hir::Stmt::Assign {
-                        target: hir::Place::Var(result_name.clone(), ty.clone()),
-                        value: hir::RValue::Use(else_op),
-                        span: *span,
-                    });
-                    eb.set_terminator(hir::Terminator::Return(None));
-                    Box::new(eb)
-                });
-
-            body.set_terminator(hir::Terminator::If {
-                cond: cond_op,
-                result: result_name.clone(),
-                then_body: Box::new(then_body),
-                else_body,
-            });
-            hir::Operand::Var(result_name, ty)
+            hir::Operand::Var(temp, ty)
         }
         Expr::Match { scrutinee, arms, span } => {
             let scrut_op = lower_expr(scrutinee, body);
             let ty = Type::unit();
-            let result_name = fresh_temp_name();
-            body.push(hir::Stmt::Let {
-                name: result_name.clone(),
-                ty: ty.clone(),
-                value: hir::RValue::Use(hir::Operand::Unit),
-                span: *span,
-            });
-
+            let temp = fresh_temp_name();
             let arms_hir: Vec<_> = arms
                 .iter()
-                .map(|(pat, e)| {
-                    let mut arm_body = hir::Body::new();
-                    let arm_op = lower_expr(e, &mut arm_body);
-                    arm_body.push(hir::Stmt::Assign {
-                        target: hir::Place::Var(result_name.clone(), ty.clone()),
-                        value: hir::RValue::Use(arm_op),
-                        span: *span,
-                    });
-                    arm_body.set_terminator(hir::Terminator::Return(None));
-                    (pat.clone(), Box::new(arm_body))
-                })
+                .map(|(pat, e)| (pat.clone(), Box::new(lower_body(e))))
                 .collect();
-
-            body.set_terminator(hir::Terminator::Match {
-                scrutinee: scrut_op,
-                result: result_name.clone(),
-                arms: arms_hir,
+            body.push(hir::Stmt::Let {
+                name: temp.clone(),
+                ty: ty.clone(),
+                value: hir::RValue::Match {
+                    scrutinee: scrut_op,
+                    arms: arms_hir,
+                    ty: ty.clone(),
+                },
+                span: *span,
             });
-            hir::Operand::Var(result_name, ty)
+            hir::Operand::Var(temp, ty)
         }
         Expr::Block { exprs, span: _ } => {
             let mut last = hir::Operand::Unit;
             for e in exprs {
+                if body.is_terminated() {
+                    break;
+                }
                 last = lower_expr(e, body);
             }
             last
@@ -461,7 +427,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         Expr::Binary { op, left, right, span } => {
             let l = lower_expr(left, body);
             let r = lower_expr(right, body);
-            let ty = binary_type(op, &l, &r);
+            let ty = binary_type(op);
             let temp = fresh_temp_name();
             body.push(hir::Stmt::Let {
                 name: temp.clone(),
@@ -647,42 +613,46 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Unit
         }
-        Expr::For { var: _, iterable, body: b, span } => {
+        Expr::For { var, iterable, body: b, span } => {
             let iop = lower_expr(iterable, body);
-            let _loop_body = lower_body(b);
-            let ty = Type::unit();
+            let loop_body = lower_body(b);
             let temp = fresh_temp_name();
             body.push(hir::Stmt::Let {
                 name: temp.clone(),
-                ty: ty.clone(),
-                value: hir::RValue::Use(iop),
-                span: *span,
-            });
-            hir::Operand::Var(temp, ty)
-        }
-        Expr::Pipe { left, right, span } => {
-            let lop = lower_expr(left, body);
-            let rop = lower_expr(right, body);
-            let ty = Type::unit();
-            let temp = fresh_temp_name();
-            body.push(hir::Stmt::Let {
-                name: temp.clone(),
-                ty: ty.clone(),
-                value: hir::RValue::Call {
-                    func: rop,
-                    args: vec![lop],
-                    ty: ty.clone(),
+                ty: Type::unit(),
+                value: hir::RValue::For {
+                    var: var.clone(),
+                    iterable: iop,
+                    body: Box::new(loop_body),
                 },
                 span: *span,
             });
-            hir::Operand::Var(temp, ty)
+            hir::Operand::Var(temp, Type::unit())
+        }
+        Expr::Pipe { left, right, span } => {
+            // Lower `x |> f(a, b)` to `f(x, a, b)`, matching the stable
+            // compiler's pipe semantics.
+            let app = match right.as_ref() {
+                Expr::App { func, args, span: app_span } => {
+                    let mut new_args = vec![left.as_ref().clone()];
+                    new_args.extend(args.iter().cloned());
+                    Expr::App {
+                        func: func.clone(),
+                        args: new_args,
+                        span: *app_span,
+                    }
+                }
+                _ => Expr::App {
+                    func: right.clone(),
+                    args: vec![left.as_ref().clone()],
+                    span: *span,
+                },
+            };
+            lower_expr(&app, body)
         }
         Expr::Return(val, _span) => {
-            let op = val
-                .as_ref()
-                .map(|e| lower_expr(e, body))
-                .unwrap_or(hir::Operand::Unit);
-            body.set_terminator(hir::Terminator::Return(Some(op)));
+            let op = val.as_ref().map(|e| lower_expr(e, body));
+            body.set_terminator(hir::Terminator::FnReturn(op));
             hir::Operand::Unit
         }
         Expr::Break(_) => {
@@ -726,6 +696,23 @@ fn lower_place(expr: &Expr, body: &mut hir::Body) -> hir::Place {
     }
 }
 
+/// Free variables of a lambda (candidates for capture). The MIR lowering
+/// filters this against what is actually in scope.
+fn lambda_captures(params: &[(String, Option<Type>)], body: &Expr) -> Vec<String> {
+    let bound: std::collections::HashSet<String> =
+        params.iter().map(|(n, _)| n.clone()).collect();
+    let mut free = std::collections::HashSet::new();
+    crate::compiler::free_vars(body, &bound, &mut free);
+    let mut captures: Vec<String> = free.into_iter().collect();
+    captures.sort(); // deterministic ordering shared with codegen
+    captures
+}
+
+/// Does a let-bound lambda reference its own binding name?
+fn lambda_references(name: &str, params: &[(String, Option<Type>)], body: &Expr) -> bool {
+    lambda_captures(params, body).iter().any(|c| c == name)
+}
+
 fn resolve_type(ty: &Option<Type>) -> Type {
     ty.clone().unwrap_or_else(Type::unit)
 }
@@ -742,7 +729,8 @@ fn literal_type(lit: &Literal) -> Type {
     }
 }
 
-fn binary_type(op: &BinOp, _l: &hir::Operand, _r: &hir::Operand) -> Type {
+fn binary_type(op: &ast::BinOp) -> Type {
+    use crate::ast::BinOp;
     use crate::types::PrimitiveType;
     match op {
         BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or => {
@@ -764,11 +752,6 @@ static TEMP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32
 fn fresh_temp_name() -> String {
     let n = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!("__tmp{}", n)
-}
-
-fn free_vars(_expr: &Expr) -> Vec<String> {
-    // TODO: implement proper free-variable capture for closures.
-    Vec::new()
 }
 
 #[cfg(test)]
@@ -794,5 +777,30 @@ mod tests {
         };
         let hir = lower_module(&ast);
         assert_eq!(hir.decls.len(), 1);
+    }
+
+    #[test]
+    fn test_lower_if_is_expression_positioned() {
+        // `let x = if c then 1 else 2 in x` must keep the if as an RValue so
+        // statements after it stay in evaluation order.
+        let source_body = Expr::Let {
+            name: "x".to_string(),
+            value: Box::new(Expr::If {
+                cond: Box::new(Expr::Literal(Literal::Bool(true), Span::default())),
+                then_branch: Box::new(Expr::Literal(Literal::Int(1), Span::default())),
+                else_branch: Some(Box::new(Expr::Literal(Literal::Int(2), Span::default()))),
+                span: Span::default(),
+            }),
+            body: Box::new(Expr::Var("x".to_string(), Span::default())),
+            span: Span::default(),
+        };
+        let body = lower_body(&source_body);
+        // The if lowers to a Let stmt with an RValue::If, then x's Let, and
+        // the body yields x.
+        assert!(matches!(body.terminator, hir::Terminator::Yield(_)));
+        assert!(body
+            .stmts
+            .iter()
+            .any(|s| matches!(s, hir::Stmt::Let { value: hir::RValue::If { .. }, .. })));
     }
 }
