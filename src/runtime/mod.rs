@@ -45,7 +45,7 @@ pub use registry::*;
 pub use process_groups::*;
 pub use persistence::*;
 
-use crate::ai::{complete_sync, LlmClient, LlmMessage, LlmRequest, LlmResponse, Pipeline, PipelineStage};
+use crate::ai::{complete_sync, LlmClient, LlmMessage, LlmRequest, LlmResponse, Pipeline, PipelineStage, SupervisorTeam};
 use crate::types::ExitReason;
 use crate::vm::Value;
 
@@ -127,6 +127,10 @@ pub struct Runtime {
     // Pipelines (v0.9 AI Runtime)
     pub next_pipeline_id: u64,
     pub pipelines: HashMap<u64, Pipeline>,
+
+    // Supervisor teams (v0.9 AI Runtime)
+    pub next_supervisor_id: u64,
+    pub supervisor_teams: HashMap<u64, SupervisorTeam>,
 }
 
 impl Runtime {
@@ -157,6 +161,8 @@ impl Runtime {
             recovery_modules: HashMap::new(),
             next_pipeline_id: 1,
             pipelines: HashMap::new(),
+            next_supervisor_id: 1,
+            supervisor_teams: HashMap::new(),
         }
     }
 
@@ -295,6 +301,45 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| format!("Pipeline {} not found", id))?;
         pipeline.run(self, input)
+    }
+
+    /// Create a new empty supervisor team and return its ID.
+    pub fn supervisor_new(&mut self) -> u64 {
+        let id = self.next_supervisor_id;
+        self.next_supervisor_id = self.next_supervisor_id.wrapping_add(1);
+        self.supervisor_teams.insert(id, SupervisorTeam::new());
+        id
+    }
+
+    /// Add a worker to an existing supervisor team. Returns the same team ID on
+    /// success so fluent construction can continue.
+    pub fn supervisor_worker(
+        &mut self,
+        id: u64,
+        name: &str,
+        agent_id: u64,
+        description: &str,
+    ) -> Result<u64, String> {
+        let team = self
+            .supervisor_teams
+            .get_mut(&id)
+            .ok_or_else(|| format!("Supervisor team {} not found", id))?;
+        team.workers.push(crate::ai::Worker {
+            name: name.to_string(),
+            agent_id,
+            description: description.to_string(),
+        });
+        Ok(id)
+    }
+
+    /// Run a supervisor team, returning the final worker's output.
+    pub fn supervisor_run(&mut self, id: u64, task: &str) -> Result<String, String> {
+        let team = self
+            .supervisor_teams
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| format!("Supervisor team {} not found", id))?;
+        team.run(self, task)
     }
 
     /// Convert a VM value to a Rust string using the actor's bytecode module
@@ -2911,6 +2956,28 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     fn pipeline_run(&mut self, id: i64, input: &str) -> Option<String> {
         self.runtime.borrow_mut().pipeline_run(id as u64, input).ok()
     }
+
+    fn supervisor_new(&mut self) -> i64 {
+        self.runtime.borrow_mut().supervisor_new() as i64
+    }
+
+    fn supervisor_worker(
+        &mut self,
+        id: i64,
+        name: &str,
+        actor_id: u64,
+        description: &str,
+    ) -> i64 {
+        self.runtime
+            .borrow_mut()
+            .supervisor_worker(id as u64, name, actor_id, description)
+            .map(|id| id as i64)
+            .unwrap_or(-1)
+    }
+
+    fn supervisor_run(&mut self, id: i64, task: &str) -> Option<String> {
+        self.runtime.borrow_mut().supervisor_run(id as u64, task).ok()
+    }
 }
 
 /// Raw-pointer callbacks used when the runtime itself executes an actor's
@@ -3070,6 +3137,29 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
 
     fn pipeline_run(&mut self, id: i64, input: &str) -> Option<String> {
         unsafe { (*self.runtime).pipeline_run(id as u64, input).ok() }
+    }
+
+    fn supervisor_new(&mut self) -> i64 {
+        unsafe { (*self.runtime).supervisor_new() as i64 }
+    }
+
+    fn supervisor_worker(
+        &mut self,
+        id: i64,
+        name: &str,
+        actor_id: u64,
+        description: &str,
+    ) -> i64 {
+        unsafe {
+            (*self.runtime)
+                .supervisor_worker(id as u64, name, actor_id, description)
+                .map(|id| id as i64)
+                .unwrap_or(-1)
+        }
+    }
+
+    fn supervisor_run(&mut self, id: i64, task: &str) -> Option<String> {
+        unsafe { (*self.runtime).supervisor_run(id as u64, task).ok() }
     }
 }
 

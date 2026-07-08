@@ -145,6 +145,11 @@ pub enum OpCode {
     // == FFI (0xB0-0xBF) ==
     FFICall = 0xB0, // Call foreign function (func_idx high, func_idx low, dst)
 
+    // == Supervisor (0xC0-0xCF) ==
+    SupervisorNew    = 0xC0, // Create a new supervisor team (dst)
+    SupervisorWorker = 0xC1, // Add worker to team (reads r0=id, r1=name, r2=actor, r3=description; dst)
+    SupervisorRun    = 0xC2, // Run supervisor team (reads r0=id, r1=task; dst)
+
     // == Distribution (0xD0-0xDF) ==
     NodeId  = 0xD0, // Get current node id (dst)
     Migrate = 0xD1, // Migrate actor (addr_reg, node_id_reg, dst)
@@ -216,6 +221,7 @@ impl OpCode {
             0xA0 => Some(CapChk), 0xA1 => Some(CapUp), 0xA2 => Some(CapDown),
             0xA3 => Some(CapSend),
             0xB0 => Some(FFICall),
+            0xC0 => Some(SupervisorNew), 0xC1 => Some(SupervisorWorker), 0xC2 => Some(SupervisorRun),
             0xD0 => Some(NodeId), 0xD1 => Some(Migrate), 0xD2 => Some(RSend),
             0xD3 => Some(RAsk), 0xD4 => Some(RSpawn), 0xD5 => Some(Gossip),
             0xE0 => Some(SConcat), 0xE1 => Some(SPrint), 0xE2 => Some(SRead),

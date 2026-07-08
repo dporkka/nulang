@@ -2074,4 +2074,59 @@ mod tests {
         let result = vm.value_to_string(module_idx, value);
         assert_eq!(result, "final article");
     }
+
+    #[test]
+    fn test_supervisor_source_end_to_end() {
+        let source = r#"
+            agent Researcher = {
+                model: "llama3.1",
+                system_prompt: "Research.",
+                pricing: { input: 0.0, output: 0.0 }
+            }
+            agent Writer = {
+                model: "llama3.1",
+                system_prompt: "Write.",
+                pricing: { input: 0.0, output: 0.0 }
+            }
+
+            fn main() {
+                let researcher = spawn Researcher {} in
+                let writer = spawn Writer {} in
+                let team = Supervisor.new()
+                    |> Supervisor.worker("researcher", researcher, "Finds information")
+                    |> Supervisor.worker("writer", writer, "Writes content")
+                in
+                team.run("Write an article about CRDTs")
+            }
+        "#;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let client = crate::ai::MockLlmClient::sequence(vec![
+            crate::ai::LlmResponse {
+                content: Some("research notes".to_string()),
+                tool_calls: Vec::new(),
+                model: "mock".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: crate::ai::TokenUsage::default(),
+            },
+            crate::ai::LlmResponse {
+                content: Some("final article".to_string()),
+                tool_calls: Vec::new(),
+                model: "mock".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: crate::ai::TokenUsage::default(),
+            },
+        ]);
+        rt.borrow_mut().set_llm_client(Box::new(client));
+
+        let (module, _ty) = compile_source(source).unwrap();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt)));
+        let value = vm.run().unwrap();
+
+        let module_idx = vm.modules.len() - 1;
+        let result = vm.value_to_string(module_idx, value);
+        assert_eq!(result, "final article");
+    }
 }

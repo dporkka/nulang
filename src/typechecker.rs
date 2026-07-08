@@ -1367,6 +1367,36 @@ impl TypeChecker {
                     return Ok((vec![], func_ty));
                 }
             }
+            // Supervisor built-in namespace: Supervisor.new / Supervisor.worker.
+            if base == "Supervisor" {
+                if field == "new" {
+                    let func_ty = Type::Function {
+                        param: Box::new(Type::Tuple(vec![])),
+                        ret: Box::new(Type::int()),
+                        effect: EffectRow::empty(),
+                        cap: Capability::Ref,
+                    };
+                    return Ok((vec![], func_ty));
+                }
+                if field == "worker" {
+                    let actor_ty = Type::Actor {
+                        state: Box::new(Type::Var(TypeVar::fresh())),
+                        behavior: Box::new(Type::Var(TypeVar::fresh())),
+                    };
+                    let func_ty = Type::Function {
+                        param: Box::new(Type::Tuple(vec![
+                            Type::int(),
+                            Type::string(),
+                            actor_ty,
+                            Type::string(),
+                        ])),
+                        ret: Box::new(Type::int()),
+                        effect: EffectRow::empty(),
+                        cap: Capability::Ref,
+                    };
+                    return Ok((vec![], func_ty));
+                }
+            }
         }
 
         // Pipeline instance method: <pipeline-id>.run(input)

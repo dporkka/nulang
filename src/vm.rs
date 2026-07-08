@@ -184,6 +184,21 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
 
     /// Run a pipeline and return its final output string.
     fn pipeline_run(&mut self, _id: i64, _input: &str) -> Option<String> { None }
+
+    /// Create a new supervisor team and return its runtime ID.
+    fn supervisor_new(&mut self) -> i64 { 0 }
+
+    /// Add a worker to an existing supervisor team and return its ID.
+    fn supervisor_worker(
+        &mut self,
+        _id: i64,
+        _name: &str,
+        _actor_id: u64,
+        _description: &str,
+    ) -> i64 { -1 }
+
+    /// Run a supervisor team and return its final output string.
+    fn supervisor_run(&mut self, _id: i64, _task: &str) -> Option<String> { None }
 }
 
 /// Standalone callbacks used when the VM runs without an actor runtime.
@@ -1760,6 +1775,36 @@ impl VM {
                 let id = regs[0].as_int().unwrap_or(0);
                 let input = self.value_to_string(module_idx, regs[1]);
                 let value = match self.actor_callbacks.pipeline_run(id, &input) {
+                    Some(content) => self.add_runtime_string(module_idx, content),
+                    None => Value::nil(),
+                };
+                self.frames[frame_idx].regs[dst as usize] = value;
+            }
+
+            // -- Supervisor (v0.9 AI Runtime) --
+            OpCode::SupervisorNew => {
+                let dst = instr.op1;
+                let id = self.actor_callbacks.supervisor_new();
+                self.frames[frame_idx].regs[dst as usize] = Value::int(id);
+            }
+            OpCode::SupervisorWorker => {
+                let dst = instr.op1;
+                let regs = &self.frames[frame_idx].regs;
+                let id = regs[0].as_int().unwrap_or(0);
+                let name = self.value_to_string(module_idx, regs[1]);
+                let actor_id = regs[2].as_actor_id().unwrap_or(0);
+                let description = self.value_to_string(module_idx, regs[3]);
+                let result = self
+                    .actor_callbacks
+                    .supervisor_worker(id, &name, actor_id, &description);
+                self.frames[frame_idx].regs[dst as usize] = Value::int(result);
+            }
+            OpCode::SupervisorRun => {
+                let dst = instr.op1;
+                let regs = &self.frames[frame_idx].regs;
+                let id = regs[0].as_int().unwrap_or(0);
+                let task = self.value_to_string(module_idx, regs[1]);
+                let value = match self.actor_callbacks.supervisor_run(id, &task) {
                     Some(content) => self.add_runtime_string(module_idx, content),
                     None => Value::nil(),
                 };

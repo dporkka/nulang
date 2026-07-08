@@ -498,8 +498,32 @@ impl Compiler {
                         return Ok(dst);
                     }
                 }
+                if base == "Supervisor" {
+                    if field == "new" && args.is_empty() {
+                        let dst = self.alloc_reg();
+                        self.emit(Instruction::new1(OpCode::SupervisorNew, dst));
+                        return Ok(dst);
+                    }
+                    if field == "worker" && args.len() == 4 {
+                        self.next_reg = 0;
+                        let mut arg_regs = Vec::new();
+                        for arg in args {
+                            let arg_reg = self.compile_expr(arg)?;
+                            arg_regs.push(arg_reg);
+                        }
+                        for (i, &arg_reg) in arg_regs.iter().enumerate() {
+                            if arg_reg != i as u8 {
+                                self.emit(Instruction::new2(OpCode::Move, arg_reg, i as u8));
+                            }
+                        }
+                        let dst = self.alloc_reg();
+                        self.emit(Instruction::new1(OpCode::SupervisorWorker, dst));
+                        self.next_reg = saved_next_reg.max(dst + 1);
+                        return Ok(dst);
+                    }
+                }
                 if field == "run" && args.len() == 1 {
-                    // Instance method: receiver is the pipeline id variable.
+                    // Instance method: receiver is the pipeline/supervisor id variable.
                     self.next_reg = 0;
                     let receiver_reg = self.compile_expr(expr)?;
                     if receiver_reg != 0 {
@@ -510,7 +534,29 @@ impl Compiler {
                         self.emit(Instruction::new2(OpCode::Move, arg_reg, 1));
                     }
                     let dst = self.alloc_reg();
-                    self.emit(Instruction::new1(OpCode::PipelineRun, dst));
+                    // Choose the opcode based on the receiver type.  The parser
+                    // makes `|>` left-associative, so the receiver here is the
+                    // variable bound by the chained construction expression.
+                    // We conservatively emit SupervisorRun when the base name
+                    // is "Supervisor"; otherwise PipelineRun.
+                    // Heuristic disambiguation: instance `.run()` is a pipeline
+                    // run unless the receiver variable name clearly refers to a
+                    // supervisor team.  In the v0.9 MVP, name your supervisor
+                    // variable `team` or `supervisor`.
+                    let opcode = if let Expr::Var(receiver_name, _) = expr.as_ref() {
+                        let lowered = receiver_name.to_lowercase();
+                        if lowered == "team"
+                            || lowered == "supervisor"
+                            || lowered.contains("supervisor")
+                        {
+                            OpCode::SupervisorRun
+                        } else {
+                            OpCode::PipelineRun
+                        }
+                    } else {
+                        OpCode::PipelineRun
+                    };
+                    self.emit(Instruction::new1(opcode, dst));
                     self.next_reg = saved_next_reg.max(dst + 1);
                     return Ok(dst);
                 }
