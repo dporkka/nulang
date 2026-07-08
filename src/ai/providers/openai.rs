@@ -1,0 +1,324 @@
+//! OpenAI-compatible LLM provider client.
+//!
+//! Supports the standard `https://api.openai.com/v1/chat/completions` endpoint
+//! as well as any OpenAI-compatible API by configuring a custom `base_url`.
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+use crate::ai::client::LlmClient;
+use crate::ai::request::{LlmMessage, LlmRequest, ToolSchema};
+use crate::ai::response::{LlmResponse, TokenUsage, ToolCall};
+
+/// Client for the OpenAI chat completions API.
+#[derive(Debug, Clone)]
+pub struct OpenAiClient {
+    base_url: String,
+    api_key: String,
+    model: String,
+    client: reqwest::Client,
+}
+
+#[async_trait]
+impl LlmClient for OpenAiClient {
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, String> {
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+        let model = if request.model.is_empty() {
+            self.model.clone()
+        } else {
+            request.model
+        };
+
+        let messages: Vec<LlmMessage> = request
+            .memory
+            .into_iter()
+            .chain(request.messages)
+            .collect();
+
+        let tools: Vec<OpenAiTool> = request.tools.into_iter().map(into_openai_tool).collect();
+        let tool_choice = if tools.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!("auto"))
+        };
+
+        let body = OpenAiChatRequest {
+            model,
+            messages,
+            tools: if tools.is_empty() { None } else { Some(tools) },
+            tool_choice,
+            stream: false,
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("OpenAI request failed: {}", e))?
+            .json::<OpenAiChatResponse>()
+            .await
+            .map_err(|e| format!("OpenAI response parse failed: {}", e))?;
+
+        let choice = response
+            .choices
+            .into_iter()
+            .next()
+            .ok_or_else(|| "OpenAI response contained no choices".to_string())?;
+
+        let message = choice.message;
+        let content = if message.content.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+            None
+        } else {
+            message.content
+        };
+
+        let tool_calls: Vec<ToolCall> = message
+            .tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tc| {
+                let arguments = match tc.function.arguments {
+                    serde_json::Value::Object(map) => map,
+                    serde_json::Value::String(s) => {
+                        serde_json::from_str(&s).unwrap_or_default()
+                    }
+                    _ => serde_json::Map::new(),
+                };
+                ToolCall {
+                    id: tc.id,
+                    name: tc.function.name,
+                    arguments,
+                }
+            })
+            .collect();
+
+        let usage = response.usage.unwrap_or_default();
+
+        Ok(LlmResponse {
+            content,
+            tool_calls,
+            model: response.model,
+            finish_reason: choice.finish_reason.unwrap_or_default(),
+            usage: TokenUsage::new(usage.prompt_tokens, usage.completion_tokens),
+        })
+    }
+}
+
+impl OpenAiClient {
+    /// Create a new OpenAI client with the given API key and default model.
+    pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: api_key.into(),
+            model: model.into(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Create a client pointing at a custom OpenAI-compatible endpoint.
+    pub fn with_base_url(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            model: model.into(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Default client for GPT-4o. Reads the `OPENAI_API_KEY` environment
+    /// variable; returns an error-string client if the variable is missing.
+    pub fn gpt4o() -> Result<Self, String> {
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| "OPENAI_API_KEY environment variable not set".to_string())?;
+        Ok(Self::new(api_key, "gpt-4o"))
+    }
+}
+
+fn into_openai_tool(tool: ToolSchema) -> OpenAiTool {
+    OpenAiTool {
+        ty: "function".to_string(),
+        function: OpenAiFunction {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+        },
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiChatRequest {
+    model: String,
+    messages: Vec<LlmMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAiTool>>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "tool_choice")]
+    tool_choice: Option<serde_json::Value>,
+    stream: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAiTool {
+    #[serde(rename = "type")]
+    ty: String,
+    function: OpenAiFunction,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAiFunction {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatResponse {
+    model: String,
+    choices: Vec<OpenAiChoice>,
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    message: OpenAiMessage,
+    #[serde(rename = "finish_reason")]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiMessage {
+    content: Option<String>,
+    #[serde(rename = "tool_calls")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct OpenAiToolCall {
+    id: String,
+    function: OpenAiToolCallFunction,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct OpenAiToolCallFunction {
+    name: String,
+    /// OpenAI returns arguments as a JSON string.
+    arguments: serde_json::Value,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_openai_client_default_model() {
+        let client = OpenAiClient::new("test-key", "gpt-4o-mini");
+        assert_eq!(client.model, "gpt-4o-mini");
+        assert_eq!(client.base_url, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn test_openai_client_custom_base_url() {
+        let client = OpenAiClient::with_base_url("https://api.example.com/v1", "key", "model");
+        assert_eq!(client.base_url, "https://api.example.com/v1");
+    }
+
+    #[test]
+    fn test_into_openai_tool_preserves_schema() {
+        let schema = ToolSchema {
+            name: "get_weather".to_string(),
+            description: "Get the weather".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "location": { "type": "string" }
+                }
+            }),
+        };
+        let tool = into_openai_tool(schema);
+        assert_eq!(tool.function.name, "get_weather");
+        assert_eq!(tool.ty, "function");
+    }
+
+    #[test]
+    fn test_parse_openai_response() {
+        let json = json!({
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {
+                    "content": "Hello!",
+                    "role": "assistant"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5
+            }
+        });
+        let response: OpenAiChatResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(response.model, "gpt-4o");
+        assert_eq!(response.choices.len(), 1);
+        assert_eq!(response.choices[0].message.content.as_deref(), Some("Hello!"));
+        assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+    }
+
+    #[test]
+    fn test_parse_openai_tool_call_response() {
+        let json = json!({
+            "model": "gpt-4o",
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"location\":\"NYC\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 20,
+                "completion_tokens": 10
+            }
+        });
+        let response: OpenAiChatResponse = serde_json::from_value(json).unwrap();
+        let tool_call = response.choices[0].message.tool_calls.as_ref().unwrap()[0].clone();
+        assert_eq!(tool_call.id, "call_1");
+        assert_eq!(tool_call.function.name, "get_weather");
+        assert_eq!(
+            tool_call.function.arguments,
+            json!("{\"location\":\"NYC\"}")
+        );
+    }
+
+    #[test]
+    fn test_argument_string_parsing_roundtrip() {
+        let raw = json!("{\"location\":\"NYC\"}");
+        let arguments = match raw {
+            serde_json::Value::Object(map) => map,
+            serde_json::Value::String(s) => serde_json::from_str(&s).unwrap_or_default(),
+            _ => serde_json::Map::new(),
+        };
+        assert_eq!(arguments.get("location").unwrap(), "NYC");
+    }
+}

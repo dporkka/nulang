@@ -22,6 +22,7 @@ pub use pipeline::{Pipeline, PipelineRuntime, PipelineStage};
 pub use memory::{EpisodicMemory, Turn};
 pub use mock::MockLlmClient;
 pub use providers::ollama::OllamaClient;
+pub use providers::openai::OpenAiClient;
 pub use request::{LlmMessage, LlmRequest, ModelPricing, ToolSchema};
 pub use response::{LlmResponse, TokenUsage, ToolCall};
 pub use procedural_memory::{Pattern, ProceduralMemory};
