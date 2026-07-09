@@ -12,7 +12,7 @@
 //! which reordered any code lowered after it.
 
 use crate::ast;
-use crate::ast::{Decl, Expr, Literal};
+use crate::ast::{BinOp, Decl, Expr, Literal};
 use crate::hir;
 use crate::types::{Capability, EffectRow, Span, Type};
 
@@ -424,6 +424,14 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
+        // `self.field = v`, `arr[i] = v`, `record.f = v` are NOT parsed as
+        // Expr::Assign (that node is only produced for a bare `ident = v`
+        // prefix) — everywhere else, `=` is picked up by the Pratt parser's
+        // infix loop as an ordinary-looking BinOp::Assign. Route it through
+        // the same assignment lowering as Expr::Assign below.
+        Expr::Binary { op: BinOp::Assign, left, right, span } => {
+            lower_assign_to(left, right, *span, body)
+        }
         Expr::Binary { op, left, right, span } => {
             let l = lower_expr(left, body);
             let r = lower_expr(right, body);
@@ -449,16 +457,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
-        Expr::Assign { target, value, span } => {
-            let val = lower_expr(value, body);
-            let place = lower_place(target, body);
-            body.push(hir::Stmt::Assign {
-                target: place,
-                value: hir::RValue::Use(val),
-                span: *span,
-            });
-            hir::Operand::Unit
-        }
+        Expr::Assign { target, value, span } => lower_assign_to(target, value, *span, body),
         Expr::Spawn { actor_type, init, span } => {
             let name = actor_name_from_expr(actor_type).unwrap_or_default();
             let init_ops: Vec<_> = init
@@ -662,9 +661,29 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
     }
 }
 
+/// Shared lowering for both `Expr::Assign` (bare `ident = v`) and
+/// `Expr::Binary { op: BinOp::Assign, .. }` (`self.f = v`, `arr[i] = v`,
+/// `record.f = v` — everything else, since only a bare identifier target is
+/// special-cased by the parser's prefix position).
+fn lower_assign_to(target: &Expr, value: &Expr, span: Span, body: &mut hir::Body) -> hir::Operand {
+    let val = lower_expr(value, body);
+    let place = lower_place(target, body);
+    body.push(hir::Stmt::Assign {
+        target: place,
+        value: hir::RValue::Use(val),
+        span,
+    });
+    hir::Operand::Unit
+}
+
 fn lower_place(expr: &Expr, body: &mut hir::Body) -> hir::Place {
     match expr {
         Expr::Var(name, _) => hir::Place::Var(name.clone(), Type::unit()),
+        // `self` always parses as SelfRef, never Var("self", _) — without this
+        // arm, `self.field = value` would fall through to the generic
+        // temp-materializing case below and lose the "this is self" marker
+        // that lower_assign's place_is_self check depends on.
+        Expr::SelfRef(_) => hir::Place::Var("self".to_string(), Type::unit()),
         Expr::FieldAccess { expr, field, span: _ } => {
             let base = lower_place(expr, body);
             hir::Place::Field {
@@ -802,5 +821,44 @@ mod tests {
             .stmts
             .iter()
             .any(|s| matches!(s, hir::Stmt::Let { value: hir::RValue::If { .. }, .. })));
+    }
+
+    /// Regression test: `self.field = value` must lower to an Assign whose
+    /// target is `Place::Field { base: Place::Var("self", _), .. }`. Before
+    /// the SelfRef arm was added to `lower_place`, the generic fallback
+    /// materialized `self` into an unrelated temp, silently breaking the
+    /// `place_is_self` check every self-assignment codegen path depends on.
+    #[test]
+    fn test_lower_self_field_assign_targets_self_place() {
+        let expr = Expr::Assign {
+            target: Box::new(Expr::FieldAccess {
+                expr: Box::new(Expr::SelfRef(Span::default())),
+                field: "count".to_string(),
+                span: Span::default(),
+            }),
+            value: Box::new(Expr::Literal(Literal::Int(1), Span::default())),
+            span: Span::default(),
+        };
+        let mut body = hir::Body::new();
+        lower_expr(&expr, &mut body);
+        let assign = body
+            .stmts
+            .iter()
+            .find_map(|s| match s {
+                hir::Stmt::Assign { target, .. } => Some(target),
+                _ => None,
+            })
+            .expect("assignment statement should be present");
+        match assign {
+            hir::Place::Field { base, field, .. } => {
+                assert_eq!(field, "count");
+                assert!(
+                    matches!(base.as_ref(), hir::Place::Var(name, _) if name == "self"),
+                    "field base should be Place::Var(\"self\", _), got {:?}",
+                    base
+                );
+            }
+            other => panic!("expected Place::Field, got {:?}", other),
+        }
     }
 }

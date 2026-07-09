@@ -9,7 +9,7 @@
 //! error, never silent misbehavior.
 
 use crate::ast::{BinOp, UnOp};
-use crate::bytecode::Constant;
+use crate::bytecode::{ActorMeta, Constant};
 use crate::types::Type;
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,14 @@ pub struct Local {
 pub struct Module {
     pub name: String,
     pub functions: Vec<Function>,
+    /// Actor behaviors, compiled the same way as `functions` but never
+    /// addressable via `Call` — only through `RValue::Spawn/Send/Ask`, which
+    /// reference them by index into this vector.
+    pub behaviors: Vec<Function>,
+    /// One entry per lowered `actor` declaration. `behavior_indices` are
+    /// indices into `behaviors` above; codegen copies this vector into
+    /// `CodeModule.actor_metadata` unchanged.
+    pub actor_metadata: Vec<ActorMeta>,
     pub foreign_functions: Vec<ForeignFunction>,
 }
 
@@ -104,6 +112,8 @@ pub enum Stmt {
     /// Pop the innermost handler frame (bytecode `Unwind`).
     PopHandler,
     Emit { event: String, args: Vec<LocalId> },
+    /// `self.field = src` inside a behavior body (bytecode `StateSet`).
+    StateSet { field: String, src: LocalId },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +144,19 @@ pub enum RValue {
     Migrate { actor: LocalId, node: LocalId },
     SelfRef,
     CapabilityCheck { val: LocalId },
+    /// `self.field` inside a behavior body (bytecode `StateGet`).
+    StateGet { field: String },
+    /// `spawn ActorName { ... }`. `behavior_idx` is the actor's first
+    /// behavior's index into `Module::behaviors` — the VM resolves the rest
+    /// of the actor's behaviors and state defaults from there via
+    /// `ActorMeta`. Spawn-site init argument values are not passed through
+    /// (matching the stable compiler): only literal `state` field defaults
+    /// take effect.
+    Spawn { behavior_idx: usize },
+    /// `send actor behavior(args...)`. Fire-and-forget; evaluates to 0.
+    Send { actor: LocalId, behavior_idx: usize, args: Vec<LocalId> },
+    /// `ask actor behavior(args...)`. Evaluates to the behavior's result.
+    Ask { actor: LocalId, behavior_idx: usize, args: Vec<LocalId> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -279,6 +302,8 @@ impl Module {
         Module {
             name: name.into(),
             functions: Vec::new(),
+            behaviors: Vec::new(),
+            actor_metadata: Vec::new(),
             foreign_functions: Vec::new(),
         }
     }

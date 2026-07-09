@@ -108,6 +108,27 @@ impl MirCodegen {
             }
         }
 
+        // Actor behaviors compile through the exact same machinery as
+        // ordinary functions, but land in CodeModule.behaviors instead of
+        // function_table — Spawn/Send/Ask reference them by index there,
+        // and (unlike functions) they are never reachable via Call.
+        // mir_lower.rs computed ActorMeta.behavior_indices assuming
+        // behaviors compile in this order, so this loop must not be
+        // reordered or interleaved with function compilation.
+        for func in &mir.behaviors {
+            let offset = self.compile_function(func)?;
+            self.module.behaviors.push(crate::bytecode::BehaviorTableEntry {
+                name: func.name.clone(),
+                param_count: func.params.len(),
+                code_offset: offset,
+                local_count: LOCAL_BASE as usize + func.locals.len(),
+                effect_mask: 0,
+                compensate_offset: None,
+                parallel_branches: None,
+            });
+        }
+        self.module.actor_metadata = mir.actor_metadata.clone();
+
         // Entry prologue: call __main (if present) and halt.
         if let Some(main_idx) = main_idx {
             let entry = self.module.instructions.len();
@@ -280,6 +301,15 @@ impl MirCodegen {
             }
             mir::Stmt::PopHandler => {
                 self.emit(Instruction::new0(OpCode::Unwind));
+            }
+            mir::Stmt::StateSet { field, src } => {
+                let field_idx = self.module.add_constant(Constant::String(field.clone()));
+                self.emit(Instruction::new3(
+                    OpCode::StateSet,
+                    ((field_idx >> 8) & 0xFF) as u8,
+                    (field_idx & 0xFF) as u8,
+                    reg_of(*src),
+                ));
             }
             mir::Stmt::Emit { event, args } => {
                 self.stage_args(args)?;
@@ -485,6 +515,51 @@ impl MirCodegen {
             mir::RValue::CapabilityCheck { val } => {
                 let _ = val;
                 self.emit(Instruction::new1(OpCode::Const1, dst)); // true
+            }
+            mir::RValue::StateGet { field } => {
+                let field_idx = self.module.add_constant(Constant::String(field.clone()));
+                self.emit(Instruction::new3(
+                    OpCode::StateGet,
+                    ((field_idx >> 8) & 0xFF) as u8,
+                    (field_idx & 0xFF) as u8,
+                    dst,
+                ));
+            }
+            mir::RValue::Spawn { behavior_idx } => {
+                self.emit(Instruction::new3(
+                    OpCode::Spawn,
+                    ((*behavior_idx >> 8) & 0xFF) as u8,
+                    (*behavior_idx & 0xFF) as u8,
+                    dst,
+                ));
+            }
+            mir::RValue::Send { actor, behavior_idx, args } => {
+                // Protect the actor value in a register outside the 0..15
+                // staging zone before staging args, mirroring the Call/
+                // FUNC_VALUE_REG pattern.
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), FUNC_VALUE_REG));
+                self.stage_args(args)?;
+                self.emit(Instruction::new3(
+                    OpCode::Send,
+                    FUNC_VALUE_REG,
+                    ((*behavior_idx >> 8) & 0xFF) as u8,
+                    (*behavior_idx & 0xFF) as u8,
+                ));
+                // Send is fire-and-forget with no VM-level result register;
+                // the stable compiler yields 0 for send-as-expression.
+                self.load_constant(dst, &Constant::Int(0));
+            }
+            mir::RValue::Ask { actor, behavior_idx, args } => {
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), FUNC_VALUE_REG));
+                self.stage_args(args)?;
+                self.emit(Instruction::new3(
+                    OpCode::Ask,
+                    FUNC_VALUE_REG,
+                    ((*behavior_idx >> 8) & 0xFF) as u8,
+                    (*behavior_idx & 0xFF) as u8,
+                ));
+                // Ask writes its result back into its own op1 register.
+                self.emit(Instruction::new2(OpCode::Move, FUNC_VALUE_REG, dst));
             }
         }
         Ok(())
@@ -715,6 +790,21 @@ mod tests {
         assert_eq!(value.as_int(), Some(42));
     }
 
+    /// Only a bare `ident = v` parses as the dedicated Expr::Assign AST node;
+    /// `arr[i] = v` and `record.f = v` are ordinary-looking BinOp::Assign
+    /// binary expressions instead. Both must route through place-based
+    /// lowering (regression: the stable compiler does NOT do this for
+    /// non-self targets — see test_legacy_index_assign_is_a_noop_bug below).
+    #[test]
+    fn test_mir_codegen_index_and_field_assign() {
+        let value = run_mir_source("let arr = [1, 2, 3] in { arr[0] = 99 arr[0] }").unwrap();
+        assert_eq!(value.as_int(), Some(99), "arr[0] = 99 should actually mutate the array");
+
+        let value =
+            run_mir_source("let r = { x: 1, y: 2 } in { r.x = 99 r.x + r.y }").unwrap();
+        assert_eq!(value.as_int(), Some(101), "r.x = 99 should actually mutate the record");
+    }
+
     #[test]
     fn test_mir_codegen_effect_handler() {
         let value = run_mir_source(
@@ -725,13 +815,36 @@ mod tests {
     }
 
     #[test]
-    fn test_mir_codegen_actor_is_honest_nyi() {
-        let result = compile_mir_source(
+    fn test_mir_codegen_actor_spawn_returns_actor_ref() {
+        // Actors are now lowered by the HIR/MIR pipeline. Without a real
+        // Runtime attached, spawn_actor's default stub always returns
+        // actor_ref(0); real behavior semantics (state, ask) are covered by
+        // src/integration_tests.rs's MIR-vs-legacy actor tests, which attach
+        // a Runtime.
+        let value = run_mir_source(
             "actor A { state x = 0 behavior get() { self.x } }\nspawn A { x = 0 }",
+        )
+        .unwrap();
+        assert!(value.as_actor_id().is_some(), "spawn should yield an actor reference");
+    }
+
+    #[test]
+    fn test_mir_codegen_workflow_agent_still_honest_nyi() {
+        // Workflow/agent desugaring is a separate, larger effort (they
+        // synthesize additional actor behaviors at compile time) and stays
+        // out of the MIR pipeline's scope for now.
+        let result = compile_mir_source("workflow W { step a { 1 } }");
+        assert!(
+            matches!(result, Err(NuError::NotYetImplemented { .. })),
+            "workflow must be an honest NotYetImplemented, got {:?}",
+            result
+        );
+        let result = compile_mir_source(
+            r#"agent Ag = { model: "gpt-4o" }"#,
         );
         assert!(
             matches!(result, Err(NuError::NotYetImplemented { .. })),
-            "actors must be an honest NotYetImplemented, got {:?}",
+            "agent must be an honest NotYetImplemented, got {:?}",
             result
         );
     }

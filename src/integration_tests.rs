@@ -890,6 +890,29 @@ mod tests {
         assert_eq!(value.as_int(), Some(30), "ask add(10, 20) should return 30");
     }
 
+    /// KNOWN BUG in the stable/legacy compiler, discovered while adding actor
+    /// support to the HIR/MIR pipeline (not fixed here — separate scope from
+    /// actor lowering, needs its own careful fix + regression pass across the
+    /// legacy backend). `compile_binary`'s BinOp::Assign case only special-
+    /// cases `self.field = v`; every other assignment target (array index,
+    /// non-self record field, ...) falls through to `compile_expr(left)`
+    /// (reading the CURRENT value) followed by `OpCode::Store`, which is a
+    /// plain register-to-register copy (see vm.rs's `Load | Store | Move |
+    /// Dup` handler) — it never writes back to the array/record at all. The
+    /// assignment silently has no effect. The HIR/MIR pipeline does not have
+    /// this bug (see mir_codegen::tests::test_mir_codegen_index_and_field_assign).
+    /// This test pins the CURRENT (buggy) behavior so a future fix is a
+    /// deliberate, visible change to this assertion, not a silent flip.
+    #[test]
+    fn test_legacy_non_self_assign_is_a_known_noop_bug() {
+        let (value, _ty) = run_source("let arr = [1, 2, 3] in { arr[0] = 99 arr[0] }").unwrap();
+        assert_eq!(
+            value.as_int(),
+            Some(1),
+            "documents the bug: arr[0] = 99 should mutate to 99 but currently doesn't"
+        );
+    }
+
     #[test]
     fn test_register_overflow_errors() {
         // 20 nested let bindings exhaust the 240..254 binding-register range.
@@ -1602,6 +1625,127 @@ mod tests {
     fn assert_int_new(source: &str, expected: i64) {
         let value = run_source_new(source).unwrap();
         assert_eq!(value.as_int(), Some(expected), "new pipeline expected integer for: {}", source);
+    }
+
+    /// Compile and run `source` through the HIR/MIR pipeline with a real
+    /// Runtime attached, exercising actual actor semantics (state, ask)
+    /// rather than the no-op stubs a bare VM falls back to.
+    fn run_source_new_with_runtime(
+        source: &str,
+        runtime: Rc<RefCell<Runtime>>,
+    ) -> Result<Value, NuError> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module()?;
+
+        let mut type_checker = TypeChecker::new();
+        let _ = type_checker.check_module(&ast)?;
+
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir)?;
+        let module = crate::mir_codegen::compile_mir(&mir, "test")?;
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(runtime)));
+        vm.run()
+    }
+
+    #[test]
+    fn test_mir_pipeline_actor_ask_with_arguments() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Calculator {
+                behavior add(a: Int, b: Int) { a + b }
+            }
+            let calc = spawn Calculator {} in
+                ask calc add(10, 20)
+        "#;
+        let value = run_source_new_with_runtime(source, rt).unwrap();
+        assert_eq!(value.as_int(), Some(30), "ask add(10, 20) should return 30");
+    }
+
+    #[test]
+    fn test_mir_pipeline_actor_state_get_set() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Counter {
+                state count = 0
+                behavior inc() { self.count = self.count + 1 }
+                behavior get() { self.count }
+            }
+            let c = spawn Counter { count = 0 } in
+            let _ = ask c inc() in
+            let _ = ask c inc() in
+            ask c get()
+        "#;
+        let value = run_source_new_with_runtime(source, rt).unwrap();
+        assert_eq!(value.as_int(), Some(2), "two increments should leave count at 2");
+    }
+
+    #[test]
+    fn test_mir_pipeline_actor_send_then_scheduler() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Counter {
+                state count = 0
+                behavior add(n: Int) { self.count = self.count + n }
+            }
+            let c = spawn Counter { count = 0 } in {
+                send c add(5)
+                send c add(7)
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("count").and_then(|v| v.as_int()),
+            Some(12),
+            "counter should be 12 after adding 5 and 7"
+        );
+    }
+
+    /// The legacy compiler and the HIR/MIR pipeline must agree on actor
+    /// semantics too, not just pure expressions — run the same program
+    /// through both with independent Runtimes and compare results.
+    #[test]
+    fn test_mir_and_legacy_actor_semantics_agree() {
+        let corpus: &[&str] = &[
+            r#"
+                actor Calculator { behavior add(a: Int, b: Int) { a + b } }
+                let calc = spawn Calculator {} in ask calc add(10, 20)
+            "#,
+            r#"
+                actor Counter {
+                    state count = 0
+                    behavior inc() { self.count = self.count + 1 }
+                    behavior get() { self.count }
+                }
+                let c = spawn Counter { count = 0 } in
+                let _ = ask c inc() in
+                let _ = ask c inc() in
+                let _ = ask c inc() in
+                ask c get()
+            "#,
+        ];
+        for src in corpus {
+            let legacy_rt = Rc::new(RefCell::new(Runtime::new()));
+            let legacy = run_source_with_runtime(src, legacy_rt)
+                .map(|(v, _)| v.to_string_repr())
+                .unwrap_or_else(|e| panic!("legacy pipeline failed on {:?}: {}", src, e));
+            let mir_rt = Rc::new(RefCell::new(Runtime::new()));
+            let mir = run_source_new_with_runtime(src, mir_rt)
+                .map(|v| v.to_string_repr())
+                .unwrap_or_else(|e| panic!("MIR pipeline failed on {:?}: {}", src, e));
+            assert_eq!(legacy, mir, "pipelines disagree on {:?}", src);
+        }
     }
 
     #[test]

@@ -337,7 +337,10 @@ fn run_source(source: &str, verbose: bool, use_mir: bool) -> NuResult<()> {
 
     // Compile. The stable compiler is the default; the experimental HIR/MIR
     // pipeline covers the functional core (closures, effects, control flow)
-    // but not actors/workflows/agents, so it is opt-in and falls back loudly.
+    // and plain `actor` declarations (spawn/send/ask/state), but not
+    // `workflow`/`agent` (which desugar to actors with substantial synthesized
+    // code at the AST layer — a separate, larger effort), so it is opt-in and
+    // falls back loudly.
     let code_module = if use_mir {
         match compile_with_new_pipeline(&ast, "main") {
             Ok(m) => {

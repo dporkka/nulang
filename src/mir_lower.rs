@@ -9,6 +9,12 @@
 //!   - Lexical scoping (with shadowing) is respected via a scope stack.
 //!   - Lambdas and recursive let-bindings are lifted to top-level MIR
 //!     functions; closures capture enclosing locals by value.
+//!   - Plain `actor` declarations are supported: behaviors compile through
+//!     the same machinery as ordinary functions (see `lower_behavior_def`),
+//!     with `self` bound as a local and `spawn`/`send`/`ask`/`self.field`
+//!     lowered to their dedicated MIR constructs. `workflow`/`agent`
+//!     declarations desugar to actors with substantial synthesized code at
+//!     the AST layer in the stable compiler and are not yet ported here.
 
 use crate::ast::Pattern;
 use crate::hir;
@@ -30,8 +36,12 @@ fn compile_err(msg: impl Into<String>) -> NuError {
 pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
     let mut ctx = ModuleCtx::new(&hir.name);
 
-    // Pass 1: reserve function slots for all named top-level functions so
-    // forward references and mutual recursion resolve, and register externs.
+    // Pass 1: reserve function/behavior slots and build actor metadata up
+    // front, so forward references and mutual recursion between functions,
+    // and between actors' send/ask sites, all resolve regardless of source
+    // order. (The stable compiler only supports actors declared before use;
+    // this pass is strictly more permissive, which cannot make any
+    // currently-valid program disagree between the two backends.)
     for decl in &hir.decls {
         match decl {
             hir::Decl::Function(f) => {
@@ -51,7 +61,38 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
                 }
             }
             hir::Decl::Actor(a) => {
-                return Err(nyi(&format!("actor '{}' in HIR/MIR pipeline", a.name)));
+                let first_idx = ctx.behaviors.len();
+                for b in &a.behaviors {
+                    ctx.reserve_behavior(format!("{}.{}", a.name, b.name));
+                }
+                let behavior_indices: Vec<usize> = (first_idx..ctx.behaviors.len()).collect();
+                let state_models = a
+                    .state_fields
+                    .iter()
+                    .map(|(name, model, _ty, _default)| (name.clone(), *model))
+                    .collect();
+                let state_defaults = a
+                    .state_fields
+                    .iter()
+                    .filter_map(|(name, _model, _ty, default)| match default {
+                        hir::Operand::Literal(lit, _) => {
+                            Some((name.clone(), literal_to_constant(lit)))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                ctx.actor_metas.push(crate::bytecode::ActorMeta {
+                    name: a.name.clone(),
+                    persistent: a.persistent,
+                    state_models,
+                    state_defaults,
+                    behavior_indices,
+                    is_workflow: false,
+                    is_agent: false,
+                    tools: Vec::new(),
+                    semantic_memory_dimensions: None,
+                    procedural_memory_namespace: None,
+                });
             }
             hir::Decl::Workflow { name, .. } => {
                 return Err(nyi(&format!("workflow '{}' in HIR/MIR pipeline", name)));
@@ -71,12 +112,29 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
         }
     }
 
-    // Pass 2: lower function bodies into their reserved slots.
+    // Pass 2: lower function and behavior bodies into their reserved slots.
     for decl in &hir.decls {
-        if let hir::Decl::Function(f) = decl {
-            let idx = ctx.func_map[&f.name];
-            let func = lower_function_def(&mut ctx, f)?;
-            ctx.fill_function(idx, func);
+        match decl {
+            hir::Decl::Function(f) => {
+                let idx = ctx.func_map[&f.name];
+                let func = lower_function_def(&mut ctx, f)?;
+                ctx.fill_function(idx, func);
+            }
+            hir::Decl::Actor(a) => {
+                let indices = ctx
+                    .actor_metas
+                    .iter()
+                    .find(|m| m.name == a.name)
+                    .expect("actor registered in pass 1")
+                    .behavior_indices
+                    .clone();
+                for (b, &idx) in a.behaviors.iter().zip(indices.iter()) {
+                    let full_name = format!("{}.{}", a.name, b.name);
+                    let func = lower_behavior_def(&mut ctx, &full_name, b)?;
+                    ctx.fill_behavior(idx, func);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -93,6 +151,12 @@ struct ModuleCtx {
     func_map: HashMap<String, usize>,
     extern_map: HashMap<String, usize>,
     foreign: Vec<mir::ForeignFunction>,
+    /// Actor behaviors, reserved (with their fully-qualified "Actor.behavior"
+    /// name) in pass 1 and filled in pass 2 — mirrors `functions`, but never
+    /// registered in `func_map` so they stay un-`Call`-able.
+    behaviors: Vec<Option<mir::Function>>,
+    behavior_names: Vec<String>,
+    actor_metas: Vec<crate::bytecode::ActorMeta>,
     next_lambda: u32,
 }
 
@@ -104,6 +168,9 @@ impl ModuleCtx {
             func_map: HashMap::new(),
             extern_map: HashMap::new(),
             foreign: Vec::new(),
+            behaviors: Vec::new(),
+            behavior_names: Vec::new(),
+            actor_metas: Vec::new(),
             next_lambda: 0,
         }
     }
@@ -115,6 +182,45 @@ impl ModuleCtx {
 
     fn fill_function(&mut self, idx: usize, func: mir::Function) {
         self.functions[idx] = Some(func);
+    }
+
+    fn reserve_behavior(&mut self, full_name: String) -> usize {
+        self.behaviors.push(None);
+        self.behavior_names.push(full_name);
+        self.behaviors.len() - 1
+    }
+
+    fn fill_behavior(&mut self, idx: usize, func: mir::Function) {
+        self.behaviors[idx] = Some(func);
+    }
+
+    /// Resolve `spawn ActorName { ... }` to the behavior-table index the VM
+    /// uses to look up the actor's metadata (its first behavior's index).
+    /// Mirrors the stable compiler's `compile_spawn`.
+    fn spawn_behavior_idx(&self, actor_name: &str) -> usize {
+        self.actor_metas
+            .iter()
+            .find(|m| m.name == actor_name)
+            .and_then(|m| m.behavior_indices.first().copied())
+            .unwrap_or(self.behaviors.len())
+    }
+
+    /// Resolve `send`/`ask actor behavior(...)` to a behavior-table index by
+    /// name. Mirrors the stable compiler's `behavior_table_index`: an exact
+    /// "ActorName.behavior" match first, falling back to any behavior with a
+    /// matching suffix if the receiver expression isn't a bare actor-typed
+    /// variable name (a known ambiguity inherited from the stable compiler,
+    /// not introduced here).
+    fn send_behavior_idx(&self, actor_name_hint: &str, behavior: &str) -> usize {
+        let full_name = format!("{}.{}", actor_name_hint, behavior);
+        if let Some(idx) = self.behavior_names.iter().position(|n| *n == full_name) {
+            return idx;
+        }
+        let suffix = format!(".{}", behavior);
+        self.behavior_names
+            .iter()
+            .position(|n| n.ends_with(&suffix))
+            .unwrap_or(self.behaviors.len())
     }
 
     fn fresh_lambda_name(&mut self) -> String {
@@ -130,6 +236,12 @@ impl ModuleCtx {
                 compile_err(format!("internal: MIR function slot {} left unfilled", i))
             })?);
         }
+        for (i, f) in self.behaviors.into_iter().enumerate() {
+            module.behaviors.push(f.ok_or_else(|| {
+                compile_err(format!("internal: MIR behavior slot {} left unfilled", i))
+            })?);
+        }
+        module.actor_metadata = self.actor_metas;
         module.foreign_functions = self.foreign;
         Ok(module)
     }
@@ -176,6 +288,27 @@ fn lower_lifted(
         lowerer.bind(rec_name, id);
     }
     lowerer.lower_body_top(body)?;
+    Ok(lowerer.b.build())
+}
+
+/// Lower an actor behavior body into a standalone MIR function. Identical to
+/// an ordinary function except for the prologue statement binding `self` to
+/// the current actor reference, mirroring the stable compiler's
+/// `compile_behavior`.
+fn lower_behavior_def(
+    ctx: &mut ModuleCtx,
+    full_name: &str,
+    bh: &hir::BehaviorDef,
+) -> NuResult<mir::Function> {
+    let mut lowerer = FnLowerer::new(ctx, full_name, Some(bh.ret.clone()));
+    for (name, ty) in &bh.params {
+        let id = lowerer.b.add_param(name.clone(), ty.clone());
+        lowerer.bind(name, id);
+    }
+    let self_id = lowerer.b.add_local("self", Type::unit());
+    lowerer.b.assign(self_id, mir::RValue::SelfRef);
+    lowerer.bind("self", self_id);
+    lowerer.lower_body_top(&bh.body)?;
     Ok(lowerer.b.build())
 }
 
@@ -307,7 +440,11 @@ impl<'c> FnLowerer<'c> {
                 Ok(())
             }
             hir::Stmt::Assign { target, value, .. } => self.lower_assign(target, value),
-            hir::Stmt::StateSet { .. } => Err(nyi("actor state assignment in HIR/MIR pipeline")),
+            hir::Stmt::StateSet { field, value, .. } => {
+                let src = self.lower_operand(value)?;
+                self.b.emit(mir::Stmt::StateSet { field: field.clone(), src });
+                Ok(())
+            }
             hir::Stmt::Emit { event, args, .. } => {
                 let mut ids = Vec::with_capacity(args.len());
                 for a in args {
@@ -322,18 +459,22 @@ impl<'c> FnLowerer<'c> {
     fn lower_assign(&mut self, target: &hir::Place, value: &hir::RValue) -> NuResult<()> {
         match target {
             hir::Place::Var(name, _) => {
-                if name == "self" {
-                    return Err(nyi("assignment to self in HIR/MIR pipeline"));
-                }
+                // "self" is bound as an ordinary local in behavior bodies
+                // (see lower_behavior_def), so reassigning it needs no
+                // special case — it just overwrites that local, same as the
+                // stable compiler.
                 let dst = self.lookup(name).ok_or_else(|| {
                     compile_err(format!("assignment to undefined variable '{}'", name))
                 })?;
                 self.lower_rvalue(dst, value)
             }
+            hir::Place::Field { base, field, .. } if place_is_self(base) => {
+                let src = self.b.add_temp(Type::unit());
+                self.lower_rvalue(src, value)?;
+                self.b.emit(mir::Stmt::StateSet { field: field.clone(), src });
+                Ok(())
+            }
             hir::Place::Field { base, field, .. } => {
-                if place_is_self(base) {
-                    return Err(nyi("actor state assignment in HIR/MIR pipeline"));
-                }
                 let obj = self.read_place(base)?;
                 let src = self.b.add_temp(Type::unit());
                 self.lower_rvalue(src, value)?;
@@ -535,10 +676,11 @@ impl<'c> FnLowerer<'c> {
                 self.b.assign(dst, mir::RValue::ArrayLit(ids));
                 Ok(())
             }
+            hir::RValue::FieldAccess { base, field, .. } if operand_is_self(base) => {
+                self.b.assign(dst, mir::RValue::StateGet { field: field.clone() });
+                Ok(())
+            }
             hir::RValue::FieldAccess { base, field, .. } => {
-                if operand_is_self(base) {
-                    return Err(nyi("actor state access in HIR/MIR pipeline"));
-                }
                 let obj = self.lower_operand(base)?;
                 self.b
                     .assign(dst, mir::RValue::LoadFieldNamed { obj, field: field.clone() });
@@ -653,9 +795,46 @@ impl<'c> FnLowerer<'c> {
                 self.b.assign(dst, mir::RValue::FFICall { idx, args: ids });
                 Ok(())
             }
-            hir::RValue::Spawn { .. } => Err(nyi("spawn in HIR/MIR pipeline")),
-            hir::RValue::Send { .. } => Err(nyi("send in HIR/MIR pipeline")),
-            hir::RValue::Ask { .. } => Err(nyi("ask in HIR/MIR pipeline")),
+            hir::RValue::Spawn { actor_type, .. } => {
+                // Spawn-site init argument values are compiled for side
+                // effects only and then discarded — hir_lower already
+                // materialized them as statements in the enclosing body when
+                // it lowered the AST's init exprs into Operands, so there is
+                // nothing left to do with them here. Only literal `state`
+                // field defaults (captured in ActorMeta) take effect at
+                // spawn time. This matches the stable compiler exactly.
+                let idx = self.ctx.spawn_behavior_idx(actor_type);
+                self.b.assign(dst, mir::RValue::Spawn { behavior_idx: idx });
+                Ok(())
+            }
+            hir::RValue::Send { actor, behavior, args, .. } => {
+                let actor_hint = operand_name_hint(actor);
+                let idx = self.ctx.send_behavior_idx(&actor_hint, behavior);
+                let actor_id = self.lower_operand(actor)?;
+                let mut arg_ids = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_ids.push(self.lower_operand(a)?);
+                }
+                self.b.assign(
+                    dst,
+                    mir::RValue::Send { actor: actor_id, behavior_idx: idx, args: arg_ids },
+                );
+                Ok(())
+            }
+            hir::RValue::Ask { actor, behavior, args, .. } => {
+                let actor_hint = operand_name_hint(actor);
+                let idx = self.ctx.send_behavior_idx(&actor_hint, behavior);
+                let actor_id = self.lower_operand(actor)?;
+                let mut arg_ids = Vec::with_capacity(args.len());
+                for a in args {
+                    arg_ids.push(self.lower_operand(a)?);
+                }
+                self.b.assign(
+                    dst,
+                    mir::RValue::Ask { actor: actor_id, behavior_idx: idx, args: arg_ids },
+                );
+                Ok(())
+            }
             hir::RValue::Receive { .. } => Err(nyi("receive in HIR/MIR pipeline")),
         }
     }
@@ -922,6 +1101,17 @@ fn place_is_self(place: &hir::Place) -> bool {
 
 fn operand_is_self(op: &hir::Operand) -> bool {
     matches!(op, hir::Operand::Var(name, _) if name == "self")
+}
+
+/// Best-effort actor-type-name hint for `send`/`ask` behavior resolution,
+/// mirroring the stable compiler's `actor_name_from_expr`: only a bare
+/// variable reference yields a usable name (the receiver's own binding
+/// name), anything else falls back to the empty string.
+fn operand_name_hint(op: &hir::Operand) -> String {
+    match op {
+        hir::Operand::Var(name, _) => name.clone(),
+        _ => String::new(),
+    }
 }
 
 fn literal_to_constant(lit: &crate::ast::Literal) -> crate::bytecode::Constant {
