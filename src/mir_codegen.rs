@@ -189,6 +189,20 @@ impl MirCodegen {
             )));
         }
 
+        if func.params.len() > MAX_STAGED_ARGS {
+            // Mirrors stage_args's call-site limit: the prologue below reads
+            // incoming arguments from r0..r15 (the same staging zone callers
+            // stage into), so a param count above that would alias into
+            // LOCAL_BASE-mapped registers instead of erroring cleanly.
+            self.module.instructions = saved_instructions;
+            return Err(compile_err(format!(
+                "function '{}' has {} parameters, exceeding the MIR calling convention's limit of {}",
+                func.name,
+                func.params.len(),
+                MAX_STAGED_ARGS
+            )));
+        }
+
         // Prologue: move incoming arguments from r0..rN to their fixed local
         // registers, then load closure captures.
         for (i, param) in func.params.iter().enumerate() {
@@ -856,6 +870,25 @@ mod tests {
         // assignment mutates it in place.
         let value = run_mir_source("let x = &10 in { x = 3; *x }").unwrap();
         assert_eq!(value.as_int(), Some(3));
+    }
+
+    #[test]
+    fn test_mir_codegen_over_limit_params_is_honest_error_not_corruption() {
+        // A function with more than MAX_STAGED_ARGS (16) parameters used to
+        // compile "successfully" with a prologue that reads incoming
+        // arguments from registers overlapping LOCAL_BASE-mapped locals —
+        // corrupt bytecode nothing could ever validly call (every call site
+        // is bounded by the same 16-arg staging limit), but a compile error
+        // is the honest outcome, matching this pipeline's "no silent
+        // misbehavior" guarantee.
+        let params = (0..17).map(|i| format!("a{}: Int", i)).collect::<Vec<_>>().join(", ");
+        let source = format!("fn f({}) -> Int {{ a0 }}\n0", params);
+        let result = compile_mir_source(&source);
+        assert!(
+            matches!(result, Err(NuError::VMError(_))),
+            "a 17-parameter function should be an honest compile error, got {:?}",
+            result
+        );
     }
 
     #[test]

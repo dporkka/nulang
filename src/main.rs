@@ -34,8 +34,9 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() <= 1 {
-        // Default: start REPL
-        let mut repl = Repl::new();
+        // Default: start REPL. No args were given, so `--experimental-mir`
+        // can't have been passed either — matches the file/eval paths' default.
+        let mut repl = Repl::new(false);
         repl.run();
         return;
     }
@@ -97,7 +98,7 @@ async fn main() {
     }
 
     if opts.repl {
-        let mut repl = Repl::new();
+        let mut repl = Repl::new(opts.experimental_mir);
         repl.run();
         return;
     }
@@ -144,7 +145,7 @@ async fn main() {
     }
 
     // No arguments and no options: start REPL
-    let mut repl = Repl::new();
+    let mut repl = Repl::new(opts.experimental_mir);
     repl.run();
 }
 
