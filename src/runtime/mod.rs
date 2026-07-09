@@ -2863,6 +2863,18 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     // SAFETY: trait-impl signature is fixed; `ptr` always comes from the
     // VM's own heap allocations (the current actor's ActorHeap).
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    fn retain_ref(&mut self, ptr: *mut u8) {
+        let mut rt = self.runtime.borrow_mut();
+        if let Some(actor_id) = rt.current_actor {
+            if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                unsafe { actor.orca_gc.local_ref(&actor.heap, ptr); }
+            }
+        }
+    }
+
+    // SAFETY: trait-impl signature is fixed; `ptr` always comes from the
+    // VM's own heap allocations (the current actor's ActorHeap).
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn array_len(&self, ptr: *mut u8) -> Option<usize> {
         let rt = self.runtime.borrow();
         if let Some(actor_id) = rt.current_actor {
@@ -3142,6 +3154,14 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 // references are deferred instead of freed out from under
                 // other actors.
                 actor.orca_gc.drop_local_ref(&mut actor.heap, ptr);
+            }
+        }
+    }
+
+    fn retain_ref(&mut self, ptr: *mut u8) {
+        unsafe {
+            if let Some(actor) = (*self.runtime).actors.get_mut(&self.actor_id) {
+                actor.orca_gc.local_ref(&actor.heap, ptr);
             }
         }
     }

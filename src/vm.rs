@@ -109,6 +109,14 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// decrement the local reference count and reclaim when possible.
     fn drop_ref(&mut self, ptr: *mut u8);
 
+    /// Create an additional local reference to a heap object.
+    ///
+    /// Called when a value that owns a heap pointer is captured into a
+    /// closure environment, so the object cannot be freed by a `Drop` of the
+    /// original binding while the closure still holds it. Mirrors `drop_ref`
+    /// (increment vs. decrement of the same reference count).
+    fn retain_ref(&mut self, ptr: *mut u8);
+
     /// Return the number of elements in an array allocated on the actor heap.
     fn array_len(&self, ptr: *mut u8) -> Option<usize>;
 
@@ -242,6 +250,12 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
     fn drop_ref(&mut self, ptr: *mut u8) {
         unsafe {
             self.gc.drop_local_ref(&mut self.heap, ptr);
+        }
+    }
+
+    fn retain_ref(&mut self, ptr: *mut u8) {
+        unsafe {
+            self.gc.local_ref(&self.heap, ptr);
         }
     }
 
@@ -650,9 +664,27 @@ pub struct VM {
     /// Defaults to a standalone heap so the VM is usable without a runtime.
     actor_callbacks: Box<dyn ActorVmCallbacks>,
     /// Capture environments for closures that captured enclosing locals.
-    /// Indexed by the payload of env-flagged closure values. Environments are
-    /// never reclaimed for the lifetime of the VM (known limitation — closure
-    /// envs are not yet traced by the GC).
+    /// Indexed by the payload of env-flagged closure values.
+    ///
+    /// KNOWN LIMITATION: entries are never reclaimed by the GC — closures are
+    /// plain `Value`s, not heap objects, so ORCA has no way to know when the
+    /// last reference to an env has gone out of scope, and closures stored
+    /// inside heap composites (records/tuples/arrays, actor state) mean a
+    /// scan of live VM frames alone cannot soundly prove an env is dead.
+    /// Doing this correctly requires making closures first-class GC-traced
+    /// heap objects; that is a larger follow-up, not attempted here.
+    ///
+    /// For a single self-contained execution (the standalone VM, and each
+    /// REPL evaluation) this is bounded: `clear_closure_envs` should be
+    /// called before starting a fresh, independent program so envs from the
+    /// previous run — verifiably unreachable, since `run`/`run_from` always
+    /// rebuild `frames` from scratch — don't accumulate forever.
+    ///
+    /// For a VM shared across many actors and messages over a long-running
+    /// process (`Runtime`'s bytecode-call path), no such safe reset point
+    /// exists today: a different actor's suspended frame or persisted state
+    /// could still reference an existing env, so envs accumulate for the
+    /// life of the process. Use `closure_env_count` to monitor growth.
     closure_envs: Vec<ClosureEnv>,
 }
 
@@ -771,6 +803,26 @@ impl VM {
         let bits = constants_to_jit_bits(&module.constants);
         self.modules.push(module);
         self.jit_constants.push(bits);
+    }
+
+    /// Discard all closure capture environments.
+    ///
+    /// Only call this when no live value can reference an existing
+    /// environment — e.g. immediately before starting a fresh, independent
+    /// program on a VM that has no other in-flight or persisted state (the
+    /// REPL does this before every evaluation). Calling this while another
+    /// closure created earlier is still reachable (a suspended frame, or a
+    /// closure stored in actor state or a heap composite) would turn those
+    /// closures into dangling references.
+    pub fn clear_closure_envs(&mut self) {
+        self.closure_envs.clear();
+    }
+
+    /// Number of closure capture environments currently retained. Exposed so
+    /// long-running embedders (e.g. the actor runtime) can monitor growth of
+    /// the known unbounded-retention limitation documented on `closure_envs`.
+    pub fn closure_env_count(&self) -> usize {
+        self.closure_envs.len()
     }
 
     /// Copy the payload of a string-like value into a `Vec<u8>`.
@@ -1362,6 +1414,12 @@ impl VM {
                     };
                     idx
                 };
+                // If the captured value is a heap pointer, take out an extra
+                // local reference so a `Drop` of the original binding cannot
+                // free the object while this closure still holds it.
+                if let Some(ptr) = src.as_ptr() {
+                    self.actor_callbacks.retain_ref(ptr);
+                }
                 let env = &mut self.closure_envs[env_idx];
                 if env.captures.len() <= slot {
                     env.captures.resize(slot + 1, Value::nil());

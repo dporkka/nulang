@@ -223,6 +223,13 @@ impl Repl {
         };
         self.last_bytecode = Some(disassemble_module(&code_module));
 
+        // Each evaluation recompiles and reruns the full accumulated program
+        // from scratch (see `combined_module` above), so no closure created
+        // by a previous evaluation can still be reachable — safe to reclaim
+        // their capture environments before this run instead of leaking them
+        // for the life of the REPL session.
+        self.vm.clear_closure_envs();
+
         // Load and execute
         self.vm.load_module(code_module);
         let value = self.vm.run()?;
@@ -327,6 +334,14 @@ impl Repl {
     pub fn execute(&mut self, source: &str) -> NuResult<Value> {
         self.evaluate(source)?;
         Ok(Value::unit())
+    }
+
+    /// Number of closure capture environments currently retained by the
+    /// REPL's VM. Exposed for testing that `clear_closure_envs` keeps this
+    /// bounded across repeated evaluations instead of growing forever.
+    #[cfg(test)]
+    pub(crate) fn closure_env_count(&self) -> usize {
+        self.vm.closure_env_count()
     }
 }
 
@@ -520,4 +535,28 @@ fn disassemble_module(module: &crate::bytecode::CodeModule) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: each REPL evaluation recompiles and reruns the full
+    /// accumulated program from scratch, so no closure from a previous
+    /// evaluation can still be reachable. Without `clear_closure_envs` in
+    /// `evaluate`, every capturing closure ever created in a REPL session
+    /// would accumulate in the VM forever.
+    #[test]
+    fn test_repl_does_not_leak_closure_envs_across_evaluations() {
+        let mut repl = Repl::new();
+        for _ in 0..20 {
+            repl.execute("let a = 40 in let add = fn(x) { x + a } in add(2)")
+                .unwrap();
+        }
+        assert!(
+            repl.closure_env_count() <= 1,
+            "closure envs should not accumulate across REPL evaluations, got {}",
+            repl.closure_env_count()
+        );
+    }
 }

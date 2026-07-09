@@ -610,6 +610,7 @@ fn test_memory_store_latest_sequence() {
     assert_eq!(store.latest_sequence(1), 7);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_save_load_snapshot() {
     let mut store = SqliteStore::in_memory().unwrap();
@@ -629,6 +630,7 @@ fn test_sqlite_store_save_load_snapshot() {
     assert_eq!(loaded.state.get("count"), Some(&PersistedValue::Int(42)));
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_append_read_journal() {
     let mut store = SqliteStore::in_memory().unwrap();
@@ -660,6 +662,7 @@ fn test_sqlite_store_append_read_journal() {
     assert_eq!(journal[1].payload, vec![PersistedValue::Int(20)]);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_latest_sequence() {
     let mut store = SqliteStore::in_memory().unwrap();
@@ -684,6 +687,7 @@ fn test_sqlite_store_latest_sequence() {
     assert_eq!(store.latest_sequence(1), 7);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_clear() {
     let mut store = SqliteStore::in_memory().unwrap();
@@ -712,6 +716,7 @@ fn test_sqlite_store_clear() {
     assert_eq!(store.latest_sequence(1), 0);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_persists_to_disk() {
     let path = std::env::temp_dir()
@@ -753,6 +758,7 @@ fn test_sqlite_store_persists_to_disk() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_persistent_actor_with_sqlite_store() {
     let mut rt = Runtime::new();
@@ -984,6 +990,64 @@ fn test_vm_drop_frees_actor_heap_object() {
     let rt_ref = rt.borrow();
     let actor = rt_ref.actors.get(&actor_id).unwrap();
     assert_eq!(actor.heap.live_count(), 0);
+}
+
+/// Regression test: capturing a heap pointer into a closure (`CapStore`)
+/// must retain it, so dropping the original local binding does not free an
+/// object the closure still holds — a latent use-after-free that would
+/// trigger the moment any codegen path emits `Drop` for a captured local.
+#[test]
+fn test_closure_capture_retains_heap_object_across_drop() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
+    use crate::vm::VM;
+
+    let rt = Rc::new(RefCell::new(Runtime::new()));
+    let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
+    rt.borrow_mut().current_actor = Some(actor_id);
+
+    let mut module = CodeModule::new("test_capture_retain");
+    let len_idx = module.add_constant(Constant::Int(4));
+
+    // main:
+    //   0: ConstU 4 -> r2 (array length)
+    //   1: ArrAlloc r2 -> r1 (heap object, local ref_count starts at 1)
+    //   2: Closure #0 -> r3
+    //   3: CapStore r3[0] = r1   (must retain: ref_count -> 2)
+    //   4: Drop r1               (ref_count -> 1; must NOT free)
+    //   5: Move r3 -> r4
+    //   6: Call r4, 0 args, dst r0
+    //   7: Halt
+    // fn0 (at offset 8): just returns unit; the object's survival is
+    // checked on the actor heap directly after run() completes.
+    module.emit(Instruction::new3(OpCode::ConstU,
+        ((len_idx >> 8) & 0xFF) as u8, (len_idx & 0xFF) as u8, 2)); // 0
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 2, 1));          // 1
+    module.emit(Instruction::new3(OpCode::Closure, 0, 0, 3));        // 2
+    module.emit(Instruction::new3(OpCode::CapStore, 3, 0, 1));       // 3
+    module.emit(Instruction::new1(OpCode::Drop, 1));                 // 4
+    module.emit(Instruction::new2(OpCode::Move, 3, 4));              // 5
+    module.emit(Instruction::new3(OpCode::Call, 4, 0, 0));           // 6
+    module.emit(Instruction::new0(OpCode::Halt));                    // 7
+    let fn0_offset = module.current_offset();
+    module.emit(Instruction::new1(OpCode::Const0, 0));               // 8
+    module.emit(Instruction::new1(OpCode::RetVal, 0));                // 9
+    module.function_table.push(fn0_offset);
+    module.entry_point = Some(0);
+
+    let mut vm = VM::new();
+    vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+    vm.load_module(module);
+    vm.run().unwrap();
+
+    let rt_ref = rt.borrow();
+    let actor = rt_ref.actors.get(&actor_id).unwrap();
+    assert_eq!(
+        actor.heap.live_count(),
+        1,
+        "object captured by a closure must survive a Drop of the original local"
+    );
 }
 
 #[test]
@@ -1472,6 +1536,7 @@ fn test_memory_store_append_read_saga_event() {
     );
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_append_read_new_workflow_events() {
     let mut store = SqliteStore::in_memory().unwrap();
