@@ -45,139 +45,157 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
     // this pass is strictly more permissive, which cannot make any
     // currently-valid program disagree between the two backends.)
     for decl in &hir.decls {
-        match decl {
-            hir::Decl::Function(f) => {
-                let idx = ctx.reserve_function(&f.name);
-                ctx.func_map.insert(f.name.clone(), idx);
-            }
-            hir::Decl::ExternBlock { library, funcs, .. } => {
-                for f in funcs {
-                    let idx = ctx.foreign.len();
-                    ctx.foreign.push(mir::ForeignFunction {
-                        library: library.clone(),
-                        symbol: f.name.clone(),
-                        params: f.params.iter().map(|(_, t)| t.clone()).collect(),
-                        ret: f.ret.clone(),
-                    });
-                    ctx.extern_map.insert(f.name.clone(), idx);
-                }
-            }
-            hir::Decl::Actor(a) => {
-                let first_idx = ctx.behaviors.len();
-                for b in &a.behaviors {
-                    ctx.reserve_behavior(format!("{}.{}", a.name, b.name));
-                }
-                let behavior_indices: Vec<usize> = (first_idx..ctx.behaviors.len()).collect();
-                // Compensation slots are reserved AFTER all of this actor's
-                // real behaviors, so they never fall inside behavior_indices
-                // (compensations are invoked directly by offset, never
-                // dispatched by name via send/ask).
-                for (b, &idx) in a.behaviors.iter().zip(behavior_indices.iter()) {
-                    if b.compensate.is_some() {
-                        let comp_idx =
-                            ctx.reserve_behavior(format!("{}.{}__compensate", a.name, b.name));
-                        ctx.compensation_of.push((idx, comp_idx));
-                    }
-                    if let Some(branches) = &b.parallel_branches {
-                        ctx.parallel_branches_of.push((idx, branches.clone()));
-                    }
-                }
-                let state_models = a
-                    .state_fields
-                    .iter()
-                    .map(|(name, model, _ty, _default)| (name.clone(), *model))
-                    .collect();
-                let state_defaults = a
-                    .state_fields
-                    .iter()
-                    .filter_map(|(name, _model, _ty, default)| match default {
-                        hir::Operand::Literal(lit, _) => {
-                            Some((name.clone(), literal_to_constant(lit)))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                ctx.actor_metas.push(crate::bytecode::ActorMeta {
-                    name: a.name.clone(),
-                    persistent: a.persistent,
-                    state_models,
-                    state_defaults,
-                    behavior_indices,
-                    is_workflow: a.is_workflow,
-                    is_agent: a.is_agent,
-                    tools: a.tools.clone(),
-                    semantic_memory_dimensions: a.semantic_memory_dimensions,
-                    procedural_memory_namespace: a.procedural_memory_namespace.clone(),
-                });
-            }
-            hir::Decl::Workflow { name, .. } => {
-                return Err(nyi(&format!("workflow '{}' in HIR/MIR pipeline", name)));
-            }
-            hir::Decl::Agent { name, .. } => {
-                return Err(nyi(&format!("agent '{}' in HIR/MIR pipeline", name)));
-            }
-            hir::Decl::Module { .. } => {
-                return Err(nyi("nested module in HIR/MIR pipeline"));
-            }
-            // Type-level declarations produce no code.
-            hir::Decl::TypeAlias { .. }
-            | hir::Decl::RecordType { .. }
-            | hir::Decl::VariantType { .. }
-            | hir::Decl::EffectDecl { .. }
-            | hir::Decl::Import { .. } => {}
-        }
+        reserve_decl(&mut ctx, decl)?;
     }
 
     // Pass 2: lower function and behavior bodies into their reserved slots.
     for decl in &hir.decls {
-        match decl {
-            hir::Decl::Function(f) => {
-                let idx = ctx.func_map[&f.name];
-                let func = lower_function_def(&mut ctx, f)?;
-                ctx.fill_function(idx, func);
-            }
-            hir::Decl::Actor(a) => {
-                let indices = ctx
-                    .actor_metas
-                    .iter()
-                    .find(|m| m.name == a.name)
-                    .expect("actor registered in pass 1")
-                    .behavior_indices
-                    .clone();
-                for (b, &idx) in a.behaviors.iter().zip(indices.iter()) {
-                    let full_name = format!("{}.{}", a.name, b.name);
-                    let func = lower_behavior_def(&mut ctx, &full_name, b)?;
-                    ctx.fill_behavior(idx, func);
-
-                    if let Some(comp_body) = &b.compensate {
-                        let comp_idx = ctx
-                            .compensation_of
-                            .iter()
-                            .find(|(behavior_idx, _)| *behavior_idx == idx)
-                            .map(|(_, comp_idx)| *comp_idx)
-                            .expect("compensation slot reserved in pass 1");
-                        let comp_def = hir::BehaviorDef {
-                            name: format!("{}__compensate", b.name),
-                            params: Vec::new(),
-                            ret: b.ret.clone(),
-                            effect: b.effect.clone(),
-                            cap: b.cap,
-                            body: comp_body.clone(),
-                            compensate: None,
-                            parallel_branches: None,
-                            span: b.span,
-                        };
-                        let comp_full_name = format!("{}.{}__compensate", a.name, b.name);
-                        let comp_func = lower_behavior_def(&mut ctx, &comp_full_name, &comp_def)?;
-                        ctx.fill_behavior(comp_idx, comp_func);
-                    }
-                }
-            }
-            _ => {}
-        }
+        lower_decl_bodies(&mut ctx, decl)?;
     }
 
     ctx.finish()
+}
+
+/// Nested modules are purely a namespacing construct: the stable compiler's
+/// `compile_decl` flattens `Decl::Module { decls, .. }` by recursing over
+/// `decls` in place, so this pass does the same instead of erroring.
+fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
+    match decl {
+        hir::Decl::Function(f) => {
+            let idx = ctx.reserve_function(&f.name);
+            ctx.func_map.insert(f.name.clone(), idx);
+        }
+        hir::Decl::ExternBlock { library, funcs, .. } => {
+            for f in funcs {
+                let idx = ctx.foreign.len();
+                ctx.foreign.push(mir::ForeignFunction {
+                    library: library.clone(),
+                    symbol: f.name.clone(),
+                    params: f.params.iter().map(|(_, t)| t.clone()).collect(),
+                    ret: f.ret.clone(),
+                });
+                ctx.extern_map.insert(f.name.clone(), idx);
+            }
+        }
+        hir::Decl::Actor(a) => {
+            let first_idx = ctx.behaviors.len();
+            for b in &a.behaviors {
+                ctx.reserve_behavior(format!("{}.{}", a.name, b.name));
+            }
+            let behavior_indices: Vec<usize> = (first_idx..ctx.behaviors.len()).collect();
+            // Compensation slots are reserved AFTER all of this actor's
+            // real behaviors, so they never fall inside behavior_indices
+            // (compensations are invoked directly by offset, never
+            // dispatched by name via send/ask).
+            for (b, &idx) in a.behaviors.iter().zip(behavior_indices.iter()) {
+                if b.compensate.is_some() {
+                    let comp_idx =
+                        ctx.reserve_behavior(format!("{}.{}__compensate", a.name, b.name));
+                    ctx.compensation_of.push((idx, comp_idx));
+                }
+                if let Some(branches) = &b.parallel_branches {
+                    ctx.parallel_branches_of.push((idx, branches.clone()));
+                }
+            }
+            let state_models = a
+                .state_fields
+                .iter()
+                .map(|(name, model, _ty, _default)| (name.clone(), *model))
+                .collect();
+            let state_defaults = a
+                .state_fields
+                .iter()
+                .filter_map(|(name, _model, _ty, default)| match default {
+                    hir::Operand::Literal(lit, _) => Some((name.clone(), literal_to_constant(lit))),
+                    _ => None,
+                })
+                .collect();
+            ctx.actor_metas.push(crate::bytecode::ActorMeta {
+                name: a.name.clone(),
+                persistent: a.persistent,
+                state_models,
+                state_defaults,
+                behavior_indices,
+                is_workflow: a.is_workflow,
+                is_agent: a.is_agent,
+                tools: a.tools.clone(),
+                semantic_memory_dimensions: a.semantic_memory_dimensions,
+                procedural_memory_namespace: a.procedural_memory_namespace.clone(),
+            });
+        }
+        hir::Decl::Workflow { name, .. } => {
+            return Err(nyi(&format!("workflow '{}' in HIR/MIR pipeline", name)));
+        }
+        hir::Decl::Agent { name, .. } => {
+            return Err(nyi(&format!("agent '{}' in HIR/MIR pipeline", name)));
+        }
+        hir::Decl::Module { decls, .. } => {
+            for d in decls {
+                reserve_decl(ctx, d)?;
+            }
+        }
+        // Type-level declarations produce no code.
+        hir::Decl::TypeAlias { .. }
+        | hir::Decl::RecordType { .. }
+        | hir::Decl::VariantType { .. }
+        | hir::Decl::EffectDecl { .. }
+        | hir::Decl::Import { .. } => {}
+    }
+    Ok(())
+}
+
+fn lower_decl_bodies(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
+    match decl {
+        hir::Decl::Function(f) => {
+            let idx = ctx.func_map[&f.name];
+            let func = lower_function_def(ctx, f)?;
+            ctx.fill_function(idx, func);
+        }
+        hir::Decl::Actor(a) => {
+            let indices = ctx
+                .actor_metas
+                .iter()
+                .find(|m| m.name == a.name)
+                .expect("actor registered in pass 1")
+                .behavior_indices
+                .clone();
+            for (b, &idx) in a.behaviors.iter().zip(indices.iter()) {
+                let full_name = format!("{}.{}", a.name, b.name);
+                let func = lower_behavior_def(ctx, &full_name, b)?;
+                ctx.fill_behavior(idx, func);
+
+                if let Some(comp_body) = &b.compensate {
+                    let comp_idx = ctx
+                        .compensation_of
+                        .iter()
+                        .find(|(behavior_idx, _)| *behavior_idx == idx)
+                        .map(|(_, comp_idx)| *comp_idx)
+                        .expect("compensation slot reserved in pass 1");
+                    let comp_def = hir::BehaviorDef {
+                        name: format!("{}__compensate", b.name),
+                        params: Vec::new(),
+                        ret: b.ret.clone(),
+                        effect: b.effect.clone(),
+                        cap: b.cap,
+                        body: comp_body.clone(),
+                        compensate: None,
+                        parallel_branches: None,
+                        span: b.span,
+                    };
+                    let comp_full_name = format!("{}.{}__compensate", a.name, b.name);
+                    let comp_func = lower_behavior_def(ctx, &comp_full_name, &comp_def)?;
+                    ctx.fill_behavior(comp_idx, comp_func);
+                }
+            }
+        }
+        hir::Decl::Module { decls, .. } => {
+            for d in decls {
+                lower_decl_bodies(ctx, d)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

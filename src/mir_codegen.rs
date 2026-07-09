@@ -406,15 +406,17 @@ impl MirCodegen {
             }
             mir::RValue::Unary(op, id) => {
                 let src = reg_of(*id);
+                // `Deref`/`Ref` are register copies, same as the stable
+                // compiler's compile_unary: Nulang's ref cells are locals
+                // reassigned in place (see lower_place's Var arm), not a
+                // distinct heap allocation, so `&`/`*` are no-ops at the
+                // bytecode level — the type checker is what restricts
+                // reassignment to Ref-typed locals.
                 let opcode = match op {
                     crate::ast::UnOp::Neg => OpCode::INeg,
                     crate::ast::UnOp::Not => OpCode::Not,
-                    other => {
-                        return Err(not_yet_implemented(&format!(
-                            "unary operator {:?} in HIR/MIR pipeline",
-                            other
-                        )))
-                    }
+                    crate::ast::UnOp::Deref => OpCode::Load,
+                    crate::ast::UnOp::Ref(_) => OpCode::Move,
                 };
                 self.emit(Instruction::new2(opcode, src, dst));
             }
@@ -837,11 +839,23 @@ mod tests {
         // Mirrors the stable compiler's compile_assign, which returns the
         // assigned value rather than unit — an assignment used as a block's
         // trailing expression must yield that value, not unit.
+        let value = run_mir_source("let x = &1 in { x = 2 }").unwrap();
+        assert_eq!(value.as_int(), Some(2), "`x = 2` as an expression should yield 2");
+
         let value = run_mir_source("let r = { x: 1 } in { r.x = 5 }").unwrap();
         assert_eq!(value.as_int(), Some(5), "`r.x = 5` as an expression should yield 5");
 
         let value = run_mir_source("let arr = [1, 2] in { arr[0] = 7 }").unwrap();
         assert_eq!(value.as_int(), Some(7), "`arr[0] = 7` as an expression should yield 7");
+    }
+
+    #[test]
+    fn test_mir_codegen_ref_cell_deref_and_assign() {
+        // Mirrors src/integration_tests.rs's test_local_assignment (legacy
+        // pipeline): `&` creates a ref cell, `*` dereferences it, and
+        // assignment mutates it in place.
+        let value = run_mir_source("let x = &10 in { x = 3; *x }").unwrap();
+        assert_eq!(value.as_int(), Some(3));
     }
 
     #[test]
@@ -953,5 +967,95 @@ mod tests {
         };
         let result = crate::mir_lower::lower_module(&hir);
         assert!(result.is_err(), "unknown callee must be a compile error");
+    }
+
+    #[test]
+    fn test_mir_nested_module_declarations_are_flattened() {
+        // Nested `module Name { ... }` blocks are a pure namespacing
+        // construct: the stable compiler's compile_decl flattens them by
+        // recursing over their inner decls in place, and mir_lower.rs now
+        // does the same instead of erroring. Constructed directly against
+        // HIR (rather than via source + the type checker) because nested
+        // modules don't yet export bindings into the enclosing scope at the
+        // type-checker level — a separate, pre-existing gap in both
+        // pipelines, unrelated to this mir_lower.rs fix.
+        let square_fn = crate::hir::FunctionDef {
+            name: "square".into(),
+            type_params: vec![],
+            params: vec![("x".into(), crate::types::Type::int())],
+            ret: crate::types::Type::int(),
+            effect: crate::types::EffectRow::empty(),
+            cap: crate::types::Capability::Ref,
+            body: {
+                let mut b = crate::hir::Body::new();
+                b.set_terminator(crate::hir::Terminator::Yield(crate::hir::Operand::Var(
+                    "__result".into(),
+                    crate::types::Type::int(),
+                )));
+                b.push(crate::hir::Stmt::Let {
+                    name: "__result".into(),
+                    ty: crate::types::Type::int(),
+                    value: crate::hir::RValue::Binary(
+                        crate::ast::BinOp::Mul,
+                        crate::hir::Operand::Var("x".into(), crate::types::Type::int()),
+                        crate::hir::Operand::Var("x".into(), crate::types::Type::int()),
+                        crate::types::Type::int(),
+                    ),
+                    span: Span::default(),
+                });
+                b
+            },
+            public: false,
+            span: Span::default(),
+        };
+        let main_fn = crate::hir::FunctionDef {
+            name: "__main".into(),
+            type_params: vec![],
+            params: vec![],
+            ret: crate::types::Type::int(),
+            effect: crate::types::EffectRow::empty(),
+            cap: crate::types::Capability::Ref,
+            body: {
+                let mut b = crate::hir::Body::new();
+                b.set_terminator(crate::hir::Terminator::Yield(crate::hir::Operand::Var(
+                    "r".into(),
+                    crate::types::Type::int(),
+                )));
+                b.push(crate::hir::Stmt::Let {
+                    name: "r".into(),
+                    ty: crate::types::Type::int(),
+                    value: crate::hir::RValue::Call {
+                        func: crate::hir::Operand::Var("square".into(), crate::types::Type::unit()),
+                        args: vec![crate::hir::Operand::Literal(
+                            crate::ast::Literal::Int(6),
+                            crate::types::Type::int(),
+                        )],
+                        ty: crate::types::Type::int(),
+                    },
+                    span: Span::default(),
+                });
+                b
+            },
+            public: false,
+            span: Span::default(),
+        };
+        let hir = crate::hir::Module {
+            name: "t".into(),
+            decls: vec![
+                crate::hir::Decl::Module {
+                    name: "Math".into(),
+                    exports: vec![],
+                    decls: vec![crate::hir::Decl::Function(square_fn)],
+                    span: Span::default(),
+                },
+                crate::hir::Decl::Function(main_fn),
+            ],
+        };
+        let mir = crate::mir_lower::lower_module(&hir).unwrap();
+        let module = crate::mir_codegen::compile_mir(&mir, "t").unwrap();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let value = vm.run().unwrap();
+        assert_eq!(value.as_int(), Some(36), "nested module's function should be reachable unqualified");
     }
 }

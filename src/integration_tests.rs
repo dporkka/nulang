@@ -1948,21 +1948,40 @@ mod tests {
             "#,
         ];
         for src in corpus {
+            // `Value::to_string_repr()` prints heap-allocated results (like
+            // the "world" string these agents return) as a raw pointer
+            // address (`#Value(hex)`) — it has no VM/module to dereference
+            // through. Comparing that directly is flaky: two independently
+            // constructed VMs allocate at addresses that only coincidentally
+            // match. `vm.value_to_string` resolves the actual string content
+            // instead, which is what these assertions actually care about.
+            let (legacy_module, _) = compile_source(src)
+                .unwrap_or_else(|e| panic!("legacy pipeline failed to compile {:?}: {}", src, e));
             let legacy_rt = Rc::new(RefCell::new(Runtime::new()));
             legacy_rt
                 .borrow_mut()
                 .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
-            let legacy = run_source_with_runtime(src, legacy_rt)
-                .map(|(v, _)| v.to_string_repr())
-                .unwrap_or_else(|e| panic!("legacy pipeline failed on {:?}: {}", src, e));
+            let mut legacy_vm = VM::new();
+            legacy_vm.load_module(legacy_module);
+            legacy_vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(legacy_rt)));
+            let legacy_value = legacy_vm
+                .run()
+                .unwrap_or_else(|e| panic!("legacy pipeline failed to run {:?}: {}", src, e));
+            let legacy = legacy_vm.value_to_string(legacy_vm.modules.len() - 1, legacy_value);
 
+            let mir_module = compile_source_new(src)
+                .unwrap_or_else(|e| panic!("MIR pipeline failed to compile {:?}: {}", src, e));
             let mir_rt = Rc::new(RefCell::new(Runtime::new()));
             mir_rt
                 .borrow_mut()
                 .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
-            let mir = run_source_new_with_runtime(src, mir_rt)
-                .map(|v| v.to_string_repr())
-                .unwrap_or_else(|e| panic!("MIR pipeline failed on {:?}: {}", src, e));
+            let mut mir_vm = VM::new();
+            mir_vm.load_module(mir_module);
+            mir_vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(mir_rt)));
+            let mir_value = mir_vm
+                .run()
+                .unwrap_or_else(|e| panic!("MIR pipeline failed to run {:?}: {}", src, e));
+            let mir = mir_vm.value_to_string(mir_vm.modules.len() - 1, mir_value);
 
             assert_eq!(legacy, mir, "pipelines disagree on {:?}", src);
         }
@@ -2131,6 +2150,9 @@ mod tests {
             "let r = { x: 1, y: 2 } in { r.x = 99 r.x + r.y }",
             // For loops evaluate to unit
             "for i in [1, 2, 3] { i }",
+            // Ref cells: `&` creates a cell, `*` dereferences, assignment
+            // mutates and yields the assigned value.
+            "let x = &10 in { x = 3; *x }",
             // Effect handlers, with and without a resumed value
             "handle perform Math.getAnswer() { | Math.getAnswer() => 42 }",
             "handle perform IO.print(\"hello\") { | IO.print(msg) => 7 }",
