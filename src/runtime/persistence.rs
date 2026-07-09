@@ -494,6 +494,7 @@ impl PersistenceStore for JsonFileStore {
 /// A panic in one thread holding the connection lock must not cascade
 /// panics into every other thread that touches the store; the SQLite
 /// connection stays usable across panics, so poisoning is ignored.
+#[cfg(feature = "sqlite")]
 fn lock_ignore_poison<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -503,12 +504,14 @@ fn lock_ignore_poison<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T
 /// Each actor gets one row in the `snapshots` table and zero or more rows in
 /// the `journal` table ordered by sequence number. State and payloads are
 /// serialized to JSON and stored as TEXT.
+#[cfg(feature = "sqlite")]
 #[derive(Debug)]
 pub struct SqliteStore {
     conn: std::sync::Mutex<rusqlite::Connection>,
     path: PathBuf,
 }
 
+#[cfg(feature = "sqlite")]
 impl SqliteStore {
     /// Open (or create) a SQLite persistence store at `path`.
     ///
@@ -571,6 +574,7 @@ impl SqliteStore {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl PersistenceStore for SqliteStore {
     fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
         let mut conn = lock_ignore_poison(&self.conn);

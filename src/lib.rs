@@ -10,6 +10,7 @@ pub mod mir_codegen;
 pub mod integration_tests;
 pub mod value_layout;
 pub mod lexer;
+#[cfg(feature = "lsp")]
 pub mod lsp;
 pub mod parser;
 pub mod repl;
@@ -20,6 +21,7 @@ pub mod vm;
 pub mod runtime;
 pub mod jit;
 pub use crate::jit::reset_hot_counters;
+#[cfg(feature = "python")]
 pub mod python;
 pub mod ffi;
 pub mod ai;

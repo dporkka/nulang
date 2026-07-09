@@ -84,8 +84,16 @@ async fn main() {
     }
 
     if opts.lsp {
-        nulang::lsp::run_lsp_server().await;
-        return;
+        #[cfg(feature = "lsp")]
+        {
+            nulang::lsp::run_lsp_server().await;
+            return;
+        }
+        #[cfg(not(feature = "lsp"))]
+        {
+            eprintln!("Error: this build was compiled without the 'lsp' feature.");
+            std::process::exit(1);
+        }
     }
 
     if opts.repl {

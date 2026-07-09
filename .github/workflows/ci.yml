@@ -30,6 +30,26 @@ jobs:
       - name: Test
         run: cargo test
 
+  minimal-build:
+    name: Build without optional features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # No python3-dev installed here on purpose: this job proves the
+      # no-default-features build has zero PyO3/SQLite/LSP dependencies.
+      - name: Build
+        run: cargo build --all-targets --no-default-features
+
+      - name: Test
+        run: cargo test --no-default-features
+
   lint:
     name: Format & Clippy
     runs-on: ubuntu-latest
