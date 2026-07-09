@@ -24,7 +24,7 @@
 | **CRDTs** | 8 conflict-free replicated data types for shared distributed state |
 | **Register-Based VM** | High-performance bytecode VM with NaN-tagged value representation |
 | **Cranelift JIT Backend** | Tiered execution: interpreter for cold code, native compilation for hot loops |
-| **BEAM/OTP Primitives** | `receive`, `spawn_link`, `monitor`, `link`, registry, timers, process groups |
+| **BEAM/OTP Primitives** | `spawn_link`, `monitor`, `link`, registry, timers, process groups (`receive` is not yet usable — see [Known limitations](#known-limitations)) |
 | **Linear Type Moves** | Zero-cost `iso` actor messaging via compile-time linearity tracking |
 | **SIMD Vectorization** | Auto-vectorization of array loops via Cranelift SIMD (I64x2, F64x2, I32x4, F32x4) |
 | **Python Interop** | Native Actor pattern: Python isolated to dedicated OS threads, marshal-only boundary |
@@ -38,7 +38,7 @@
 - ✅ NaN-boxed `Value` representation with distinct high-16 type tags
 - ✅ 91-opcode bytecode ISA (arithmetic, control flow, closures, arrays, effects, actors, capabilities, distribution)
 - ✅ Hindley-Milner type inference with algebraic effects
-- ✅ Actor runtime: spawn, send, receive, monitors, links, supervision, timers, registry, process groups
+- ✅ Actor runtime: spawn, send, monitors, links, supervision, timers, registry, process groups (⚠️ `receive` is not yet usable — see [Known limitations](#known-limitations))
 - ✅ ORCA-style per-actor GC with cycle detection
 - ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams
 - ✅ Durable workflow runtime: `workflow` declarations with steps, timers, signals, saga compensation
@@ -348,7 +348,7 @@ rt.sync_crdts();  // broadcast to all connected nodes
 
 | Primitive | File | Description |
 |-----------|------|-------------|
-| `receive` | `vm.rs` | Pattern-matching mailbox consume with timeout |
+| `receive` | `vm.rs` | ⚠️ Not usable today — no lexer keyword (unparseable from source), stable-compiler codegen discards match arms, VM has no dispatch arm for the opcode, MIR lowering explicitly rejects it. See [Known limitations](#known-limitations). |
 | `spawn_link` | `vm.rs` | Spawn actor with bidirectional fault link |
 | `monitor` | `runtime/mod.rs` | Watcher monitors target actor for exit |
 | `demonitor` | `runtime/mod.rs` | Remove a monitor |
@@ -497,7 +497,7 @@ This is an active implementation with the following components functional:
 - [x] VM (register-based execution, arithmetic, comparisons, control flow)
 - [x] REPL (parse-typecheck-compile-execute cycle with introspection)
 - [x] Integration tests (16 end-to-end pipeline tests)
-- [x] Actor runtime (spawn, send, receive, links, monitors)
+- [x] Actor runtime (spawn, send, links, monitors) — ⚠️ `receive` not usable from source, see [Known limitations](#known-limitations)
 - [x] Work-stealing scheduler (M:N threading with reduction quotas)
 - [x] ORCA garbage collector (per-actor heap, 3-count protocol, cycle detection)
 - [x] Supervision trees (OneForOne, OneForAll, RestForOne restart strategies)
@@ -505,7 +505,7 @@ This is an active implementation with the following components functional:
 - [x] Distributed runtime (TCP transport, cluster membership, location-transparent messaging)
 - [x] CRDT subsystem (8 types: counters, sets, registers, sequences)
 - [x] CRDT manager (factory, sync, inter-node merge)
-- [x] BEAM/OTP primitives (receive, spawn_link, monitor, link, exit, trap_exit, register, whereis, send_after, pg, yield)
+- [x] BEAM/OTP primitives (spawn_link, monitor, link, exit, trap_exit, register, whereis, send_after, pg, yield) — ⚠️ `receive` not usable from source, see [Known limitations](#known-limitations)
 - [x] Unbounded mailboxes (crossbeam::SegQueue — BEAM semantics, no message loss)
 - [x] Hierarchical timer wheel (send_after, exit_after, kill_after)
 - [x] Actor registry (register/whereis/registered)
@@ -534,7 +534,7 @@ This is an active implementation with the following components functional:
 | v0.4 | ORCA garbage collector | Completed |
 | v0.5 | Multi-node distribution | Completed |
 | v0.6 | CRDT integration | Completed |
-| v0.7 | BEAM/OTP primitives (receive, spawn_link, monitor, links, registry, timers, process groups) | Completed |
+| v0.7 | BEAM/OTP primitives (spawn_link, monitor, links, registry, timers, process groups) | Completed (`receive` not usable — see [Known limitations](#known-limitations)) |
 | v0.8 | Performance improvements (mimalloc, lock-free mailboxes, linear type moves) | Completed |
 | v0.9 | Cranelift JIT backend | Completed |
 | v0.10 | Type guard stripping + LSP inlay hints | Completed |
@@ -544,6 +544,17 @@ This is an active implementation with the following components functional:
 | — | Durable workflow runtime (steps, timers, signals, saga compensation) | Completed |
 | — | AI runtime (`agent` keyword, LLM providers, memory, pipeline/debate/supervisor patterns) | Completed |
 | v1.0 | Production release — requires: chaos test suite passing ✅, scheduler profiled ✅, cycle detector intra-node only ✅ | Planned |
+
+---
+
+## Known Limitations
+
+- **`receive` (pattern-matching mailbox consume) is not usable today, on either backend.** The gap is deeper than a single missing opcode:
+  - The lexer has no `receive` keyword, so `receive { ... }` cannot even be parsed from `.nu` source today (`src/lexer.rs`). The AST/HIR node (`Expr::Receive` / `hir::RValue::Receive`) and its downstream consumers (effect checker, type checker) exist and are exercised only by hand-built Rust test fixtures, never by real parsed source.
+  - The stable compiler's codegen for `Expr::Receive` (`src/compiler.rs`) discards the match arms and emits a single `OpCode::Receive` with no encoding of which behaviors/patterns/bodies exist.
+  - The VM's interpreter loop (`src/vm.rs`) has no dispatch arm for `OpCode::Receive` at all — it falls through to the "unimplemented opcode" error at runtime. This dispatch arm existed prior to the NaN-boxing/effect-system rewrite in `2c860f6` and was dropped without a regression test catching it.
+  - The `--experimental-mir` pipeline rejects `hir::RValue::Receive` explicitly at HIR→MIR lowering time with a `NotYetImplemented` error (`src/mir_lower.rs`) — so this is a pre-existing, backend-agnostic gap, not a MIR-specific regression.
+  - Actor message handling that *is* exercised by tests goes through other paths (direct behavior dispatch, not a `receive`-with-pattern-match expression).
 
 ---
 
