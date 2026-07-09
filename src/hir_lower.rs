@@ -11,20 +11,63 @@
 //! flow expression — the old design stored `if` as a *body terminator*,
 //! which reordered any code lowered after it.
 
+use crate::ai::request::ToolSchema;
+use crate::ai::schema::function_to_tool_schema;
 use crate::ast;
-use crate::ast::{BinOp, Decl, Expr, Literal};
+use crate::ast::{BinOp, Decl, Expr, FunctionAnnotation, Literal};
 use crate::hir;
 use crate::types::{Capability, EffectRow, Span, Type};
 
 pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
     let mut module = hir::Module::new(&ast.name);
+    let tools = collect_tool_schemas(&ast.decls);
     for decl in &ast.decls {
-        module.decls.push(lower_decl(decl));
+        module.decls.push(lower_decl(decl, &tools));
     }
     module
 }
 
-fn lower_decl(decl: &Decl) -> hir::Decl {
+/// Collect `@tool`-annotated function signatures across the whole module
+/// (including nested modules), mirroring the stable compiler's
+/// `collect_functions` so `agent` declarations can resolve `tools: [...]`
+/// names regardless of source order.
+fn collect_tool_schemas(decls: &[Decl]) -> Vec<ToolSchema> {
+    let mut tools = Vec::new();
+    collect_tool_schemas_into(decls, &mut tools);
+    tools
+}
+
+fn collect_tool_schemas_into(decls: &[Decl], tools: &mut Vec<ToolSchema>) {
+    for decl in decls {
+        match decl {
+            Decl::Function { name, params, ret_type, annotations, .. } if name != "__main" => {
+                if let Some(FunctionAnnotation::Tool { description }) = annotations
+                    .iter()
+                    .find(|a| matches!(a, FunctionAnnotation::Tool { .. }))
+                {
+                    let mut typed_params = Vec::with_capacity(params.len());
+                    let mut all_typed = true;
+                    for (param_name, param_ty) in params {
+                        if let Some(ty) = param_ty {
+                            typed_params.push((param_name.clone(), ty.clone()));
+                        } else {
+                            all_typed = false;
+                            break;
+                        }
+                    }
+                    if all_typed {
+                        let ret = ret_type.clone().unwrap_or_else(Type::unit);
+                        tools.push(function_to_tool_schema(name, description, &typed_params, &ret));
+                    }
+                }
+            }
+            Decl::Module { decls: subdecls, .. } => collect_tool_schemas_into(subdecls, tools),
+            _ => {}
+        }
+    }
+}
+
+fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
     match decl {
         Decl::Function {
             name,
@@ -156,7 +199,7 @@ fn lower_decl(decl: &Decl) -> hir::Decl {
         } => hir::Decl::Module {
             name: name.clone(),
             exports: exports.clone(),
-            decls: decls.iter().map(lower_decl).collect(),
+            decls: decls.iter().map(|d| lower_decl(d, tools)).collect(),
             span: *span,
         },
         Decl::Import { path, items, span } => hir::Decl::Import {
@@ -169,7 +212,7 @@ fn lower_decl(decl: &Decl) -> hir::Decl {
             name,
             model,
             system_prompt,
-            tools,
+            tools: tool_names,
             memory,
             semantic_memory,
             procedural_memory,
@@ -179,11 +222,12 @@ fn lower_decl(decl: &Decl) -> hir::Decl {
             name,
             model,
             system_prompt,
-            tools,
+            tool_names,
             memory,
             semantic_memory,
             procedural_memory,
             pricing,
+            tools,
             *span,
         ),
     }
@@ -202,6 +246,7 @@ fn lower_behavior(b: &ast::Behavior) -> hir::BehaviorDef {
         cap: b.cap,
         body: lower_body(&b.body),
         compensate: None,
+        parallel_branches: None,
         span: b.span,
     }
 }
@@ -241,14 +286,19 @@ fn desugar_agent(
     semantic_memory: &Option<ast::AgentSemanticMemoryConfig>,
     procedural_memory: &Option<ast::AgentProceduralMemoryConfig>,
     pricing: &Option<ast::AgentPricing>,
+    available_tools: &[ToolSchema],
     span: Span,
 ) -> hir::Decl {
-    // Tool-schema resolution needs the module-wide @tool-annotated function
-    // table, which this pipeline does not build yet (see collect_functions
-    // in the stable compiler). Fall back honestly rather than resolve
-    // tool references incorrectly.
-    if !tool_names.is_empty() {
-        return hir::Decl::Agent { name: name.to_string(), span };
+    // Resolve tool names against the module's @tool-annotated functions,
+    // mirroring the stable compiler's `compile_agent`. An unresolvable name
+    // means the whole program is invalid; fall back honestly so the stable
+    // compiler raises the same "unknown tool" error instead of miscompiling.
+    let mut resolved_tools = Vec::with_capacity(tool_names.len());
+    for tool_name in tool_names {
+        match available_tools.iter().find(|t| &t.name == tool_name) {
+            Some(schema) => resolved_tools.push(schema.clone()),
+            None => return hir::Decl::Agent { name: name.to_string(), span },
+        }
     }
 
     let agent_pricing = pricing.unwrap_or(ast::AgentPricing { input: 0.0, output: 0.0 });
@@ -451,7 +501,7 @@ fn desugar_agent(
         init: Vec::new(),
         is_workflow: false,
         is_agent: true,
-        tools: Vec::new(),
+        tools: resolved_tools,
         semantic_memory_dimensions,
         procedural_memory_namespace,
         span,
@@ -465,16 +515,95 @@ fn desugar_agent(
 /// `parallel` block falls back honestly (parallel-branch synthesis and its
 /// progress-counter bookkeeping is a separate, not-yet-ported effort).
 fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir::Decl {
-    if items.iter().any(|i| matches!(i, ast::WorkflowItem::Parallel(_))) {
-        return hir::Decl::Workflow { name: name.to_string(), span };
+    // Flatten the ordered workflow items into a list of sequential steps.
+    // Each `parallel` block becomes a synthetic step whose body runs
+    // branches sequentially (guarded by a durable `parallel_progress`
+    // counter so recovery skips branches that already completed before a
+    // crash) and emits a `ParallelBranchCompleted` event after each branch.
+    // Mirrors the stable compiler's `compile_workflow` exactly.
+    let mut flattened_steps: Vec<ast::WorkflowStep> = Vec::new();
+    let mut parallel_branch_names: std::collections::HashMap<usize, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut parallel_counter = 0usize;
+
+    for item in items {
+        match item {
+            ast::WorkflowItem::Step(step) => flattened_steps.push(step.clone()),
+            ast::WorkflowItem::Parallel(branches) => {
+                let parallel_name = format!("parallel_{}", parallel_counter);
+                parallel_counter += 1;
+
+                let progress_expr = Expr::FieldAccess {
+                    expr: Box::new(Expr::SelfRef(span)),
+                    field: "parallel_progress".to_string(),
+                    span,
+                };
+                let mut body_exprs: Vec<Expr> = Vec::with_capacity(branches.len() + 1);
+                for (branch_idx, branch) in branches.iter().enumerate() {
+                    let threshold = (branch_idx + 1) as i64;
+                    let guard = Expr::Binary {
+                        op: BinOp::Lt,
+                        left: Box::new(progress_expr.clone()),
+                        right: Box::new(Expr::Literal(Literal::Int(threshold), span)),
+                        span,
+                    };
+                    let branch_block = Expr::Block {
+                        exprs: vec![
+                            branch.body.clone(),
+                            Expr::Emit {
+                                event: "ParallelBranchCompleted".to_string(),
+                                args: vec![
+                                    Expr::Literal(Literal::String(parallel_name.clone()), span),
+                                    Expr::Literal(Literal::String(branch.name.clone()), span),
+                                ],
+                                span,
+                            },
+                        ],
+                        span,
+                    };
+                    body_exprs.push(Expr::If {
+                        cond: Box::new(guard),
+                        then_branch: Box::new(branch_block),
+                        else_branch: None,
+                        span,
+                    });
+                }
+                // Reset the parallel-progress counter once every branch has
+                // finished. The runtime advances step_index when it records
+                // StepCompleted so signal-waiting branches don't
+                // double-increment.
+                body_exprs.push(Expr::Assign {
+                    target: Box::new(progress_expr.clone()),
+                    value: Box::new(Expr::Literal(Literal::Int(0), span)),
+                    span,
+                });
+
+                let combined_compensate = {
+                    let comp_exprs: Vec<Expr> = branches
+                        .iter()
+                        .rev()
+                        .filter_map(|b| b.compensate.clone())
+                        .collect();
+                    if comp_exprs.is_empty() {
+                        None
+                    } else {
+                        Some(Expr::Block { exprs: comp_exprs, span })
+                    }
+                };
+
+                flattened_steps.push(ast::WorkflowStep {
+                    name: parallel_name.clone(),
+                    body: Expr::Block { exprs: body_exprs, span },
+                    compensate: combined_compensate,
+                    span,
+                });
+                parallel_branch_names.insert(
+                    flattened_steps.len() - 1,
+                    branches.iter().map(|b| b.name.clone()).collect(),
+                );
+            }
+        }
     }
-    let steps: Vec<&ast::WorkflowStep> = items
-        .iter()
-        .map(|i| match i {
-            ast::WorkflowItem::Step(s) => s,
-            ast::WorkflowItem::Parallel(_) => unreachable!("checked above"),
-        })
-        .collect();
 
     let state_fields: Vec<(String, ast::StateModel, Type, hir::Operand)> = vec![
         (
@@ -497,9 +626,10 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
         ),
     ];
 
-    let behaviors = steps
+    let behaviors = flattened_steps
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(i, s)| {
             let mut def = lower_behavior(&ast::Behavior {
                 name: s.name.clone(),
                 params: Vec::new(),
@@ -509,6 +639,7 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
                 span: s.span,
             });
             def.compensate = s.compensate.as_ref().map(lower_body);
+            def.parallel_branches = parallel_branch_names.get(&i).cloned();
             def
         })
         .collect();
@@ -1013,10 +1144,14 @@ fn lower_assign_to(target: &Expr, value: &Expr, span: Span, body: &mut hir::Body
     let place = lower_place(target, body);
     body.push(hir::Stmt::Assign {
         target: place,
-        value: hir::RValue::Use(val),
+        value: hir::RValue::Use(val.clone()),
         span,
     });
-    hir::Operand::Unit
+    // Mirrors the stable compiler's `compile_assign`, which returns the
+    // assigned value (val_reg) rather than unit — load-bearing for code
+    // like `(emit E(), self.x = self.x + 1)`, whose block result is the
+    // assignment's value.
+    val
 }
 
 fn lower_place(expr: &Expr, body: &mut hir::Body) -> hir::Place {

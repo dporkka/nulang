@@ -123,6 +123,10 @@ pub struct BehaviorDef {
     /// Saga compensation body for a `workflow` step, run in reverse order if
     /// a later step fails. `None` for ordinary (non-workflow) behaviors.
     pub compensate: Option<Body>,
+    /// Branch names for a step synthesized from a `parallel { ... }` block
+    /// (see `hir_lower::desugar_workflow`). `None` for an ordinary step; the
+    /// runtime uses this to skip branches a crash already completed.
+    pub parallel_branches: Option<Vec<String>>,
     pub span: Span,
 }
 

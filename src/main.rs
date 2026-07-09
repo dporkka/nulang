@@ -337,10 +337,10 @@ fn run_source(source: &str, verbose: bool, use_mir: bool) -> NuResult<()> {
 
     // Compile. The stable compiler is the default; the experimental HIR/MIR
     // pipeline covers the functional core (closures, effects, control flow),
-    // `actor` declarations (spawn/send/ask/state), sequential `workflow`s
-    // (with saga compensation), and tool-less `agent`s. A workflow with a
-    // `parallel` block or an agent with `@tool`-backed tools still falls
-    // back, so this stays opt-in and falls back loudly on anything else too.
+    // `actor` declarations (spawn/send/ask/state), `workflow`s (including
+    // `parallel` blocks and saga compensation), and `agent`s (including
+    // `@tool`-backed tools). It stays opt-in and falls back loudly to the
+    // stable compiler on anything it can't yet lower.
     let code_module = if use_mir {
         match compile_with_new_pipeline(&ast, "main") {
             Ok(m) => {
@@ -387,9 +387,10 @@ fn check_source(source: &str, verbose: bool) -> NuResult<()> {
 }
 
 fn compile_with_new_pipeline(ast: &nulang::ast::AstModule, name: &str) -> NuResult<nulang::bytecode::CodeModule> {
-    // Actors, workflows, and agents are not yet lowered by this pipeline;
-    // mir_lower reports them as honest NotYetImplemented errors, which the
-    // caller turns into a loud fallback to the stable compiler.
+    // Anything this pipeline can't yet lower faithfully (see hir_lower.rs
+    // and mir_lower.rs module docs) returns an honest NotYetImplemented
+    // error, which the caller turns into a loud fallback to the stable
+    // compiler.
     let hir = nulang::hir_lower::lower_module(ast);
     let mir = nulang::mir_lower::lower_module(&hir)?;
     nulang::mir_codegen::compile_mir(&mir, name)

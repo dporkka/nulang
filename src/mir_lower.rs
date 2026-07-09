@@ -12,13 +12,11 @@
 //!   - `actor` declarations are supported: behaviors compile through the
 //!     same machinery as ordinary functions (see `lower_behavior_def`), with
 //!     `self` bound as a local and `spawn`/`send`/`ask`/`self.field` lowered
-//!     to their dedicated MIR constructs. `workflow` (sequential steps, with
-//!     saga compensation) and `agent` (without `@tool`-backed tools) desugar
-//!     to actors at the HIR layer (see `hir_lower::desugar_workflow`/
-//!     `desugar_agent`) and are supported the same way. A workflow
-//!     containing a `parallel` block, or an agent declaring tools, falls
-//!     back honestly — parallel-branch synthesis and @tool schema
-//!     resolution are not yet ported.
+//!     to their dedicated MIR constructs. `workflow` (including `parallel`
+//!     blocks and saga compensation) and `agent` (including `@tool`-backed
+//!     tools) desugar to actors at the HIR layer (see
+//!     `hir_lower::desugar_workflow`/`desugar_agent`) and are supported the
+//!     same way.
 
 use crate::ast::Pattern;
 use crate::hir;
@@ -79,6 +77,9 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
                         let comp_idx =
                             ctx.reserve_behavior(format!("{}.{}__compensate", a.name, b.name));
                         ctx.compensation_of.push((idx, comp_idx));
+                    }
+                    if let Some(branches) = &b.parallel_branches {
+                        ctx.parallel_branches_of.push((idx, branches.clone()));
                     }
                 }
                 let state_models = a
@@ -163,6 +164,7 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
                             cap: b.cap,
                             body: comp_body.clone(),
                             compensate: None,
+                            parallel_branches: None,
                             span: b.span,
                         };
                         let comp_full_name = format!("{}.{}__compensate", a.name, b.name);
@@ -196,6 +198,8 @@ struct ModuleCtx {
     actor_metas: Vec<crate::bytecode::ActorMeta>,
     /// `(behavior_idx, compensation_behavior_idx)` pairs; see `mir::Module`.
     compensation_of: Vec<(usize, usize)>,
+    /// `(behavior_idx, branch_names)` pairs; see `mir::Module`.
+    parallel_branches_of: Vec<(usize, Vec<String>)>,
     next_lambda: u32,
 }
 
@@ -211,6 +215,7 @@ impl ModuleCtx {
             behavior_names: Vec::new(),
             actor_metas: Vec::new(),
             compensation_of: Vec::new(),
+            parallel_branches_of: Vec::new(),
             next_lambda: 0,
         }
     }
@@ -283,6 +288,7 @@ impl ModuleCtx {
         }
         module.actor_metadata = self.actor_metas;
         module.compensation_of = self.compensation_of;
+        module.parallel_branches_of = self.parallel_branches_of;
         module.foreign_functions = self.foreign;
         Ok(module)
     }

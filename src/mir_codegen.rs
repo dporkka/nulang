@@ -144,6 +144,16 @@ impl MirCodegen {
                 .ok_or_else(|| compile_err("internal: compensated behavior index out of range"))?;
             entry.compensate_offset = Some(comp_offset);
         }
+        // Parallel-branch metadata: copy branch names onto the matching
+        // synthesized step's BehaviorTableEntry (see mir::Module::parallel_branches_of).
+        for (behavior_idx, branches) in &mir.parallel_branches_of {
+            let entry = self
+                .module
+                .behaviors
+                .get_mut(*behavior_idx)
+                .ok_or_else(|| compile_err("internal: parallel-branch behavior index out of range"))?;
+            entry.parallel_branches = Some(branches.clone());
+        }
         self.module.actor_metadata = mir.actor_metadata.clone();
 
         // Entry prologue: call __main (if present) and halt.
@@ -823,6 +833,18 @@ mod tests {
     }
 
     #[test]
+    fn test_mir_codegen_assign_expression_yields_assigned_value() {
+        // Mirrors the stable compiler's compile_assign, which returns the
+        // assigned value rather than unit — an assignment used as a block's
+        // trailing expression must yield that value, not unit.
+        let value = run_mir_source("let r = { x: 1 } in { r.x = 5 }").unwrap();
+        assert_eq!(value.as_int(), Some(5), "`r.x = 5` as an expression should yield 5");
+
+        let value = run_mir_source("let arr = [1, 2] in { arr[0] = 7 }").unwrap();
+        assert_eq!(value.as_int(), Some(7), "`arr[0] = 7` as an expression should yield 7");
+    }
+
+    #[test]
     fn test_mir_codegen_effect_handler() {
         let value = run_mir_source(
             "handle perform Math.getAnswer() { | Math.getAnswer() => 42 }",
@@ -857,23 +879,44 @@ mod tests {
     }
 
     #[test]
-    fn test_mir_codegen_parallel_workflow_and_tooled_agent_still_honest_nyi() {
-        // Parallel-branch synthesis and @tool schema resolution are not yet
-        // ported; both fall back honestly rather than compiling incorrectly.
+    fn test_mir_codegen_parallel_workflow_compiles() {
         let result = compile_mir_source(
             "workflow W { parallel { step a { 1 } step b { 2 } } }",
         );
-        assert!(
-            matches!(result, Err(NuError::NotYetImplemented { .. })),
-            "parallel workflow must be an honest NotYetImplemented, got {:?}",
-            result
+        assert!(result.is_ok(), "parallel workflow should compile: {:?}", result);
+        let module = result.unwrap();
+        assert_eq!(module.behaviors.len(), 1);
+        assert_eq!(
+            module.behaviors[0].parallel_branches,
+            Some(vec!["a".to_string(), "b".to_string()])
         );
+    }
+
+    #[test]
+    fn test_mir_codegen_agent_with_resolved_tool_compiles() {
         let result = compile_mir_source(
-            r#"agent Ag = { model: "gpt-4o", tools: [search] }"#,
+            r#"
+            @tool(description: "Search the web.")
+            fn search(query: String) -> String { query }
+
+            agent Ag = { model: "gpt-4o", tools: [search] }
+            "#,
         );
+        assert!(result.is_ok(), "agent with a resolvable tool should compile: {:?}", result);
+        let module = result.unwrap();
+        assert_eq!(module.actor_metadata.len(), 1);
+        assert_eq!(module.actor_metadata[0].tools.len(), 1);
+        assert_eq!(module.actor_metadata[0].tools[0].name, "search");
+    }
+
+    #[test]
+    fn test_mir_codegen_agent_with_unknown_tool_falls_back_honestly() {
+        // No @tool-annotated `search` function exists; this must not
+        // silently compile with a dropped/garbage tool reference.
+        let result = compile_mir_source(r#"agent Ag = { model: "gpt-4o", tools: [search] }"#);
         assert!(
             matches!(result, Err(NuError::NotYetImplemented { .. })),
-            "agent with tools must be an honest NotYetImplemented, got {:?}",
+            "agent with an unresolvable tool must be an honest NotYetImplemented, got {:?}",
             result
         );
     }

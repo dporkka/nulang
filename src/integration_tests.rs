@@ -1930,6 +1930,22 @@ mod tests {
                 agent Ag = { model: "mock-model", system_prompt: "hi" }
                 let a = spawn Ag {} in ask a ask("hello")
             "#,
+            r#"
+                workflow W2 {
+                    step before { self.step_index = self.step_index + 1 }
+                    parallel {
+                        step branch_a { self.step_index = self.step_index + 1 }
+                        step branch_b { self.step_index = self.step_index + 1 }
+                    }
+                }
+                let w = spawn W2 {} in ask w before()
+            "#,
+            r#"
+                @tool(description: "Adds two integers.")
+                fn add(x: Int, y: Int) -> Int { x + y }
+                agent Ag2 = { model: "mock-model", tools: [add] }
+                let a = spawn Ag2 {} in ask a ask("hello")
+            "#,
         ];
         for src in corpus {
             let legacy_rt = Rc::new(RefCell::new(Runtime::new()));
@@ -1950,6 +1966,79 @@ mod tests {
 
             assert_eq!(legacy, mir, "pipelines disagree on {:?}", src);
         }
+    }
+
+    /// Same source and assertions as test_workflow_parallel_branches_normal
+    /// (legacy pipeline), run through the HIR/MIR pipeline instead —
+    /// exercises `hir_lower::desugar_workflow`'s parallel-branch synthesis
+    /// and mir_codegen's `parallel_branches_of` patching end to end.
+    #[test]
+    fn test_mir_workflow_parallel_branches_normal() {
+        let source = r#"
+            workflow ParallelNormal {
+                step before { (emit BeforeDone(), self.step_index = self.step_index + 1) }
+                parallel {
+                    step branch_a { emit BranchA_Done() }
+                    step branch_b { emit BranchB_Done() }
+                }
+                step after { (emit AfterDone(), self.step_index = self.step_index + 1) }
+            }
+            spawn ParallelNormal {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 2, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        assert_eq!(
+            rt.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(3),
+            "workflow should advance through before, parallel, and after"
+        );
+
+        let events = store.read_workflow_events(actor_id);
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. })).count(),
+            2,
+            "both branches should emit ParallelBranchCompleted"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "AfterDone")),
+            "AfterDone should be persisted"
+        );
+    }
+
+    /// Regression test for tool-schema resolution in `desugar_agent`: a
+    /// spawn-time `ActorMeta.tools` entry must resolve to the same
+    /// `ToolSchema` the stable compiler's `compile_agent` would produce.
+    #[test]
+    fn test_mir_agent_with_tool_resolves_schema() {
+        let source = r#"
+            @tool(description: "Adds two integers.")
+            fn add(x: Int, y: Int) -> Int { x + y }
+
+            agent Ag = { model: "gpt-4o", tools: [add] }
+        "#;
+        let module = compile_source_new(source).unwrap();
+        let meta = module
+            .actor_metadata
+            .iter()
+            .find(|m| m.name == "Ag")
+            .expect("agent should produce actor metadata");
+        assert_eq!(meta.tools.len(), 1);
+        assert_eq!(meta.tools[0].name, "add");
+        assert_eq!(meta.tools[0].description, "Adds two integers.");
     }
 
     #[test]

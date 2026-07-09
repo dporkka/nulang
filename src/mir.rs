@@ -52,6 +52,10 @@ pub struct Module {
     /// `BehaviorTableEntry::compensate_offset` from the compiled
     /// compensation function's code offset instead.
     pub compensation_of: Vec<(usize, usize)>,
+    /// `(behavior_idx, branch_names)` pairs for steps synthesized from a
+    /// `parallel { ... }` block; codegen copies `branch_names` into the
+    /// matching `BehaviorTableEntry::parallel_branches` unchanged.
+    pub parallel_branches_of: Vec<(usize, Vec<String>)>,
     pub foreign_functions: Vec<ForeignFunction>,
 }
 
@@ -312,6 +316,7 @@ impl Module {
             behaviors: Vec::new(),
             actor_metadata: Vec::new(),
             compensation_of: Vec::new(),
+            parallel_branches_of: Vec::new(),
             foreign_functions: Vec::new(),
         }
     }
