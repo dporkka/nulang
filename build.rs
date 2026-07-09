@@ -3,6 +3,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    // Only needed when linking against PyO3; skip entirely for builds with
+    // the "python" feature disabled (`cargo:rerun-if-changed` for the
+    // feature flag itself so re-enabling it re-triggers this build script).
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_PYTHON");
+    if env::var_os("CARGO_FEATURE_PYTHON").is_none() {
+        return;
+    }
+
     // On some Linux distributions (e.g. Fedora) the libpython3.X.so symlink
     // installed by the -devel package is missing while libpython3.X.so.1.0 is
     // present. PyO3 emits -lpython3.X and the linker fails because it cannot

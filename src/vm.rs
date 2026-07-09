@@ -109,6 +109,14 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// decrement the local reference count and reclaim when possible.
     fn drop_ref(&mut self, ptr: *mut u8);
 
+    /// Create an additional local reference to a heap object.
+    ///
+    /// Called when a value that owns a heap pointer is captured into a
+    /// closure environment, so the object cannot be freed by a `Drop` of the
+    /// original binding while the closure still holds it. Mirrors `drop_ref`
+    /// (increment vs. decrement of the same reference count).
+    fn retain_ref(&mut self, ptr: *mut u8);
+
     /// Return the number of elements in an array allocated on the actor heap.
     fn array_len(&self, ptr: *mut u8) -> Option<usize>;
 
@@ -223,13 +231,14 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
 #[derive(Debug)]
 struct StandaloneVmCallbacks {
     heap: ActorHeap,
+    gc: crate::runtime::OrcaGc,
 }
 
 impl StandaloneVmCallbacks {
     fn new() -> Self {
         let mut heap = ActorHeap::new(1024 * 1024);
         heap.set_actor_id(0);
-        Self { heap }
+        Self { heap, gc: crate::runtime::OrcaGc::new(0) }
     }
 }
 
@@ -240,7 +249,13 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
 
     fn drop_ref(&mut self, ptr: *mut u8) {
         unsafe {
-            self.heap.free(ptr);
+            self.gc.drop_local_ref(&mut self.heap, ptr);
+        }
+    }
+
+    fn retain_ref(&mut self, ptr: *mut u8) {
+        unsafe {
+            self.gc.local_ref(&self.heap, ptr);
         }
     }
 
@@ -648,7 +663,63 @@ pub struct VM {
     ///
     /// Defaults to a standalone heap so the VM is usable without a runtime.
     actor_callbacks: Box<dyn ActorVmCallbacks>,
+    /// Capture environments for closures that captured enclosing locals.
+    /// Indexed by the payload of env-flagged closure values.
+    ///
+    /// KNOWN LIMITATION: entries are never reclaimed by the GC — closures are
+    /// plain `Value`s, not heap objects, so ORCA has no way to know when the
+    /// last reference to an env has gone out of scope, and closures stored
+    /// inside heap composites (records/tuples/arrays, actor state) mean a
+    /// scan of live VM frames alone cannot soundly prove an env is dead.
+    /// Doing this correctly requires making closures first-class GC-traced
+    /// heap objects; that is a larger follow-up, not attempted here.
+    ///
+    /// For a single self-contained execution (the standalone VM, and each
+    /// REPL evaluation) this is bounded: `clear_closure_envs` should be
+    /// called before starting a fresh, independent program so envs from the
+    /// previous run — verifiably unreachable, since `run`/`run_from` always
+    /// rebuild `frames` from scratch — don't accumulate forever.
+    ///
+    /// For a VM shared across many actors and messages over a long-running
+    /// process (`Runtime`'s bytecode-call path), no such safe reset point
+    /// exists today: a different actor's suspended frame or persisted state
+    /// could still reference an existing env, so envs accumulate for the
+    /// life of the process. Use `closure_env_count` to monitor growth.
+    ///
+    /// Scoping this per-actor (freed when the owning `Actor`/`ActorHeap` is
+    /// dropped, matching how per-actor heap memory is already reclaimed) is
+    /// NOT a safe fix without more work: closures are ordinary `Value`s with
+    /// no actor-boundary enforcement, so a closure created by one actor can
+    /// be sent to another via a message/spawn argument or stored into
+    /// shared/persisted state — if the originating actor terminated first,
+    /// the receiving actor would hold a dangling env index into a Vec that
+    /// no longer exists. `max_closure_envs` bounds the leak's blast radius
+    /// with an honest error instead, until real GC tracing lands.
+    closure_envs: Vec<ClosureEnv>,
+    /// Ceiling on `closure_envs.len()`; defaults to `MAX_CLOSURE_ENVS`.
+    /// A field (not just the constant) so tests can shrink it instead of
+    /// actually allocating millions of envs to exercise the limit.
+    max_closure_envs: usize,
 }
+
+/// Captured environment of a closure: the lifted function it wraps plus the
+/// values captured (by value) from the enclosing scope at creation time.
+#[derive(Debug, Clone)]
+struct ClosureEnv {
+    func_idx: usize,
+    captures: Vec<Value>,
+}
+
+/// Payload bit distinguishing env-carrying closures (index into
+/// `VM::closure_envs`) from immediate closures (payload = function index).
+const CLOSURE_ENV_FLAG: u64 = 0x0000_4000_0000_0000;
+const CLOSURE_ENV_IDX_MASK: u64 = CLOSURE_ENV_FLAG - 1;
+/// Hard ceiling on retained closure envs (see `VM::closure_envs`'s KNOWN
+/// LIMITATION). ~10M entries is generous — a legitimate program's live
+/// closure count shouldn't come close — while still bounding the leak to a
+/// fixed, predictable amount of memory instead of running unboundedly
+/// toward an uncontrolled OOM.
+const MAX_CLOSURE_ENVS: usize = 10_000_000;
 
 impl VM {
     /// Create a new VM.
@@ -667,7 +738,16 @@ impl VM {
             suspended_signal_name: None,
             distributed_callbacks: None,
             actor_callbacks: Box::new(StandaloneVmCallbacks::new()),
+            closure_envs: Vec::new(),
+            max_closure_envs: MAX_CLOSURE_ENVS,
         }
+    }
+
+    /// Override the closure-env ceiling. Exposed for testing the limit
+    /// without actually allocating `MAX_CLOSURE_ENVS` entries.
+    #[cfg(test)]
+    pub(crate) fn set_max_closure_envs_for_test(&mut self, n: usize) {
+        self.max_closure_envs = n;
     }
 
     /// Set the local node ID returned by the `NodeId` opcode.
@@ -751,6 +831,26 @@ impl VM {
         let bits = constants_to_jit_bits(&module.constants);
         self.modules.push(module);
         self.jit_constants.push(bits);
+    }
+
+    /// Discard all closure capture environments.
+    ///
+    /// Only call this when no live value can reference an existing
+    /// environment — e.g. immediately before starting a fresh, independent
+    /// program on a VM that has no other in-flight or persisted state (the
+    /// REPL does this before every evaluation). Calling this while another
+    /// closure created earlier is still reachable (a suspended frame, or a
+    /// closure stored in actor state or a heap composite) would turn those
+    /// closures into dangling references.
+    pub fn clear_closure_envs(&mut self) {
+        self.closure_envs.clear();
+    }
+
+    /// Number of closure capture environments currently retained. Exposed so
+    /// long-running embedders (e.g. the actor runtime) can monitor growth of
+    /// the known unbounded-retention limitation documented on `closure_envs`.
+    pub fn closure_env_count(&self) -> usize {
+        self.closure_envs.len()
     }
 
     /// Copy the payload of a string-like value into a `Vec<u8>`.
@@ -1313,9 +1413,88 @@ impl VM {
                 let func_idx = instr.imm16() as u64;
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::closure(func_idx);
             }
-            OpCode::CapLoad | OpCode::CapStore | OpCode::FreeVar => {
-                // Captures are not yet implemented at runtime; these opcodes are
-                // no-ops so that simple capture-free closures still work.
+            OpCode::CapStore => {
+                // op1 = register holding the closure, op2 = capture slot,
+                // op3 = source register. The first store upgrades the closure
+                // from the immediate form (payload = function index) to the
+                // env-carrying form (payload = env index).
+                let closure_reg = instr.op1 as usize;
+                let slot = instr.op2 as usize;
+                let src = self.frames[frame_idx].regs[instr.op3 as usize];
+                let val = self.frames[frame_idx].regs[closure_reg];
+                if (val.raw & TAG_MASK) != TAG_CLOSURE {
+                    return Err(NuError::VMError(format!(
+                        "CapStore target is not a closure: {}",
+                        val.to_string_repr()
+                    )));
+                }
+                let payload = val.raw & PAYLOAD_MASK;
+                let env_idx = if payload & CLOSURE_ENV_FLAG != 0 {
+                    (payload & CLOSURE_ENV_IDX_MASK) as usize
+                } else {
+                    if self.closure_envs.len() >= self.max_closure_envs {
+                        // See the KNOWN LIMITATION on `closure_envs`: entries
+                        // are never reclaimed, so a long-running process that
+                        // keeps creating capturing closures accumulates them
+                        // without bound. Rather than let that run into an
+                        // uncontrolled OOM kill, fail cleanly once retained
+                        // envs cross a generous but finite ceiling — an
+                        // honest, catchable resource-exhaustion error instead
+                        // of silent unbounded growth.
+                        return Err(NuError::VMError(format!(
+                            "closure capture environments exceeded the {} limit; this process has been running long enough to accumulate unreclaimed closure envs (see VM::closure_envs)",
+                            self.max_closure_envs
+                        )));
+                    }
+                    let idx = self.closure_envs.len();
+                    self.closure_envs.push(ClosureEnv {
+                        func_idx: payload as usize,
+                        captures: Vec::new(),
+                    });
+                    self.frames[frame_idx].regs[closure_reg] = Value {
+                        raw: TAG_CLOSURE | CLOSURE_ENV_FLAG | (idx as u64 & CLOSURE_ENV_IDX_MASK),
+                    };
+                    idx
+                };
+                // If the captured value is a heap pointer, take out an extra
+                // local reference so a `Drop` of the original binding cannot
+                // free the object while this closure still holds it.
+                if let Some(ptr) = src.as_ptr() {
+                    self.actor_callbacks.retain_ref(ptr);
+                }
+                let env = &mut self.closure_envs[env_idx];
+                if env.captures.len() <= slot {
+                    env.captures.resize(slot + 1, Value::nil());
+                }
+                env.captures[slot] = src;
+            }
+            OpCode::CapLoad => {
+                // op1 = capture slot, op2 = destination register. Reads from
+                // the closure environment of the currently executing frame.
+                let slot = instr.op1 as usize;
+                let dst = instr.op2 as usize;
+                let env_val = self.frames[frame_idx].closure_env.ok_or_else(|| {
+                    NuError::VMError("CapLoad outside a closure call".to_string())
+                })?;
+                let payload = env_val.raw & PAYLOAD_MASK;
+                if payload & CLOSURE_ENV_FLAG == 0 {
+                    return Err(NuError::VMError(
+                        "CapLoad in a closure without captures".to_string(),
+                    ));
+                }
+                let env_idx = (payload & CLOSURE_ENV_IDX_MASK) as usize;
+                let value = self
+                    .closure_envs
+                    .get(env_idx)
+                    .and_then(|env| env.captures.get(slot))
+                    .copied()
+                    .ok_or_else(|| {
+                        NuError::VMError(format!("CapLoad of missing capture slot {}", slot))
+                    })?;
+                self.frames[frame_idx].regs[dst] = value;
+            }
+            OpCode::FreeVar => {
+                // Nothing emits FreeVar; keep it a no-op.
             }
 
             // -- Arithmetic --
@@ -1485,6 +1664,13 @@ impl VM {
                 if !arr_ptr.is_null() {
                     if let Some(len) = self.actor_callbacks.array_len(arr_ptr) {
                         if idx < len {
+                            // Mirrors CapStore: a heap pointer stored into a
+                            // live container needs its own local reference,
+                            // so a later `Drop` of the value's original
+                            // binding can't free it out from under this array.
+                            if let Some(ptr) = val.as_ptr() {
+                                self.actor_callbacks.retain_ref(ptr);
+                            }
                             unsafe { *((arr_ptr as *mut Value).add(idx)) = val; }
                         }
                     }
@@ -1527,6 +1713,11 @@ impl VM {
                             let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
                             let len = payload_size / std::mem::size_of::<Value>();
                             if field_id < len {
+                                // Mirrors CapStore/ArrStore: retain a heap
+                                // pointer stored into a live record.
+                                if let Some(ptr) = val.as_ptr() {
+                                    self.actor_callbacks.retain_ref(ptr);
+                                }
                                 *((rec_ptr as *mut Value).add(field_id)) = val;
                             }
                         }
@@ -2028,10 +2219,22 @@ impl VM {
         if let Some(func_idx) = func_val.as_int() {
             Ok((func_idx as usize, None))
         } else if (func_val.raw & TAG_MASK) == TAG_CLOSURE {
-            let closure_id = func_val.raw & 0x0000_7FFF_FFFF_FFFF;
-            // For closures, the closure_id IS the function index (MVP).
-            // In a full implementation, we'd look up the closure env.
-            Ok((closure_id as usize, Some(func_val)))
+            let payload = func_val.raw & PAYLOAD_MASK;
+            if payload & CLOSURE_ENV_FLAG != 0 {
+                // Env-carrying closure: the function index lives in the env.
+                let env_idx = (payload & CLOSURE_ENV_IDX_MASK) as usize;
+                let func_idx = self
+                    .closure_envs
+                    .get(env_idx)
+                    .map(|env| env.func_idx)
+                    .ok_or_else(|| {
+                        NuError::VMError(format!("Dangling closure environment {}", env_idx))
+                    })?;
+                Ok((func_idx, Some(func_val)))
+            } else {
+                // Immediate closure: the payload is the function index.
+                Ok((payload as usize, Some(func_val)))
+            }
         } else {
             Err(NuError::VMError(format!("Not a function: {}", func_val.to_string_repr())))
         }
@@ -2101,8 +2304,8 @@ mod vm_tests {
         assert_eq!(v_int.as_int(), Some(42));
         assert!(v_int.is_int());
 
-        let v_float = Value::float(3.14);
-        assert!((v_float.as_float().unwrap() - 3.14).abs() < 0.001);
+        let v_float = Value::float(2.5);
+        assert!((v_float.as_float().unwrap() - 2.5).abs() < 0.001);
 
         let v_bool = Value::bool(true);
         assert_eq!(v_bool.as_bool(), Some(true));
@@ -2203,13 +2406,13 @@ mod vm_tests {
     #[test]
     fn test_float_operations() {
         let mut module = CodeModule::new("test_float");
-        let c3_14 = module.add_constant(Constant::Float(3.14));
+        let c3_5 = module.add_constant(Constant::Float(3.5));
         let c2_0 = module.add_constant(Constant::Float(2.0));
         module.emit(Instruction::new3(OpCode::ConstU,
-            ((c3_14 >> 8) & 0xFF) as u8, (c3_14 & 0xFF) as u8, 0)); // r0 = 3.14
+            ((c3_5 >> 8) & 0xFF) as u8, (c3_5 & 0xFF) as u8, 0)); // r0 = 3.5
         module.emit(Instruction::new3(OpCode::ConstU,
             ((c2_0 >> 8) & 0xFF) as u8, (c2_0 & 0xFF) as u8, 1));  // r1 = 2.0
-        module.emit(Instruction::new3(OpCode::FAdd, 0, 1, 2)); // r2 = 5.14
+        module.emit(Instruction::new3(OpCode::FAdd, 0, 1, 2)); // r2 = 5.5
         module.emit(Instruction::new2(OpCode::Move, 2, 0));
         module.emit(Instruction::new0(OpCode::Halt));
         module.entry_point = Some(0);
@@ -2219,7 +2422,7 @@ mod vm_tests {
         let result = vm.run();
         assert!(result.is_ok(), "Float ops should work: {:?}", result.err());
         let f = result.unwrap().as_float().unwrap();
-        assert!((f - 5.14).abs() < 0.01, "3.14 + 2.0 = 5.14, got {}", f);
+        assert!((f - 5.5).abs() < 0.01, "3.5 + 2.0 = 5.5, got {}", f);
     }
 
     /// Test 10: Perform + Resume with handler.
@@ -2550,6 +2753,149 @@ mod vm_tests {
         assert_eq!(hot_result.as_int(), cold_result.as_int(),
             "JIT hot loop should match interpreter");
         assert_eq!(hot_result.as_int(), Some(6), "sum 0..4 = 6");
+    }
+
+    /// Regression test: a hot loop whose body is long enough to JIT and whose
+    /// header has an early-exit conditional must produce the exact interpreter
+    /// result. Guards the straight-line-region contract: compiled regions must
+    /// not contain branches, because the VM advances pc by the full region
+    /// length after a region runs.
+    #[test]
+    fn test_jit_hot_loop_with_early_exit_branch() {
+        let mut module = CodeModule::new("test_jit_early_exit");
+        let c100_idx = module.add_constant(Constant::Int(100));
+
+        // r0 = sum, r1 = i, r2 = limit, r3 = one, r4 = cond, r5 = pad
+        module.emit(Instruction::new1(OpCode::Const0, 0));               // 0
+        module.emit(Instruction::new1(OpCode::Const0, 1));               // 1
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c100_idx >> 8) & 0xFF) as u8, (c100_idx & 0xFF) as u8, 2)); // 2
+        module.emit(Instruction::new1(OpCode::Const1, 3));               // 3
+        module.emit(Instruction::new1(OpCode::Const0, 5));               // 4
+
+        let loop_check = module.current_offset();
+        module.emit(Instruction::new3(OpCode::ICmpLt, 1, 2, 4));         // 5
+        let jmpf_idx = module.current_offset();
+        module.emit(Instruction::new2(OpCode::JmpF, 4, 0));              // 6 (patched)
+        // Loop body: 7 straight-line instructions so it clears the JIT's
+        // minimum region size and actually gets compiled once hot.
+        module.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0));           // 7: sum += i
+        module.emit(Instruction::new3(OpCode::IAdd, 5, 3, 5));           // 8: pad
+        module.emit(Instruction::new3(OpCode::IAdd, 5, 3, 5));           // 9: pad
+        module.emit(Instruction::new3(OpCode::IAdd, 5, 3, 5));           // 10: pad
+        module.emit(Instruction::new3(OpCode::IAdd, 5, 3, 5));           // 11: pad
+        module.emit(Instruction::new3(OpCode::IAdd, 5, 3, 5));           // 12: pad
+        module.emit(Instruction::new3(OpCode::IAdd, 1, 3, 1));           // 13: i += 1
+        let jmp_back_idx = module.current_offset();
+        let back_offset = loop_check as i64 - jmp_back_idx as i64;
+        module.emit(Instruction::new3(OpCode::Jmp,
+            ((back_offset as i16 >> 8) & 0xFF) as u8,
+            (back_offset as i16 & 0xFF) as u8,
+            0));                                                          // 14
+        let after_loop = module.current_offset();
+        if let Some(instr) = module.instructions.get_mut(jmpf_idx) {
+            let forward_offset = after_loop as i64 - jmpf_idx as i64;
+            instr.op2 = ((forward_offset as i16 >> 8) & 0xFF) as u8;
+            instr.op3 = (forward_offset as i16 & 0xFF) as u8;
+        }
+        module.emit(Instruction::new0(OpCode::Halt));                    // 15
+        module.entry_point = Some(0);
+
+        crate::jit::reset_hot_counters();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let cold_result = vm.run_from(0, 0).unwrap();
+        assert_eq!(cold_result.as_int(), Some(4950), "sum 0..100 = 4950");
+
+        // Heat the loop body well past the hot threshold so it JIT-compiles,
+        // then verify the compiled path still takes the early exit correctly.
+        for _ in 0..50 {
+            let result = vm.run_from(0, 0).unwrap();
+            assert_eq!(result.as_int(), Some(4950),
+                "JIT-compiled loop with early-exit branch must match interpreter");
+        }
+    }
+
+    /// Closure capture environments: Closure + CapStore then Call + CapLoad
+    /// round-trips the captured value into the callee frame.
+    #[test]
+    fn test_closure_capture_env_roundtrip() {
+        let mut module = CodeModule::new("test_capture");
+        let c41_idx = module.add_constant(Constant::Int(41));
+
+        // Entry: build a closure over function 0 capturing 41, call it.
+        // main:
+        //   0: ConstU 41 -> r1
+        //   1: Closure #0 -> r2
+        //   2: CapStore r2[0] = r1
+        //   3: Move r2 -> r3
+        //   4: Call r3, 0 args, dst r0
+        //   5: Halt
+        // fn0 (at offset 6):
+        //   6: CapLoad [0] -> r4
+        //   7: Const1 r5
+        //   8: IAdd r4, r5, r6
+        //   9: RetVal r6
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c41_idx >> 8) & 0xFF) as u8, (c41_idx & 0xFF) as u8, 1)); // 0
+        module.emit(Instruction::new3(OpCode::Closure, 0, 0, 2));       // 1
+        module.emit(Instruction::new3(OpCode::CapStore, 2, 0, 1));      // 2
+        module.emit(Instruction::new2(OpCode::Move, 2, 3));             // 3
+        module.emit(Instruction::new3(OpCode::Call, 3, 0, 0));          // 4
+        module.emit(Instruction::new0(OpCode::Halt));                   // 5
+        let fn0_offset = module.current_offset();
+        module.emit(Instruction::new3(OpCode::CapLoad, 0, 4, 0));       // 6
+        module.emit(Instruction::new1(OpCode::Const1, 5));              // 7
+        module.emit(Instruction::new3(OpCode::IAdd, 4, 5, 6));          // 8
+        module.emit(Instruction::new1(OpCode::RetVal, 6));              // 9
+        module.function_table.push(fn0_offset);
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run().unwrap();
+        assert_eq!(result.as_int(), Some(42), "captured 41 + 1 should be 42");
+    }
+
+    /// CapLoad without a closure environment must error, not silently no-op.
+    #[test]
+    fn test_capload_outside_closure_errors() {
+        let mut module = CodeModule::new("test_capload_err");
+        module.emit(Instruction::new3(OpCode::CapLoad, 0, 1, 0));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_err(), "CapLoad outside a closure call should error");
+    }
+
+    /// Regression test for the closure_envs leak's safety valve: once the
+    /// ceiling is reached, creating a new capturing closure must fail with
+    /// an honest error rather than growing `closure_envs` forever.
+    #[test]
+    fn test_closure_env_limit_is_an_honest_error_not_unbounded_growth() {
+        let mut module = CodeModule::new("test_capture_limit");
+        let c41_idx = module.add_constant(Constant::Int(41));
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c41_idx >> 8) & 0xFF) as u8, (c41_idx & 0xFF) as u8, 1));
+        module.emit(Instruction::new3(OpCode::Closure, 0, 0, 2));
+        module.emit(Instruction::new3(OpCode::CapStore, 2, 0, 1));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.function_table.push(module.current_offset());
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.set_max_closure_envs_for_test(0);
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(
+            result.is_err(),
+            "CapStore past the closure-env ceiling should be an honest error, not silently succeed"
+        );
+        assert_eq!(vm.closure_env_count(), 0, "no env should have been retained past the ceiling");
     }
 
     /// Test 17: NodeId returns the configured local node ID.

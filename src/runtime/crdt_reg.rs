@@ -6,58 +6,9 @@
 use std::collections::HashSet;
 use std::hash::Hash;
 
-// ---------------------------------------------------------------------------
-// Lamport Clock infrastructure
-// ---------------------------------------------------------------------------
-
-/// A Lamport timestamp: a monotonic counter paired with a node ID.
-///
-/// Timestamps are compared first by `counter`, then by `node_id` to ensure a
-/// total order even when two different nodes happen to increment at the same
-/// logical moment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct LamportTime {
-    pub counter: u64,
-    pub node_id: u64,
-}
-
-impl PartialOrd for LamportTime {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for LamportTime {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.counter
-            .cmp(&other.counter)
-            .then_with(|| self.node_id.cmp(&other.node_id))
-    }
-}
-
-impl LamportTime {
-    pub fn new(counter: u64, node_id: u64) -> Self {
-        Self { counter, node_id }
-    }
-}
-
-/// A Lamport clock owned by a single node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LamportClock {
-    pub node_id: u64,
-    pub counter: u64,
-}
-
-impl LamportClock {
-    pub fn new(node_id: u64) -> Self {
-        Self { node_id, counter: 0 }
-    }
-
-    pub fn tick(&mut self) -> LamportTime {
-        self.counter += 1;
-        LamportTime { counter: self.counter, node_id: self.node_id }
-    }
-}
+// Lamport clock infrastructure is shared with the other CRDTs; the canonical
+// definitions live in `crdt` (and are re-exported from the runtime root).
+use super::crdt::{LamportClock, LamportTime};
 
 // ---------------------------------------------------------------------------
 // 1. LWWRegister

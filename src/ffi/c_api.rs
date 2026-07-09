@@ -421,8 +421,8 @@ mod tests {
         let int_val: NulangValue = Value::int(42).into();
         assert_eq!(nulang_value_int(int_val), 42);
 
-        let float_val: NulangValue = Value::float(3.14).into();
-        assert!((nulang_value_float(float_val) - 3.14).abs() < f64::EPSILON);
+        let float_val: NulangValue = Value::float(2.5).into();
+        assert!((nulang_value_float(float_val) - 2.5).abs() < f64::EPSILON);
 
         let bool_val: NulangValue = Value::bool(true).into();
         assert!(nulang_value_bool(bool_val));

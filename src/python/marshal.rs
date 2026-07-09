@@ -324,7 +324,7 @@ mod tests {
     fn test_marshal_float_roundtrip() {
         ensure_python();
 
-        let original = Value::float(3.14159);
+        let original = Value::float(std::f64::consts::PI);
         let py_obj = nulang_to_python(original).expect("nulang_to_python failed");
 
         let restored = Python::attach(|py| {
@@ -333,7 +333,7 @@ mod tests {
         });
 
         let val = restored.as_float().expect("Expected float");
-        assert!((val - 3.14159).abs() < 1e-5, "Expected ~3.14159, got {}", val);
+        assert!((val - std::f64::consts::PI).abs() < 1e-5, "Expected ~pi, got {}", val);
     }
 
     // ------------------------------------------------------------------
@@ -516,7 +516,7 @@ mod tests {
     fn test_value_to_python_object_id_and_back() {
         ensure_python();
 
-        let original = Value::float(2.71828);
+        let original = Value::float(std::f64::consts::E);
 
         // Value → PythonObjectId
         let py_id = value_to_python_object_id(original).expect("value_to_python_object_id failed");
@@ -525,7 +525,7 @@ mod tests {
         let restored = python_object_id_to_value(py_id).expect("python_object_id_to_value failed");
 
         let val = restored.as_float().expect("Expected float");
-        assert!((val - 2.71828).abs() < 1e-5, "Expected ~2.71828, got {}", val);
+        assert!((val - std::f64::consts::E).abs() < 1e-5, "Expected ~e, got {}", val);
     }
 
     #[test]

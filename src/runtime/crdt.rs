@@ -424,6 +424,10 @@ pub struct LamportTime {
 }
 
 impl LamportTime {
+    pub fn new(counter: u64, node_id: u64) -> Self {
+        Self { counter, node_id }
+    }
+
     pub fn is_greater_than(&self, other: &LamportTime) -> bool {
         self.counter > other.counter
             || (self.counter == other.counter && self.node_id > other.node_id)

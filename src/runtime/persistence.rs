@@ -489,17 +489,46 @@ impl PersistenceStore for JsonFileStore {
     }
 }
 
+/// Acquire the connection mutex, recovering the guard even if a previous
+/// holder panicked.
+///
+/// A panic in one thread holding the connection lock must not cascade
+/// panics into every other thread that touches the store, so poisoning is
+/// ignored rather than propagated. But a panic could in principle occur
+/// between `tx.execute` and `tx.commit()` in `save_snapshot`, leaving a
+/// transaction open on the connection; recovering the guard alone doesn't
+/// undo that. `rusqlite::Transaction`'s own `Drop` impl already issues a
+/// `ROLLBACK` when a transaction is dropped without `commit()` (including
+/// during unwind), so this is normally already safe — but as defense in
+/// depth against any transaction that manages to outlive its `Transaction`
+/// handle (e.g. a future bug that leaks one across a panic boundary), issue
+/// a best-effort `ROLLBACK` whenever we actually recover from poisoning, so
+/// the connection can't be left mid-transaction for whoever locks it next.
+#[cfg(feature = "sqlite")]
+fn lock_ignore_poison(m: &std::sync::Mutex<rusqlite::Connection>) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+    match m.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let guard = poisoned.into_inner();
+            let _ = guard.execute_batch("ROLLBACK");
+            guard
+        }
+    }
+}
+
 /// SQLite-backed persistence store.
 ///
 /// Each actor gets one row in the `snapshots` table and zero or more rows in
 /// the `journal` table ordered by sequence number. State and payloads are
 /// serialized to JSON and stored as TEXT.
+#[cfg(feature = "sqlite")]
 #[derive(Debug)]
 pub struct SqliteStore {
     conn: std::sync::Mutex<rusqlite::Connection>,
     path: PathBuf,
 }
 
+#[cfg(feature = "sqlite")]
 impl SqliteStore {
     /// Open (or create) a SQLite persistence store at `path`.
     ///
@@ -562,9 +591,10 @@ impl SqliteStore {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl PersistenceStore for SqliteStore {
     fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = lock_ignore_poison(&self.conn);
         let state_json = serde_json::to_string(&snapshot.state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let tx = conn.transaction()
@@ -581,7 +611,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let (sequence, state_json, waiting_signal): (i64, String, Option<String>) = conn
             .query_row(
                 "SELECT sequence, state, waiting_signal FROM snapshots WHERE actor_id = ?1",
@@ -599,7 +629,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> io::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let payload_json = serde_json::to_string(&entry.payload)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         conn.execute(
@@ -611,7 +641,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let mut stmt = match conn.prepare(
             "SELECT sequence, behavior_id, payload FROM journal
              WHERE actor_id = ?1 ORDER BY sequence ASC",
@@ -643,7 +673,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let event_json = serde_json::to_string(&event)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         conn.execute(
@@ -655,7 +685,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let mut stmt = match conn.prepare(
             "SELECT event FROM workflow_events
              WHERE actor_id = ?1 ORDER BY sequence ASC",
@@ -678,7 +708,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn latest_sequence(&self, actor_id: u64) -> u64 {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         let snapshot_seq: Option<i64> = conn
             .query_row(
                 "SELECT sequence FROM snapshots WHERE actor_id = ?1",
@@ -704,7 +734,7 @@ impl PersistenceStore for SqliteStore {
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = lock_ignore_poison(&self.conn);
         conn.execute("DELETE FROM snapshots WHERE actor_id = ?1", [actor_id as i64])
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         conn.execute("DELETE FROM journal WHERE actor_id = ?1", [actor_id as i64])
@@ -712,5 +742,45 @@ impl PersistenceStore for SqliteStore {
         conn.execute("DELETE FROM workflow_events WHERE actor_id = ?1", [actor_id as i64])
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+
+    /// Regression test: recovering a poisoned connection lock must also
+    /// clean up any transaction a panicking holder left open, or the very
+    /// next `save_snapshot`'s `conn.transaction()` fails with "cannot start
+    /// a transaction within a transaction" instead of the lock recovery
+    /// being transparent to callers.
+    #[test]
+    fn test_lock_ignore_poison_rolls_back_dangling_transaction() {
+        let store = SqliteStore::in_memory().unwrap();
+
+        // Poison the mutex while a transaction is left open on the
+        // connection (simulating a panic between `tx.execute` and
+        // `tx.commit()`), bypassing `Transaction`'s own rollback-on-drop by
+        // never constructing a `Transaction` value at all.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch("BEGIN").unwrap();
+            panic!("simulated panic mid-transaction");
+        }));
+        assert!(result.is_err(), "the panic should have propagated");
+        assert!(store.conn.is_poisoned(), "the mutex should now be poisoned");
+
+        // Recovering the lock must leave the connection usable: a fresh
+        // transaction must be startable, not blocked by the dangling BEGIN.
+        let conn = lock_ignore_poison(&store.conn);
+        conn.execute_batch("BEGIN").unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+    }
+
+    #[test]
+    fn test_lock_ignore_poison_returns_normally_when_not_poisoned() {
+        let store = SqliteStore::in_memory().unwrap();
+        let conn = lock_ignore_poison(&store.conn);
+        conn.execute_batch("SELECT 1").unwrap();
     }
 }

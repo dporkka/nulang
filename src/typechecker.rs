@@ -409,6 +409,24 @@ pub struct TypeChecker {
     ctx_free_vars: HashSet<TypeVar>,
 }
 
+/// Recursively splice any `Decl::Module { decls, .. }` in place with its own
+/// contents, in source order, leaving every other declaration untouched.
+///
+/// This mirrors the stable compiler's `collect_functions`/`compile_decl`,
+/// which recurse into nested modules and register their contents in the same
+/// flat, unqualified namespace as top-level decls — modules are a namespacing
+/// construct only, with no enforced visibility boundary.
+fn flatten_decls(decls: &[Decl]) -> Vec<&Decl> {
+    let mut out = Vec::with_capacity(decls.len());
+    for decl in decls {
+        match decl {
+            Decl::Module { decls: inner, .. } => out.extend(flatten_decls(inner)),
+            _ => out.push(decl),
+        }
+    }
+    out
+}
+
 impl TypeChecker {
     /// Create a new type checker with an empty context.
     pub fn new() -> Self {
@@ -418,10 +436,18 @@ impl TypeChecker {
     }
 
     /// Type-check an entire module, returning the type of the last declaration.
+    ///
+    /// Nested `module { ... }` blocks are purely a namespacing construct with
+    /// no enforced visibility (mirroring the stable compiler's `collect_functions`/
+    /// `compile_decl`, which recurse into `Decl::Module` and register its
+    /// contents in the same flat, unqualified namespace as top-level decls).
+    /// So declarations are flattened before checking, which both exports
+    /// nested-module bindings to the enclosing scope and lets sibling decls
+    /// within the same nested module see each other.
     pub fn check_module(&mut self, module: &AstModule) -> NuResult<Type> {
         let mut ctx = TypeContext::new();
         let mut last_type = Type::unit();
-        for decl in &module.decls {
+        for decl in flatten_decls(&module.decls) {
             let (s, ty) = self.infer_decl(&ctx, decl)?;
             ctx = apply_subst_to_ctx(&ctx, &s);
             let final_ty = apply_subst(&ty, &s);
@@ -2079,7 +2105,7 @@ mod tests {
     fn test_infer_float_literal() {
         let mut tc = TypeChecker::new();
         let ctx = TypeContext::new();
-        let expr = Expr::Literal(Literal::Float(3.14), sp());
+        let expr = Expr::Literal(Literal::Float(2.5), sp());
         let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
         assert!(s.is_empty());
         assert_eq!(ty, Type::float());
@@ -2718,6 +2744,110 @@ mod tests {
                 assert_eq!(*param, Type::int());
                 assert_eq!(*ret, Type::int());
             }
+            other => panic!("Expected function type, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_nested_module_exports_to_enclosing_scope() {
+        // module Foo { fn bar() { 42 } }
+        // bar()
+        let mut tc = TypeChecker::new();
+        let module = AstModule {
+            name: "test".to_string(),
+            decls: vec![
+                Decl::Module {
+                    name: "Foo".to_string(),
+                    exports: vec![],
+                    decls: vec![Decl::Function {
+                        name: "bar".to_string(),
+                        type_params: vec![],
+                        params: vec![],
+                        ret_type: Some(Type::int()),
+                        effect: None,
+                        cap: None,
+                        body: int_lit(42),
+                        annotations: vec![],
+                        public: true,
+                        span: sp(),
+                    }],
+                    span: sp(),
+                },
+                Decl::Function {
+                    name: "main".to_string(),
+                    type_params: vec![],
+                    params: vec![],
+                    ret_type: None,
+                    effect: None,
+                    cap: None,
+                    body: Expr::App {
+                        func: Box::new(var("bar")),
+                        args: vec![],
+                        span: sp(),
+                    },
+                    annotations: vec![],
+                    public: true,
+                    span: sp(),
+                },
+            ],
+        };
+        let ty = tc.check_module(&module).unwrap();
+        assert_eq!(
+            ty,
+            Type::Function {
+                param: Box::new(Type::Tuple(vec![])),
+                ret: Box::new(Type::int()),
+                effect: EffectRow::empty(),
+                cap: Capability::Ref,
+            }
+        );
+    }
+
+    #[test]
+    fn test_nested_module_siblings_see_each_other() {
+        // module Foo { fn bar() { 42 } fn baz() { bar() } }
+        let mut tc = TypeChecker::new();
+        let module = AstModule {
+            name: "test".to_string(),
+            decls: vec![Decl::Module {
+                name: "Foo".to_string(),
+                exports: vec![],
+                decls: vec![
+                    Decl::Function {
+                        name: "bar".to_string(),
+                        type_params: vec![],
+                        params: vec![],
+                        ret_type: Some(Type::int()),
+                        effect: None,
+                        cap: None,
+                        body: int_lit(42),
+                        annotations: vec![],
+                        public: true,
+                        span: sp(),
+                    },
+                    Decl::Function {
+                        name: "baz".to_string(),
+                        type_params: vec![],
+                        params: vec![],
+                        ret_type: None,
+                        effect: None,
+                        cap: None,
+                        body: Expr::App {
+                            func: Box::new(var("bar")),
+                            args: vec![],
+                            span: sp(),
+                        },
+                        annotations: vec![],
+                        public: true,
+                        span: sp(),
+                    },
+                ],
+                span: sp(),
+            }],
+        };
+        let ty = tc.check_module(&module).unwrap();
+        match ty {
+            Type::Function { ret, .. } => assert_eq!(*ret, Type::int()),
             other => panic!("Expected function type, got {:?}", other),
         }
     }

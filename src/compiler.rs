@@ -38,7 +38,8 @@ fn pattern_bindings(pat: &Pattern, out: &mut std::collections::HashSet<String>) 
 }
 
 /// Map a Nulang primitive type to its FFI representation.
-fn nulang_type_to_ffi_type(ty: &Type) -> Option<FfiType> {
+/// Shared with the MIR codegen, which registers the same foreign functions.
+pub(crate) fn nulang_type_to_ffi_type(ty: &Type) -> Option<FfiType> {
     match ty {
         Type::Primitive(PrimitiveType::Int) => Some(FfiType::Int),
         Type::Primitive(PrimitiveType::Float) => Some(FfiType::Float),
@@ -51,7 +52,8 @@ fn nulang_type_to_ffi_type(ty: &Type) -> Option<FfiType> {
 }
 
 /// Accumulate free variable names in `expr` that are not in `bound`.
-fn free_vars(expr: &Expr, bound: &std::collections::HashSet<String>, acc: &mut std::collections::HashSet<String>) {
+/// Shared with the HIR lowering pass, which needs the same capture analysis.
+pub(crate) fn free_vars(expr: &Expr, bound: &std::collections::HashSet<String>, acc: &mut std::collections::HashSet<String>) {
     match expr {
         Expr::Var(name, _) => {
             if !bound.contains(name) {
@@ -313,6 +315,21 @@ impl Compiler {
             Expr::FieldAccess { expr, field, .. } => self.compile_field_access(expr, field),
             Expr::Array(elems, _) => self.compile_array(elems),
             Expr::Index { arr, idx, .. } => self.compile_index(arr, idx),
+            // Only a bare `ident = v` is parsed as Expr::Assign; every other
+            // assignment target (`self.f = v`, `arr[i] = v`, `record.f = v`)
+            // is an ordinary-looking BinOp::Assign — route both through the
+            // same place-based compile_assign instead of compile_binary's
+            // generic value-reading prologue, which would read the target's
+            // CURRENT value instead of computing a place to write to.
+            // Only a bare `ident = v` is parsed as Expr::Assign; every other
+            // assignment target (`self.f = v`, `arr[i] = v`, `record.f = v`)
+            // is an ordinary-looking BinOp::Assign — route both through the
+            // same place-based compile_assign instead of compile_binary's
+            // generic value-reading prologue, which would read the target's
+            // CURRENT value instead of computing a place to write to.
+            Expr::Binary { op: BinOp::Assign, left, right, .. } => {
+                self.compile_assign(left, right)
+            }
             Expr::Binary { op, left, right, .. } => self.compile_binary(*op, left, right),
             Expr::Unary { op, expr, .. } => self.compile_unary(*op, expr),
             Expr::Spawn { actor_type, init, .. } => self.compile_spawn(actor_type, init),
@@ -699,9 +716,17 @@ impl Compiler {
     fn compile_let(&mut self, name: &str, value: &Expr, body: &Expr) -> NuResult<u8> {
         // Let-bound lambdas that reference themselves (e.g. `let fac = fn(n) ...
         // fac(n-1) ... in ...`) are compiled as recursive functions so the
-        // self-reference resolves without capture support.
+        // self-reference resolves without capture support. Lambdas that do
+        // NOT reference their own name compile as ordinary closures so they
+        // can capture the enclosing scope.
         if let Expr::Lambda { params, body: lam_body, .. } = value {
-            return self.compile_let_rec(name, params, lam_body, body);
+            let param_set: std::collections::HashSet<String> =
+                params.iter().map(|(n, _)| n.clone()).collect();
+            let mut free = std::collections::HashSet::new();
+            free_vars(lam_body, &param_set, &mut free);
+            if free.contains(name) {
+                return self.compile_let_rec(name, params, lam_body, body);
+            }
         }
 
         let val_reg = self.compile_expr(value)?;
@@ -1000,24 +1025,11 @@ impl Compiler {
             BinOp::BitXor => { self.emit(Instruction::new3(OpCode::Xor, r1_save, r2, dst)); }
             BinOp::Shl => { self.emit(Instruction::new3(OpCode::Shl, r1_save, r2, dst)); }
             BinOp::Shr => { self.emit(Instruction::new3(OpCode::Shr, r1_save, r2, dst)); }
-            BinOp::Assign => {
-                // Assignment to `self.field` writes actor state rather than a local register.
-                let is_self_field = matches!(left, Expr::FieldAccess { expr, .. }
-                    if matches!(expr.as_ref(), Expr::SelfRef(_))
-                        || matches!(expr.as_ref(), Expr::Var(name, _) if name == "self"));
-                if is_self_field {
-                    if let Expr::FieldAccess { field, .. } = left {
-                        let field_idx = self.add_const(Constant::String(field.to_string()));
-                        self.emit(Instruction::new3(OpCode::StateSet,
-                            ((field_idx >> 8) & 0xFF) as u8,
-                            (field_idx & 0xFF) as u8,
-                            r2));
-                    }
-                } else {
-                    self.emit(Instruction::new2(OpCode::Store, r2, r1_save));
-                }
-                self.emit(Instruction::new2(OpCode::Move, r2, dst));
-            }
+            // BinOp::Assign is intercepted in compile_expr's Expr::Binary
+            // dispatch and never reaches compile_binary (see the comment
+            // there): assignment targets need a *place*, not a value, and
+            // this function's prologue always reads `left` as a value.
+            BinOp::Assign => unreachable!("BinOp::Assign is handled by compile_assign"),
             BinOp::Pipe => {
                 self.emit(Instruction::new2(OpCode::Move, r1_save, dst));
             }
@@ -1065,19 +1077,16 @@ impl Compiler {
         // laid out as a flat array indexed by these ids, so field access does not
         // need to know the concrete record literal that created the value.
         let mut max_field_id: u8 = 0;
+        let mut field_ids = Vec::with_capacity(fields.len());
         for (name, _) in fields.iter() {
-            if !self.field_map.contains_key(name) {
-                let id = self.next_field_id;
-                self.next_field_id = self.next_field_id.saturating_add(1);
-                self.field_map.insert(name.clone(), id);
-            }
-            max_field_id = max_field_id.max(self.field_map[name]);
+            let id = self.field_id(name)?;
+            max_field_id = max_field_id.max(id);
+            field_ids.push(id);
         }
         let slot_count = max_field_id.saturating_add(1);
         let dst = self.alloc_reg();
         self.emit(Instruction::new2(OpCode::RecMk, slot_count, dst));
-        for (i, (name, _)) in fields.iter().enumerate() {
-            let field_id = self.field_map[name];
+        for (i, field_id) in field_ids.into_iter().enumerate() {
             self.emit(Instruction::new3(OpCode::RecS, dst, field_id, field_regs[i]));
         }
         Ok(dst)
@@ -1101,15 +1110,7 @@ impl Compiler {
         let obj_reg = self.compile_expr(expr)?;
         let dst = self.alloc_reg();
         // Field access is positional, keyed by the module-wide field id.
-        let field_id = self.field_map.get(field).copied().unwrap_or_else(|| {
-            // Field name has not been seen in any record literal yet.  Assign a
-            // fresh id so that future record literals using this name share the
-            // same slot.  Accessing such a field will yield nil until then.
-            let id = self.next_field_id;
-            self.next_field_id = self.next_field_id.saturating_add(1);
-            self.field_map.insert(field.to_string(), id);
-            id
-        });
+        let field_id = self.field_id(field)?;
         self.emit(Instruction::new3(OpCode::RecL, obj_reg, field_id, dst));
         Ok(dst)
     }
@@ -1422,11 +1423,25 @@ impl Compiler {
                     val_reg));
                 Ok(val_reg)
             }
-            _ => {
-                let target_reg = self.compile_expr(target)?;
-                self.emit(Instruction::new2(OpCode::Store, val_reg, target_reg));
+            // `record.field = value` (non-self): write via the module-wide
+            // positional field id, same layout compile_field_access reads.
+            Expr::FieldAccess { expr, field, .. } => {
+                let obj_reg = self.compile_expr(expr)?;
+                let field_id = self.field_id(field)?;
+                self.emit(Instruction::new3(OpCode::RecS, obj_reg, field_id, val_reg));
                 Ok(val_reg)
             }
+            // `arr[idx] = value`.
+            Expr::Index { arr, idx, .. } => {
+                let arr_reg = self.compile_expr(arr)?;
+                let idx_reg = self.compile_expr(idx)?;
+                self.emit(Instruction::new3(OpCode::ArrStore, arr_reg, idx_reg, val_reg));
+                Ok(val_reg)
+            }
+            _ => Err(NuError::VMError(format!(
+                "cannot assign to this expression: {:?}",
+                target
+            ))),
         }
     }
 
@@ -1899,10 +1914,10 @@ impl Compiler {
             span,
         };
 
-        // Generated usage behavior returns cumulative usage/cost state as an
-        // array [prompt_tokens, completion_tokens, cost]. Records and tuples
-        // are not yet supported by the bytecode interpreter, so an array is the
-        // portable composite value available today.
+        // Generated usage behavior returns cumulative usage/cost state as a
+        // plain array [prompt_tokens, completion_tokens, cost] — a stable,
+        // positional format for host code (e.g. integration tests) to parse
+        // without depending on the record field-id allocator's ordering.
         let usage_behavior = Behavior {
             name: "usage".to_string(),
             params: vec![],
@@ -2318,6 +2333,31 @@ impl Compiler {
     fn add_const(&mut self, c: Constant) -> usize { self.module.add_constant(c) }
     fn current_offset(&self) -> usize { self.module.current_offset() }
 
+    /// Look up (or assign) the module-wide positional id for a record field
+    /// name. Field access is positional, keyed by these ids, so every read
+    /// and write of a given field name must resolve to the same slot.
+    fn field_id(&mut self, field: &str) -> NuResult<u8> {
+        if let Some(&id) = self.field_map.get(field) {
+            return Ok(id);
+        }
+        if self.field_map.len() >= u8::MAX as usize + 1 {
+            // The 256th distinct field name has no free id: field ids are a
+            // single byte, so this module needs a wider encoding. Erroring
+            // here is the honest outcome — silently reusing an existing id
+            // (the old `saturating_add` behavior) would alias two unrelated
+            // fields onto the same slot, corrupting whichever one loses.
+            return Err(NuError::VMError(format!(
+                "module has more than {} distinct record/tuple field names (limit for the current u8 field-id encoding); '{}' has no id left to assign",
+                u8::MAX as usize + 1,
+                field
+            )));
+        }
+        let id = self.next_field_id;
+        self.next_field_id = self.next_field_id.saturating_add(1);
+        self.field_map.insert(field.to_string(), id);
+        Ok(id)
+    }
+
     // ===================================================================
     // Python Interop Bytecode Emission
     // ===================================================================
@@ -2485,6 +2525,33 @@ mod tests {
         assert_eq!(module.actor_metadata.len(), 1);
         let meta = &module.actor_metadata[0];
         assert_eq!(meta.behavior_indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_field_id_errors_past_256_distinct_field_names_instead_of_aliasing() {
+        // 256 distinct field names fit exactly in the u8 id encoding; the
+        // 257th must be an honest compile error, not a silently reused id
+        // that aliases two unrelated fields onto the same record slot.
+        //
+        // Each field name lives in its own top-level function's own tiny
+        // record literal (not a single 257-field record, and not `let`
+        // bindings) so this only exercises field_id's cumulative,
+        // module-wide id allocation — not the unrelated, much lower
+        // per-function/per-module register caps (~240 temporaries per
+        // function, ~14 `let` bindings per module).
+        let fns: Vec<String> = (0..257)
+            .map(|i| format!("fn g{i}() -> Int {{ {{ f{i}: {i} }}.f{i} }}"))
+            .collect();
+        let source = format!("{}\ng0()", fns.join("\n"));
+
+        let tokens = Lexer::new(&source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut compiler = Compiler::new("test");
+        let result = compiler.compile_module(&ast);
+        assert!(
+            result.is_err(),
+            "the 257th distinct field name should be an honest error, not silent aliasing"
+        );
     }
 
     #[test]

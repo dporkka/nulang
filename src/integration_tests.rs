@@ -319,6 +319,98 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Test: examples/*.nu run end-to-end through the full pipeline
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_example_fibonacci_runs() {
+        let source = include_str!("../examples/fibonacci.nu");
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(value.as_int(), Some(55), "fib(10) = 55");
+    }
+
+    #[test]
+    fn test_example_effects_runs() {
+        let source = include_str!("../examples/effects.nu");
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(value.as_int(), Some(42), "handler should resume with 42");
+    }
+
+    #[test]
+    fn test_example_counter_actor_runs() {
+        let source = include_str!("../examples/counter_actor.nu");
+        let (value, _ty) = run_source(source).unwrap();
+        assert!(value.as_actor_id().is_some(), "spawn should return an actor reference");
+    }
+
+    #[test]
+    fn test_declared_effect_annotation_rejects_undeclared_effects() {
+        // Mirrors the CLI frontend's enforcement: a function annotated with a
+        // declared effect row must not perform effects outside that row.
+        use crate::effect_checker::{EffectChecker, EffectContext};
+
+        let source = r#"
+            fn f() -> Unit ! {} {
+                perform IO.print("x")
+            }
+        "#;
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex().unwrap();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module().unwrap();
+
+        let mut checker = EffectChecker::new();
+        let ctx = EffectContext::empty();
+        let mut checked = false;
+        for decl in &ast.decls {
+            if let crate::ast::Decl::Function { name, body, effect: Some(declared), .. } = decl {
+                if name == "f" {
+                    checked = true;
+                    let result = checker.check_effects(&ctx, body, declared);
+                    assert!(
+                        result.is_err(),
+                        "function declared pure (`! {{}}`) but performing IO must be rejected"
+                    );
+                }
+            }
+        }
+        assert!(checked, "parser should surface the `! {{}}` annotation on fn f");
+    }
+
+    #[test]
+    fn test_declared_effect_annotation_accepts_matching_effects() {
+        use crate::effect_checker::{EffectChecker, EffectContext};
+
+        let source = r#"
+            fn f() -> Unit ! {IO} {
+                perform IO.print("x")
+            }
+        "#;
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex().unwrap();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module().unwrap();
+
+        let mut checker = EffectChecker::new();
+        let ctx = EffectContext::empty();
+        let mut checked = false;
+        for decl in &ast.decls {
+            if let crate::ast::Decl::Function { name, body, effect: Some(declared), .. } = decl {
+                if name == "f" {
+                    checked = true;
+                    let result = checker.check_effects(&ctx, body, declared);
+                    assert!(
+                        result.is_ok(),
+                        "function performing only its declared effects must pass: {:?}",
+                        result.err()
+                    );
+                }
+            }
+        }
+        assert!(checked, "parser should surface the `! {{IO}}` annotation on fn f");
+    }
+
     #[test]
     fn test_perform_effect_with_handler() {
         // perform with a handler that catches the effect.
@@ -796,6 +888,26 @@ mod tests {
 
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
         assert_eq!(value.as_int(), Some(30), "ask add(10, 20) should return 30");
+    }
+
+    /// Regression test for a silent-data-loss bug found while adding actor
+    /// support to the HIR/MIR pipeline: `compile_binary`'s BinOp::Assign case
+    /// only special-cased `self.field = v`; every other assignment target
+    /// (array index, non-self record field) fell through to
+    /// `compile_expr(left)` (reading the CURRENT value) followed by
+    /// `OpCode::Store`, a plain register-to-register copy — the assignment
+    /// never reached the array/record at all. Fixed by intercepting
+    /// BinOp::Assign in compile_expr's dispatch and routing it through
+    /// compile_assign, which computes a place (object + field id, or array +
+    /// index) instead of reading a value.
+    #[test]
+    fn test_legacy_index_and_field_assign() {
+        let (value, _ty) = run_source("let arr = [1, 2, 3] in { arr[0] = 99 arr[0] }").unwrap();
+        assert_eq!(value.as_int(), Some(99), "arr[0] = 99 should actually mutate the array");
+
+        let (value, _ty) =
+            run_source("let r = { x: 1, y: 2 } in { r.x = 99 r.x + r.y }").unwrap();
+        assert_eq!(value.as_int(), Some(101), "r.x = 99 should actually mutate the record");
     }
 
     #[test]
@@ -1499,7 +1611,7 @@ mod tests {
 
         // New HIR -> MIR -> bytecode pipeline
         let hir = crate::hir_lower::lower_module(&ast);
-        let mir = crate::mir_lower::lower_module(&hir);
+        let mir = crate::mir_lower::lower_module(&hir)?;
         let module = crate::mir_codegen::compile_mir(&mir, "test")?;
 
         let mut vm = VM::new();
@@ -1510,6 +1622,442 @@ mod tests {
     fn assert_int_new(source: &str, expected: i64) {
         let value = run_source_new(source).unwrap();
         assert_eq!(value.as_int(), Some(expected), "new pipeline expected integer for: {}", source);
+    }
+
+    /// Compile source through the HIR/MIR pipeline into a CodeModule without
+    /// running it, for structural assertions (actor_metadata, behaviors).
+    fn compile_source_new(source: &str) -> Result<crate::bytecode::CodeModule, NuError> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module()?;
+        let mut type_checker = TypeChecker::new();
+        let _ = type_checker.check_module(&ast)?;
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir)?;
+        crate::mir_codegen::compile_mir(&mir, "test")
+    }
+
+    /// Compile and run `source` through the HIR/MIR pipeline with a real
+    /// Runtime attached, exercising actual actor semantics (state, ask)
+    /// rather than the no-op stubs a bare VM falls back to.
+    fn run_source_new_with_runtime(
+        source: &str,
+        runtime: Rc<RefCell<Runtime>>,
+    ) -> Result<Value, NuError> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module()?;
+
+        let mut type_checker = TypeChecker::new();
+        let _ = type_checker.check_module(&ast)?;
+
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir)?;
+        let module = crate::mir_codegen::compile_mir(&mir, "test")?;
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(runtime)));
+        vm.run()
+    }
+
+    #[test]
+    fn test_mir_pipeline_actor_ask_with_arguments() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Calculator {
+                behavior add(a: Int, b: Int) { a + b }
+            }
+            let calc = spawn Calculator {} in
+                ask calc add(10, 20)
+        "#;
+        let value = run_source_new_with_runtime(source, rt).unwrap();
+        assert_eq!(value.as_int(), Some(30), "ask add(10, 20) should return 30");
+    }
+
+    #[test]
+    fn test_mir_pipeline_actor_state_get_set() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Counter {
+                state count = 0
+                behavior inc() { self.count = self.count + 1 }
+                behavior get() { self.count }
+            }
+            let c = spawn Counter { count = 0 } in
+            let _ = ask c inc() in
+            let _ = ask c inc() in
+            ask c get()
+        "#;
+        let value = run_source_new_with_runtime(source, rt).unwrap();
+        assert_eq!(value.as_int(), Some(2), "two increments should leave count at 2");
+    }
+
+    #[test]
+    fn test_mir_pipeline_actor_send_then_scheduler() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Counter {
+                state count = 0
+                behavior add(n: Int) { self.count = self.count + n }
+            }
+            let c = spawn Counter { count = 0 } in {
+                send c add(5)
+                send c add(7)
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("count").and_then(|v| v.as_int()),
+            Some(12),
+            "counter should be 12 after adding 5 and 7"
+        );
+    }
+
+    /// The legacy compiler and the HIR/MIR pipeline must agree on actor
+    /// semantics too, not just pure expressions — run the same program
+    /// through both with independent Runtimes and compare results.
+    #[test]
+    fn test_mir_and_legacy_actor_semantics_agree() {
+        let corpus: &[&str] = &[
+            r#"
+                actor Calculator { behavior add(a: Int, b: Int) { a + b } }
+                let calc = spawn Calculator {} in ask calc add(10, 20)
+            "#,
+            r#"
+                actor Counter {
+                    state count = 0
+                    behavior inc() { self.count = self.count + 1 }
+                    behavior get() { self.count }
+                }
+                let c = spawn Counter { count = 0 } in
+                let _ = ask c inc() in
+                let _ = ask c inc() in
+                let _ = ask c inc() in
+                ask c get()
+            "#,
+        ];
+        for src in corpus {
+            let legacy_rt = Rc::new(RefCell::new(Runtime::new()));
+            let legacy = run_source_with_runtime(src, legacy_rt)
+                .map(|(v, _)| v.to_string_repr())
+                .unwrap_or_else(|e| panic!("legacy pipeline failed on {:?}: {}", src, e));
+            let mir_rt = Rc::new(RefCell::new(Runtime::new()));
+            let mir = run_source_new_with_runtime(src, mir_rt)
+                .map(|v| v.to_string_repr())
+                .unwrap_or_else(|e| panic!("MIR pipeline failed on {:?}: {}", src, e));
+            assert_eq!(legacy, mir, "pipelines disagree on {:?}", src);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Workflow/agent desugaring via the HIR/MIR pipeline
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mir_workflow_lowers_to_persistent_actor() {
+        let source = "workflow PurchaseOrder { step validate { 1 } }";
+        let module = compile_source_new(source).unwrap();
+
+        let meta = module
+            .actor_metadata
+            .iter()
+            .find(|m| m.name == "PurchaseOrder")
+            .expect("workflow should produce actor metadata");
+        assert!(meta.is_workflow, "workflow metadata should be flagged");
+        assert!(meta.persistent, "workflows should be persistent actors");
+        assert_eq!(meta.behavior_indices.len(), 1, "one behavior per step");
+
+        let behavior = &module.behaviors[meta.behavior_indices[0]];
+        assert_eq!(behavior.name, "PurchaseOrder.validate");
+    }
+
+    /// Same source and assertions as
+    /// test_saga_compensation_runs_in_reverse_order (legacy pipeline), run
+    /// through the HIR/MIR pipeline instead. The runtime's saga-compensation
+    /// machinery (invoked automatically when a step's execution fails, via
+    /// BehaviorTableEntry::compensate_offset) is pipeline-agnostic, so this
+    /// exercises mir_codegen's compensation_of patching end to end.
+    #[test]
+    fn test_mir_saga_compensation_runs_in_reverse_order() {
+        let source = r#"
+            workflow SagaTest {
+                step a {
+                    (self.step_index = self.step_index + 1, self.a_done = 1, emit A_Done())
+                } compensate {
+                    self.comp_order = self.comp_order * 10 + 1
+                }
+                step b {
+                    (self.step_index = self.step_index + 1, self.b_done = 1, emit B_Done())
+                } compensate {
+                    self.comp_order = self.comp_order * 10 + 2
+                }
+                step c {
+                    perform Fail.now()
+                }
+            }
+            let c = spawn SagaTest {} in { c }
+        "#;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return actor reference");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 2, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(actor.get_state_field("a_done").and_then(|v| v.as_int()), Some(1));
+        assert_eq!(actor.get_state_field("b_done").and_then(|v| v.as_int()), Some(1));
+        assert_eq!(
+            actor.get_state_field("comp_order").and_then(|v| v.as_int()),
+            Some(21),
+            "compensations should run in reverse order (b then a)"
+        );
+    }
+
+    /// Same source and assertions as test_agent_ask_uses_memory (legacy
+    /// pipeline), run through the HIR/MIR pipeline instead.
+    #[test]
+    fn test_mir_agent_ask_uses_memory() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                memory: { max_turns: 10 }
+            }
+            let a = spawn Agent {} in
+            let r1 = ask a ask("hello") in
+            let r2 = ask a ask("world") in
+            r1
+        "#;
+        let module = compile_source_new(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let client = crate::ai::MockLlmClient::text("world");
+        rt.borrow_mut().set_llm_client(Box::new(client.clone()));
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt)));
+
+        let result = vm.run().unwrap();
+
+        let calls = client.recorded_calls();
+        assert_eq!(calls.len(), 2, "expected two LLM calls");
+
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.value_to_string(module_idx, result);
+        assert_eq!(content, "world");
+
+        assert_eq!(calls[0].messages.len(), 2);
+        assert_eq!(calls[0].messages[1].content, "hello");
+        assert_eq!(calls[1].messages.len(), 4);
+        assert_eq!(calls[1].messages[2].content, "world");
+    }
+
+    /// Regression test for ActorMeta.is_agent/semantic_memory_dimensions:
+    /// unlike `ask`/`usage` (ordinary compiled bytecode behaviors),
+    /// `store_fact`/`recall` are placeholder bodies the RUNTIME intercepts
+    /// by name, gated on `actor_is_agent(actor_id)` — which reads
+    /// `Actor.is_agent`, itself set from `ActorMeta.is_agent` at spawn time.
+    /// If mir_lower.rs ever went back to hardcoding is_agent/
+    /// semantic_memory_dimensions instead of reading them off the desugared
+    /// hir::ActorDef, this interception would silently stop firing and the
+    /// placeholder `Unit` body would run instead — same source and
+    /// assertions as test_agent_semantic_memory_store_and_recall.
+    #[test]
+    fn test_mir_agent_semantic_memory_store_and_recall() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                semantic_memory: { dimensions: 32 }
+            }
+            let a = spawn Agent {} in
+            let _ = ask a store_fact("hello world") in
+            ask a recall("hello", 1)
+        "#;
+        let module = compile_source_new(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+
+        let result = vm.run().unwrap();
+
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.value_to_string(module_idx, result);
+        assert_eq!(content, "hello world");
+
+        let rt = rt.borrow();
+        let actor = rt.actors.values().next().expect("expected one actor");
+        let memory_json = actor.get_state_field("semantic_memory").unwrap();
+        let memory_json_str = vm.value_to_string(module_idx, memory_json);
+        let memory: crate::ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
+        assert_eq!(memory.len(), 1);
+        assert_eq!(memory.documents[0].content, "hello world");
+    }
+
+    /// The legacy compiler and the HIR/MIR pipeline must agree on
+    /// workflow/agent semantics too.
+    #[test]
+    fn test_mir_and_legacy_workflow_agent_semantics_agree() {
+        let corpus: &[&str] = &[
+            // Actor-ref values aren't compared here (their string repr
+            // embeds an internal, Runtime-instance-specific id counter that
+            // isn't guaranteed to line up between two independently
+            // constructed runtimes) — ask a step for a plain value instead.
+            "workflow W { step a { 1 } } let w = spawn W {} in ask w a()",
+            r#"
+                agent Ag = { model: "mock-model", system_prompt: "hi" }
+                let a = spawn Ag {} in ask a ask("hello")
+            "#,
+            r#"
+                workflow W2 {
+                    step before { self.step_index = self.step_index + 1 }
+                    parallel {
+                        step branch_a { self.step_index = self.step_index + 1 }
+                        step branch_b { self.step_index = self.step_index + 1 }
+                    }
+                }
+                let w = spawn W2 {} in ask w before()
+            "#,
+            r#"
+                @tool(description: "Adds two integers.")
+                fn add(x: Int, y: Int) -> Int { x + y }
+                agent Ag2 = { model: "mock-model", tools: [add] }
+                let a = spawn Ag2 {} in ask a ask("hello")
+            "#,
+        ];
+        for src in corpus {
+            // `Value::to_string_repr()` prints heap-allocated results (like
+            // the "world" string these agents return) as a raw pointer
+            // address (`#Value(hex)`) — it has no VM/module to dereference
+            // through. Comparing that directly is flaky: two independently
+            // constructed VMs allocate at addresses that only coincidentally
+            // match. `vm.value_to_string` resolves the actual string content
+            // instead, which is what these assertions actually care about.
+            let (legacy_module, _) = compile_source(src)
+                .unwrap_or_else(|e| panic!("legacy pipeline failed to compile {:?}: {}", src, e));
+            let legacy_rt = Rc::new(RefCell::new(Runtime::new()));
+            legacy_rt
+                .borrow_mut()
+                .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            let mut legacy_vm = VM::new();
+            legacy_vm.load_module(legacy_module);
+            legacy_vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(legacy_rt)));
+            let legacy_value = legacy_vm
+                .run()
+                .unwrap_or_else(|e| panic!("legacy pipeline failed to run {:?}: {}", src, e));
+            let legacy = legacy_vm.value_to_string(legacy_vm.modules.len() - 1, legacy_value);
+
+            let mir_module = compile_source_new(src)
+                .unwrap_or_else(|e| panic!("MIR pipeline failed to compile {:?}: {}", src, e));
+            let mir_rt = Rc::new(RefCell::new(Runtime::new()));
+            mir_rt
+                .borrow_mut()
+                .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            let mut mir_vm = VM::new();
+            mir_vm.load_module(mir_module);
+            mir_vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(mir_rt)));
+            let mir_value = mir_vm
+                .run()
+                .unwrap_or_else(|e| panic!("MIR pipeline failed to run {:?}: {}", src, e));
+            let mir = mir_vm.value_to_string(mir_vm.modules.len() - 1, mir_value);
+
+            assert_eq!(legacy, mir, "pipelines disagree on {:?}", src);
+        }
+    }
+
+    /// Same source and assertions as test_workflow_parallel_branches_normal
+    /// (legacy pipeline), run through the HIR/MIR pipeline instead —
+    /// exercises `hir_lower::desugar_workflow`'s parallel-branch synthesis
+    /// and mir_codegen's `parallel_branches_of` patching end to end.
+    #[test]
+    fn test_mir_workflow_parallel_branches_normal() {
+        let source = r#"
+            workflow ParallelNormal {
+                step before { (emit BeforeDone(), self.step_index = self.step_index + 1) }
+                parallel {
+                    step branch_a { emit BranchA_Done() }
+                    step branch_b { emit BranchB_Done() }
+                }
+                step after { (emit AfterDone(), self.step_index = self.step_index + 1) }
+            }
+            spawn ParallelNormal {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 2, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        assert_eq!(
+            rt.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("step_index").and_then(|v| v.as_int()),
+            Some(3),
+            "workflow should advance through before, parallel, and after"
+        );
+
+        let events = store.read_workflow_events(actor_id);
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. })).count(),
+            2,
+            "both branches should emit ParallelBranchCompleted"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "AfterDone")),
+            "AfterDone should be persisted"
+        );
+    }
+
+    /// Regression test for tool-schema resolution in `desugar_agent`: a
+    /// spawn-time `ActorMeta.tools` entry must resolve to the same
+    /// `ToolSchema` the stable compiler's `compile_agent` would produce.
+    #[test]
+    fn test_mir_agent_with_tool_resolves_schema() {
+        let source = r#"
+            @tool(description: "Adds two integers.")
+            fn add(x: Int, y: Int) -> Int { x + y }
+
+            agent Ag = { model: "gpt-4o", tools: [add] }
+        "#;
+        let module = compile_source_new(source).unwrap();
+        let meta = module
+            .actor_metadata
+            .iter()
+            .find(|m| m.name == "Ag")
+            .expect("agent should produce actor metadata");
+        assert_eq!(meta.tools.len(), 1);
+        assert_eq!(meta.tools[0].name, "add");
+        assert_eq!(meta.tools[0].description, "Adds two integers.");
     }
 
     #[test]
@@ -1563,6 +2111,79 @@ mod tests {
     fn test_new_pipeline_inequality() {
         let value = run_source_new("1 != 2").unwrap();
         assert_eq!(value.as_bool(), Some(true));
+    }
+
+    /// Differential test: the legacy compiler and the HIR/MIR pipeline must
+    /// produce identical results over a corpus of pure programs.
+    #[test]
+    fn test_mir_and_legacy_pipelines_agree() {
+        let corpus: &[&str] = &[
+            // Arithmetic and precedence
+            "1 + 2 * 3 - 4",
+            "(1 + 2) * (3 + 4)",
+            "100 / 7 % 5",
+            // Let chains and shadowing
+            "let x = 5 in let y = x * 2 in x + y",
+            "let x = 1 in let x = x + 1 in x",
+            // Conditionals, including statements after an if
+            "if 1 < 2 then 10 else 20",
+            "let x = if false then 1 else 2 in x + 10",
+            "if true then (if false then 1 else 2) else 3",
+            // Match with literals, variable binding, and wildcard
+            "match 2 { case 1 => 10 case 2 => 20 case _ => 30 }",
+            "match 9 { case 1 => 10 case n => n * 2 }",
+            // Closures: capturing, recursive, higher-order
+            "let a = 40 in let add = fn(x) { x + a } in add(2)",
+            "let fib = fn(n) { if n <= 1 then n else fib(n - 1) + fib(n - 2) } in fib(10)",
+            "let twice = fn(f, x) { f(f(x)) } in let inc = fn(n) { n + 1 } in twice(inc, 5)",
+            // Top-level functions
+            "fn add(x: Int, y: Int) -> Int { x + y }\nadd(3, 4)",
+            "fn fact(n: Int) -> Int { if n == 0 then 1 else n * fact(n - 1) }\nfact(6)",
+            // Arrays, indexing, records
+            "[10, 20, 30][1]",
+            "let arr = [10, 20, 30] in arr[0] + arr[2]",
+            "let r = { x: 1, y: 41 } in r.x + r.y",
+            // Mutation via `=`: `arr[i] = v` and `record.f = v` parse as
+            // BinOp::Assign binary expressions (only a bare `ident = v`
+            // parses as the distinct Expr::Assign node).
+            "let arr = [1, 2, 3] in { arr[0] = 99 arr[0] }",
+            "let r = { x: 1, y: 2 } in { r.x = 99 r.x + r.y }",
+            // For loops evaluate to unit
+            "for i in [1, 2, 3] { i }",
+            // Ref cells: `&` creates a cell, `*` dereferences, assignment
+            // mutates and yields the assigned value.
+            "let x = &10 in { x = 3; *x }",
+            // Effect handlers, with and without a resumed value
+            "handle perform Math.getAnswer() { | Math.getAnswer() => 42 }",
+            "handle perform IO.print(\"hello\") { | IO.print(msg) => 7 }",
+            // Pipe operator
+            "let inc = fn(n) { n + 1 } in 41 |> inc",
+        ];
+        for src in corpus {
+            let legacy = run_source(src)
+                .map(|(v, _)| v.to_string_repr())
+                .unwrap_or_else(|e| panic!("legacy pipeline failed on {:?}: {}", src, e));
+            let mir = run_source_new(src)
+                .map(|v| v.to_string_repr())
+                .unwrap_or_else(|e| panic!("MIR pipeline failed on {:?}: {}", src, e));
+            assert_eq!(legacy, mir, "pipelines disagree on {:?}", src);
+        }
+    }
+
+    /// Regression: closures capturing enclosing locals must see the captured
+    /// values (CapStore/CapLoad used to be VM no-ops, yielding garbage).
+    #[test]
+    fn test_legacy_closure_capture() {
+        let source = "let a = 40 in let add = fn(x) { x + a } in add(2)";
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(value.as_int(), Some(42));
+    }
+
+    #[test]
+    fn test_legacy_closure_capture_two_vars() {
+        let source = "let a = 30 in let b = 10 in let f = fn(x) { a + b + x } in f(2)";
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(value.as_int(), Some(42));
     }
 
     #[test]
@@ -1709,9 +2330,9 @@ mod tests {
 
         let result = vm.run().unwrap();
 
-        // The usage behavior returns an array [prompt_tokens, completion_tokens, cost].
-        // Records and tuples are not yet supported by the interpreter, so the
-        // actor-allocated array is inspected directly in Rust.
+        // The usage behavior returns an array [prompt_tokens, completion_tokens, cost]
+        // (see compile_agent's usage_behavior); inspect the actor-allocated
+        // array directly.
         let ptr = result
             .as_ptr()
             .expect("usage() should return an array pointer");

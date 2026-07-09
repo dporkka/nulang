@@ -16,9 +16,11 @@ fn test_jit_session_creation() {
 #[test]
 fn test_hot_counter() {
     reset_hot_counters();
-    assert!(!record_and_check_hot(0));
-    for _ in 0..HOT_THRESHOLD { record_and_check_hot(42); }
-    assert!(record_and_check_hot(42));
+    assert!(!record_and_check_hot(0, 0));
+    for _ in 0..HOT_THRESHOLD { record_and_check_hot(0, 42); }
+    assert!(record_and_check_hot(0, 42));
+    // The same offset in a different module has its own independent counter.
+    assert!(!record_and_check_hot(1, 42));
     reset_hot_counters();
 }
 
@@ -41,6 +43,32 @@ fn test_find_region_stops_at_unsupported() {
         Instruction::new3(OpCode::ISub, 0, 1, 2),
     ];
     assert_eq!(find_compilable_region(0, &instructions), 1);
+}
+
+/// Regions must stop before branches and Halt: after a region runs, the VM
+/// advances pc by the region length, so a compiled branch whose target lies
+/// elsewhere would resume at the wrong instruction.
+#[test]
+fn test_find_region_stops_before_branches_and_halt() {
+    for branch in [
+        Instruction::new3(OpCode::Jmp, 0, 2, 0),
+        Instruction::new3(OpCode::JmpT, 0, 0, 2),
+        Instruction::new3(OpCode::JmpF, 0, 0, 2),
+        Instruction::new0(OpCode::Halt),
+    ] {
+        let instructions = vec![
+            Instruction::new3(OpCode::IAdd, 0, 1, 2),
+            Instruction::new3(OpCode::ISub, 0, 1, 2),
+            branch,
+            Instruction::new3(OpCode::IMul, 0, 1, 2),
+        ];
+        assert_eq!(
+            find_compilable_region(0, &instructions),
+            2,
+            "region must stop before {:?}",
+            instructions[2].opcode
+        );
+    }
 }
 
 #[test]

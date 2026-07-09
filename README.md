@@ -18,13 +18,13 @@
 | **Actor Model** | Lightweight green-thread actors with M:N scheduling, work-stealing queues, and supervision trees |
 | **Algebraic Effects** | First-class effect system with `perform`/`handle`/`resume` semantics |
 | **Capability System** | Fine-grained reference permissions (iso/trn/ref/val/box/tag) for memory safety |
-| **AI Capabilities** | LLM access through the capability/effect system (agent DSL removed in v0.7) |
+| **AI Agents** | First-class `agent` declarations with LLM clients (OpenAI, Ollama), episodic/semantic/procedural memory, pipelines, debates, and supervisor teams |
 | **Distributed Runtime** | Location-transparent actor messaging across nodes with TCP transport |
 | **ORCA GC** | Per-actor concurrent garbage collection with cycle detection |
 | **CRDTs** | 8 conflict-free replicated data types for shared distributed state |
 | **Register-Based VM** | High-performance bytecode VM with NaN-tagged value representation |
 | **Cranelift JIT Backend** | Tiered execution: interpreter for cold code, native compilation for hot loops |
-| **BEAM/OTP Primitives** | `receive`, `spawn_link`, `monitor`, `link`, registry, timers, process groups |
+| **BEAM/OTP Primitives** | `spawn_link`, `monitor`, `link`, registry, timers, process groups (`receive` is not yet usable — see [Known limitations](#known-limitations)) |
 | **Linear Type Moves** | Zero-cost `iso` actor messaging via compile-time linearity tracking |
 | **SIMD Vectorization** | Auto-vectorization of array loops via Cranelift SIMD (I64x2, F64x2, I32x4, F32x4) |
 | **Python Interop** | Native Actor pattern: Python isolated to dedicated OS threads, marshal-only boundary |
@@ -34,13 +34,14 @@
 ### Current Status
 
 - ✅ Builds with `cargo build`
-- ✅ All 508 unit tests pass with `cargo test`
+- ✅ All 740 tests pass with `cargo test`
 - ✅ NaN-boxed `Value` representation with distinct high-16 type tags
 - ✅ 91-opcode bytecode ISA (arithmetic, control flow, closures, arrays, effects, actors, capabilities, distribution)
 - ✅ Hindley-Milner type inference with algebraic effects
-- ✅ Actor runtime: spawn, send, receive, monitors, links, supervision, timers, registry, process groups
+- ✅ Actor runtime: spawn, send, monitors, links, supervision, timers, registry, process groups (⚠️ `receive` is not yet usable — see [Known limitations](#known-limitations))
 - ✅ ORCA-style per-actor GC with cycle detection
-- ⚠️ AI agent DSL removed; LLM integration planned via capability-based effects
+- ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams
+- ✅ Durable workflow runtime: `workflow` declarations with steps, timers, signals, saga compensation
 
 ---
 
@@ -48,7 +49,8 @@
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (stable channel, 1.70+)
+- [Rust](https://rustup.rs/) (stable channel, 1.95+)
+- Python 3 development headers, for the default build (see [Feature flags](#feature-flags) to skip this)
 - Linux or macOS (Windows support planned)
 
 ### Building
@@ -57,6 +59,26 @@
 git clone https://github.com/dporkka/nulang.git
 cd nulang
 cargo build --release
+```
+
+### Feature flags
+
+Three optional subsystems are on by default so a plain `cargo build` behaves
+as before this flag set existed. Build without them for a leaner binary and
+fewer system dependencies:
+
+| Feature | Enables | Off by default? |
+|---------|---------|------------------|
+| `python` | Python interop (`perform Python.call(...)`) via PyO3 | No — needs Python 3 dev headers |
+| `sqlite` | `SqliteStore` actor persistence backend | No — `MemoryStore`/`JsonFileStore` always available |
+| `lsp` | `nulang --lsp` Language Server | No |
+
+```bash
+# Skip PyO3, SQLite, and the LSP server entirely:
+cargo build --release --no-default-features
+
+# Pick just what you need:
+cargo build --release --no-default-features --features sqlite
 ```
 
 ### Running Tests
@@ -82,6 +104,16 @@ cargo run -- --check myprogram.nula
 
 # Evaluate a string
 cargo run -- --eval 'perform IO.print("Hello")'
+```
+
+### Examples
+
+Runnable programs live in [`examples/`](examples/):
+
+```bash
+cargo run -- examples/fibonacci.nu       # closures + recursion
+cargo run -- examples/effects.nu         # algebraic effect handlers
+cargo run -- examples/counter_actor.nu   # actor declaration + spawn
 ```
 
 ---
@@ -125,19 +157,13 @@ let result = handle compute() with
 ### AI Agents
 
 ```nulang
-agent CodeReviewer {
-  llm "gpt-4",
-      "You are a senior code reviewer.",
-      0.7
-
-  tool analyze: SyntaxAnalysis,
-       "Perform syntax analysis on the given code"
-
-  behavior review(code: String) =
-    let analysis = perform SyntaxAnalysis.analyze(code)
-    let review = perform LLM.generate(analysis)
-    review
+agent Assistant = {
+    model: "gpt-4o",
+    system_prompt: "You are helpful.",
+    memory: { max_turns: 10 }
 }
+let a = spawn Assistant {} in
+ask a ask("What is an actor model?")
 ```
 
 ### Pattern Matching
@@ -258,7 +284,7 @@ let processed =
 | `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~490 |
 | `main` | CLI entry point (run, repl, eval, check modes) | ~450 |
 
-**Total: ~33,000 lines of Rust across 37 source files with 590+ tests.**
+**Total: ~52,000 lines of Rust across 70+ source files with 740 tests.**
 
 ---
 
@@ -322,7 +348,7 @@ rt.sync_crdts();  // broadcast to all connected nodes
 
 | Primitive | File | Description |
 |-----------|------|-------------|
-| `receive` | `vm.rs` | Pattern-matching mailbox consume with timeout |
+| `receive` | `vm.rs` | ⚠️ Not usable today — no lexer keyword (unparseable from source), stable-compiler codegen discards match arms, VM has no dispatch arm for the opcode, MIR lowering explicitly rejects it. See [Known limitations](#known-limitations). |
 | `spawn_link` | `vm.rs` | Spawn actor with bidirectional fault link |
 | `monitor` | `runtime/mod.rs` | Watcher monitors target actor for exit |
 | `demonitor` | `runtime/mod.rs` | Remove a monitor |
@@ -439,12 +465,10 @@ perform IO.print(result)  -- marshaled Float value: 6.0
 | `stress_effect_resume_after_mailbox_pressure` | Effect yield → flood → resume → drain |
 | `stress_supervisor_crash_during_effect_recovery` | Supervisor crashes mid-effect-recovery |
 
-**Design documents created:**
-- [DESIGN_AI_SDK.md](DESIGN_AI_SDK.md) — OpenAI SDK equivalent (1,309 lines)
-- [DESIGN_WORKFLOW_SDK.md](DESIGN_WORKFLOW_SDK.md) — Temporal SDK equivalent (1,774 lines)
-- [DESIGN_WEB_FRAMEWORK.md](DESIGN_WEB_FRAMEWORK.md) — Phoenix Framework equivalent (1,978 lines)
-- [DESIGN_PACKAGE_MANAGER.md](DESIGN_PACKAGE_MANAGER.md) — Cargo-equivalent package manager (1,627 lines)
-- [DESIGN_CLOUD.md](DESIGN_CLOUD.md) — Nulang Cloud platform architecture (1,738 lines)
+**Design documents** (see [`docs/archive/`](docs/archive/)):
+- `DESIGN_AI_SDK.md` — AI SDK design (partially implemented in v0.9)
+- `DESIGN_WORKFLOW_SDK.md` — workflow SDK design (partially implemented in v0.8)
+- `DESIGN_WEB_FRAMEWORK.md`, `DESIGN_PACKAGE_MANAGER.md`, `DESIGN_CLOUD.md` — design-only, not implemented
 
 ---
 
@@ -473,7 +497,7 @@ This is an active implementation with the following components functional:
 - [x] VM (register-based execution, arithmetic, comparisons, control flow)
 - [x] REPL (parse-typecheck-compile-execute cycle with introspection)
 - [x] Integration tests (16 end-to-end pipeline tests)
-- [x] Actor runtime (spawn, send, receive, links, monitors)
+- [x] Actor runtime (spawn, send, links, monitors) — ⚠️ `receive` not usable from source, see [Known limitations](#known-limitations)
 - [x] Work-stealing scheduler (M:N threading with reduction quotas)
 - [x] ORCA garbage collector (per-actor heap, 3-count protocol, cycle detection)
 - [x] Supervision trees (OneForOne, OneForAll, RestForOne restart strategies)
@@ -481,7 +505,7 @@ This is an active implementation with the following components functional:
 - [x] Distributed runtime (TCP transport, cluster membership, location-transparent messaging)
 - [x] CRDT subsystem (8 types: counters, sets, registers, sequences)
 - [x] CRDT manager (factory, sync, inter-node merge)
-- [x] BEAM/OTP primitives (receive, spawn_link, monitor, link, exit, trap_exit, register, whereis, send_after, pg, yield)
+- [x] BEAM/OTP primitives (spawn_link, monitor, link, exit, trap_exit, register, whereis, send_after, pg, yield) — ⚠️ `receive` not usable from source, see [Known limitations](#known-limitations)
 - [x] Unbounded mailboxes (crossbeam::SegQueue — BEAM semantics, no message loss)
 - [x] Hierarchical timer wheel (send_after, exit_after, kill_after)
 - [x] Actor registry (register/whereis/registered)
@@ -510,20 +534,35 @@ This is an active implementation with the following components functional:
 | v0.4 | ORCA garbage collector | Completed |
 | v0.5 | Multi-node distribution | Completed |
 | v0.6 | CRDT integration | Completed |
-| v0.7 | BEAM/OTP primitives (receive, spawn_link, monitor, links, registry, timers, process groups) | Completed |
+| v0.7 | BEAM/OTP primitives (spawn_link, monitor, links, registry, timers, process groups) | Completed (`receive` not usable — see [Known limitations](#known-limitations)) |
 | v0.8 | Performance improvements (mimalloc, lock-free mailboxes, linear type moves) | Completed |
 | v0.9 | Cranelift JIT backend | Completed |
 | v0.10 | Type guard stripping + LSP inlay hints | Completed |
 | v0.11 | SIMD vectorization (auto-vectorize array loops) | Completed |
 | v0.12 | Architectural audit & corrections (reverted nursery, bounded mailbox, deep Python) | Completed |
 | v0.13 | Python interop (Native Actor) + stress tests + AI ecosystem design foundation | Completed |
+| — | Durable workflow runtime (steps, timers, signals, saga compensation) | Completed |
+| — | AI runtime (`agent` keyword, LLM providers, memory, pipeline/debate/supervisor patterns) | Completed |
 | v1.0 | Production release — requires: chaos test suite passing ✅, scheduler profiled ✅, cycle detector intra-node only ✅ | Planned |
+
+---
+
+## Known Limitations
+
+- **`receive` (pattern-matching mailbox consume) is not usable today, on either backend.** The gap is deeper than a single missing opcode:
+  - The lexer has no `receive` keyword, so `receive { ... }` cannot even be parsed from `.nu` source today (`src/lexer.rs`). The AST/HIR node (`Expr::Receive` / `hir::RValue::Receive`) and its downstream consumers (effect checker, type checker) exist and are exercised only by hand-built Rust test fixtures, never by real parsed source.
+  - The stable compiler's codegen for `Expr::Receive` (`src/compiler.rs`) discards the match arms and emits a single `OpCode::Receive` with no encoding of which behaviors/patterns/bodies exist.
+  - The VM's interpreter loop (`src/vm.rs`) has no dispatch arm for `OpCode::Receive` at all — it falls through to the "unimplemented opcode" error at runtime. This dispatch arm existed prior to the NaN-boxing/effect-system rewrite in `2c860f6` and was dropped without a regression test catching it.
+  - The `--experimental-mir` pipeline rejects `hir::RValue::Receive` explicitly at HIR→MIR lowering time with a `NotYetImplemented` error (`src/mir_lower.rs`) — so this is a pre-existing, backend-agnostic gap, not a MIR-specific regression.
+  - Actor message handling that *is* exercised by tests goes through other paths (direct behavior dispatch, not a `receive`-with-pattern-match expression).
 
 ---
 
 ## Documentation
 
-- **[SPEC.md](SPEC.md)** — Complete 60,000-word language specification covering syntax, semantics, type system, runtime, and standard library
+- **[SPEC2.md](SPEC2.md)** — Language specification covering syntax, semantics, type system, runtime, and standard library
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — Implementation architecture notes
+- **[docs/archive/](docs/archive/)** — Historical specs, roadmaps, design documents, and review reports
 
 ---
 

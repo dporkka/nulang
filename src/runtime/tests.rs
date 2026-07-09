@@ -473,8 +473,8 @@ fn test_trap_exit_converts_to_message() {
 fn test_vm_value_nan_tagging() {
     let v = Value::int(42);
     assert_eq!(v.as_int(), Some(42));
-    let f = Value::float(3.14);
-    assert!((f.as_float().unwrap() - 3.14).abs() < 0.001);
+    let f = Value::float(2.5);
+    assert!((f.as_float().unwrap() - 2.5).abs() < 0.001);
     assert_eq!(Value::bool(true).as_bool(), Some(true));
     assert!(Value::unit().is_unit());
 }
@@ -610,6 +610,7 @@ fn test_memory_store_latest_sequence() {
     assert_eq!(store.latest_sequence(1), 7);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_save_load_snapshot() {
     let mut store = SqliteStore::in_memory().unwrap();
@@ -629,6 +630,7 @@ fn test_sqlite_store_save_load_snapshot() {
     assert_eq!(loaded.state.get("count"), Some(&PersistedValue::Int(42)));
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_append_read_journal() {
     let mut store = SqliteStore::in_memory().unwrap();
@@ -660,6 +662,7 @@ fn test_sqlite_store_append_read_journal() {
     assert_eq!(journal[1].payload, vec![PersistedValue::Int(20)]);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_latest_sequence() {
     let mut store = SqliteStore::in_memory().unwrap();
@@ -684,6 +687,7 @@ fn test_sqlite_store_latest_sequence() {
     assert_eq!(store.latest_sequence(1), 7);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_clear() {
     let mut store = SqliteStore::in_memory().unwrap();
@@ -712,6 +716,7 @@ fn test_sqlite_store_clear() {
     assert_eq!(store.latest_sequence(1), 0);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_persists_to_disk() {
     let path = std::env::temp_dir()
@@ -753,6 +758,7 @@ fn test_sqlite_store_persists_to_disk() {
     let _ = std::fs::remove_file(&path);
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_persistent_actor_with_sqlite_store() {
     let mut rt = Runtime::new();
@@ -984,6 +990,166 @@ fn test_vm_drop_frees_actor_heap_object() {
     let rt_ref = rt.borrow();
     let actor = rt_ref.actors.get(&actor_id).unwrap();
     assert_eq!(actor.heap.live_count(), 0);
+}
+
+/// Regression test: capturing a heap pointer into a closure (`CapStore`)
+/// must retain it, so dropping the original local binding does not free an
+/// object the closure still holds — a latent use-after-free that would
+/// trigger the moment any codegen path emits `Drop` for a captured local.
+#[test]
+fn test_closure_capture_retains_heap_object_across_drop() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
+    use crate::vm::VM;
+
+    let rt = Rc::new(RefCell::new(Runtime::new()));
+    let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
+    rt.borrow_mut().current_actor = Some(actor_id);
+
+    let mut module = CodeModule::new("test_capture_retain");
+    let len_idx = module.add_constant(Constant::Int(4));
+
+    // main:
+    //   0: ConstU 4 -> r2 (array length)
+    //   1: ArrAlloc r2 -> r1 (heap object, local ref_count starts at 1)
+    //   2: Closure #0 -> r3
+    //   3: CapStore r3[0] = r1   (must retain: ref_count -> 2)
+    //   4: Drop r1               (ref_count -> 1; must NOT free)
+    //   5: Move r3 -> r4
+    //   6: Call r4, 0 args, dst r0
+    //   7: Halt
+    // fn0 (at offset 8): just returns unit; the object's survival is
+    // checked on the actor heap directly after run() completes.
+    module.emit(Instruction::new3(OpCode::ConstU,
+        ((len_idx >> 8) & 0xFF) as u8, (len_idx & 0xFF) as u8, 2)); // 0
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 2, 1));          // 1
+    module.emit(Instruction::new3(OpCode::Closure, 0, 0, 3));        // 2
+    module.emit(Instruction::new3(OpCode::CapStore, 3, 0, 1));       // 3
+    module.emit(Instruction::new1(OpCode::Drop, 1));                 // 4
+    module.emit(Instruction::new2(OpCode::Move, 3, 4));              // 5
+    module.emit(Instruction::new3(OpCode::Call, 4, 0, 0));           // 6
+    module.emit(Instruction::new0(OpCode::Halt));                    // 7
+    let fn0_offset = module.current_offset();
+    module.emit(Instruction::new1(OpCode::Const0, 0));               // 8
+    module.emit(Instruction::new1(OpCode::RetVal, 0));                // 9
+    module.function_table.push(fn0_offset);
+    module.entry_point = Some(0);
+
+    let mut vm = VM::new();
+    vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+    vm.load_module(module);
+    vm.run().unwrap();
+
+    let rt_ref = rt.borrow();
+    let actor = rt_ref.actors.get(&actor_id).unwrap();
+    assert_eq!(
+        actor.heap.live_count(),
+        1,
+        "object captured by a closure must survive a Drop of the original local"
+    );
+}
+
+/// Same regression as `test_closure_capture_retains_heap_object_across_drop`,
+/// but for `ArrStore`: storing a heap pointer into an array slot must retain
+/// it too, or a later `Drop` of the value's original binding would free it
+/// out from under the array — a latent use-after-free CapStore was already
+/// protected against but ArrStore wasn't.
+#[test]
+fn test_array_store_retains_heap_object_across_drop() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
+    use crate::vm::VM;
+
+    let rt = Rc::new(RefCell::new(Runtime::new()));
+    let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
+    rt.borrow_mut().current_actor = Some(actor_id);
+
+    let mut module = CodeModule::new("test_arrstore_retain");
+    let inner_len_idx = module.add_constant(Constant::Int(2));
+    let outer_len_idx = module.add_constant(Constant::Int(3));
+
+    // main:
+    //   0: ConstU 2 -> r1 (inner array length)
+    //   1: ArrAlloc r1 -> r2 (inner object, local ref_count starts at 1)
+    //   2: ConstU 3 -> r3 (outer array length)
+    //   3: ArrAlloc r3 -> r4 (outer array object)
+    //   4: Const0 -> r5 (index 0)
+    //   5: ArrStore r4[0] = r2 (must retain r2: ref_count -> 2)
+    //   6: Drop r2 (ref_count -> 1; must NOT free)
+    //   7: Halt
+    module.emit(Instruction::new3(OpCode::ConstU,
+        ((inner_len_idx >> 8) & 0xFF) as u8, (inner_len_idx & 0xFF) as u8, 1)); // 0
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 1, 2));                     // 1
+    module.emit(Instruction::new3(OpCode::ConstU,
+        ((outer_len_idx >> 8) & 0xFF) as u8, (outer_len_idx & 0xFF) as u8, 3)); // 2
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 3, 4));                     // 3
+    module.emit(Instruction::new1(OpCode::Const0, 5));                         // 4
+    module.emit(Instruction::new3(OpCode::ArrStore, 4, 5, 2));                 // 5
+    module.emit(Instruction::new1(OpCode::Drop, 2));                           // 6
+    module.emit(Instruction::new0(OpCode::Halt));                             // 7
+    module.entry_point = Some(0);
+
+    let mut vm = VM::new();
+    vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+    vm.load_module(module);
+    vm.run().unwrap();
+
+    let rt_ref = rt.borrow();
+    let actor = rt_ref.actors.get(&actor_id).unwrap();
+    assert_eq!(
+        actor.heap.live_count(),
+        2,
+        "object stored into an array slot must survive a Drop of the original local (both the inner and outer objects should remain live)"
+    );
+}
+
+/// Same regression as `test_array_store_retains_heap_object_across_drop`,
+/// but for `RecS`: storing a heap pointer into a record field must retain
+/// it too, mirroring CapStore/ArrStore.
+#[test]
+fn test_record_field_store_retains_heap_object_across_drop() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
+    use crate::vm::VM;
+
+    let rt = Rc::new(RefCell::new(Runtime::new()));
+    let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
+    rt.borrow_mut().current_actor = Some(actor_id);
+
+    let mut module = CodeModule::new("test_recs_retain");
+    let inner_len_idx = module.add_constant(Constant::Int(2));
+
+    // main:
+    //   0: ConstU 2 -> r1 (inner array length)
+    //   1: ArrAlloc r1 -> r2 (inner object, local ref_count starts at 1)
+    //   2: RecMk 1 slot -> r3 (record object)
+    //   3: RecS r3[field 0] = r2 (must retain r2: ref_count -> 2)
+    //   4: Drop r2 (ref_count -> 1; must NOT free)
+    //   5: Halt
+    module.emit(Instruction::new3(OpCode::ConstU,
+        ((inner_len_idx >> 8) & 0xFF) as u8, (inner_len_idx & 0xFF) as u8, 1)); // 0
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 1, 2));                     // 1
+    module.emit(Instruction::new2(OpCode::RecMk, 1, 3));                        // 2
+    module.emit(Instruction::new3(OpCode::RecS, 3, 0, 2));                     // 3
+    module.emit(Instruction::new1(OpCode::Drop, 2));                           // 4
+    module.emit(Instruction::new0(OpCode::Halt));                             // 5
+    module.entry_point = Some(0);
+
+    let mut vm = VM::new();
+    vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+    vm.load_module(module);
+    vm.run().unwrap();
+
+    let rt_ref = rt.borrow();
+    let actor = rt_ref.actors.get(&actor_id).unwrap();
+    assert_eq!(
+        actor.heap.live_count(),
+        2,
+        "object stored into a record field must survive a Drop of the original local (both the inner object and the record should remain live)"
+    );
 }
 
 #[test]
@@ -1235,6 +1401,82 @@ fn test_cross_actor_send_foreign_count_lifecycle() {
     assert_eq!(actor.heap.live_count(), 0, "object should be freed after local+foreign counts hit zero");
 }
 
+/// Regression test: the VM `Drop` callback must honor ORCA foreign counts.
+/// An object another actor still references must be deferred, not freed.
+#[test]
+fn test_vm_drop_ref_defers_object_with_foreign_refs() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use crate::vm::ActorVmCallbacks;
+
+    let rt = Rc::new(RefCell::new(Runtime::new()));
+    let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
+    rt.borrow_mut().current_actor = Some(actor_id);
+
+    let mut cb = RuntimeVmCallbacks::new(rt.clone());
+    let ptr = cb.alloc(16, TypeTag::Raw).unwrap();
+
+    // Simulate an in-flight foreign reference held by another actor.
+    unsafe {
+        (*ActorHeap::header_of(ptr)).foreign_count.store(1, Ordering::Relaxed);
+    }
+
+    cb.drop_ref(ptr);
+    assert_eq!(
+        rt.borrow().actors.get(&actor_id).unwrap().heap.live_count(),
+        1,
+        "object with a live foreign reference must not be freed by Drop"
+    );
+
+    // Once the foreign reference goes away, the deferred pass reclaims it.
+    unsafe {
+        (*ActorHeap::header_of(ptr)).foreign_count.store(0, Ordering::Relaxed);
+    }
+    {
+        let mut rt_mut = rt.borrow_mut();
+        let actor = rt_mut.actors.get_mut(&actor_id).unwrap();
+        actor.orca_gc.process_deferred(&mut actor.heap);
+    }
+    assert_eq!(
+        rt.borrow().actors.get(&actor_id).unwrap().heap.live_count(),
+        0,
+        "deferred object should be freed once foreign_count returns to zero"
+    );
+}
+
+/// Regression test: `run_scheduler` must pump the ORCA GC on its own.
+/// A cross-actor reference whose local ref was dropped is reclaimed by the
+/// scheduler without the embedder calling `process_gc_ops` manually.
+#[test]
+fn test_run_scheduler_pumps_gc() {
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    rt.current_actor = Some(a);
+
+    let ptr = rt.actors.get_mut(&a).unwrap().heap.alloc(16, TypeTag::Raw).unwrap();
+    let v = Value::ptr(ptr);
+    rt.send_message_by_id(b, 0, &[v]);
+
+    // Sender drops its local reference while foreign_count is still 1: the
+    // object must be deferred, not freed.
+    {
+        let actor = rt.actors.get_mut(&a).unwrap();
+        unsafe { actor.orca_gc.drop_local_ref(&mut actor.heap, ptr); }
+        assert_eq!(actor.heap.live_count(), 1, "object should be deferred while foreign ref is live");
+    }
+
+    // Draining the scheduler must deliver the pending foreign-ref decrement
+    // and retry deferred frees — no explicit process_gc_ops() call.
+    rt.run_scheduler();
+
+    assert_eq!(
+        rt.actors.get(&a).unwrap().heap.live_count(),
+        0,
+        "run_scheduler should reclaim the object once the foreign ref op is delivered"
+    );
+}
+
 // ========================================================================
 // v0.8 Workflow Runtime Tests
 // ========================================================================
@@ -1396,6 +1638,7 @@ fn test_memory_store_append_read_saga_event() {
     );
 }
 
+#[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_append_read_new_workflow_events() {
     let mut store = SqliteStore::in_memory().unwrap();

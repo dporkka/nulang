@@ -203,6 +203,9 @@ impl CTypeArg for *const c_char {
         // SAFETY: we only borrow the pointer for the duration of the call.
         unsafe { value_to_cstr(&v) }
     }
+    // SAFETY: trait-impl signature is fixed; the pointer is a C string
+    // produced by the FFI call whose signature declared it as CType::CStr.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn to_value(self) -> Value {
         // SAFETY: `self` is a C string pointer.
         unsafe { cstr_to_value(self) }
@@ -442,9 +445,9 @@ mod tests {
 
     #[test]
     fn test_marshal_f64_roundtrip() {
-        let v = Value::float(3.14);
-        assert_eq!(value_to_f64(&v), Ok(3.14));
-        assert_eq!(f64_to_value(3.14).as_float(), Some(3.14));
+        let v = Value::float(2.5);
+        assert_eq!(value_to_f64(&v), Ok(2.5));
+        assert_eq!(f64_to_value(2.5).as_float(), Some(2.5));
     }
 
     #[test]

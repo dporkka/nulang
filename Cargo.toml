@@ -6,6 +6,22 @@ authors = ["David Porkka"]
 license = "Apache-2.0"
 description = "Nulang - Distributed Actor-Based Programming Language with AI Agent Support"
 
+[features]
+# All optional subsystems are on by default so `cargo build`/`cargo test`
+# behave exactly as before this feature set was introduced. Build with
+# `--no-default-features --features <subset>` for a leaner binary, e.g.
+# `cargo build --no-default-features --features sqlite` skips PyO3 and the
+# LSP server entirely.
+default = ["python", "sqlite", "lsp"]
+# Python interop (native-actor `perform Python.call(...)`). Fully isolated
+# to src/python/ — nothing else in the crate depends on it.
+python = ["dep:pyo3"]
+# SQLite-backed actor persistence (SqliteStore). MemoryStore and
+# JsonFileStore remain available without this feature.
+sqlite = ["dep:rusqlite"]
+# Language Server Protocol support (`nulang --lsp`).
+lsp = ["dep:tower-lsp"]
+
 [dependencies]
 # Memory & concurrency
 mimalloc = "0.1"
@@ -22,19 +38,19 @@ cranelift-module = "0.132"
 cranelift-native = "0.132"
 cranelift-frontend = "0.132"
 
-# LSP server
-tower-lsp = "0.20"
+# LSP server (optional, see [features])
+tower-lsp = { version = "0.20", optional = true }
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client for AI provider integrations
 reqwest = { version = "0.12", features = ["json"] }
 async-trait = "0.1"
 
-# Python interop (PyO3)
-pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"] }
+# Python interop (optional, see [features])
+pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"], optional = true }
 
-# SQLite persistence backend
-rusqlite = { version = "0.40", features = ["bundled"] }
+# SQLite persistence backend (optional, see [features])
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 
 # Native library loading
 libloading = "0.8"
