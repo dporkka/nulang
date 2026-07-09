@@ -1050,6 +1050,108 @@ fn test_closure_capture_retains_heap_object_across_drop() {
     );
 }
 
+/// Same regression as `test_closure_capture_retains_heap_object_across_drop`,
+/// but for `ArrStore`: storing a heap pointer into an array slot must retain
+/// it too, or a later `Drop` of the value's original binding would free it
+/// out from under the array — a latent use-after-free CapStore was already
+/// protected against but ArrStore wasn't.
+#[test]
+fn test_array_store_retains_heap_object_across_drop() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
+    use crate::vm::VM;
+
+    let rt = Rc::new(RefCell::new(Runtime::new()));
+    let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
+    rt.borrow_mut().current_actor = Some(actor_id);
+
+    let mut module = CodeModule::new("test_arrstore_retain");
+    let inner_len_idx = module.add_constant(Constant::Int(2));
+    let outer_len_idx = module.add_constant(Constant::Int(3));
+
+    // main:
+    //   0: ConstU 2 -> r1 (inner array length)
+    //   1: ArrAlloc r1 -> r2 (inner object, local ref_count starts at 1)
+    //   2: ConstU 3 -> r3 (outer array length)
+    //   3: ArrAlloc r3 -> r4 (outer array object)
+    //   4: Const0 -> r5 (index 0)
+    //   5: ArrStore r4[0] = r2 (must retain r2: ref_count -> 2)
+    //   6: Drop r2 (ref_count -> 1; must NOT free)
+    //   7: Halt
+    module.emit(Instruction::new3(OpCode::ConstU,
+        ((inner_len_idx >> 8) & 0xFF) as u8, (inner_len_idx & 0xFF) as u8, 1)); // 0
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 1, 2));                     // 1
+    module.emit(Instruction::new3(OpCode::ConstU,
+        ((outer_len_idx >> 8) & 0xFF) as u8, (outer_len_idx & 0xFF) as u8, 3)); // 2
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 3, 4));                     // 3
+    module.emit(Instruction::new1(OpCode::Const0, 5));                         // 4
+    module.emit(Instruction::new3(OpCode::ArrStore, 4, 5, 2));                 // 5
+    module.emit(Instruction::new1(OpCode::Drop, 2));                           // 6
+    module.emit(Instruction::new0(OpCode::Halt));                             // 7
+    module.entry_point = Some(0);
+
+    let mut vm = VM::new();
+    vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+    vm.load_module(module);
+    vm.run().unwrap();
+
+    let rt_ref = rt.borrow();
+    let actor = rt_ref.actors.get(&actor_id).unwrap();
+    assert_eq!(
+        actor.heap.live_count(),
+        2,
+        "object stored into an array slot must survive a Drop of the original local (both the inner and outer objects should remain live)"
+    );
+}
+
+/// Same regression as `test_array_store_retains_heap_object_across_drop`,
+/// but for `RecS`: storing a heap pointer into a record field must retain
+/// it too, mirroring CapStore/ArrStore.
+#[test]
+fn test_record_field_store_retains_heap_object_across_drop() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
+    use crate::vm::VM;
+
+    let rt = Rc::new(RefCell::new(Runtime::new()));
+    let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
+    rt.borrow_mut().current_actor = Some(actor_id);
+
+    let mut module = CodeModule::new("test_recs_retain");
+    let inner_len_idx = module.add_constant(Constant::Int(2));
+
+    // main:
+    //   0: ConstU 2 -> r1 (inner array length)
+    //   1: ArrAlloc r1 -> r2 (inner object, local ref_count starts at 1)
+    //   2: RecMk 1 slot -> r3 (record object)
+    //   3: RecS r3[field 0] = r2 (must retain r2: ref_count -> 2)
+    //   4: Drop r2 (ref_count -> 1; must NOT free)
+    //   5: Halt
+    module.emit(Instruction::new3(OpCode::ConstU,
+        ((inner_len_idx >> 8) & 0xFF) as u8, (inner_len_idx & 0xFF) as u8, 1)); // 0
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 1, 2));                     // 1
+    module.emit(Instruction::new2(OpCode::RecMk, 1, 3));                        // 2
+    module.emit(Instruction::new3(OpCode::RecS, 3, 0, 2));                     // 3
+    module.emit(Instruction::new1(OpCode::Drop, 2));                           // 4
+    module.emit(Instruction::new0(OpCode::Halt));                             // 5
+    module.entry_point = Some(0);
+
+    let mut vm = VM::new();
+    vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+    vm.load_module(module);
+    vm.run().unwrap();
+
+    let rt_ref = rt.borrow();
+    let actor = rt_ref.actors.get(&actor_id).unwrap();
+    assert_eq!(
+        actor.heap.live_count(),
+        2,
+        "object stored into a record field must survive a Drop of the original local (both the inner object and the record should remain live)"
+    );
+}
+
 #[test]
 fn test_vm_sconcat_uses_actor_heap() {
     use std::cell::RefCell;

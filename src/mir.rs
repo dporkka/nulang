@@ -115,8 +115,6 @@ pub enum Stmt {
     Assign { dst: LocalId, op: RValue },
     /// Store to a named record field (module-wide field id resolved by codegen).
     StoreFieldNamed { obj: LocalId, field: String, src: LocalId },
-    /// Store to a positional tuple slot.
-    StoreTupleSlot { obj: LocalId, slot: u8, src: LocalId },
     ArrayStore { arr: LocalId, idx: LocalId, src: LocalId },
     /// Install handler table `table` (index into `Function::handler_tables`).
     EnterHandle { table: usize },

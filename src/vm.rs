@@ -685,7 +685,21 @@ pub struct VM {
     /// exists today: a different actor's suspended frame or persisted state
     /// could still reference an existing env, so envs accumulate for the
     /// life of the process. Use `closure_env_count` to monitor growth.
+    ///
+    /// Scoping this per-actor (freed when the owning `Actor`/`ActorHeap` is
+    /// dropped, matching how per-actor heap memory is already reclaimed) is
+    /// NOT a safe fix without more work: closures are ordinary `Value`s with
+    /// no actor-boundary enforcement, so a closure created by one actor can
+    /// be sent to another via a message/spawn argument or stored into
+    /// shared/persisted state — if the originating actor terminated first,
+    /// the receiving actor would hold a dangling env index into a Vec that
+    /// no longer exists. `max_closure_envs` bounds the leak's blast radius
+    /// with an honest error instead, until real GC tracing lands.
     closure_envs: Vec<ClosureEnv>,
+    /// Ceiling on `closure_envs.len()`; defaults to `MAX_CLOSURE_ENVS`.
+    /// A field (not just the constant) so tests can shrink it instead of
+    /// actually allocating millions of envs to exercise the limit.
+    max_closure_envs: usize,
 }
 
 /// Captured environment of a closure: the lifted function it wraps plus the
@@ -700,6 +714,12 @@ struct ClosureEnv {
 /// `VM::closure_envs`) from immediate closures (payload = function index).
 const CLOSURE_ENV_FLAG: u64 = 0x0000_4000_0000_0000;
 const CLOSURE_ENV_IDX_MASK: u64 = CLOSURE_ENV_FLAG - 1;
+/// Hard ceiling on retained closure envs (see `VM::closure_envs`'s KNOWN
+/// LIMITATION). ~10M entries is generous — a legitimate program's live
+/// closure count shouldn't come close — while still bounding the leak to a
+/// fixed, predictable amount of memory instead of running unboundedly
+/// toward an uncontrolled OOM.
+const MAX_CLOSURE_ENVS: usize = 10_000_000;
 
 impl VM {
     /// Create a new VM.
@@ -719,7 +739,15 @@ impl VM {
             distributed_callbacks: None,
             actor_callbacks: Box::new(StandaloneVmCallbacks::new()),
             closure_envs: Vec::new(),
+            max_closure_envs: MAX_CLOSURE_ENVS,
         }
+    }
+
+    /// Override the closure-env ceiling. Exposed for testing the limit
+    /// without actually allocating `MAX_CLOSURE_ENVS` entries.
+    #[cfg(test)]
+    pub(crate) fn set_max_closure_envs_for_test(&mut self, n: usize) {
+        self.max_closure_envs = n;
     }
 
     /// Set the local node ID returned by the `NodeId` opcode.
@@ -1404,6 +1432,20 @@ impl VM {
                 let env_idx = if payload & CLOSURE_ENV_FLAG != 0 {
                     (payload & CLOSURE_ENV_IDX_MASK) as usize
                 } else {
+                    if self.closure_envs.len() >= self.max_closure_envs {
+                        // See the KNOWN LIMITATION on `closure_envs`: entries
+                        // are never reclaimed, so a long-running process that
+                        // keeps creating capturing closures accumulates them
+                        // without bound. Rather than let that run into an
+                        // uncontrolled OOM kill, fail cleanly once retained
+                        // envs cross a generous but finite ceiling — an
+                        // honest, catchable resource-exhaustion error instead
+                        // of silent unbounded growth.
+                        return Err(NuError::VMError(format!(
+                            "closure capture environments exceeded the {} limit; this process has been running long enough to accumulate unreclaimed closure envs (see VM::closure_envs)",
+                            self.max_closure_envs
+                        )));
+                    }
                     let idx = self.closure_envs.len();
                     self.closure_envs.push(ClosureEnv {
                         func_idx: payload as usize,
@@ -1622,6 +1664,13 @@ impl VM {
                 if !arr_ptr.is_null() {
                     if let Some(len) = self.actor_callbacks.array_len(arr_ptr) {
                         if idx < len {
+                            // Mirrors CapStore: a heap pointer stored into a
+                            // live container needs its own local reference,
+                            // so a later `Drop` of the value's original
+                            // binding can't free it out from under this array.
+                            if let Some(ptr) = val.as_ptr() {
+                                self.actor_callbacks.retain_ref(ptr);
+                            }
                             unsafe { *((arr_ptr as *mut Value).add(idx)) = val; }
                         }
                     }
@@ -1664,6 +1713,11 @@ impl VM {
                             let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
                             let len = payload_size / std::mem::size_of::<Value>();
                             if field_id < len {
+                                // Mirrors CapStore/ArrStore: retain a heap
+                                // pointer stored into a live record.
+                                if let Some(ptr) = val.as_ptr() {
+                                    self.actor_callbacks.retain_ref(ptr);
+                                }
                                 *((rec_ptr as *mut Value).add(field_id)) = val;
                             }
                         }
@@ -2815,6 +2869,33 @@ mod vm_tests {
         vm.load_module(module);
         let result = vm.run();
         assert!(result.is_err(), "CapLoad outside a closure call should error");
+    }
+
+    /// Regression test for the closure_envs leak's safety valve: once the
+    /// ceiling is reached, creating a new capturing closure must fail with
+    /// an honest error rather than growing `closure_envs` forever.
+    #[test]
+    fn test_closure_env_limit_is_an_honest_error_not_unbounded_growth() {
+        let mut module = CodeModule::new("test_capture_limit");
+        let c41_idx = module.add_constant(Constant::Int(41));
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c41_idx >> 8) & 0xFF) as u8, (c41_idx & 0xFF) as u8, 1));
+        module.emit(Instruction::new3(OpCode::Closure, 0, 0, 2));
+        module.emit(Instruction::new3(OpCode::CapStore, 2, 0, 1));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.function_table.push(module.current_offset());
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.set_max_closure_envs_for_test(0);
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(
+            result.is_err(),
+            "CapStore past the closure-env ceiling should be an honest error, not silently succeed"
+        );
+        assert_eq!(vm.closure_env_count(), 0, "no env should have been retained past the ceiling");
     }
 
     /// Test 17: NodeId returns the configured local node ID.

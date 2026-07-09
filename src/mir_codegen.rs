@@ -56,6 +56,12 @@ pub struct MirCodegen {
     /// Module-wide record field ids, mirroring the stable compiler's layout.
     field_map: HashMap<String, u8>,
     next_field_id: u8,
+    /// Constant-pool index of each `self.field` name already emitted for
+    /// `StateGet`/`StateSet`, so repeated access to the same field reuses
+    /// one constant instead of growing the pool with a fresh duplicate
+    /// string every time (unlike record fields, `state` is string-keyed at
+    /// runtime, not a positional slot `field_id` could cover).
+    state_field_constants: HashMap<String, usize>,
 }
 
 impl MirCodegen {
@@ -64,7 +70,19 @@ impl MirCodegen {
             module: CodeModule::new(module_name),
             field_map: HashMap::new(),
             next_field_id: 0,
+            state_field_constants: HashMap::new(),
         }
+    }
+
+    /// Constant-pool index for a `self.field` name, reusing an existing
+    /// entry if this field was already referenced elsewhere in the module.
+    fn state_field_constant(&mut self, field: &str) -> usize {
+        if let Some(&idx) = self.state_field_constants.get(field) {
+            return idx;
+        }
+        let idx = self.module.add_constant(Constant::String(field.to_string()));
+        self.state_field_constants.insert(field.to_string(), idx);
+        idx
     }
 
     pub fn compile_module(&mut self, mir: &mir::Module) -> NuResult<&CodeModule> {
@@ -318,11 +336,8 @@ impl MirCodegen {
                 self.compile_rvalue(reg_of(*dst), op)?;
             }
             mir::Stmt::StoreFieldNamed { obj, field, src } => {
-                let fid = self.field_id(field);
+                let fid = self.field_id(field)?;
                 self.emit(Instruction::new3(OpCode::RecS, reg_of(*obj), fid, reg_of(*src)));
-            }
-            mir::Stmt::StoreTupleSlot { obj, slot, src } => {
-                self.emit(Instruction::new3(OpCode::FieldS, reg_of(*obj), *slot, reg_of(*src)));
             }
             mir::Stmt::ArrayStore { arr, idx, src } => {
                 self.emit(Instruction::new3(
@@ -344,7 +359,7 @@ impl MirCodegen {
                 self.emit(Instruction::new0(OpCode::Unwind));
             }
             mir::Stmt::StateSet { field, src } => {
-                let field_idx = self.module.add_constant(Constant::String(field.clone()));
+                let field_idx = self.state_field_constant(field);
                 self.emit(Instruction::new3(
                     OpCode::StateSet,
                     ((field_idx >> 8) & 0xFF) as u8,
@@ -396,7 +411,7 @@ impl MirCodegen {
                 }
             }
             mir::RValue::LoadFieldNamed { obj, field } => {
-                let fid = self.field_id(field);
+                let fid = self.field_id(field)?;
                 self.emit(Instruction::new3(OpCode::RecL, reg_of(*obj), fid, dst));
             }
             mir::RValue::ArrayLoad { arr, idx } => {
@@ -488,14 +503,15 @@ impl MirCodegen {
                 // Stable-compiler layout: records are flat arrays indexed by
                 // module-wide field ids; slot count covers the largest id.
                 let mut max_field_id: u8 = 0;
+                let mut field_ids = Vec::with_capacity(fields.len());
                 for (name, _) in fields {
-                    let fid = self.field_id(name);
+                    let fid = self.field_id(name)?;
                     max_field_id = max_field_id.max(fid);
+                    field_ids.push(fid);
                 }
                 let slot_count = max_field_id.saturating_add(1);
                 self.emit(Instruction::new2(OpCode::RecMk, slot_count, dst));
-                for (name, e) in fields {
-                    let fid = self.field_id(name);
+                for ((_, e), fid) in fields.iter().zip(field_ids) {
                     self.emit(Instruction::new3(OpCode::RecS, dst, fid, reg_of(*e)));
                 }
             }
@@ -560,7 +576,7 @@ impl MirCodegen {
                 self.emit(Instruction::new1(OpCode::Const1, dst)); // true
             }
             mir::RValue::StateGet { field } => {
-                let field_idx = self.module.add_constant(Constant::String(field.clone()));
+                let field_idx = self.state_field_constant(field);
                 self.emit(Instruction::new3(
                     OpCode::StateGet,
                     ((field_idx >> 8) & 0xFF) as u8,
@@ -696,14 +712,25 @@ impl MirCodegen {
         Ok(())
     }
 
-    fn field_id(&mut self, name: &str) -> u8 {
+    fn field_id(&mut self, name: &str) -> NuResult<u8> {
         if let Some(&id) = self.field_map.get(name) {
-            return id;
+            return Ok(id);
+        }
+        if self.field_map.len() >= u8::MAX as usize + 1 {
+            // Mirrors the stable compiler's field_id: the 256th distinct
+            // field name has no free id left (a single byte encodes it), so
+            // this is an honest error instead of silently aliasing two
+            // unrelated fields onto the same slot.
+            return Err(compile_err(format!(
+                "module has more than {} distinct record/tuple field names (limit for the current u8 field-id encoding); '{}' has no id left to assign",
+                u8::MAX as usize + 1,
+                name
+            )));
         }
         let id = self.next_field_id;
         self.next_field_id = self.next_field_id.saturating_add(1);
         self.field_map.insert(name.to_string(), id);
-        id
+        Ok(id)
     }
 
     fn load_constant(&mut self, dst: u8, c: &Constant) {
@@ -892,6 +919,28 @@ mod tests {
     }
 
     #[test]
+    fn test_mir_codegen_field_id_errors_past_256_distinct_field_names() {
+        // Mirrors the same regression in the stable compiler: the 257th
+        // distinct record field name has no free u8 id, and must be an
+        // honest error rather than silently aliasing onto an existing id.
+        //
+        // Each field name lives in its own top-level function's own tiny
+        // record literal, not a single 257-field record — a single record
+        // (or a chain of 257 `let`s) hits MIR's unrelated per-function local
+        // count cap first, which would mask the field_id check this test is
+        // actually targeting.
+        let fns: Vec<String> = (0..257)
+            .map(|i| format!("fn g{i}() -> Int {{ {{ f{i}: {i} }}.f{i} }}"))
+            .collect();
+        let source = format!("{}\ng0()", fns.join("\n"));
+        let result = compile_mir_source(&source);
+        assert!(
+            result.is_err(),
+            "the 257th distinct field name should be an honest error, not silent aliasing"
+        );
+    }
+
+    #[test]
     fn test_mir_codegen_effect_handler() {
         let value = run_mir_source(
             "handle perform Math.getAnswer() { | Math.getAnswer() => 42 }",
@@ -912,6 +961,27 @@ mod tests {
         )
         .unwrap();
         assert!(value.as_actor_id().is_some(), "spawn should yield an actor reference");
+    }
+
+    #[test]
+    fn test_mir_codegen_state_field_access_reuses_one_constant() {
+        // Every `self.x` read/write used to add a fresh, duplicate string
+        // constant to the module's constant pool. A behavior referencing the
+        // same field several times should only cost one "x" constant.
+        let module = compile_mir_source(
+            "actor A { state x = 0 behavior bump() { (self.x = self.x + 1, self.x = self.x + 1, self.x) } }\nspawn A { x = 0 }",
+        )
+        .unwrap();
+        let x_constants = module
+            .constants
+            .iter()
+            .filter(|c| matches!(c, crate::bytecode::Constant::String(s) if s == "x"))
+            .count();
+        assert_eq!(
+            x_constants, 1,
+            "repeated self.x access should reuse one constant-pool entry, found {}",
+            x_constants
+        );
     }
 
     #[test]

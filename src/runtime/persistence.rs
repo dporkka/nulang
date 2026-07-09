@@ -489,14 +489,31 @@ impl PersistenceStore for JsonFileStore {
     }
 }
 
-/// Acquire a mutex, recovering the guard even if a previous holder panicked.
+/// Acquire the connection mutex, recovering the guard even if a previous
+/// holder panicked.
 ///
 /// A panic in one thread holding the connection lock must not cascade
-/// panics into every other thread that touches the store; the SQLite
-/// connection stays usable across panics, so poisoning is ignored.
+/// panics into every other thread that touches the store, so poisoning is
+/// ignored rather than propagated. But a panic could in principle occur
+/// between `tx.execute` and `tx.commit()` in `save_snapshot`, leaving a
+/// transaction open on the connection; recovering the guard alone doesn't
+/// undo that. `rusqlite::Transaction`'s own `Drop` impl already issues a
+/// `ROLLBACK` when a transaction is dropped without `commit()` (including
+/// during unwind), so this is normally already safe — but as defense in
+/// depth against any transaction that manages to outlive its `Transaction`
+/// handle (e.g. a future bug that leaks one across a panic boundary), issue
+/// a best-effort `ROLLBACK` whenever we actually recover from poisoning, so
+/// the connection can't be left mid-transaction for whoever locks it next.
 #[cfg(feature = "sqlite")]
-fn lock_ignore_poison<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+fn lock_ignore_poison(m: &std::sync::Mutex<rusqlite::Connection>) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+    match m.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let guard = poisoned.into_inner();
+            let _ = guard.execute_batch("ROLLBACK");
+            guard
+        }
+    }
 }
 
 /// SQLite-backed persistence store.
@@ -725,5 +742,45 @@ impl PersistenceStore for SqliteStore {
         conn.execute("DELETE FROM workflow_events WHERE actor_id = ?1", [actor_id as i64])
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+
+    /// Regression test: recovering a poisoned connection lock must also
+    /// clean up any transaction a panicking holder left open, or the very
+    /// next `save_snapshot`'s `conn.transaction()` fails with "cannot start
+    /// a transaction within a transaction" instead of the lock recovery
+    /// being transparent to callers.
+    #[test]
+    fn test_lock_ignore_poison_rolls_back_dangling_transaction() {
+        let store = SqliteStore::in_memory().unwrap();
+
+        // Poison the mutex while a transaction is left open on the
+        // connection (simulating a panic between `tx.execute` and
+        // `tx.commit()`), bypassing `Transaction`'s own rollback-on-drop by
+        // never constructing a `Transaction` value at all.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let conn = store.conn.lock().unwrap();
+            conn.execute_batch("BEGIN").unwrap();
+            panic!("simulated panic mid-transaction");
+        }));
+        assert!(result.is_err(), "the panic should have propagated");
+        assert!(store.conn.is_poisoned(), "the mutex should now be poisoned");
+
+        // Recovering the lock must leave the connection usable: a fresh
+        // transaction must be startable, not blocked by the dangling BEGIN.
+        let conn = lock_ignore_poison(&store.conn);
+        conn.execute_batch("BEGIN").unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+    }
+
+    #[test]
+    fn test_lock_ignore_poison_returns_normally_when_not_poisoned() {
+        let store = SqliteStore::in_memory().unwrap();
+        let conn = lock_ignore_poison(&store.conn);
+        conn.execute_batch("SELECT 1").unwrap();
     }
 }

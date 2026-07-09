@@ -1077,19 +1077,16 @@ impl Compiler {
         // laid out as a flat array indexed by these ids, so field access does not
         // need to know the concrete record literal that created the value.
         let mut max_field_id: u8 = 0;
+        let mut field_ids = Vec::with_capacity(fields.len());
         for (name, _) in fields.iter() {
-            if !self.field_map.contains_key(name) {
-                let id = self.next_field_id;
-                self.next_field_id = self.next_field_id.saturating_add(1);
-                self.field_map.insert(name.clone(), id);
-            }
-            max_field_id = max_field_id.max(self.field_map[name]);
+            let id = self.field_id(name)?;
+            max_field_id = max_field_id.max(id);
+            field_ids.push(id);
         }
         let slot_count = max_field_id.saturating_add(1);
         let dst = self.alloc_reg();
         self.emit(Instruction::new2(OpCode::RecMk, slot_count, dst));
-        for (i, (name, _)) in fields.iter().enumerate() {
-            let field_id = self.field_map[name];
+        for (i, field_id) in field_ids.into_iter().enumerate() {
             self.emit(Instruction::new3(OpCode::RecS, dst, field_id, field_regs[i]));
         }
         Ok(dst)
@@ -1113,7 +1110,7 @@ impl Compiler {
         let obj_reg = self.compile_expr(expr)?;
         let dst = self.alloc_reg();
         // Field access is positional, keyed by the module-wide field id.
-        let field_id = self.field_id(field);
+        let field_id = self.field_id(field)?;
         self.emit(Instruction::new3(OpCode::RecL, obj_reg, field_id, dst));
         Ok(dst)
     }
@@ -1430,7 +1427,7 @@ impl Compiler {
             // positional field id, same layout compile_field_access reads.
             Expr::FieldAccess { expr, field, .. } => {
                 let obj_reg = self.compile_expr(expr)?;
-                let field_id = self.field_id(field);
+                let field_id = self.field_id(field)?;
                 self.emit(Instruction::new3(OpCode::RecS, obj_reg, field_id, val_reg));
                 Ok(val_reg)
             }
@@ -2339,13 +2336,26 @@ impl Compiler {
     /// Look up (or assign) the module-wide positional id for a record field
     /// name. Field access is positional, keyed by these ids, so every read
     /// and write of a given field name must resolve to the same slot.
-    fn field_id(&mut self, field: &str) -> u8 {
-        self.field_map.get(field).copied().unwrap_or_else(|| {
-            let id = self.next_field_id;
-            self.next_field_id = self.next_field_id.saturating_add(1);
-            self.field_map.insert(field.to_string(), id);
-            id
-        })
+    fn field_id(&mut self, field: &str) -> NuResult<u8> {
+        if let Some(&id) = self.field_map.get(field) {
+            return Ok(id);
+        }
+        if self.field_map.len() >= u8::MAX as usize + 1 {
+            // The 256th distinct field name has no free id: field ids are a
+            // single byte, so this module needs a wider encoding. Erroring
+            // here is the honest outcome — silently reusing an existing id
+            // (the old `saturating_add` behavior) would alias two unrelated
+            // fields onto the same slot, corrupting whichever one loses.
+            return Err(NuError::VMError(format!(
+                "module has more than {} distinct record/tuple field names (limit for the current u8 field-id encoding); '{}' has no id left to assign",
+                u8::MAX as usize + 1,
+                field
+            )));
+        }
+        let id = self.next_field_id;
+        self.next_field_id = self.next_field_id.saturating_add(1);
+        self.field_map.insert(field.to_string(), id);
+        Ok(id)
     }
 
     // ===================================================================
@@ -2515,6 +2525,33 @@ mod tests {
         assert_eq!(module.actor_metadata.len(), 1);
         let meta = &module.actor_metadata[0];
         assert_eq!(meta.behavior_indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_field_id_errors_past_256_distinct_field_names_instead_of_aliasing() {
+        // 256 distinct field names fit exactly in the u8 id encoding; the
+        // 257th must be an honest compile error, not a silently reused id
+        // that aliases two unrelated fields onto the same record slot.
+        //
+        // Each field name lives in its own top-level function's own tiny
+        // record literal (not a single 257-field record, and not `let`
+        // bindings) so this only exercises field_id's cumulative,
+        // module-wide id allocation — not the unrelated, much lower
+        // per-function/per-module register caps (~240 temporaries per
+        // function, ~14 `let` bindings per module).
+        let fns: Vec<String> = (0..257)
+            .map(|i| format!("fn g{i}() -> Int {{ {{ f{i}: {i} }}.f{i} }}"))
+            .collect();
+        let source = format!("{}\ng0()", fns.join("\n"));
+
+        let tokens = Lexer::new(&source).lex().unwrap();
+        let ast = Parser::new(tokens).parse_module().unwrap();
+        let mut compiler = Compiler::new("test");
+        let result = compiler.compile_module(&ast);
+        assert!(
+            result.is_err(),
+            "the 257th distinct field name should be an honest error, not silent aliasing"
+        );
     }
 
     #[test]
