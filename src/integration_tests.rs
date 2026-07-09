@@ -1866,9 +1866,9 @@ mod tests {
 
         let result = vm.run().unwrap();
 
-        // The usage behavior returns an array [prompt_tokens, completion_tokens, cost].
-        // Records and tuples are not yet supported by the interpreter, so the
-        // actor-allocated array is inspected directly in Rust.
+        // The usage behavior returns an array [prompt_tokens, completion_tokens, cost]
+        // (see compile_agent's usage_behavior); inspect the actor-allocated
+        // array directly.
         let ptr = result
             .as_ptr()
             .expect("usage() should return an array pointer");

@@ -50,7 +50,7 @@
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) (stable channel, 1.95+)
-- Python 3 development headers (for the PyO3 interop module)
+- Python 3 development headers, for the default build (see [Feature flags](#feature-flags) to skip this)
 - Linux or macOS (Windows support planned)
 
 ### Building
@@ -59,6 +59,26 @@
 git clone https://github.com/dporkka/nulang.git
 cd nulang
 cargo build --release
+```
+
+### Feature flags
+
+Three optional subsystems are on by default so a plain `cargo build` behaves
+as before this flag set existed. Build without them for a leaner binary and
+fewer system dependencies:
+
+| Feature | Enables | Off by default? |
+|---------|---------|------------------|
+| `python` | Python interop (`perform Python.call(...)`) via PyO3 | No — needs Python 3 dev headers |
+| `sqlite` | `SqliteStore` actor persistence backend | No — `MemoryStore`/`JsonFileStore` always available |
+| `lsp` | `nulang --lsp` Language Server | No |
+
+```bash
+# Skip PyO3, SQLite, and the LSP server entirely:
+cargo build --release --no-default-features
+
+# Pick just what you need:
+cargo build --release --no-default-features --features sqlite
 ```
 
 ### Running Tests

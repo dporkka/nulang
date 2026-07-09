@@ -1909,10 +1909,10 @@ impl Compiler {
             span,
         };
 
-        // Generated usage behavior returns cumulative usage/cost state as an
-        // array [prompt_tokens, completion_tokens, cost]. Records and tuples
-        // are not yet supported by the bytecode interpreter, so an array is the
-        // portable composite value available today.
+        // Generated usage behavior returns cumulative usage/cost state as a
+        // plain array [prompt_tokens, completion_tokens, cost] — a stable,
+        // positional format for host code (e.g. integration tests) to parse
+        // without depending on the record field-id allocator's ordering.
         let usage_behavior = Behavior {
             name: "usage".to_string(),
             params: vec![],
