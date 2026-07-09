@@ -315,6 +315,21 @@ impl Compiler {
             Expr::FieldAccess { expr, field, .. } => self.compile_field_access(expr, field),
             Expr::Array(elems, _) => self.compile_array(elems),
             Expr::Index { arr, idx, .. } => self.compile_index(arr, idx),
+            // Only a bare `ident = v` is parsed as Expr::Assign; every other
+            // assignment target (`self.f = v`, `arr[i] = v`, `record.f = v`)
+            // is an ordinary-looking BinOp::Assign — route both through the
+            // same place-based compile_assign instead of compile_binary's
+            // generic value-reading prologue, which would read the target's
+            // CURRENT value instead of computing a place to write to.
+            // Only a bare `ident = v` is parsed as Expr::Assign; every other
+            // assignment target (`self.f = v`, `arr[i] = v`, `record.f = v`)
+            // is an ordinary-looking BinOp::Assign — route both through the
+            // same place-based compile_assign instead of compile_binary's
+            // generic value-reading prologue, which would read the target's
+            // CURRENT value instead of computing a place to write to.
+            Expr::Binary { op: BinOp::Assign, left, right, .. } => {
+                self.compile_assign(left, right)
+            }
             Expr::Binary { op, left, right, .. } => self.compile_binary(*op, left, right),
             Expr::Unary { op, expr, .. } => self.compile_unary(*op, expr),
             Expr::Spawn { actor_type, init, .. } => self.compile_spawn(actor_type, init),
@@ -1010,24 +1025,11 @@ impl Compiler {
             BinOp::BitXor => { self.emit(Instruction::new3(OpCode::Xor, r1_save, r2, dst)); }
             BinOp::Shl => { self.emit(Instruction::new3(OpCode::Shl, r1_save, r2, dst)); }
             BinOp::Shr => { self.emit(Instruction::new3(OpCode::Shr, r1_save, r2, dst)); }
-            BinOp::Assign => {
-                // Assignment to `self.field` writes actor state rather than a local register.
-                let is_self_field = matches!(left, Expr::FieldAccess { expr, .. }
-                    if matches!(expr.as_ref(), Expr::SelfRef(_))
-                        || matches!(expr.as_ref(), Expr::Var(name, _) if name == "self"));
-                if is_self_field {
-                    if let Expr::FieldAccess { field, .. } = left {
-                        let field_idx = self.add_const(Constant::String(field.to_string()));
-                        self.emit(Instruction::new3(OpCode::StateSet,
-                            ((field_idx >> 8) & 0xFF) as u8,
-                            (field_idx & 0xFF) as u8,
-                            r2));
-                    }
-                } else {
-                    self.emit(Instruction::new2(OpCode::Store, r2, r1_save));
-                }
-                self.emit(Instruction::new2(OpCode::Move, r2, dst));
-            }
+            // BinOp::Assign is intercepted in compile_expr's Expr::Binary
+            // dispatch and never reaches compile_binary (see the comment
+            // there): assignment targets need a *place*, not a value, and
+            // this function's prologue always reads `left` as a value.
+            BinOp::Assign => unreachable!("BinOp::Assign is handled by compile_assign"),
             BinOp::Pipe => {
                 self.emit(Instruction::new2(OpCode::Move, r1_save, dst));
             }
@@ -1111,15 +1113,7 @@ impl Compiler {
         let obj_reg = self.compile_expr(expr)?;
         let dst = self.alloc_reg();
         // Field access is positional, keyed by the module-wide field id.
-        let field_id = self.field_map.get(field).copied().unwrap_or_else(|| {
-            // Field name has not been seen in any record literal yet.  Assign a
-            // fresh id so that future record literals using this name share the
-            // same slot.  Accessing such a field will yield nil until then.
-            let id = self.next_field_id;
-            self.next_field_id = self.next_field_id.saturating_add(1);
-            self.field_map.insert(field.to_string(), id);
-            id
-        });
+        let field_id = self.field_id(field);
         self.emit(Instruction::new3(OpCode::RecL, obj_reg, field_id, dst));
         Ok(dst)
     }
@@ -1432,11 +1426,25 @@ impl Compiler {
                     val_reg));
                 Ok(val_reg)
             }
-            _ => {
-                let target_reg = self.compile_expr(target)?;
-                self.emit(Instruction::new2(OpCode::Store, val_reg, target_reg));
+            // `record.field = value` (non-self): write via the module-wide
+            // positional field id, same layout compile_field_access reads.
+            Expr::FieldAccess { expr, field, .. } => {
+                let obj_reg = self.compile_expr(expr)?;
+                let field_id = self.field_id(field);
+                self.emit(Instruction::new3(OpCode::RecS, obj_reg, field_id, val_reg));
                 Ok(val_reg)
             }
+            // `arr[idx] = value`.
+            Expr::Index { arr, idx, .. } => {
+                let arr_reg = self.compile_expr(arr)?;
+                let idx_reg = self.compile_expr(idx)?;
+                self.emit(Instruction::new3(OpCode::ArrStore, arr_reg, idx_reg, val_reg));
+                Ok(val_reg)
+            }
+            _ => Err(NuError::VMError(format!(
+                "cannot assign to this expression: {:?}",
+                target
+            ))),
         }
     }
 
@@ -2327,6 +2335,18 @@ impl Compiler {
     fn emit(&mut self, instr: Instruction) -> usize { self.module.emit(instr) }
     fn add_const(&mut self, c: Constant) -> usize { self.module.add_constant(c) }
     fn current_offset(&self) -> usize { self.module.current_offset() }
+
+    /// Look up (or assign) the module-wide positional id for a record field
+    /// name. Field access is positional, keyed by these ids, so every read
+    /// and write of a given field name must resolve to the same slot.
+    fn field_id(&mut self, field: &str) -> u8 {
+        self.field_map.get(field).copied().unwrap_or_else(|| {
+            let id = self.next_field_id;
+            self.next_field_id = self.next_field_id.saturating_add(1);
+            self.field_map.insert(field.to_string(), id);
+            id
+        })
+    }
 
     // ===================================================================
     // Python Interop Bytecode Emission

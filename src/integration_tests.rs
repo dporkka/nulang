@@ -890,27 +890,24 @@ mod tests {
         assert_eq!(value.as_int(), Some(30), "ask add(10, 20) should return 30");
     }
 
-    /// KNOWN BUG in the stable/legacy compiler, discovered while adding actor
-    /// support to the HIR/MIR pipeline (not fixed here — separate scope from
-    /// actor lowering, needs its own careful fix + regression pass across the
-    /// legacy backend). `compile_binary`'s BinOp::Assign case only special-
-    /// cases `self.field = v`; every other assignment target (array index,
-    /// non-self record field, ...) falls through to `compile_expr(left)`
-    /// (reading the CURRENT value) followed by `OpCode::Store`, which is a
-    /// plain register-to-register copy (see vm.rs's `Load | Store | Move |
-    /// Dup` handler) — it never writes back to the array/record at all. The
-    /// assignment silently has no effect. The HIR/MIR pipeline does not have
-    /// this bug (see mir_codegen::tests::test_mir_codegen_index_and_field_assign).
-    /// This test pins the CURRENT (buggy) behavior so a future fix is a
-    /// deliberate, visible change to this assertion, not a silent flip.
+    /// Regression test for a silent-data-loss bug found while adding actor
+    /// support to the HIR/MIR pipeline: `compile_binary`'s BinOp::Assign case
+    /// only special-cased `self.field = v`; every other assignment target
+    /// (array index, non-self record field) fell through to
+    /// `compile_expr(left)` (reading the CURRENT value) followed by
+    /// `OpCode::Store`, a plain register-to-register copy — the assignment
+    /// never reached the array/record at all. Fixed by intercepting
+    /// BinOp::Assign in compile_expr's dispatch and routing it through
+    /// compile_assign, which computes a place (object + field id, or array +
+    /// index) instead of reading a value.
     #[test]
-    fn test_legacy_non_self_assign_is_a_known_noop_bug() {
+    fn test_legacy_index_and_field_assign() {
         let (value, _ty) = run_source("let arr = [1, 2, 3] in { arr[0] = 99 arr[0] }").unwrap();
-        assert_eq!(
-            value.as_int(),
-            Some(1),
-            "documents the bug: arr[0] = 99 should mutate to 99 but currently doesn't"
-        );
+        assert_eq!(value.as_int(), Some(99), "arr[0] = 99 should actually mutate the array");
+
+        let (value, _ty) =
+            run_source("let r = { x: 1, y: 2 } in { r.x = 99 r.x + r.y }").unwrap();
+        assert_eq!(value.as_int(), Some(101), "r.x = 99 should actually mutate the record");
     }
 
     #[test]
@@ -1831,6 +1828,11 @@ mod tests {
             "[10, 20, 30][1]",
             "let arr = [10, 20, 30] in arr[0] + arr[2]",
             "let r = { x: 1, y: 41 } in r.x + r.y",
+            // Mutation via `=`: `arr[i] = v` and `record.f = v` parse as
+            // BinOp::Assign binary expressions (only a bare `ident = v`
+            // parses as the distinct Expr::Assign node).
+            "let arr = [1, 2, 3] in { arr[0] = 99 arr[0] }",
+            "let r = { x: 1, y: 2 } in { r.x = 99 r.x + r.y }",
             // For loops evaluate to unit
             "for i in [1, 2, 3] { i }",
             // Effect handlers, with and without a resumed value
