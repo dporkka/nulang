@@ -127,6 +127,23 @@ impl MirCodegen {
                 parallel_branches: None,
             });
         }
+        // Saga compensation: patch each step's compensate_offset from its
+        // already-compiled compensation function's code offset. Both
+        // indices are into module.behaviors (see mir::Module::compensation_of).
+        for (behavior_idx, comp_idx) in &mir.compensation_of {
+            let comp_offset = self
+                .module
+                .behaviors
+                .get(*comp_idx)
+                .map(|b| b.code_offset)
+                .ok_or_else(|| compile_err("internal: compensation behavior index out of range"))?;
+            let entry = self
+                .module
+                .behaviors
+                .get_mut(*behavior_idx)
+                .ok_or_else(|| compile_err("internal: compensated behavior index out of range"))?;
+            entry.compensate_offset = Some(comp_offset);
+        }
         self.module.actor_metadata = mir.actor_metadata.clone();
 
         // Entry prologue: call __main (if present) and halt.
@@ -829,22 +846,34 @@ mod tests {
     }
 
     #[test]
-    fn test_mir_codegen_workflow_agent_still_honest_nyi() {
-        // Workflow/agent desugaring is a separate, larger effort (they
-        // synthesize additional actor behaviors at compile time) and stays
-        // out of the MIR pipeline's scope for now.
+    fn test_mir_codegen_plain_workflow_and_agent_compile() {
+        // Sequential workflows and tool-less agents desugar to actors and
+        // compile like any other actor declaration.
         let result = compile_mir_source("workflow W { step a { 1 } }");
+        assert!(result.is_ok(), "plain sequential workflow should compile: {:?}", result);
+
+        let result = compile_mir_source(r#"agent Ag = { model: "gpt-4o" }"#);
+        assert!(result.is_ok(), "tool-less agent should compile: {:?}", result);
+    }
+
+    #[test]
+    fn test_mir_codegen_parallel_workflow_and_tooled_agent_still_honest_nyi() {
+        // Parallel-branch synthesis and @tool schema resolution are not yet
+        // ported; both fall back honestly rather than compiling incorrectly.
+        let result = compile_mir_source(
+            "workflow W { parallel { step a { 1 } step b { 2 } } }",
+        );
         assert!(
             matches!(result, Err(NuError::NotYetImplemented { .. })),
-            "workflow must be an honest NotYetImplemented, got {:?}",
+            "parallel workflow must be an honest NotYetImplemented, got {:?}",
             result
         );
         let result = compile_mir_source(
-            r#"agent Ag = { model: "gpt-4o" }"#,
+            r#"agent Ag = { model: "gpt-4o", tools: [search] }"#,
         );
         assert!(
             matches!(result, Err(NuError::NotYetImplemented { .. })),
-            "agent must be an honest NotYetImplemented, got {:?}",
+            "agent with tools must be an honest NotYetImplemented, got {:?}",
             result
         );
     }

@@ -1624,6 +1624,20 @@ mod tests {
         assert_eq!(value.as_int(), Some(expected), "new pipeline expected integer for: {}", source);
     }
 
+    /// Compile source through the HIR/MIR pipeline into a CodeModule without
+    /// running it, for structural assertions (actor_metadata, behaviors).
+    fn compile_source_new(source: &str) -> Result<crate::bytecode::CodeModule, NuError> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module()?;
+        let mut type_checker = TypeChecker::new();
+        let _ = type_checker.check_module(&ast)?;
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir)?;
+        crate::mir_codegen::compile_mir(&mir, "test")
+    }
+
     /// Compile and run `source` through the HIR/MIR pipeline with a real
     /// Runtime attached, exercising actual actor semantics (state, ask)
     /// rather than the no-op stubs a bare VM falls back to.
@@ -1741,6 +1755,199 @@ mod tests {
             let mir = run_source_new_with_runtime(src, mir_rt)
                 .map(|v| v.to_string_repr())
                 .unwrap_or_else(|e| panic!("MIR pipeline failed on {:?}: {}", src, e));
+            assert_eq!(legacy, mir, "pipelines disagree on {:?}", src);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Workflow/agent desugaring via the HIR/MIR pipeline
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mir_workflow_lowers_to_persistent_actor() {
+        let source = "workflow PurchaseOrder { step validate { 1 } }";
+        let module = compile_source_new(source).unwrap();
+
+        let meta = module
+            .actor_metadata
+            .iter()
+            .find(|m| m.name == "PurchaseOrder")
+            .expect("workflow should produce actor metadata");
+        assert!(meta.is_workflow, "workflow metadata should be flagged");
+        assert!(meta.persistent, "workflows should be persistent actors");
+        assert_eq!(meta.behavior_indices.len(), 1, "one behavior per step");
+
+        let behavior = &module.behaviors[meta.behavior_indices[0]];
+        assert_eq!(behavior.name, "PurchaseOrder.validate");
+    }
+
+    /// Same source and assertions as
+    /// test_saga_compensation_runs_in_reverse_order (legacy pipeline), run
+    /// through the HIR/MIR pipeline instead. The runtime's saga-compensation
+    /// machinery (invoked automatically when a step's execution fails, via
+    /// BehaviorTableEntry::compensate_offset) is pipeline-agnostic, so this
+    /// exercises mir_codegen's compensation_of patching end to end.
+    #[test]
+    fn test_mir_saga_compensation_runs_in_reverse_order() {
+        let source = r#"
+            workflow SagaTest {
+                step a {
+                    (self.step_index = self.step_index + 1, self.a_done = 1, emit A_Done())
+                } compensate {
+                    self.comp_order = self.comp_order * 10 + 1
+                }
+                step b {
+                    (self.step_index = self.step_index + 1, self.b_done = 1, emit B_Done())
+                } compensate {
+                    self.comp_order = self.comp_order * 10 + 2
+                }
+                step c {
+                    perform Fail.now()
+                }
+            }
+            let c = spawn SagaTest {} in { c }
+        "#;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return actor reference");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 1, &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message_by_id(actor_id, 2, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(actor.get_state_field("a_done").and_then(|v| v.as_int()), Some(1));
+        assert_eq!(actor.get_state_field("b_done").and_then(|v| v.as_int()), Some(1));
+        assert_eq!(
+            actor.get_state_field("comp_order").and_then(|v| v.as_int()),
+            Some(21),
+            "compensations should run in reverse order (b then a)"
+        );
+    }
+
+    /// Same source and assertions as test_agent_ask_uses_memory (legacy
+    /// pipeline), run through the HIR/MIR pipeline instead.
+    #[test]
+    fn test_mir_agent_ask_uses_memory() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                memory: { max_turns: 10 }
+            }
+            let a = spawn Agent {} in
+            let r1 = ask a ask("hello") in
+            let r2 = ask a ask("world") in
+            r1
+        "#;
+        let module = compile_source_new(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let client = crate::ai::MockLlmClient::text("world");
+        rt.borrow_mut().set_llm_client(Box::new(client.clone()));
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt)));
+
+        let result = vm.run().unwrap();
+
+        let calls = client.recorded_calls();
+        assert_eq!(calls.len(), 2, "expected two LLM calls");
+
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.value_to_string(module_idx, result);
+        assert_eq!(content, "world");
+
+        assert_eq!(calls[0].messages.len(), 2);
+        assert_eq!(calls[0].messages[1].content, "hello");
+        assert_eq!(calls[1].messages.len(), 4);
+        assert_eq!(calls[1].messages[2].content, "world");
+    }
+
+    /// Regression test for ActorMeta.is_agent/semantic_memory_dimensions:
+    /// unlike `ask`/`usage` (ordinary compiled bytecode behaviors),
+    /// `store_fact`/`recall` are placeholder bodies the RUNTIME intercepts
+    /// by name, gated on `actor_is_agent(actor_id)` — which reads
+    /// `Actor.is_agent`, itself set from `ActorMeta.is_agent` at spawn time.
+    /// If mir_lower.rs ever went back to hardcoding is_agent/
+    /// semantic_memory_dimensions instead of reading them off the desugared
+    /// hir::ActorDef, this interception would silently stop firing and the
+    /// placeholder `Unit` body would run instead — same source and
+    /// assertions as test_agent_semantic_memory_store_and_recall.
+    #[test]
+    fn test_mir_agent_semantic_memory_store_and_recall() {
+        let source = r#"
+            agent Agent = {
+                model: "mock-model",
+                system_prompt: "You are helpful.",
+                semantic_memory: { dimensions: 32 }
+            }
+            let a = spawn Agent {} in
+            let _ = ask a store_fact("hello world") in
+            ask a recall("hello", 1)
+        "#;
+        let module = compile_source_new(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+
+        let result = vm.run().unwrap();
+
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.value_to_string(module_idx, result);
+        assert_eq!(content, "hello world");
+
+        let rt = rt.borrow();
+        let actor = rt.actors.values().next().expect("expected one actor");
+        let memory_json = actor.get_state_field("semantic_memory").unwrap();
+        let memory_json_str = vm.value_to_string(module_idx, memory_json);
+        let memory: crate::ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
+        assert_eq!(memory.len(), 1);
+        assert_eq!(memory.documents[0].content, "hello world");
+    }
+
+    /// The legacy compiler and the HIR/MIR pipeline must agree on
+    /// workflow/agent semantics too.
+    #[test]
+    fn test_mir_and_legacy_workflow_agent_semantics_agree() {
+        let corpus: &[&str] = &[
+            // Actor-ref values aren't compared here (their string repr
+            // embeds an internal, Runtime-instance-specific id counter that
+            // isn't guaranteed to line up between two independently
+            // constructed runtimes) — ask a step for a plain value instead.
+            "workflow W { step a { 1 } } let w = spawn W {} in ask w a()",
+            r#"
+                agent Ag = { model: "mock-model", system_prompt: "hi" }
+                let a = spawn Ag {} in ask a ask("hello")
+            "#,
+        ];
+        for src in corpus {
+            let legacy_rt = Rc::new(RefCell::new(Runtime::new()));
+            legacy_rt
+                .borrow_mut()
+                .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            let legacy = run_source_with_runtime(src, legacy_rt)
+                .map(|(v, _)| v.to_string_repr())
+                .unwrap_or_else(|e| panic!("legacy pipeline failed on {:?}: {}", src, e));
+
+            let mir_rt = Rc::new(RefCell::new(Runtime::new()));
+            mir_rt
+                .borrow_mut()
+                .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            let mir = run_source_new_with_runtime(src, mir_rt)
+                .map(|v| v.to_string_repr())
+                .unwrap_or_else(|e| panic!("MIR pipeline failed on {:?}: {}", src, e));
+
             assert_eq!(legacy, mir, "pipelines disagree on {:?}", src);
         }
     }

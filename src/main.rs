@@ -336,11 +336,11 @@ fn run_source(source: &str, verbose: bool, use_mir: bool) -> NuResult<()> {
     let ast = run_frontend(source, verbose)?;
 
     // Compile. The stable compiler is the default; the experimental HIR/MIR
-    // pipeline covers the functional core (closures, effects, control flow)
-    // and plain `actor` declarations (spawn/send/ask/state), but not
-    // `workflow`/`agent` (which desugar to actors with substantial synthesized
-    // code at the AST layer — a separate, larger effort), so it is opt-in and
-    // falls back loudly.
+    // pipeline covers the functional core (closures, effects, control flow),
+    // `actor` declarations (spawn/send/ask/state), sequential `workflow`s
+    // (with saga compensation), and tool-less `agent`s. A workflow with a
+    // `parallel` block or an agent with `@tool`-backed tools still falls
+    // back, so this stays opt-in and falls back loudly on anything else too.
     let code_module = if use_mir {
         match compile_with_new_pipeline(&ast, "main") {
             Ok(m) => {

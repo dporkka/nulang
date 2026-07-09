@@ -80,6 +80,11 @@ fn lower_decl(decl: &Decl) -> hir::Decl {
                     (n.clone(), op)
                 })
                 .collect(),
+            is_workflow: false,
+            is_agent: false,
+            tools: Vec::new(),
+            semantic_memory_dimensions: None,
+            procedural_memory_namespace: None,
             span: *span,
         }),
         Decl::TypeAlias {
@@ -159,14 +164,28 @@ fn lower_decl(decl: &Decl) -> hir::Decl {
             items: items.clone(),
             span: *span,
         },
-        Decl::Workflow { name, span, .. } => hir::Decl::Workflow {
-            name: name.clone(),
-            span: *span,
-        },
-        Decl::Agent { name, span, .. } => hir::Decl::Agent {
-            name: name.clone(),
-            span: *span,
-        },
+        Decl::Workflow { name, items, span, .. } => desugar_workflow(name, items, *span),
+        Decl::Agent {
+            name,
+            model,
+            system_prompt,
+            tools,
+            memory,
+            semantic_memory,
+            procedural_memory,
+            pricing,
+            span,
+        } => desugar_agent(
+            name,
+            model,
+            system_prompt,
+            tools,
+            memory,
+            semantic_memory,
+            procedural_memory,
+            pricing,
+            *span,
+        ),
     }
 }
 
@@ -182,8 +201,332 @@ fn lower_behavior(b: &ast::Behavior) -> hir::BehaviorDef {
         effect: b.effect.clone().unwrap_or_else(EffectRow::empty),
         cap: b.cap,
         body: lower_body(&b.body),
+        compensate: None,
         span: b.span,
     }
+}
+
+/// Placeholder behavior for a memory operation the runtime intercepts by
+/// name (see `is_agent`/`semantic_memory_dimensions`/
+/// `procedural_memory_namespace` on `hir::ActorDef`) instead of running its
+/// bytecode body.
+fn placeholder_behavior(name: &str, params: Vec<(&str, Type)>, span: Span) -> ast::Behavior {
+    ast::Behavior {
+        name: name.to_string(),
+        params: params
+            .into_iter()
+            .map(|(n, t)| (n.to_string(), Some(t)))
+            .collect(),
+        body: Expr::Literal(Literal::Unit, span),
+        effect: None,
+        cap: Capability::Ref,
+        span,
+    }
+}
+
+/// Desugar an `agent Name = { ... }` declaration into an actor: durable
+/// state fields hold the model/prompt/memory configuration, and generated
+/// behaviors implement `ask`/`usage` (plus memory operations, intercepted by
+/// the runtime rather than executed as bytecode). Mirrors the stable
+/// compiler's `compile_agent` exactly, so both backends produce the same
+/// source-level shape — synthesized `ast::Behavior` bodies are lowered
+/// through the ordinary `lower_behavior`/`lower_expr` path.
+#[allow(clippy::too_many_arguments)]
+fn desugar_agent(
+    name: &str,
+    model: &str,
+    system_prompt: &Option<String>,
+    tool_names: &[String],
+    memory: &Option<ast::AgentMemoryConfig>,
+    semantic_memory: &Option<ast::AgentSemanticMemoryConfig>,
+    procedural_memory: &Option<ast::AgentProceduralMemoryConfig>,
+    pricing: &Option<ast::AgentPricing>,
+    span: Span,
+) -> hir::Decl {
+    // Tool-schema resolution needs the module-wide @tool-annotated function
+    // table, which this pipeline does not build yet (see collect_functions
+    // in the stable compiler). Fall back honestly rather than resolve
+    // tool references incorrectly.
+    if !tool_names.is_empty() {
+        return hir::Decl::Agent { name: name.to_string(), span };
+    }
+
+    let agent_pricing = pricing.unwrap_or(ast::AgentPricing { input: 0.0, output: 0.0 });
+    let max_turns = memory.as_ref().map(|m| m.max_turns).unwrap_or(50);
+    let initial_memory = serde_json::to_string(&crate::ai::memory::EpisodicMemory::new(max_turns))
+        .unwrap_or_else(|_| "{}".to_string());
+
+    let semantic_memory_dimensions = semantic_memory.as_ref().map(|m| m.dimensions);
+    let initial_semantic_memory = semantic_memory_dimensions.map(|dimensions| {
+        serde_json::to_string(&crate::ai::SemanticMemory::new(dimensions, None))
+            .unwrap_or_else(|_| "{}".to_string())
+    });
+
+    let procedural_memory_namespace = procedural_memory.as_ref().map(|m| m.namespace.clone());
+    let initial_procedural_memory = procedural_memory_namespace.as_ref().map(|namespace| {
+        serde_json::to_string(&crate::ai::ProceduralMemory::new(namespace.clone()))
+            .unwrap_or_else(|_| "{}".to_string())
+    });
+
+    let str_ty = Type::string();
+    let int_ty = Type::int();
+    let float_ty = Type::float();
+    let lit_op = |lit: Literal, ty: Type| hir::Operand::Literal(lit, ty);
+
+    let mut state_fields: Vec<(String, ast::StateModel, Type, hir::Operand)> = vec![
+        (
+            "model".to_string(),
+            ast::StateModel::Durable,
+            str_ty.clone(),
+            lit_op(Literal::String(model.to_string()), str_ty.clone()),
+        ),
+        (
+            "system_prompt".to_string(),
+            ast::StateModel::Durable,
+            str_ty.clone(),
+            lit_op(Literal::String(system_prompt.clone().unwrap_or_default()), str_ty.clone()),
+        ),
+        (
+            "episodic_memory".to_string(),
+            ast::StateModel::Durable,
+            str_ty.clone(),
+            lit_op(Literal::String(initial_memory), str_ty.clone()),
+        ),
+        (
+            "usage_prompt".to_string(),
+            ast::StateModel::Durable,
+            int_ty.clone(),
+            lit_op(Literal::Int(0), int_ty.clone()),
+        ),
+        (
+            "usage_completion".to_string(),
+            ast::StateModel::Durable,
+            int_ty.clone(),
+            lit_op(Literal::Int(0), int_ty.clone()),
+        ),
+        (
+            "usage_cost".to_string(),
+            ast::StateModel::Durable,
+            float_ty.clone(),
+            lit_op(Literal::Float(0.0), float_ty.clone()),
+        ),
+        (
+            "pricing_input".to_string(),
+            ast::StateModel::Durable,
+            float_ty.clone(),
+            lit_op(Literal::Float(agent_pricing.input), float_ty.clone()),
+        ),
+        (
+            "pricing_output".to_string(),
+            ast::StateModel::Durable,
+            float_ty.clone(),
+            lit_op(Literal::Float(agent_pricing.output), float_ty.clone()),
+        ),
+    ];
+    if let Some(json) = initial_semantic_memory {
+        state_fields.push((
+            "semantic_memory".to_string(),
+            ast::StateModel::Durable,
+            str_ty.clone(),
+            lit_op(Literal::String(json), str_ty.clone()),
+        ));
+    }
+    if let Some(json) = initial_procedural_memory {
+        state_fields.push((
+            "procedural_memory".to_string(),
+            ast::StateModel::Durable,
+            str_ty.clone(),
+            lit_op(Literal::String(json), str_ty.clone()),
+        ));
+    }
+
+    // Generated ask behavior reads agent state and performs the LLM ask.
+    let ask_behavior = ast::Behavior {
+        name: "ask".to_string(),
+        params: vec![("prompt".to_string(), Some(str_ty.clone()))],
+        body: Expr::Block {
+            exprs: vec![
+                Expr::FieldAccess {
+                    expr: Box::new(Expr::SelfRef(span)),
+                    field: "model".to_string(),
+                    span,
+                },
+                Expr::FieldAccess {
+                    expr: Box::new(Expr::SelfRef(span)),
+                    field: "system_prompt".to_string(),
+                    span,
+                },
+                Expr::FieldAccess {
+                    expr: Box::new(Expr::SelfRef(span)),
+                    field: "episodic_memory".to_string(),
+                    span,
+                },
+                Expr::Perform {
+                    effect: "LLM".to_string(),
+                    op: "ask".to_string(),
+                    args: vec![Expr::Var("prompt".to_string(), span)],
+                    span,
+                },
+            ],
+            span,
+        },
+        effect: None,
+        cap: Capability::Ref,
+        span,
+    };
+
+    // Generated usage behavior returns cumulative usage/cost state as a
+    // plain array [prompt_tokens, completion_tokens, cost].
+    let usage_behavior = ast::Behavior {
+        name: "usage".to_string(),
+        params: vec![],
+        body: Expr::Array(
+            vec![
+                Expr::FieldAccess {
+                    expr: Box::new(Expr::SelfRef(span)),
+                    field: "usage_prompt".to_string(),
+                    span,
+                },
+                Expr::FieldAccess {
+                    expr: Box::new(Expr::SelfRef(span)),
+                    field: "usage_completion".to_string(),
+                    span,
+                },
+                Expr::FieldAccess {
+                    expr: Box::new(Expr::SelfRef(span)),
+                    field: "usage_cost".to_string(),
+                    span,
+                },
+            ],
+            span,
+        ),
+        effect: None,
+        cap: Capability::Ref,
+        span,
+    };
+
+    let mut behaviors = vec![lower_behavior(&ask_behavior), lower_behavior(&usage_behavior)];
+
+    if semantic_memory_dimensions.is_some() {
+        behaviors.push(lower_behavior(&placeholder_behavior(
+            "store_fact",
+            vec![("content", str_ty.clone())],
+            span,
+        )));
+        behaviors.push(lower_behavior(&placeholder_behavior(
+            "recall",
+            vec![("query", str_ty.clone()), ("top_k", int_ty.clone())],
+            span,
+        )));
+    }
+    if procedural_memory_namespace.is_some() {
+        behaviors.push(lower_behavior(&placeholder_behavior(
+            "store_pattern",
+            vec![("key", str_ty.clone()), ("input_pattern", str_ty.clone()), ("output_template", str_ty.clone())],
+            span,
+        )));
+        behaviors.push(lower_behavior(&placeholder_behavior(
+            "get_pattern",
+            vec![("key", str_ty.clone())],
+            span,
+        )));
+        behaviors.push(lower_behavior(&placeholder_behavior(
+            "add_example",
+            vec![("task", str_ty.clone()), ("input", str_ty.clone()), ("output", str_ty.clone())],
+            span,
+        )));
+        behaviors.push(lower_behavior(&placeholder_behavior(
+            "get_examples",
+            vec![("task", str_ty.clone()), ("query", str_ty.clone()), ("top_k", int_ty.clone())],
+            span,
+        )));
+    }
+
+    hir::Decl::Actor(hir::ActorDef {
+        name: name.to_string(),
+        type_params: Vec::new(),
+        persistent: true,
+        state_fields,
+        behaviors,
+        init: Vec::new(),
+        is_workflow: false,
+        is_agent: true,
+        tools: Vec::new(),
+        semantic_memory_dimensions,
+        procedural_memory_namespace,
+        span,
+    })
+}
+
+/// Desugar a `workflow Name { step ... }` declaration into a persistent
+/// actor: one behavior per step, plus a durable `step_index` counter the
+/// runtime advances as steps complete. Mirrors the stable compiler's
+/// `compile_workflow` for the sequential case; a workflow containing a
+/// `parallel` block falls back honestly (parallel-branch synthesis and its
+/// progress-counter bookkeeping is a separate, not-yet-ported effort).
+fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir::Decl {
+    if items.iter().any(|i| matches!(i, ast::WorkflowItem::Parallel(_))) {
+        return hir::Decl::Workflow { name: name.to_string(), span };
+    }
+    let steps: Vec<&ast::WorkflowStep> = items
+        .iter()
+        .map(|i| match i {
+            ast::WorkflowItem::Step(s) => s,
+            ast::WorkflowItem::Parallel(_) => unreachable!("checked above"),
+        })
+        .collect();
+
+    let state_fields: Vec<(String, ast::StateModel, Type, hir::Operand)> = vec![
+        (
+            "step_index".to_string(),
+            ast::StateModel::Durable,
+            Type::int(),
+            hir::Operand::Literal(Literal::Int(0), Type::int()),
+        ),
+        (
+            "workflow_name".to_string(),
+            ast::StateModel::Durable,
+            Type::string(),
+            hir::Operand::Literal(Literal::String(name.to_string()), Type::string()),
+        ),
+        (
+            "parallel_progress".to_string(),
+            ast::StateModel::Durable,
+            Type::int(),
+            hir::Operand::Literal(Literal::Int(0), Type::int()),
+        ),
+    ];
+
+    let behaviors = steps
+        .iter()
+        .map(|s| {
+            let mut def = lower_behavior(&ast::Behavior {
+                name: s.name.clone(),
+                params: Vec::new(),
+                body: s.body.clone(),
+                effect: None,
+                cap: Capability::Ref,
+                span: s.span,
+            });
+            def.compensate = s.compensate.as_ref().map(lower_body);
+            def
+        })
+        .collect();
+
+    hir::Decl::Actor(hir::ActorDef {
+        name: name.to_string(),
+        type_params: Vec::new(),
+        persistent: true,
+        state_fields,
+        behaviors,
+        init: Vec::new(),
+        is_workflow: true,
+        is_agent: false,
+        tools: Vec::new(),
+        semantic_memory_dimensions: None,
+        procedural_memory_namespace: None,
+        span,
+    })
 }
 
 /// Lower an expression into a fresh body that yields the expression's value.

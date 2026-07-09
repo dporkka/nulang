@@ -9,12 +9,16 @@
 //!   - Lexical scoping (with shadowing) is respected via a scope stack.
 //!   - Lambdas and recursive let-bindings are lifted to top-level MIR
 //!     functions; closures capture enclosing locals by value.
-//!   - Plain `actor` declarations are supported: behaviors compile through
-//!     the same machinery as ordinary functions (see `lower_behavior_def`),
-//!     with `self` bound as a local and `spawn`/`send`/`ask`/`self.field`
-//!     lowered to their dedicated MIR constructs. `workflow`/`agent`
-//!     declarations desugar to actors with substantial synthesized code at
-//!     the AST layer in the stable compiler and are not yet ported here.
+//!   - `actor` declarations are supported: behaviors compile through the
+//!     same machinery as ordinary functions (see `lower_behavior_def`), with
+//!     `self` bound as a local and `spawn`/`send`/`ask`/`self.field` lowered
+//!     to their dedicated MIR constructs. `workflow` (sequential steps, with
+//!     saga compensation) and `agent` (without `@tool`-backed tools) desugar
+//!     to actors at the HIR layer (see `hir_lower::desugar_workflow`/
+//!     `desugar_agent`) and are supported the same way. A workflow
+//!     containing a `parallel` block, or an agent declaring tools, falls
+//!     back honestly — parallel-branch synthesis and @tool schema
+//!     resolution are not yet ported.
 
 use crate::ast::Pattern;
 use crate::hir;
@@ -66,6 +70,17 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
                     ctx.reserve_behavior(format!("{}.{}", a.name, b.name));
                 }
                 let behavior_indices: Vec<usize> = (first_idx..ctx.behaviors.len()).collect();
+                // Compensation slots are reserved AFTER all of this actor's
+                // real behaviors, so they never fall inside behavior_indices
+                // (compensations are invoked directly by offset, never
+                // dispatched by name via send/ask).
+                for (b, &idx) in a.behaviors.iter().zip(behavior_indices.iter()) {
+                    if b.compensate.is_some() {
+                        let comp_idx =
+                            ctx.reserve_behavior(format!("{}.{}__compensate", a.name, b.name));
+                        ctx.compensation_of.push((idx, comp_idx));
+                    }
+                }
                 let state_models = a
                     .state_fields
                     .iter()
@@ -87,11 +102,11 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
                     state_models,
                     state_defaults,
                     behavior_indices,
-                    is_workflow: false,
-                    is_agent: false,
-                    tools: Vec::new(),
-                    semantic_memory_dimensions: None,
-                    procedural_memory_namespace: None,
+                    is_workflow: a.is_workflow,
+                    is_agent: a.is_agent,
+                    tools: a.tools.clone(),
+                    semantic_memory_dimensions: a.semantic_memory_dimensions,
+                    procedural_memory_namespace: a.procedural_memory_namespace.clone(),
                 });
             }
             hir::Decl::Workflow { name, .. } => {
@@ -132,6 +147,28 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
                     let full_name = format!("{}.{}", a.name, b.name);
                     let func = lower_behavior_def(&mut ctx, &full_name, b)?;
                     ctx.fill_behavior(idx, func);
+
+                    if let Some(comp_body) = &b.compensate {
+                        let comp_idx = ctx
+                            .compensation_of
+                            .iter()
+                            .find(|(behavior_idx, _)| *behavior_idx == idx)
+                            .map(|(_, comp_idx)| *comp_idx)
+                            .expect("compensation slot reserved in pass 1");
+                        let comp_def = hir::BehaviorDef {
+                            name: format!("{}__compensate", b.name),
+                            params: Vec::new(),
+                            ret: b.ret.clone(),
+                            effect: b.effect.clone(),
+                            cap: b.cap,
+                            body: comp_body.clone(),
+                            compensate: None,
+                            span: b.span,
+                        };
+                        let comp_full_name = format!("{}.{}__compensate", a.name, b.name);
+                        let comp_func = lower_behavior_def(&mut ctx, &comp_full_name, &comp_def)?;
+                        ctx.fill_behavior(comp_idx, comp_func);
+                    }
                 }
             }
             _ => {}
@@ -157,6 +194,8 @@ struct ModuleCtx {
     behaviors: Vec<Option<mir::Function>>,
     behavior_names: Vec<String>,
     actor_metas: Vec<crate::bytecode::ActorMeta>,
+    /// `(behavior_idx, compensation_behavior_idx)` pairs; see `mir::Module`.
+    compensation_of: Vec<(usize, usize)>,
     next_lambda: u32,
 }
 
@@ -171,6 +210,7 @@ impl ModuleCtx {
             behaviors: Vec::new(),
             behavior_names: Vec::new(),
             actor_metas: Vec::new(),
+            compensation_of: Vec::new(),
             next_lambda: 0,
         }
     }
@@ -242,6 +282,7 @@ impl ModuleCtx {
             })?);
         }
         module.actor_metadata = self.actor_metas;
+        module.compensation_of = self.compensation_of;
         module.foreign_functions = self.foreign;
         Ok(module)
     }
