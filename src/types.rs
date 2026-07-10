@@ -39,6 +39,7 @@ pub enum PrimitiveType {
     Float,
     Bool,
     String,
+    Nil,
     Unit,
     Never,
     Address, // Actor address
@@ -293,6 +294,10 @@ impl Type {
     pub fn string() -> Type {
         Type::Primitive(PrimitiveType::String)
     }
+    pub fn nil() -> Type {
+        Type::Primitive(PrimitiveType::Nil)
+    }
+
     pub fn unit() -> Type {
         Type::Primitive(PrimitiveType::Unit)
     }

@@ -1221,7 +1221,7 @@ fn literal_type(lit: &Literal) -> Type {
         Literal::Float(_) => Type::Primitive(PrimitiveType::Float),
         Literal::String(_) => Type::Primitive(PrimitiveType::String),
         Literal::Bool(_) => Type::Primitive(PrimitiveType::Bool),
-        Literal::Nil => Type::Primitive(PrimitiveType::Unit),
+        Literal::Nil => Type::Primitive(PrimitiveType::Nil),
         Literal::Unit => Type::Primitive(PrimitiveType::Unit),
     }
 }

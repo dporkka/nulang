@@ -434,6 +434,7 @@ pub fn type_to_string(ty: &Type) -> String {
             crate::types::PrimitiveType::Bool => "Bool".to_string(),
             crate::types::PrimitiveType::String => "String".to_string(),
             crate::types::PrimitiveType::Unit => "Unit".to_string(),
+            crate::types::PrimitiveType::Nil => "Nil".to_string(),
             crate::types::PrimitiveType::Never => "Never".to_string(),
             crate::types::PrimitiveType::Address => "Address".to_string(),
         },

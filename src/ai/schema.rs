@@ -24,6 +24,7 @@ pub fn type_to_json_schema(ty: &Type) -> serde_json::Value {
         Type::Primitive(PrimitiveType::Bool) => serde_json::json!({"type": "boolean"}),
         Type::Primitive(PrimitiveType::String) => serde_json::json!({"type": "string"}),
         Type::Primitive(PrimitiveType::Unit) => serde_json::json!({"type": "null"}),
+        Type::Primitive(PrimitiveType::Nil) => serde_json::json!({"type": "null"}),
         Type::Primitive(PrimitiveType::Never) | Type::Primitive(PrimitiveType::Address) => {
             serde_json::json!({})
         }

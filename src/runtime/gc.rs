@@ -656,18 +656,11 @@ impl OrcaCoordinator {
                 .unwrap_or_default();
 
             if let Some(actor) = runtime.actors.get_mut(&actor_id) {
-                // NOTE: Actor doesn't have an `orca_gc` field yet (heap.rs
-                // rewrite is in progress).  We temporarily store the ops on
-                // the actor's heap as a side-channel until the integration
-                // is complete.  For now we just count them as delivered.
-                //
-                // TODO(A2-integration): once Actor has `orca_gc: OrcaGc`,
-                // replace this block with:
-                //   for op in ops {
-                //       actor.orca_gc.process_foreign_op(&mut actor.heap, op);
-                //   }
-                self.delivered_count += ops.len();
-                let _ = actor; // silence unused warning during transition
+                let delivered = ops.len();
+                for op in ops {
+                    actor.orca_gc.process_foreign_op(&mut actor.heap, op);
+                }
+                self.delivered_count += delivered;
             } else {
                 // Target actor is gone — drop the ops.  The objects will be
                 // reclaimed via normal refcounting on the owner side.
@@ -703,26 +696,6 @@ impl Default for OrcaCoordinator {
 // ---------------------------------------------------------------------------
 // SharedHeapGc — retained for backward compatibility
 // ---------------------------------------------------------------------------
-
-/// Simple threshold-based GC trigger for the shared immutable heap.
-///
-/// This is a legacy type from the MVP stub.  It may be removed once the
-/// ORCA heap fully subsumes the shared heap.
-pub struct SharedHeapGc {
-    threshold: usize,
-}
-
-impl SharedHeapGc {
-    /// Create a new trigger.
-    pub fn new(threshold: usize) -> Self {
-        SharedHeapGc { threshold }
-    }
-
-    /// Returns `true` if the shared heap usage exceeds the threshold.
-    pub fn should_collect(&self, used: usize) -> bool {
-        used > self.threshold
-    }
-}
 
 // ===========================================================================
 // Tests
@@ -1265,17 +1238,6 @@ mod tests {
         // Threshold.
         assert_eq!(coord.cycle_detect_threshold, 10_000);
         assert!(!coord.should_trigger_cycle_detection());
-    }
-
-    // ------------------------------------------------------------------
-    // Test 15: SharedHeapGc backward compatibility
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_shared_heap_gc() {
-        let gc = SharedHeapGc::new(1024);
-        assert!(!gc.should_collect(512));
-        assert!(gc.should_collect(2048));
     }
 
     // ------------------------------------------------------------------

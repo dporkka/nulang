@@ -914,7 +914,7 @@ impl TypeChecker {
             Literal::Float(_) => Type::float(),
             Literal::String(_) => Type::string(),
             Literal::Bool(_) => Type::bool(),
-            Literal::Nil => Type::unit(), // TODO: dedicated nil type
+            Literal::Nil => Type::nil(),
             Literal::Unit => Type::unit(),
         };
         Ok((vec![], ty))
@@ -1621,7 +1621,7 @@ impl TypeChecker {
                     Literal::Float(_) => Type::float(),
                     Literal::String(_) => Type::string(),
                     Literal::Bool(_) => Type::bool(),
-                    Literal::Nil => Type::unit(), // TODO: dedicated nil type
+                    Literal::Nil => Type::nil(),
                     Literal::Unit => Type::unit(),
                 };
                 let _ = mgu(scrut_ty, &lit_ty, Span::default())?;

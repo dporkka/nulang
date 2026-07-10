@@ -31,7 +31,7 @@ pub use actor::*;
 pub use scheduler::*;
 pub use mailbox::*;
 pub use heap::*;
-pub use gc::{ForeignRefOp, GcStats, OrcaCoordinator, OrcaGc, OrcaHeap, SharedHeapGc};
+pub use gc::{ForeignRefOp, GcStats, OrcaCoordinator, OrcaGc, OrcaHeap};
 pub use supervisor::*;
 pub use orca_cycle::*;
 pub use cluster::*;

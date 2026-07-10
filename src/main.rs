@@ -406,6 +406,7 @@ fn type_to_string(ty: &Type) -> String {
             nulang::types::PrimitiveType::Bool => "Bool".to_string(),
             nulang::types::PrimitiveType::String => "String".to_string(),
             nulang::types::PrimitiveType::Unit => "Unit".to_string(),
+            nulang::types::PrimitiveType::Nil => "Nil".to_string(),
             nulang::types::PrimitiveType::Never => "Never".to_string(),
             nulang::types::PrimitiveType::Address => "Address".to_string(),
         },
