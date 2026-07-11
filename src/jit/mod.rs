@@ -139,6 +139,12 @@ impl JitSession {
             ("nulang_or", crate::jit::runtime::nulang_or as *const u8),
             ("nulang_itof", crate::jit::runtime::nulang_itof as *const u8),
             ("nulang_ftoi", crate::jit::runtime::nulang_ftoi as *const u8),
+            ("nulang_xor", crate::jit::runtime::nulang_xor as *const u8),
+            ("nulang_shl", crate::jit::runtime::nulang_shl as *const u8),
+            ("nulang_shr", crate::jit::runtime::nulang_shr as *const u8),
+            ("nulang_bitand", crate::jit::runtime::nulang_bitand as *const u8),
+            ("nulang_bitor", crate::jit::runtime::nulang_bitor as *const u8),
+            ("nulang_fneg", crate::jit::runtime::nulang_fneg as *const u8),
         ];
         for (name, ptr) in helpers {
             builder.symbol(*name, *ptr);
@@ -215,8 +221,10 @@ impl JitSession {
     /// Compile a SIMD-vectorizable bytecode region.
     ///
     /// First analyzes the region for vectorizable array loop patterns. If found,
-    /// emits SIMD CLIF (I64x2/F64x2/I32x4/F32x4). Falls back to the scalar
-    /// typed compiler if the region is not vectorizable.
+    /// emits SIMD CLIF (I64x2/F64x2/I32x4/F32x4), falling back to the scalar
+    /// compiler if SIMD emission fails. Returns `None` when the region has no
+    /// vectorizable pattern at all — callers (e.g. `tiered_execute_step`) must
+    /// then fall back to `compile_region` for scalar compilation.
     ///
     /// # Safety
     /// Same safety requirements as `compile_region`.
@@ -318,6 +326,15 @@ pub fn tiered_execute_step(
             } {
                 func(regs.as_mut_ptr(), constants.as_ptr());
                 return TieredAction::CompiledSimdAndRan;
+            }
+            // The region has no vectorizable pattern (or SIMD emission
+            // failed): compile it with the scalar compiler so hot
+            // non-array code still tiers up instead of interpreting forever.
+            if let Some(func) = unsafe {
+                jit.compile_region(module_idx, pc, region_len, instructions)
+            } {
+                func(regs.as_mut_ptr(), constants.as_ptr());
+                return TieredAction::RanJit;
             }
         }
     }

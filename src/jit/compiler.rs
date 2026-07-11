@@ -5,14 +5,15 @@
 //! instructions, with NaN-tag-aware arithmetic delegated to runtime
 //! helper functions (see `runtime.rs`).
 //!
-//! # Supported Opcodes (MVP)
+//! # Supported Opcodes
 //!
 //! | Category | Opcodes |
 //! |----------|---------|
 //! | Special | Nop, Halt, Const0-2, ConstM1 |
-//! | Register | Move, Swap, Dup |
+//! | Register | Load, Store, Move, Swap, Dup |
 //! | Integer Arith | IAdd, ISub, IMul, IDiv, IMod, INeg, IInc, IDec |
-//! | Float Arith | FAdd, FSub, FMul, FDiv |
+//! | Bitwise | Xor, Shl, Shr, BitAnd, BitOr |
+//! | Float Arith | FAdd, FSub, FMul, FDiv, FNeg |
 //! | Compare | ICmp{Eq,Lt,Gt,Le,Ge}, FCmp{Eq,Lt,Gt} |
 //! | Logic | Not, And, Or |
 //! | Control | Jmp, JmpT, JmpF |
@@ -34,16 +35,17 @@ use crate::value_layout::{PAYLOAD_MASK, TAG_INT};
 // Opcode Support Matrix
 // ---------------------------------------------------------------------------
 
-/// Check if an opcode can be compiled by the JIT (MVP subset).
+/// Check if an opcode can be compiled by the JIT.
 pub fn is_opcode_compilable(op: OpCode) -> bool {
     matches!(
         op,
         OpCode::Nop | OpCode::Halt
         | OpCode::Const0 | OpCode::Const1 | OpCode::Const2 | OpCode::ConstM1 | OpCode::ConstU
-        | OpCode::Move | OpCode::Swap | OpCode::Dup
+        | OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Swap | OpCode::Dup
         | OpCode::IAdd | OpCode::ISub | OpCode::IMul | OpCode::IDiv | OpCode::IMod
         | OpCode::INeg | OpCode::IInc | OpCode::IDec
-        | OpCode::FAdd | OpCode::FSub | OpCode::FMul | OpCode::FDiv
+        | OpCode::Xor | OpCode::Shl | OpCode::Shr | OpCode::BitAnd | OpCode::BitOr
+        | OpCode::FAdd | OpCode::FSub | OpCode::FMul | OpCode::FDiv | OpCode::FNeg
         | OpCode::ICmpEq | OpCode::ICmpLt | OpCode::ICmpGt | OpCode::ICmpLe | OpCode::ICmpGe
         | OpCode::FCmpEq | OpCode::FCmpLt | OpCode::FCmpGt
         | OpCode::Not | OpCode::And | OpCode::Or
@@ -80,8 +82,9 @@ fn make_unary_sig<M: Module>(module: &M) -> Signature {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeHelper {
     IAdd, ISub, IMul, IDiv, IMod,
+    Xor, Shl, Shr, BitAnd, BitOr,
     ICmpEq, ICmpLt, ICmpGt, ICmpLe, ICmpGe,
-    FAdd, FSub, FMul, FDiv,
+    FAdd, FSub, FMul, FDiv, FNeg,
     FCmpEq, FCmpLt, FCmpGt,
     And, Or, INeg, IInc, IDec, Not, IToF, FToI,
 }
@@ -96,6 +99,9 @@ fn register_runtime_helpers<M: Module>(
         (RuntimeHelper::IAdd, "nulang_iadd"), (RuntimeHelper::ISub, "nulang_isub"), 
         (RuntimeHelper::IMul, "nulang_imul"), (RuntimeHelper::IDiv, "nulang_idiv"), 
         (RuntimeHelper::IMod, "nulang_imod"),
+        (RuntimeHelper::Xor, "nulang_xor"), (RuntimeHelper::Shl, "nulang_shl"),
+        (RuntimeHelper::Shr, "nulang_shr"), (RuntimeHelper::BitAnd, "nulang_bitand"),
+        (RuntimeHelper::BitOr, "nulang_bitor"),
         (RuntimeHelper::ICmpEq, "nulang_icmp_eq"), (RuntimeHelper::ICmpLt, "nulang_icmp_lt"), 
         (RuntimeHelper::ICmpGt, "nulang_icmp_gt"), (RuntimeHelper::ICmpLe, "nulang_icmp_le"), 
         (RuntimeHelper::ICmpGe, "nulang_icmp_ge"),
@@ -117,7 +123,7 @@ fn register_runtime_helpers<M: Module>(
         (RuntimeHelper::INeg, "nulang_ineg"), (RuntimeHelper::IInc, "nulang_iinc"), 
         (RuntimeHelper::IDec, "nulang_idec"),
         (RuntimeHelper::Not, "nulang_not"), (RuntimeHelper::IToF, "nulang_itof"), 
-        (RuntimeHelper::FToI, "nulang_ftoi"),
+        (RuntimeHelper::FToI, "nulang_ftoi"), (RuntimeHelper::FNeg, "nulang_fneg"),
     ];
 
     for (helper, name) in unary_helpers {
@@ -214,11 +220,10 @@ pub fn compile_bytecode_region(
                     builder.ins().iadd(consts_ptr, off)
                 };
                 let val = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
-                store_reg(&mut builder, regs_ptr, instr.op1 as usize, val);
+                store_reg(&mut builder, regs_ptr, instr.op3 as usize, val);
             }
 
-            OpCode::Move => { let v = load_reg(&mut builder, regs_ptr, instr.op1 as usize); store_reg(&mut builder, regs_ptr, instr.op2 as usize, v); }
-            OpCode::Dup => { let v = load_reg(&mut builder, regs_ptr, instr.op1 as usize); store_reg(&mut builder, regs_ptr, instr.op2 as usize, v); }
+            OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Dup => { let v = load_reg(&mut builder, regs_ptr, instr.op1 as usize); store_reg(&mut builder, regs_ptr, instr.op2 as usize, v); }
             OpCode::Swap => {
                 let v1 = load_reg(&mut builder, regs_ptr, instr.op1 as usize);
                 let v2 = load_reg(&mut builder, regs_ptr, instr.op2 as usize);
@@ -234,11 +239,18 @@ pub fn compile_bytecode_region(
             OpCode::INeg => emit_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, RuntimeHelper::INeg),
             OpCode::IInc => emit_self_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, RuntimeHelper::IInc),
             OpCode::IDec => emit_self_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, RuntimeHelper::IDec),
+            OpCode::Xor => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::Xor),
+            OpCode::Shl => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::Shl),
+            OpCode::Shr => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::Shr),
+            OpCode::BitAnd => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::BitAnd),
+            OpCode::BitOr => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::BitOr),
 
             OpCode::FAdd => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FAdd),
             OpCode::FSub => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FSub),
             OpCode::FMul => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FMul),
             OpCode::FDiv => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FDiv),
+            // Interpreter reads src from op1 and writes dst to op3 for FNeg.
+            OpCode::FNeg => emit_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op3 as usize, RuntimeHelper::FNeg),
 
             OpCode::ICmpEq => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::ICmpEq),
             OpCode::ICmpLt => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::ICmpLt),
@@ -393,6 +405,25 @@ mod tests {
         assert!(is_opcode_compilable(OpCode::Move));
         assert!(is_opcode_compilable(OpCode::Jmp));
         assert!(is_opcode_compilable(OpCode::Ret));
+    }
+
+    #[test]
+    fn test_is_opcode_compilable_extended() {
+        // Register copies.
+        assert!(is_opcode_compilable(OpCode::Load));
+        assert!(is_opcode_compilable(OpCode::Store));
+        // Bitwise integer ops.
+        assert!(is_opcode_compilable(OpCode::Xor));
+        assert!(is_opcode_compilable(OpCode::Shl));
+        assert!(is_opcode_compilable(OpCode::Shr));
+        assert!(is_opcode_compilable(OpCode::BitAnd));
+        assert!(is_opcode_compilable(OpCode::BitOr));
+        // Float negate.
+        assert!(is_opcode_compilable(OpCode::FNeg));
+        // Opcodes the interpreter itself does not implement stay unsupported.
+        assert!(!is_opcode_compilable(OpCode::IPow));
+        assert!(!is_opcode_compilable(OpCode::FMod));
+        assert!(!is_opcode_compilable(OpCode::ConstL));
     }
 
     #[test]

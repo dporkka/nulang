@@ -1,7 +1,7 @@
 //! Runtime helper functions callable from JIT-compiled code.
 
 use crate::vm::Value;
-use crate::value_layout::{sext48, tag_int, PAYLOAD_MASK};
+use crate::value_layout::{sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK};
 
 #[no_mangle]
 pub extern "C" fn nulang_iadd(a: u64, b: u64) -> u64 {
@@ -30,6 +30,39 @@ pub extern "C" fn nulang_imod(a: u64, b: u64) -> u64 {
     let bv = sext48(b & PAYLOAD_MASK);
     if bv == 0 { return Value::nil().as_raw(); }
     tag_int(sext48(a & PAYLOAD_MASK) % bv)
+}
+
+/// Extract the integer payload like the interpreter's `as_int().unwrap_or(0)`:
+/// non-int-tagged values contribute 0.
+fn as_int_or_zero(v: u64) -> i64 {
+    if (v & TAG_MASK) == TAG_INT { sext48(v & PAYLOAD_MASK) } else { 0 }
+}
+
+#[no_mangle]
+pub extern "C" fn nulang_xor(a: u64, b: u64) -> u64 {
+    tag_int(as_int_or_zero(a) ^ as_int_or_zero(b))
+}
+
+#[no_mangle]
+pub extern "C" fn nulang_shl(a: u64, b: u64) -> u64 {
+    let shift = (as_int_or_zero(b) as u64) & 0x3f;
+    tag_int(as_int_or_zero(a) << shift)
+}
+
+#[no_mangle]
+pub extern "C" fn nulang_shr(a: u64, b: u64) -> u64 {
+    let shift = (as_int_or_zero(b) as u64) & 0x3f;
+    tag_int(as_int_or_zero(a) >> shift)
+}
+
+#[no_mangle]
+pub extern "C" fn nulang_bitand(a: u64, b: u64) -> u64 {
+    tag_int(as_int_or_zero(a) & as_int_or_zero(b))
+}
+
+#[no_mangle]
+pub extern "C" fn nulang_bitor(a: u64, b: u64) -> u64 {
+    tag_int(as_int_or_zero(a) | as_int_or_zero(b))
 }
 
 #[no_mangle]
@@ -134,4 +167,13 @@ pub extern "C" fn nulang_itof(a: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn nulang_ftoi(a: u64) -> u64 {
     Value::int(f64::from_bits(a) as i64).as_raw()
+}
+
+/// Float negate, matching the interpreter's `as_float().unwrap_or(0.0)`:
+/// any NaN bit pattern (i.e. any tagged value) negates to -0.0.
+#[no_mangle]
+pub extern "C" fn nulang_fneg(a: u64) -> u64 {
+    let f = f64::from_bits(a);
+    let v = if f.is_nan() { 0.0 } else { f };
+    Value::float(-v).as_raw()
 }

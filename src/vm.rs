@@ -1605,6 +1605,20 @@ impl VM {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
                 self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(-a);
             }
+            // IInc/IDec mirror the JIT helpers `nulang_iinc`/`nulang_idec`
+            // bit-for-bit: the register's low 48 payload bits are read as a
+            // signed value (tag ignored), adjusted by ±1 with 48-bit wrap,
+            // and the result is re-tagged as an int.
+            OpCode::IInc => {
+                let reg = instr.op1 as usize;
+                let a = sext48(self.frames[frame_idx].regs[reg].as_raw() & PAYLOAD_MASK);
+                self.frames[frame_idx].regs[reg] = Value::int(a + 1);
+            }
+            OpCode::IDec => {
+                let reg = instr.op1 as usize;
+                let a = sext48(self.frames[frame_idx].regs[reg].as_raw() & PAYLOAD_MASK);
+                self.frames[frame_idx].regs[reg] = Value::int(a - 1);
+            }
 
             // -- Float arithmetic --
             OpCode::FAdd => {
@@ -2402,6 +2416,81 @@ mod vm_tests {
         assert_eq!(result.unwrap().as_int(), Some(13), "10 + 3 = 13");
     }
 
+    /// IInc/IDec on a normal int-tagged register: in-place ±1.
+    #[test]
+    fn test_iinc_idec_int() {
+        let mut module = CodeModule::new("test_iinc_idec_int");
+        let c41_idx = module.add_constant(Constant::Int(41));
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c41_idx >> 8) & 0xFF) as u8, (c41_idx & 0xFF) as u8, 0)); // r0 = 41
+        module.emit(Instruction::new1(OpCode::IInc, 0)); // r0 = 42
+        module.emit(Instruction::new1(OpCode::IInc, 0)); // r0 = 43
+        module.emit(Instruction::new1(OpCode::IDec, 0)); // r0 = 42
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "IInc/IDec should work: {:?}", result.err());
+        assert_eq!(result.unwrap().as_int(), Some(42));
+    }
+
+    /// IInc/IDec ignore the tag and operate on the raw 48-bit payload,
+    /// exactly like the JIT helpers `nulang_iinc`/`nulang_idec`:
+    /// bool true (payload 1) increments to int 2, nil (payload 0)
+    /// decrements to int -1, and the result is always int-tagged.
+    #[test]
+    fn test_iinc_idec_non_int_operand() {
+        let mut module = CodeModule::new("test_iinc_idec_non_int");
+        let ctrue_idx = module.add_constant(Constant::Bool(true));
+        let cnil_idx = module.add_constant(Constant::Nil);
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((ctrue_idx >> 8) & 0xFF) as u8, (ctrue_idx & 0xFF) as u8, 0)); // r0 = true
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((cnil_idx >> 8) & 0xFF) as u8, (cnil_idx & 0xFF) as u8, 1));   // r1 = nil
+        module.emit(Instruction::new1(OpCode::IInc, 0)); // r0: payload 1 -> int 2
+        module.emit(Instruction::new1(OpCode::IDec, 1)); // r1: payload 0 -> int -1
+        module.emit(Instruction::new3(OpCode::IMul, 0, 1, 0)); // r0 = 2 * -1 = -2
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "IInc/IDec on non-int should work: {:?}", result.err());
+        // IMul only yields -2 if both operands became int-tagged (2 and -1).
+        assert_eq!(result.unwrap().as_int(), Some(-2));
+    }
+
+    /// IInc/IDec wrap at the 48-bit signed boundary, matching `tag_int`
+    /// masking in the JIT helpers: INT48_MAX + 1 == INT48_MIN and
+    /// INT48_MIN - 1 == INT48_MAX.
+    #[test]
+    fn test_iinc_idec_wrap() {
+        const INT48_MAX: i64 = 0x0000_7FFF_FFFF_FFFF; // 2^47 - 1
+        const INT48_MIN: i64 = -0x0000_8000_0000_0000; // -2^47
+        let mut module = CodeModule::new("test_iinc_idec_wrap");
+        let cmax_idx = module.add_constant(Constant::Int(INT48_MAX));
+        let cmin_idx = module.add_constant(Constant::Int(INT48_MIN));
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((cmax_idx >> 8) & 0xFF) as u8, (cmax_idx & 0xFF) as u8, 0)); // r0 = INT48_MAX
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((cmin_idx >> 8) & 0xFF) as u8, (cmin_idx & 0xFF) as u8, 1)); // r1 = INT48_MIN
+        module.emit(Instruction::new1(OpCode::IInc, 0)); // r0 wraps to INT48_MIN
+        module.emit(Instruction::new1(OpCode::IDec, 1)); // r1 wraps to INT48_MAX
+        module.emit(Instruction::new3(OpCode::ISub, 1, 0, 0)); // r0 = MAX - MIN = -1 (48-bit)
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "IInc/IDec wrap should work: {:?}", result.err());
+        // INT48_MAX - INT48_MIN = 2^48 - 1, which wraps to -1 in 48 bits.
+        assert_eq!(result.unwrap().as_int(), Some(-1));
+    }
+
     /// Test 2: NaN-boxed value representation.
     #[test]
     fn test_value_nan_tagging() {
@@ -2919,6 +3008,12 @@ mod vm_tests {
             assert_eq!(result.as_int(), Some(4950),
                 "JIT-compiled loop with early-exit branch must match interpreter");
         }
+        // The loop body is a non-array straight-line region: it must have
+        // tiered up through the scalar compiler even on SIMD-capable hosts
+        // (where SIMD analysis finds no pattern and used to silently skip
+        // compilation entirely).
+        let compiled = vm.jit_session.as_ref().map(|j| j.compiled_count()).unwrap_or(0);
+        assert!(compiled > 0, "hot non-array loop body must be JIT-compiled");
     }
 
     /// Closure capture environments: Closure + CapStore then Call + CapLoad
