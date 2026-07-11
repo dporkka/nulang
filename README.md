@@ -24,21 +24,21 @@
 | **CRDTs** | 8 conflict-free replicated data types for shared distributed state |
 | **Register-Based VM** | High-performance bytecode VM with NaN-tagged value representation |
 | **Cranelift JIT Backend** | Tiered execution: interpreter for cold code, native compilation for hot loops |
-| **BEAM/OTP Primitives** | `spawn_link`, `monitor`, `link`, registry, timers, process groups (`receive` is not yet usable — see [Known limitations](#known-limitations)) |
+| **BEAM/OTP Primitives** | `spawn_link`, `monitor`, `link`, registry, timers, process groups (`receive` is parse-only today — see [Known limitations](#known-limitations)) |
 | **Linear Type Moves** | Zero-cost `iso` actor messaging via compile-time linearity tracking |
 | **SIMD Vectorization** | Auto-vectorization of array loops via Cranelift SIMD (I64x2, F64x2, I32x4, F32x4) |
 | **Python Interop** | Native Actor pattern: Python isolated to dedicated OS threads, marshal-only boundary |
 | **Unbounded Mailboxes** | Lock-free MPSC queues (crossbeam::SegQueue) — BEAM-semantics, no message loss |
-| **Stress Test Suite** | 10 chaos tests for actor-effect boundary, supervision, scheduler fairness |
+| **Stress Test Suite** | 30 chaos tests for supervision, scheduler fairness, GC, persistence, CRDTs, and JIT fallback under load |
 
 ### Current Status
 
 - ✅ Builds with `cargo build`
-- ✅ All 740 tests pass with `cargo test`
-- ✅ NaN-boxed `Value` representation with distinct high-16 type tags
-- ✅ 91-opcode bytecode ISA (arithmetic, control flow, closures, arrays, effects, actors, capabilities, distribution)
+- ✅ All 853 tests pass with `cargo test`
+- ✅ NaN-boxed `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`)
+- ✅ 140-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, capabilities, FFI, Python, distribution)
 - ✅ Hindley-Milner type inference with algebraic effects
-- ✅ Actor runtime: spawn, send, monitors, links, supervision, timers, registry, process groups (⚠️ `receive` is not yet usable — see [Known limitations](#known-limitations))
+- ✅ Actor runtime: spawn, send, monitors, links, supervision, timers, registry, process groups (⚠️ `receive` is parse-only today — see [Known limitations](#known-limitations))
 - ✅ ORCA-style per-actor GC with cycle detection
 - ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams
 - ✅ Durable workflow runtime: `workflow` declarations with steps, timers, signals, saga compensation
@@ -71,7 +71,7 @@ fewer system dependencies:
 |---------|---------|------------------|
 | `python` | Python interop (`perform Python.call(...)`) via PyO3 | No — needs Python 3 dev headers |
 | `sqlite` | `SqliteStore` actor persistence backend | No — `MemoryStore`/`JsonFileStore` always available |
-| `lsp` | `nulang --lsp` Language Server | No |
+| `lsp` | Language Server Protocol server (`src/lsp/`) | No |
 
 ```bash
 # Skip PyO3, SQLite, and the LSP server entirely:
@@ -203,7 +203,7 @@ let processed =
                               v                       v
                     +-------------------------+  +-------------------+
                     |  Type Checker (H-M)     |  | Bytecode Module   |
-                    |  Effect Checker         |  | (64 opcodes)      |
+                    |  Effect Checker         |  | (140 opcodes)     |
                     +-------------------------+  +-------------------+
                                                            |
                                                            v
@@ -250,41 +250,50 @@ let processed =
 
 | Module | Description | Lines |
 |--------|-------------|-------|
-| `lexer` | Hand-written state machine, indentation-based tokenization | ~550 |
-| `parser` | Recursive descent with Pratt precedence climbing | ~1,400 |
-| `ast` | Abstract syntax tree definitions (30+ expression types) | ~400 |
-| `types` | Type system, capabilities, effects, NaN-tagged values | ~600 |
-| `typechecker` | Hindley-Milner Algorithm W with full inference | ~2,500 |
-| `effect_checker` | Algebraic effect row checking + capability analysis | ~1,750 |
-| `bytecode` | 64 opcodes, 32-bit fixed-width instructions | ~300 |
-| `compiler` | AST-to-bytecode compilation with register allocation | ~1,000 |
-| `vm` | Register-based virtual machine with token-threaded dispatch | ~1,200 |
-| `effects` | Algebraic effect row subset and combine operations | ~200 |
-| `capabilities` | Permission lattice (join/meet) and access checking | ~150 |
-| `jit/compiler` | Bytecode → Cranelift IR (30 opcodes, type-directed optimization) | ~400 |
-| `jit/runtime` | NaN-tag-aware runtime helpers for JIT (30 extern C functions) | ~150 |
-| `jit/mod` | JIT session manager, tiered execution, hot-counter tracking | ~200 |
-| `runtime/actor` | Actor struct, lifecycle, state management | ~120 |
-| `runtime/scheduler` | Work-stealing M:N scheduler with reductions | ~200 |
-| `runtime/mailbox` | Lock-free MPSC via crossbeam ArrayQueue (ABA-safe) | ~200 |
-| `runtime/timer` | Hierarchical timer wheel for send_after, exit_after, kill_after | ~220 |
-| `runtime/registry` | Local actor name registry (register/whereis/registered) | ~230 |
-| `runtime/process_groups` | Decentralized actor group membership (Erlang pg) | ~165 |
-| `runtime/heap` | Per-actor bump allocator with ORCA object headers | ~1,030 |
-| `runtime/gc` | ORCA reference counting (3-count protocol) | ~1,400 |
-| `runtime/orca_cycle` | Centralized cycle detector with weighted heuristic | ~1,550 |
-| `runtime/supervisor` | Erlang/OTP-style supervision strategies | ~465 |
-| `runtime/network` | TCP transport, NUL0 wire protocol | ~1,390 |
+| `lexer` | Hand-written state machine, indentation-based tokenization | ~1,020 |
+| `parser` | Recursive descent with Pratt precedence climbing | ~2,760 |
+| `ast` | Abstract syntax tree definitions (30+ expression types) | ~600 |
+| `types` | Type system, capability lattice, effect rows, error types | ~700 |
+| `typechecker` | Hindley-Milner Algorithm W with full inference | ~3,125 |
+| `effect_checker` | Algebraic effect row checking + capability analysis | ~1,825 |
+| `hir` / `hir_lower` | High-level IR and AST → HIR lowering | ~2,030 |
+| `mir` / `mir_lower` | Mid-level IR and HIR → MIR lowering | ~1,715 |
+| `mir_codegen` | MIR-to-bytecode compilation with register allocation | ~1,230 |
+| `bytecode` | 140 opcodes, 32-bit fixed-width instructions | ~880 |
+| `value_layout` | Canonical NaN-boxing tag/mask constants (single source of truth) | ~140 |
+| `vm` | Register-based virtual machine, effect handlers, JIT tiering hook | ~3,100 |
+| `jit/mod` | JIT session manager, tiered execution, hot-counter tracking | ~375 |
+| `jit/compiler` | Bytecode → Cranelift IR (41 opcodes) | ~400 |
+| `jit/typed_compiler` | Type-directed JIT: direct CLIF when operand types are known | ~1,390 |
+| `jit/simd_analyzer` / `jit/simd_compiler` | Vectorizable-loop detection + SIMD CLIF emission | ~2,960 |
+| `jit/runtime` | NaN-tag-aware runtime helpers for JIT (25 extern C functions) | ~140 |
+| `runtime/mod` | Runtime coordinator: actors, scheduling, GC, supervision, distribution | ~3,400 |
+| `runtime/actor` | Actor struct, lifecycle, state management | ~300 |
+| `runtime/scheduler` | Work-stealing M:N scheduler with reductions | ~500 |
+| `runtime/mailbox` | Unbounded lock-free MPSC via crossbeam SegQueue | ~270 |
+| `runtime/timer` | Hierarchical timer wheel for send_after, exit_after, kill_after | ~345 |
+| `runtime/registry` | Local actor name registry (register/whereis/registered) | ~215 |
+| `runtime/process_groups` | Decentralized actor group membership (Erlang pg) | ~280 |
+| `runtime/heap` | Per-actor bump allocator with ORCA object headers | ~990 |
+| `runtime/gc` | ORCA reference counting (3-count protocol) | ~1,300 |
+| `runtime/orca_cycle` | Intra-node cycle detector with weighted heuristic | ~1,660 |
+| `runtime/supervisor` | Erlang/OTP-style supervision strategies | ~440 |
+| `runtime/network` | TCP transport, NUL0 wire protocol | ~1,410 |
 | `runtime/cluster` | Gossip-based cluster membership + failure detection | ~1,080 |
 | `runtime/distributed` | Location-transparent actor addressing | ~1,140 |
-| `runtime/crdt` | CRDT trait + GCounter, PNCounter, GSet, ORSet, AWORSet | ~1,680 |
-| `runtime/crdt_reg` | LWWRegister, MVRegister, RGA sequence CRDT | ~1,170 |
-| `runtime/crdt_manager` | CRDT factory, sync ops, inter-node merge | ~450 |
-| `runtime/tests` | Integration tests (fault tolerance, GC, distributed, CRDTs) | ~2,050 |
-| `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~490 |
-| `main` | CLI entry point (run, repl, eval, check modes) | ~450 |
+| `runtime/crdt` | CRDT trait + GCounter, PNCounter, GSet, ORSet, AWORSet | ~860 |
+| `runtime/crdt_reg` | LWWRegister, MVRegister, RGA sequence CRDT | ~565 |
+| `runtime/crdt_manager` | CRDT factory, sync ops, inter-node merge | ~600 |
+| `runtime/persistence` | Snapshot/journal stores (MemoryStore, JsonFileStore, SqliteStore) | ~785 |
+| `python/bridge` + `python/marshal` | PyO3 interpreter bridge + Value↔Python marshalling | ~1,290 |
+| `ffi` | C-compatible FFI layer, native-library registry, embedder C API | ~1,380 |
+| `ai` | LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams | ~2,590 |
+| `lsp` | tower-lsp language server (13 features incl. hover, inlay hints, completion) | ~1,160 |
+| `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~570 |
+| `main` | CLI entry point (run, repl, eval, check modes) | ~425 |
+| `integration_tests` / `stress_tests` / `runtime/tests` | End-to-end pipeline, chaos, and runtime test suites | ~6,170 |
 
-**Total: ~52,000 lines of Rust across 70+ source files with 740 tests.**
+**Total: ~54,400 lines of Rust across 69 source files with 853 tests.**
 
 ---
 
@@ -344,11 +353,11 @@ rt.sync_crdts();  // broadcast to all connected nodes
 
 ### v0.7 — BEAM/OTP Primitives
 
-35+ Erlang/OTP primitives analyzed and 14 core primitives implemented:
+35+ Erlang/OTP primitives analyzed and 12 core primitives implemented:
 
 | Primitive | File | Description |
 |-----------|------|-------------|
-| `receive` | `vm.rs` | ⚠️ Not usable today — no lexer keyword (unparseable from source), stable-compiler codegen discards match arms, VM has no dispatch arm for the opcode, MIR lowering explicitly rejects it. See [Known limitations](#known-limitations). |
+| `receive` | `parser.rs`, `vm.rs` | ⚠️ Parse-only today — lexes, parses, and type-checks, but MIR lowering yields `nil` and codegen never emits the VM's `OpCode::Receive` arm. See [Known limitations](#known-limitations). |
 | `spawn_link` | `vm.rs` | Spawn actor with bidirectional fault link |
 | `monitor` | `runtime/mod.rs` | Watcher monitors target actor for exit |
 | `demonitor` | `runtime/mod.rs` | Remove a monitor |
@@ -367,7 +376,7 @@ Three high-ROI changes implemented in parallel:
 | # | Proposal | Change | Impact |
 |---|----------|--------|--------|
 | 2.3 | mimalloc | `#[global_allocator]` → MiMalloc | 10-20% throughput |
-| 2.1 | Lock-free mailboxes | `crossbeam::ArrayQueue` | ABA-safe, cache-line optimized |
+| 2.1 | Lock-free mailboxes | `crossbeam::ArrayQueue` | ABA-safe, cache-line optimized (later replaced by `SegQueue` in v0.12 — see below) |
 | 4.2 | Linear type moves | `Capability::LinearIso` + consumption tracking | Zero-cost `iso` sends |
 
 ### v0.9 — Cranelift JIT Backend
@@ -377,8 +386,8 @@ Tiered execution system with Cranelift 0.132:
 | Component | Description |
 |-----------|-------------|
 | `JitSession` | Manages Cranelift JIT module, compiled function cache |
-| `compiler.rs` | Bytecode → CLIF for 30 opcodes (arith, compare, control flow) |
-| `runtime.rs` | 30 `extern "C"` NaN-tag-aware runtime helpers |
+| `compiler.rs` | Bytecode → CLIF for 41 opcodes (arith, compare, control flow) |
+| `runtime.rs` | 25 `extern "C"` NaN-tag-aware runtime helpers |
 | Tiered execution | Interpreter (cold) → JIT compile (hot threshold: 1,000) |
 | Graceful fallback | Unsupported opcodes → continue interpreting |
 
@@ -447,23 +456,43 @@ perform IO.print(result)  -- marshaled Float value: 6.0
 | `python/bridge.rs` | PyO3 interpreter bridge with GIL management |
 | `python/marshal.rs` | Bidirectional Nulang Value ↔ Python object conversion |
 | Enforced isolation | No Python objects in Nulang VM — marshal at boundary |
-| 8 opcodes reserved | 0x94-0x9B reserved for future Python bytecode |
-| 22 tests | Registry, import, call, marshal round-trips |
+| 8 Python opcodes | 0x94-0x9B (PyImport, PyCall, PyToNu, …) defined and dispatched by the VM |
+| 21 tests | Registry, import, call, marshal round-trips |
 
-**Stress test suite** (10 chaos tests) deliberately breaks the actor-effect boundary:
+**Stress test suite** (30 chaos tests in `src/stress_tests.rs`) deliberately breaks the runtime under load — actor-effect boundary, supervision, GC, persistence, CRDTs, and JIT fallback:
 
 | Test | Scenario |
 |------|----------|
-| `stress_slow_io_effect_with_mailbox_flood` | 15K message flood during slow effect — verify scheduler non-blocking |
-| `stress_actor_crash_during_effect_yield` | Crash mid-effect yield — verify supervisor cleans partial stack |
-| `stress_cascading_exit_under_load` | 5-level supervision tree — leaf crash, verify cascade boundaries |
-| `stress_monitor_during_rapid_spawn_exit` | 100 actors spawned/exited — verify exactly 100 DOWN messages |
-| `stress_scheduler_with_mixed_workload` | CPU + I/O + message-heavy actors — verify no starvation |
-| `stress_mailbox_never_drops_system_messages` | 1M normal + 100 system messages — verify all system msgs present |
-| `stress_orphaned_actor_cleanup` | 50-actor mesh, kill hub — verify no orphans |
-| `stress_reduction_quota_fairness` | Two competing actors — verify equal progress |
-| `stress_effect_resume_after_mailbox_pressure` | Effect yield → flood → resume → drain |
-| `stress_supervisor_crash_during_effect_recovery` | Supervisor crashes mid-effect-recovery |
+| `stress_slow_worker_with_mailbox_flood` | Slow Worker + Mailbox Flood |
+| `stress_actor_crash_during_scheduling` | Actor Crash During Scheduling |
+| `stress_cascading_exit_under_load` | Cascading Exit Under Load |
+| `stress_monitor_during_rapid_spawn_exit` | Monitor During Rapid Spawn/Exit |
+| `stress_scheduler_with_mixed_workload` | Scheduler with Mixed Workload |
+| `stress_mailbox_never_drops_system_messages` | Mailbox Never Drops System Messages |
+| `stress_orphaned_actor_cleanup` | Orphaned Actor Cleanup |
+| `stress_reduction_quota_fairness` | Reduction Quota Fairness |
+| `stress_effect_resume_after_mailbox_pressure` | Effect Resume After Mailbox Pressure |
+| `stress_supervisor_crash_during_recovery` | Supervisor Crash During Recovery |
+| `stress_registry_high_churn` | Registry High Churn |
+| `stress_process_groups_membership_churn` | Process Groups Membership Churn |
+| `stress_timer_wheel_overload` | Timer Wheel Overload |
+| `stress_persistent_actor_checkpoint_recovery` | Persistent Actor Checkpoint / Recovery |
+| `stress_crdt_counter_merge_stress` | CRDT Counter Merge Stress |
+| `stress_crdt_manager_sync_ops` | CRDT Manager Sync Ops |
+| `stress_monitor_spawn_storm` | Monitor Spawn Storm |
+| `stress_jit_hot_loop_then_cold_fallback` | JIT Hot Loop Matches Interpreter |
+| `stress_remote_actor_cache_lru_eviction` | Remote Actor Cache LRU Eviction |
+| `stress_supervisor_restart_intensity` | Supervisor Restart Intensity |
+| `stress_gc_foreign_ref_churn` | GC Foreign Reference Churn |
+| `stress_distribution_local_fallback_when_disabled` | Distribution Local Fallback When Disabled |
+| `stress_reduction_yield_under_pressure` | Reduction Yield Under Pressure |
+| `stress_actor_heap_allocation_pressure` | Actor Heap Allocation Pressure |
+| `stress_cascading_supervisor_shutdown` | Cascading Supervisor Shutdown |
+| `stress_persistence_journal_replay_ordering` | Persistence Journal Replay Ordering |
+| `stress_cycle_detector_epoch_gating` | Cycle Detector Epoch Gating |
+| `stress_mailbox_system_priority_preservation` | Mailbox System Priority Preservation |
+| `stress_trap_exit_with_monitor_storm` | Trap Exit With Monitor Storm |
+| `stress_gc_cycle_detector_under_foreign_ref_load` | GC Cycle Detector Under Foreign Reference Load |
 
 **Design documents** (see [`docs/archive/`](docs/archive/)):
 - `DESIGN_AI_SDK.md` — AI SDK design (partially implemented in v0.9)
@@ -492,33 +521,33 @@ This is an active implementation with the following components functional:
 - [x] AST (complete node types)
 - [x] Hindley-Milner type checker (Algorithm W with full inference)
 - [x] Algebraic effect checker (effect row compatibility, capability analysis)
-- [x] Bytecode (91 opcodes, constant pool, behavior table)
-- [x] Compiler (AST-to-bytecode with register allocation)
+- [x] Bytecode (140 opcodes, constant pool, behavior table)
+- [x] Compiler (AST → HIR → MIR → bytecode with register allocation)
 - [x] VM (register-based execution, arithmetic, comparisons, control flow)
 - [x] REPL (parse-typecheck-compile-execute cycle with introspection)
-- [x] Integration tests (16 end-to-end pipeline tests)
-- [x] Actor runtime (spawn, send, links, monitors) — ⚠️ `receive` not usable from source, see [Known limitations](#known-limitations)
+- [x] Integration tests (111 end-to-end pipeline tests)
+- [x] Actor runtime (spawn, send, links, monitors) — ⚠️ `receive` is parse-only, see [Known limitations](#known-limitations)
 - [x] Work-stealing scheduler (M:N threading with reduction quotas)
 - [x] ORCA garbage collector (per-actor heap, 3-count protocol, cycle detection)
 - [x] Supervision trees (OneForOne, OneForAll, RestForOne restart strategies)
-- [x] Fault tolerance tests (18 supervisor/exit/link/monitor tests)
+- [x] Fault tolerance tests (27 supervisor/exit/link/monitor tests)
 - [x] Distributed runtime (TCP transport, cluster membership, location-transparent messaging)
 - [x] CRDT subsystem (8 types: counters, sets, registers, sequences)
 - [x] CRDT manager (factory, sync, inter-node merge)
-- [x] BEAM/OTP primitives (spawn_link, monitor, link, exit, trap_exit, register, whereis, send_after, pg, yield) — ⚠️ `receive` not usable from source, see [Known limitations](#known-limitations)
+- [x] BEAM/OTP primitives (spawn_link, monitor, link, exit, trap_exit, register, whereis, send_after, pg, yield) — ⚠️ `receive` is parse-only, see [Known limitations](#known-limitations)
 - [x] Unbounded mailboxes (crossbeam::SegQueue — BEAM semantics, no message loss)
 - [x] Hierarchical timer wheel (send_after, exit_after, kill_after)
 - [x] Actor registry (register/whereis/registered)
 - [x] Process groups (decentralized actor group membership)
 - [x] Linear type moves (compile-time `iso` consumption tracking)
-- [x] Cranelift JIT backend (tiered execution, 30 opcodes, hot-counter threshold)
+- [x] Cranelift JIT backend (tiered execution, 41 opcodes, hot-counter threshold)
 - [x] Type guard stripping (direct CLIF when types known, ~30% speedup in numeric loops)
 - [x] LSP inlay hints (type/capability/effect annotations via tower-lsp)
 - [x] SIMD vectorization (auto-vectorize array loops: I64x2, F64x2, I32x4, F32x4)
 - [x] ~~Dual-region generational heap~~ **REVERTED** (audit: ORCA+nursery corruption risk)
 - [x] ~~Escape analysis~~ **REVERTED** (audit: no benefit without nursery)
 - [x] Python interop — Native Actor pattern (isolated OS threads, marshal-only boundary)
-- [x] Stress test suite (10 chaos tests: actor-effect boundary, supervision, scheduler)
+- [x] Stress test suite (30 chaos tests: supervision, scheduler fairness, GC, persistence, CRDTs, JIT fallback)
 - [x] AI SDK design document (agent DSL, tool binding, memory, multi-agent)
 - [x] Workflow SDK design document (durable actors, sagas, timers, signals)
 - [x] Web Framework design document (endpoints, controllers, channels, LiveView)
@@ -534,7 +563,7 @@ This is an active implementation with the following components functional:
 | v0.4 | ORCA garbage collector | Completed |
 | v0.5 | Multi-node distribution | Completed |
 | v0.6 | CRDT integration | Completed |
-| v0.7 | BEAM/OTP primitives (spawn_link, monitor, links, registry, timers, process groups) | Completed (`receive` not usable — see [Known limitations](#known-limitations)) |
+| v0.7 | BEAM/OTP primitives (spawn_link, monitor, links, registry, timers, process groups) | Completed (`receive` parse-only — see [Known limitations](#known-limitations)) |
 | v0.8 | Performance improvements (mimalloc, lock-free mailboxes, linear type moves) | Completed |
 | v0.9 | Cranelift JIT backend | Completed |
 | v0.10 | Type guard stripping + LSP inlay hints | Completed |
@@ -549,12 +578,13 @@ This is an active implementation with the following components functional:
 
 ## Known Limitations
 
-- **`receive` (pattern-matching mailbox consume) is not usable today, on either backend.** The gap is deeper than a single missing opcode:
-  - The lexer has no `receive` keyword, so `receive { ... }` cannot even be parsed from `.nu` source today (`src/lexer.rs`). The AST/HIR node (`Expr::Receive` / `hir::RValue::Receive`) and its downstream consumers (effect checker, type checker) exist and are exercised only by hand-built Rust test fixtures, never by real parsed source.
-  - The stable compiler's codegen for `Expr::Receive` (`src/compiler.rs`) discards the match arms and emits a single `OpCode::Receive` with no encoding of which behaviors/patterns/bodies exist.
-  - The VM's interpreter loop (`src/vm.rs`) has no dispatch arm for `OpCode::Receive` at all — it falls through to the "unimplemented opcode" error at runtime. This dispatch arm existed prior to the NaN-boxing/effect-system rewrite in `2c860f6` and was dropped without a regression test catching it.
-  - The `--experimental-mir` pipeline rejects `hir::RValue::Receive` explicitly at HIR→MIR lowering time with a `NotYetImplemented` error (`src/mir_lower.rs`) — so this is a pre-existing, backend-agnostic gap, not a MIR-specific regression.
-  - Actor message handling that *is* exercised by tests goes through other paths (direct behavior dispatch, not a `receive`-with-pattern-match expression).
+- **`receive` is parse-only today — on the MIR pipeline it evaluates to `nil`.** The syntax is fully wired, but the semantics stop at MIR lowering:
+  - The lexer has a `receive` keyword and the parser produces `Expr::Receive` (`src/lexer.rs`, `src/parser.rs`); the expression passes the type checker, and HIR lowering maps it to `hir::RValue::Receive` (`src/hir_lower.rs`).
+  - MIR lowering currently lowers `hir::RValue::Receive` to a constant `nil` (`src/mir_lower.rs`), so `receive { | Msg(x) => x }` compiles and runs but always yields `nil`. Pattern-matching dispatch across arms is future work.
+  - The VM does have an `OpCode::Receive` dispatch arm that pops the next mailbox message via `ActorVmCallbacks::try_receive()` (`src/vm.rs`), but no current codegen path emits that opcode.
+  - Integration tests pin the current MVP behavior — `receive { | Msg(x) => x }` returns `nil` outside an actor context (`src/integration_tests.rs`).
+  - Actor messaging that *is* fully wired goes through named behavior dispatch (`send actor behavior(args)`) — see `examples/counter_actor.nu`.
+- **`nulang --lsp` is not reachable from the CLI.** `main.rs` declares the option and lists it in `--help`, but the argument parser has no `--lsp` arm, so the flag is rejected as an unknown option even in `lsp`-feature builds. The LSP server itself (`src/lsp/`, behind the `lsp` Cargo feature) is implemented.
 
 ---
 

@@ -389,6 +389,9 @@ impl NulangLanguageServer {
         for decl in &ast.decls { self.collect_syms(decl, &mut syms); }
         Some(syms)
     }
+    // `deprecated` is a required-but-deprecated field in lsp-types; we always
+    // pass `None` (no symbols are marked deprecated), so silence the lint here.
+    #[allow(deprecated)]
     fn collect_syms(&self, decl: &crate::ast::Decl, syms: &mut Vec<SymbolInformation>) {
         use crate::ast::Decl;
         let si = |name: &str, kind: SymbolKind, span: &crate::types::Span| SymbolInformation {

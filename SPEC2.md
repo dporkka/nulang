@@ -26,7 +26,41 @@ The specification is organized into five conceptual layers:
 
 Each chapter contains a detailed outline of all sections and subsections, followed by the prose and examples for those sections. Chapters 1 through 3 are fully written. Chapters 4 through 15 contain detailed outlines with section headings, descriptive bullet points, and at least one complete code example per chapter to illustrate the key concepts.
 
-Unless otherwise noted, all examples in this specification are complete, syntactically valid Nulang programs or program fragments.
+Unless otherwise noted, examples in sections describing *implemented* features are complete, syntactically valid Nulang programs or program fragments under the current compiler. Sections describing unimplemented features are marked **Planned**, and their examples are aspirational.
+
+---
+
+# Implementation Status (Current Alpha)
+
+This document is the design target for Nulang 2.0. The implementation in this repository is an alpha (the v0.9 series) that realizes a substantial subset of the design. This section records, as of the current commit, what is implemented and what remains planned, so readers can distinguish descriptions of working behavior from aspirational ones. Sections that describe unimplemented surface are marked **Planned** inline.
+
+> **Verification note (July 2026).** The syntax, keyword, and semantic claims in Chapters 1–12 and Appendices A–C were re-verified against the implementation in July 2026 — specifically `src/lexer.rs` (keyword inventory, literals, operators), `src/parser.rs` (grammar), `src/ast.rs` (AST shapes), `src/typechecker.rs` (inference, defaults), `src/effect_checker.rs` (effect rows, capability lattice, sendability), `src/vm.rs` (runtime effect dispatch, arithmetic), `src/hir_lower.rs` (pipe semantics, AI builtins), and `src/main.rs` (CLI). Chapters 13–15 and Appendix D describe planned surfaces and were only annotated as such, not verified line-by-line.
+
+**Implemented and verified against the source tree:**
+
+- The core expression language: literals (`Int`, `Float`, `String`, `Bool`, `Unit`, `Nil`), `let` / `let rec` bindings with `in`, `fn` lambdas, tuples, records, arrays, `if`/`then`/`else`, `match` (wildcard, variable, literal, tuple, record, variant, and `@` alias patterns), blocks, the pipe operator `|>`, and the operator set of Chapter 2.
+- Top-level declarations: `fn` (with `[T]` type parameters, `->` return types, `!` effect rows, `: cap` capability annotations, and `@tool` annotations), `type` (alias, record, and variant forms), `effect`, `actor` / `persistent actor`, `agent`, `workflow`, `module`, `import`, and `extern` FFI blocks.
+- Hindley-Milner type inference (Algorithm W) over tuples, records, variants, arrays, function types carrying effect rows and capabilities, and `&cap T` reference types.
+- Algebraic effects: `perform Effect.op(args)`, `handle body { | Effect.op(x) => value }`, closed and open effect rows written `{IO, FS}` and `{IO, | row}`, enforced `!` annotations on `fn` and `behavior` bodies, and runtime handlers with resume semantics.
+- Reference capabilities `iso`, `trn`, `ref`, `val`, `box`, `tag`, plus `lineariso` with exactly-once consumption tracking. Capabilities are checked at compile time and erased at runtime. Sendability (`lineariso`, `iso`, `val`, `tag`) is enforced for message arguments.
+- Actors: `spawn Actor { field = value }`, `send actor behavior(args)` and `actor ! behavior(args)`, `ask actor behavior(args)`, `receive { | Behavior(x) => expr }`, `self.field` state access, and the four state models (`local`, `durable`, `event_sourced`, `crdt`).
+- Persistence for `persistent actor`s: durable snapshot/journal recovery and event-sourced replay, backed by in-memory, JSON-file, and SQLite stores.
+- Workflows: `workflow Name { step name { body } compensate { expr } ... }` with `parallel { ... }` step groups, saga compensation in reverse order, `perform Signal.wait("name")`, and `perform Timer.sleep("name", ms)`, all durable across restarts.
+- The AI runtime: `agent` declarations with model, system prompt, tools, episodic/semantic/procedural memory, and pricing; the `perform LLM.ask(prompt)` effect; agent behaviors (`ask`, `usage`, `store_fact`, `recall`); tool schemas generated from `@tool` functions and executed when the model issues tool calls; and the `Pipeline`, `Supervisor`, and `Debate` orchestration builtins.
+- A register-based bytecode VM with a Cranelift JIT tiering path; an OTP-style supervision runtime (restart strategies and policies, links, monitors, exit signals); a distributed runtime (TCP wire protocol, gossip membership, location-transparent addressing, eight CRDT types); a REPL; and an LSP server.
+
+**Planned (described in this specification, not implemented):**
+
+- The WebAssembly compilation target, WIT interface generation, and WASI worlds (Chapter 13). The current backend emits bytecode for the register VM.
+- The standard-library modules of Chapter 14 (`Core`, `List`, `Map`, `Set`, `String`, `Json`, `Http`, `Concurrent`, …). The only builtin modules today are `Pipeline`, `Supervisor`, and `Debate`.
+- Typeclasses and type-parameter constraints (Section 3.6), higher-kinded types, `Char` and `Decimal` primitives, character literals, multi-line strings, `\u{...}` escapes, string interpolation, and `++` concatenation syntax.
+- `var` bindings, `consume` / `recover` expressions, pattern guards, record-update syntax `{ r .. f = v }`, ranges, the `**` operator, `<-` message syntax, and indentation-based layout (Section 2.8).
+- Authority capabilities (`capability` declarations on actors, delegation, revocation, auditing — Sections 1.5 and 5.3–5.6), `config` blocks, the `tool` declaration form inside actors, `virtual` actors, `select`, `await`, `await_human`, `sleep_until`, and `retry` blocks.
+- The deployment manifest (`nulang.toml`), `nulang migrate`, and `nulang shell` (Chapter 15, Appendix D).
+
+Several keywords are reserved in the lexer but not yet wired into the grammar: `where`, `priv`, `loop`, `node`, `monitor`, `link`, `exit`, `await`, and `subworkflow`. `case` is accepted only as an optional match-arm prefix.
+
+Where a section is marked **Planned**, its examples show the intended v2.0 syntax and may not parse under the current compiler.
 
 ---
 
@@ -90,22 +124,22 @@ Nulang's design is guided by five principles that influence every aspect of the 
 
 The actor is the fundamental unit of computation, concurrency, state, and distribution in Nulang. Every running program consists of a tree of actors, each with its own mailbox, behaviors, and optionally persistent state.
 
-An actor is declared with the `actor` keyword, followed by a name, optional type parameters, optional capability parameters, and a body containing behaviors, state declarations, and helper functions:
+An actor is declared with the `actor` keyword, followed by a name, optional type parameters, and a body containing state declarations and behaviors. Inside behaviors, state is read and written through `self`:
 
 ```nulang
-actor Counter[T: Numeric] {
-  state local count: T = 0
+actor Counter {
+  state local count: Int = 0
 
-  behavior increment(by: T) {
-    count = count + by
+  behavior increment(by: Int) {
+    self.count = self.count + by
   }
 
-  behavior get(): T {
-    count
+  behavior get() {
+    self.count
   }
 
   behavior reset() {
-    count = 0
+    self.count = 0
   }
 }
 ```
@@ -115,48 +149,49 @@ Actors communicate exclusively through asynchronous messages. Sending a message 
 Actors can be made persistent by adding the `persistent` keyword:
 
 ```nulang
+type Result[T, E] = Ok(T) | Error(E)
+
 persistent actor BankAccount {
-  state durable balance: Decimal = 0.00
+  state durable balance: Int = 0
 
-  behavior deposit(amount: Decimal) {
-    balance = balance + amount
+  behavior deposit(amount: Int) {
+    self.balance = self.balance + amount
   }
 
-  behavior withdraw(amount: Decimal): Result[Unit, String] {
-    if amount > balance then
+  behavior withdraw(amount: Int) {
+    if amount > self.balance then
       Error("Insufficient funds")
-    else
-      balance = balance - amount
-      Ok(())
+    else {
+      self.balance = self.balance - amount
+      Ok(unit)
+    }
   }
 
-  behavior get_balance(): Decimal {
-    balance
+  behavior get_balance() {
+    self.balance
   }
 }
 ```
 
+(`Int` is used here because exact-decimal arithmetic — the `Decimal` type — is planned rather than implemented; see §3.2.4.)
+
 The `persistent` keyword enables automatic checkpointing after each behavior invocation, ensuring that the actor's state survives process restarts. The `durable` state model (one of four available) guarantees that `balance` is written to persistent storage before the behavior returns.
 
-Actors can hold capabilities that grant them authority to perform effects:
+Actors perform effects through the effect system, with their effect rows making authority explicit in the type signature. LLM inference is itself an effect — `perform LLM.ask(...)` — wired to the agent runtime (Chapter 11):
 
 ```nulang
 actor ChatBot {
-  capability llm
-  capability http
+  state local turns: Int = 0
 
-  state local history: List[Message] = []
-
-  behavior ask(question: String): String {
-    let context = build_context(history)
-    let answer = perform llm.complete(prompt: context, user_message: question)
-    history = history ++ [User(question), Assistant(answer)]
+  behavior ask(question: String) ! {LLM} {
+    let answer = perform LLM.ask(question) in
+    self.turns = self.turns + 1
     answer
   }
 }
 ```
 
-The `capability llm` declaration indicates that this actor is authorized to perform LLM effects. Without this declaration, the `perform llm.complete(...)` expression would be a compile-time error. This is capability-based security in action: authority is explicit, granular, and auditable.
+The `! {LLM}` row declares that this behavior may perform LLM effects; performing an effect outside the declared row is a compile-time error. Authority capabilities (`capability llm`) that grant and revoke such authority per actor are planned — see §5.3.
 
 ## 1.4 State Models Overview
 
@@ -173,34 +208,35 @@ The state model is declared alongside the variable:
 
 ```nulang
 persistent actor ShoppingCart {
-  state durable items: List[CartItem] = []
-  state crdt   viewers: GSet[NodeId] = GSet.empty()
-  state local  temp_discount: Option[Decimal] = None
+  state durable items_count: Int = 0
+  state crdt    viewers: Int = 0
+  state local   temp_discount: Int = 0
 
-  behavior add_item(item: CartItem) {
-    items = items ++ [item]
+  behavior add_item(item_id: Int) {
+    self.items_count = self.items_count + 1
   }
 
-  behavior apply_discount(code: String) {
-    -- Temporary, not persisted
-    temp_discount = lookup_discount(code)
+  behavior apply_discount(code: Int) {
+    // Temporary, not persisted
+    self.temp_discount = code
   }
 
-  behavior track_viewer(node: NodeId) {
-    -- Automatically replicated across cluster
-    viewers = viewers.add(node)
+  behavior track_viewer(node: Int) {
+    // CRDT state is merged automatically across the cluster
+    self.viewers = self.viewers + 1
   }
 }
 ```
 
-The compiler verifies that each state model is used correctly. For example, `event_sourced` state can only be mutated by appending events through a designated `emit` operation, and `crdt` state must use a CRDT data type that supports automatic merging.
+The runtime enforces the semantics of each model: `durable` fields are checkpointed and journaled, `event_sourced` state is rebuilt by replaying emitted events (see `emit`, §6.14), and `crdt` state uses one of the eight built-in CRDT data types (Appendix B.4) so concurrent updates merge deterministically.
 
 ## 1.5 Capability Security Overview
 
 Nulang employs two complementary capability systems: reference capabilities (which control how data can be aliased and shared) and authority capabilities (which control what effects an actor can perform).
 
-Reference capabilities are part of the type system. Every reference has one of six capabilities:
+Reference capabilities are part of the type system. Every reference has one of seven capabilities:
 
+- `lineariso` — unique and linear, sendable, must be consumed exactly once
 - `iso` — unique, sendable (no other references exist)
 - `trn` — unique but locally writable (transitioning to `val`)
 - `ref` — uniquely writable but not sendable
@@ -208,20 +244,21 @@ Reference capabilities are part of the type system. Every reference has one of s
 - `box` — read-only view of `ref` or `val`
 - `tag` — opaque identifier, not readable
 
-These capabilities form a lattice under a subtyping relation. The compiler uses them to guarantee that no data race can occur: an `iso` or `val` reference can be sent to another actor because the sender cannot retain the ability to mutate the data.
+These capabilities form a lattice under a subtyping relation (§3.9.1). The compiler uses them to guarantee that no data race can occur: a `lineariso`, `iso`, `val`, or `tag` reference can be sent to another actor because the sender cannot retain the ability to mutate the data. Reference capabilities are checked at compile time and erased before execution.
 
-Authority capabilities are declared on actors and govern which effects they can perform:
+Authority capabilities — declared on actors to govern which effects they can perform — are planned (§5.3). The intended surface is:
 
 ```nulang
-capability llm      -- Can perform LLM effects
-capability http     -- Can make HTTP requests
-capability file     -- Can access the file system
-capability network  -- Can open network connections
-capability random   -- Can access random number generation
-capability time     -- Can access the system clock
+// Planned — not yet implemented
+capability llm      // Can perform LLM effects
+capability http     // Can make HTTP requests
+capability file     // Can access the file system
+capability network  // Can open network connections
+capability random   // Can access random number generation
+capability time     // Can access the system clock
 ```
 
-Authority capabilities can be delegated from one actor to another, and they can be revoked at any time. This enables fine-grained security policies: an AI agent can be given `llm` and `http` capabilities, but not `file` or `network`.
+Authority capabilities are designed to be delegated from one actor to another and revoked at any time. This enables fine-grained security policies: an AI agent can be given `llm` and `http` capabilities, but not `file` or `network`.
 
 ## 1.6 Relationship to Other Languages
 
@@ -243,52 +280,49 @@ Nulang's design synthesizes ideas from several language families:
 
 ## 2.1 Source Files and Encoding
 
-Nulang source files use the `.nula` extension. A source file is a sequence of Unicode code points encoded in UTF-8. The UTF-8 Byte Order Mark (U+FEFF) at the beginning of a file is recognized and ignored, though its use is discouraged.
+Nulang source files use the `.nula` extension (the examples in this repository currently use the older `.nu` extension; the CLI accepts any path). A source file is a sequence of Unicode code points encoded in UTF-8. A leading UTF-8 Byte Order Mark is **not** currently stripped; source files should be saved without one.
 
-A source file consists of a sequence of declarations: functions, type definitions, actor definitions, effect definitions, and module-level expressions. Declarations are separated by whitespace; there is no statement terminator. The parser uses an indentation-sensitive grammar where indentation determines block structure (see Section 2.8).
+A source file consists of a sequence of declarations: functions, type definitions, actor and agent definitions, effect definitions, workflow definitions, imports, and module-level expressions. There is no statement terminator; declarations and expressions are separated by newlines or semicolons. Blocks are delimited by braces, and newlines are tokens the parser uses to find expression boundaries — indentation itself is not significant (see Section 2.8).
 
-A minimal Nulang program is a single module file that need not contain a `main` function. Module-level expressions are evaluated in order when the program starts, and any spawned actors continue running:
+A minimal Nulang program is a single module file that need not contain a `main` function. Each module-level expression is wrapped in a synthetic `__main` function and evaluated in order when the program starts, and any spawned actors continue running:
 
 ```nulang
--- hello.nula: a minimal Nulang program
-let greeting = "Hello, World!"
-perform io.println(greeting)
+// hello.nula: a minimal Nulang program
+handle perform Console.println("Hello, World!") {
+  | Console.println(msg) => unit
+}
 ```
 
-Programs are compiled to WebAssembly modules. The entry point of a Nulang program is the `__nulang_start` function generated by the compiler, which initializes the runtime, evaluates module-level bindings, and starts the actor scheduler.
+If the module declares `fn main()`, that function is the entry point instead. Programs compile to bytecode for the Nulang register VM, which initializes the runtime, evaluates the entry function, and starts the actor scheduler. (Compilation to WebAssembly with a `__nulang_start` export is **Planned**; see Chapter 13.)
 
 ## 2.2 Comments
 
 Nulang supports two comment styles:
 
-**Line comments** begin with `--` and extend to the end of the line:
+**Line comments** begin with `//` and extend to the end of the line:
 
 ```nulang
--- This is a line comment
-let x = 42  -- Comments can also follow code on the same line
+// This is a line comment
+let x = 42 in x  // Comments can also follow code on the same line
 ```
 
-**Block comments** are delimited by `{-` and `-}`. Block comments may be nested, which allows commenting out code that itself contains block comments:
+**Block comments** are delimited by `/*` and `*/`. Block comments may be nested, which allows commenting out code that itself contains block comments:
 
 ```nulang
-{- This is a block comment.
+/* This is a block comment.
    It can span multiple lines.
-   {- And they can be nested. -}
--}
+   /* And they can be nested. */
+*/
 ```
 
-Comments are treated as whitespace by the parser and have no semantic significance. They may appear between any two tokens.
+Comments are treated as whitespace by the parser and have no semantic significance. They may appear between any two tokens. (An unterminated block comment currently consumes input to end-of-file rather than producing a lex error.)
 
-**Documentation comments** are a special form of block comment delimited by `{-|` and `-}`. These comments are extracted by the documentation generator and associated with the declaration that follows them:
+**Documentation comments** are line comments beginning with `///`. They are preserved by the lexer as doc-comment tokens (ordinary comments are discarded) so tooling can associate them with the declaration that follows:
 
 ```nulang
-{-| Calculate the factorial of a non-negative integer.
-    Returns 1 for n = 0, and n * factorial(n - 1) otherwise.
-    
-    Example:
-    factorial(5) == 120
--}
-let factorial = (n: Int) -> Int {
+/// Calculate the factorial of a non-negative integer.
+/// Returns 1 for n = 0, and n * factorial(n - 1) otherwise.
+fn factorial(n: Int) -> Int {
   if n == 0 then 1 else n * factorial(n - 1)
 }
 ```
@@ -298,30 +332,47 @@ let factorial = (n: Int) -> Int {
 The following identifiers are reserved as keywords in Nulang and may not be used as ordinary identifiers:
 
 ```
-actor        behavior     capability   compensate
-crdt         durable      effect       else
-emit         enum         event        event_sourced
-false        handle       if           iso
-let          local        match        module
-parallel     perform      persistent   ref
-resume       state        step         tag
-then         trn          true         type
-val          workflow     box          import
-from         as           step         parallel
+agent        and          ask          actor
+await        behavior     box          break
+case         compensate   crdt         durable
+effect       else         emit         exit
+extern       event_sourced false      fn
+for          handle       if           import
+in           iso          let          link
+local        loop         match        migrate
+module       monitor      nil          node
+not          or           parallel     perform
+persistent   priv         pub          receive
+rec          ref          resume       return
+self         send         spawn        state
+step         subworkflow  tag          then
+tool         trn          true         type
+unit         val          where        with
+workflow     alias
 ```
 
-Keywords are case-sensitive and must be written in lowercase. Keywords that introduce declarations (`actor`, `behavior`, `effect`, `let`, `type`, `state`, `capability`, `persistent`, `workflow`, `event`) are only recognized in declaration position and may be used as field names or variables in expression position, though this is discouraged.
+Keywords are case-sensitive and must be written in lowercase.
+
+Notes on the inventory:
+
+- `true`, `false`, `nil`, and `unit` are literal keywords, and `and`, `or`, `not` are keyword spellings of the `&&`, `||`, `!` operators.
+- `await`, `exit`, `link`, `loop`, `monitor`, `node`, `priv`, `subworkflow`, and `where` are reserved but not yet accepted by the grammar (see Implementation Status). `case` is accepted only as an optional prefix on match arms.
+- The capability words `iso`, `trn`, `ref`, `val`, `box`, `tag` are keywords usable anywhere a capability is parsed. `lineariso` is **not** a keyword; it is recognized as a contextual identifier in capability position.
+- `cap` (in the `expr :cap iso` annotation) and `to` (in `migrate a to node`) are contextual identifiers, not keywords.
+- There is no `capability`, `var`, `consume`, `recover`, `enum`, `event`, `from`, `as`, or `config` keyword. Constructs earlier drafts associated with those words are either expressed differently (Chapters 5 and 7) or **Planned**.
 
 ## 2.4 Identifiers
 
-An identifier is a sequence of Unicode characters that begins with a letter (Unicode categories `Lu`, `Ll`, `Lt`, `Lm`, or `Lo`) or an underscore (`_`), followed by any number of letters, decimal digits (Unicode category `Nd`), or underscores.
+An identifier begins with an ASCII letter (`a`–`z`, `A`–`Z`) or an underscore (`_`), followed by any number of ASCII letters, digits, or underscores. The current lexer is ASCII-only: non-ASCII letters (for example `α`) are rejected with a lex error. (Unicode identifiers are **Planned**.)
 
-Nulang uses the following naming conventions, which are enforced by the compiler's style checker:
+Identifiers beginning with an uppercase letter are lexed as *upper identifiers* and are used for type, variant-constructor, actor, and effect names. Both forms are otherwise ordinary identifiers.
 
-- **Types and modules**: PascalCase (`String`, `Option`, `HttpClient`, `BankAccount`)
-- **Functions and variables**: snake_case or camelCase (`map`, `get_balance`, `process_request`)
-- **Type variables in generics**: PascalCase with a single uppercase letter, or PascalCase starting with one (`T`, `U`, `A`, `Elem`, `Key`)
-- **Effect names**: PascalCase (`IO`, `FileSystem`, `Network`, `LLM`)
+Nulang uses the following naming conventions. They are conventions only — no style checker enforces them:
+
+- **Types, variants, actors, and modules**: PascalCase (`String`, `Option`, `BankAccount`)
+- **Functions and variables**: snake_case (`map`, `get_balance`, `process_request`)
+- **Type variables in generics**: PascalCase, typically a single letter (`T`, `U`, `Elem`, `Key`)
+- **Effect names**: PascalCase, short for the built-ins (`IO`, `Net`, `FS`, `Rand`, `Time`, `LLM`)
 - **Constants**: UPPER_SNAKE_CASE (`MAX_RETRIES`, `PI`)
 
 Examples of valid identifiers:
@@ -337,70 +388,44 @@ Nulang provides literals for the following types:
 
 ### 2.5.1 Integer Literals
 
-Integer literals are sequences of decimal digits, optionally prefixed with a base indicator:
+Integer literals are sequences of decimal digits, or hexadecimal digits after a `0x` (or `0X`) prefix:
 
 ```nulang
-42        -- Decimal
-0x2A      -- Hexadecimal
-0o52      -- Octal
-0b101010  -- Binary
+42        // Decimal
+0x2A      // Hexadecimal (= 42)
 ```
 
-Integer literals without a type annotation are polymorphic and can be instantiated to any type that implements the `Integral` typeclass, subject to range constraints. The default type for an unannotated integer literal is `Int`.
-
-Underscores may be inserted between digits for readability and are ignored by the parser:
-
-```nulang
-1_000_000     -- One million
-0xFF_FF       -- Max 16-bit value
-0b1010_0101   -- Grouped binary digits
-```
+An integer literal has type `Int` (a 64-bit signed integer; see Section 3.2.2). A negative literal is written with unary negation (`-42`), which folds at compile time like any other unary expression. Octal (`0o52`), binary (`0b101010`), and underscore digit separators (`1_000_000`) are **Planned** — they are rejected by the current lexer.
 
 ### 2.5.2 Floating-Point Literals
 
-Floating-point literals consist of an integer part, a decimal point, a fractional part, and optionally an exponent:
+Floating-point literals consist of an integer part, a decimal point, a fractional part, and optionally an exponent introduced by `e` or `E` with an optional sign:
 
 ```nulang
 3.14159
-2.99792458e8    -- Scientific notation
-1.0e-9          -- Small numbers
+2.99792458e8    // Scientific notation
+1.0e-9          // Small numbers
 ```
 
-Floating-point literals default to type `Float`. An `f64` suffix may be used to specify 64-bit precision explicitly; `f32` for 32-bit.
+A floating-point literal has type `Float` (IEEE 754 double precision). There are no `f32`/`f64` suffixes. A bare `1.` is not a float literal: a `.` is only consumed as a decimal point when followed by a digit, so `1..10` lexes as `1`, `..`, `10` (the range operator is **Planned**).
 
 ### 2.5.3 String Literals
 
-String literals are delimited by double quotes (`"`). They may contain any Unicode character except an unescaped double quote, backslash, or newline. The following escape sequences are recognized:
+String literals are delimited by double quotes (`"`). They may contain any character except an unescaped double quote or backslash. The following escape sequences are recognized:
 
 ```nulang
 "Hello, World!"
-"Line 1\nLine 2"     -- Newline
-"Tab\tseparated"      -- Tab
-"Quote: \"hello\""    -- Escaped quotes
-"Backslash: \\"       -- Escaped backslash
-"Unicode: \u{1F600}"  -- Unicode escape (emoji)
+"Line 1\nLine 2"     // Newline
+"Tab\tseparated"     // Tab
+"Quote: \"hello\""   // Escaped quotes
+"Backslash: \\"      // Escaped backslash
 ```
 
-Multi-line string literals use triple quotes (`"""`) and preserve all characters between the delimiters, including newlines and indentation:
-
-```nulang
-let poem = """
-    Roses are red,
-    Violets are blue,
-    Nulang is typed,
-    And effects are too.
-    """
-```
-
-The common leading whitespace of all non-empty lines is stripped from multi-line strings. In the example above, each line's leading 4 spaces are removed.
+`\r` (carriage return) and `\0` (NUL) are also recognized. `\u{...}` Unicode escapes, triple-quoted multi-line strings, and `{expr}` string interpolation are **Planned**; none are accepted by the current lexer. (Template strings such as `"Research: {input}"` used with `Pipeline.stage` are plain string literals interpreted at runtime by the pipeline builtin — they are not language-level interpolation.)
 
 ### 2.5.4 Character Literals
 
-Character literals are single Unicode characters enclosed in single quotes (`'`). They have type `Char`:
-
-```nulang
-'a'     '\n'    '\u{03BB}'   -- Greek letter lambda
-```
+**Planned.** There is no `Char` type and the lexer does not recognize single-quoted character literals.
 
 ### 2.5.5 Boolean Literals
 
@@ -408,11 +433,40 @@ The boolean literals are `true` and `false`, with type `Bool`.
 
 ### 2.5.6 Unit Literal
 
-The unit literal is `()`, with type `Unit`. It represents the absence of a meaningful value and is the return type of effectful operations that produce no data.
+The unit literal is written `()` or with the keyword `unit`, both with type `Unit`. It represents the absence of a meaningful value and is the return type of operations that produce no data.
+
+### 2.5.7 Nil Literal
+
+The `nil` literal, with type `Nil`, represents the absence of a value (for example, a `receive` on an empty mailbox evaluates to `nil`).
 
 ## 2.6 Operators
 
-Nulang operators are classified by precedence level, from highest (tightest binding) to lowest. Operators at the same precedence level are left-associative unless noted.
+The expression grammar is a Pratt parser with thirteen precedence levels. From loosest to tightest binding:
+
+| Level | Operators | Associativity |
+|-------|-----------|---------------|
+| 1 | `=` `+=` `-=` | right |
+| 2 | `\|>` | left |
+| 3 | `\|\|` `or` | left |
+| 4 | `&&` `and` | left |
+| 5 | `==` `!=` | left |
+| 6 | `<` `<=` `>` `>=` | left |
+| 7 | `+` `-` | left |
+| 8 | `*` `/` `%` | left |
+| 9 | `<<` `>>` | left |
+| 10 | `&` | left |
+| 11 | `^` | left |
+| 12 | `\|\|\|` | left |
+| prefix | `!` `not` `-` `&` `*` | — |
+
+Prefix operators bind at level 10. Postfix forms — function application `f(x)`, field access `x.f` / `x.0`, indexing `a[i]`, message send `a ! b(args)`, and annotations `e : T` / `e :cap c` — bind tighter than all binary operators.
+
+Two quirks of the current grammar are worth noting:
+
+- **Bitwise operators bind tighter than arithmetic.** `1 + 2 & 3` parses as `1 + (2 & 3)`. Use parentheses when mixing arithmetic and bitwise operators. (This ordering is inherited from the precedence table and may be revised before 2.0.)
+- **Single `|` is not an infix operator.** It is reserved as the match-arm and variant separator, so bitwise OR is written `|||` (or the keyword `or` for booleans).
+
+There is no `**` exponentiation operator, no `++` concatenation operator, and no `~` bitwise-not operator.
 
 ### 2.6.1 Arithmetic Operators
 
@@ -423,10 +477,9 @@ Nulang operators are classified by precedence level, from highest (tightest bind
 | `*` | Multiplication | `a * b` |
 | `/` | Division | `a / b` |
 | `%` | Remainder | `a % b` |
-| `**` | Exponentiation (right-associative) | `2 ** 10` |
 | `-` | Unary negation | `-x` |
 
-All arithmetic operators work on any numeric type (`Int`, `Float`, `Decimal`). Mixed-type arithmetic requires explicit conversion.
+Arithmetic operators are type-polymorphic through inference: both operands and the result share one type variable, so `+` works on `Int` or `Float` but the two operands must have the same type. Mixed-type arithmetic requires explicit conversion (conversion functions are **Planned** with the standard library). Division by zero evaluates to `nil`.
 
 ### 2.6.2 Comparison Operators
 
@@ -439,37 +492,39 @@ All arithmetic operators work on any numeric type (`Int`, `Float`, `Decimal`). M
 | `>` | Greater than |
 | `>=` | Greater than or equal |
 
-Comparison operators are non-associative. Chained comparisons like `a < b < c` are not permitted; use `(a < b) && (b < c)` instead.
+Comparison operators are left-associative like all binary operators, so `a < b < c` parses as `(a < b) < c`, which fails to type-check (`Bool` is not comparable to `c`). Write `(a < b) && (b < c)` instead.
 
 ### 2.6.3 Boolean Operators
 
 | Operator | Description |
 |----------|-------------|
-| `&&` | Logical AND (short-circuiting) |
-| `\|\|` | Logical OR (short-circuiting) |
-| `!` | Logical NOT (unary) |
+| `&&` / `and` | Logical AND (short-circuiting) |
+| `\|\|` / `or` | Logical OR (short-circuiting) |
+| `!` / `not` | Logical NOT (unary prefix) |
 
 The `&&` and `||` operators use short-circuit evaluation: the right operand is only evaluated if necessary.
 
 ### 2.6.4 Reference Capability Operators
 
-| Operator | Description |
-|----------|-------------|
-| `consume` | Consume a reference, producing an `iso` |
-| `recover` | Recover a reference to `iso` or `val` |
+| Operator | Description | Status |
+|----------|-------------|--------|
+| `&` | Create a reference (`&x`, capability `ref`) | Implemented |
+| `*` | Dereference a reference (`*r`) | Implemented |
+| `consume` | Consume a reference, producing an `iso` | **Planned** |
+| `recover` | Recover a reference to `iso` or `val` | **Planned** |
 
-These operators are discussed in detail in Chapter 5.
+Reference types and capabilities are discussed in detail in Chapter 5.
 
 ### 2.6.5 The Pipe Operator
 
-The pipe operator `|>` passes the left operand as the last argument to the function on the right:
+The pipe operator `|>` passes the left operand as the **first** argument to the function on the right:
 
 ```nulang
-list |> map(f) |> filter(g) |> fold(h, 0)
--- Equivalent to: fold(h, 0, filter(g, map(f, list)))
+list |> map(f) |> filter(g)
+// Equivalent to: filter(map(list, f), g)
 ```
 
-The pipe operator has low precedence and is left-associative. It is described fully in Section 6.9.
+The pipe operator has very low precedence (level 2, above only assignment) and is left-associative. It is described fully in Section 6.9.
 
 ## 2.7 Delimiters
 
@@ -477,67 +532,50 @@ Nulang uses the following delimiters:
 
 | Delimiter | Usage |
 |-----------|-------|
-| `()` | Parentheses for grouping and function arguments |
-| `{}` | Braces for actor bodies and explicit blocks |
-| `[]` | Square brackets for array literals and type parameters |
-| `,` | Comma for separating list elements |
-| `:` | Colon for type annotations and field definitions |
-| `;` | Semicolon for separating expressions on the same line (rare) |
-| `->` | Arrow for function types and match branches |
-| `=>` | Fat arrow for lambda expressions |
-| `=` | Equals for assignments and definitions |
-| `..` | Double dot for record update and range operations |
-| `\|` | Vertical bar for pattern match branches |
+| `()` | Parentheses for grouping, tuples, and function arguments |
+| `{}` | Braces for blocks, record literals, actor bodies, and effect rows |
+| `[]` | Square brackets for array literals, indexing, and type parameters |
+| `,` | Comma for separating elements |
+| `:` | Colon for type annotations (`x : Int`) and capability annotations (`x :cap iso`) |
+| `;` | Semicolon for separating expressions on the same line |
+| `->` | Arrow for function types and `fn` bodies |
+| `=>` | Fat arrow for match arms and handler clauses |
+| `=` | Equals for bindings and assignment |
+| `.` | Dot for field access (`r.name`) and tuple indexing (`t.0`) |
+| `!` | Bang for message send (`a ! b(args)`) and effect annotations (`! {IO}`) |
+| `\|` | Vertical bar introducing match arms, handler clauses, and variant constructors |
+| `@` | At sign for annotations (`@tool(...)`) and pattern aliases (`n @ Some(x)`) |
 
-## 2.8 Indentation-Based Grouping
+The lexer also recognizes `..`, `::`, `<-`, and `?`, but the parser does not yet accept them anywhere; programs using them fail with a parse error. Their uses (ranges/record update, module paths, message send, error propagation) are **Planned**.
 
-Nulang uses indentation to determine block structure, following a rule similar to Haskell's *offside rule*. A block begins when a construct expects a sub-expression, and the indentation of the first token in that sub-expression determines the indentation level for the entire block. All subsequent lines in the block must be indented at least to this level.
+## 2.8 Newlines, Semicolons, and Blocks
 
-Specifically:
+Block structure in the current grammar is explicit, not indentation-based:
 
-1. After `then` in an `if` expression, the expression body must be indented.
-2. After `else`, the alternative expression must be indented.
-3. After `let` with an `=`, the binding expression must be indented.
-4. After `behavior` name and parameters, the behavior body must be indented.
-5. After `actor` name, the actor body must be indented.
-6. After `workflow` name, the workflow body must be indented.
-7. After a `match` expression, each `\|` branch must be indented consistently.
-8. After `handle` and `perform`, the handler body must be indented.
-
-The parser allows the use of explicit braces `{` and `}` to override indentation-based grouping. When braces are used, indentation is not significant within the braces:
+- A **block** is a brace-delimited sequence of expressions, `{ e1; e2; …; en }`, whose value is the value of the last expression.
+- **Newlines** are tokens. The parser skips newlines wherever an expression or declaration may continue, so expressions may span lines freely, and a newline (or a run of them) terminates an expression or declaration where one is complete.
+- **Semicolons** separate expressions on the same line, exactly like newlines.
 
 ```nulang
--- Indentation-based
-let max = (a: Int, b: Int) -> Int {
-  if a > b then
-    a
-  else
-    b
-}
-
--- Braces-based (equivalent)
-let max = (a: Int, b: Int) -> Int {
-  if a > b then { a } else { b }
-}
+let max = fn(a: Int, b: Int) {
+  if a > b then a else b
+} in
+let m = max(3, 7) in
+{ m; m + 1 }   // semicolons separate expressions; block value is m + 1
 ```
 
-When mixing indentation and braces, the outermost construct determines the mode. If the opening token of a block uses braces, all nested blocks within it may use braces freely. If the outer block uses indentation, braces may still be used for individual inner blocks.
-
-A tab character is treated as equivalent to 2 spaces for indentation purposes. Consistent use of spaces is strongly recommended.
+Indentation has no semantic significance; tabs and spaces are ordinary whitespace. (Indentation-sensitive layout, in the style of Haskell's offside rule, is **Planned** for a future revision.)
 
 ```nulang
--- Example: indentation in an actor definition
+// Example: an actor definition. Braces delimit the body; state fields
+// and behaviors are separated by newlines.
 actor WeatherService {
-  state local cache: Map[String, Weather] = Map.empty()
+  state cache = 0
 
-  behavior get_forecast(city: String): Weather {
-    match Map.get(cache, city) {
-      | Some(weather) => weather
-      | None => {
-          let weather = fetch_from_api(city)
-          cache = Map.insert(cache, city, weather)
-          weather
-        }
+  behavior get_forecast(city: String) {
+    match self.cache with {
+      | 0 => self.cache
+      | n => n
     }
   }
 }
@@ -551,17 +589,17 @@ actor WeatherService {
 
 Nulang employs a static type system based on Hindley-Milner type inference with extensions for reference capabilities, effect rows, and generic programming. The type system has the following properties:
 
-**Soundness.** Well-typed programs do not go wrong at runtime due to type errors. The type system prevents null pointer dereferences (through `Option` types), out-of-bounds array access (through safe indexing), and data races (through reference capabilities).
+**Soundness.** Well-typed programs do not go wrong at runtime due to type errors. The type system prevents null pointer dereferences (through user-declared `Option`-style variants and the explicit `nil` value) and data races (through reference capabilities and the sendability check on messages).
 
-**Complete inference.** The types of all expressions can be inferred automatically by the compiler. Type annotations are optional except on top-level function parameters and explicit type declarations. Annotations may be provided for documentation purposes or to constrain inference.
+**Complete inference.** The types of all expressions can be inferred automatically by the compiler (Hindley-Milner Algorithm W). Parameter type annotations are optional: unannotated parameters receive fresh type variables that unify with their uses. Annotations may be provided for documentation or to constrain inference, and they are required in `extern` FFI declarations.
 
-**Parametric polymorphism.** Functions and types may be parameterized by type variables, enabling generic programming without the overhead of boxing or runtime type checks.
+**Parametric polymorphism.** Functions and types may be parameterized by type variables (`fn map[A, B](...)`, `type Pair[A, B] = ...`), enabling generic programming without runtime type checks. Let-bound values are generalized (let-polymorphism).
 
-**Effect tracking.** Function types include an effect row that describes which computational effects the function may perform. This makes effectful dependencies explicit and enables local reasoning about code.
+**Effect tracking.** Function types include an effect row that describes which computational effects the function may perform. This makes effectful dependencies explicit and enables local reasoning about code. Effect rows are inferred; a `! {Row}` annotation on a `fn` or `behavior` is enforced against the body's inferred row.
 
-**Capability safety.** Reference types are qualified with capabilities that control how data can be read, written, and shared across actor boundaries. The capability system guarantees memory safety and data-race freedom.
+**Capability safety.** Reference types are qualified with capabilities that control how data can be read, written, and shared across actor boundaries. The capability system guarantees memory safety and data-race freedom and is checked entirely at compile time; capability annotations are erased before execution.
 
-Types in Nulang are organized into a hierarchy of *kinds*. The base kind `*` represents ordinary types (types of values). Higher kinds represent type constructors: `* -> *` is the kind of a type constructor taking one type argument (like `List`), and `* -> * -> *` takes two (like `Map`).
+(Kinds and higher-kinded types are **Planned**; the current type system has a single kind `*` for ordinary types, and type constructors like `List` are not yet kind-checked.)
 
 ## 3.2 Primitive Types
 
@@ -569,50 +607,52 @@ Nulang provides the following primitive types:
 
 ### 3.2.1 Bool
 
-The type `Bool` has two values: `true` and `false`. It supports the logical operators `&&`, `||`, and `!`.
+The type `Bool` has two values: `true` and `false`. It supports the logical operators `&&`, `||`, and `!` (also spelled `and`, `or`, `not`).
 
 ```nulang
-let is_valid = (x: Int) -> Bool {
+fn is_valid(x: Int) -> Bool {
   x > 0 && x < 100
 }
 ```
 
 ### 3.2.2 Int
 
-The type `Int` represents signed integers with platform-defined precision (at least 32 bits, typically 64 bits on modern platforms). It supports all arithmetic operators and bitwise operations (`&`, `|`, `^`, `<<`, `>>`).
+The type `Int` is a 64-bit signed integer (`i64`; range −9,223,372,036,854,775,808 to 9,223,372,036,854,775,807). It supports all arithmetic operators and the bitwise operations `&`, `^`, `|||`, `<<`, `>>`. (Single `|` is reserved for match arms — see Section 2.6.)
 
 ```nulang
-let double = (x: Int) -> Int { x * 2 }
-let is_even = (x: Int) -> Bool { x % 2 == 0 }
+fn double(x: Int) -> Int { x * 2 }
+fn is_even(x: Int) -> Bool { x % 2 == 0 }
 ```
 
 ### 3.2.3 Float
 
-The type `Float` represents IEEE 754 double-precision floating-point numbers. Single-precision `Float32` is also available for memory-constrained scenarios.
+The type `Float` represents IEEE 754 double-precision floating-point numbers (`f64`). (A single-precision `Float32` is **Planned**.)
 
 ```nulang
-let area = (radius: Float) -> Float {
+fn area(radius: Float) -> Float {
   3.14159 * radius * radius
 }
 ```
 
 ### 3.2.4 Decimal
 
-The type `Decimal` represents arbitrary-precision decimal numbers, suitable for financial calculations where floating-point rounding is unacceptable. `Decimal` values are created from string literals or integer literals:
-
-```nulang
-let price: Decimal = 19.99
-let tax_rate: Decimal = 0.08
-let total = price * (1 + tax_rate)  -- 21.5892
-```
+**Planned.** An arbitrary-precision `Decimal` type for financial calculations is not implemented. Use `Int` (scaled, e.g. cents) or `Float` today.
 
 ### 3.2.5 Char
 
-The type `Char` represents a single Unicode scalar value. Character literals use single quotes.
+**Planned.** There is no `Char` type; the lexer rejects single-quoted character literals.
 
 ### 3.2.6 Unit
 
-The type `Unit` has a single value `()` and is used for functions and effects that return no meaningful value. It is analogous to `void` in C or `()` in Haskell.
+The type `Unit` has a single value `()` (also written `unit`) and is used for functions and effects that return no meaningful value. It is analogous to `void` in C or `()` in Haskell.
+
+### 3.2.7 Nil, Never, and Address
+
+Three further primitive types complete the current set:
+
+- `Nil` — the type of the `nil` literal (Section 2.5.7).
+- `Never` — the empty type, used for computations that cannot produce a value.
+- `Address` — the type of actor references (Section 8.10).
 
 ## 3.3 Product Types
 
@@ -623,18 +663,18 @@ Product types combine multiple values into a single value. Nulang provides two p
 A tuple is an ordered collection of values of possibly different types. Tuple types are written with parentheses and commas; tuple values use the same syntax:
 
 ```nulang
-let point: (Float, Float) = (3.0, 4.0)
-let person: (String, Int, Bool) = ("Alice", 30, true)
+let point: (Float, Float) = (3.0, 4.0) in point
+let person: (String, Int, Bool) = ("Alice", 30, true) in person
 ```
 
-Tuples are destructured with pattern matching:
+Tuples are destructured with tuple patterns:
 
 ```nulang
-let (x, y) = point
-let distance = (p: (Float, Float)) -> Float {
-  let (x, y) = p
-  (x * x + y * y) ** 0.5
-}
+let distance = fn(p: (Float, Float)) {
+  match p with {
+    | (x, y) => x * x + y * y
+  }
+} in distance((3.0, 4.0))
 ```
 
 The empty tuple `()` is the same as the unit value. Single-element tuples `(a,)` are distinguished from parenthesized expressions by the trailing comma.
@@ -643,37 +683,29 @@ Tuple components are accessed by position using zero-based indexing: `point.0`, 
 
 ### 3.3.2 Records
 
-A record is a labeled product type, where each field has a name and a type. Record types are structural: two record types are equivalent if they have the same fields with the same types, regardless of declaration order.
+A record is a labeled product type, where each field has a name and a type. Record types are structural: two record types unify when they have the same field names with unifiable types, regardless of declaration order. Record literals and record types use a colon between the field name and its value or type:
 
 ```nulang
-let person = { name = "Alice", age = 30, active = true }
+let person = { name: "Alice", age: 30, active: true } in person
 
--- Type is inferred as: { name: String, age: Int, active: Bool }
-let greet = (p: { name: String, age: Int }) -> String {
-  "Hello, " ++ p.name ++ "! You are " ++ Int.to_string(p.age) ++ " years old."
-}
+// Type is inferred as: { name: String, age: Int, active: Bool }
+let greet = fn(p: { name: String, age: Int }) {
+  p.name
+} in greet(person)
 ```
 
-Record fields are accessed using dot notation: `person.name`, `person.age`.
+Record fields are accessed using dot notation: `person.name`, `person.age`. Record patterns destructure records with the same colon syntax: `{ name: n, age: a }`.
 
-Records support structural update with the `..` syntax, which creates a new record with modified fields:
+Structural update (`{ person .. age = 31 }`) and range expressions are **Planned**; the `..` token is lexed but not yet accepted by the grammar. Records are immutable values; to "update" one today, construct a new record.
 
-```nulang
-let older_person = { person .. age = person.age + 1 }
--- Result: { name = "Alice", age = 31, active = true }
-```
-
-The update expression `r .. f = v` creates a new record with all fields of `r` except `f`, which is replaced by `v`. The original record is not modified; records are immutable by default.
-
-Record types can be abbreviated using type aliases (Section 3.11):
+Record types can be named with a record type declaration or abbreviated with a type alias (Section 7.3):
 
 ```nulang
 type Person = { name: String, age: Int, active: Bool }
-
 type Point = { x: Float, y: Float }
 
-let translate = (p: Point, dx: Float, dy: Float) -> Point {
-  { p .. x = p.x + dx, y = p.y + dy }
+fn translate(p: Point, dx: Float, dy: Float) -> Point {
+  { x: p.x + dx, y: p.y + dy }
 }
 ```
 
@@ -683,12 +715,12 @@ Sum types represent values that can be one of several alternatives. Nulang provi
 
 ### 3.4.1 Variant Types
 
-A variant type is defined with the `type` keyword and consists of a set of constructors, each optionally carrying data:
+A variant type is defined with the `type` keyword and consists of a set of constructors, each optionally carrying a single payload type:
 
 ```nulang
 type Option[T] =
-  | None
   | Some(T)
+  | None
 
 type Result[T, E] =
   | Ok(T)
@@ -696,32 +728,34 @@ type Result[T, E] =
 
 type Tree[T] =
   | Leaf
-  | Node { left: Tree[T], value: T, right: Tree[T] }
+  | Node((Tree[T], T, Tree[T]))
 ```
 
-Variant constructors are used to create values, and pattern matching is used to destructure them:
+The leading `|` on the first constructor is optional, and constructors may be written on one line (`type Color = Red | Green | Blue`). A constructor payload is a single parenthesized type; a constructor carrying several values takes a tuple payload, as `Node` shows. Record-style constructors with named fields (`Node { left: ..., ... }`) are **Planned**.
+
+Nulang has no prelude: `Option` and `Result` are not built in. Programs declare the variants they need (as above) and then use the constructors as ordinary uppercase values. Variant constructors create values, and pattern matching destructures them:
 
 ```nulang
-let safe_divide = (a: Float, b: Float) -> Result[Float, String] {
+type Result[T, E] = Ok(T) | Error(E)
+
+fn safe_divide(a: Float, b: Float) -> Result[Float, String] {
   if b == 0.0 then
     Error("Division by zero")
   else
     Ok(a / b)
 }
 
-let handle_result = (r: Result[Float, String]) -> String {
-  match r {
-    | Ok(value) => "Result: " ++ Float.to_string(value)
-    | Error(msg) => "Error: " ++ msg
+fn describe(r: Result[Float, String]) -> String {
+  match r with {
+    | Ok(value) => "ok"
+    | Error(msg) => msg
   }
 }
 ```
 
-Record-style constructors (like `Node` above) carry named fields. Tuple-style constructors (like `Some` and `Ok`) carry anonymous positional fields.
-
 ### 3.4.2 Enums
 
-An enum is a variant type where no constructor carries data. Enums are defined with a concise syntax:
+An enum is a variant type where no constructor carries data. Enums use the same concise syntax:
 
 ```nulang
 type Color = Red | Green | Blue
@@ -729,11 +763,11 @@ type Color = Red | Green | Blue
 type Status = Pending | Running | Completed | Failed
 ```
 
-Enum constructors are compared with structural equality and pattern-matched like other variants:
+Enum constructors are pattern-matched like other variants:
 
 ```nulang
-let status_message = (s: Status) -> String {
-  match s {
+fn status_message(s: Status) -> String {
+  match s with {
     | Pending   => "Waiting to start..."
     | Running   => "In progress..."
     | Completed => "Done!"
@@ -744,169 +778,112 @@ let status_message = (s: Status) -> String {
 
 ## 3.5 Function Types
 
-Function types describe the type of a function, including its parameter types, return type, and effect row. The general form is:
+Function types describe the type of a function, including its parameter type, return type, effect row, and capability. The general form is:
 
 ```nulang
-(A1, A2, ..., An) -> [EffectRow] R
+A -> R ! {EffectRow} : cap
 ```
 
-Where `A1` through `An` are the parameter types, `R` is the return type, and `EffectRow` is the set of effects the function may perform. The effect row may be omitted if it is the default (pure) effect row.
+where `A` is the parameter type (a multi-argument function takes a tuple parameter `(A1, A2, ..., An)`), `R` is the return type, `! {EffectRow}` is the optional effect row, and `: cap` is the optional capability. Both annotations are omitted when the function is pure with the default `ref` capability:
 
 ```nulang
--- Pure function: no effects
-let add: (Int, Int) -> Int = (a, b) -> a + b
+// Pure function: no effects
+fn add(a: Int, b: Int) -> Int { a + b }
 
--- Effectful function: may perform IO
-let greet: (String) -> [IO] Unit = (name) -> {
-  perform io.println("Hello, " ++ name)
-}
-
--- Function with explicit effect row
-let read_config: () -> [FileSystem, IO] Result[Config, String] = () -> {
-  perform filesystem.read("config.json")
+// Effectful function: the ! {IO} row is enforced — the body may perform
+// IO effects and nothing else.
+fn greet(name: String) -> Unit ! {IO} {
+  handle perform IO.println(name) {
+    | IO.println(msg) => unit
+  }
 }
 ```
 
-Effect rows are enclosed in square brackets after the parameter list. An empty effect row `[]` denotes a pure function. A non-empty row lists the effects the function may perform.
+In a *type* position the row is written the same way, e.g. `(String) -> Unit ! {IO}`. An empty effect row `{}` denotes a pure function; a row with a row variable `{IO, | e}` is effect-polymorphic (Section 4.5). Inside `fn` and `behavior` bodies the declared row is checked; unannotated bodies have their rows inferred.
 
-Functions are first-class values: they can be passed as arguments, returned from other functions, and stored in data structures.
+Functions are first-class values: they can be passed as arguments, returned from other functions, and stored in data structures. Anonymous functions are written with `fn` (Section 6.8):
 
 ```nulang
-let compose = (f: (B) -> C, g: (A) -> B) -> (A) -> C {
-  (x) -> f(g(x))
+fn compose(f: (B) -> C, g: (A) -> B) -> ((A) -> C) {
+  fn(x) { f(g(x)) }
 }
 
-let twice = (f: (Int) -> Int) -> (Int) -> Int {
-  (x) -> f(f(x))
+fn twice(f: (Int) -> Int) -> ((Int) -> Int) {
+  fn(x) { f(f(x)) }
 }
 ```
 
 ## 3.6 Generic Types
 
-Type constructors may be parameterized by type variables, enabling generic programming. Type variables are written with a leading uppercase letter and may be constrained by typeclasses.
+Type constructors and functions may be parameterized by type variables, enabling generic programming.
 
 ### 3.6.1 Type Parameters
 
 Type parameters are declared in square brackets after a type or function name:
 
 ```nulang
-type Pair[A, B] = (A, B)
+type Pair[A, B] = { first: A, second: B }
 
-let first = [T, U] (p: Pair[T, U]) -> T {
-  let (a, _) = p
-  a
+fn first[T, U](p: (T, U)) -> T {
+  match p with { | (a, _) => a }
 }
 
 type Box[T] =
   | Empty
   | Full(T)
 
-let map_box = [A, B] (b: Box[A], f: (A) -> B) -> Box[B] {
-  match b {
-    | Empty    => Empty
-    | Full(x)  => Full(f(x))
+fn map_box[A, B](b: Box[A], f: (A) -> B) -> Box[B] {
+  match b with {
+    | Empty   => Empty
+    | Full(x) => Full(f(x))
   }
 }
 ```
 
-### 3.6.2 Type Parameter Constraints
-
-Type parameters may be constrained to implement certain typeclasses. A typeclass constraint is written as `T: ClassName` in the type parameter list:
+Unannotated parameters are inferred, so explicitly polymorphic functions can also be written without a parameter list:
 
 ```nulang
-let max = [T: Ordered] (a: T, b: T) -> T {
-  if a > b then a else b
-}
-
-let sum = [T: Numeric] (list: List[T]) -> T {
-  List.fold(list, 0, (acc, x) -> acc + x)
-}
+fn id(x) { x }        // inferred as forall 't. 't -> 't
+fn const(a, b) { a }
 ```
 
-Common typeclasses include:
+### 3.6.2 Type Parameter Constraints
 
-| Typeclass | Methods | Description |
-|-----------|---------|-------------|
-| `Eq` | `==`, `!=` | Structural equality |
-| `Ordered` | `<`, `<=`, `>`, `>=` | Total ordering |
-| `Numeric` | `+`, `-`, `*`, `/` | Arithmetic operations |
-| `Show` | `to_string` | String representation |
-| `Semigroup` | `++` | Associative combination |
-| `Monoid` | `++`, `empty` | Semigroup with identity |
+**Planned.** Typeclass constraints such as `[T: Ordered]` and the typeclasses `Eq`, `Ordered`, `Numeric`, `Show`, `Semigroup`, and `Monoid` are not implemented. Generic functions today are parametric: a polymorphic function may only use operations available for every type (construction, pattern matching, and passing values around).
 
 ### 3.6.3 Higher-Kinded Types
 
-Type parameters can themselves be type constructors (higher-kinded types):
-
-```nulang
-let map = [F: Functor, A, B] (fa: F[A], f: (A) -> B) -> F[B] {
-  Functor.map(fa, f)
-}
-
-let sequence = [F: Applicative, G: Traversable, A] (fga: G[F[A]]) -> F[G[A]] {
-  Traversable.sequence(fga)
-}
-```
+**Planned.** Type parameters that are themselves type constructors (`[F: Functor, A, B]`) are not implemented; every type parameter has kind `*`.
 
 ## 3.7 Array and String Types
 
 ### 3.7.1 Arrays
 
-Arrays are homogeneous, dynamically-sized sequences with O(1) indexed access. The type `Array[T]` represents an array of elements of type `T`.
+Arrays are homogeneous sequences with O(1) indexed access. The type of an array of `T` is written `[T]`. Array literals use square brackets and the element type is inferred:
 
 ```nulang
-let numbers: Array[Int] = [1, 2, 3, 4, 5]
-let first = numbers.0     -- 1
-let length = Array.length(numbers)
+let numbers = [1, 2, 3, 4, 5] in
+let first = numbers[0] in     // 1
+first
 ```
 
-Array elements are accessed using bracket notation: `arr.i` or `arr.(i)` for dynamic indexing. Arrays are immutable by default; mutable arrays are available through reference types.
-
-Array literals use square bracket syntax. The type can usually be inferred from the elements.
-
-Common array operations:
-
-```nulang
-let doubled = Array.map(numbers, (x) -> x * 2)       -- [2, 4, 6, 8, 10]
-let evens = Array.filter(numbers, (x) -> x % 2 == 0) -- [2, 4]
-let total = Array.fold(numbers, 0, (a, b) -> a + b)  -- 15
-let has_three = Array.contains(numbers, 3)           -- true
-```
+Elements are accessed using bracket indexing: `arr[i]`. All elements must have the same type. Arrays are heap-allocated values; the `for x in arr body` comprehension (Section 6.15) iterates over them. Higher-level operations (`Array.map`, `Array.filter`, `Array.length`, …) are **Planned** with the standard library (Chapter 14).
 
 ### 3.7.2 Strings
 
-The type `String` represents a sequence of Unicode characters. Strings are immutable and support concatenation, slicing, and various transformation functions.
+The type `String` represents a sequence of characters. Strings are immutable values and support equality comparison (`==`). Concatenation (`++`), slicing, case conversion, and the other `String` module functions are **Planned** with the standard library.
 
-```nulang
-let greeting = "Hello"
-let target = "World"
-let message = greeting ++ ", " ++ target ++ "!"
-
-let length = String.length(message)           -- 13
-let upper = String.to_uppercase(message)        -- "HELLO, WORLD!"
-let contains_hello = String.contains(message, "Hello")  -- true
-let words = String.split(message, ", ")         -- ["Hello", "World!"]
-```
-
-String interpolation provides a convenient syntax for embedding expressions within strings:
-
-```nulang
-let name = "Nulang"
-let version = 2.0
-let desc = "Welcome to {name} version {version}!"
--- Result: "Welcome to Nulang version 2.0!"
-```
-
-Interpolated expressions are enclosed in `{` and `}` within a string literal. The expression's `to_string` method is called automatically.
+String interpolation (`"Welcome to {name}!"`) is likewise **Planned**: the current lexer treats `{` and `}` inside string literals as ordinary characters. As noted in Section 2.5.3, `{input}` templates passed to `Pipeline.stage` are expanded at runtime by the pipeline builtin, not by the language.
 
 ## 3.8 Reference Types
 
-Nulang's reference type system is adapted from Pony's capability system. Every reference to an object carries a *reference capability* that determines how it may be read, written, and shared. These capabilities enable the compiler to guarantee memory safety and data-race freedom.
+Nulang's reference type system is adapted from Pony's capability system. Every reference to an object carries a *reference capability* that determines how it may be read, written, and shared. Capabilities are checked entirely at compile time and **erased at runtime** — the virtual machine does not re-check them (the `CapChk`/`CapUp`/`CapDown`/`CapSend` opcodes are currently no-ops).
 
-### 3.8.1 The Six Reference Capabilities
+### 3.8.1 The Seven Reference Capabilities
 
 | Capability | Read | Write | Sendable | Description |
 |------------|------|-------|----------|-------------|
+| `lineariso` | Yes | Yes | Yes | Linear unique reference; must be consumed exactly once |
 | `iso` | Yes | Yes | Yes | Unique reference; no aliases exist |
 | `trn` | Yes | Yes | No | Transitioning; will become `val` |
 | `ref` | Yes | Yes | No | Standard read-write reference |
@@ -914,27 +891,27 @@ Nulang's reference type system is adapted from Pony's capability system. Every r
 | `box` | Yes | No | No | Read-only view of `ref` or `val` |
 | `tag` | No | No | Yes | Opaque reference; only identity |
 
-Reference capabilities are written as a prefix to the type: `iso String`, `val Array[Int]`, `ref Tree[T]`.
+A capability-qualified reference type is written with an ampersand followed by the capability: `&iso String`, `&val [Int]`, `&ref Tree[T]`. An expression can be annotated with a capability directly using the contextual keyword `cap`: `expr :cap iso`.
 
 ```nulang
--- iso: unique, can be sent to another actor
-let unique_data: iso Buffer = Buffer.create(1024)
+// iso: unique, can be sent to another actor
+let unique_data: &iso Buffer = make_buffer(1024)
 
--- val: immutable, can be shared freely
-let config: val Config = load_config()
+// val: immutable, can be shared freely
+let config: &val Config = load_config()
 
--- ref: local mutable reference
-let counter: ref Int = 0
+// ref: local mutable reference
+let counter: &ref Int = 0
 
--- box: read-only view
-let view: box { name: String } = person_record
+// capability annotation on an expression
+let boxed = data :cap box
 ```
 
 ### 3.8.2 Capability Semantics
 
-An `iso` reference guarantees that no other reference to the same object exists. This makes `iso` references safe to send to other actors, because the sender cannot retain any alias that would allow concurrent mutation. When an `iso` reference is consumed (sent or destructured), the original binding becomes inaccessible.
+An `iso` reference guarantees that no other reference to the same object exists. This makes `iso` references safe to send to other actors, because the sender cannot retain any alias that would allow concurrent mutation. A `lineariso` reference is a stricter `iso` that must be consumed *exactly once*; the compiler tracks it with exactly-once linearity and reports a `LinearTypeError` if it is dropped or used twice.
 
-A `val` reference is an immutable view of an object. Multiple `val` aliases can exist, and `val` references can be sent to other actors because the data cannot change. An object is promoted to `val` when all write-capable references (`iso`, `trn`, `ref`) are given up.
+A `val` reference is an immutable view of an object. Multiple `val` aliases can exist, and `val` references can be sent to other actors because the data cannot change.
 
 A `ref` reference is the default for local mutable data. It allows reading and writing but cannot be sent to other actors because the sender could retain an alias and modify the data concurrently.
 
@@ -944,13 +921,20 @@ A `tag` reference is an opaque identifier. It carries no read or write permissio
 
 ### 3.8.3 Capability Defaults
 
-When no capability is explicitly specified, the compiler infers the most restrictive capability that satisfies the usage. In actor behaviors, the default capability for parameters is `val` (immutable, sendable), ensuring that data sent between actors is safe by default.
+When no capability is explicitly specified, the checker assigns defaults by context rather than inferring the most restrictive capability from usage:
+
+- Function and behavior parameters without an explicit capability are bound at `ref` by the type checker.
+- Literals and freshly constructed values default to `val`.
+- The default capability context is `val`.
+- Actor references produced by `spawn` carry `iso`.
+
+Explicit annotations (`x: &iso T`, or the `! ... : cap` suffix on a function signature) override these defaults.
 
 ```nulang
 actor Processor {
-  -- 'data' defaults to val, meaning it is immutable and sendable
+  // 'data' has the declared type String with the default parameter capability
   behavior process(data: String) {
-    perform io.println("Processing: " ++ data)
+    perform IO.print("Processing")
   }
 }
 ```
@@ -959,43 +943,44 @@ actor Processor {
 
 A capability-qualified type combines a reference capability with a structural type. This combination determines both what operations are permitted on the reference and what type-level guarantees hold about the data.
 
-Capability-qualified types are written with the capability as a prefix to the type expression:
+Capability-qualified types are written with the capability after an ampersand prefix:
 
 ```nulang
--- An iso reference to a mutable buffer
-let buf: iso Buffer = Buffer.create(4096)
+// An iso reference to a mutable buffer
+let buf: &iso Buffer = make_buffer(4096)
 
--- A val reference to an immutable tree
-let tree: val Tree[Int] = build_tree()
+// A val reference to an immutable tree
+let tree: &val Tree[Int] = build_tree()
 
--- A ref reference to a local record
-let state: ref { count: Int, name: String } = { count = 0, name = "default" }
+// A ref reference to a local record
+let state: &ref { count: Int, name: String } = { count: 0, name: "default" }
 ```
 
 The compiler checks that all operations on a capability-qualified type are permitted. Attempting to write through a `val` reference or send a `ref` reference to another actor results in a compile-time error.
 
 ### 3.9.1 Capability Subtyping
 
-Reference capabilities form a subtyping lattice. The key subtyping relationships are:
+Reference capabilities form a subtyping lattice, checked by the compiler's `is_subtype_of`. The key subtyping relationships are:
 
-- `iso <: tag` — a unique reference can be viewed as an opaque identity
-- `val <: box` — an immutable reference can be viewed as read-only
-- `ref <: box` — a mutable reference can be viewed as read-only
-- `trn <: val` — a transitioning reference can be frozen to immutable
-- `trn <: box` — a transitioning reference can be viewed as read-only
+- `lineariso <: iso` — a linear unique reference can be used as a plain unique reference
 - `iso <: trn` — a unique reference can downgrade to transitioning
+- `trn <: ref` — a transitioning reference can be viewed as a mutable reference
+- `ref <: box` — a mutable reference can be viewed as read-only
+- `val <: box` — an immutable reference can be viewed as read-only
+- `ref <: tag` — a mutable reference can be reduced to opaque identity
+- `val <: tag` — an immutable reference can be reduced to opaque identity
+- `box <: tag` — a read-only view can be reduced to opaque identity
 
 These relationships enable safe capability transitions. For example, a function that accepts a `box` parameter can be called with either a `ref` or a `val` argument.
 
-### 3.9.2 Recovering Capabilities
+### 3.9.2 Recovering Capabilities — Planned
 
-The `recover` expression creates an `iso` or `val` reference from an expression that only uses `iso`, `trn`, `val`, or `tag` references internally:
+`recover` is not a keyword in the current implementation. The `recover` expression, which creates an `iso` or `val` reference from an expression that only uses `iso`, `trn`, `val`, or `tag` references internally, is planned for a future version:
 
 ```nulang
-let immutable_tree: val Tree[Int] = recover {
-  let left = Tree.Leaf
-  let right = Tree.Leaf
-  Tree.Node { left = left, value = 42, right = right }
+// Planned — not yet implemented
+let immutable_tree: &val Tree[Int] = recover {
+  Tree.Node { left: Tree.Leaf, value: 42, right: Tree.Leaf }
 }
 ```
 
@@ -1009,141 +994,137 @@ Nulang uses algebraic effects and handlers as the primary mechanism for defining
 
 The effect system has four key properties:
 
-**Explicit effect tracking.** Every function's type includes an effect row that enumerates the effects it may perform. This makes dependencies on external systems visible in the type signature.
+**Explicit effect tracking.** Every function's type includes an effect row that enumerates the effects it may perform, introduced by `!` in the signature. This makes dependencies on external systems visible in the type signature.
 
 **Compositional handlers.** Effects are handled locally, not globally. A handler intercepts effect operations and defines their meaning in a specific context. Different handlers can provide different interpretations of the same effect.
 
-**Resume-based semantics.** When an effect is performed, the current computation is suspended and a continuation (represented by a `resume` function) is passed to the handler. The handler may resume the computation zero, one, or multiple times.
+**Resume-based semantics.** When an effect is performed, the current computation is suspended and its continuation is captured by the VM. The handler clause computes a value that becomes the result of the `perform` expression, after which the suspended computation resumes (see §4.4.2 for the current single-resumption model).
 
-**Type-safe effect polymorphism.** Higher-order functions can be polymorphic in their effect rows, enabling generic code that works with both pure and effectful functions.
+**Type-safe effect polymorphism.** Higher-order functions can be polymorphic in their effect rows via open rows (`{IO, | row}`), enabling generic code that works with both pure and effectful functions.
 
 ## 4.2 Effect Declarations
 
-Effects are declared with the `effect` keyword, followed by a name and a set of operations:
+Effects are declared with the `effect` keyword, followed by a name and a set of operations. Each operation is written `name: (A, B) -> R` — a colon, the argument types in parentheses (or a single bare type for one argument, or nothing for zero arguments), an arrow, and the return type:
 
 ```nulang
 effect Console {
-  println(message: String): Unit
-  read_line(): String
+  print: (String) -> Unit
+  read_line: () -> String
 }
 
 effect FileSystem {
-  read(path: String): Result[String, String]
-  write(path: String, content: String): Result[Unit, String]
-  exists(path: String): Bool
+  read: (String) -> String
+  write: (String, String) -> Unit
+  exists: (String) -> Bool
 }
 
 effect Random {
-  int(): Int
-  float(): Float
+  int: () -> Int
+  float: () -> Float
 }
 ```
 
-Each operation has a name, parameter types, and a return type. Operations may themselves have effect rows, enabling effects that depend on other effects.
+Each operation has a name, a list of parameter types, and a return type. Effect declarations describe the interface; every `perform` is dispatched dynamically to whichever handler is innermost at runtime (§4.8).
 
 ## 4.3 Performing Effects
 
 The `perform` keyword invokes an effect operation:
 
 ```nulang
-let greet_user = () -> [Console] Unit {
-  perform Console.println("What is your name?")
-  let name = perform Console.read_line()
-  perform Console.println("Hello, " ++ name ++ "!")
+fn greet_user() -> Unit ! {Console} {
+  perform Console.print("What is your name?")
+  let name = perform Console.read_line() in
+  perform Console.print("Hello!")
 }
 ```
 
-The effect row `[Console]` in the function type indicates that `greet_user` may perform the `Console` effect. Without this annotation (or an equivalent inferred type), the `perform` expressions would be compile-time errors.
+The effect row `{Console}` in the function type indicates that `greet_user` may perform the `Console` effect. If a function performs effects beyond its declared row, the effect checker reports a compile-time `EffectError`. Performing an effect with no matching handler installed is a **runtime** error (`EffectError: Unhandled effect: 'Console'`), not a compile-time one — handlers are resolved dynamically.
+
+Three operations are backed directly by the runtime when no source handler intercepts them: `LLM.ask(prompt)` (routes to the agent runtime's LLM client), `Signal.wait(name)` (workflow signal waiting), and `Timer.sleep(ms)` (used by workflow steps). All other effects must be handled by an enclosing `handle` expression.
 
 ## 4.4 Effect Handlers
 
-The `handle` expression installs an effect handler for a block of code:
+The `handle` expression installs an effect handler around a body expression. Note the syntax: the body follows `handle` directly, and the handler clauses are listed between braces — there is no `with` keyword:
 
 ```nulang
 let result = handle {
-  perform Console.println("Hello from handled code!")
+  perform Console.print("Hello from handled code!")
   42
-} with {
-  | Console.println(msg) => {
-      perform IO.println("[LOG] " ++ msg)
-      resume(())
-    }
-  | Console.read_line() => {
-      resume("test user")
-    }
+} {
+  | Console.print(msg) => unit
 }
 ```
 
-The handler pattern matches on effect operations. Each branch receives the operation's arguments and a `resume` function that continues the suspended computation. Calling `resume(v)` resumes with value `v` as the result of the `perform` expression.
+Each clause pattern matches on an effect operation, binds the operation's arguments to its parameter names, and evaluates its body. The clause body's final value is used to resume the suspended computation (§4.4.2). An optional `resume` keyword may appear before the `=>` (`| Op(x) resume => ...`); it is recorded in the AST for forward compatibility but does not change current behavior.
 
 ### 4.4.1 Handler Return Value
 
-The handler's return value becomes the value of the `handle` expression. When the handled block completes without performing any unhandled effects, its final value is returned.
+If the handled body completes without performing any effect that escapes, the value of the `handle` expression is the body's final value. If a performed effect is handled, the suspended body is resumed and, when it eventually completes, its final value is the result.
 
 ```nulang
 let sum = handle {
-  let x = perform Random.int()
-  let y = perform Random.int()
+  let x = perform Random.int() in
+  let y = perform Random.int() in
   x + y
-} with {
-  | Random.int() => resume(5)
+} {
+  | Random.int() => 5
 }
--- sum == 10
+// sum == 10
 ```
 
 ### 4.4.2 Resume Semantics
 
-The `resume` function captures the continuation of the performed effect. It can be called:
+When a `perform` is intercepted, the VM captures the suspended computation as a continuation and jumps to the matching handler clause. The clause body's final value becomes the resume value: the VM restores the continuation with that value as the result of the `perform` expression, and execution continues from the point of the `perform`.
 
-- **Once:** Standard linear resumption
-- **Zero times:** Abort the computation (e.g., for exceptions)
-- **Multiple times:** Non-deterministic or backtracking semantics
+The current implementation supports exactly this single-resumption model:
+
+- **Once:** every handler clause ends by resuming with its body's value — this is the only supported mode.
+- **Zero times (abort):** not directly expressible; `resume` without a captured continuation is a VM error. (Planned.)
+- **Multiple times:** non-deterministic/backtracking handlers are not expressible. (Planned.)
 
 ```nulang
--- Exception-like handler (resume called zero times)
-let safe_divide = (a: Float, b: Float) -> [Console] Float {
+// Log-and-continue handler: prints, then resumes with unit
+fn run_logged() -> Unit ! {Console} {
   handle {
-    if b == 0.0 then
-      perform Error.raise("Division by zero")
-    else
-      a / b
-  } with {
-    | Error.raise(msg) => {
-        perform Console.println("Error: " ++ msg)
-        0.0  -- Return default value instead of resuming
-      }
+    perform Console.print("event happened")
+  } {
+    | Console.print(msg) => perform IO.print("logged")
   }
 }
 ```
 
 ## 4.5 Effect Rows
 
-Effect rows describe the set of effects a function may perform. They support polymorphism and subtyping.
+Effect rows describe the set of effects a function may perform. They support polymorphism and subtyping, and appear in signatures after `!`.
 
 ### 4.5.1 Closed Effect Rows
 
-A closed effect row enumerates exactly the effects a function performs:
+A closed effect row enumerates exactly the effects a function performs, in braces. As a shorthand, a single effect may be written bare without braces:
 
 ```nulang
-let pure_function = (x: Int) -> [] Int { x + 1 }
+fn pure_function(x: Int) -> Int { x + 1 }
 
-let console_function = (msg: String) -> [Console] Unit {
-  perform Console.println(msg)
+fn console_function(msg: String) -> Unit ! {Console} {
+  perform Console.print(msg)
 }
 
-let multi_effect = () -> [Console, FileSystem, Random] Unit {
-  perform Console.println("Starting...")
-  let content = perform FileSystem.read("data.txt")
-  perform Console.println(content)
+fn multi_effect() -> Unit ! {Console, FileSystem, Rand} {
+  perform Console.print("Starting...")
+}
+
+// bare single-effect row — equivalent to ! {IO}
+fn log_once(msg: String) -> Unit ! IO {
+  perform IO.print(msg)
 }
 ```
 
 ### 4.5.2 Open Effect Rows
 
-An open effect row (ending with `...`) indicates polymorphism over effects:
+An open effect row lists concrete effects followed by a row variable after a pipe, `{IO, | row}`, indicating polymorphism over any additional effects:
 
 ```nulang
-let map_option = [E, A, B] (opt: Option[A], f: (A) -> [E] B) -> [E] Option[B] {
+// f may perform arbitrary effects; map_option passes them through
+fn map_option[A, B](opt: Option[A], f: fn(A) -> B ! {| row}) -> Option[B] ! {| row} {
   match opt {
     | None => None
     | Some(a) => Some(f(a))
@@ -1155,74 +1136,66 @@ The function `map_option` preserves the effect row of its callback function `f`.
 
 ### 4.5.3 Effect Row Subtyping
 
-A function with a smaller effect row can be used where a larger effect row is expected:
+A function whose inferred effect row is a subset of the expected row can be used where that row is expected. The checker is deliberately conservative: a closed row is a subtype of another row only if all of its effects are listed; an open row on the expected side may absorb additional effects through its row variable, while an open row on the actual side is assumed to possibly contain any unlisted effect.
 
-```nulang
-let use_callback = [E] (f: () -> [E] Int) -> [Console, E] Int {
-  perform Console.println("About to call callback...")
-  let result = f()
-  perform Console.println("Callback returned: " ++ Int.to_string(result))
-  result
-}
-
--- Pure callback works
-let r1 = use_callback(() -> 42)
-
--- Effectful callback also works
-let r2 = use_callback(() -> [Random] perform Random.int())
-```
+When a function or lambda carries an explicit `! {Row}` annotation, the effect checker infers the body's row and verifies it is a subset of the annotation, reporting an `EffectError` naming the offending effects otherwise.
 
 ## 4.6 Built-in Effects
 
-Nulang provides several built-in effects that are available without explicit declaration:
+The following effect names are recognized by the compiler without an explicit `effect` declaration (any other name becomes a user-defined effect, which should be declared with `effect`):
 
-| Effect | Operations | Description |
-|--------|-----------|-------------|
-| `IO` | `println`, `print`, `read_line` | Console input/output |
-| `FileSystem` | `read`, `write`, `exists`, `delete` | File system access |
-| `Network` | `get`, `post`, `put`, `delete`, `request` | HTTP requests |
-| `Random` | `int`, `float`, `bool` | Random number generation |
-| `Time` | `now`, `sleep` | Time access and delays |
-| `Error` | `raise` | Exception handling |
-| `LLM` | `complete`, `embed` | Language model inference |
-| `Metrics` | `counter`, `histogram`, `gauge` | Observability metrics |
-| `Trace` | `span`, `annotate` | Distributed tracing |
+| Effect | Description |
+|--------|-------------|
+| `IO` | Console input/output |
+| `Net` | Network communication |
+| `FS` | File system access |
+| `Rand` | Random number generation |
+| `Time` | Time access and delays |
+| `Spawn` | Actor spawning |
+| `Send` | Message sending |
+| `Receive` | Message receiving |
+| `Migrate` | Actor migration |
+| `STM` | Software transactional memory |
+| `Async` | Asynchronous computation |
+| `LLM` | Language model inference (`LLM.ask` is runtime-backed) |
+| `Cost` | Cost accounting |
+| `Event` | Event emission |
+| `FFI` | Foreign function calls |
+
+These names identify effects in rows and dispatch; they are not pre-declared operation sets. Concrete operations come from user `effect` declarations or runtime-backed operations (`LLM.ask`, `Signal.wait`, `Timer.sleep`).
 
 ## 4.7 Effect Inference
 
 The compiler infers effect rows automatically. A function's effect row is the union of all effects performed in its body, plus the effects of any functions it calls.
 
 ```nulang
--- Effect row inferred as [Console]
-let inferred = () -> {
-  perform IO.println("Hello")
+// Effect row inferred as {IO}
+fn inferred() {
+  perform IO.print("Hello")
 }
 
--- Effect row inferred as [FileSystem, Console]
-let read_and_print = (path: String) -> {
-  let content = perform FileSystem.read(path)
-  match content {
-    | Ok(data) => perform IO.println(data)
-    | Error(e) => perform IO.println("Error: " ++ e)
-  }
+// Effect row inferred as {FS, IO}
+fn read_and_print(path: String) {
+  let content = perform FS.read(path) in
+  perform IO.print(content)
 }
 ```
 
-Effect annotations are required only for top-level function parameters and explicit type declarations.
+Effect annotations are optional; when present (`! {Row}`), the inferred row must be a subset of the annotation (§4.5.3).
 
 ## 4.8 Effect Elaboration
 
-At compile time, the compiler transforms effectful code into efficient low-level code. This process, called *effect elaboration*, replaces `perform` and `handle` with direct function calls and continuation-passing style transformations. The result is zero-cost abstraction: effectful code runs as fast as equivalent callback-based code.
+Effects are not compiled to continuation-passing style. Lowering emits four dedicated opcodes — `Handle` (push a handler frame), `Perform` (search the handler stack, capture a continuation, jump to the clause), `Resume` (restore the captured continuation with the clause's value), and `Unwind` (pop the handler frame). Dispatch is therefore dynamic and resolved at runtime against the VM's handler stack; the static effect row is checked before compilation and imposes no runtime cost.
 
 ## 4.9 Effect Safety
 
 The effect system guarantees several safety properties:
 
-**Effect containment.** An effect performed inside a handler cannot escape the handler unless explicitly re-performed.
+**Effect containment.** An effect performed inside a handler is intercepted by the innermost matching handler frame; effects escape only when no enclosing handler matches.
 
-**Handler exhaustiveness.** Every effect performed in the handled block must be handled by a matching pattern. Unhandled effects result in a compile-time error.
+**No implicit effects.** Functions whose inferred row is empty perform no effects; any `perform` in their body would appear in the inferred row. Annotating such a function with an empty or narrower row than it needs is a compile-time `EffectError`.
 
-**No implicit effects.** Pure functions (those with an empty effect row `[]`) cannot perform IO, access mutable state, or call LLMs. This is verified at compile time.
+**Runtime handler resolution.** Whether an enclosing handler exists for a performed effect is decided dynamically. An unhandled effect is a runtime `EffectError` (`Unhandled effect: 'Name'`), so programs that perform effects must install handlers (or use the runtime-backed operations) to avoid failing at runtime. Static exhaustiveness checking of handlers is planned.
 
 ---
 
@@ -1232,9 +1205,9 @@ The effect system guarantees several safety properties:
 
 Nulang employs two complementary capability systems that together provide comprehensive security and safety guarantees:
 
-1. **Reference capabilities** control how data can be read, written, and shared across actor boundaries. They are part of the type system and are checked at compile time.
+1. **Reference capabilities** control how data can be read, written, and shared across actor boundaries. They are part of the type system and are checked at compile time. **Implemented** — and erased at runtime (the VM's capability opcodes are no-ops).
 
-2. **Authority capabilities** control what effects an actor can perform. They are declared on actors and checked both at compile time and runtime.
+2. **Authority capabilities** control what effects an actor can perform. They are declared on actors and checked both at compile time and runtime. **Planned** — the `capability` keyword does not exist in the current implementation; effect authority is currently expressed only through effect rows (Chapter 4).
 
 These systems work together: reference capabilities prevent data races, while authority capabilities prevent unauthorized access to external resources.
 
@@ -1243,18 +1216,17 @@ These systems work together: reference capabilities prevent data races, while au
 Reference capabilities are described in detail in Section 3.8. They form a lattice of permissions:
 
 ```
-iso (read+write, sendable)
-  |
-trn (read+write, local)
-  |
-ref (read+write, local)
-  |
-box (read-only, local)
-  |
-val (read-only, sendable)
-  |
-tag (no access, sendable)
+lineariso <: iso <: trn <: ref <: box <: tag
+                              val <: box,  val <: tag
 ```
+
+- `lineariso` — read+write, sendable, must be consumed exactly once
+- `iso` — read+write, sendable
+- `trn` — read+write, local
+- `ref` — read+write, local
+- `box` — read-only, local
+- `val` — read-only, sendable
+- `tag` — no access, sendable
 
 The compiler uses these capabilities to guarantee:
 
@@ -1262,66 +1234,62 @@ The compiler uses these capabilities to guarantee:
 
 **Data-race freedom.** Mutable references cannot be shared between actors concurrently.
 
-**Safe concurrency.** Only `iso` and `val` references can be sent between actors.
+**Safe concurrency.** Only `lineariso`, `iso`, `val`, and `tag` references can be sent between actors; the capability analyzer rejects `send` arguments of any other capability with a compile-time `CapError`.
 
-## 5.3 Authority Capabilities
+## 5.3 Authority Capabilities — Planned
+
+*The `capability` declaration described here is not yet implemented — `capability` is not a keyword in the current lexer. The design follows.*
 
 Authority capabilities are declared on actors using the `capability` keyword:
 
 ```nulang
+// Planned — not yet implemented
 actor FileProcessor {
   capability file
   capability io
 
   behavior process(path: String) {
-    let content = perform FileSystem.read(path)
-    match content {
-      | Ok(data) => perform IO.println("Read: " ++ data)
-      | Error(e) => perform IO.println("Error: " ++ e)
-    }
+    let content = perform FS.read(path) in
+    perform IO.print("Read")
   }
 }
 ```
 
-Without the `capability file` declaration, the `perform FileSystem.read(...)` would be a compile-time error. This is authority-based security: the actor must explicitly declare what external resources it needs.
+Without the `capability file` declaration, the `perform FS.read(...)` would be a compile-time error. This is authority-based security: the actor must explicitly declare what external resources it needs.
 
-## 5.4 Capability Delegation
+## 5.4 Capability Delegation — Planned
+
+*Not yet implemented (depends on §5.3). The design follows.*
 
 Authority capabilities can be delegated from one actor to another:
 
 ```nulang
+// Planned — not yet implemented
 actor Supervisor {
   capability llm
   capability http
 
-  behavior spawn_worker(): Worker {
-    -- Delegate capabilities to child actor
+  behavior spawn_worker() {
+    // Delegate capabilities to child actor
     spawn Worker with capabilities [llm, http]
-  }
-}
-
-actor Worker {
-  -- Worker inherits llm and http from parent
-  capability llm
-  capability http
-
-  behavior do_work(query: String): String {
-    perform llm.complete(query)
   }
 }
 ```
 
 Delegation creates a capability chain that can be audited. The runtime tracks which actor granted which capability to which other actor.
 
-## 5.5 Capability Revocation
+## 5.5 Capability Revocation — Planned
+
+*Not yet implemented (depends on §5.3). The design follows.*
 
 Capabilities can be revoked at any time:
 
 ```nulang
+// Planned — not yet implemented
 actor ResourceManager {
   capability network
 
-  behavior revoke_access(worker: Worker) {
+  behavior revoke_access(worker) {
     revoke worker.network
   }
 }
@@ -1329,41 +1297,37 @@ actor ResourceManager {
 
 After revocation, any attempt by the worker to perform network operations results in a runtime error.
 
-## 5.6 Capability Auditing
+## 5.6 Capability Auditing — Planned
 
-The runtime maintains a capability graph that records all capability grants and revocations. This graph can be queried for security auditing:
+*Not yet implemented (depends on §5.3). The design follows.*
 
-```nulang
--- Query which actors hold the llm capability
-let llm_holders = perform audit.actors_with_capability(LLM)
-
--- Query the delegation chain for an actor
-let chain = perform audit.capability_chain(worker_id)
-```
+The runtime maintains a capability graph that records all capability grants and revocations. This graph can be queried for security auditing.
 
 ## 5.7 Sendable Types
 
 A type is *sendable* if it can be safely passed between actors. The sendable types are:
 
-- Primitive types (`Bool`, `Int`, `Float`, `Decimal`, `Char`, `Unit`)
+- Primitive types (`Bool`, `Int`, `Float`, `String`, `Unit`, `Nil`)
+- `lineariso` reference types
 - `iso` reference types
 - `val` reference types
 - `tag` reference types
 - Immutable collections of sendable types
-- Actor references (as `tag`)
+- Actor references (`Address`, as `tag`)
 
-The compiler checks that all values sent between actors are sendable.
+The compiler checks that all values passed as `send` arguments are sendable, rejecting anything else with a `CapError` at compile time.
 
 ## 5.8 Capability Defaults
 
 In the absence of explicit annotations, the compiler applies the following defaults:
 
-- **Function parameters:** `box` (read-only view)
-- **Local variables:** `ref` (mutable, local)
-- **Actor behavior parameters:** `val` (immutable, sendable)
-- **Return values:** Inferred from the expression
+- **Function and behavior parameters:** bound at `ref` by the type checker when no capability is declared
+- **Literals and freshly constructed values:** `val`
+- **Ambient default (capability context):** `val`
+- **Actor references from `spawn`:** `iso`
+- **Return values:** inferred from the expression
 
-These defaults ensure that data sent between actors is safe by default.
+Explicit type annotations (`x: &iso T`), capability annotations (`x :cap box`), and signature suffixes (`! {Row} : iso`) override these defaults.
 
 ---
 
@@ -1371,74 +1335,95 @@ These defaults ensure that data sent between actors is safe by default.
 
 ## 6.1 Expression Overview
 
-Nulang is an expression-oriented language: every construct produces a value. There are no statements, only expressions that may or may not be used. The value of the last expression in a block is the value of the block.
+Nulang is an expression-oriented language: every construct produces a value. The value of the last expression in a block is the value of the block. (Assignments, loops, and message sends evaluate to `unit`.)
 
 ## 6.2 Literals
 
 Literal expressions produce constant values:
 
 ```nulang
-42          -- Int literal
-3.14        -- Float literal
-"hello"     -- String literal
-'a'         -- Char literal
-true        -- Bool literal
-()          -- Unit literal
+42          // Int literal
+0x2A        // Int literal (hexadecimal)
+3.14        // Float literal
+"hello"     // String literal
+true        // Bool literal
+nil         // Nil literal (absence of a value)
+()          // Unit literal (also written `unit`)
 ```
+
+There is no character literal — characters are represented as single-character strings. (`Char` is planned; see §3.2.5.)
 
 ## 6.3 Variables
 
 Variable references look up the value bound to a name:
 
 ```nulang
-let x = 42
-x  -- evaluates to 42
+let x = 42 in
+x  // evaluates to 42
 ```
+
+Inside an actor behavior, actor state fields are accessed through `self` (`self.count`); bare field names are not in scope.
 
 ## 6.4 Function Application
 
-Function application applies a function to its arguments:
+Function application applies a function to its arguments. Functions are called positionally; paths through modules use dot syntax:
 
 ```nulang
-add(1, 2)           -- Named function
-String.length("hi") -- Method-style call on module
-list |> map(f)      -- Pipe operator
+add(1, 2)              // function call
+Math.Utils.clamp(v, 0, 10)  // call through a module path
+list |> map(f)         // pipe operator (§6.9)
 ```
 
 ## 6.5 Let Bindings
 
-The `let` expression binds a name to a value:
+The `let` expression binds a name to a value *in* a body expression — the `in` keyword is required:
 
 ```nulang
-let x = 42
-let y = x + 1
-y  -- evaluates to 43
+let x = 42 in
+let y = x + 1 in
+y  // evaluates to 43
 ```
 
-Let bindings are immutable by default. Mutable bindings use `var` (within a single actor):
+An optional type annotation may follow the name: `let x: Int = 42 in ...`.
+
+Recursive functions are bound with `let rec`:
 
 ```nulang
-var counter = 0
-counter = counter + 1
-counter  -- evaluates to 1
+let rec fact(n) = if n <= 1 then 1 else n * fact(n - 1) in
+fact(5)
 ```
+
+Let bindings are immutable. Mutable references are created explicitly with the prefix `&` operator and read back with the prefix `*` operator; assignment uses `=`:
+
+```nulang
+let counter = &0 in {
+  counter = *counter + 1
+  *counter  // evaluates to 1
+}
+```
+
+Mutable `var` bindings are planned for a future version (`var` is not currently a keyword).
 
 ## 6.6 Conditionals
 
-The `if` expression chooses between two branches:
+The `if` expression chooses between branches. The `then` keyword is optional, branches may be single expressions or `{ }` blocks, and the `else` branch is optional (an omitted `else` yields `unit`):
 
 ```nulang
 if x > 0 then
   "positive"
 else
   "non-positive"
+
+if x > 0 {
+  perform IO.print("positive")
+}
 ```
 
-Both branches must have the same type. The `else` branch is required.
+When both branches are present they must have the same type.
 
 ## 6.7 Pattern Matching
 
-The `match` expression performs pattern matching:
+The `match` expression performs pattern matching. The `with` keyword after the scrutinee is optional, and each arm may optionally begin with `case` or `|`:
 
 ```nulang
 match option {
@@ -1447,103 +1432,109 @@ match option {
 }
 ```
 
-Patterns can be nested and include guards:
+Supported patterns are: wildcard `_`, variable bindings, literals, tuples, records, variant constructors, and aliases (`name @ pattern`):
 
 ```nulang
-match list {
-  | [] => "empty"
-  | [x] if x > 0 => "single positive"
-  | [x, ..] => "starts with " ++ Int.to_string(x)
+match tree {
+  | Leaf => 0
+  | n @ Node((l, v, r)) => v
 }
 ```
 
+Pattern guards (`| pat if cond => ...`) and list-cons patterns are planned for a future version.
+
 ## 6.8 Lambda Expressions
 
-Lambda expressions create anonymous functions:
+Lambda expressions create anonymous functions with the `fn` keyword. An optional `->` may separate the parameter list from the body:
 
 ```nulang
-(x) -> x + 1
-(x, y) -> x + y
-() -> perform IO.println("hello")
+fn(x) -> x + 1
+fn(x, y) -> x + y
+fn() perform IO.print("hello")
 ```
 
-The parameter types and effect row can be inferred or annotated explicitly.
+Parameter types and the effect row are inferred from use; lambdas may carry an effect annotation via their type ascription.
 
 ## 6.9 Pipe Operator
 
-The pipe operator `|>` passes the left-hand side as the last argument to the right-hand side:
+The pipe operator `|>` passes the left-hand side as the **first** argument to the right-hand-side call:
 
 ```nulang
 list |> map(f) |> filter(g) |> fold(h, 0)
--- Equivalent to: fold(h, 0, filter(g, map(f, list)))
+// Equivalent to: fold(filter(map(list, f), g), h, 0)
 ```
 
 ## 6.10 Blocks
 
-A block is a sequence of expressions enclosed in braces. The value of a block is the value of its last expression:
+A block is a sequence of expressions enclosed in braces, separated by newlines or semicolons. The value of a block is the value of its last expression:
 
 ```nulang
 let result = {
-  let x = 1
-  let y = 2
+  let x = 1 in
+  let y = 2 in
   x + y
-}  -- result == 3
+} in result  // result == 3
 ```
 
 ## 6.11 Error Handling
 
-Nulang uses the `Result` and `Option` types for error handling:
+Nulang has no exceptions. Recoverable errors are values, conventionally carried by user-declared `Result` and `Option` variants (there is no prelude — programs declare these types themselves):
 
 ```nulang
-let safe_divide = (a: Float, b: Float) -> Result[Float, String] {
+type Result[T, E] = Ok(T) | Error(E)
+
+fn safe_divide(a: Float, b: Float) -> Result[Float, String] {
   if b == 0.0 then
     Error("Division by zero")
   else
     Ok(a / b)
 }
 
--- Using match
 match safe_divide(10.0, 2.0) {
-  | Ok(result) => perform IO.println("Result: " ++ Float.to_string(result))
-  | Error(msg) => perform IO.println("Error: " ++ msg)
+  | Ok(result) => perform IO.print("ok")
+  | Error(msg) => perform IO.print("error")
 }
 ```
+
+Unhandled effects and runtime faults (division-by-zero yields `nil`, failed `resume`, etc.) surface as runtime errors, not catchable exceptions.
 
 ## 6.12 Effect Handling
 
-The `handle` expression installs an effect handler (see Chapter 4):
+The `handle` expression installs an effect handler (see Chapter 4). The body follows `handle` directly; there is no `with` keyword:
 
 ```nulang
 let result = handle {
-  perform Console.println("Hello!")
+  perform Console.print("Hello!")
   42
-} with {
-  | Console.println(msg) => {
-      perform IO.println("[LOG] " ++ msg)
-      resume(())
-    }
+} {
+  | Console.print(msg) => perform IO.print("logged")
 }
 ```
 
-## 6.13 Recover Expressions
+## 6.13 Recover Expressions — Planned
 
-The `recover` expression creates an `iso` or `val` reference:
-
-```nulang
-let immutable = recover {
-  { x = 1, y = 2 }
-}
-```
+The `recover` expression, which creates an `iso` or `val` reference from an expression using only sendable capabilities internally, is planned (`recover` is not currently a keyword). See §3.9.2.
 
 ## 6.14 Actor Operations
 
 Actor expressions create and interact with actors:
 
 ```nulang
-let actor = spawn Counter  -- Create an actor
-actor <- increment(1)      -- Send a message (fire-and-forget)
-let result = ask(actor, get())  -- Request-response
+let counter = spawn Counter { count = 0 } in  // create an actor with initial state
+send counter increment(1)                     // fire-and-forget message
+counter ! increment(1)                        // infix form of send
+let n = ask counter get() in                  // request-response
+n
 ```
+
+Related expression forms:
+
+- `receive { | Behavior(params) => expr }` — take the next message from the actor's own mailbox (pattern-matching dispatch across arms is planned).
+- `migrate actor_expr to node_expr` — move an actor to another node (§12.4).
+- `for x in array body` — iterate over a built-in array; `break` exits early.
+- `return expr` / `return` — early return from a function or behavior.
+- `emit Event(args)` — emit an event (§10, §11).
+- `self` — the current actor reference, and the receiver for state access (`self.field`).
 
 ---
 
@@ -1551,42 +1542,64 @@ let result = ask(actor, get())  -- Request-response
 
 ## 7.1 Declaration Overview
 
-Declarations introduce names into the module scope. Nulang supports several kinds of declarations: value bindings, type definitions, actor definitions, effect definitions, and imports.
+Declarations introduce names into the module scope. The supported declaration forms are: function definitions (`fn`), actor definitions (`actor`, `persistent actor`), agent definitions (`agent`), workflow definitions (`workflow`), type definitions (`type`, `type alias`), effect definitions (`effect`), foreign function declarations (`extern`), imports (`import`), and nested modules (`module`).
 
-## 7.2 Value Bindings
+A top-level expression that is not a declaration is wrapped by the parser into a synthetic `__main` function, which is what the runtime executes.
 
-Value bindings associate names with values or functions:
+## 7.2 Function Definitions
+
+Functions are defined with the `fn` keyword. The full signature form is:
 
 ```nulang
-let x = 42
+fn name[T, U](param: Type, ...) -> ReturnType ! {Effect, Row} : capability body
+```
 
-let add = (a: Int, b: Int) -> Int {
+Every part after the parameter list is optional. Examples:
+
+```nulang
+fn add(a: Int, b: Int) -> Int {
   a + b
 }
 
-let factorial = (n: Int) -> Int {
+fn factorial(n: Int) -> Int {
   if n == 0 then 1 else n * factorial(n - 1)
+}
+
+fn log(msg: String) -> Unit ! {IO} {
+  perform IO.print(msg)
 }
 ```
 
-Value bindings are immutable. They cannot be reassigned.
+Named functions may recurse by referring to their own name. Functions may be preceded by annotations; the only supported annotation is `@tool(description: "...")`, which exposes the function as an agent tool (§11.4):
+
+```nulang
+@tool(description: "Search the knowledge base")
+fn search(query: String) -> String {
+  ...
+}
+```
 
 ## 7.3 Type Definitions
 
-Type definitions create new types:
+Type definitions create new types. A `type` declaration is either a record type (braces) or a variant type (pipe-separated constructors); each variant constructor carries at most one payload type (use a tuple payload for several fields):
 
 ```nulang
 type Point = { x: Float, y: Float }
 
 type Color = Red | Green | Blue
 
-type Option[T] =
-  | None
-  | Some(T)
+type Option[T] = None | Some(T)
 
-type Result[T, E] =
-  | Ok(T)
-  | Error(E)
+type Result[T, E] = Ok(T) | Error(E)
+
+type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))
+```
+
+`type alias` introduces a transparent alias for an existing type:
+
+```nulang
+type alias UserId = Int
+type alias Handler[T] = fn(T) -> Unit
 ```
 
 ## 7.4 Actor Definitions
@@ -1598,94 +1611,81 @@ actor Counter {
   state local count: Int = 0
 
   behavior increment() {
-    count = count + 1
+    self.count = self.count + 1
   }
 
-  behavior get(): Int {
-    count
+  behavior get() {
+    self.count
   }
 }
 ```
 
 ## 7.5 Effect Definitions
 
-Effect definitions declare new effect types (see Chapter 4 for full details):
+Effect definitions declare new effect types (see Chapter 4 for full details). Operations use the `name: (Arg, Types) -> Return` form:
 
 ```nulang
 effect Console {
-  println(message: String): Unit
-  read_line(): String
+  print: (String) -> Unit
+  read_line: () -> String
 }
 ```
 
 ## 7.6 Imports
 
-The `import` declaration brings names from other modules into scope:
+The `import` declaration brings a module path into scope. Only the plain path form is implemented:
 
 ```nulang
 import List
-import Map
-import Http
-
-import List exposing [map, filter, fold]
-import Math as M
+import Math.Utils
 ```
 
-Imports are resolved at compile time and have no runtime cost.
+Selective imports (`import List exposing [map]`) and aliased imports (`import Math as M`) are planned. Imports are resolved at compile time and have no runtime cost.
 
 ## 7.7 Module Structure
 
-A Nulang module is a file with the `.nula` extension. The module name is derived from the file name. A module exports all top-level declarations by default.
+A Nulang source file (conventionally `.nu` or `.nula`) is compiled as a single module named `main`. Named modules can be nested inside a file with `module Name { ... }`, which prefixes its declarations into the flat namespace:
 
 ```nulang
--- math.nula
-let pi = 3.14159
+module Math {
+  fn pi_val() -> Float { 3.14159 }
 
-let circumference = (radius: Float) -> Float {
-  2.0 * pi * radius
-}
-
-let area = (radius: Float) -> Float {
-  pi * radius * radius
+  fn circumference(radius: Float) -> Float {
+    2.0 * pi_val() * radius
+  }
 }
 ```
 
+Module-level visibility enforcement and multi-file compilation units are planned.
+
 ## 7.8 Generics in Declarations
 
-Type parameters can be declared on functions and types:
+Type parameters are declared in brackets after the function or type name. There are no constraints or bounds on type parameters (typeclass constraints are planned):
 
 ```nulang
-let map = [A, B] (list: List[A], f: (A) -> B) -> List[B] {
-  match list {
-    | [] => []
-    | [x, ..xs] => [f(x), ..map(xs, f)]
-  }
+fn map[A, B](list: List[A], f: fn(A) -> B) -> List[B] {
+  ...
 }
 
-type Tree[T] =
-  | Leaf
-  | Node { left: Tree[T], value: T, right: Tree[T] }
+type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))
 ```
 
 ## 7.9 Visibility
 
-By default, all declarations are public. The `private` keyword restricts visibility to the current module:
+All declarations are visible throughout the program; there is currently no visibility enforcement. The `pub` keyword is accepted before any declaration for forward compatibility, and `priv` is reserved as a keyword for the planned visibility system:
 
 ```nulang
-private let helper = (x: Int) -> Int { x * 2 }
-
-public let exported = (x: Int) -> Int { helper(x) + 1 }
+pub fn exported(x: Int) -> Int { x + 1 }
 ```
 
 ## 7.10 Documentation
 
-Documentation comments use the `{-|` and `-}` delimiters:
+Documentation comments use the `///` line form (there is no block doc-comment form):
 
 ```nulang
-{-| Calculate the factorial of a non-negative integer.
-    Returns 1 for n = 0, and n * factorial(n - 1) otherwise.
--}
-let factorial = (n: Int) -> Int {
+/// Calculate the factorial of a non-negative integer.
+/// Returns 1 for n = 0, and n * factorial(n - 1) otherwise.
+fn factorial(n: Int) -> Int {
   if n == 0 then 1 else n * factorial(n - 1)
 }
 ```
@@ -1708,23 +1708,32 @@ Actors communicate exclusively through asynchronous message passing. There is no
 
 ## 8.2 Actor Declaration
 
-Actors are declared with the `actor` keyword:
+Actors are declared with the `actor` keyword. State fields are accessed through `self` inside behaviors — bare field names are not in scope:
 
 ```nulang
 actor Counter {
   state local count: Int = 0
 
   behavior increment() {
-    count = count + 1
+    self.count = self.count + 1
   }
 
-  behavior get(): Int {
-    count
+  behavior get() {
+    self.count
   }
 
   behavior reset() {
-    count = 0
+    self.count = 0
   }
+}
+```
+
+A persistent actor is declared by prefixing with `persistent` (Chapter 9):
+
+```nulang
+persistent actor Account {
+  state durable balance: Int = 0
+  ...
 }
 ```
 
@@ -1733,110 +1742,91 @@ actor Counter {
 State is declared with the `state` keyword:
 
 ```nulang
-state local name: Type = initial_value
+state model name: Type = initial_value
 ```
 
-The state model (`local`, `durable`, `event_sourced`, or `crdt`) determines how the state is stored and recovered.
+The state model (`local`, `durable`, `event_sourced`, or `crdt`) determines how the state is stored and recovered (§9.3). The model is optional and defaults to `local`; the type annotation is optional and inferred from the initial value. The `= initial_value` initializer is required.
 
 ## 8.4 Behavior Declarations
 
-Behaviors are declared with the `behavior` keyword:
+Behaviors are declared with the `behavior` keyword. A behavior has parameters but **no declared return type**; its value is the value of its body expression. Optional `! {Row}` effect and `: capability` annotations may follow the parameter list (the capability defaults to `ref` when omitted):
 
 ```nulang
-behavior name(parameters): ReturnType {
-  -- body
+behavior name(parameters) ! {Row} : capability {
+  // body
 }
 ```
 
-Behaviors execute sequentially within an actor. Each behavior processes one message at a time.
+Behaviors execute sequentially within an actor. Each behavior processes one message at a time. The value of a behavior that is invoked via `ask` becomes the reply.
 
 ## 8.5 Message Passing
 
-Messages are sent using the `<-` operator:
+Messages are sent with the `send` keyword or the infix `!` operator, naming the target behavior and its arguments:
 
 ```nulang
-let counter = spawn Counter
-counter <- increment()
-counter <- increment()
+let counter = spawn Counter { count = 0 } in
+send counter increment()
+counter ! increment()
 ```
 
-Message sending is asynchronous and non-blocking.
+Message sending is asynchronous and non-blocking: the message is enqueued in the target's mailbox and the sender continues immediately. Send arguments must be sendable (§5.7).
 
 ## 8.6 Request-Response
 
-The `ask` pattern sends a message and waits for a response:
+The `ask` expression sends a message and waits for the behavior's value as a response:
 
 ```nulang
-let counter = spawn Counter
-counter <- increment()
-let count = ask(counter, get())
+let counter = spawn Counter { count = 0 } in
+send counter increment()
+let count = ask counter get() in
+count
 ```
 
 ## 8.7 Actor Lifecycle
 
-Actors are created with `spawn`:
+Actors are created with `spawn`, which takes the actor type name and a brace-enclosed list of initial state values (the braces are required, and may be empty to use the declared defaults):
 
 ```nulang
-let counter = spawn Counter
+let counter = spawn Counter { count = 0 } in
+let other = spawn Counter {} in
+...
 ```
 
-Actors can be stopped with `stop`:
-
-```nulang
-stop counter
-```
+`spawn` returns an actor reference with capability `iso`. Explicit actor shutdown (`stop`) is planned; today actors are stopped by the runtime when they fail or when their supervisor shuts them down (§8.8), and `exit` is a reserved keyword for the future lifecycle surface.
 
 ## 8.8 Supervision
 
-Actors can supervise other actors:
+Supervision is provided by the runtime, not by syntax. A spawned actor can be attached to a supervisor with a strategy (`OneForOne`, `OneForAll`, `RestForOne`) and a restart policy (`Permanent`, `Temporary`, `Transient`); when a behavior raises a runtime error the supervisor applies its policy — restarting the actor (with state rebuilt from its persistence store, if any), shutting it down, or escalating. The stress tests exercise these paths under load. Declarative in-language supervision syntax is planned.
 
 ```nulang
-actor Supervisor {
-  behavior start_worker(): Worker {
-    spawn Worker
-  }
-
-  behavior on_child_failed(child: ActorRef, error: String) {
-    -- Restart the failed child
-    let new_child = spawn Worker
-    -- Log the failure
-    perform IO.println("Worker failed: " ++ error ++ ", restarted.")
-  }
-}
+// Supervised actors are spawned and wired through the runtime API;
+// language-level supervision declarations are planned.
 ```
 
 ## 8.9 Actor Types
 
-Actor types can be parameterized:
+Actor declarations may be parameterized over types, like functions. State field initializers are required, so generic actors typically use an empty built-in array or a variant constructor as the default:
 
 ```nulang
-actor Buffer[T] {
-  state local items: List[T] = []
+type Option[T] = None | Some(T)
 
-  behavior push(item: T) {
-    items = items ++ [item]
-  }
+actor Queue[T] {
+  state local items: [T] = []
 
-  behavior pop(): Option[T] {
-    match items {
-      | [] => None
-      | [x, ..xs] => {
-          items = xs
-          Some(x)
-        }
-    }
+  behavior size() {
+    self.items
   }
 }
 ```
 
 ## 8.10 Actor References
 
-Actor references (`ActorRef`) are opaque identifiers that can be passed between actors:
+Actor references are values of the primitive type `Address` — opaque identifiers that can be passed between actors (capability `tag` once shared):
 
 ```nulang
-let counter = spawn Counter
-let ref: ActorRef = counter
-another_actor <- use_counter(ref)
+let counter = spawn Counter { count = 0 } in
+let ref: Address = counter in
+send another_actor use_counter(ref)
 ```
 
 ---
@@ -1847,28 +1837,33 @@ another_actor <- use_counter(ref)
 
 Persistent actors survive process restarts through automatic checkpointing, event journaling, and deterministic replay. They are the foundation for durable execution in Nulang.
 
+**Implementation status.** Persistence is implemented in the runtime behind a `PersistenceStore` trait with three backends — in-memory, JSON file, and SQLite. `persistent actor` with `durable`/`event_sourced`/`crdt` state models parses and runs; checkpointing and journaling happen on each behavior step, and supervisors rebuild actor state from the store on restart. Snapshot compaction and the test-only replay helpers mentioned below are planned.
+
 ## 9.2 Declaring Persistent Actors
 
 A persistent actor is declared with the `persistent` keyword:
 
 ```nulang
+type Result[T, E] = Ok(T) | Error(E)
+
 persistent actor BankAccount {
-  state durable balance: Decimal = 0.00
+  state durable balance: Int = 0
 
-  behavior deposit(amount: Decimal) {
-    balance = balance + amount
+  behavior deposit(amount: Int) {
+    self.balance = self.balance + amount
   }
 
-  behavior withdraw(amount: Decimal): Result[Unit, String] {
-    if amount > balance then
+  behavior withdraw(amount: Int) {
+    if amount > self.balance then
       Error("Insufficient funds")
-    else
-      balance = balance - amount
-      Ok(())
+    else {
+      self.balance = self.balance - amount
+      Ok(unit)
+    }
   }
 
-  behavior get_balance(): Decimal {
-    balance
+  behavior get_balance() {
+    self.balance
   }
 }
 ```
@@ -1899,20 +1894,22 @@ All state mutations are recorded in an event journal:
 
 ```nulang
 persistent actor ShoppingCart {
-  state durable items: List[Item] = []
-  state event_sourced events: List[CartEvent] = []
+  state durable items_count: Int = 0
+  state event_sourced events: Int = 0
 
-  behavior add_item(item: Item) {
-    items = items ++ [item]
+  behavior add_item(item: Int) {
+    self.items_count = self.items_count + 1
     emit ItemAdded(item)
   }
 
-  behavior remove_item(item_id: String) {
-    items = List.filter(items, (i) -> i.id != item_id)
+  behavior remove_item(item_id: Int) {
+    self.items_count = self.items_count - 1
     emit ItemRemoved(item_id)
   }
 }
 ```
+
+`emit Name(args)` records an event in the journal; on recovery the actor's `event_sourced` state is reconstructed by replaying it.
 
 ## 9.6 Crash Recovery
 
@@ -1927,9 +1924,9 @@ Runtime recovery process:
 
 - Same input sequence + same initial state = same output
 - Enables testing and debugging of persistent actor execution
-- Testing framework provides `snapshot` and `replay_from_start` helpers
+- Dedicated `snapshot` / `replay_from_start` testing helpers are planned
 
-## 9.8 Snapshotting and Compaction
+## 9.8 Snapshotting and Compaction — Planned
 
 - Snapshots capture state at a point in time
 - Old snapshots and journal entries compacted periodically
@@ -1960,162 +1957,128 @@ Runtime recovery process:
 
 ## 10.2 Workflow Declaration
 
-- Declared with `workflow` keyword
-- Body contains steps, state declarations, event declarations
-- Durable state automatically checkpointed
+- Declared with the `workflow` keyword
+- Body contains `step` declarations, `parallel` blocks, and an optional workflow-level `compensate` block — **not** state declarations (workflows carry no `state` fields in the current syntax)
 
 ```nulang
 workflow OrderFulfillment {
-  state durable order_id: String = ""
-  state durable status: OrderStatus = Received
-
-  step receive_order(order: Order) {
-    order_id = order.id
-    status = Processing
-    perform io.println("Processing order: " ++ order.id)
-    Ok(order)
+  step receive_order {
+    perform IO.print("Processing order")
   }
 
-  step validate_inventory(order: Order) {
-    let available = perform inventory.check(order.items)
-    if available then Ok(order) else Error("Out of stock")
+  step validate_inventory {
+    perform IO.print("Checking stock")
   }
 
-  step charge_payment(order: Order) {
-    perform payment.charge(order.total, order.customer)
+  step charge_payment {
+    perform IO.print("Charging payment")
   }
 
-  step ship_order(order: Order) {
-    let tracking = perform shipping.create_label(order)
-    status = Shipped
-    Ok(tracking)
+  step ship_order {
+    perform IO.print("Shipping")
   }
 }
 ```
 
 ## 10.3 Steps
 
-- Named, durably executed blocks of code
+- A step is `step name { body }` — named, durably executed block of code
+- Steps take **no parameters** and declare no return type in the current syntax; data is passed through actor state and messages
 - Checkpointed before and after execution
-- Can declare compensation logic
+- Can declare compensation logic (§10.8)
 - Idempotent by design
 
 ## 10.4 Sequential Execution
 
 - Default execution mode for workflow steps
-- Output of one step becomes input of the next
-- Data flows through the workflow pipeline
+- Steps run in declaration order
 
 ## 10.5 Conditional Execution
 
-- `if` within steps or `when` guards
+- Ordinary `if` expressions within step bodies
 - Conditional routing of workflow based on step output
 
 ## 10.6 Parallel Execution
 
-- `parallel` keyword for concurrent step execution
+- The `parallel { step ... }` block declares steps that execute concurrently
 - Waits for all branches before continuing
 - Entire block fails if any branch fails
 
 ```nulang
 workflow ParallelProcessing {
-  step gather_data(requests: List[Request]): List[Response] {
-    parallel for request in requests {
-      perform http.get(request.url)
+  parallel {
+    step gather_a {
+      perform IO.print("gathering A")
+    }
+    step gather_b {
+      perform IO.print("gathering B")
     }
   }
 
-  step aggregate_results(responses: List[Response]): Report {
-    perform Report.generate(responses)
+  step aggregate_results {
+    perform IO.print("aggregating")
   }
 }
 ```
 
+(Iteration with `for` over collections happens inside step bodies; a `parallel for` form is planned.)
+
 ## 10.7 Loops and Iteration
 
-- `for` loops over collections within workflow steps
+- `for x in array body` loops within workflow steps
 - State accumulated across iterations
 - Each iteration checkpointed for durability
 
 ## 10.8 Compensation and Sagas
 
-- `compensate` keyword declares undo logic per step
+- The `compensate { expr }` block declares undo logic, either per step (after the step body) or once at workflow level
 - Saga pattern: automatically compensates on failure
 - Compensation runs in reverse order of step execution
 
 ```nulang
 workflow SagaTransaction {
-  step reserve_inventory(order: Order): Reservation {
-    let r = perform inventory.reserve(order.items)
-    compensate { perform inventory.release(r) }
-    r
+  step reserve_inventory {
+    perform IO.print("reserved")
+  } compensate {
+    perform IO.print("released")
   }
 
-  step charge_payment(order: Order): PaymentId {
-    let p = perform payment.charge(order.total)
-    compensate { perform payment.refund(p) }
-    p
+  step charge_payment {
+    perform IO.print("charged")
+  } compensate {
+    perform IO.print("refunded")
   }
 
-  step ship_goods(order: Order): TrackingId {
-    perform shipping.dispatch(order)
+  step ship_goods {
+    perform IO.print("shipped")
   }
 }
 ```
 
-## 10.9 Human-in-the-Loop
+## 10.9 Human-in-the-Loop — Planned
 
-- `await_human` construct pauses workflow for human input
+- `await_human` construct pauses workflow for human input (planned; not a keyword today)
 - Configurable assignee, timeout, and default action
 - Workflow state durably preserved during wait
 
-```nulang
-workflow ApprovalWorkflow {
-  step submit_request(req: ApprovalRequest): ApprovedRequest {
-    let approval = await_human approve(
-      assignee = req.manager,
-      timeout = Duration.hours(48),
-      on_timeout = Reject
-    )
-    match approval {
-      | Approved => { req .. approved = true }
-      | Rejected => throw WorkflowError("Request rejected")
-    }
-  }
-}
-```
+The runtime-backed `Signal.wait(name)` operation (performed as `perform Signal.wait("approval")`) already lets a workflow step block until a named signal is delivered, which is the current foundation for human-in-the-loop patterns.
 
 ## 10.10 Time-Based Operations
 
-- `sleep_until` for delayed action scheduling
-- Time-based triggers and timeouts
+- `perform Timer.sleep(ms)` is runtime-backed and available today for delays inside steps
+- `sleep_until` and calendar-based scheduling are planned
 - Workflow state preserved during sleep
 
-## 10.11 Subworkflows
+## 10.11 Subworkflows — Planned
 
-- Workflows can invoke other workflows
-- Inherit parent's durability guarantees
-- Participate in same compensation scope
+- `subworkflow` is a reserved keyword; invoking one workflow from another is not yet wired into the parser
+- Design: inherit parent's durability guarantees and participate in same compensation scope
 
-## 10.12 Error Handling and Retry
+## 10.12 Error Handling and Retry — Planned
 
-- Automatic retry with configurable policies
+- Automatic retry with configurable policies is planned (`retry` is not a keyword today)
 - Exponential backoff, max attempts, transient error detection
-- Integration with saga compensation for non-retryable failures
-
-```nulang
-workflow ResilientWorkflow {
-  step fetch_with_retry(url: String): Response {
-    retry {
-      max_attempts: 3
-      backoff: exponential(100, 2.0)
-      retry_if: (error) -> is_transient(error)
-    } {
-      perform http.get(url)
-    }
-  }
-}
-```
+- Integration with saga compensation for non-retryable failures — today, a failing step triggers the workflow's compensation chain (§10.8)
 
 ---
 
@@ -2124,119 +2087,89 @@ workflow ResilientWorkflow {
 ## 11.1 Overview
 
 - Language-integrated AI, not external SDKs
-- First-class constructs through algebraic effect system
-- Governed by capability-based security model
-- Handles model selection, prompt construction, response parsing, error recovery
+- First-class `agent` declarations and an `LLM` effect
+- LLM inference performed as `perform LLM.ask(prompt)`, wired to the runtime's LLM client
+- Orchestration builtins: `Pipeline`, `Supervisor`, `Debate` (§11.6)
 
-## 11.2 Model Providers
+## 11.2 Agent Declarations
+
+An `agent` declaration defines an LLM-backed actor. The `model` field is required; all other fields are optional:
+
+```nulang
+agent ResearchAssistant = {
+  model: "gpt-4",
+  system_prompt: "You are a research assistant. Provide structured reports.",
+  tools: [search, summarize],
+  memory: { max_turns: 50 },
+  semantic_memory: { dimensions: 64 },
+  procedural_memory: { namespace: "research" },
+  pricing: { input: 30, output: 60 }
+}
+```
+
+Spawning an agent creates an actor with built-in behaviors:
+
+- `ask prompt` — send a prompt, receive the model's response (also reachable as `perform LLM.ask(...)`)
+- `usage` — report token usage and cost (from `pricing`)
+- `store_fact key value` / `recall key` — long-term memory access
+
+## 11.3 Model Providers
 
 - Unified interface for multiple providers
 - OpenAI, Anthropic, Google, local models (Ollama/vLLM)
-- Per-call provider selection
+- The provider and model are selected by the agent's `model` string
 
-```nulang
-config llm {
-  provider = "openai"
-  model = "gpt-4"
-  temperature = 0.7
-  max_tokens = 2048
-}
-
-let result = perform llm.complete(
-  prompt = "Explain quantum computing",
-  provider = Provider.Anthropic("claude-3-opus")
-)
-```
-
-## 11.3 LLM Capability
-
-- `llm` authority capability required on actor
-- `perform llm.complete()`, `perform llm.embed()`, etc.
-- Compile-time error without capability declaration
-
-```nulang
-actor ResearchAssistant {
-  capability llm
-  state local conversation: List[Message] = []
-
-  behavior research(topic: String): Report {
-    let prompt = build_research_prompt(topic, conversation)
-    let response = perform llm.complete(
-      system = "You are a research assistant. Provide structured reports.",
-      user = prompt
-    )
-    conversation = conversation ++ [
-      Message { role = User, content = prompt },
-      Message { role = Assistant, content = response.text }
-    ]
-    parse_report(response.text)
-  }
-}
-```
+Provider configuration files (`config llm { ... }`) are planned — `config` is not a keyword in the current implementation.
 
 ## 11.4 Tool System
 
-- Nulang functions exposed as tools to LLMs
-- Automatic description from type signatures and doc comments
-- Structured tool call and result handling
+- Nulang functions are exposed as agent tools with the `@tool(description: "...")` annotation
+- An agent's `tools: [...]` list names the `@tool` functions it may invoke
+- The runtime executes tool calls the model emits and feeds the results back
 
 ```nulang
-actor CalculatorAgent {
-  capability llm
+@tool(description: "Evaluate an arithmetic expression")
+fn calculate(expression: String) -> Float {
+  ...
+}
 
-  tool calculate(expression: String): Float {
-    perform math.evaluate(expression)
-  }
-
-  tool convert_currency(amount: Float, from: String, to: String): Float {
-    perform forex.convert(amount, from, to)
-  }
-
-  behavior answer_query(query: String): String {
-    let response = perform llm.tool_call(
-      system = "Use the calculator and currency converter to help answer questions.",
-      user = query,
-      tools = [calculate, convert_currency]
-    )
-    response.text
-  }
+agent CalculatorAgent = {
+  model: "gpt-4",
+  tools: [calculate]
 }
 ```
+
+(The standalone `tool name(params): Type { ... }` declaration form shown in earlier drafts is not implemented; tools are ordinary `fn`s carrying the `@tool` annotation.)
 
 ## 11.5 Memory (Short-term, Long-term, Event)
 
 ### 11.5.1 Short-term Memory
-- Actor-local state for conversation context
+- Conversation context, bounded by `memory: { max_turns: N }` (default 50)
 - Persists for duration of interaction
 
 ### 11.5.2 Long-term Memory
-- Vector embeddings for semantic retrieval
-- Store and recall facts based on semantic similarity
+- Vector embeddings for semantic retrieval, configured by `semantic_memory: { dimensions: N }` (default 64)
+- Store and recall facts based on semantic similarity via the `store_fact` / `recall` behaviors
 
 ### 11.5.3 Event Memory
+- Procedural memory namespace via `procedural_memory: { namespace: "..." }`
 - Immutable audit trail via event sourcing
-- Complete history of agent actions
 
-## 11.6 Planning and Delegation
+## 11.6 Planning, Orchestration, and Delegation
 
-- Structured planning via LLM
-- Delegation to specialist sub-agents
-- Tool selection and sequential execution
+Multi-agent orchestration is provided by three built-in modules whose call chains the compiler recognizes:
+
+- `Pipeline.new(name).stage(name, agent).run(input)` — sequential agent pipeline
+- `Supervisor.new(name).worker(agent).run(input)` — supervisor dispatching to worker agents
+- `Debate.new(name).participant(agent).run(topic)` — multi-agent debate
+
+Structured planning and delegation to specialist sub-agents beyond these builtins are planned.
 
 ## 11.7 Observability
 
-- Automatic logging and tracing of all LLM interactions
-- Token usage tracking
-- OpenTelemetry export support
-
-```nulang
-config llm.observability {
-  log_prompts = true
-  log_responses = true
-  trace_tokens = true
-  export_to = "opentelemetry"
-}
-```
+- Token usage and cost tracking through the agent's `usage` behavior and the `pricing` config
+- Automatic logging of LLM interactions
+- OpenTelemetry export and prompt/response logging configuration are planned
 
 ---
 
@@ -2246,9 +2179,10 @@ config llm.observability {
 
 - Actor model extended across machine boundaries
 - Location-transparent: same code on single node or cluster
-- Virtual actors activated on any node
 - Message routing handled by runtime
 - CRDT convergence, fault containment and recovery
+
+**Implementation status.** The distributed runtime exists: a TCP wire protocol with a node handshake, gossip-based cluster membership, an address resolver with a remote-actor cache providing location transparency, and CRDT synchronization between nodes. Virtual actors (activation on demand by name) are planned.
 
 ## 12.2 Clustering
 
@@ -2256,14 +2190,7 @@ config llm.observability {
 - Discovery via gossip protocol or seed list
 - Configurable heartbeat and gossip parameters
 
-```nulang
-config cluster {
-  node_id = "node-1"
-  seed_nodes = ["node-1:8080", "node-2:8080", "node-3:8080"]
-  heartbeat_interval = 1000
-  gossip_fanout = 3
-}
-```
+Cluster parameters are configured through the runtime API today; a declarative `config cluster { ... }` block is planned (`config` is not a keyword in the current implementation).
 
 ## 12.3 Node Lifecycle
 
@@ -2274,15 +2201,22 @@ config cluster {
 
 ## 12.4 Message Routing
 
-- Consistent hashing over actor IDs for routing
-- Small fraction of actors relocated on membership change
-- Programmer sends messages; runtime handles routing
+- The runtime resolves an actor's address (local or remote) and routes messages accordingly
+- Remote-actor references are cached; the programmer sends messages and the runtime handles routing
 
 ```nulang
-let cart = virtual ShoppingCart("user-123")
-cart <- add_item(CartItem { product = "Book", quantity = 1 })
--- Runtime routes to whichever node hosts the actor
+let cart = spawn ShoppingCart { items_count = 0 } in
+send cart add_item(42)
+// Runtime routes to whichever node hosts the actor
 ```
+
+Actors move between nodes explicitly with `migrate` (the `to` here is contextual syntax, not a keyword):
+
+```nulang
+migrate cart to target_node
+```
+
+`monitor`, `link`, and `exit` are reserved keywords for the planned in-language fault-tolerance surface; today these are runtime-level operations.
 
 ## 12.5 CRDT Replication
 
@@ -2292,55 +2226,40 @@ cart <- add_item(CartItem { product = "Book", quantity = 1 })
 
 ```nulang
 persistent actor GlobalCounter {
-  state crdt count: GCounter = GCounter.empty()
+  state crdt count: Int = 0
 
   behavior increment() {
-    count = count.increment(cluster.node_id())
+    self.count = self.count + 1
   }
 
-  behavior get(): Int {
-    count.total()
+  behavior get() {
+    self.count
   }
 }
 ```
+
+Eight CRDT types are built into the runtime (`GCounter`, `PNCounter`, `GSet`, `ORSet`, `AWORSet`, `LWWRegister`, `MVRegister`, `RGA`; see Appendix B.4) and back `crdt` state fields.
 
 ## 12.6 Fault Tolerance
 
 - Actor migration on node failure
 - Message buffering for failed-node actors
 - CRDT healing on node rejoin
-- Supervision-based recovery
+- Supervision-based recovery (§8.8)
 
-```nulang
-actor FaultTolerantService {
-  behavior resilient_operation() {
-    perform cluster.with_failover {
-      let result = perform database.query("SELECT * FROM orders")
-      Ok(result)
-    } on_failure {
-      | NetworkPartition => {
-          perform time.sleep(Duration.seconds(5))
-          resilient_operation()
-        }
-      | NodeFailure => {
-          perform io.println("Node failed, retried on another node")
-          Error("Redirected")
-        }
-    }
-  }
-}
-```
+In-language failover constructs (`with_failover` / `on_failure`) are planned; today recovery is driven by the supervision and migration mechanisms above.
 
 ## 12.7 Network Transport
 
-- Binary protocol over TCP
-- Compact binary serialization preserving type info
-- Small messages sent inline; large messages streamed with backpressure
-- Actor references sent as virtual IDs
+- Length-prefixed binary protocol over TCP with a node-id handshake
+- Compact binary serialization of actor messages, heartbeats, acknowledgements, spawn requests/responses, and CRDT sync packets
+- Actor references sent as globally unique IDs
 
 ---
 
-# Chapter 13: WebAssembly Integration
+# Chapter 13: WebAssembly Integration — Planned
+
+> **Status: not implemented.** No WebAssembly backend exists in the current implementation. Nulang programs are compiled through the AST → HIR → MIR pipeline to a register-based bytecode executed by the Nulang virtual machine, with hot regions JIT-compiled to native code via Cranelift. This chapter describes the planned Wasm target and is retained as the design reference; every construct in it (`@export`, `@import`, `config wasi`, `wasm { ... }` blocks) is unimplemented.
 
 ## 13.1 Compilation Target
 
@@ -2437,7 +2356,9 @@ Each component adds to the final Wasm module size. A simple single-threaded prog
 
 ---
 
-# Chapter 14: Standard Library
+# Chapter 14: Standard Library — Planned
+
+> **Status: not implemented.** There is currently no standard library and no prelude: no module is automatically imported, and common types such as `Option`/`Result`/`List`/`Map` must be declared by the program itself (as variants/records) or represented with built-in arrays. The only built-in modules the compiler recognizes are the AI-orchestration modules `Pipeline`, `Supervisor`, and `Debate` (§11.6). This chapter describes the planned standard library and is retained as the design reference; all modules and functions in it are unimplemented.
 
 ## 14.1 Core Module
 
@@ -2708,7 +2629,18 @@ let compatible = Binary.deserialize_with_schema(bytes, UserSchema.v2)
 
 ---
 
-# Chapter 15: Operational Model
+# Chapter 15: Operational Model — Planned
+
+> **Status: mostly not implemented.** The deployment manifest, configuration system, observability exporters, and operational tooling described in this chapter are planned. What exists today is the `nulang` command-line tool:
+>
+> - `nulang file.nu` — compile and run a source file
+> - `nulang --eval 'expr'` / `-e` — evaluate a source string
+> - `nulang --check file.nu` / `-c` — type, effect, and capability checking only (no execution)
+> - `nulang --repl` / `-r` — interactive read-eval-print loop (also the default when no arguments are given)
+> - `nulang --verbose file.nu` / `-v` — print AST, bytecode, and inferred types while running
+> - `nulang --version` / `-V`, `nulang --help` / `-h`
+>
+> (`--help` also advertises `nulang --lsp` for the stdio language server; in the current build that flag is not wired into the argument parser and is rejected as an unknown option — a known issue to be fixed.)
 
 ## 15.1 Deployment
 
@@ -2981,14 +2913,47 @@ This appendix uses Extended Backus-Naur Form (EBNF) notation:
 
 ## A.2 Top-Level Grammar
 
-```
-module        ::= { declaration }
+This grammar reflects the current parser (as of July 2026). Forms marked † are lexed/reserved but not yet wired into the parser.
 
-declaration   ::= value_binding
+```
+module        ::= { declaration } [ top_level_expression ]
+
+declaration   ::= [ annotations ] [ "pub" ] decl_head
+
+annotations   ::= { "@tool" "(" "description" ":" string ")" }
+
+decl_head     ::= function_definition
+                | agent_definition
+                | workflow_definition
                 | type_definition
+                | type_alias
                 | actor_definition
                 | effect_definition
+                | extern_block
                 | import_declaration
+                | module_definition
+
+function_definition ::= "fn" identifier [ type_params ] "(" [ parameters ] ")"
+                        [ "->" type ] [ "!" effect_row ] [ ":" capability ] expression
+
+type_params   ::= "[" identifier { "," identifier } "]"
+
+parameters    ::= identifier [ ":" type ] { "," identifier [ ":" type ] }
+
+type_definition ::= "type" identifier [ type_params ] "="
+                    ( record_type | variant_type )
+
+variant_type  ::= [ "|" ] constructor { "|" constructor }
+
+constructor   ::= identifier [ "(" type ")" ]
+
+type_alias    ::= "type" "alias" identifier [ type_params ] "=" type
+
+module_definition ::= "module" identifier "{" { declaration } "}"
+
+import_declaration ::= "import" identifier   (dotted module path)
+
+extern_block  ::= "extern" string "{" { "fn" identifier "(" [ parameters ] ")" [ "->" type ] } "}"
 ```
 
 ## A.3 Expression Grammar
@@ -2996,38 +2961,66 @@ declaration   ::= value_binding
 ```
 expression    ::= literal
                 | identifier
+                | prefix_op expression
+                | expression infix_op expression
                 | application
+                | field_access
+                | index_expr
+                | send_infix
                 | lambda
                 | let_binding
+                | let_rec
                 | conditional
                 | match_expr
                 | handle_expr
                 | perform_expr
-                | recover_expr
+                | actor_expr
+                | loop_expr
                 | block
 
 application   ::= expression "(" [ arguments ] ")"
-                | expression "|>" expression
+
+field_access  ::= expression "." ( identifier | integer )   (incl. self.field, tuple .0)
+
+index_expr    ::= expression "[" expression "]"
+
+send_infix    ::= expression "!" identifier "(" [ arguments ] ")"
 
 arguments     ::= expression { "," expression }
 
-lambda        ::= "(" [ parameters ] ")" "->" [ effect_row ] expression
+prefix_op     ::= "-" | "not" | "!" | "&" | "*"
 
-let_binding   ::= "let" pattern "=" expression
-                | "var" identifier "=" expression
+lambda        ::= "fn" "(" [ parameters ] ")" [ "->" ] expression
 
-conditional   ::= "if" expression "then" expression "else" expression
+let_binding   ::= "let" identifier [ ":" type ] "=" expression "in" expression
 
-match_expr    ::= "match" expression "{" { "|" pattern "=>" expression } "}"
+let_rec       ::= "let" "rec" identifier "(" [ parameters ] ")" "=" expression "in" expression
 
-handle_expr   ::= "handle" expression "with" "{" { handler_clause } "}"
+conditional   ::= "if" expression [ "then" ] ( expression | block ) [ "else" ( expression | block ) ]
 
-perform_expr  ::= "perform" effect_operation
+match_expr    ::= "match" expression [ "with" ] "{" { [ "case" | "|" ] pattern "=>" expression } "}"
 
-recover_expr  ::= "recover" expression
+handle_expr   ::= "handle" expression "{" { handler_clause } "}"
 
-block         ::= "{" { expression } "}"
+handler_clause ::= "|" identifier "." identifier "(" [ identifiers ] ")" [ "resume" ] "=>" expression
+
+perform_expr  ::= "perform" identifier "." identifier "(" [ arguments ] ")"
+
+actor_expr    ::= "spawn" expression "{" { identifier "=" expression } "}"
+                | "send" expression identifier "(" [ arguments ] ")"
+                | "ask" expression identifier "(" [ arguments ] ")"
+                | "receive" "{" { "|" identifier "(" [ identifiers ] ")" "=>" expression } "}"
+                | "migrate" expression "to" expression
+                | "emit" identifier "(" [ arguments ] ")"
+                | "self"
+
+loop_expr     ::= "for" identifier "in" expression expression
+                | "break" | "return" [ expression ]
+
+block         ::= "{" { expression ( ";" | newline ) } "}"
 ```
+
+Reserved but unimplemented: `recover` (capability recovery), `var` (mutable bindings), `loop` (unconditional loops), `monitor` / `link` / `exit` (process lifecycle), `subworkflow` / `await` (workflow composition), `stop` (actor shutdown), `capability` (authority capabilities).
 
 ## A.4 Pattern Grammar
 
@@ -3038,15 +3031,20 @@ pattern       ::= identifier
                 | constructor_pattern
                 | record_pattern
                 | tuple_pattern
+                | alias_pattern
 
-constructor_pattern ::= identifier [ "(" [ patterns ] ")" ]
+constructor_pattern ::= identifier [ "(" pattern ")" ]   (single payload)
 
-record_pattern ::= "{" { identifier "=" pattern } "}"
+record_pattern ::= "{" { identifier ":" pattern } "}"
 
 tuple_pattern  ::= "(" [ patterns ] ")"
 
+alias_pattern ::= identifier "@" pattern
+
 patterns      ::= pattern { "," pattern }
 ```
+
+(Pattern guards are planned.)
 
 ## A.5 Type Grammar
 
@@ -3056,21 +3054,26 @@ type          ::= primitive_type
                 | function_type
                 | tuple_type
                 | record_type
+                | array_type
                 | capability_type
+
+primitive_type ::= "Int" | "Float" | "Bool" | "String" | "Unit" | "Nil" | "Never" | "Address"
 
 type_constructor ::= identifier [ "[" types "]" ]
 
-function_type ::= "(" [ types ] ")" "->" [ effect_row ] type
+function_type ::= "fn" "(" [ types ] ")" "->" type [ "!" effect_row ] [ ":" capability ]
 
 tuple_type    ::= "(" [ types ] ")"
 
 record_type   ::= "{" { identifier ":" type } "}"
 
-capability_type ::= capability type
+array_type    ::= "[" type "]"
 
-capability    ::= "iso" | "trn" | "ref" | "val" | "box" | "tag"
+capability_type ::= "&" capability type
 
-effect_row    ::= "[" [ effect_refs ] [ "..." ] "]"
+capability    ::= "lineariso" | "iso" | "trn" | "ref" | "val" | "box" | "tag"
+
+effect_row    ::= "{" [ effect_refs ] [ "|" row_var ] "}" | identifier
 
 effect_refs   ::= identifier { "," identifier }
 
@@ -3084,16 +3087,13 @@ actor_definition ::= [ "persistent" ] "actor" identifier [ type_params ] "{" { a
 
 actor_member  ::= state_declaration
                 | behavior_declaration
-                | capability_declaration
-                | value_binding
 
-state_declaration ::= "state" state_model identifier ":" type "=" expression
+state_declaration ::= "state" [ state_model ] identifier [ ":" type ] "=" expression
 
-state_model   ::= "local" | "durable" | "event_sourced" | "crdt"
+state_model   ::= "local" | "durable" | "event_sourced" | "crdt"   (default: local)
 
-behavior_declaration ::= "behavior" identifier "(" [ parameters ] ")" [ ":" type ] expression
-
-capability_declaration ::= "capability" identifier
+behavior_declaration ::= "behavior" identifier "(" [ parameters ] ")"
+                         [ "!" effect_row ] [ ":" capability ] expression
 ```
 
 ## A.7 Workflow Grammar
@@ -3102,12 +3102,28 @@ capability_declaration ::= "capability" identifier
 workflow_definition ::= "workflow" identifier "{" { workflow_member } "}"
 
 workflow_member ::= step_declaration
-                  | state_declaration
-                  | event_declaration
+                  | parallel_block
+                  | compensate_block
 
-step_declaration ::= "step" identifier "(" [ parameters ] ")" [ ":" type ] expression
+step_declaration ::= "step" identifier "{" expression "}" [ "compensate" "{" expression "}" ]
 
-event_declaration ::= "event" identifier "(" [ parameters ] ")"
+parallel_block ::= "parallel" "{" { step_declaration } "}"
+
+compensate_block ::= "compensate" "{" expression "}"
+```
+
+## A.8 Agent Grammar
+
+```
+agent_definition ::= "agent" identifier "=" "{" { agent_field } "}"
+
+agent_field   ::= "model" ":" string
+                | "system_prompt" ":" string
+                | "tools" ":" "[" { identifier } "]"
+                | "memory" ":" "{" [ "max_turns" ":" integer ] "}"
+                | "semantic_memory" ":" "{" [ "dimensions" ":" integer ] "}"
+                | "procedural_memory" ":" "{" [ "namespace" ":" string ] "}"
+                | "pricing" ":" "{" [ "input" ":" number ] [ "output" ":" number ] "}"
 ```
 
 ---
@@ -3119,13 +3135,19 @@ event_declaration ::= "event" identifier "(" [ parameters ] ")"
 | Type | Size | Range/Description |
 |------|------|-------------------|
 | `Bool` | 1 byte | `true` or `false` |
-| `Int` | 64 bits | -9,223,372,036,854,775,808 to 9,223,372,036,854,775,807 |
-| `Float` | 64 bits | IEEE 754 double-precision |
-| `Decimal` | Arbitrary | Arbitrary-precision decimal |
-| `Char` | 32 bits | Single Unicode scalar value |
-| `Unit` | 0 bytes | The unit value `()` |
+| `Int` | 64 bits | Signed 64-bit integer (i64) |
+| `Float` | 64 bits | IEEE 754 double-precision (f64) |
+| `String` | — | UTF-8 string |
+| `Unit` | 0 bytes | The unit value `()` (also `unit`) |
+| `Nil` | — | The `nil` value; absence of a value |
+| `Never` | — | The empty type (no values) |
+| `Address` | — | Opaque actor/node address |
+| `Decimal` | — | *Planned* — arbitrary-precision decimal |
+| `Char` | — | *Planned* — single Unicode scalar value |
 
-## B.2 Collection Types
+## B.2 Collection Types — Planned
+
+Only the built-in fixed-size array `[T]` exists today (indexed load/store, `arr[i]`). The following persistent collections are planned standard-library types:
 
 | Type | Description | Complexity |
 |------|-------------|------------|
@@ -3138,9 +3160,9 @@ event_declaration ::= "event" identifier "(" [ parameters ] ")"
 
 | Type | Description |
 |------|-------------|
-| `ActorRef` | Opaque reference to an actor |
-| `Promise[T]` | A future value from an async operation |
-| `Mailbox[T]` | An actor's message queue |
+| `Address` | Opaque reference to an actor (the implemented actor-reference type) |
+| `Promise[T]` | *Planned* — a future value from an async operation |
+| `Mailbox[T]` | *Planned* — an actor's message queue as a first-class type |
 
 ## B.4 CRDT Types
 
@@ -3159,6 +3181,7 @@ event_declaration ::= "event" identifier "(" [ parameters ] ")"
 
 | Capability | Read | Write | Sendable | Use Case |
 |------------|------|-------|----------|----------|
+| `lineariso` | Yes | Yes | Yes | Unique ownership, consumed exactly once |
 | `iso` | Yes | Yes | Yes | Unique ownership |
 | `trn` | Yes | Yes | No | Transitioning to val |
 | `ref` | Yes | Yes | No | Local mutable reference |
@@ -3170,92 +3193,101 @@ event_declaration ::= "event" identifier "(" [ parameters ] ")"
 
 # Appendix C: Effect Reference
 
-## C.1 Console Effect
+The compiler recognizes the built-in effect names `IO`, `Net`, `FS`, `Rand`, `Time`, `Spawn`, `Send`, `Receive`, `Migrate`, `STM`, `Async`, `LLM`, `Cost`, `Event`, and `FFI` (§4.6). These names do not come with pre-declared operation sets — programs declare the operations they use with `effect` declarations, and only `LLM.ask`, `Signal.wait`, and `Timer.sleep` are backed by the runtime directly.
+
+The declarations below are **illustrative** — they show the planned standard-library effect surface written in current syntax. They are not shipped with the implementation.
+
+## C.1 Console Effect (illustrative)
 
 ```
 effect Console {
-  println(message: String): Unit
-  read_line(): String
-  print(message: String): Unit
+  println: (String) -> Unit
+  read_line: () -> String
+  print: (String) -> Unit
 }
 ```
 
-## C.2 FileSystem Effect
+## C.2 FileSystem Effect (illustrative)
 
 ```
 effect FileSystem {
-  read(path: String): Result[String, String]
-  write(path: String, content: String): Result[Unit, String]
-  exists(path: String): Bool
-  delete(path: String): Result[Unit, String]
-  list_dir(path: String): Result[List[String], String]
+  read: (String) -> String
+  write: (String, String) -> Unit
+  exists: (String) -> Bool
+  delete: (String) -> Unit
+  list_dir: (String) -> List[String]
 }
 ```
 
-## C.3 Network Effect
+## C.3 Network Effect (illustrative)
 
 ```
 effect Network {
-  get(url: String): Result[Response, String]
-  post(url: String, body: String): Result[Response, String]
-  put(url: String, body: String): Result[Response, String]
-  delete(url: String): Result[Response, String]
-  request(req: Request): Result[Response, String]
+  get: (String) -> Response
+  post: (String, String) -> Response
+  put: (String, String) -> Response
+  delete: (String) -> Response
+  request: (Request) -> Response
 }
 ```
 
-## C.4 Random Effect
+## C.4 Random Effect (illustrative)
 
 ```
 effect Random {
-  int(): Int
-  float(): Float
-  bool(): Bool
-  int_range(min: Int, max: Int): Int
+  int: () -> Int
+  float: () -> Float
+  bool: () -> Bool
+  int_range: (Int, Int) -> Int
 }
 ```
 
-## C.5 Time Effect
+## C.5 Time Effect (illustrative)
 
 ```
 effect Time {
-  now(): Timestamp
-  sleep(duration: Duration): Unit
+  now: () -> Timestamp
+  sleep: (Int) -> Unit
 }
 ```
 
 ## C.6 LLM Effect
 
+`LLM.ask` is runtime-backed today; the broader planned surface:
+
 ```
 effect LLM {
-  complete(prompt: String, options: LLMOptions): LLMResponse
-  embed(text: String): Embedding
-  tool_call(prompt: String, tools: List[Tool]): ToolResult
+  ask: (String) -> String
+  complete: (String, LLMOptions) -> LLMResponse
+  embed: (String) -> Embedding
+  tool_call: (String, List[Tool]) -> ToolResult
 }
 ```
 
-## C.7 Metrics Effect
+## C.7 Metrics Effect (illustrative)
 
 ```
 effect Metrics {
-  counter(name: String, value: Int, tags: Map[String, String]): Unit
-  histogram(name: String, value: Float, tags: Map[String, String]): Unit
-  gauge(name: String, value: Float, tags: Map[String, String]): Unit
+  counter: (String, Int, Map[String, String]) -> Unit
+  histogram: (String, Float, Map[String, String]) -> Unit
+  gauge: (String, Float, Map[String, String]) -> Unit
 }
 ```
 
-## C.8 Trace Effect
+## C.8 Trace Effect (illustrative)
 
 ```
 effect Trace {
-  span(name: String, operation: () -> T): T
-  annotate(key: String, value: String): Unit
+  span: (String, fn() -> T) -> T
+  annotate: (String, String) -> Unit
 }
 ```
 
 ---
 
-# Appendix D: Migration Guide from v1 to v2
+# Appendix D: Migration Guide from v1 to v2 — Planned
+
+> **Status: illustrative.** This guide describes a planned v1→v2 migration path and its examples predate the current syntax. Two corrections against the current implementation: the `agent` keyword is **not** removed — it is a live v0.9 feature (§11.2); and the "After" examples below use old surface syntax (`capability llm`, bare state access, `perform llm.complete`) — the current forms are effect rows (`! {LLM}`), `self.field` state access, and `perform LLM.ask(...)`. No `nulang migrate` tool exists today (§D.8 is planned).
 
 ## D.1 Overview
 

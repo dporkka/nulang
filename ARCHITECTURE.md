@@ -1,9 +1,17 @@
 # Nulang Architecture Reference
 
-**Document Version:** 1.0
-**Date:** January 2025
+**Document Version:** 1.1
+**Date:** July 2026
 **Audience:** Core implementers, runtime engineers, language designers
-**Companion Document:** STRATEGY.md (strategic rationale and migration plan)
+**Companion Documents:** design notes in `docs/archive/` (AI SDK, workflow SDK, cloud, package manager)
+
+> **Implementation status (v1.1):** Sections 2 and 6 (Language and AI Runtime)
+> have been re-verified against the current source tree and describe the
+> system as implemented. Sections 3–5 and the derived material in Sections
+> 7–10 still describe the *target* architecture; where the implementation
+> already diverges in a verified way, §1 carries the corrections. Treat
+> uncaveated numbers and diagrams in Sections 3–5 as design goals, not
+> as-built fact.
 
 ---
 
@@ -30,7 +38,8 @@ Nulang is organized into five strictly layered subsystems. Each layer communicat
 ```
 +==========================================================================+
 |                           LAYER 5: AI RUNTIME                             |
-|  Model Providers | Tool Registry | Memory (3-tier) | Planner | Traces   |
+|  LLM Providers | Agent Actors | Tool Schemas | Memory (3 kinds) | Cost   |
+|  Pipelines | Supervisor Teams | Debates | Sync-over-Async Providers      |
 +==========================================================================+
                               |
 +==========================================================================+
@@ -53,7 +62,8 @@ Nulang is organized into five strictly layered subsystems. Each layer communicat
                               |
 +==========================================================================+
 |                       LAYER 1: LANGUAGE                                   |
-|  Parser | HM Type Checker | Effect System | Capability Types | WIT Gen   |
+|  Lexer | Parser | HM Type Checker | Effect & Capability Analysis | HIR   |
+|  MIR | Register-Bytecode Compiler | NaN-Boxed VM | Cranelift JIT Tier    |
 +==========================================================================+
 ```
 
@@ -63,295 +73,346 @@ Nulang is organized into five strictly layered subsystems. Each layer communicat
 - Data passes across boundaries as plain structs; no shared mutable state
 - Each layer can be tested with mocked adjacent layers
 
+**Implementation note (verified July 2026):** the compiler targets a
+register-VM bytecode, not WASM — nothing in the current tree compiles to or
+runs inside Wasmtime (§2.5–§2.6). Other verified divergences from the target
+design of Layers 2–4, to keep in mind while reading §3–§5:
+
+- **Mailboxes are unbounded**, backed by `crossbeam::queue::SegQueue`
+  (`src/runtime/mailbox.rs`); push always succeeds — there is no 10,000-slot
+  ring buffer, no overflow policy, and no transport-level backpressure.
+  Messages carry a `MessagePriority` (`System`/`Normal`/`Bulk`) field, but the
+  queue itself is a single FIFO.
+- **Actor identity is a bare `u64`** from a global atomic counter
+  (`fresh_actor_id`, `src/runtime/mod.rs`); `spawn` is explicit — there is no
+  Orleans-style string identity, no activation-on-first-message, and no
+  consistent-hash placement yet.
+- **The reduction budget is 1000** per scheduling round (`next_reductions` in
+  `src/runtime/mod.rs`), enforced by a synchronous single-threaded
+  `step_actor` loop — not 2000 WASM-asyncify reductions.
+- **Persistence** ships three `PersistenceStore` backends — `MemoryStore`,
+  `JsonFileStore`, `SqliteStore` (`src/runtime/persistence.rs`) — not
+  PostgreSQL or S3.
+- **The NUL0 transport** is a hand-rolled, length-prefixed TCP protocol whose
+  fixed header is 13 bytes (4-byte `NUL0` magic, 1-byte packet type, 8-byte
+  sequence); the version/flags/MAC fields, TLS, QUIC, and Poly1305 drawn in
+  §5.5 do not exist in `src/runtime/network.rs`.
+
 ---
 
 ## 2. Layer 1: Language
 
-The Language layer is a pure compiler: Nulang source files in, WASM components out. It has zero runtime dependencies and can run entirely at compile time.
+The Language layer is a self-contained compiler: Nulang source in,
+register-machine bytecode out, executed by an interpreter loop with a
+Cranelift JIT tier. It has no hard dependency on the actor runtime — the VM
+reaches actors only through two object-safe callback traits (§2.6), so the
+language layer runs standalone (`VM::new()` + `load_module` + `run`), which
+is how `--eval` and the REPL work without a cluster attached.
 
 ### 2.1 Syntax Design
 
-Nulang uses an indentation-sensitive syntax. This is not a stylistic choice — it is a semantic choice that eliminates an entire class of bracket-matching bugs and forces a visual hierarchy that mirrors the actor hierarchy.
-
-**Design decisions:**
-
-| Decision | Rationale | Rejected Alternative |
-|----------|-----------|---------------------|
-| Indentation-based | Visual hierarchy matches actor nesting; no bracket noise | Braces (C-style) — visual clutter |
-| Expression-oriented | Every construct returns a value; no `return` keyword needed | Statement-oriented — requires explicit returns |
-| Actor as top-level | The actor is the only module-level construct | Module system separate from actors — extra layer of indirection |
-| No semicolons | Newlines separate statements; semicolons allow multi-line | Mandatory semicolons — visual noise |
-
-**Indentation rules:**
-- 2 spaces per indentation level (not configurable — see ADR-001)
-- Actor bodies are indented under the `actor` keyword
-- Behavior bodies are indented under the `behavior` keyword
-- Continuation lines indent 4 spaces past the start of the expression
+Nulang is an expression-oriented, ML-flavored language with C-style braces
+for blocks and actor bodies. Indentation is **not** significant — the lexer
+preserves newlines as tokens only so the parser can terminate expressions.
+Every construct is an expression that produces a value; there is no `return`
+keyword, and the last expression of a block is the block's value. Comments
+are `//`. The examples in this section are taken from `examples/` and run as
+written.
 
 ```nulang
-actor BankAccount:
-  state:
-    balance: Decimal
-
-  behavior deposit(amount: Decimal):
-    state.balance = state.balance + amount
-    effect Log("Deposited {amount}, new balance: {state.balance}")
-
-  behavior withdraw(amount: Decimal) -> Result<Unit, Error>:
-    if state.balance >= amount:
-      state.balance = state.balance - amount
-      Ok(Unit)
-    else:
-      Err(InsufficientFunds)
+// Recursive Fibonacci — closures and recursion (examples/fibonacci.nu)
+let fib = fn(n) {
+    if n <= 1 then n else fib(n - 1) + fib(n - 2)
+} in fib(10)
 ```
 
-**Expression orientation:** There is no `return` keyword. The last expression in a block is its value. This extends to behavior handlers, `if` branches, and `match` arms:
+Core surface forms (`src/ast.rs`, `src/parser.rs`):
 
-```nulang
-behavior get_balance() -> Decimal:
-  state.balance                    -- last expression = return value
+- `let x = e1 in e2` and `let rec f = ... in ...`. A `let`-bound lambda may
+  reference itself; it is lowered like `let rec` so the self-reference
+  resolves.
+- `fn(x) { body }` lambdas with real closures (captured locals live in
+  closure environments, §2.6).
+- `if cond then e1 else e2`; `match scrutinee { | Pat => e ... }`; blocks
+  `{ e1; e2 }`; tuples, records `{ field: value }`, arrays.
+- Actors: `actor Counter { state count = 0 behavior inc() { self.count + 1 } }`,
+  spawned explicitly with `spawn Counter { count = 0 }`
+  (`examples/counter_actor.nu`). Messages are sent with
+  `send target behavior(args)`; inside a behavior,
+  `receive { | Msg(x) => x }` reads the next mailbox message
+  (`examples/receive.nu`).
+- Effects: `perform Effect.op(args)`, intercepted by handlers written as
+  `handle perform Math.getAnswer() { | Math.getAnswer() => 42 }`
+  (`examples/effects.nu`).
+- Module-level declarations: `fn` (optionally `@tool`-annotated, §6.5),
+  `actor`, `type` aliases, record and variant types, `effect` declarations,
+  `module`/`import`, `extern` blocks, `workflow` (v0.8), and `agent` (v0.9,
+  §6.3).
 
-behavior describe() -> String:
-  if state.balance > 0:
-    " solvent"                    -- if branch returns String
-  else:
-    " overdrawn"                  -- else branch returns String
+There is no `switch` and no `case` keyword — `match` arms are introduced by
+`|`. Pattern matching is typed but **not** exhaustiveness-checked today: a
+non-exhaustive `match` compiles and may fail at runtime.
+
+### 2.2 HM Type Inference
+
+`TypeChecker::check_module` (`src/typechecker.rs`) implements Damas-Milner
+Algorithm W in the classical substitution-based form:
+
+- `Substitution = Vec<(TypeVar, Type)>`; unification via `mgu` with an occurs
+  check; `apply_subst` / `compose_subst` propagate results.
+- `generalize` at let-bindings builds `Type::Scheme { vars, body }`;
+  `instantiate` freshens scheme variables at use sites.
+- The `Type` universe (`src/types.rs`): `Var`, `Primitive` (`Int`, `Float`,
+  `Bool`, `String`, `Nil`, `Unit`, `Never`, `Address`), `Tuple`, `Record`,
+  `Variant`, `Array`, `Function { param, ret, effect, cap }`,
+  `Actor { state, behavior }`, `App { constructor, args }` (type
+  constructors such as `Option[T]`), `Reference { cap, inner }`, `Scheme`.
+
+**Parameterized types.** Functions, actors, and type declarations accept
+`type_params` (e.g. `fn f[T](x: T)`). Because the VM's value representation
+is dynamically tagged (§2.6), generic types are **erased**, not
+monomorphized — no per-instantiation code is generated, and there is no
+special boxing of generic values because every value is already a tagged
+`u64`.
+
+**Row-polymorphic effects.** Every function type carries an `EffectRow`:
+`Closed(Vec<Effect>)` or `Open(Vec<Effect>, Region)` (`src/types.rs`). See
+§2.3 for checking and runtime dispatch.
+
+**Capability types.** Function types also carry a `Capability` from the
+Pony-style lattice (`iso`, `lineariso`, `trn`, `ref`, `val`, `box`, `tag`;
+subtyping computed via `join`). `LinearIso` adds exactly-once linear
+consumption tracking. Capabilities are compile-time only — see §2.4.
+
+**What does not exist:** no type classes or constrained types
+(`fn f[T: Serializable]` is not valid Nulang), no `protocol` construct, and
+no exhaustiveness checking for `match`. Type inference deliberately does not
+cross actor boundaries — behavior signatures are explicit annotations — so
+actors remain separately checkable units.
+
+### 2.3 Effects: Static Rows, Runtime Handler Stack
+
+Effects are row-polymorphic in the type system and handler-resolved at
+runtime; the two halves meet in the `Perform` opcode.
+
+**Static side** (`src/effect_checker.rs`, wired per declaration in
+`run_frontend`, `src/main.rs`):
+
+- `EffectChecker::infer_effects` computes the row a body may perform;
+  `check_effects` enforces a declared row (`fn f() ! E { ... }`) against the
+  inferred one via `effect_row_subset`. Rows are `Closed` or `Open` with a
+  `Region` variable; an open row on the *allowed* side may cover extra
+  effects.
+- Bodies with a declared row are enforced; un-annotated bodies are
+  inference-only so existing programs keep compiling until interprocedural
+  effect propagation lands. The checker accumulates `diagnostics` rather
+  than aborting the compile.
+
+**Runtime side** (opcode-level detail in §2.6):
+
+- `handle perform Math.getAnswer() { | Math.getAnswer() => 42 }` compiles to
+  a handler table plus a `Handle` opcode; `perform` compiles to `Perform`; a
+  handler that resumes the suspended computation uses `Resume`; leaving the
+  handled scope emits `Unwind`.
+- If no installed handler binds the effect, the VM asks the
+  `ActorVmCallbacks::perform_effect` hook. This is how built-in effects are
+  serviced — e.g. `Timer.sleep` in workflow steps and `Python.call(...)`.
+  Any waiting on I/O happens inside the hook implementation, never in the VM
+  interpreter loop itself.
+- `perform LLM.ask(prompt)` never reaches the generic path: MIR lowering
+  special-cases it into the `LlmAsk` opcode (§6.3).
+
+**Determinism.** The static row tells the durable-execution layer (§4) which
+operations a body *may* perform; capturing and replaying effect results for
+deterministic replay is the persistence layer's job, not the effect
+checker's.
+
+### 2.4 Reference Capabilities (Compile-Time Only)
+
+"Capabilities" in the implemented language are Pony-style *reference
+capabilities* — qualifiers on references that govern aliasing and
+sendability — not the authority tokens of the target design. The lattice
+(`src/types.rs`):
+
+```
+iso ─ lineariso ─ trn ─ ref ─ val ─ box ─ tag
 ```
 
-**Pattern matching:** Nulang uses exhaustively-checked pattern matching for all conditional destructuring. There is no `switch` statement, no `if-else` chains on enums:
+| Capability | Meaning | Sendable? |
+|-----------|---------|-----------|
+| `iso` | Unique ownership | Yes |
+| `lineariso` | Unique ownership + exactly-once linear consumption | Yes |
+| `trn` | Unique writer (recoverable to `iso`) | No |
+| `ref` | Shared read/write | No |
+| `val` | Immutable shared | Yes |
+| `box` | Read-only view (any non-`tag` cap reads as `box`) | No |
+| `tag` | Opaque identity only, no dereference | Yes |
 
-```nulang
-match payment_result:
-  case Success(tx_id):
-    effect Log("Payment {tx_id} succeeded")
-    confirm_order(order)
-  case Failure(NetworkError):
-    retry_after(Duration.seconds(5))
-  case Failure(Declined(reason)):
-    cancel_order(order, reason)
-  case Failure(FraudSuspected):
-    escalate_to_security(order)
-```
+`CapabilityAnalyzer::infer_cap` (`src/effect_checker.rs`) runs in
+`run_frontend` over the same bodies as the effect checker; subtyping is
+computed via `join` on the lattice, and `is_sendable` is
+`LinearIso | Iso | Val | Tag`.
 
-Non-exhaustive matches are compile-time errors. The compiler suggests missing cases.
-
-### 2.2 HM Type Inference with Extensions
-
-Nulang uses Hindley-Milner type inference with four extensions: parameterized types, row-polymorphic effects, capability types, and constrained types.
-
-**Core algorithm:** Standard HM with let-generalization. Type variables are unified via Robinson's algorithm. The type checker is a constraint generator + solver, producing a typed AST.
-
-**Extension 1: Parameterized types (ML-style generics).**
-
-```nulang
--- Generic mailbox protocol
-protocol Mailbox<T>:
-  behavior send(msg: T)
-  behavior receive() -> T
-
--- Usage: Mailbox<Order> is a distinct type from Mailbox<Invoice>
-```
-
-Generics are monomorphized at compile time for WASM generation. There is no runtime boxing of generic values.
-
-**Extension 2: Row-polymorphic effects.**
-
-Every function type carries an effect row: an unordered set of effects the function may perform. Effect rows are open by default (prefixed with `..`), enabling composition:
-
-```nulang
--- Effect row is open: the function requires at least IO and Log
-fn process_file(path: String) : [IO, Log, ..] -> String
-
--- A caller with [IO, Log, DB] can call process_file (DB is extra, allowed)
--- A caller with [IO] cannot (Log is missing)
-```
-
-Effect rows are represented internally as sorted, duplicate-free lists. Unification of effect rows uses row unification: `{a, b | r1}` unifies with `{b, c | r2}` by producing `{a, b, c | r3}` where `r3` is the union of the remainders.
-
-**Extension 3: Capability types.**
-
-Capabilities are types that represent authority. They are distinct from regular types — a `capability DatabaseRead` is not a struct, an enum, or a function. Capabilities appear in effect rows and function signatures:
-
-```nulang
--- Function requires the DatabaseRead capability
-fn query_orders(db: capability DatabaseRead) -> List<Order>
-
--- Actor holds the capability; behaviors implicitly have access
-actor OrderService:
-  capability DatabaseRead
-
-  behavior list_orders():
-    -- No need to pass 'db' explicitly; the actor holds it
-    effect DBQuery("SELECT * FROM orders")
-```
-
-**Extension 4: Constrained types.**
-
-Type constraints restrict the set of valid types for a parameter:
-
-```nulang
--- T must be serializable (for message passing)
-fn send_message<T: Serializable>(mailbox: Mailbox<T>, msg: T)
-
--- T must be comparable (for CRDT merge)
-fn merge_values<T: Comparable>(a: T, b: T) -> T
-```
-
-Built-in type classes: `Serializable`, `Comparable`, `Hashable`, `Default`, `Clone`.
-
-**Type inference across actor boundaries:** There is NONE. Actor protocols are fully explicit — every behavior parameter and return type must be annotated. This is deliberate: it enables separate compilation, protocol evolution, and cross-language implementation. Within an actor's behavior handlers, local functions are fully inferred.
-
-### 2.3 Effect System Integration with the Actor Model
-
-Nulang's effect system is the bridge between actor code and the runtime. Effects are not just types — they are the mechanism by which actors interact with the world.
-
-**Effect lifecycle:**
-
-```
-Actor code calls `effect Foo(arg)`
-         |
-         v
-Runtime intercepts the effect (WASM host function)
-         |
-         v
-Effect handler executes (may be async, may access external systems)
-         |
-         v
-Result returned to actor; optionally captured in checkpoint
-```
-
-**Effect categories:**
-
-| Category | Examples | Handler Location | Captured in Journal? |
-|----------|----------|-----------------|---------------------|
-| IO | `HttpGet`, `HttpPost` | Runtime IO thread | Yes |
-| Time | `Now`, `Sleep` | Runtime clock | Yes |
-| Random | `Random`, `RandomInt` | Runtime entropy | Yes |
-| Storage | `DBQuery`, `KVGet` | Building block backend | Yes |
-| Messaging | `Send`, `Ask` | Actor runtime | Yes (send recorded) |
-| AI | `LLMComplete` | AI runtime | Yes |
-| Logging | `Log`, `Metrics` | Observability subsystem | No (non-deterministic) |
-| Capability | `Require`, `Delegate` | Capability manager | No |
-
-**Effect handlers are pluggable.** The runtime maintains an effect handler registry. Each effect name maps to a handler function. For testing, handlers can be swapped:
-
-```nulang
-test "order processing with mock payment":
-  let mock_handler = MockHttp({
-    "POST /charge": Ok({"status": "approved", "ref": "tx-123"})
-  })
-  with_handler(HttpPost, mock_handler):
-    let result = order_processor.process(test_order)
-    assert result == Ok(OrderConfirmed("tx-123"))
-```
-
-**Effects and determinism:** For `durable` and `event_sourced` actors, effect results are captured. On replay, the stored result is returned without re-invoking the handler. This is how Nulang implements deterministic replay — not by recording all IO at the OS level (like Temporal records gRPC calls), but by capturing at the effect boundary.
-
-### 2.4 Capability Syntax and Type Integration
-
-Capabilities are first-class types and first-class values. They can be held, passed, narrowed, and revoked.
-
-**Capability syntax:**
-
-```nulang
--- Actor declares it holds a capability with optional constraints
-capability DatabaseRead { tables: ["orders", "customers"] }
-capability HttpClient { hosts: ["api.stripe.com"] }
-capability LLM { model: GPT4O, budget: "$100/day" }
-
--- Capabilities can be passed as parameters
-behavior delegate_reader(consumer: ActorRef, read_cap: capability DatabaseRead):
-  consumer.accept(read_cap)  -- consumer can now use this capability
-
--- Capabilities can be narrowed at delegation
-behavior narrow_and_delegate():
-  let narrow_cap = capability DatabaseRead {
-    tables: ["orders"],       -- subset of original tables
-    columns: ["id", "status"]  -- further restriction
-  }
-  child_actor.work(narrow_cap)
-```
-
-**Capability narrowing rules:** A capability can only be narrowed when delegated. Narrowing means reducing the set of allowed operations, adding constraints, or reducing scope. A broader capability cannot be created from a narrower one.
-
-| Original | Delegated | Valid? |
-|----------|-----------|--------|
-| `DatabaseRead { tables: ["orders"] }` | `DatabaseRead { tables: ["orders"] }` | Yes (exact) |
-| `DatabaseRead { tables: ["orders", "customers"] }` | `DatabaseRead { tables: ["orders"] }` | Yes (subset) |
-| `DatabaseRead { tables: ["orders"] }` | `DatabaseRead { tables: ["orders", "customers"] }` | No (superset) |
-| `HttpClient { hosts: ["api.stripe.com"] }` | `HttpClient { hosts: ["api.stripe.com"], rate_limit: "100/h" }` | Yes (added constraint) |
-| `DatabaseRead { tables: ["orders"] }` | `DatabaseWrite { tables: ["orders"] }` | No (different capability) |
-
-**Capability type checking:** The type checker verifies that every `effect` invocation is covered by a capability held by the actor or passed as a parameter. Violations are compile-time errors, not runtime failures.
-
-```nulang
-actor UnsafeActor:
-  -- No HttpClient capability declared
-
-  behavior fetch_data():
-    effect HttpGet("https://example.com")  -- COMPILE ERROR: missing capability HttpClient
-```
-
-**Capability revocation:** Capabilities are revoked in three scenarios:
-1. **Actor deactivation:** When an actor is deactivated, all its capabilities are revoked
-2. **Explicit revocation:** An actor can revoke a capability it previously delegated
-3. **Timeout:** Time-limited capabilities expire automatically
-
-Revocation is lazy: the capability token is added to a revocation list. The next use of the token is rejected. There is no active "kill switch" that interrupts in-progress operations.
+**Capabilities are erased at runtime.** The capability opcodes are MVP
+no-ops: `CapChk` writes `true` into its destination register; `CapUp`,
+`CapDown`, and `CapSend` copy their input register (`src/vm.rs`). There is no
+runtime revocation list, no capability tokens in message headers, and no
+cross-node capability verification today. When §3–§5 below mention
+capability managers, narrowing, or revocation, they are describing the
+target design, not the current implementation.
 
 ### 2.5 Compilation Pipeline
 
+The pipeline is a straight line, wired exactly in `run_frontend` /
+`run_source` (`src/main.rs`) and reused by the REPL (`src/repl.rs`) and the
+LSP (`src/lsp/`):
+
 ```
-+-------------------------------------------------------------------+
-|  Nulang Source (.nul files)                                        |
-|  actor MyActor { ... }                                            |
-+-------------------------------------------------------------------+
-                            |
-                            v
-+-------------------------------------------------------------------+
-|  1. Lexer + Parser                                                 |
-|     - Indentation-sensitive token stream                           |
-|     - Produces untyped AST                                         |
-|     - Error recovery: continues past syntax errors                 |
-+-------------------------------------------------------------------+
-                            |
-                            v
-+-------------------------------------------------------------------+
-|  2. Type Checker (HM + Effects + Capabilities)                    |
-|     - Constraint generation: HM unification + effect row unification|
-|     - Capability checking: every effect must be covered            |
-|     - Exhaustiveness: all pattern matches must be complete         |
-|     - Produces typed AST                                           |
-+-------------------------------------------------------------------+
-                            |
-                            v
-+-------------------------------------------------------------------+
-|  3. WIT Interface Extractor                                        |
-|     - Actor protocols -> WIT interface definitions                 |
-|     - Actor capabilities -> WIT world imports                      |
-|     - Produces .wit files                                          |
-+-------------------------------------------------------------------+
-                            |
-                            v
-+-------------------------------------------------------------------+
-|  4. WASM Code Generator                                            |
-|     - Typed AST -> WASM core module (wasm32-wasip2)                |
-|     - Actor state -> linear memory layout                          |
-|     - Effect calls -> host function imports                        |
-|     - Generic monomorphization                                     |
-+-------------------------------------------------------------------+
-                            |
-                            v
-+-------------------------------------------------------------------+
-|  5. Component Linker                                               |
-|     - WASM core module + WIT interface -> WASM component           |
-|     - Exports actor protocol, imports capabilities                 |
-+-------------------------------------------------------------------+
+source &str
+  -> Lexer::lex()                  Vec<Token>        src/lexer.rs
+  -> Parser::parse_module()        AstModule         src/parser.rs
+  -> TypeChecker::check_module()   Type              src/typechecker.rs (Algorithm W)
+  -> EffectChecker (per body)      infer / check     src/effect_checker.rs
+  -> CapabilityAnalyzer (per body) Capability        src/effect_checker.rs
+  -> hir_lower::lower_module()     hir::Module       src/hir_lower.rs
+  -> mir_lower::lower_module()     mir::Module       src/mir_lower.rs
+  -> mir_codegen::compile_mir()    CodeModule        src/mir_codegen.rs
+  -> VM::load_module() + VM::run() Value             src/vm.rs
 ```
+
+Notes:
+
+- `--check` runs `check_source`, which stops after capability analysis — no
+  HIR/MIR/codegen and no execution.
+- The pipeline is **MIR-exclusive**: there is no AST-to-bytecode compiler
+  left in the tree. HIR mirrors the AST with resolved types and flattened
+  statement/terminator bodies, and desugars `workflow` and `agent`
+  declarations into persistent actors (§6.3). MIR is 3-address code with
+  explicit basic blocks and terminators — the last IR before bytecode.
+- Constructs the MIR pipeline cannot yet lower return an honest
+  `NotYetImplemented` error rather than miscompiling (current examples: a
+  `workflow` or `agent` that reaches MIR un-desugared, and an `agent` whose
+  `tools` list names an unknown function, §6.3).
+- Top-level expressions are wrapped in a synthetic `__main` function.
+
+### 2.6 Bytecode VM Backend
+
+**Instruction format** (`src/bytecode.rs`): fixed 32-bit instructions
+`{ opcode: u8, op1: u8, op2: u8, op3: u8 }` with `encode`/`decode`;
+`imm16()` reads op1+op2, `simm16()` its signed form, and `offset16()` reads
+op2+op3 (used by `JmpT`/`JmpF`, whose op1 holds the condition register).
+Constants live in a per-module pool (`Constant::{Int, Float, String, Bool,
+Nil, Unit, TypeDescriptor, FunctionRef, BehaviorRef}`). A `CodeModule` holds
+the instructions, the constant pool, `function_table` (code offsets),
+`exports`, an optional `entry_point`, `handler_tables` (one per `handle`
+block), `actor_metadata` (`ActorMeta`, incl. the agent flags in §6.3),
+`foreign_functions`, and `tools` (`@tool` schemas, §6.5).
+
+**Opcode space:** 140 opcodes in 18 categories (`OpCode`, `src/bytecode.rs`,
+counting the source's comment-header groups):
+
+| Range | Category | Count | Examples |
+|-------|----------|------:|----------|
+| 0x00–0x08 | Special | 9 | `Nop`, `Halt`, `Panic`, `Const0`…`ConstL` |
+| 0x10–0x15 | Stack & locals | 6 | `Load`, `Store`, `Move`, `Dup`, `Swap` |
+| 0x20–0x2D | Integer arithmetic | 14 | `IAdd`…`IPow`, shifts, bitwise |
+| 0x30–0x38 | Float arithmetic | 9 | `FAdd`…`FMod`, `IToF`, `FToI`, `FToS` |
+| 0x40–0x4B | Comparison & logic | 12 | `ICmp*`, `FCmp*`, `SCmpEq`, `Not/And/Or` |
+| 0x50–0x57 | Control flow | 8 | `Jmp`, `JmpT/F`, `Switch`, `Call`, `TailCall`, `Ret*` |
+| 0x60–0x64 | Closures | 5 | `Closure`, `CapLoad/Store`, `FreeVar`, `ClosureCall` |
+| 0x70–0x7F | Memory & objects | 16 | `Alloc`, `Field*`, `Arr*`, `Tuple*`, `Rec*`, `IsTag`, `Unpack`, `Copy`, `Drop` |
+| 0x80–0x8E | Actor & concurrency | 15 | `Spawn`, `Send`, `Ask`, `Receive`, `Monitor`…`Unlink`, `StateGet/Set`, `Emit`, `SignalWait` |
+| 0x90–0x93 | Effects | 4 | `Perform`, `Handle`, `Resume`, `Unwind` |
+| 0x94–0x9F | Python interop & AI | 12 | `PyImport`…`PyRelease`, `LlmAsk`, `PipelineNew/Stage/Run` |
+| 0xA0–0xA3 | Capabilities | 4 | `CapChk`, `CapUp`, `CapDown`, `CapSend` |
+| 0xB0 | FFI | 1 | `FFICall` |
+| 0xC0–0xC2 | Supervisor teams | 3 | `SupervisorNew/Worker/Run` |
+| 0xC3–0xC5 | Debates | 3 | `DebateNew/Participant/Run` |
+| 0xD0–0xD5 | Distribution | 6 | `NodeId`, `Migrate`, `RSend`, `RAsk`, `RSpawn`, `Gossip` |
+| 0xE0–0xE7 | String & IO | 8 | `SConcat`, `SPrint/SRead`, `FOpen`…`FClose`, `Print` |
+| 0xF0–0xF4 | Debug & meta | 5 | `DbgBreak/Print/Stack`, `MetaType/Cap` |
+
+**Value representation:** NaN-boxed `u64` (`Value { raw: u64 }`, `src/vm.rs`).
+The canonical layout lives in **`src/value_layout.rs`** — the single source
+of truth imported by the VM, the JIT runtime helpers, the typed JIT compiler,
+and the Python marshalling layer (the constants are *not* duplicated across
+those files):
+
+- Non-float values are quiet NaNs: upper 16 bits = tag
+  (`TAG_MASK = 0xFFFF_0000_0000_0000`), low 48 bits = payload
+  (`PAYLOAD_MASK = 0x0000_FFFF_FFFF_FFFF`). Any bit pattern that is not a
+  quiet NaN is a real IEEE-754 `f64`.
+- Tags: `TAG_NIL 0x7FF8`, `TAG_UNIT 0x7FF9`, `TAG_BOOL 0x7FFA`,
+  `TAG_INT 0x7FFB` (48-bit signed payload, sign-extended by `sext48`),
+  `TAG_PTR 0x7FFC` (heap pointer), `TAG_ACTOR 0x7FFD`, `TAG_STRING 0x7FFE`
+  (interned string id), `TAG_CLOSURE 0x7FF7`. `TAG_PYTHON 0x7FF6` lives in
+  `src/python/bridge.rs` behind the `python` feature.
+
+**Frames:** a `Frame` holds `[Value; 256]` registers, `pc`, `module_idx`,
+`return_dst`, `caller_idx`, and an optional `closure_env`. Frames live in a
+flat `Vec<Frame>` on the VM (not a linked stack): a call pushes a frame
+recording the caller's index, `Ret`/`RetVal` pop back. Closures with
+captures are `TAG_CLOSURE` values whose payload indexes a VM-side
+`closure_envs` table.
+
+**Effects at runtime** (`handler_stack: Vec<HandlerFrame>`, `src/vm.rs`):
+
+- `Handle` pushes a `HandlerFrame` (handler-table index, module, resume
+  pc/dst).
+- `Perform` finds the innermost handler frame whose table binds the effect
+  name, captures a `Continuation` (deep-cloned frames up to the current one,
+  resume pc/dst, step count) into that frame, and jumps to the handler body.
+  With no binding it falls back to the innermost table's `fallback_offset`,
+  then to the `perform_effect` callback (built-ins), else raises
+  `Unhandled effect`.
+- `Resume` restores the captured continuation with the resume value in the
+  destination register (an error if none was captured); `Unwind` pops the
+  handler frame.
+
+**Runtime callbacks:** the VM never touches the actor runtime directly. Two
+object-safe traits mediate (`src/vm.rs`): `ActorVmCallbacks` (heap
+alloc/drop, spawn/send/ask, `try_receive`, `perform_effect`, and the AI hooks
+`complete_llm`, `pipeline_*`, `supervisor_*`, `debate_*`) and
+`DistributedVmCallbacks` (node id, migrate, remote send/ask/spawn, gossip).
+Standalone execution installs `StandaloneVmCallbacks`, which owns a private
+`ActorHeap`; the actor runtime installs bridges back into `Runtime`.
+
+**MVP stubs worth knowing about:** capability opcodes are no-ops (§2.4); the
+`Py*` opcodes error in the standalone VM ("Python opcodes require native
+actor runtime — use `perform Python.call(...)`"); `Receive` stores the next
+message's first payload value or `nil` (pattern dispatch across arms is
+future work); `FOpen`/`FRead`/`FWrite`/`FClose` are stubs.
+
+**JIT tiering** (`src/jit/`): the VM keeps an optional `JitSession`. Before
+each instruction it snapshots the frame registers into a `[u64; 256]` and
+calls `tiered_execute_step`:
+
+1. If a compiled function exists for `(module, pc)`, run it — its ABI is
+   `extern "C" fn(*mut u64 regs, *const u64 constants)`.
+2. Otherwise bump the hot counter; at `HOT_THRESHOLD = 1000` executions,
+   `find_compilable_region` collects up to 500 instructions (stopping at the
+   first non-compilable opcode, and *before* `Ret` so the VM still pops the
+   frame); regions longer than 5 instructions are compiled.
+3. SIMD first: `simd_analyzer` recognizes element-wise binop/unary/compare
+   loops and `simd_compiler` emits vectorized Cranelift IR
+   (`I64x2`/`F64x2`/`I32x4`/`F32x4`); otherwise the scalar
+   `compiler::compile_region` path is used.
+4. Helpers callable from JIT code are `extern "C"` functions in
+   `src/jit/runtime.rs`, NaN-tag-aware (e.g. division by zero yields `nil`).
+
+Cold code always interprets; there is no whole-module AOT compilation.
 
 ---
 
 ## 3. Layer 2: Actor Runtime
+
+> **Target design — read with care.** Sections 3–5 describe the architecture
+> Nulang is building toward; they have not been re-verified in this revision.
+> The implementation has already diverged in the verified ways listed in §1 —
+> most importantly, actors execute as register-VM bytecode (§2.6) and nothing
+> runs inside a WASM sandbox, and mailboxes are unbounded `SegQueue`s whose
+> push always succeeds. Until these sections are re-verified against
+> `src/runtime/`, treat their diagrams and numeric defaults as design intent.
 
 The Actor Runtime is the in-memory execution engine. It schedules actors, routes messages, manages lifecycles, and enforces isolation. All code runs inside WASM sandboxes provided by Wasmtime.
 
@@ -1149,300 +1210,228 @@ MAC: Poly1305 message authentication code
 
 ## 6. Layer 5: AI Runtime
 
-The AI Runtime is the top layer. It provides LLM integration, tool calling, memory management, planning, and observability. Every feature in this layer is built from the same primitives as all other layers — there is no special-case "AI subsystem."
+The AI Runtime (v0.9) ships as a library tree (`src/ai/`) plus language-level
+wiring for `agent` declarations and orchestration builtins. It is not a
+separate interpreter: agents compile to ordinary persistent actors, and LLM
+calls flow through the same register VM and callback traits as every other
+effect. There is no WIT layer, no capability-injected provider, and no
+routing DSL in the current implementation — provider selection is a
+Rust-level decision (`Runtime::set_llm_client`).
 
-### 6.1 Model Provider Abstraction
+### 6.1 Module Layout
 
-All LLM providers implement a standard WIT interface. Actors request the `LLM` capability, and the runtime injects the configured provider.
+| File | Contents |
+|------|----------|
+| `src/ai/mod.rs` | Re-exports the public surface |
+| `src/ai/client.rs` | `LlmClient` async trait + `complete_sync` bridge |
+| `src/ai/request.rs` | `LlmRequest`, `LlmMessage`, `ToolSchema`, `ModelPricing` |
+| `src/ai/response.rs` | `LlmResponse`, `ToolCall`, `TokenUsage` |
+| `src/ai/providers/openai.rs` | `OpenAiClient` (OpenAI + compatible endpoints) |
+| `src/ai/providers/ollama.rs` | `OllamaClient` (local Ollama) |
+| `src/ai/mock.rs` | `MockLlmClient` (canned/sequenced responses, records requests) |
+| `src/ai/memory.rs` | `EpisodicMemory` — bounded conversation buffer |
+| `src/ai/semantic_memory.rs` | `SemanticMemory` — cosine-similarity fact store |
+| `src/ai/procedural_memory.rs` | `ProceduralMemory` — patterns + few-shot examples |
+| `src/ai/schema.rs` | Nulang `Type` → JSON Schema, `function_to_tool_schema` |
+| `src/ai/usage.rs` | `estimated_cost`, `UsageSummary` accumulation |
+| `src/ai/pipeline.rs` | `Pipeline` / `PipelineStage` + `PipelineRuntime` |
+| `src/ai/supervisor.rs` | `SupervisorTeam` / `Worker` + `SupervisorRuntime` |
+| `src/ai/debate.rs` | `Debate` / `Participant` / `Stance` + `DebateRuntime` |
 
-**WIT interface:**
+### 6.2 Provider Abstraction: Async Trait, Sync Bridge
 
-```wit
-interface llm-provider {
-  variant model { gpt-4o, claude-sonnet, llama-3-1, custom(string) }
+All providers implement one trait (`src/ai/client.rs`):
 
-  record message {
-    role: string,
-    content: string,
-  }
-
-  record tool-definition {
-    name: string,
-    description: string,
-    parameters: schema,
-  }
-
-  record tool-call {
-    id: string,
-    name: string,
-    arguments: string,
-  }
-
-  record completion-request {
-    model: model,
-    messages: list<message>,
-    tools: option<list<tool-definition>>,
-    temperature: option<float64>,
-    max-tokens: option<u32>,
-  }
-
-  record completion-response {
-    content: string,
-    tool-calls: list<tool-call>,
-    usage: token-usage,
-    latency: duration,
-  }
-
-  complete: func(req: completion-request) -> result<completion-response, error>
+```rust
+#[async_trait]
+pub trait LlmClient: Send + Sync {
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, String>;
 }
 ```
 
-**Provider backends:**
+The runtime and VM are synchronous, so `complete_sync(client, request)`
+bridges the gap: it reuses the current Tokio runtime handle when one exists
+(`Handle::try_current().block_on(...)`), and otherwise builds a temporary
+single-threaded Tokio runtime for the duration of the call. The only async
+code in the project is this trait, `main` (`#[tokio::main]`), and the LSP
+server.
 
-| Provider | Connection | Streaming | Tool Calling | Cost Tracking |
-|----------|-----------|-----------|--------------|---------------|
-| OpenAI | HTTP/2 | Yes | Native | Per-token |
-| Anthropic | HTTP/2 | Yes | Native | Per-token |
-| Azure OpenAI | HTTP/2 | Yes | Native | Per-token + quota |
-| Ollama | HTTP/1.1 | Yes | Via prompt | None |
-| vLLM | HTTP/2 | Yes | Native | Per-token |
-| Custom | Configurable | Optional | Via schema | Custom |
+`LlmRequest` carries `model`, `messages`, `tools`, `memory` (prepended to
+`messages` by the provider before sending), and optional `pricing`
+(`ModelPricing`, USD per 1k input/output tokens). `LlmResponse` carries
+`content: Option<String>`, `tool_calls`, `model`, `finish_reason`, and
+`TokenUsage { prompt, completion, total }`.
 
-**Multi-provider routing:** The runtime can route different actors to different providers:
+**Providers** (both `reqwest`-based, `stream: false` — no streaming today):
 
-```nulang
--- Actor-level provider selection
-actor Researcher:
-  capability LLM { provider: openai, model: gpt-4o }
+| Provider | Endpoint | Tool calling | Construction |
+|----------|----------|--------------|--------------|
+| `OpenAiClient` | `POST {base_url}/chat/completions`, `Authorization: Bearer` | Native function-calling format, `tool_choice: "auto"` | `new(key, model)`; `with_base_url(...)` for OpenAI-compatible APIs; `gpt4o()` reads `OPENAI_API_KEY` |
+| `OllamaClient` | `POST {base_url}/api/chat` | Native | `new(base_url, model)`; `default()` = `http://localhost:11434`, `llama3.1` |
 
--- Runtime-level routing rules
-llm_routing:
-  - match: { actor_type: "Researcher", behavior: "deep_research" }
-    provider: openai/gpt-4o
-  - match: { actor_type: "Researcher", behavior: "classify" }
-    provider: ollama/llama-3.1
-  - match: { cost_today: "> $100" }
-    provider: ollama/llama-3.1  -- fallback on budget exceed
-```
+`MockLlmClient` returns a fixed response, a sequence of responses, or tool
+calls, and records every request it receives — it is how agent, pipeline,
+and debate tests run without a network.
 
-### 6.2 Tool Registration and Execution
+There is no multi-provider routing and no budget auto-fallback yet; Anthropic,
+Azure, and vLLM backends from the target design are unimplemented.
 
-Tools are actor behaviors exposed to LLMs. There is no separate tool definition format.
+### 6.3 Agent Declarations Are Compiled, Not Interpreted
 
-**Tool discovery:**
+`agent` is a real declaration form wired through the whole pipeline — lexer
+(`"agent"` keyword, `src/lexer.rs`) → parser (`parse_agent`,
+`src/parser.rs`) → AST (`Decl::Agent`, `src/ast.rs`) → type checker (binds an
+opaque synthetic `Actor` type) → HIR desugaring → MIR → bytecode metadata →
+runtime support. It is not library-only sugar assembled in Rust code.
 
-```
-1. Actor A calls LLMComplete with `tools: [B.behavior1, C.behavior2]`
-2. AI runtime generates tool schemas from behavior types
-3. Schemas sent to LLM provider (OpenAI function calling format)
-4. LLM may request tool call in its response
-5. AI runtime parses tool call, sends message to target actor
-6. Tool result injected back into conversation
-```
-
-**Tool schema generation:**
+Syntax (`examples/pipeline.nu`):
 
 ```nulang
-actor WeatherService:
-  -- This behavior becomes a tool with auto-generated schema:
-  -- {
-  --   "name": "WeatherService_get_forecast",
-  --   "description": "Get weather forecast for a city",
-  --   "parameters": {
-  --     "type": "object",
-  --     "properties": {
-  --       "city": { "type": "string", "description": "..." },
-  --       "days": { "type": "integer", "description": "..." }
-  --     },
-  --     "required": ["city", "days"]
-  --   }
-  -- }
-  behavior get_forecast(city: String, days: U8) -> Forecast:
-    effect HttpGet("https://api.weather.com/forecast", { city, days })
+agent Researcher = {
+    model: "llama3.1",
+    system_prompt: "You are a researcher. Provide factual information.",
+    pricing: { input: 0.0, output: 0.0 }
+}
 ```
 
-**Tool execution flow:**
+Recognized fields — anything else is a parse error: `model` (required
+string), `system_prompt` (string), `tools` (list of function names),
+`memory: { max_turns }` (default 50), `semantic_memory: { dimensions }`,
+`procedural_memory: { namespace }`, `pricing: { input, output }` (USD per 1k
+tokens).
 
-```
-LLM requests tool call: get_forecast({"city": "Paris", "days": 3})
-         |
-         v
-AI Runtime parses arguments (JSON -> Nulang values)
-         |
-         v
-Sends message to WeatherService actor
-         |
-         v
-Waits for response (with timeout, default 30s)
-         |
-         v
-Injects result into conversation as tool result message
-         |
-         v
-Re-sends conversation to LLM for final response
-```
+`hir_lower::desugar_agent` rewrites the declaration into a **persistent
+actor** (`is_agent: true`) whose durable state holds the configuration and
+whose generated behaviors provide the interface:
 
-**Tool safety:**
-- Tool calls are effects, so they are traced and captured for replay
-- Tool arguments are validated against the behavior's parameter types
-- Tool execution timeouts prevent hung tool calls from blocking forever
-- Tool results are truncated to fit the model's context window
+- State fields (all `StateModel::Durable`): `model`, `system_prompt`,
+  `episodic_memory` (an `EpisodicMemory` serialized as JSON),
+  `usage_prompt`, `usage_completion`, `usage_cost`, `pricing_input`,
+  `pricing_output`, and — when configured — `semantic_memory` and
+  `procedural_memory` (JSON snapshots of the corresponding stores).
+- `ask(prompt)` behavior: reads the state fields above and performs
+  `LLM.ask(prompt)`, which MIR lowering turns into the `LlmAsk` opcode.
+- `usage()` behavior: returns `[prompt_tokens, completion_tokens, cost]`.
+- Memory behaviors (`store_fact` / `recall` for semantic memory;
+  `store_pattern` / `get_pattern` / `add_example` / `get_examples` for
+  procedural memory) are placeholders compiled with unit bodies — the
+  runtime intercepts them by name and serves them from the deserialized
+  stores instead of executing bytecode.
+- `tools` names are resolved at lowering time against the module's
+  `@tool`-annotated functions. An unresolvable name produces an honest
+  `NotYetImplemented` compile error, never a silent drop.
 
-### 6.3 Memory Subsystem (3 Tiers)
+At the VM boundary (`src/vm.rs`), `LlmAsk` reads the model string from the
+constant pool and the prompt from a register, calls
+`ActorVmCallbacks::complete_llm(model, prompt)`, and writes the reply string
+(or `nil`) back into the same register. The bytecode module records agent
+metadata (`ActorMeta { is_agent, tools, semantic_memory_dimensions,
+procedural_memory_namespace }`) so the runtime knows which actors are
+agents.
 
-AI agents need memory. Nulang provides three tiers, each with different scope, persistence, and access patterns.
+On the runtime side (`src/runtime/mod.rs`):
 
-**Tier 1: Short-term (conversation buffer):**
+- `Runtime::set_llm_client(Box<dyn LlmClient>)` installs the provider. With
+  no client installed, LLM requests fail with an error string that becomes
+  `nil` at the VM boundary — agents degrade gracefully instead of panicking.
+- `complete_agent_llm(actor_id, prompt)` loads the agent's durable state,
+  builds the request (system prompt + episodic memory + user prompt), calls
+  `complete_llm_with_tools`, then writes the updated episodic memory back and
+  accumulates token usage and cost into durable state — so memory and spend
+  survive actor restarts.
+- `complete_llm_with_tools` populates `request.tools` from `module.tools`;
+  if the model returns tool calls, each named function is invoked with the
+  JSON arguments (`invoke_agent_tool_function`) and the results are appended
+  to the conversation for a final model round-trip.
 
-| Property | Value |
-|----------|-------|
-| Scope | Single behavior handler |
-| API | `conversation` (implicit) |
-| Backend | In-memory buffer |
-| Persistence | None (session-scoped) |
-| Limit | Model context window (auto-truncation) |
+### 6.4 Memory: Three Kinds
 
-The conversation buffer holds the current LLM conversation. It is automatically managed:
-- Messages are appended as the conversation progresses
-- When the buffer exceeds the model's context window, old messages are summarized
-- The summary replaces the oldest messages, preserving context within limits
+The design's "3-tier memory" exists today as three Rust types, all
+serde-serializable so they can live in durable actor state:
+
+| Kind | Type | Scope | Mechanism |
+|------|------|-------|-----------|
+| Episodic | `EpisodicMemory` (`src/ai/memory.rs`) | Conversation | `VecDeque<Turn>` bounded by `max_turns` (default 50); oldest evicted first; `to_messages()` materializes provider-agnostic `LlmMessage`s |
+| Semantic | `SemanticMemory` (`src/ai/semantic_memory.rs`) | Long-term facts | `store` / `search(query, top_k)` / `delete`; cosine similarity over embeddings — a deterministic built-in FNV-based embedder by default, or a caller-supplied `fn(&str) -> Vec<f32>`; brute-force scan |
+| Procedural | `ProceduralMemory` (`src/ai/procedural_memory.rs`) | Learned patterns | Namespaced `Pattern`s (`input_pattern` → `output_template`) plus few-shot `Example`s per task; `get_examples` ranks by keyword overlap, falling back to most-recent |
+
+Agent declarations opt into semantic/procedural memory via
+`semantic_memory: { dimensions }` and `procedural_memory: { namespace }`;
+the generated actor keeps each store as a JSON blob in durable state and the
+runtime services the memory behaviors by name (§6.3).
+
+Not implemented yet: context-window auto-summarization, external vector
+backends (Qdrant/pgvector/HNSW), and the journal-backed "event memory" tier.
+
+### 6.5 Tools: `@tool` Functions, Not a Separate Registry
+
+A tool is an ordinary function annotated `@tool(description: "...")`
+(`FunctionAnnotation::Tool`, parsed in `src/parser.rs`). There is no
+standalone tool-registry process and no separate definition format:
+
+1. `ai::schema::function_to_tool_schema` builds a `ToolSchema`
+   (`{ name, description, parameters }`) from the function signature;
+   `type_to_json_schema` maps Nulang types to the JSON-Schema subset —
+   primitives, records → objects, arrays, tuples → `prefixItems`, variants →
+   `oneOf`, references unwrap, `Option[T]` → `anyOf [null, T]`.
+2. Codegen collects the schemas of every agent actor into `CodeModule.tools`
+   (`src/mir_codegen.rs`).
+3. At request time the runtime attaches them to the outgoing request; the
+   provider returns `tool_calls`; the runtime invokes each named function
+   with the JSON arguments and feeds the results back for a final model
+   round-trip (§6.3).
+
+### 6.6 Orchestration: Pipelines, Supervisor Teams, Debates
+
+Three multi-agent patterns ship both as Rust types and as surface-syntax
+builtins. Each pattern defines a minimal runtime trait —
+`PipelineRuntime`, `SupervisorRuntime`, `DebateRuntime`, each with a single
+`ask_agent(agent_id, prompt)` method — so tests can drive them with mocks.
+All three are implemented for `Runtime` by `ask`-ing the target agent actor
+(the `ask` behavior is resolved by name, with a bytecode-module fallback for
+source-compiled agents).
+
+| Pattern | Type | Semantics |
+|---------|------|-----------|
+| Pipeline | `Pipeline { stages: Vec<PipelineStage> }` | Sequential chain of `PipelineStage { name, agent_id, prompt_template }`; `{input}` in each template is replaced by the previous stage's output (or the pipeline input for the first stage) |
+| Supervisor team | `SupervisorTeam { workers, max_iterations }` | Sequential refinement over `Worker { name, agent_id, description }`; each worker is prompted with its description plus the accumulated result |
+| Debate | `Debate { topic, rounds, consensus_threshold, participants }` | `rounds` rounds over `Participant { name, stance: Pro/Con/Neutral, agent_id }` with the running argument record in each prompt; the **last** participant acts as moderator and synthesizes the conclusion (`consensus_threshold` is clamped to [0,1] and currently advisory) |
+
+Surface syntax such as
 
 ```nulang
-behavior chat(user_message: String):
-  -- conversation is implicitly available
-  -- effect LLMComplete uses conversation as messages
-  let response = effect LLMComplete({ model: GPT4O })
-  -- response is automatically appended to conversation
-  return response.content
+let pipeline = Pipeline.new()
+    |> Pipeline.stage("research", researcher, "Research: {input}")
+    |> Pipeline.stage("write", writer, "Write based on: {input}")
+in
+pipeline.run("CRDTs")
 ```
 
-**Tier 2: Long-term (vector store):**
+(`examples/pipeline.nu`) is recognized in HIR lowering
+(`is_ai_builtin_call` / `try_lower_run_call`, `src/hir_lower.rs`) and
+compiled to dedicated opcodes — `PipelineNew/Stage/Run`,
+`SupervisorNew/Worker/Run`, `DebateNew/Participant/Run` (§2.6). The VM
+forwards them to the runtime, which owns `pipelines`, `supervisor_teams`,
+and `debates` maps keyed by monotonic ids.
 
-| Property | Value |
-|----------|-------|
-| Scope | Actor instance |
-| API | `memory.remember(key, text)`, `memory.recall(query, limit)` |
-| Backend | Qdrant, pgvector, or in-memory HNSW |
-| Persistence | `durable` (checkpointed with actor) |
-| Embedding model | Configurable (default: text-embedding-3-small) |
+The target design's LLM-driven planner (natural-language goal → workflow
+graph) is not implemented; `workflow` declarations (§2.1) are the only
+workflow mechanism today.
 
-```nulang
-actor PersonalAssistant:
-  capability LLM
-  capability VectorStore
+### 6.7 Usage Tracking and Cost
 
-  behavior learn_fact(fact: String):
-    effect VectorStoreUpsert({ id: generate_id(), text: fact })
+`TokenUsage` (per response) feeds `estimated_cost(usage, pricing)`
+(`src/ai/usage.rs`) with per-1k-token USD rates from `ModelPricing` (or the
+agent's `pricing` block). `UsageSummary` accumulates prompt/completion/total
+tokens (saturating adds) and cost (plain `f64` sum).
 
-  behavior answer_question(question: String):
-    let relevant = effect VectorStoreQuery(question, limit: 5)
-    let context = relevant.map(|f| f.text).join("\n")
-    effect LLMComplete({
-      model: GPT4O,
-      messages: [
-        { role: "system", content: "Context: {context}" },
-        { role: "user", content: question }
-      ]
-    })
-```
+For agent actors this accumulation is automatic: `complete_agent_llm` writes
+the running totals into durable state after every call, and the generated
+`usage()` behavior exposes `[prompt, completion, cost]`.
 
-**Tier 3: Event memory (the journal):**
-
-| Property | Value |
-|----------|-------|
-| Scope | All messages ever received |
-| API | `journal.read(from, to)`, `journal.search(query)` |
-| Backend | Event journal (Layer 3) |
-| Persistence | `event_sourced` (permanent) |
-| Query | Full-text search on message payloads |
-
-For event-sourced actors, the entire message history is the memory. This is "perfect memory" — every interaction is recorded and replayable. The journal supports full-text search via inverted indices built asynchronously.
-
-### 6.4 Planning and Delegation
-
-Planning is workflow composition driven by an LLM. The planner actor generates workflows from natural language goals.
-
-**Planner architecture:**
-
-```
-+------------------------------------------------------------------+
-|                        Planner Actor                              |
-|                                                                   |
-|  Input: natural language goal ("Process all pending orders")     |
-|         + available tools (actor behavior registry)               |
-|         + constraints (max cost, max time, allowed actors)        |
-|                                                                   |
-|  LLM generates workflow definition (JSON/YAML)                    |
-|       |                                                           |
-|       v                                                           |
-|  Workflow Validator (compile-time check)                          |
-|       |                                                           |
-|       v                                                           |
-|  Workflow Compiler -> Actor graph (Layer 3)                       |
-|       |                                                           |
-|       v                                                           |
-|  Submitted to runtime for execution                               |
-+------------------------------------------------------------------+
-```
-
-**Planner capabilities:**
-- Generate workflows from natural language descriptions
-- Execute pre-defined workflow templates with LLM-filled parameters
-- Delegate to sub-agents (other actors) for parallel work
-- Handle failures by replanning (retry with modified workflow)
-- Respect capability constraints (only use tools the caller has access to)
-
-**Delegation pattern:**
-
-```nulang
-actor Manager:
-  capability LLM
-
-  behavior delegate_task(task: String):
-    -- Planner generates a workflow
-    let plan = effect LLMComplete({
-      model: GPT4O,
-      messages: [
-        { role: "system", content: planner_prompt },
-        { role: "user", content: task }
-      ],
-      tools: [WorkflowCompiler.validate, ToolRegistry.list]
-    })
-
-    -- Compile and execute
-    let workflow = compile_workflow(plan.tool_calls[0].arguments)
-    effect StartWorkflow(workflow)
-```
-
-### 6.5 Observability: Tracing Every LLM Call
-
-Every LLM call is automatically traced. No manual instrumentation required.
-
-**Traced fields:**
-
-| Field | Description | PII Handling |
-|-------|-------------|--------------|
-| Input prompt | Full conversation | Redacted by default (hash + length) |
-| Output completion | Full response | Redacted by default |
-| Model name | e.g., "gpt-4o" | None |
-| Token usage | Input/output counts | None |
-| Latency | Time to first token, total time | None |
-| Tool calls requested | Names and arguments | Redacted |
-| Tool call results | Return values | Redacted |
-| Cost | Estimated USD | None |
-| Actor identity | Which actor made the call | None |
-| Behavior name | Which behavior | None |
-| Timestamp | Wall clock | None |
-
-**Trace output:** All traces are emitted as OpenTelemetry spans. They can be sent to:
-- Jaeger (distributed tracing)
-- Prometheus (metrics: latency histograms, token counters)
-- Custom backends (via OTLP)
-
-**Cost tracking:** The AI runtime maintains per-actor, per-workflow, and per-deployment cost counters. These are exposed as metrics and can be used for:
-- Budget alerts ("deployment X has spent $500 today")
-- Auto-routing ("switch to local model when budget exceeded")
-- Chargeback ("team Y spent $Z on LLM calls this month")
+Not implemented yet: OpenTelemetry span emission, PII redaction, latency
+tracing, per-deployment cost counters, and budget enforcement or alerts —
+the observability half of the target design remains open.
 
 ---
 
@@ -1732,7 +1721,7 @@ locally and converge via the CRDT merge function.
 
 ### ADR-001: Virtual Actors by Default
 
-**Status:** Accepted
+**Status:** Partially implemented — actors today have numeric `u64` identities and explicit `spawn`; identity-string addressing, activation-on-first-message, and hash-ring placement remain target design (see §1 implementation note).
 **Context:** Actor lifecycle management is complex and error-prone. Erlang requires explicit spawn/link/monitor. Akka requires actor-of-actor factories. Both force developers to manage lifetimes, introducing coupling between creator and created.
 **Decision:** All actors in Nulang are virtual — addressed by identity, runtime manages activation/deactivation/ placement/migration. Creating an actor is as simple as sending it a message.
 **Consequences:** (+) Simpler programming model, location transparency, automatic scaling. (-) Requires distributed directory service, potential "cold start" latency for first message.
@@ -1740,7 +1729,7 @@ locally and converge via the CRDT merge function.
 
 ### ADR-002: WASM as Compilation Target
 
-**Status:** Accepted
+**Status:** Superseded (2026-07) — the implementation compiles to register-VM bytecode with a Cranelift JIT tier; no WASM/Wasmtime exists in the tree. See §2.5–§2.6. The sandboxing/portability goals remain open.
 **Context:** Nulang needs sandboxed execution, cross-language interop, and portable deployment. Options: native code (fast but unsafe), JVM (heavyweight, Oracle licensing), BEAM (Erlang-specific), WASM (sandboxed, portable, standard).
 **Decision:** Nulang compiles to WASM components (wasm32-wasip2). Every actor is a WASM component running in Wasmtime.
 **Consequences:** (+) Sandboxed execution, cross-language composition, portable deployment, capability-based security via WASI. (-) ~10-20% performance overhead vs native, dependency on Wasmtime project health.
@@ -1756,7 +1745,7 @@ locally and converge via the CRDT merge function.
 
 ### ADR-004: No Separate AI DSL
 
-**Status:** Accepted
+**Status:** Accepted, with a 2026-07 refinement: `agent` is now a first-class declaration form, but it *desugars* to an ordinary persistent actor (§6.3) — the "agents are actors, no separate interpreter" principle holds. Tools are `@tool`-annotated functions (§6.5); memory is durable actor state (§6.4).
 **Context:** AI frameworks (LangChain, LangGraph) create parallel programming models for agents. This forces developers to learn two systems and prevents agents from using general distributed systems features.
 **Decision:** There is no separate AI DSL in Nulang. An AI agent is an actor that holds the `LLM` capability. Tools are actor behaviors. Memory is actor state. Planning delegates to the workflow subsystem.
 **Consequences:** (+) Unified programming model, agents get durability/distribution/supervision for free, no framework lock-in. (-) AI-specific ergonomics (prompt templates, conversation management) must be provided as libraries, not language features.
@@ -1796,7 +1785,7 @@ locally and converge via the CRDT merge function.
 
 ### ADR-009: Capabilities Map to WASI
 
-**Status:** Accepted
+**Status:** Superseded (2026-07) — capabilities are Pony-style reference capabilities enforced at compile time and erased at runtime (§2.4); no WASI mapping exists. The authority-token model (narrowing, revocation) remains target design.
 **Context:** Nulang's capability security model needs an implementation mechanism. Inventing a custom capability system would require custom tooling and verification.
 **Decision:** Nulang capabilities compile to WASI world imports. The WASM Component Model's import system IS the capability system. If an actor doesn't import `wasi:http/outgoing-handler`, it cannot make HTTP requests — enforced by the WASM sandbox.
 **Consequences:** (+) Zero-overhead capability enforcement (sandbox-level, not runtime checks), standard tooling, composable via WIT. (-) Tied to WASI/WASM ecosystem evolution, some capabilities need custom WIT interfaces.
@@ -1812,7 +1801,7 @@ locally and converge via the CRDT merge function.
 
 ### ADR-011: Indentation-Sensitive Syntax
 
-**Status:** Accepted
+**Status:** Superseded (2026-07) — the implemented syntax is brace-based and indentation-insensitive (§2.1); newlines are expression terminators, not block structure.
 **Context:** Syntax style debates waste time. Braces (C-style) are redundant with proper indentation. Python proved indentation-based syntax works at scale.
 **Decision:** Nulang uses mandatory 2-space indentation. No braces, no semicolons, no configuration. A deterministic formatter is required (like gofmt).
 **Consequences:** (+) Visual hierarchy matches semantic hierarchy, no style debates, smaller code, enforced consistency. (-) Whitespace sensitivity can surprise newcomers, copy-paste can break indentation, hard to generate programmatically.

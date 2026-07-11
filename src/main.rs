@@ -68,6 +68,7 @@ async fn main() {
                 println!("nulang v{}", env!("CARGO_PKG_VERSION"));
                 return;
             }
+            "--lsp" => opts.lsp = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-h" | "--help" => {
                 print_help();

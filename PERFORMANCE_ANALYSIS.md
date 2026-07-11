@@ -3,6 +3,48 @@
 
 **Verdict:** 20 of 28 proposals are high-value and should be pursued. 8 deferred.
 
+> **Status update (2026-07-11):** This document was written 2026-06-25 as a
+> pre-implementation evaluation. Much of Phase 1 has since shipped. All
+> speedup/throughput figures quoted below ("10-100x", "~30%", "2-4x", "10x",
+> "10-20%") are proposal-era design estimates, **not measurements** — the
+> repository has no benchmark harness (no `benches/`, no criterion), so no
+> number in this file should be cited as a measured result. Read the status
+> table and the "Track 1 as built" section before treating any recommendation
+> below as current.
+
+### Implementation status (verified 2026-07-11)
+
+| # | Proposal | Status | Where / notes |
+|---|----------|--------|---------------|
+| 1.1 | Cranelift JIT backend | **Shipped** | `src/jit/` (~5,500 lines, cranelift 0.132), tiered into `VM::step` at `src/vm.rs:1115-1140` |
+| 1.2 | Type guard stripping | **Partial** | `src/jit/typed_compiler.rs` emits guard-stripped CLIF from `TypeMetadata`, but the live tiering path passes `None` (`src/vm.rs:1129`) — typechecker output is not yet threaded in, so stripping is dormant in production runs |
+| 1.3 | Linear scan regalloc | Deferred | Still correct — Cranelift's own regalloc is used |
+| 1.4 | MLIR dialect | Deferred | No MLIR in tree |
+| 1.5 | SIMD auto-vectorization | **Shipped** | `src/jit/simd_analyzer.rs` + `src/jit/simd_compiler.rs` (I64x2/F64x2/I32x4/F32x4) |
+| 2.1 | Lock-free MPSC mailboxes | **Shipped differently** | `src/runtime/mailbox.rs` uses an unbounded `crossbeam::queue::SegQueue`, **not** the `ArrayQueue` recommended below — a bounded queue would force blocking or message drops, violating BEAM never-drop semantics. crossbeam's epoch-based reclamation (the Risk Register's ABA mitigation) comes with `SegQueue` |
+| 2.2 | Dual-region actor heaps | Not started; premise stale | No `bumpalo` dependency exists — `src/runtime/heap.rs` is a hand-rolled bump allocator with size-class free lists. No LOS split yet |
+| 2.3 | mimalloc global allocator | **Shipped** | `mimalloc = "0.1"` in `Cargo.toml`; `#[global_allocator]` in `src/main.rs` |
+| 2.4 | Static escape analysis | **Reverted** | `src/escape_analysis.rs` was added and later removed; no escape analysis in the tree today |
+| 2.5 | Actor arenas | Deferred | Not present |
+| 2.6 | Cache-locality scheduling | Not started | Scheduler remains single-threaded cooperative |
+| 3.1 | rkyv zero-copy serialization | Not started | No rkyv dep; wire format is hand-rolled big-endian in `src/runtime/network.rs` |
+| 3.2 | Delta-state CRDT replication | Not started as specified | No delta-state code in `src/runtime/crdt_manager.rs`; replication uses `CrdtSync` packets |
+| 3.3 | io_uring / RDMA | Deferred | Not present |
+| 3.4 | Native Raft | Deferred | No Raft code |
+| 3.5 | Content-addressable bytecode | Deferred | Not present |
+| 4.1 | Evidence-passing style | Not started | Effects remain runtime handler-stack based (`Handle`/`Perform`/`Resume`/`Unwind`) |
+| 4.2 | Linear moves for iso | **Partial** | `LinearIso` capability exists in `src/types.rs` with exactly-once tracking in the typechecker; capabilities are erased at runtime, so no runtime move mechanism as proposed |
+| 4.3 | Typestate analysis | Not started | Not present |
+| 4.4 | Implicit effect returns | Not found | No corresponding transform in the current effect checker / HIR lowering |
+| 5.1 | Unify actor/agent primitives | **Partial** | v0.9 AI runtime exists (`src/ai/`: OpenAI/Ollama providers, memory, pipelines, debates, supervisor) but agents are not actors with `capability llm` |
+| 5.2 | Agent-aware supervision | **Partial** | `src/ai/supervisor.rs` (agent supervisor teams) exists alongside the actor `Supervisor` |
+| 5.3 | Wasmtime sandboxed tools | Not started | No wasmtime dep |
+| 5.4 | Agent telemetry monitors | **Partial** | `src/ai/usage.rs` tracks token usage and pricing; no general telemetry monitor |
+| 6.1 | LSP inlay hints | **Shipped** | `src/lsp/mod.rs` implements inlay hints (typechecker-backed with regex fallback) |
+| 6.2 | Deterministic simulation testing | Not started | No DST harness |
+| 6.3 | Causal profiling | Deferred | Not present |
+| 6.4 | Actor topology dashboard | Not started | Not present |
+
 ---
 
 ## Track 1: Native Compilation
@@ -17,6 +59,8 @@
 
 **Recommendation:** **DO FIRST.** Highest-leverage single change. JIT can tier: interpreter for cold code, JIT for hot loops.
 
+**Status (2026-07-11): SHIPPED.** See "Track 1 as built" below for the tiering mechanics that actually landed.
+
 ### 1.2 Static Type Guard Stripping
 | Criterion | Assessment |
 |-----------|------------|
@@ -25,6 +69,8 @@
 | **Effort** | 1-2 weeks |
 
 **Recommendation:** **Bundle with 1.1.** Free once Cranelift backend exists.
+
+**Status (2026-07-11): PARTIAL.** `src/jit/typed_compiler.rs` implements guard stripping, but the VM passes no type metadata into the tiering path (`src/vm.rs:1129`), so it is not active in production runs. The "~30%" figure is the module's own design estimate, unmeasured.
 
 ### 1.3 Linear Scan Register Allocation
 **Recommendation:** **DEFER.** Cranelift's regalloc2 is already excellent.
@@ -35,7 +81,55 @@
 ### 1.5 SIMD Auto-Vectorization
 **Recommendation:** **Pursue after 1.1.** High-value for AI inference, text processing.
 
+**Status (2026-07-11): SHIPPED** for element-wise array loops (details below).
+
 **Track 1 Summary: Do 1.1 + 1.2 first. Defer 1.3. Research 1.4. Do 1.5 after 1.1.**
+
+---
+
+## Track 1 as built (verified 2026-07-11)
+
+The JIT backend lives in `src/jit/` (~5,500 lines across 7 files, cranelift 0.132) and is wired into the interpreter loop at `src/vm.rs:1115-1140`.
+
+### Tiering mechanics (`src/jit/mod.rs`)
+
+- `VM` holds `jit_session: Option<JitSession>` (`src/vm.rs:650`). A session builds the Cranelift `JITModule` for the host ISA with the `enable_simd` flag set, and registers 25 `nulang_*` runtime helpers as importable symbols.
+- Before each interpreted instruction, the VM snapshots the current frame's 256 registers into a `[u64; 256]` array and calls `jit::tiered_execute_step`. If the result is not `TieredAction::Interpret`, the array is copied back into the frame and `pc` is advanced by the compiled region's length.
+- Hotness is tracked in a global `Mutex<HashMap<(usize, usize), u64>>` keyed by `(module_idx, offset)` so identical offsets in different modules do not share counts. `HOT_THRESHOLD = 1000` (`src/jit/mod.rs:55`): a region compiles on its 1000th interpreted hit.
+- `find_compilable_region` scans at most **500 instructions** from the hot offset and stops at the first unsupported opcode and *before* `Ret`/`RetVal`/`Jmp`/`JmpT`/`JmpF`/`Halt`. Regions are therefore **straight-line only** — branches and returns stay interpreted (loop *bodies* still compile, since the back-edge jump terminates the region). Regions of ≤5 instructions are not compiled.
+- Compiled functions are cached per `(module_idx, offset)`; a region is compiled at most once per session.
+
+### Compiled-function ABI
+
+```rust
+pub type JitFunctionPtr = extern "C" fn(*mut u64, *const u64);
+```
+
+Argument 1 is the 256-entry register file (read/write), argument 2 the module's constant pool pre-converted to raw NaN-boxed bits (`constants_to_jit_bits`, `src/vm.rs:456`). JIT function pointers are obtained by transmuting the finalized `*const u8`; bytecode must not be mutated while JIT code is executing.
+
+### Scalar path (`src/jit/compiler.rs`)
+
+MVP opcode subset: `Nop`/`Halt`, `Const0/1/2/M1`/`ConstU`, `Move`/`Swap`/`Dup`, integer and float arithmetic, integer/float compares, `Not`/`And`/`Or`, `Jmp`/`JmpT`/`JmpF`, `IToF`/`FToI`, `DbgPrint`, `Ret`/`RetVal`. Everything else (actors, effects, FFI, Python, strings, capabilities) forces interpretation.
+
+Arithmetic lowers to calls to 25 `#[no_mangle] extern "C"` helpers in `src/jit/runtime.rs`. These are NaN-tag aware via the canonical layout in `src/value_layout.rs` (`sext48`, `tag_int`, `PAYLOAD_MASK`). Integer `idiv`/`imod` by zero return `nil` instead of trapping; float `fdiv` is raw IEEE-754. `fcmp_eq` compares with `f64::EPSILON` tolerance.
+
+### Typed path (`src/jit/typed_compiler.rs`)
+
+Given `TypeMetadata` (register → `KnownType::{Int, Float, Bool, Unknown}`), the typed compiler emits direct CLIF (`iadd`, `fadd`, …) instead of helper calls, stripping NaN-tag manipulation for statically known operands and falling back to helpers for `Unknown`. **Not yet active**: `tiered_execute_step` receives `None` for type metadata (`src/vm.rs:1129`); threading typechecker output into the JIT is the remaining half of proposal 1.2.
+
+### SIMD path (`src/jit/simd_analyzer.rs`, `src/jit/simd_compiler.rs`)
+
+`JitSession::compile_region_simd` runs `analyze_region` first. The analyzer recognizes three loop shapes — `ElementWiseBinop` (`c[i] = a[i] + b[i]`), `ElementWiseUnary` (`b[i] = -a[i]`), `ElementWiseCmp` (`c[i] = a[i] < b[i]`) — requiring an `ArrLoad`→arithmetic→`ArrStore` chain on a single induction variable that steps by 1, a determinable trip count (`ArrLen` bound or constant), a uniform element type, no calls in the body, and no control flow beyond the back-edge.
+
+The SIMD compiler emits 128-bit vectors — `I64x2`/`F64x2` (2-wide) and `I32x4`/`F32x4` (4-wide) — as a scalar prefix loop, a SIMD body, and a scalar epilogue (`SimdWidth::Width8`/`I16x8` is reserved, not implemented). Compilation requires a compile-time trip-count hint and host support (`is_simd_supported()`: SSE2 on x86_64, always true on aarch64); otherwise it falls back to the typed scalar compiler. On a SIMD compile error the session falls back to the plain scalar `compile_region`.
+
+### Testing
+
+54 `#[test]`s under `src/jit/` (19 in `tests.rs`, 2 in `compiler.rs`, 15 in `simd_analyzer.rs`, 10 in `simd_compiler.rs`, 8 in `typed_compiler.rs`) plus 2 VM-level regression tests in `src/vm.rs` (`test_jit_hot_loop_matches_interpreter`, `test_jit_hot_loop_with_early_exit_branch`) that assert JIT-compiled hot loops produce exactly the interpreter's result. There is **no performance benchmark harness** anywhere in the repository — all speedup numbers in this document are estimates.
+
+### Not implemented (do not claim)
+
+No whole-function or ahead-of-time compilation; no inlining; no deoptimization or on-stack replacement beyond re-entering the interpreter at region boundaries; no JIT support for actor, effect, FFI, or Python opcodes; no control flow across region boundaries; no 8/16-bit SIMD widths; no recorded benchmark numbers.
 
 ---
 
@@ -50,14 +144,22 @@
 
 **Recommendation:** **DO IMMEDIATELY.** Highest-ROI change in Track 2. Use `crossbeam::queue::ArrayQueue`.
 
+**Status (2026-07-11): SHIPPED with a different structure.** `src/runtime/mailbox.rs` uses an unbounded `crossbeam::queue::SegQueue`, not `ArrayQueue`: a bounded queue forces a choice between blocking senders and dropping messages, both of which violate BEAM never-drop semantics. Push always succeeds; reclamation uses crossbeam's epoch-based GC.
+
 ### 2.2 Dual-Region Actor Heaps (LOS Split)
-**Recommendation:** **DO.** Natural evolution of existing `bumpalo`-based heap.
+**Recommendation:** **DO.** Natural evolution of the existing per-actor heap.
+
+**Status (2026-07-11): NOT STARTED; premise corrected.** There is no `bumpalo` dependency — `src/runtime/heap.rs` is a hand-rolled bump allocator with per-size-class intrusive free lists and ORCA headers. No large-object split exists yet.
 
 ### 2.3 Global Memory Arena via mimalloc
 **Recommendation:** **DO RIGHT NOW.** Literally a one-line change. Instant 10-20% win.
 
+**Status (2026-07-11): SHIPPED.** `mimalloc = "0.1"` is the `#[global_allocator]` in `src/main.rs`. The "10-20%" figure was never measured.
+
 ### 2.4 Static Escape Analysis for Stack Allocation
 **Recommendation:** **DO after 1.1.** Key to making ORCA GC effectively disappear.
+
+**Status (2026-07-11): REVERTED.** `src/escape_analysis.rs` was implemented and subsequently removed (tests and references cleaned up); no escape analysis exists in the tree today.
 
 ### 2.5 Actor Arenas (Allocation Pooling)
 **Recommendation:** **DEFER.** Power-user feature; covered by 2.2 and 2.4.
