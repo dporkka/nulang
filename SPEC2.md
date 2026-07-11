@@ -1529,7 +1529,7 @@ n
 
 Related expression forms:
 
-- `receive { | Behavior(params) => expr }` — take the next message from the actor's own mailbox (pattern-matching dispatch across arms is planned).
+- `receive { | Behavior(params) => expr }` — selective receive: scan the actor's own mailbox in FIFO order for the first message matching any arm, bind its payload values to the arm's params (missing values bind to nil, extras ignored), and evaluate the arm body; non-matching messages stay queued. Non-blocking: when nothing matches, the next message is popped and its first payload value yielded (nil when the mailbox is empty).
 - `migrate actor_expr to node_expr` — move an actor to another node (§12.4).
 - `for x in array body` — iterate over a built-in array; `break` exits early.
 - `return expr` / `return` — early return from a function or behavior.

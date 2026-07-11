@@ -74,13 +74,13 @@ type ExitReason =
 |----------------|---------------|-------------|-----------|
 | `Pid ! Message` | **IMPLEMENTED** | `send actor_ref behavior(args)` | Non-blocking, asynchronous → `Send` opcode (0x81) → `Runtime::send_message_by_id`. **Note:** the `<-` operator shown in earlier drafts is not Nulang syntax (the lexer tokenizes `<-` but the parser never uses it); `!` is unary-not. |
 | `Name ! Message` | **ADAPT — NOT IMPLEMENTED** | `registered_name <- message` | Send to registered name. Requires an explicit `whereis` lookup today (registry is Rust-only). |
-| `{Name, Node} ! Message` | **IMPLEMENTED (runtime API, with stub)** | `Runtime::send_distributed(ActorAddress, behavior, args)` | `ActorAddress::Local`/`Remote` give location-transparent routing. **Caveat:** remote sends ship with `behavior_id = 0` (placeholder) — the message is delivered to the mailbox but does not dispatch to the intended behavior. See §17.5 item 1. |
+| `{Name, Node} ! Message` | **IMPLEMENTED (runtime API)** | `Runtime::send_distributed(ActorAddress, behavior, args)` | `ActorAddress::Local`/`Remote` give location-transparent routing. Remote sends carry the behavior **name** on the wire; the receiver resolves it to a behavior id on delivery (unknown names fall back to behavior 0, mirroring local sends). |
 
 ### 2.2 Receive (Critical Addition)
 
 | BEAM Primitive | Nulang Status | Nulang Form | Rationale |
 |----------------|---------------|-------------|-----------|
-| `receive ... end` | **PARTIALLY IMPLEMENTED** | `receive { \| Behavior(params) => expr }` | **This is the single most important BEAM primitive Nulang currently lacks.** The syntax parses and type-checks (adds the `Receive` effect), but the MIR pipeline lowers the whole expression to `nil` — arms are never matched. A `Receive` opcode (0x84) exists in the VM and would pop the next mailbox message via `try_receive`, but no compiled code path emits it. No `after` timeout, no selective receive. |
+| `receive ... end` | **IMPLEMENTED (non-blocking)** | `receive { \| Behavior(params) => expr }` | Selective receive is wired end-to-end: MIR lowering (`lower_receive` in `src/mir_lower.rs`) resolves arm names to behavior-table indices and emits `OpCode::ReceiveMatch` (0x8F); the VM scans the mailbox in FIFO order via `ActorVmCallbacks::try_receive_match` (`Mailbox::receive_match`), skips non-matching messages (left queued), binds payload values to arm params (missing → nil, extras ignored), and dispatches to the arm body. Non-blocking: no-match falls back to pop-any (nil when empty). No `after` timeout yet. |
 
 **Nulang `receive` Design:**
 
@@ -124,13 +124,13 @@ behavior server_loop(state: ServerState) {
 
 **Design Note:** Unlike Erlang's `receive` (which scans the entire mailbox), Nulang's `receive` should compile to efficient mailbox matching. Messages that don't match are left in the mailbox for future receives. The `after` clause provides timeout semantics for request-response patterns.
 
-**Reality check:** the examples above are the *target* syntax, which parses today. Semantics are missing: the MIR lowering of `receive` discards the arms and evaluates to `nil` (`src/mir_lower.rs:959`), the `after` clause is not in the grammar, and message delivery to running actors happens through behavior dispatch in `Runtime::step_actor`, not through `receive`. The dead `Receive` opcode handler in the VM pops the next message and returns its first payload value (or `nil` when empty) — that is the only implemented mailbox-read semantics.
+**Reality check:** the basic-receive example above is implemented today (behavior-name arms, payload binding, selective mailbox scan via `OpCode::ReceiveMatch` / `Mailbox::receive_match`). Two differences from Erlang remain: `receive` never blocks — when no queued message matches, a legacy fallback pops the next message and yields its first payload value (nil when empty) — and the `after` clause is not in the grammar. Message delivery to running actors still primarily happens through behavior dispatch in `Runtime::step_actor`; the legacy pop-any `Receive` opcode (0x84) remains as the no-match fallback path.
 
 ### 2.3 Selective Receive Considerations
 
 OTP's selective receive is both powerful and problematic — it can cause mailbox bloat when messages don't match any pattern. Nulang should:
 
-1. **Support selective receive** (required for Erlang compatibility patterns) — **not implemented**
+1. **Support selective receive** (required for Erlang compatibility patterns) — **implemented** (mailbox-order scan, non-matching messages stay queued; non-blocking)
 2. **Provide mailbox inspection** (`actor.mailbox_size(self)`) for monitoring — exists as `Mailbox::len()` in Rust; no language builtin
 3. **Warn at compile time** if a behavior has a `receive` with no catch-all pattern (potential mailbox leak) — **not implemented**
 4. **Support `receive` with `flush`** to clear non-matching messages after timeout — **not implemented**
@@ -405,7 +405,7 @@ Mnesia's complex transaction semantics and schema evolution are pain points. Nul
 
 | BEAM Primitive | Nulang Status | Nulang Form | Rationale |
 |----------------|---------------|-------------|-----------|
-| `{Name, Node} ! Message` | **IMPLEMENTED (runtime API, with stub)** | `Runtime::send_distributed(ActorAddress, behavior, args)` | Location-transparent routing via `AddressResolver` + LRU `RemoteActorCache` (10,000 entries). **Stub:** remote `ActorMessage` packets carry `behavior_id = 0`; the receiver delivers them verbatim, so the intended behavior is not dispatched. The `RSend` opcode (0xD2) is a no-op in the VM. |
+| `{Name, Node} ! Message` | **IMPLEMENTED (runtime API)** | `Runtime::send_distributed(ActorAddress, behavior, args)` | Location-transparent routing via `AddressResolver` + LRU `RemoteActorCache` (10,000 entries). Remote `ActorMessage` packets carry the behavior **name**; the receiver resolves it via `Runtime::behavior_id_for` on delivery (unknown names fall back to behavior 0, mirroring local sends). The `RSend` opcode (0xD2) is a no-op in the VM. |
 | `rpc:call/4` | **IMPLEMENTED (partial)** | `RAsk` opcode (0xD3) → `DistributedVmCallbacks::remote_ask(target, behavior, args, 5000ms)` | Type-safe RPC. Only through the VM callback; returns `nil` when no distributed runtime is attached. |
 | `rpc:multicall/4` | **ADAPT — NOT IMPLEMENTED** | `cluster.multicall(nodes, behavior, args)` | Parallel RPC to multiple nodes. |
 | `rpc:cast/4` | **ADAPT — NOT IMPLEMENTED** | `cluster.cast(node, behavior, args)` | Fire-and-forget remote call. |
@@ -727,7 +727,7 @@ let hash = crypto_lib.call("sha256", data)
 14. Process groups (`pg`) — *runtime API done; group broadcast missing*
 
 ### Phase 4: Distribution
-15. `cluster.call` / `multicast` / `broadcast` — *not started; fix the `behavior_id = 0` remote-send stub and remote `SpawnRequest` handling first*
+15. `cluster.call` / `multicast` / `broadcast` — *not started; remote-send behavior-name resolution is done (§17.5 item 1), remote `SpawnRequest` delivery is done as an MVP (§17.5 item 2), gossip has a wire packet (`Packet::Gossip`)*
 16. `cluster.monitor_node` — *not started*
 
 ### Phase 5: Advanced
@@ -796,9 +796,9 @@ Custom TCP protocol in `src/runtime/network.rs`. Every frame:
 
 An **8-byte node-id handshake** (big-endian `u64`) is exchanged immediately after TCP connect, before any framed packets; a mismatch aborts the connection. Limits: `MAX_PACKET_LEN` 16 MiB, per-connection I/O timeout 30 s, internal channel capacity 1024.
 
-Packet types: `ActorMessage` = 0, `Heartbeat` = 1, `Ack` = 2 (serde-complete but unused in delivery paths), `SpawnRequest` = 3, `SpawnResponse` = 4, `CrdtSync` = 5. All serde is hand-rolled big-endian. `Value` payloads serialize under five tags — int / float / bool / string-id (u32) / unit; anything else (nil, actor refs, pointers) is written as raw-bit float and does **not** round-trip on read (see §17.5 item 12).
+Packet types: `ActorMessage` = 0, `Heartbeat` = 1, `Ack` = 2 (serde-complete but unused in delivery paths), `SpawnRequest` = 3, `SpawnResponse` = 4, `CrdtSync` = 5, `Gossip` = 6. All serde is hand-rolled big-endian. `Value` payloads serialize under five tags — int / float / bool / string-id (u32) / unit; anything else (nil, actor refs, pointers) is written as raw-bit float and does **not** round-trip on read (see §17.5 item 12).
 
-Cluster membership (`src/runtime/cluster.rs`) is gossip/SWIM-style: heartbeat every **500 ms**, heartbeat timeout **2 s**, suspicion **5 s**, failed-node retention **60 s**, gossip fanout **2**. `NodeStatus`: `Joining`, `Healthy`, `Suspicious`, `Failed`, `Leaving`. `ClusterState::tick` returns `ClusterAction::{SendHeartbeat, NodeJoined, NodeFailed, NodeLeft, SendGossip}` which `Runtime::process_network` executes.
+Cluster membership (`src/runtime/cluster.rs`) is gossip/SWIM-style: heartbeat every **500 ms**, heartbeat timeout **2 s**, suspicion **5 s**, failed-node retention **60 s**, gossip fanout **2**. `NodeStatus`: `Joining`, `Healthy`, `Suspicious`, `Failed`, `Leaving`. `ClusterState::tick` returns `ClusterAction::{SendHeartbeat, NodeJoined, NodeFailed, NodeLeft, SendGossip}` which `Runtime::process_network` executes. `SendGossip` is wired: `Packet::Gossip` carries the sender's compact membership view (`Vec<NodeGossip>` — node id, address, status, incarnation per member; address = family byte + octets + port), merged on receipt by `ClusterState::merge_membership` (higher incarnation wins; equal incarnation refreshes `last_heartbeat` as a liveness hint, which keeps relay-only nodes from being suspected). Transitive propagation works — a chain of pairwise seeds (B joins A, C joins B) converges without a full mesh; see `test_three_node_gossip_converges_chain_seeded`.
 
 Location transparency (`src/runtime/distributed.rs`): `ActorAddress::{Local, Remote}`, `AddressResolver` (checks cluster health before resolving), and an LRU `RemoteActorCache` capped at **10,000** entries. `NodeId::LOCAL = 0`. `Migrate` opcode (0xD1) records `(actor, node)` in `VM::pending_migrations` and forwards to the distributed callback; actual cross-node state transfer is not implemented.
 
@@ -831,8 +831,8 @@ Location transparency (`src/runtime/distributed.rs`): `ActorAddress::{Local, Rem
 
 ### 17.5 Stubs and known gaps (flag for fixing)
 
-1. **Remote send drops the behavior name.** `send_distributed` ships `behavior_id = 0` with a comment claiming the remote side resolves the name; the receiver (`AddressResolver::parse_packet`) does no resolution and delivers `behavior_id 0` verbatim, so remote messages never dispatch to the intended behavior (`runtime/distributed.rs:660`, `:443`).
-2. **Remote spawn is send-only.** `spawn_on_node` transmits `Packet::SpawnRequest`, but `process_network_packets` routes all non-`ActorMessage` packets through `parse_packet`, which returns `None` for them — the request is silently dropped (`runtime/distributed.rs:716`). `RSpawn` (0xD4) returns `actor_ref(0)` (`vm.rs:1392`); `DistributedRuntimeImpl::spawn_on_node` returns placeholder addresses.
+1. ~~**Remote send drops the behavior name.**~~ **FIXED.** `Packet::ActorMessage` now carries `behavior_name: String` on the wire (length-prefixed UTF-8, replacing the `behavior_id: u16` field); `process_network_packets` resolves it via `Runtime::behavior_id_for` against the target actor's behavior table, falling back to behavior 0 for unknown names — mirroring local `send_message`'s `unwrap_or(0)` (`runtime/distributed.rs`, `runtime/network.rs`).
+2. ~~**Remote spawn is send-only.**~~ **FIXED (MVP).** `process_network_packets` now handles `Packet::SpawnRequest`: the receiving node spawns a fresh actor with the request's `initial_state` and registers the requested behavior — but only if that behavior was explicitly offered via `Runtime::register_spawnable_behavior` (MVP scope: remote spawn supports native behaviors the receiver opted into, not arbitrary or bytecode behaviors). Unknown names are answered with `SpawnResponse{success:false}` and no actor is created — the no-crash counterpart of the local unknown-behavior fallback. The reply carries the real actor id; the requester collects it via `Runtime::take_spawn_response(request_id)` (recorded by the `SpawnResponse` arm of `process_network_packets`; the address returned by `spawn_on_node` is still a placeholder whose `actor_id` is the request id). `RSpawn` (0xD4) still returns `actor_ref(0)` (`vm.rs:1392`); `DistributedRuntimeImpl::spawn_on_node` still returns placeholder addresses.
 3. **`RSend` (0xD2) is a no-op** in the VM (`vm.rs:1389`).
 4. **`receive` has no semantics.** MIR lowering discards arms and yields `nil` (`mir_lower.rs:959`); the VM's `Receive` handler (`vm.rs:2213`, pops next message, returns first payload or `nil`) is never emitted by the compiler. No `after` timeout in the grammar.
 5. **Fault-tolerance opcodes unhandled.** `Monitor`/`Demon`/`Link`/`Unlink`/`Exit`/`Yield` hit the VM's "unimplemented opcode" catch-all (`vm.rs:2222`); the functionality exists only as Rust runtime API.

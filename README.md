@@ -1,6 +1,6 @@
 # Nulang
 
-> A distributed actor-based programming language with AI agent support, built in Rust.
+> The language for autonomous distributed software systems — AI agents, durable workflows, and resilient services where distribution, durability, and capability security are the default model, built in Rust.
 
 [![Rust](https://img.shields.io/badge/rust-2021%20Edition-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/github/license/dporkka/nulang.svg)](LICENSE)
@@ -9,13 +9,15 @@
 
 ## Overview
 
-**Nulang** is a modern systems programming language that combines the fault-tolerant distributed computing model of Erlang with advanced type system features borrowed from Rust, Pony, and research languages. It is designed for building concurrent, distributed, and AI-agent-powered applications.
+**Nulang** is the language for autonomous distributed software systems: AI agents, durable workflows, and resilient services where distribution, durability, capability security, and AI-assisted execution are the default model rather than bolted-on abstractions. It is not a general-purpose language competing with Rust or Go — it is purpose-built for software that must keep running across nodes, failures, and restarts without human intervention.
+
+It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired type system (Hindley-Milner inference, reference capabilities, row-polymorphic algebraic effects), a register-based VM with a Cranelift JIT, per-actor ORCA garbage collection, location-transparent distribution over TCP, CRDTs for shared state, durable workflows with saga compensation, and a first-class AI agent runtime — all in a single Rust implementation.
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
-| **Actor Model** | Lightweight green-thread actors with M:N scheduling, work-stealing queues, and supervision trees |
+| **Actor Model** | Lightweight actors with cooperative reduction-bounded scheduling, work-stealing queues, and supervision trees |
 | **Algebraic Effects** | First-class effect system with `perform`/`handle`/`resume` semantics |
 | **Capability System** | Fine-grained reference permissions (iso/trn/ref/val/box/tag) for memory safety |
 | **AI Agents** | First-class `agent` declarations with LLM clients (OpenAI, Ollama), episodic/semantic/procedural memory, pipelines, debates, and supervisor teams |
@@ -24,7 +26,7 @@
 | **CRDTs** | 8 conflict-free replicated data types for shared distributed state |
 | **Register-Based VM** | High-performance bytecode VM with NaN-tagged value representation |
 | **Cranelift JIT Backend** | Tiered execution: interpreter for cold code, native compilation for hot loops |
-| **BEAM/OTP Primitives** | `spawn_link`, `monitor`, `link`, registry, timers, process groups (`receive` is parse-only today — see [Known limitations](#known-limitations)) |
+| **BEAM/OTP Primitives** | `spawn_link`, `monitor`, `link`, registry, timers, process groups, selective `receive` |
 | **Linear Type Moves** | Zero-cost `iso` actor messaging via compile-time linearity tracking |
 | **SIMD Vectorization** | Auto-vectorization of array loops via Cranelift SIMD (I64x2, F64x2, I32x4, F32x4) |
 | **Python Interop** | Native Actor pattern: Python isolated to dedicated OS threads, marshal-only boundary |
@@ -33,12 +35,14 @@
 
 ### Current Status
 
+Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
+
 - ✅ Builds with `cargo build`
-- ✅ All 853 tests pass with `cargo test`
+- ✅ All 884 tests pass with `cargo test`
 - ✅ NaN-boxed `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`)
-- ✅ 140-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, capabilities, FFI, Python, distribution)
+- ✅ 141-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, capabilities, FFI, Python, distribution)
 - ✅ Hindley-Milner type inference with algebraic effects
-- ✅ Actor runtime: spawn, send, monitors, links, supervision, timers, registry, process groups (⚠️ `receive` is parse-only today — see [Known limitations](#known-limitations))
+- ✅ Actor runtime: spawn, send, monitors, links, supervision, timers, registry, process groups, selective `receive`
 - ✅ ORCA-style per-actor GC with cycle detection
 - ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams
 - ✅ Durable workflow runtime: `workflow` declarations with steps, timers, signals, saga compensation
@@ -224,7 +228,7 @@ let processed =
           +------------------+                    +------------------+        +------------------+
           | Actor Runtime    |                    |   Scheduler      |        |   ORCA GC        |
           | (Spawn/Send/     |                    | (Work-Stealing   |        | (Per-Actor Heap, |
-          |  Receive/Links)  |                    |  M:N Threads)    |        |  Ref Counting,   |
+          |  Receive/Links)  |                    |  Coop Threads)   |        |  Ref Counting,   |
           +--------+---------+                    +------------------+        |  Cycle Detect)   |
                    |                                                          +------------------+
                    |
@@ -269,7 +273,7 @@ let processed =
 | `jit/runtime` | NaN-tag-aware runtime helpers for JIT (25 extern C functions) | ~140 |
 | `runtime/mod` | Runtime coordinator: actors, scheduling, GC, supervision, distribution | ~3,400 |
 | `runtime/actor` | Actor struct, lifecycle, state management | ~300 |
-| `runtime/scheduler` | Work-stealing M:N scheduler with reductions | ~500 |
+| `runtime/scheduler` | Work-stealing queues + reduction-bounded cooperative scheduler | ~500 |
 | `runtime/mailbox` | Unbounded lock-free MPSC via crossbeam SegQueue | ~270 |
 | `runtime/timer` | Hierarchical timer wheel for send_after, exit_after, kill_after | ~345 |
 | `runtime/registry` | Local actor name registry (register/whereis/registered) | ~215 |
@@ -293,7 +297,7 @@ let processed =
 | `main` | CLI entry point (run, repl, eval, check modes) | ~425 |
 | `integration_tests` / `stress_tests` / `runtime/tests` | End-to-end pipeline, chaos, and runtime test suites | ~6,170 |
 
-**Total: ~54,400 lines of Rust across 69 source files with 853 tests.**
+**Total: ~54,400 lines of Rust across 69 source files with 884 tests.**
 
 ---
 
@@ -357,7 +361,7 @@ rt.sync_crdts();  // broadcast to all connected nodes
 
 | Primitive | File | Description |
 |-----------|------|-------------|
-| `receive` | `parser.rs`, `vm.rs` | ⚠️ Parse-only today — lexes, parses, and type-checks, but MIR lowering yields `nil` and codegen never emits the VM's `OpCode::Receive` arm. See [Known limitations](#known-limitations). |
+| `receive` | `parser.rs`, `vm.rs` | Selective receive: scans the mailbox in FIFO order for the first message matching any arm (`OpCode::ReceiveMatch` → `ActorVmCallbacks::try_receive_match`), binds payload values to arm params, non-matching messages stay queued; no-match falls back to pop-any (nil when empty). See `examples/receive.nu`. |
 | `spawn_link` | `vm.rs` | Spawn actor with bidirectional fault link |
 | `monitor` | `runtime/mod.rs` | Watcher monitors target actor for exit |
 | `demonitor` | `runtime/mod.rs` | Remove a monitor |
@@ -525,16 +529,16 @@ This is an active implementation with the following components functional:
 - [x] Compiler (AST → HIR → MIR → bytecode with register allocation)
 - [x] VM (register-based execution, arithmetic, comparisons, control flow)
 - [x] REPL (parse-typecheck-compile-execute cycle with introspection)
-- [x] Integration tests (111 end-to-end pipeline tests)
-- [x] Actor runtime (spawn, send, links, monitors) — ⚠️ `receive` is parse-only, see [Known limitations](#known-limitations)
-- [x] Work-stealing scheduler (M:N threading with reduction quotas)
+- [x] Integration tests (121 end-to-end pipeline tests)
+- [x] Actor runtime (spawn, send, links, monitors, selective receive)
+- [x] Work-stealing scheduler (cooperative, reduction quotas)
 - [x] ORCA garbage collector (per-actor heap, 3-count protocol, cycle detection)
 - [x] Supervision trees (OneForOne, OneForAll, RestForOne restart strategies)
 - [x] Fault tolerance tests (27 supervisor/exit/link/monitor tests)
 - [x] Distributed runtime (TCP transport, cluster membership, location-transparent messaging)
 - [x] CRDT subsystem (8 types: counters, sets, registers, sequences)
 - [x] CRDT manager (factory, sync, inter-node merge)
-- [x] BEAM/OTP primitives (spawn_link, monitor, link, exit, trap_exit, register, whereis, send_after, pg, yield) — ⚠️ `receive` is parse-only, see [Known limitations](#known-limitations)
+- [x] BEAM/OTP primitives (spawn_link, monitor, link, exit, trap_exit, register, whereis, send_after, pg, yield, selective receive)
 - [x] Unbounded mailboxes (crossbeam::SegQueue — BEAM semantics, no message loss)
 - [x] Hierarchical timer wheel (send_after, exit_after, kill_after)
 - [x] Actor registry (register/whereis/registered)
@@ -563,7 +567,7 @@ This is an active implementation with the following components functional:
 | v0.4 | ORCA garbage collector | Completed |
 | v0.5 | Multi-node distribution | Completed |
 | v0.6 | CRDT integration | Completed |
-| v0.7 | BEAM/OTP primitives (spawn_link, monitor, links, registry, timers, process groups) | Completed (`receive` parse-only — see [Known limitations](#known-limitations)) |
+| v0.7 | BEAM/OTP primitives (spawn_link, monitor, links, registry, timers, process groups, selective receive) | Completed |
 | v0.8 | Performance improvements (mimalloc, lock-free mailboxes, linear type moves) | Completed |
 | v0.9 | Cranelift JIT backend | Completed |
 | v0.10 | Type guard stripping + LSP inlay hints | Completed |
@@ -578,12 +582,8 @@ This is an active implementation with the following components functional:
 
 ## Known Limitations
 
-- **`receive` is parse-only today — on the MIR pipeline it evaluates to `nil`.** The syntax is fully wired, but the semantics stop at MIR lowering:
-  - The lexer has a `receive` keyword and the parser produces `Expr::Receive` (`src/lexer.rs`, `src/parser.rs`); the expression passes the type checker, and HIR lowering maps it to `hir::RValue::Receive` (`src/hir_lower.rs`).
-  - MIR lowering currently lowers `hir::RValue::Receive` to a constant `nil` (`src/mir_lower.rs`), so `receive { | Msg(x) => x }` compiles and runs but always yields `nil`. Pattern-matching dispatch across arms is future work.
-  - The VM does have an `OpCode::Receive` dispatch arm that pops the next mailbox message via `ActorVmCallbacks::try_receive()` (`src/vm.rs`), but no current codegen path emits that opcode.
-  - Integration tests pin the current MVP behavior — `receive { | Msg(x) => x }` returns `nil` outside an actor context (`src/integration_tests.rs`).
-  - Actor messaging that *is* fully wired goes through named behavior dispatch (`send actor behavior(args)`) — see `examples/counter_actor.nu`.
+- **`receive` uses non-blocking selective matching.** `receive { | Behavior(params) => expr }` scans the mailbox in FIFO order for the first message matching any arm (`src/mir_lower.rs` `lower_receive` → `OpCode::ReceiveMatch` → `ActorVmCallbacks::try_receive_match`), binds payload values to the arm's params (missing values bind to nil, extras ignored), and skips non-matching messages, which stay queued. Unlike Erlang's `receive`, it never blocks: when nothing matches, a legacy fallback pops the next message and yields its first payload value (nil when the mailbox is empty or outside an actor context). Payload matching is by behavior name and arity-free — no guard expressions or payload patterns yet.
+- Actor messaging that *is* fully wired goes through named behavior dispatch (`send actor behavior(args)`) — see `examples/counter_actor.nu`.
 - **`nulang --lsp` is not reachable from the CLI.** `main.rs` declares the option and lists it in `--help`, but the argument parser has no `--lsp` arm, so the flag is rejected as an unknown option even in `lsp`-feature builds. The LSP server itself (`src/lsp/`, behind the `lsp` Cargo feature) is implemented.
 
 ---
