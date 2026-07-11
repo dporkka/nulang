@@ -149,6 +149,11 @@ pub enum RValue {
     LlmAsk { prompt: LocalId },
     /// `perform Signal.wait("name")` — workflow signal wait.
     SignalWait { name: String },
+    /// `receive { | Behavior(params) => expr ... }` — pop the next message
+    /// from the actor's mailbox; evaluates to its first payload value (nil
+    /// when the mailbox is empty or outside an actor context). Arm patterns
+    /// are parsed and type-checked but dispatch across arms is future work.
+    Receive,
     FFICall { idx: usize, args: Vec<LocalId> },
     Migrate { actor: LocalId, node: LocalId },
     SelfRef,

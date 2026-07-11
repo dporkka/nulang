@@ -957,7 +957,11 @@ impl<'c> FnLowerer<'c> {
                 Ok(())
             }
             hir::RValue::Receive { .. } => {
-                self.b.assign(dst, mir::RValue::Const(crate::bytecode::Constant::Nil));
+                // Arm patterns are parsed and type-checked but not lowered:
+                // dispatch across arms is future work. The VM handler pops
+                // the next mailbox message and yields its first payload value
+                // (nil when empty or outside an actor context).
+                self.b.assign(dst, mir::RValue::Receive);
                 Ok(())
             }
         }

@@ -17,6 +17,7 @@ pub struct MockLlmClient {
     responses: Vec<LlmResponse>,
     index: Arc<AtomicUsize>,
     calls: Arc<Mutex<Vec<LlmRequest>>>,
+    delay: std::time::Duration,
 }
 
 #[async_trait]
@@ -24,6 +25,11 @@ impl LlmClient for MockLlmClient {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, String> {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(request);
+        }
+        if !self.delay.is_zero() {
+            // Runs on the caller's thread under `block_on`, so a blocking
+            // sleep is fine here (used to simulate slow providers).
+            std::thread::sleep(self.delay);
         }
         let idx = self.index.fetch_add(1, Ordering::SeqCst);
         if idx < self.responses.len() {
@@ -42,12 +48,22 @@ impl MockLlmClient {
             responses: Vec::new(),
             index: Arc::new(AtomicUsize::new(0)),
             calls: Arc::new(Mutex::new(Vec::new())),
+            delay: std::time::Duration::ZERO,
         }
     }
 
     /// Create a mock client that returns a plain text response.
     pub fn text(content: impl Into<String>) -> Self {
         Self::with_usage(content, TokenUsage::default())
+    }
+
+    /// Create a mock client that waits for `delay` before returning a plain
+    /// text response. The sleep runs inside the async `complete`; callers run
+    /// it under `block_on` on their own thread, so a blocking sleep is fine.
+    pub fn delayed(content: impl Into<String>, delay: std::time::Duration) -> Self {
+        let mut client = Self::text(content);
+        client.delay = delay;
+        client
     }
 
     /// Create a mock client that returns a plain text response with usage.
@@ -101,6 +117,7 @@ impl MockLlmClient {
             responses,
             index: Arc::new(AtomicUsize::new(0)),
             calls: Arc::new(Mutex::new(Vec::new())),
+            delay: std::time::Duration::ZERO,
         }
     }
 

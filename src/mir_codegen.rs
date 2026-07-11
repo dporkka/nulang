@@ -570,6 +570,11 @@ impl MirCodegen {
                     dst,
                 ));
             }
+            mir::RValue::Receive => {
+                // Pops the next mailbox message via ActorVmCallbacks::try_receive;
+                // writes its first payload value (or nil) to dst.
+                self.emit(Instruction::new1(OpCode::Receive, dst));
+            }
             mir::RValue::FFICall { idx, args } => {
                 self.stage_args(args)?;
                 self.emit(Instruction::new3(

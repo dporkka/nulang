@@ -47,8 +47,9 @@ pub struct Actor {
     pub monitors: Vec<u64>,        // Actors monitoring this one
     pub links: Vec<u64>,           // Bidirectional links
     pub trap_exits: bool,          // If true, exit signals become messages instead of killing this actor
-    pub reduction_count: u32,      // Reductions since last yield
-    pub max_reductions: u32,       // Max reductions before yield (preemption)
+    pub reduction_count: u32,      // Lifetime messages handled (monotonic progress metric)
+    turn_reductions: u32,          // Messages handled in the current scheduling turn
+    pub max_reductions: u32,       // Max reductions per turn before yield (preemption)
     pub sequence: u64,             // Last persisted sequence number
     /// Sentinel heap object used by the cycle detector to represent this
     /// actor as a holder of foreign references.
@@ -61,6 +62,15 @@ pub struct Actor {
     pub received_signals: Vec<(String, Option<String>)>,
     /// True if this actor was generated from an `agent` declaration.
     pub is_agent: bool,
+    /// True while a background worker thread holds an in-flight LLM request
+    /// issued by this actor's suspended bytecode behavior.
+    pub llm_inflight: bool,
+    /// Prompt of the in-flight LLM request, if any (kept for resume
+    /// bookkeeping; cleared when the completion is pumped).
+    pub llm_pending_prompt: Option<String>,
+    /// Completed background LLM result waiting to be consumed when the
+    /// suspended behavior re-executes its `LlmAsk` instruction.
+    pub llm_completed: Option<Result<crate::ai::LlmResponse, String>>,
 }
 
 /// Captured VM state plus metadata for resuming a workflow step.
@@ -107,6 +117,7 @@ impl Actor {
             links: Vec::new(),
             trap_exits: false,
             reduction_count: 0,
+            turn_reductions: 0,
             max_reductions: 1000,
             sequence: 0,
             cycle_sentinel: None,
@@ -114,6 +125,9 @@ impl Actor {
             waiting_signal: None,
             received_signals: Vec::new(),
             is_agent: false,
+            llm_inflight: false,
+            llm_pending_prompt: None,
+            llm_completed: None,
         }
     }
 
@@ -160,9 +174,9 @@ impl Actor {
         self.state_data.iter().find(|(n, _)| n == name).map(|(_, v)| *v)
     }
 
-    /// Check if the actor has exceeded its reduction quota and should yield.
+    /// Check if the actor has exceeded its per-turn reduction quota and should yield.
     pub fn should_yield(&self) -> bool {
-        self.reduction_count >= self.max_reductions
+        self.turn_reductions >= self.max_reductions
     }
 
     /// Register a named behavior handler.
@@ -181,14 +195,17 @@ impl Actor {
         });
     }
 
-    /// Reset the reduction count (called after yielding).
+    /// Reset the per-turn reduction budget (called after yielding or when the
+    /// actor goes waiting). Does not touch the monotonic `reduction_count`.
     pub fn reset_reductions(&mut self) {
-        self.reduction_count = 0;
+        self.turn_reductions = 0;
     }
 
-    /// Increment the reduction count.
+    /// Increment the reduction count: both the monotonic lifetime metric and
+    /// the per-turn budget counter.
     pub fn increment_reductions(&mut self, count: u32) {
         self.reduction_count += count;
+        self.turn_reductions += count;
     }
 
     /// Allocate a null-terminated string on the actor heap and return a pointer
@@ -265,7 +282,10 @@ mod tests {
         actor.increment_reductions(500);
         assert_eq!(actor.reduction_count, 500);
         actor.reset_reductions();
-        assert_eq!(actor.reduction_count, 0);
+        // The monotonic lifetime count survives the reset; only the per-turn
+        // budget is cleared.
+        assert_eq!(actor.reduction_count, 500);
+        assert!(!actor.should_yield());
     }
 
     #[test]

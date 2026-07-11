@@ -699,6 +699,13 @@ impl NetworkTransport {
     /// The packet is enqueued on the outgoing channel; the background sender
     /// thread will establish a connection (if necessary) and write the
     /// packet to the wire.
+    ///
+    /// **Backpressure:** the outgoing channel is bounded
+    /// ([`CHANNEL_CAPACITY`] packets). When it is full this call *blocks*
+    /// until the sender thread drains a slot — this is deliberate
+    /// backpressure toward the caller (typically the scheduler thread), not
+    /// a silent drop. A packet is dropped only if the sender thread has
+    /// already shut down (channel disconnected); that case is logged.
     pub fn send(&mut self, to_node: NodeId, to_addr: SocketAddr, packet: Packet) {
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let outgoing = OutgoingPacket {
@@ -706,10 +713,15 @@ impl NetworkTransport {
             to_addr,
             packet,
         };
-        // We intentionally ignore send errors here — if the channel is
-        // disconnected it means the sender thread has shut down and the
-        // packet is effectively dropped.
-        let _ = self.outgoing_tx.send(outgoing);
+        // Blocks on a full channel (backpressure). An error means the sender
+        // thread has shut down and the packet cannot be delivered — log it
+        // rather than dropping silently.
+        if self.outgoing_tx.send(outgoing).is_err() {
+            eprintln!(
+                "nulang-net: dropping packet to node {:?} (addr {}): sender thread shut down",
+                to_node, to_addr
+            );
+        }
         // The sequence number is part of the packet on the wire, but we
         // keep it in the transport for tracking.  For simplicity we
         // embed it directly into the bytes when the sender thread

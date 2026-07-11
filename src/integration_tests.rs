@@ -2163,6 +2163,41 @@ mod tests {
         assert!(v.is_nil(), "receive in fn main should return nil outside actor");
     }
 
+    /// End-to-end: a behavior using `receive` pops the next pending mailbox
+    /// message and observes its first payload value.
+    #[test]
+    fn test_mir_receive_reads_mailbox_end_to_end() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive { | Msg(x) => x }
+                }
+                behavior feed(n: Int) { n }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                send c feed(7)
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        // `drain` is dispatched first; its `receive` pops the still-pending
+        // `feed(7)` message and stores its first payload in `seen`.
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(7),
+            "receive should have popped the pending feed(7) message"
+        );
+    }
+
 
 
     /// Differential test: the legacy compiler and the HIR/MIR pipeline must
@@ -2257,6 +2292,204 @@ mod tests {
         let module_idx = vm.modules.len() - 1;
         let content = vm.constant_string(module_idx, string_id).unwrap();
         assert_eq!(content, "world");
+    }
+
+    // -----------------------------------------------------------------------
+    // Non-blocking LLM calls in actor bytecode behaviors
+    // -----------------------------------------------------------------------
+
+    /// Native counter handler for the non-blocking LLM ordering test.
+    fn llm_test_counter_inc(actor: &mut crate::runtime::Actor, _args: &[Value]) {
+        let n = actor.get_state_field("count").and_then(|v| v.as_int()).unwrap_or(0);
+        actor.set_state_field("count", Value::int(n + 1));
+    }
+
+    /// A bytecode behavior that performs `LLM.ask` suspends on the scheduler
+    /// thread, a background worker completes the HTTP call, and the behavior
+    /// resumes with the response written back into the prompt register.
+    #[test]
+    fn test_llm_ask_actor_behavior_suspends_and_resumes() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let client = crate::ai::MockLlmClient::text("world");
+        rt.borrow_mut().set_llm_client(Box::new(client.clone()));
+
+        let source = r#"
+            actor LlmActor {
+                state answer = ""
+                behavior go() {
+                    self.answer = perform LLM.ask("hello")
+                }
+            }
+            let a = spawn LlmActor { answer = "" } in a
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().send_message(actor_id, "go", &[]);
+        rt.borrow_mut().run_scheduler();
+
+        let answer = rt.borrow().actor_state_string(actor_id, "answer");
+        assert_eq!(
+            answer.as_deref(),
+            Some("world"),
+            "resumed behavior should store the LLM response in state"
+        );
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert!(!actor.llm_inflight, "in-flight flag should be cleared");
+            assert!(
+                actor.llm_completed.is_none(),
+                "completion should be consumed by the re-executed LlmAsk"
+            );
+            assert!(
+                actor.suspended_execution.is_none(),
+                "suspension should be cleared after resume"
+            );
+        }
+        assert_eq!(client.recorded_calls().len(), 1, "exactly one LLM call");
+    }
+
+    /// While one actor is suspended on a slow LLM call, the scheduler must
+    /// keep running other actors: all counter work completes before the LLM
+    /// response is even pumped. Deterministic because completions are only
+    /// pumped by run_scheduler, never by manual stepping.
+    #[test]
+    fn test_llm_ask_nonblocking_other_actors_run_first() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().set_llm_client(Box::new(crate::ai::MockLlmClient::delayed(
+            "done",
+            std::time::Duration::from_millis(100),
+        )));
+
+        let source = r#"
+            actor LlmActor {
+                state answer = ""
+                behavior go() {
+                    self.answer = perform LLM.ask("hello")
+                }
+            }
+            let a = spawn LlmActor { answer = "" } in a
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let llm_actor = value.as_actor_id().expect("spawn should return an actor reference");
+
+        let counter = rt
+            .borrow_mut()
+            .spawn_actor(Box::new(|| vec![("count".into(), Value::int(0))]));
+        rt.borrow_mut()
+            .actors
+            .get_mut(&counter)
+            .unwrap()
+            .register_behavior("inc", llm_test_counter_inc);
+
+        // LLM message first, then 20 counter increments.
+        rt.borrow_mut().send_message(llm_actor, "go", &[]);
+        for _ in 0..20 {
+            rt.borrow_mut().send_message(counter, "inc", &[]);
+        }
+
+        // Pump the run queue manually. LLM completions are only delivered by
+        // run_scheduler's completion pump, so during manual stepping the
+        // response sits untouched in the channel no matter how long the
+        // worker takes.
+        loop {
+            let next = rt.borrow_mut().scheduler.dequeue();
+            match next {
+                Some(actor_id) => rt.borrow_mut().step_actor(actor_id),
+                None => break,
+            }
+        }
+
+        {
+            let rt_ref = rt.borrow();
+            let counter_actor = rt_ref.actors.get(&counter).unwrap();
+            assert_eq!(
+                counter_actor.get_state_field("count").and_then(|v| v.as_int()),
+                Some(20),
+                "all counter work must complete while the LLM call is in flight"
+            );
+            let llm = rt_ref.actors.get(&llm_actor).unwrap();
+            assert!(
+                llm.llm_inflight,
+                "LLM call should still be in flight after the queue drained \
+                 (a blocking call would have completed inline and stalled the counter)"
+            );
+            assert_eq!(
+                rt_ref.actor_state_string(llm_actor, "answer").as_deref(),
+                Some(""),
+                "answer must not be stored before the completion is pumped"
+            );
+        }
+
+        // Let the worker finish, then pump the completion and resume.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        assert_eq!(
+            rt_ref.actor_state_string(llm_actor, "answer").as_deref(),
+            Some("done"),
+            "LLM behavior should resume and store the delayed response"
+        );
+        assert_eq!(
+            rt_ref.actors.get(&counter).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            Some(20)
+        );
+    }
+
+    /// Two sequential `perform LLM.ask` calls in one behavior: the behavior
+    /// suspends and resumes twice, re-capturing VM state on the second
+    /// suspend, and observes both responses in order.
+    #[test]
+    fn test_llm_ask_chained_suspensions_resume_in_order() {
+        let text_response = |content: &str| crate::ai::LlmResponse {
+            content: Some(content.to_string()),
+            tool_calls: Vec::new(),
+            model: "mock".to_string(),
+            finish_reason: "stop".to_string(),
+            usage: crate::ai::TokenUsage::default(),
+        };
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let client = crate::ai::MockLlmClient::sequence(vec![
+            text_response("first-reply"),
+            text_response("second-reply"),
+        ]);
+        rt.borrow_mut().set_llm_client(Box::new(client.clone()));
+
+        let source = r#"
+            actor Chained {
+                state first = ""
+                state second = ""
+                behavior go() {
+                    let _ = self.first = perform LLM.ask("one") in
+                    self.second = perform LLM.ask("two")
+                }
+            }
+            let a = spawn Chained { first = ""; second = "" } in a
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().send_message(actor_id, "go", &[]);
+        rt.borrow_mut().run_scheduler();
+
+        {
+            let rt_ref = rt.borrow();
+            assert_eq!(
+                rt_ref.actor_state_string(actor_id, "first").as_deref(),
+                Some("first-reply")
+            );
+            assert_eq!(
+                rt_ref.actor_state_string(actor_id, "second").as_deref(),
+                Some("second-reply")
+            );
+            assert!(!rt_ref.actors.get(&actor_id).unwrap().llm_inflight);
+        }
+        let calls = client.recorded_calls();
+        assert_eq!(calls.len(), 2, "expected two LLM calls");
+        assert_eq!(calls[0].messages[0].content, "one");
+        assert_eq!(calls[1].messages[0].content, "two");
     }
 
     #[test]

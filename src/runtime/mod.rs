@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 mod actor;
 mod scheduler;
@@ -78,6 +79,13 @@ fn timer_fired_handler(actor: &mut Actor, _args: &[Value]) {
 /// higher indices without colliding.
 fn bytecode_step_placeholder(_actor: &mut Actor, _args: &[Value]) {}
 
+/// True for the sentinel VM errors that indicate a behavior suspended
+/// (waiting on a workflow signal or a background LLM call) rather than
+/// failed.
+fn is_suspend_error(msg: &str) -> bool {
+    msg == "SignalWait:suspend" || msg == "LlmAsk:suspend"
+}
+
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
@@ -116,8 +124,21 @@ pub struct Runtime {
     // VM used to execute bytecode behavior handlers.
     vm: Option<crate::vm::VM>,
 
-    // LLM client for the v0.9 AI Runtime.
-    llm_client: Option<Box<dyn LlmClient>>,
+    // LLM client for the v0.9 AI Runtime. Shared (Arc) so background worker
+    // threads can perform non-blocking `perform LLM.ask` calls.
+    llm_client: Option<Arc<dyn LlmClient>>,
+
+    // Channel receiving results from background LLM worker threads, plus the
+    // number of calls currently in flight. Drained by run_scheduler.
+    llm_tx: std::sync::mpsc::Sender<(u64, Result<LlmResponse, String>)>,
+    llm_rx: std::sync::mpsc::Receiver<(u64, Result<LlmResponse, String>)>,
+    llm_inflight_count: usize,
+
+    // True while executing a scheduler-driven bytecode behavior, enabling
+    // non-blocking suspension on `perform LLM.ask`. Nested synchronous entry
+    // points (ask_actor_sync: pipelines, supervisors, debates, `Ask`) force
+    // it back to false so they keep blocking behavior.
+    llm_suspend_enabled: bool,
 
     // Bytecode modules for actors that may need to be recovered after a
     // runtime restart.  Maps actor_id -> (bytecode_module, behavior_offsets,
@@ -139,6 +160,7 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new() -> Self {
+        let (llm_tx, llm_rx) = std::sync::mpsc::channel();
         Runtime {
             actors: HashMap::new(),
             supervisors: HashMap::new(),
@@ -162,6 +184,10 @@ impl Runtime {
             persistence: Box::new(MemoryStore::new()),
             vm: None,
             llm_client: None,
+            llm_tx,
+            llm_rx,
+            llm_inflight_count: 0,
+            llm_suspend_enabled: false,
             recovery_modules: HashMap::new(),
             next_pipeline_id: 1,
             pipelines: HashMap::new(),
@@ -267,7 +293,7 @@ impl Runtime {
 
     /// Install an LLM client for `perform LLM.ask(...)` calls.
     pub fn set_llm_client(&mut self, client: Box<dyn LlmClient>) {
-        self.llm_client = Some(client);
+        self.llm_client = Some(Arc::from(client));
     }
 
     /// Create a new empty pipeline and return its ID.
@@ -430,7 +456,18 @@ impl Runtime {
     }
 
     fn complete_agent_llm_inner(&mut self, actor_id: u64, prompt: &str) -> Option<String> {
-        let (model, system_prompt, memory_json, pricing, usage_prompt, usage_completion, usage_cost, module) = {
+        let request = self.build_agent_llm_request(actor_id, prompt)?;
+        let module = self.actors.get(&actor_id)?.bytecode_module.clone()?;
+        let response = self.complete_llm_with_tools(request, Vec::new(), &module).ok()?;
+        self.finish_agent_llm(actor_id, prompt, &response)
+    }
+
+    /// Build the LLM request for an agent actor from its durable state
+    /// (model, system prompt, episodic memory, pricing) without issuing any
+    /// network call. Pure read/build: safe to run before handing the request
+    /// to a background worker thread.
+    fn build_agent_llm_request(&self, actor_id: u64, prompt: &str) -> Option<LlmRequest> {
+        let (model, system_prompt, memory_json, pricing, module) = {
             let actor = self.actors.get(&actor_id)?;
             let module = actor.bytecode_module.clone()?;
             let model = Self::vm_value_to_string(&actor.get_state_field("model")?, Some(&module))?;
@@ -446,22 +483,10 @@ impl Runtime {
                 input_cost_per_1k: actor.get_state_field("pricing_input")?.as_float()?,
                 output_cost_per_1k: actor.get_state_field("pricing_output")?.as_float()?,
             };
-            let usage_prompt = actor.get_state_field("usage_prompt")?.as_int()? as u32;
-            let usage_completion = actor.get_state_field("usage_completion")?.as_int()? as u32;
-            let usage_cost = actor.get_state_field("usage_cost")?.as_float()?;
-            (
-                model,
-                system_prompt,
-                memory_json,
-                pricing,
-                usage_prompt,
-                usage_completion,
-                usage_cost,
-                module,
-            )
+            (model, system_prompt, memory_json, pricing, module)
         };
 
-        let mut memory: crate::ai::EpisodicMemory =
+        let memory: crate::ai::EpisodicMemory =
             serde_json::from_str(&memory_json).unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
 
         let mut messages = Vec::new();
@@ -477,14 +502,41 @@ impl Runtime {
             content: prompt.to_string(),
         });
 
-        let request = crate::ai::LlmRequest {
+        Some(LlmRequest {
             model,
             messages,
-            tools: Vec::new(),
+            tools: module.tools.clone(),
             memory: Vec::new(),
             pricing: Some(pricing),
+        })
+    }
+
+    /// Finish an agent LLM call on the scheduler thread: accumulate token
+    /// usage and cost, append the exchange to episodic memory, and write the
+    /// durable state back. Returns the response content. Episodic memory is
+    /// re-read fresh here (never reuse the build-time snapshot).
+    fn finish_agent_llm(
+        &mut self,
+        actor_id: u64,
+        prompt: &str,
+        response: &LlmResponse,
+    ) -> Option<String> {
+        let (pricing, usage_prompt, usage_completion, usage_cost, memory_json) = {
+            let actor = self.actors.get(&actor_id)?;
+            let module = actor.bytecode_module.clone()?;
+            let pricing = crate::ai::ModelPricing {
+                input_cost_per_1k: actor.get_state_field("pricing_input")?.as_float()?,
+                output_cost_per_1k: actor.get_state_field("pricing_output")?.as_float()?,
+            };
+            let usage_prompt = actor.get_state_field("usage_prompt")?.as_int()? as u32;
+            let usage_completion = actor.get_state_field("usage_completion")?.as_int()? as u32;
+            let usage_cost = actor.get_state_field("usage_cost")?.as_float()?;
+            let memory_json = Self::vm_value_to_string(
+                &actor.get_state_field("episodic_memory")?,
+                Some(&module),
+            )?;
+            (pricing, usage_prompt, usage_completion, usage_cost, memory_json)
         };
-        let response = self.complete_llm_with_tools(request, Vec::new(), &module).ok()?;
         let content = response.content.clone().unwrap_or_default();
 
         // Accumulate token usage and cost into durable state.
@@ -493,6 +545,8 @@ impl Runtime {
         let updated_completion = usage_completion.saturating_add(response.usage.completion);
         let updated_cost = usage_cost + new_cost;
 
+        let mut memory: crate::ai::EpisodicMemory =
+            serde_json::from_str(&memory_json).unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
         memory.add_turn("user", prompt);
         memory.add_turn("assistant", &content);
         let updated_memory = serde_json::to_string(&memory).ok()?;
@@ -507,6 +561,44 @@ impl Runtime {
         );
         actor.set_state_field("usage_cost", crate::vm::Value::float(updated_cost));
         Some(content)
+    }
+
+    /// Build a bare LLM request for a non-agent actor bytecode behavior,
+    /// with `tools` filled from the actor's bytecode module. Pure
+    /// read/build: safe to run before handing the request to a background
+    /// worker thread.
+    fn build_actor_llm_request(
+        &self,
+        actor_id: u64,
+        model: &str,
+        prompt: &str,
+    ) -> Option<LlmRequest> {
+        let module = self.actors.get(&actor_id)?.bytecode_module.clone()?;
+        Some(LlmRequest {
+            model: model.to_string(),
+            messages: vec![LlmMessage {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            }],
+            tools: module.tools.clone(),
+            memory: Vec::new(),
+            pricing: None,
+        })
+    }
+
+    /// Read an actor's state field as a plain string, resolving string-id
+    /// values through the runtime VM's constant pools (heap pointer values
+    /// are read directly). Useful for tests and tooling that inspect actor
+    /// state produced by bytecode behaviors.
+    pub fn actor_state_string(&self, actor_id: u64, field: &str) -> Option<String> {
+        let actor = self.actors.get(&actor_id)?;
+        let value = actor.get_state_field(field)?;
+        if value.as_string_id().is_some() {
+            let vm = self.vm.as_ref()?;
+            let module_idx = actor.bytecode_module_idx?;
+            return Some(vm.value_to_string(module_idx, value));
+        }
+        Self::vm_value_to_string(&value, actor.bytecode_module.as_ref())
     }
 
     /// Execute a chat-completion request using the configured LLM client.
@@ -547,20 +639,25 @@ impl Runtime {
     ) -> Result<LlmResponse, String> {
         request.tools = module.tools.clone();
         request.memory = memory.clone();
-        let mut response = self.complete_llm_request(request.clone(), memory.clone())?;
+        let response = self.complete_llm_request(request.clone(), memory.clone())?;
+        self.finish_tool_calls(module, response)
+    }
 
+    /// Post-process an LLM response on the scheduler thread: invoke any tool
+    /// calls named in the response against `module` and synthesize the
+    /// response content from their results. Must run on the scheduler thread
+    /// because tool invocation executes module functions against runtime
+    /// state.
+    fn finish_tool_calls(
+        &mut self,
+        module: &crate::bytecode::CodeModule,
+        mut response: LlmResponse,
+    ) -> Result<LlmResponse, String> {
         if !response.tool_calls.is_empty() {
             let mut results = Vec::new();
             for call in &response.tool_calls {
                 let result = self.invoke_agent_tool_function(module, &call.name, &call.arguments)?;
                 results.push((call.name.clone(), result));
-            }
-
-            for (name, result) in &results {
-                request.messages.push(LlmMessage {
-                    role: "tool".to_string(),
-                    content: format!("{}: {}", name, result),
-                });
             }
 
             // For agent workflows, return the tool results directly so the
@@ -916,6 +1013,85 @@ impl Runtime {
         }
     }
 
+    /// Drain completed background LLM calls and resume the suspended actors
+    /// waiting for them.
+    fn poll_llm_completions(&mut self) {
+        while let Ok((actor_id, result)) = self.llm_rx.try_recv() {
+            self.store_llm_completion(actor_id, result);
+        }
+    }
+
+    /// Record a completed background LLM call on its actor and resume the
+    /// actor's suspended behavior, if any.
+    fn store_llm_completion(&mut self, actor_id: u64, result: Result<LlmResponse, String>) {
+        self.llm_inflight_count = self.llm_inflight_count.saturating_sub(1);
+        let should_resume = if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.llm_inflight = false;
+            actor.llm_pending_prompt = None;
+            actor.llm_completed = Some(result);
+            actor.suspended_execution.is_some()
+        } else {
+            false
+        };
+        if should_resume {
+            self.resume_suspended_llm_step(actor_id);
+        }
+    }
+
+    /// Resume an actor whose bytecode behavior suspended on
+    /// `perform LLM.ask` once the background worker has delivered the
+    /// response. The re-executed `LlmAsk` picks the response up from
+    /// `actor.llm_completed` via the VM callback.
+    fn resume_suspended_llm_step(&mut self, actor_id: u64) {
+        let suspended = match self.actors.get_mut(&actor_id) {
+            Some(actor) => actor.suspended_execution.take(),
+            None => return,
+        };
+        let Some(suspended) = suspended else { return };
+
+        if self.vm.is_none() {
+            // No VM available; put the suspension back so a later message
+            // can re-trigger the step.
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.suspended_execution = Some(suspended);
+            }
+            return;
+        }
+
+        let self_ptr: *mut Runtime = self;
+        unsafe {
+            let vm = (*self_ptr).vm.as_mut().unwrap();
+            // Re-install callbacks bound to THIS actor: other actors may have
+            // run on the shared VM while this one was suspended.
+            vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
+            vm.restore_suspended_state(suspended.vm_state);
+            let saved_suspend = (*self_ptr).llm_suspend_enabled;
+            (*self_ptr).llm_suspend_enabled = true;
+            let result = vm.resume();
+            (*self_ptr).llm_suspend_enabled = saved_suspend;
+            if let Err(crate::types::NuError::VMError(ref msg)) = result {
+                if is_suspend_error(msg) {
+                    // Suspended again (e.g. a chained `perform LLM.ask` or a
+                    // signal wait): re-capture the VM state so the next
+                    // completion or signal can resume it.
+                    if let Some(vm_state) = vm.take_suspended_state() {
+                        let signal_name = vm.suspended_signal_name.take();
+                        if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                            actor.waiting_signal = signal_name;
+                            actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
+                                vm_state,
+                                behavior_idx: suspended.behavior_idx,
+                                step_name: suspended.step_name,
+                            });
+                        }
+                    }
+                }
+                // Other errors: the send-path result is discarded anyway,
+                // matching step_actor semantics.
+            }
+        }
+    }
+
     /// Resume a workflow actor that is suspended waiting for a signal.
     fn resume_suspended_workflow_step(&mut self, actor_id: u64) {
         let suspended = match self.actors.get_mut(&actor_id) {
@@ -985,6 +1161,22 @@ impl Runtime {
     /// Synchronously run a single behavior on an actor and return its result.
     /// Used by the VM's `Ask` opcode when a real runtime is attached.
     pub fn ask_actor_sync(
+        &mut self,
+        actor_id: u64,
+        behavior_id: u16,
+        args: &[Value],
+    ) -> crate::types::NuResult<Value> {
+        // Synchronous asks (pipelines, supervisors, debates, nested `Ask`)
+        // always block on LLM calls; only scheduler-driven behaviors
+        // suspend. Force suspension off for the whole body.
+        let saved_suspend = self.llm_suspend_enabled;
+        self.llm_suspend_enabled = false;
+        let result = self.ask_actor_sync_inner(actor_id, behavior_id, args);
+        self.llm_suspend_enabled = saved_suspend;
+        result
+    }
+
+    fn ask_actor_sync_inner(
         &mut self,
         actor_id: u64,
         behavior_id: u16,
@@ -1319,7 +1511,31 @@ impl Runtime {
         // retried while actors are still running.
         const GC_PUMP_INTERVAL: u64 = 256;
         let mut ticks: u64 = 0;
-        while let Some(actor_id) = self.scheduler.dequeue() {
+        loop {
+            let actor_id = match self.scheduler.dequeue() {
+                Some(actor_id) => actor_id,
+                None => {
+                    if self.llm_inflight_count == 0 {
+                        break;
+                    }
+                    // The run queue is drained but background LLM calls are
+                    // still in flight: block briefly for the next completion
+                    // so run_scheduler keeps its "run until quiescent"
+                    // semantics for actors suspended on `perform LLM.ask`.
+                    match self
+                        .llm_rx
+                        .recv_timeout(std::time::Duration::from_millis(10))
+                    {
+                        Ok((actor_id, result)) => {
+                            self.store_llm_completion(actor_id, result);
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                    continue;
+                }
+            };
+            self.poll_llm_completions();
             self.tick_timers();
             self.step_actor(actor_id);
             ticks += 1;
@@ -1593,13 +1809,20 @@ impl Runtime {
                     );
                 }
                 let payload = msg.payload.clone();
+                // Enable non-blocking LLM suspension for this
+                // scheduler-driven behavior invocation. Nested synchronous
+                // entry points (ask_actor_sync) force it back off.
+                let saved_suspend = self.llm_suspend_enabled;
+                self.llm_suspend_enabled = true;
                 let result = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
+                self.llm_suspend_enabled = saved_suspend;
                 self.checkpoint_actor(actor_id);
                 match result {
                     Ok(_) => processed = true,
-                    Err(crate::types::NuError::VMError(ref msg)) if msg == "SignalWait:suspend" => {
-                        // The step yielded waiting for a signal. Do not mark it
-                        // completed and do not run compensations.
+                    Err(crate::types::NuError::VMError(ref msg)) if is_suspend_error(msg) => {
+                        // The step yielded waiting for a signal or a
+                        // background LLM call. Do not mark it completed and
+                        // do not run compensations.
                         processed = false;
                     }
                     Err(_) => {
@@ -1641,13 +1864,27 @@ impl Runtime {
                     return;
                 }
             };
-            actor.reduction_count += 1;
-            !actor.mailbox.is_empty() && !actor.should_yield()
+            actor.increment_reductions(1);
+            if actor.mailbox.is_empty() {
+                // Turn over: next scheduling starts with a fresh budget.
+                actor.reset_reductions();
+                false
+            } else if actor.should_yield() {
+                // Reduction budget exhausted with mail pending: yield —
+                // reset the counter and requeue at the back of the
+                // scheduler queue so other actors get a turn first.
+                actor.reset_reductions();
+                true
+            } else {
+                true
+            }
         } else {
             if let Some(actor) = self.actors.get_mut(&actor_id) {
                 if actor.state == ActorState::Running {
                     actor.state = ActorState::Waiting;
                 }
+                // Waiting actors start their next turn with a fresh budget.
+                actor.reset_reductions();
             }
             false
         };
@@ -2047,10 +2284,11 @@ impl Runtime {
             actor.bytecode_offsets.get(behavior_idx).copied().unwrap_or(0)
         };
         let result = self.run_bytecode_at_offset(actor_id, code_offset, args);
-        // If the step suspended waiting for a signal, record which behavior
-        // and step name it was executing so recovery/resumption can continue.
+        // If the step suspended waiting for a signal or a background LLM
+        // call, record which behavior and step name it was executing so
+        // recovery/resumption can continue.
         if let Err(crate::types::NuError::VMError(ref msg)) = result {
-            if msg == "SignalWait:suspend" {
+            if is_suspend_error(msg) {
                 let step_name = self.step_name_for(actor_id, behavior_idx);
                 if let Some(actor) = self.actors.get_mut(&actor_id) {
                     if let Some(ref mut suspended) = actor.suspended_execution {
@@ -2125,11 +2363,11 @@ impl Runtime {
             vm.set_current_frame(frame);
 
             let result = vm.run_from(module_idx, code_offset);
-            // Capture VM state for a workflow signal wait. Doing this here
-            // avoids aliasing the Runtime through the callback while the VM
-            // borrow is active.
+            // Capture VM state for a workflow signal wait or a non-blocking
+            // LLM call. Doing this here avoids aliasing the Runtime through
+            // the callback while the VM borrow is active.
             if let Err(crate::types::NuError::VMError(ref msg)) = result {
-                if msg == "SignalWait:suspend" {
+                if is_suspend_error(msg) {
                     if let Some(vm_state) = vm.take_suspended_state() {
                         let signal_name = vm.suspended_signal_name.take();
                         if let Some(actor) = self.actors.get_mut(&actor_id) {
@@ -3268,22 +3506,130 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             if rt.actors.get(&self.actor_id).map(|a| a.is_agent).unwrap_or(false) {
                 return rt.complete_agent_llm(self.actor_id, prompt);
             }
+            let request = rt.build_actor_llm_request(self.actor_id, model, prompt)?;
             let module = rt
                 .actors
                 .get(&self.actor_id)?
                 .bytecode_module
                 .clone()?;
-            let request = LlmRequest {
-                model: model.to_string(),
-                messages: vec![LlmMessage {
-                    role: "user".to_string(),
-                    content: prompt.to_string(),
-                }],
-                tools: module.tools.clone(),
-                memory: Vec::new(),
-                pricing: None,
-            };
             rt.complete_llm_with_tools(request, Vec::new(), &module).ok()?.content
+        }
+    }
+
+    fn llm_ask(&mut self, model: &str, prompt: &str) -> crate::vm::LlmAskResult {
+        use crate::vm::LlmAskResult;
+        unsafe {
+            let rt = &mut *self.runtime;
+            let actor_id = self.actor_id;
+
+            // Nested synchronous paths (pipelines, ask_actor_sync) keep the
+            // blocking behavior.
+            if !rt.llm_suspend_enabled {
+                return LlmAskResult::Ready(self.complete_llm(model, prompt));
+            }
+
+            // Re-executed after a resume: a completed response is waiting.
+            let completed = rt
+                .actors
+                .get_mut(&actor_id)
+                .and_then(|actor| actor.llm_completed.take());
+            if let Some(result) = completed {
+                return match result {
+                    Ok(response) => {
+                        // Finish on the scheduler thread: tool invocation and
+                        // durable-state write-back must not run on the worker.
+                        let prev_current_actor = rt.current_actor;
+                        rt.current_actor = Some(actor_id);
+                        let is_agent =
+                            rt.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false);
+                        let content = if is_agent {
+                            let module = rt
+                                .actors
+                                .get(&actor_id)
+                                .and_then(|a| a.bytecode_module.clone());
+                            let processed = match module {
+                                Some(m) => rt.finish_tool_calls(&m, response),
+                                None => Ok(response),
+                            };
+                            match processed {
+                                Ok(resp) => rt.finish_agent_llm(actor_id, prompt, &resp),
+                                Err(_) => None,
+                            }
+                        } else {
+                            let module = rt
+                                .actors
+                                .get(&actor_id)
+                                .and_then(|a| a.bytecode_module.clone());
+                            match module {
+                                Some(m) => {
+                                    rt.finish_tool_calls(&m, response).ok().and_then(|r| r.content)
+                                }
+                                None => response.content,
+                            }
+                        };
+                        rt.current_actor = prev_current_actor;
+                        LlmAskResult::Ready(content)
+                    }
+                    Err(_) => LlmAskResult::Ready(None),
+                };
+            }
+
+            // A call is already in flight (defensive; should not happen).
+            if rt.actors.get(&actor_id).map(|a| a.llm_inflight).unwrap_or(false) {
+                return LlmAskResult::Pending;
+            }
+
+            // Build the request on the scheduler thread, then hand it to a
+            // background worker for the HTTP call.
+            let is_agent = rt.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false);
+            let request = if is_agent {
+                rt.build_agent_llm_request(actor_id, prompt)
+            } else {
+                rt.build_actor_llm_request(actor_id, model, prompt)
+            };
+            // Build failure (e.g. missing agent state fields): nil response.
+            let Some(request) = request else {
+                return LlmAskResult::Ready(None);
+            };
+            let Some(client) = rt.llm_client.clone() else {
+                return LlmAskResult::Ready(None);
+            };
+            let tx = rt.llm_tx.clone();
+            if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                actor.llm_inflight = true;
+                actor.llm_pending_prompt = Some(prompt.to_string());
+            }
+            rt.llm_inflight_count += 1;
+            let spawned = std::thread::Builder::new()
+                .name("nulang-llm".to_string())
+                .spawn(move || {
+                    // Every failure path must still send a result so the
+                    // runtime's inflight counter can never get stuck.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        match tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                        {
+                            Ok(tokio_rt) => tokio_rt.block_on(client.complete(request)),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }))
+                    .unwrap_or_else(|_| Err("LLM worker thread panicked".to_string()));
+                    let _ = tx.send((actor_id, result));
+                });
+            match spawned {
+                Ok(_) => LlmAskResult::Pending,
+                Err(_) => {
+                    // Could not start the worker: roll back the in-flight
+                    // bookkeeping and fall back to a nil response.
+                    rt.llm_inflight_count = rt.llm_inflight_count.saturating_sub(1);
+                    if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                        actor.llm_inflight = false;
+                        actor.llm_pending_prompt = None;
+                    }
+                    LlmAskResult::Ready(None)
+                }
+            }
         }
     }
 

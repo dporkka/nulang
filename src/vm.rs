@@ -91,6 +91,17 @@ pub enum SignalWaitResult {
     NotReady,
 }
 
+/// Result of an LLM completion request from the `LlmAsk` opcode.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LlmAskResult {
+    /// The response is ready: `Some(content)` on success, `None` on failure.
+    /// The VM writes the response string (or `nil`) into the prompt register.
+    Ready(Option<String>),
+    /// The request was handed to a background worker; the VM suspends the
+    /// current behavior and re-executes the `LlmAsk` instruction on resume.
+    Pending,
+}
+
 /// Callback interface that supplies real actor-runtime behavior for the VM's
 /// `Spawn`, `ArrAlloc`, `SConcat`, `SRead`, and `Drop` opcodes.
 pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
@@ -177,6 +188,17 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// client is configured, return `None` and the VM will leave the result
     /// register as `nil`.
     fn complete_llm(&mut self, _model: &str, _prompt: &str) -> Option<String> { None }
+
+    /// Execute an LLM request, possibly asynchronously.
+    ///
+    /// The default implementation preserves blocking behavior by delegating
+    /// to `complete_llm`. Runtime-backed callbacks may override this to
+    /// return `Pending` and deliver the response on a later resume, in which
+    /// case the VM suspends the behavior with an `LlmAsk:suspend` sentinel
+    /// error (same pattern as `SignalWait`).
+    fn llm_ask(&mut self, model: &str, prompt: &str) -> LlmAskResult {
+        LlmAskResult::Ready(self.complete_llm(model, prompt))
+    }
 
     /// Create a new pipeline and return its runtime ID.
     fn pipeline_new(&mut self) -> i64 { 0 }
@@ -2095,12 +2117,23 @@ impl VM {
                 let model = self.module_const_string(module_idx, model_idx);
                 let prompt_value = self.frames[frame_idx].regs[prompt_reg];
                 let prompt = self.value_to_string(module_idx, prompt_value);
-                let result = self.actor_callbacks.complete_llm(&model, &prompt);
-                let value = match result {
-                    Some(ref content) => self.add_runtime_string(module_idx, content.clone()),
-                    None => Value::nil(),
-                };
-                self.frames[frame_idx].regs[prompt_reg] = value;
+                match self.actor_callbacks.llm_ask(&model, &prompt) {
+                    LlmAskResult::Ready(result) => {
+                        let value = match result {
+                            Some(ref content) => self.add_runtime_string(module_idx, content.clone()),
+                            None => Value::nil(),
+                        };
+                        self.frames[frame_idx].regs[prompt_reg] = value;
+                    }
+                    LlmAskResult::Pending => {
+                        // Leave the PC pointing at the LlmAsk instruction so
+                        // resumption re-executes it and writes the response
+                        // into the prompt register once the background call
+                        // completes (same pattern as SignalWait).
+                        self.frames[frame_idx].pc -= 1;
+                        return Err(NuError::VMError("LlmAsk:suspend".into()));
+                    }
+                }
             }
 
             // -- Pipeline (v0.9 AI Runtime) --
