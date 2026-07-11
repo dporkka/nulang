@@ -61,6 +61,9 @@ pub fn fresh_actor_id() -> u64 {
     ACTOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Maximum number of membership entries carried by a single gossip packet.
+const GOSSIP_PAYLOAD_MAX_ENTRIES: usize = 256;
+
 /// Native handler for durable workflow timer-fired messages.
 ///
 /// Advances the workflow's step_index so the workflow can proceed past the
@@ -156,6 +159,13 @@ pub struct Runtime {
     // Debates (v0.9 AI Runtime)
     pub next_debate_id: u64,
     pub debates: HashMap<u64, Debate>,
+
+    // Remote spawn support (v0.5+): behaviors a remote node may spawn here
+    // by name (see `register_spawnable_behavior`), plus the results of
+    // spawn requests WE issued, keyed by request id
+    // (`Some(actor_id)` = spawned, `None` = rejected).
+    pub spawnable_behaviors: HashMap<String, fn(&mut Actor, &[Value])>,
+    pub pending_spawn_responses: HashMap<u64, Option<u64>>,
 }
 
 impl Runtime {
@@ -195,6 +205,8 @@ impl Runtime {
             supervisor_teams: HashMap::new(),
             next_debate_id: 1,
             debates: HashMap::new(),
+            spawnable_behaviors: HashMap::new(),
+            pending_spawn_responses: HashMap::new(),
         }
     }
 
@@ -2917,8 +2929,12 @@ impl Runtime {
 
     pub fn enable_distribution(&mut self, bind_addr: std::net::SocketAddr) -> std::io::Result<()> {
         let transport = NetworkTransport::bind(bind_addr)?;
+        // Advertise the actual listen address (not `bind_addr`, which may
+        // carry port 0) so peers can reach us at the address the cluster
+        // records for this node.
+        let listen_addr = transport.listen_addr();
         let node_id = NodeId(transport.node_id().0);
-        let cluster = ClusterState::new(node_id, bind_addr);
+        let cluster = ClusterState::new(node_id, listen_addr);
         let resolver = AddressResolver::new(node_id);
         self.transport = Some(transport);
         self.cluster = Some(cluster);
@@ -2933,6 +2949,35 @@ impl Runtime {
         if let Some(cluster) = &mut self.cluster {
             cluster.join_cluster(seed_addr);
         }
+    }
+
+    /// Register a behavior that remote nodes are allowed to spawn on this
+    /// node by name (via `Packet::SpawnRequest`).
+    ///
+    /// This is the MVP scope of remote spawn: only native behaviors
+    /// explicitly registered here can be spawned remotely — a node cannot
+    /// make a peer run arbitrary code it never offered. When a spawn
+    /// request for `name` arrives, the runtime spawns a fresh actor with
+    /// the request's initial state and registers this handler as its sole
+    /// behavior under `name`. Unknown names are answered with
+    /// `success: false` — no actor is created.
+    pub fn register_spawnable_behavior(
+        &mut self,
+        name: &str,
+        handler: fn(&mut Actor, &[Value]),
+    ) {
+        self.spawnable_behaviors.insert(name.to_string(), handler);
+    }
+
+    /// Take the result of a previously issued remote spawn request.
+    ///
+    /// Returns `None` while the response has not arrived yet; otherwise
+    /// `Some(Some(actor_id))` on success (the real actor id on the remote
+    /// node — combine it with the node id into an `ActorAddress::remote`)
+    /// or `Some(None)` if the remote node rejected the request (unknown
+    /// behavior name).
+    pub fn take_spawn_response(&mut self, request_id: u64) -> Option<Option<u64>> {
+        self.pending_spawn_responses.remove(&request_id)
     }
 
     pub fn send_distributed(&mut self, target: ActorAddress, behavior: &str, args: &[Value]) {
@@ -2959,10 +3004,10 @@ impl Runtime {
 
     pub fn process_network(&mut self) {
         if !self.distributed_enabled { return; }
-        let transport = self.transport.take().unwrap();
+        let mut transport = self.transport.take().unwrap();
         let mut cluster = self.cluster.take().unwrap();
         let mut resolver = self.resolver.take().unwrap();
-        distributed::process_network_packets(self, &transport, &mut cluster, &mut resolver);
+        distributed::process_network_packets(self, &mut transport, &mut cluster, &mut resolver);
         self.transport = Some(transport);
         self.cluster = Some(cluster);
         self.resolver = Some(resolver);
@@ -2974,12 +3019,14 @@ impl Runtime {
             match action {
                 ClusterAction::SendHeartbeat { to, addr } => {
                     if let Some(transport) = &mut self.transport {
-                        let net_node_id = NodeId(to.0);
+                        // The heartbeat must identify the SENDER (us) —
+                        // the receiver uses it for membership discovery.
+                        let local_id = self.node_id.unwrap_or(NodeId::LOCAL);
                         let packet = Packet::Heartbeat {
-                            node_id: net_node_id,
+                            node_id: local_id,
                             timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
                         };
-                        transport.send(net_node_id, addr, packet);
+                        transport.send(NodeId(to.0), addr, packet);
                     }
                 }
                 ClusterAction::NodeJoined { node, addr } => {
@@ -3000,7 +3047,23 @@ impl Runtime {
                         transport.disconnect(net_node_id);
                     }
                 }
-                ClusterAction::SendGossip { .. } => {}
+                ClusterAction::SendGossip { targets } => {
+                    // Relay our membership view to the gossip targets. This
+                    // is what makes membership transitive: a node forwards
+                    // what it learned from others, so a chain of pairwise
+                    // seeds converges without a full mesh of join requests.
+                    if let (Some(transport), Some(cluster)) =
+                        (&mut self.transport, &self.cluster)
+                    {
+                        let members = cluster.gossip_payload(GOSSIP_PAYLOAD_MAX_ENTRIES);
+                        if !members.is_empty() {
+                            let packet = Packet::Gossip { members };
+                            for (to, addr) in targets {
+                                transport.send(NodeId(to.0), addr, packet.clone());
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -3370,6 +3433,13 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             (msg.behavior_id, val)
         })
     }
+
+    fn try_receive_match(&mut self, behavior_ids: &[u16]) -> Option<(usize, Vec<crate::vm::Value>)> {
+        let rt = self.runtime.borrow();
+        let actor_id = rt.current_actor?;
+        let actor = rt.actors.get(&actor_id)?;
+        actor.mailbox.receive_match(behavior_ids)
+    }
 }
 
 /// Raw-pointer callbacks used when the runtime itself executes an actor's
@@ -3703,6 +3773,13 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 let val = msg.payload.into_iter().next().unwrap_or(crate::vm::Value::unit());
                 (msg.behavior_id, val)
             })
+        }
+    }
+
+    fn try_receive_match(&mut self, behavior_ids: &[u16]) -> Option<(usize, Vec<crate::vm::Value>)> {
+        unsafe {
+            let actor = (*self.runtime).actors.get(&self.actor_id)?;
+            actor.mailbox.receive_match(behavior_ids)
         }
     }
 }

@@ -174,7 +174,7 @@ pub enum ClusterAction {
 ///
 /// This compact representation avoids sending full [`NodeInfo`] (including
 /// metadata maps) on every gossip round.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodeGossip {
     /// Node identifier.
     pub node_id: NodeId,
@@ -285,6 +285,13 @@ impl ClusterState {
         if !self.members.contains_key(&seed_id) {
             let mut info = NodeInfo::new(seed_id, seed_addr);
             info.status = NodeStatus::Joining;
+            // Baseline incarnation 1: the seed address is authoritative
+            // (it came from an explicit join request), so same-generation
+            // gossip (incarnation 1) must not overwrite it with a
+            // discovered address of unknown quality. Strictly-higher
+            // incarnations still win.
+            info.metadata
+                .insert("_incarnation".to_string(), "1".to_string());
             self.members.insert(seed_id, info);
         }
 
@@ -314,9 +321,14 @@ impl ClusterState {
 
                 if was_suspicious_or_failed {
                     info.status = NodeStatus::Healthy;
+                    Self::bump_entry_incarnation(info);
                     self.bump_incarnation();
                 } else if info.status == NodeStatus::Joining {
                     info.status = NodeStatus::Healthy;
+                    // Bump the entry incarnation so the promotion wins
+                    // merges on nodes that learned the stale Joining
+                    // status from an earlier gossip round.
+                    Self::bump_entry_incarnation(info);
                 }
             }
             None => {
@@ -419,7 +431,11 @@ impl ClusterState {
                 if info.node_id == self.local_node {
                     continue;
                 }
-                if info.status == NodeStatus::Healthy {
+                // Heartbeats go to Joining members as well as Healthy
+                // ones: the first heartbeat to a seed is what initiates
+                // the join — the seed discovers us from it and heartbeats
+                // back, which promotes the seed to Healthy on our side.
+                if matches!(info.status, NodeStatus::Healthy | NodeStatus::Joining) {
                     actions.push(ClusterAction::SendHeartbeat {
                         to: info.node_id,
                         addr: info.address,
@@ -529,17 +545,24 @@ impl ClusterState {
 
             match self.members.get_mut(&entry.node_id) {
                 Some(existing) => {
-                    // Higher incarnation wins.
-                    if entry.incarnation > existing
+                    let stored_incarnation = existing
                         .metadata
                         .get("_incarnation")
                         .and_then(|s| s.parse().ok())
-                        .unwrap_or(0)
-                    {
+                        .unwrap_or(0);
+                    // Continued gossip about this node is a liveness hint
+                    // even when the incarnation is not strictly newer:
+                    // without this refresh a node that is only reachable
+                    // via relay (e.g. in a chain topology) would be
+                    // suspected by the heartbeat failure detector.
+                    if entry.incarnation >= stored_incarnation {
+                        existing.last_heartbeat = Instant::now();
+                    }
+                    // Higher incarnation wins.
+                    if entry.incarnation > stored_incarnation {
                         let old_status = existing.status;
                         existing.status = entry.status;
                         existing.address = entry.address;
-                        existing.last_heartbeat = Instant::now();
                         existing
                             .metadata
                             .insert("_incarnation".to_string(), entry.incarnation.to_string());
@@ -598,6 +621,21 @@ impl ClusterState {
     // Internal helpers
     // ------------------------------------------------------------------
 
+    /// Increment the per-entry incarnation stored in a member's metadata.
+    ///
+    /// Entries carry their version in the `_incarnation` metadata key so
+    /// gossip merges can resolve conflicts (higher wins). A missing key is
+    /// treated as 1 by `gossip_payload`, so a locally-observed status
+    /// change must bump the entry past that baseline to propagate.
+    fn bump_entry_incarnation(info: &mut NodeInfo) {
+        let current = info
+            .metadata
+            .get("_incarnation")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(1);
+        info.metadata
+            .insert("_incarnation".to_string(), (current + 1).to_string());
+    }
     /// Pick `n` random healthy targets for gossip.
     ///
     /// Uses a simple round-robin when the `getrandom` facility is not
@@ -1074,5 +1112,56 @@ mod tests {
         let actions = cs.tick();
         let has_gossip = actions.iter().any(|a| matches!(a, ClusterAction::SendGossip { .. }));
         assert!(has_gossip, "tick should produce gossip action when peers exist");
+    }
+
+    // -- 21. Transitive gossip propagation across a three-node chain -------
+
+    #[test]
+    fn test_gossip_transitive_propagation_three_nodes() {
+        // Chain topology: A <-> B <-> C. B knows everyone directly; A and
+        // C only know B. Relaying gossip payloads hop by hop must converge
+        // all three membership tables to the full set.
+        let addr_a = addr(9100);
+        let addr_b = addr(9101);
+        let addr_c = addr(9102);
+        let id_a = NodeId::new(&addr_a);
+        let id_b = NodeId::new(&addr_b);
+        let id_c = NodeId::new(&addr_c);
+
+        let mut a = ClusterState::new(id_a, addr_a);
+        let mut b = ClusterState::new(id_b, addr_b);
+        let mut c = ClusterState::new(id_c, addr_c);
+
+        a.handle_heartbeat(id_b, addr_b);
+        b.handle_heartbeat(id_a, addr_a);
+        b.handle_heartbeat(id_c, addr_c);
+        c.handle_heartbeat(id_b, addr_b);
+
+        // Round 1: B gossips its full table to A and C.
+        let payload_b = b.gossip_payload(100);
+        a.merge_membership(payload_b.clone());
+        c.merge_membership(payload_b);
+
+        assert!(a.is_member(id_c), "A should learn about C via B's gossip");
+        assert!(c.is_member(id_a), "C should learn about A via B's gossip");
+        assert_eq!(a.all_members().len(), 3);
+        assert_eq!(c.all_members().len(), 3);
+
+        // Round 2: A and C gossip their now-complete tables back to B.
+        b.merge_membership(a.gossip_payload(100));
+        b.merge_membership(c.gossip_payload(100));
+        assert_eq!(b.all_members().len(), 3);
+
+        // Incarnation-based conflict resolution survives relaying: a
+        // higher-incarnation failure report about C propagates B -> A.
+        let mut failed_view = b.gossip_payload(100);
+        for entry in &mut failed_view {
+            if entry.node_id == id_c {
+                entry.status = NodeStatus::Failed;
+                entry.incarnation = 999;
+            }
+        }
+        a.merge_membership(failed_view);
+        assert_eq!(a.get_node(id_c).unwrap().status, NodeStatus::Failed);
     }
 }

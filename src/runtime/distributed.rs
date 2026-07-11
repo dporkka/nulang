@@ -413,19 +413,20 @@ impl AddressResolver {
 
     /// Build a network packet for sending a message to a remote actor.
     ///
-    /// The packet includes the sender's node ID so the remote node can
-    /// route replies back.
+    /// The packet carries the behavior **name** (not a behavior id, which is
+    /// a per-actor-table index and meaningless across nodes) plus the
+    /// sender's node ID so the remote node can route replies back.
     pub fn build_packet(
         &self,
         target_actor: u64,
-        behavior_id: u16,
+        behavior_name: &str,
         payload: Vec<Value>,
         sender_actor: u64,
         priority: MessagePriority,
     ) -> Packet {
         Packet::ActorMessage {
             target_actor,
-            behavior_id,
+            behavior_name: behavior_name.to_string(),
             payload,
             sender_actor,
             sender_node: NodeId(self.local_node.0),
@@ -435,16 +436,19 @@ impl AddressResolver {
 
     /// Parse a received network packet into a message for local delivery.
     ///
-    /// Returns `Some((target_actor_id, message))` if the packet is an actor
-    /// message that should be delivered locally. Returns `None` for other
-    /// packet types (e.g., heartbeats, spawn requests).
+    /// Returns `Some((target_actor_id, behavior_name, message))` if the
+    /// packet is an actor message that should be delivered locally. The
+    /// message's `behavior_id` is left as `0` — the caller must resolve
+    /// `behavior_name` against the target actor's behavior table before
+    /// enqueueing (see [`process_network_packets`]). Returns `None` for
+    /// other packet types (e.g., heartbeats, spawn requests).
     ///
     /// Also updates the remote cache with the sender information.
-    pub fn parse_packet(&mut self, packet: Packet) -> Option<(u64, Message)> {
+    pub fn parse_packet(&mut self, packet: Packet) -> Option<(u64, String, Message)> {
         match packet {
             Packet::ActorMessage {
                 target_actor,
-                behavior_id,
+                behavior_name,
                 payload,
                 sender_actor,
                 sender_node,
@@ -455,12 +459,12 @@ impl AddressResolver {
                 self.record_remote_receive(sender_cluster_node, sender_actor);
 
                 let msg = Message {
-                    behavior_id,
+                    behavior_id: 0, // resolved from behavior_name at delivery
                     payload,
                     sender: sender_actor,
                     priority,
                 };
-                Some((target_actor, msg))
+                Some((target_actor, behavior_name, msg))
             }
             // Non-actor-message packets are not parsed here.
             _ => None,
@@ -534,10 +538,11 @@ pub trait DistributedRuntime {
     ///
     /// Reads all packets from the transport and delivers actor messages
     /// to their target actors. Handles heartbeats by forwarding to the
-    /// cluster state.
+    /// cluster state, merges gossip, and answers spawn requests (which is
+    /// why the transport is taken mutably: replies go back over the wire).
     fn process_network_packets(
         &mut self,
-        transport: &NetworkTransport,
+        transport: &mut NetworkTransport,
         cluster: &mut ClusterState,
         resolver: &mut AddressResolver,
     );
@@ -596,7 +601,7 @@ impl<'a> DistributedRuntime for DistributedRuntimeImpl<'a> {
 
     fn process_network_packets(
         &mut self,
-        transport: &NetworkTransport,
+        transport: &mut NetworkTransport,
         cluster: &mut ClusterState,
         resolver: &mut AddressResolver,
     ) {
@@ -657,12 +662,12 @@ pub fn send_distributed(
             runtime.send_message(actor_id, behavior, args);
         }
         ResolveResult::Remote { node_id, actor_id } => {
-            // For remote sends, the behavior_id is 0 as a placeholder.
-            // The remote node resolves the behavior name on delivery
-            // using its local behavior registry.
+            // Remote sends carry the behavior name; the receiving node
+            // resolves it against the target actor's behavior table on
+            // delivery (see process_network_packets).
             let packet = resolver.build_packet(
                 actor_id,
-                0, // behavior_id placeholder — resolved on remote side
+                behavior,
                 args.to_vec(),
                 runtime.current_actor.unwrap_or(0),
                 MessagePriority::Normal,
@@ -682,11 +687,13 @@ pub fn send_distributed(
 
 /// Process all incoming network packets and deliver actor messages.
 ///
-/// Heartbeats are forwarded to the cluster state. Actor messages are
-/// parsed and delivered to the target actor's mailbox.
+/// Heartbeats are forwarded to the cluster state, gossip is merged into
+/// the membership table, actor messages are parsed and delivered to the
+/// target actor's mailbox, and spawn requests are answered with a
+/// [`Packet::SpawnResponse`] (hence the mutable transport).
 pub fn process_network_packets(
     runtime: &mut Runtime,
-    transport: &NetworkTransport,
+    transport: &mut NetworkTransport,
     cluster: &mut ClusterState,
     resolver: &mut AddressResolver,
 ) {
@@ -695,16 +702,75 @@ pub fn process_network_packets(
         match incoming.packet {
             Packet::Heartbeat { node_id, .. } => {
                 let cluster_node_id = NodeId(node_id.0);
-                // We need the SocketAddr from the incoming packet context.
-                // The IncomingPacket doesn't carry the addr directly, but
-                // we can get it from the cluster or use a default.
-                // For now, we look up the node's known address.
+                // The IncomingPacket doesn't carry the sender's address
+                // directly, so prefer the address already recorded in the
+                // membership table. For a previously-unknown node (e.g. a
+                // fresh joiner's first heartbeat to its seed) fall back to
+                // the transport's connection table — this is the discovery
+                // path by which a seed first learns about a joiner.
                 let known_addr = cluster
                     .get_node(cluster_node_id)
-                    .map(|info| info.address);
+                    .map(|info| info.address)
+                    .or_else(|| transport.connection_addr(cluster_node_id));
                 if let Some(addr) = known_addr {
                     cluster.handle_heartbeat(cluster_node_id, addr);
                 }
+            }
+            Packet::Gossip { members } => {
+                // Merge the sender's membership view into ours; higher
+                // incarnation numbers win (see ClusterState::merge_membership).
+                // Each entry carries its own listen address, so no extra
+                // connection bookkeeping is needed for the relayed nodes.
+                cluster.merge_membership(members);
+            }
+            Packet::SpawnRequest {
+                request_id,
+                behavior_name,
+                initial_state,
+            } => {
+                // MVP: remote spawn only supports behaviors the receiving
+                // runtime has explicitly registered via
+                // `Runtime::register_spawnable_behavior`. An unknown name
+                // replies `success: false` — the tolerated-no-crash
+                // counterpart of local send's unknown-behavior fallback.
+                let handler = runtime.spawnable_behaviors.get(&behavior_name).copied();
+                let (actor_id, success) = match handler {
+                    Some(handler) => {
+                        let id = runtime.spawn_actor(Box::new(move || initial_state));
+                        if let Some(actor) = runtime.actors.get_mut(&id) {
+                            actor.register_behavior(behavior_name, handler);
+                        }
+                        (id, true)
+                    }
+                    None => (0, false),
+                };
+                let reply = Packet::SpawnResponse {
+                    request_id,
+                    actor_id,
+                    success,
+                };
+                let from = incoming.from_node;
+                let reply_addr = cluster
+                    .get_node(from)
+                    .map(|info| info.address)
+                    .or_else(|| transport.connection_addr(from));
+                if let Some(addr) = reply_addr {
+                    transport.send(from, addr, reply);
+                }
+            }
+            Packet::SpawnResponse {
+                request_id,
+                actor_id,
+                success,
+            } => {
+                // Record the outcome so the requester can learn the real
+                // remote actor id (`Runtime::take_spawn_response`). The
+                // id carried by spawn_on_node's placeholder address is the
+                // request id, not a usable actor id.
+                runtime.pending_spawn_responses.insert(
+                    request_id,
+                    if success { Some(actor_id) } else { None },
+                );
             }
             Packet::CrdtSync { ops } => {
                 if let Some(manager) = &mut runtime.crdt_manager {
@@ -714,7 +780,17 @@ pub fn process_network_packets(
                 }
             }
             _ => {
-                if let Some((target_actor, msg)) = resolver.parse_packet(incoming.packet) {
+                if let Some((target_actor, behavior_name, mut msg)) =
+                    resolver.parse_packet(incoming.packet)
+                {
+                    // Resolve the behavior name against the target actor's
+                    // behavior table — the same rule local sends use
+                    // (`Runtime::send_message`). An unknown name falls back
+                    // to behavior 0, mirroring `send_message`'s
+                    // `unwrap_or(0)`.
+                    msg.behavior_id = runtime
+                        .behavior_id_for(target_actor, &behavior_name)
+                        .unwrap_or(0);
                     if let Some(actor) = runtime.actors.get_mut(&target_actor) {
                         let _ = actor.mailbox.push(msg);
                         runtime.scheduler.enqueue(target_actor);
@@ -728,7 +804,13 @@ pub fn process_network_packets(
 /// Spawn an actor on a specific node.
 ///
 /// Local spawns go through [`Runtime::spawn_actor`]. Remote spawns send
-/// a [`Packet::SpawnRequest`] over the network.
+/// a [`Packet::SpawnRequest`] over the network and return a **placeholder**
+/// address whose `actor_id` is the request id — the receiving node answers
+/// with a [`Packet::SpawnResponse`] carrying the real actor id, which the
+/// requester picks up via [`Runtime::take_spawn_response`] after pumping
+/// `Runtime::process_network`. Remote spawn only supports behaviors the
+/// receiving node registered with `Runtime::register_spawnable_behavior`;
+/// anything else is rejected with `success: false`.
 pub fn spawn_on_node(
     runtime: &mut Runtime,
     transport: &mut NetworkTransport,
@@ -968,7 +1050,7 @@ mod tests {
 
         let packet = resolver.build_packet(
             42,   // target_actor
-            3,    // behavior_id
+            "handle_msg",
             vec![Value::int(7), Value::string(0)],
             100,  // sender_actor
             MessagePriority::Normal,
@@ -977,14 +1059,14 @@ mod tests {
         match packet {
             Packet::ActorMessage {
                 target_actor,
-                behavior_id,
+                behavior_name,
                 payload,
                 sender_actor,
                 sender_node,
                 priority,
             } => {
                 assert_eq!(target_actor, 42);
-                assert_eq!(behavior_id, 3);
+                assert_eq!(behavior_name, "handle_msg");
                 assert_eq!(sender_actor, 100);
                 assert_eq!(sender_node.0, local_node.0); // Same underlying u64
                 assert_eq!(priority, MessagePriority::Normal);
@@ -1004,7 +1086,7 @@ mod tests {
 
         let packet = Packet::ActorMessage {
             target_actor: 77,
-            behavior_id: 2,
+            behavior_name: "inc".to_string(),
             payload: vec![Value::int(123)],
             sender_actor: 88,
             sender_node: NodeId(9), // Remote node 9
@@ -1014,9 +1096,11 @@ mod tests {
         let result = resolver.parse_packet(packet);
         assert!(result.is_some());
 
-        let (target, msg) = result.unwrap();
+        let (target, behavior_name, msg) = result.unwrap();
         assert_eq!(target, 77);
-        assert_eq!(msg.behavior_id, 2);
+        assert_eq!(behavior_name, "inc");
+        // behavior_id is resolved at delivery, not parse time.
+        assert_eq!(msg.behavior_id, 0);
         assert_eq!(msg.sender, 88);
         assert_eq!(msg.priority, MessagePriority::System);
         assert_eq!(msg.payload.len(), 1);
@@ -1135,5 +1219,98 @@ mod tests {
             h.finish()
         }
         assert_eq!(hash_of(&a1), hash_of(&a2));
+    }
+
+    // -- 17. End-to-end: remote send dispatches the named behavior ---------
+
+    #[test]
+    fn test_remote_send_dispatches_named_behavior() {
+        use std::time::{Duration, Instant};
+
+        // Node B runs the target actor with two behaviors. "inc" is
+        // registered second, so its behavior id is 1 — the old stub's
+        // placeholder id 0 would dispatch "dec" instead, so this test
+        // fails without name-based dispatch.
+        let mut runtime_b = Runtime::new();
+        let actor_b = runtime_b.spawn_actor(Box::new(|| {
+            vec![("count".to_string(), Value::int(0))]
+        }));
+        {
+            let actor = runtime_b.actors.get_mut(&actor_b).unwrap();
+            actor.register_behavior("dec", |actor, _args| {
+                if let Some(n) = actor.get_state_field("count").and_then(|v| v.as_int()) {
+                    actor.set_state_field("count", Value::int(n - 1));
+                }
+            });
+            actor.register_behavior("inc", |actor, args| {
+                let n = actor.get_state_field("count").and_then(|v| v.as_int()).unwrap_or(0);
+                let by = args.get(0).and_then(|v| v.as_int()).unwrap_or(1);
+                actor.set_state_field("count", Value::int(n + by));
+            });
+        }
+
+        let mut transport_a = NetworkTransport::bind(addr(0)).unwrap();
+        let mut transport_b = NetworkTransport::bind(addr(0)).unwrap();
+        let node_b = transport_b.node_id();
+        let addr_b = transport_b.listen_addr();
+
+        // Node A's cluster knows B as a healthy peer.
+        let mut cluster_a =
+            ClusterState::new(transport_a.node_id(), transport_a.listen_addr());
+        cluster_a.handle_heartbeat(node_b, addr_b);
+        let mut resolver_a = AddressResolver::new(transport_a.node_id());
+        let mut runtime_a = Runtime::new();
+
+        // Node B's delivery side.
+        let mut cluster_b = ClusterState::new(node_b, addr_b);
+        let mut resolver_b = AddressResolver::new(node_b);
+
+        let target = ActorAddress::remote(node_b, actor_b);
+        let deliver = |runtime_b: &mut Runtime,
+                       transport_b: &mut NetworkTransport,
+                       cluster_b: &mut ClusterState,
+                       resolver_b: &mut AddressResolver| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                process_network_packets(runtime_b, transport_b, cluster_b, resolver_b);
+                let pending = runtime_b
+                    .actors
+                    .get(&actor_b)
+                    .map(|a| a.mailbox.len())
+                    .unwrap_or(0);
+                if pending > 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+
+        // Named behavior: must dispatch "inc" (id 1), not "dec" (id 0).
+        send_distributed(
+            &mut runtime_a, &mut transport_a, &cluster_a, &mut resolver_a,
+            target, "inc", &[Value::int(5)],
+        );
+        deliver(&mut runtime_b, &mut transport_b, &mut cluster_b, &mut resolver_b);
+        runtime_b.step_actor(actor_b);
+        let count = runtime_b
+            .actors.get(&actor_b).unwrap()
+            .get_state_field("count").and_then(|v| v.as_int()).unwrap();
+        assert_eq!(count, 5, "remote send must dispatch the named behavior \"inc\"");
+
+        // Unknown behavior name: falls back to behavior 0, mirroring
+        // `Runtime::send_message`'s `unwrap_or(0)` for local sends.
+        send_distributed(
+            &mut runtime_a, &mut transport_a, &cluster_a, &mut resolver_a,
+            target, "no_such_behavior", &[],
+        );
+        deliver(&mut runtime_b, &mut transport_b, &mut cluster_b, &mut resolver_b);
+        runtime_b.step_actor(actor_b);
+        let count = runtime_b
+            .actors.get(&actor_b).unwrap()
+            .get_state_field("count").and_then(|v| v.as_int()).unwrap();
+        assert_eq!(count, 4, "unknown behavior name must fall back to behavior 0 (\"dec\")");
+
+        transport_a.shutdown();
+        transport_b.shutdown();
     }
 }

@@ -1,6 +1,6 @@
 //! Runtime integration tests.
 //!
-//! 107 tests total (83 pre-v0.7 + 24 v0.7 BEAM primitive tests).
+//! 81 tests total (see AGENTS.md "Testing & QA" for the suite-wide counts).
 //! Full history in local commit 1c2cde9.
 
 use super::*;
@@ -1759,4 +1759,396 @@ fn test_pipeline_runtime_api() {
     let pipeline = rt.pipelines[&id].clone();
     let output = pipeline.run(&mut MockRuntime, "hello world").unwrap();
     assert_eq!(output, "agent 42 got Summarize: hello world");
+}
+
+// ---------------------------------------------------------------------------
+// Multi-Node Distributed Tests
+// ---------------------------------------------------------------------------
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::thread::sleep;
+
+/// Start a distributed-enabled runtime bound to an ephemeral loopback port.
+fn start_distributed_node() -> Runtime {
+    let mut rt = Runtime::new();
+    rt.enable_distribution(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
+        .expect("failed to enable distribution");
+    rt
+}
+
+/// Pump `process_network` on every node until each node's cluster view
+/// holds `expected` healthy members (including itself), or fail.
+///
+/// Every poll iteration pumps ALL nodes (each `process_network` also runs
+/// the cluster `tick`, which drives heartbeats, gossip, and membership
+/// timeouts), then sleeps a fixed 50 ms — no assumption is made about
+/// wall-clock ordering between nodes. Callers should pass a generous
+/// deadline (30 s): convergence is normally sub-second, but under heavy
+/// CPU load the real-TCP handshake and heartbeat cadence can degrade by
+/// an order of magnitude.
+fn pump_until_converged(nodes: &mut [&mut Runtime], expected: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut counts = Vec::new();
+        for rt in nodes.iter_mut() {
+            rt.process_network();
+            counts.push(rt.cluster.as_ref().unwrap().healthy_node_count());
+        }
+        if counts.iter().all(|&c| c == expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cluster did not converge to {} healthy nodes (counts: {:?})",
+            expected,
+            counts
+        );
+        sleep(Duration::from_millis(50));
+    }
+}
+
+/// Shut down the transports of the given nodes.
+fn shutdown_nodes(nodes: &mut [&mut Runtime]) {
+    for rt in nodes.iter_mut() {
+        if let Some(transport) = rt.transport.take() {
+            transport.shutdown();
+        }
+    }
+}
+
+#[test]
+fn test_three_node_cluster_membership_converges() {
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+    let mut rt_c = start_distributed_node();
+
+    let addr_a = rt_a.transport.as_ref().unwrap().listen_addr();
+    let addr_b = rt_b.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.node_id.unwrap();
+    let node_b = rt_b.node_id.unwrap();
+    let node_c = rt_c.node_id.unwrap();
+
+    // The local node's own cluster entry must carry the real listen
+    // address, not the port-0 bind address.
+    assert_eq!(
+        rt_a.cluster.as_ref().unwrap().get_node(node_a).unwrap().address,
+        addr_a
+    );
+
+    // Full-mesh join: each new node seeds from every existing node.
+    // (Transitive gossip propagation over the wire is covered separately
+    // by test_three_node_gossip_converges_chain_seeded; pairwise seeding
+    // plus heartbeat-based discovery converges the mesh here regardless.)
+    rt_b.join_cluster(addr_a);
+    rt_c.join_cluster(addr_a);
+    rt_c.join_cluster(addr_b);
+
+    pump_until_converged(
+        &mut [&mut rt_a, &mut rt_b, &mut rt_c],
+        3,
+        Duration::from_secs(30),
+    );
+
+    // Every node sees every other node as a healthy member.
+    for rt in [&rt_a, &rt_b, &rt_c] {
+        let cluster = rt.cluster.as_ref().unwrap();
+        for peer in [node_a, node_b, node_c] {
+            let info = cluster
+                .get_node(peer)
+                .expect("peer missing from membership table");
+            assert_eq!(info.status, NodeStatus::Healthy, "peer {:?} not healthy", peer);
+        }
+    }
+
+    // Addresses learned by seeding carry the peer's real listen address.
+    assert_eq!(
+        rt_b.cluster.as_ref().unwrap().get_node(node_a).unwrap().address,
+        addr_a
+    );
+    assert_eq!(
+        rt_c.cluster.as_ref().unwrap().get_node(node_b).unwrap().address,
+        addr_b
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c]);
+}
+
+#[test]
+fn test_three_node_remote_actor_message_delivery() {
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+    let mut rt_c = start_distributed_node();
+
+    let addr_a = rt_a.transport.as_ref().unwrap().listen_addr();
+    let addr_b = rt_b.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.node_id.unwrap();
+
+    rt_b.join_cluster(addr_a);
+    rt_c.join_cluster(addr_a);
+    rt_c.join_cluster(addr_b);
+    pump_until_converged(
+        &mut [&mut rt_a, &mut rt_b, &mut rt_c],
+        3,
+        Duration::from_secs(30),
+    );
+
+    // An actor on node A with a decoy behavior (table index 0) and the
+    // intended behavior (index 1). Remote packets carry the behavior
+    // *name* and the receiver resolves it against the target actor's
+    // behavior table (see process_network_packets), so dispatch must run
+    // "store" — if it ever fell back to index-based dispatch the decoy
+    // would run and fail this test.
+    let actor_id = rt_a.spawn_actor(Box::new(|| {
+        vec![("received".to_string(), Value::int(0))]
+    }));
+    {
+        let actor = rt_a.actors.get_mut(&actor_id).unwrap();
+        actor.register_behavior("decoy", |actor, _args| {
+            actor.set_state_field("received", Value::int(-999));
+        });
+        actor.register_behavior("store", |actor, args| {
+            let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+            actor.set_state_field("received", Value::int(n));
+        });
+    }
+
+    // Node C sends to the actor on node A through the location-transparent
+    // address (remote node + actor id), with node B present in the mesh.
+    let target = ActorAddress::remote(node_a, actor_id);
+    rt_c.send_distributed(target, "store", &[Value::int(42)]);
+
+    // Generous deadline for loaded machines; every iteration pumps ALL
+    // nodes so heartbeats keep flowing and no membership view degrades
+    // (suspicion kicks in after 2 s of silence) while we wait.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let delivered = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        rt_c.process_network();
+        rt_a.run_scheduler();
+        let got = rt_a
+            .actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(42) {
+            break true;
+        }
+        assert_ne!(
+            got,
+            Some(-999),
+            "decoy behavior dispatched for the remote message"
+        );
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "remote message from node C was not delivered to the actor on node A"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c]);
+}
+
+/// Gossip relay convergence: three nodes seeded only as a chain
+/// (B joins A, C joins B — C never contacts A directly) must still
+/// converge to a full membership view via gossip relayed by B.
+#[test]
+fn test_three_node_gossip_converges_chain_seeded() {
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+    let mut rt_c = start_distributed_node();
+
+    let addr_a = rt_a.transport.as_ref().unwrap().listen_addr();
+    let addr_b = rt_b.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.node_id.unwrap();
+    let node_b = rt_b.node_id.unwrap();
+    let node_c = rt_c.node_id.unwrap();
+
+    // Chain seeding only: B joins A, C joins B. Without gossip on the
+    // wire, A and C could never learn about each other.
+    rt_b.join_cluster(addr_a);
+    rt_c.join_cluster(addr_b);
+
+    pump_until_converged(
+        &mut [&mut rt_a, &mut rt_b, &mut rt_c],
+        3,
+        Duration::from_secs(30),
+    );
+
+    // A learned about C (and vice versa) purely through B's gossip relay,
+    // and both views consider the relayed peer healthy.
+    let info_c_on_a = rt_a
+        .cluster
+        .as_ref()
+        .unwrap()
+        .get_node(node_c)
+        .expect("node C missing from A's membership table — gossip relay failed");
+    assert_eq!(
+        info_c_on_a.status,
+        NodeStatus::Healthy,
+        "A should see C as healthy"
+    );
+    let info_a_on_c = rt_c
+        .cluster
+        .as_ref()
+        .unwrap()
+        .get_node(node_a)
+        .expect("node A missing from C's membership table — gossip relay failed");
+    assert_eq!(
+        info_a_on_c.status,
+        NodeStatus::Healthy,
+        "C should see A as healthy"
+    );
+    // Sanity: the middle node sees both ends.
+    let cluster_b = rt_b.cluster.as_ref().unwrap();
+    assert!(cluster_b.is_member(node_a));
+    assert!(cluster_b.is_member(node_c));
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c]);
+}
+
+/// Handler for the remotely-spawnable behavior used by
+/// `test_remote_spawn_request_delivery`.
+fn remote_spawn_store_handler(actor: &mut Actor, args: &[Value]) {
+    let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+    actor.set_state_field("received", Value::int(n));
+}
+
+/// Remote spawn delivery: node A issues a SpawnRequest for a behavior
+/// registered on node B, receives the new actor's id via SpawnResponse,
+/// and can then address the spawned actor by name.
+#[test]
+fn test_remote_spawn_request_delivery() {
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+
+    let addr_b = rt_b.transport.as_ref().unwrap().listen_addr();
+    let node_b = rt_b.node_id.unwrap();
+
+    // Node B offers one behavior for remote spawn.
+    rt_b.register_spawnable_behavior("store", remote_spawn_store_handler);
+
+    rt_a.join_cluster(addr_b);
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
+
+    // Issue the remote spawn. The placeholder address carries the request
+    // id; the real actor id arrives with the SpawnResponse.
+    let request_id = {
+        let mut transport = rt_a.transport.take().unwrap();
+        let cluster = rt_a.cluster.take().unwrap();
+        let resolver = rt_a.resolver.take().unwrap();
+        let placeholder = spawn_on_node(
+            &mut rt_a,
+            &mut transport,
+            &cluster,
+            &resolver,
+            node_b,
+            "store",
+            vec![("received".to_string(), Value::int(0))],
+        );
+        rt_a.transport = Some(transport);
+        rt_a.cluster = Some(cluster);
+        rt_a.resolver = Some(resolver);
+        assert_eq!(placeholder.node_id(), node_b);
+        placeholder.actor_id()
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let remote_actor = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        if let Some(result) = rt_a.take_spawn_response(request_id) {
+            break result.expect("node B rejected the spawn request");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no SpawnResponse received from node B"
+        );
+        sleep(Duration::from_millis(50));
+    };
+
+    // The spawned actor exists on node B and was wired with the behavior.
+    assert!(
+        rt_b.actors.contains_key(&remote_actor),
+        "spawned actor missing on node B"
+    );
+    assert_eq!(
+        rt_b.behavior_id_for(remote_actor, "store"),
+        Some(0),
+        "spawned actor should have the requested behavior at index 0"
+    );
+
+    // Node A can now address the remote actor by id; a message sent by
+    // behavior name must land in the spawned actor's state.
+    let target = ActorAddress::remote(node_b, remote_actor);
+    rt_a.send_distributed(target, "store", &[Value::int(7)]);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let delivered = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        rt_b.run_scheduler();
+        let got = rt_b
+            .actors
+            .get(&remote_actor)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(7) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "message to the remotely-spawned actor was not delivered"
+    );
+
+    // Unknown behavior names are rejected, not spawned — the no-crash
+    // counterpart of the local unknown-behavior fallback.
+    let reject_id = {
+        let mut transport = rt_a.transport.take().unwrap();
+        let cluster = rt_a.cluster.take().unwrap();
+        let resolver = rt_a.resolver.take().unwrap();
+        let placeholder = spawn_on_node(
+            &mut rt_a,
+            &mut transport,
+            &cluster,
+            &resolver,
+            node_b,
+            "no_such_behavior",
+            vec![],
+        );
+        rt_a.transport = Some(transport);
+        rt_a.cluster = Some(cluster);
+        rt_a.resolver = Some(resolver);
+        placeholder.actor_id()
+    };
+    let actors_before = rt_b.actors.len();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let rejected = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        if let Some(result) = rt_a.take_spawn_response(reject_id) {
+            break result.is_none();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no SpawnResponse received for the unknown behavior"
+        );
+        sleep(Duration::from_millis(50));
+    };
+    assert!(rejected, "unknown behavior name must be rejected");
+    assert_eq!(
+        rt_b.actors.len(),
+        actors_before,
+        "rejected spawn must not create an actor"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
 }

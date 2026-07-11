@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 // ---------------------------------------------------------------------------
 
 use super::MessagePriority;
+use super::cluster::{NodeGossip, NodeStatus};
 use super::crdt_manager::CrdtOp;
 use super::NodeId;
 use crate::vm::Value;
@@ -75,6 +76,7 @@ const TYPE_ACK: u8 = 2;
 const TYPE_SPAWN_REQUEST: u8 = 3;
 const TYPE_SPAWN_RESPONSE: u8 = 4;
 const TYPE_CRDT_SYNC: u8 = 5;
+const TYPE_GOSSIP: u8 = 6;
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -90,9 +92,14 @@ const TYPE_CRDT_SYNC: u8 = 5;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Packet {
     /// Send a message to an actor on the target node.
+    ///
+    /// The behavior is identified by **name**, not by id: behavior ids are
+    /// per-actor-table indices and are meaningless across nodes. The
+    /// receiving node resolves the name against the target actor's behavior
+    /// table (the same rule local sends use in `Runtime::behavior_id_for`).
     ActorMessage {
         target_actor: u64,
-        behavior_id: u16,
+        behavior_name: String,
         payload: Vec<Value>,
         sender_actor: u64,
         sender_node: NodeId,
@@ -127,6 +134,17 @@ pub enum Packet {
     /// CRDT synchronization packet.
     CrdtSync {
         ops: Vec<CrdtOp>,
+    },
+
+    /// Cluster membership gossip.
+    ///
+    /// Carries the sender's (compact) membership view; the receiver merges
+    /// it via [`ClusterState::merge_membership`](crate::runtime::cluster::ClusterState::merge_membership),
+    /// where higher incarnation numbers win. This is what gives membership
+    /// transitive propagation: a node relays what it knows, so a chain of
+    /// pairwise seeds still converges to a full mesh.
+    Gossip {
+        members: Vec<NodeGossip>,
     },
 }
 
@@ -183,6 +201,7 @@ impl Packet {
             TYPE_SPAWN_REQUEST => Self::read_spawn_request(payload)?,
             TYPE_SPAWN_RESPONSE => Self::read_spawn_response(payload)?,
             TYPE_CRDT_SYNC => Self::read_crdt_sync(payload)?,
+            TYPE_GOSSIP => Self::read_gossip(payload)?,
             _ => return None,
         };
 
@@ -201,6 +220,7 @@ impl Packet {
             Packet::SpawnRequest { .. } => TYPE_SPAWN_REQUEST,
             Packet::SpawnResponse { .. } => TYPE_SPAWN_RESPONSE,
             Packet::CrdtSync { .. } => TYPE_CRDT_SYNC,
+            Packet::Gossip { .. } => TYPE_GOSSIP,
         }
     }
 
@@ -208,14 +228,14 @@ impl Packet {
         match self {
             Packet::ActorMessage {
                 target_actor,
-                behavior_id,
+                behavior_name,
                 payload,
                 sender_actor,
                 sender_node,
                 priority,
             } => {
                 buf.extend_from_slice(&target_actor.to_be_bytes());
-                buf.extend_from_slice(&behavior_id.to_be_bytes());
+                write_string(buf, behavior_name);
                 buf.extend_from_slice(&sender_actor.to_be_bytes());
                 buf.extend_from_slice(&sender_node.0.to_be_bytes());
                 buf.push(*priority as u8);
@@ -259,27 +279,40 @@ impl Packet {
                     buf.extend_from_slice(&op.to_bytes());
                 }
             }
+            Packet::Gossip { members } => {
+                buf.extend_from_slice(&(members.len() as u32).to_be_bytes());
+                for m in members {
+                    buf.extend_from_slice(&m.node_id.0.to_be_bytes());
+                    write_addr(buf, &m.address);
+                    buf.push(status_to_u8(m.status));
+                    buf.extend_from_slice(&m.incarnation.to_be_bytes());
+                }
+            }
         }
     }
 
     // --- Deserialisation helpers for each variant ---------------------
 
     fn read_actor_message(payload: &[u8]) -> Option<Self> {
-        if payload.len() < 31 {
+        if payload.len() < 12 {
             return None;
         }
         let target_actor = read_u64(payload, 0)?;
-        let behavior_id = read_u16(payload, 8)?;
-        let sender_actor = read_u64(payload, 10)?;
-        let sender_node = NodeId(read_u64(payload, 18)?);
-        let priority = match payload.get(26).copied()? {
+        let (behavior_name, name_len) = read_string(payload, 8)?;
+        let mut offset = 8usize.checked_add(name_len)?;
+        if payload.len() < offset + 21 {
+            return None;
+        }
+        let sender_actor = read_u64(payload, offset)?;
+        let sender_node = NodeId(read_u64(payload, offset + 8)?);
+        let priority = match payload.get(offset + 16).copied()? {
             0 => MessagePriority::System,
             1 => MessagePriority::Normal,
             2 => MessagePriority::Bulk,
             _ => return None,
         };
-        let count = read_u32(payload, 27)? as usize;
-        let mut offset = 31usize;
+        let count = read_u32(payload, offset + 17)? as usize;
+        offset = offset.checked_add(21)?;
         let mut values = Vec::with_capacity(count.min(1024));
         for _ in 0..count {
             let (v, consumed) = read_value(payload, offset)?;
@@ -291,7 +324,7 @@ impl Packet {
         }
         Some(Packet::ActorMessage {
             target_actor,
-            behavior_id,
+            behavior_name,
             payload: values,
             sender_actor,
             sender_node,
@@ -384,8 +417,40 @@ impl Packet {
         }
         Some(Packet::CrdtSync { ops })
     }
-}
 
+    fn read_gossip(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 4 {
+            return None;
+        }
+        let count = read_u32(payload, 0)? as usize;
+        let mut offset = 4usize;
+        let mut members = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            // Each entry: [node_id:u64][addr][status:u8][incarnation:u64]
+            if offset + 8 > payload.len() {
+                return None;
+            }
+            let node_id = NodeId(read_u64(payload, offset)?);
+            offset += 8;
+            let (address, consumed) = read_addr(payload, offset)?;
+            offset = offset.checked_add(consumed)?;
+            if offset + 9 > payload.len() {
+                return None;
+            }
+            let status = status_from_u8(*payload.get(offset)?)?;
+            offset += 1;
+            let incarnation = read_u64(payload, offset)?;
+            offset += 8;
+            members.push(NodeGossip {
+                node_id,
+                address,
+                status,
+                incarnation,
+            });
+        }
+        Some(Packet::Gossip { members })
+    }
+}
 // ---------------------------------------------------------------------------
 // Value (de)serialization helpers
 // ---------------------------------------------------------------------------
@@ -469,6 +534,77 @@ fn read_string(bytes: &[u8], offset: usize) -> Option<(String, usize)> {
 }
 
 // ---------------------------------------------------------------------------
+// SocketAddr / NodeStatus (de)serialization helpers
+// ---------------------------------------------------------------------------
+
+/// Address family tags for [`write_addr`] / [`read_addr`].
+const ADDR_IPV4: u8 = 4;
+const ADDR_IPV6: u8 = 6;
+
+/// Append a [`SocketAddr`] as `[family:u8][octets][port:u16]`.
+fn write_addr(buf: &mut Vec<u8>, addr: &SocketAddr) {
+    match addr {
+        SocketAddr::V4(v4) => {
+            buf.push(ADDR_IPV4);
+            buf.extend_from_slice(&v4.ip().octets());
+        }
+        SocketAddr::V6(v6) => {
+            buf.push(ADDR_IPV6);
+            buf.extend_from_slice(&v6.ip().octets());
+        }
+    }
+    buf.extend_from_slice(&addr.port().to_be_bytes());
+}
+
+/// Read a [`SocketAddr`] written by [`write_addr`].
+///
+/// Returns `(addr, bytes_consumed)`.
+fn read_addr(bytes: &[u8], offset: usize) -> Option<(SocketAddr, usize)> {
+    let family = *bytes.get(offset)?;
+    let addr = match family {
+        ADDR_IPV4 => {
+            let octets: [u8; 4] = bytes.get(offset + 1..offset + 5)?.try_into().ok()?;
+            let port = u16::from_be_bytes(
+                bytes.get(offset + 5..offset + 7)?.try_into().ok()?,
+            );
+            (SocketAddr::new(std::net::IpAddr::V4(octets.into()), port), 1 + 4 + 2)
+        }
+        ADDR_IPV6 => {
+            let octets: [u8; 16] = bytes.get(offset + 1..offset + 17)?.try_into().ok()?;
+            let port = u16::from_be_bytes(
+                bytes.get(offset + 17..offset + 19)?.try_into().ok()?,
+            );
+            (SocketAddr::new(std::net::IpAddr::V6(octets.into()), port), 1 + 16 + 2)
+        }
+        _ => return None,
+    };
+    Some(addr)
+}
+
+/// Map a [`NodeStatus`] to its wire byte.
+fn status_to_u8(status: NodeStatus) -> u8 {
+    match status {
+        NodeStatus::Joining => 0,
+        NodeStatus::Healthy => 1,
+        NodeStatus::Suspicious => 2,
+        NodeStatus::Failed => 3,
+        NodeStatus::Leaving => 4,
+    }
+}
+
+/// Inverse of [`status_to_u8`].
+fn status_from_u8(b: u8) -> Option<NodeStatus> {
+    match b {
+        0 => Some(NodeStatus::Joining),
+        1 => Some(NodeStatus::Healthy),
+        2 => Some(NodeStatus::Suspicious),
+        3 => Some(NodeStatus::Failed),
+        4 => Some(NodeStatus::Leaving),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Little endian-agnostic integer readers / writers
 // ---------------------------------------------------------------------------
 
@@ -488,12 +624,6 @@ fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     let slice = bytes.get(offset..offset + 4)?;
     let arr: [u8; 4] = slice.try_into().ok()?;
     Some(u32::from_be_bytes(arr))
-}
-
-fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
-    let slice = bytes.get(offset..offset + 2)?;
-    let arr: [u8; 2] = slice.try_into().ok()?;
-    Some(u16::from_be_bytes(arr))
 }
 
 /// Acquire a mutex, recovering the guard even if a previous holder panicked.
@@ -567,6 +697,9 @@ pub struct NetworkTransport {
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
     /// Channel endpoint used to receive packets from other nodes.
     incoming_rx: mpsc::Receiver<IncomingPacket>,
+    /// Cloneable send side of the incoming channel, handed to reader
+    /// threads spawned for dialled outbound connections.
+    incoming_tx: mpsc::SyncSender<IncomingPacket>,
     /// Channel endpoint used to enqueue packets for transmission.
     outgoing_tx: mpsc::SyncSender<OutgoingPacket>,
     /// Background thread handles.
@@ -624,10 +757,11 @@ impl NetworkTransport {
             let flag = Arc::clone(&shutdown_flag);
             let conns = Arc::clone(&connections);
             let local_id = node_id;
+            let in_tx = incoming_tx.clone();
             let handle = thread::Builder::new()
                 .name("nulang-net-sender".into())
                 .spawn(move || {
-                    sender_thread(outgoing_rx, conns, flag, local_id);
+                    sender_thread(outgoing_rx, conns, flag, local_id, in_tx);
                 })?;
             handles.push(handle);
         }
@@ -637,6 +771,7 @@ impl NetworkTransport {
             listen_addr,
             connections,
             incoming_rx,
+            incoming_tx,
             outgoing_tx,
             threads: Arc::new(Mutex::new(handles)),
             next_seq: AtomicU64::new(1),
@@ -688,8 +823,20 @@ impl NetworkTransport {
             last_activity: Instant::now(),
         };
 
-        let mut conns = lock_ignore_poison(&self.connections);
-        conns.insert(node_id, conn);
+        // Spawn a reader on a cloned handle so the link is fully duplex:
+        // packets the peer writes to this socket (e.g. heartbeat replies)
+        // are delivered just like packets on accepted inbound connections.
+        let read_stream = conn.stream.try_clone()?;
+        {
+            let mut conns = lock_ignore_poison(&self.connections);
+            conns.insert(node_id, conn);
+        }
+        let in_tx = self.incoming_tx.clone();
+        let conns = Arc::clone(&self.connections);
+        let flag = Arc::clone(&self.shutdown_flag);
+        let _ = thread::Builder::new()
+            .name(format!("nulang-net-reader-out-{}", addr.port()))
+            .spawn(move || connection_read_loop(read_stream, node_id, in_tx, conns, flag));
         Ok(())
     }
 
@@ -806,6 +953,18 @@ impl NetworkTransport {
         let conns = lock_ignore_poison(&self.connections);
         conns.len()
     }
+
+    /// Look up the remote address of an active connection by node id.
+    ///
+    /// For connections we dialled this is the peer's listen address; for
+    /// accepted inbound connections it is the peer's (ephemeral) source
+    /// address. Either way it identifies a live link to the peer, which
+    /// is enough for heartbeat-based membership discovery while the
+    /// connection is open.
+    pub fn connection_addr(&self, node_id: NodeId) -> Option<SocketAddr> {
+        let conns = lock_ignore_poison(&self.connections);
+        conns.get(&node_id).map(|conn| conn.addr)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -903,7 +1062,22 @@ fn connection_reader(
         );
     }
 
-    // --- Read loop --------------------------------------------------------
+    connection_read_loop(stream, peer_id, incoming_tx, connections, shutdown_flag);
+}
+
+/// Read framed packets from `stream` until disconnect or shutdown, then
+/// remove the peer from the connection pool.
+///
+/// Shared by the listener-side reader (accepted inbound connections) and
+/// the reader spawned for dialled outbound connections, so every TCP
+/// link is read exactly once regardless of which side initiated it.
+fn connection_read_loop(
+    mut stream: TcpStream,
+    peer_id: NodeId,
+    incoming_tx: mpsc::SyncSender<IncomingPacket>,
+    connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
+    shutdown_flag: Arc<AtomicBool>,
+) {
     loop {
         if shutdown_flag.load(Ordering::Relaxed) {
             break;
@@ -965,6 +1139,7 @@ fn sender_thread(
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
     shutdown_flag: Arc<AtomicBool>,
     local_node_id: NodeId,
+    incoming_tx: mpsc::SyncSender<IncomingPacket>,
 ) {
     // We keep a local sequence counter so we can embed it into the bytes.
     let mut next_seq: u64 = 1;
@@ -991,7 +1166,14 @@ fn sender_thread(
 
         // Establish connection if missing.
         if needs_connect {
-            if let Err(e) = connect_in_sender(&connections, local_node_id, outgoing.to_node, outgoing.to_addr) {
+            if let Err(e) = connect_in_sender(
+                &connections,
+                &incoming_tx,
+                &shutdown_flag,
+                local_node_id,
+                outgoing.to_node,
+                outgoing.to_addr,
+            ) {
                 eprintln!(
                     "[nulang-net] Failed to connect to {:?} at {}: {}",
                     outgoing.to_node, outgoing.to_addr, e
@@ -1033,8 +1215,14 @@ fn sender_thread(
 /// Establish a TCP connection from inside the sender thread.
 ///
 /// This is a best-effort connect that performs the 8-byte handshake.
+/// A reader thread is spawned on a cloned handle so the link is fully
+/// duplex: without it, a node that only ever dials out (e.g. a cluster
+/// joiner) could never receive packets over the connection it
+/// established, and heartbeat replies from its seed would be lost.
 fn connect_in_sender(
     connections: &Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
+    incoming_tx: &mpsc::SyncSender<IncomingPacket>,
+    shutdown_flag: &Arc<AtomicBool>,
     local_node_id: NodeId,
     node_id: NodeId,
     addr: SocketAddr,
@@ -1059,15 +1247,25 @@ fn connect_in_sender(
         ));
     }
 
-    let conn = TcpConnection {
-        node_id,
-        addr,
-        stream: stream.try_clone()?,
-        last_activity: Instant::now(),
-    };
-
-    let mut conns = lock_ignore_poison(connections);
-    conns.insert(node_id, conn);
+    let read_stream = stream.try_clone()?;
+    {
+        let mut conns = lock_ignore_poison(connections);
+        conns.insert(
+            node_id,
+            TcpConnection {
+                node_id,
+                addr,
+                stream,
+                last_activity: Instant::now(),
+            },
+        );
+    }
+    let in_tx = incoming_tx.clone();
+    let conns = Arc::clone(connections);
+    let flag = Arc::clone(shutdown_flag);
+    let _ = thread::Builder::new()
+        .name(format!("nulang-net-reader-out-{}", addr.port()))
+        .spawn(move || connection_read_loop(read_stream, node_id, in_tx, conns, flag));
     Ok(())
 }
 
@@ -1106,7 +1304,7 @@ mod tests {
     fn test_packet_serialize_deserialize_actor_message() {
         let packet = Packet::ActorMessage {
             target_actor: 42,
-            behavior_id: 7,
+            behavior_name: "handle_msg".to_string(),
             payload: vec![
                 Value::int(123),
                 Value::string(456),
@@ -1120,6 +1318,78 @@ mod tests {
         let (seq, decoded) = Packet::from_bytes(&bytes).expect("deserialization failed");
 
         assert_eq!(seq, 0x1234);
+        assert_eq!(decoded, packet);
+    }
+
+    // ------------------------------------------------------------------
+    // 3b. Gossip roundtrip
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_packet_serialize_deserialize_gossip() {
+        let packet = Packet::Gossip {
+            members: vec![
+                NodeGossip {
+                    node_id: NodeId(0x1111_2222_3333_4444),
+                    address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9100),
+                    status: NodeStatus::Healthy,
+                    incarnation: 7,
+                },
+                NodeGossip {
+                    node_id: NodeId(0xAAAA_BBBB_CCCC_DDDD),
+                    address: SocketAddr::new(
+                        IpAddr::V6("::1".parse().unwrap()),
+                        49152,
+                    ),
+                    status: NodeStatus::Suspicious,
+                    incarnation: u64::MAX,
+                },
+                NodeGossip {
+                    node_id: NodeId(1),
+                    address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 0),
+                    status: NodeStatus::Joining,
+                    incarnation: 0,
+                },
+            ],
+        };
+
+        let bytes = packet.to_bytes(99);
+        let (seq, decoded) = Packet::from_bytes(&bytes).expect("gossip deserialization failed");
+
+        assert_eq!(seq, 99);
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn test_packet_gossip_rejects_truncated_payload() {
+        // A header followed by a truncated entry must not panic and must
+        // fail cleanly.
+        let packet = Packet::Gossip {
+            members: vec![NodeGossip {
+                node_id: NodeId(42),
+                address: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9100),
+                status: NodeStatus::Healthy,
+                incarnation: 3,
+            }],
+        };
+        let bytes = packet.to_bytes(1);
+        // Keep the header + count, chop the entry in half.
+        let truncated = &bytes[..bytes.len() - 5];
+        assert!(Packet::from_bytes(truncated).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // 3c. Spawn request/response roundtrips
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_packet_serialize_deserialize_spawn_response() {
+        let packet = Packet::SpawnResponse {
+            request_id: 0xDEAD_BEEF,
+            actor_id: 424242,
+            success: true,
+        };
+        let bytes = packet.to_bytes(3);
+        let (seq, decoded) = Packet::from_bytes(&bytes).unwrap();
+        assert_eq!(seq, 3);
         assert_eq!(decoded, packet);
     }
 
