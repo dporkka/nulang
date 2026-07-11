@@ -45,3 +45,46 @@ pub struct ToolSchema {
     /// JSON schema for the tool arguments.
     pub parameters: serde_json::Value,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_llm_request_default() {
+        let req = LlmRequest::default();
+        assert!(req.model.is_empty());
+        assert!(req.messages.is_empty());
+        assert!(req.tools.is_empty());
+        assert!(req.memory.is_empty());
+        assert!(req.pricing.is_none());
+    }
+
+    #[test]
+    fn test_model_pricing_default() {
+        let pricing = ModelPricing::default();
+        assert_eq!(pricing.input_cost_per_1k, 0.0);
+        assert_eq!(pricing.output_cost_per_1k, 0.0);
+    }
+
+    #[test]
+    fn test_tool_schema_construction() {
+        let schema = ToolSchema {
+            name: "get_weather".to_string(),
+            description: "Get the weather".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        assert_eq!(schema.name, "get_weather");
+        assert_eq!(schema.description, "Get the weather");
+    }
+
+    #[test]
+    fn test_llm_message() {
+        let msg = LlmMessage {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+        };
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.content, "Hello");
+    }
+}

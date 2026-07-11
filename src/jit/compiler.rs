@@ -380,3 +380,25 @@ fn emit_unary(builder: &mut FunctionBuilder, helpers: &HashMap<RuntimeHelper, Fu
 fn emit_self_unary(builder: &mut FunctionBuilder, helpers: &HashMap<RuntimeHelper, FuncRef>, regs_ptr: Value, reg: usize, helper: RuntimeHelper) {
     emit_unary(builder, helpers, regs_ptr, reg, reg, helper);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::OpCode;
+
+    #[test]
+    fn test_is_opcode_compilable_mvp() {
+        assert!(is_opcode_compilable(OpCode::IAdd));
+        assert!(is_opcode_compilable(OpCode::ISub));
+        assert!(is_opcode_compilable(OpCode::Move));
+        assert!(is_opcode_compilable(OpCode::Jmp));
+        assert!(is_opcode_compilable(OpCode::Ret));
+    }
+
+    #[test]
+    fn test_is_opcode_compilable_not_mvp() {
+        assert!(!is_opcode_compilable(OpCode::Spawn));
+        assert!(!is_opcode_compilable(OpCode::Send));
+        assert!(!is_opcode_compilable(OpCode::FFICall));
+    }
+}

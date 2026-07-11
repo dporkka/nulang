@@ -25,3 +25,37 @@ pub fn complete_sync(client: &dyn LlmClient, request: LlmRequest) -> Result<LlmR
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::request::LlmRequest;
+    use crate::ai::response::{LlmResponse, TokenUsage};
+
+    struct TestClient;
+
+    #[async_trait]
+    impl LlmClient for TestClient {
+        async fn complete(&self, _request: LlmRequest) -> Result<LlmResponse, String> {
+            Ok(LlmResponse {
+                content: Some("test".to_string()),
+                tool_calls: vec![],
+                model: "test".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: TokenUsage::new(0, 0),
+            })
+        }
+    }
+
+    #[test]
+    fn test_complete_sync_requires_runtime() {
+        // Calling complete_sync without a Tokio runtime should work because
+        // the function creates a temporary single-threaded runtime when none
+        // is available.
+        let client = TestClient;
+        let request = LlmRequest::default();
+        let result = complete_sync(&client, request);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content.as_deref(), Some("test"));
+    }
+}

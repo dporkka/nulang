@@ -222,6 +222,11 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
 
     /// Run a debate and return its final output string.
     fn debate_run(&mut self, _id: i64) -> Option<String> { None }
+
+    /// Try to receive a message from the current actor's mailbox.
+    /// Returns `Some((behavior_id, value))` if a message is available,
+    /// or `None` if the mailbox is empty. Default returns `None`.
+    fn try_receive(&mut self) -> Option<(u16, Value)> { None }
 }
 
 /// Standalone callbacks used when the VM runs without an actor runtime.
@@ -2201,6 +2206,18 @@ impl VM {
                 }
             }
 
+            // -- Receive (message pattern matching) --
+            // Reads the next message from the actor's mailbox via the runtime
+            // callback. If a message is available, stores its first argument;
+            // otherwise stores nil.
+            OpCode::Receive => {
+                let dst = instr.op1;
+                let value = self.actor_callbacks.try_receive()
+                    .map(|(_bid, v)| v)
+                    .unwrap_or(Value::nil());
+                self.frames[frame_idx].regs[dst as usize] = value;
+            }
+
             // All other opcodes are not yet implemented in the interpreter.
             _ => {
                 return Err(NuError::VMError(format!(
@@ -3058,7 +3075,7 @@ mod vm_tests {
     fn test_ffi_call_libm_sqrt() {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
-        use crate::compiler::Compiler;
+        use crate::typechecker::TypeChecker;
 
         let source = r#"
             extern "libm.so.6" {
@@ -3068,8 +3085,10 @@ mod vm_tests {
         "#;
         let tokens = Lexer::new(source).lex().expect("lex");
         let ast = Parser::new(tokens).parse_module().expect("parse");
-        let mut compiler = Compiler::new("test");
-        let module = compiler.compile_module(&ast).expect("compile").clone();
+        let _ = TypeChecker::new().check_module(&ast).expect("typecheck");
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir).expect("mir lower");
+        let module = crate::mir_codegen::compile_mir(&mir, "test").expect("compile");
 
         let mut vm = VM::new();
         vm.load_module(module);

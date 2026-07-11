@@ -900,7 +900,66 @@ impl<'c> FnLowerer<'c> {
                 );
                 Ok(())
             }
-            hir::RValue::Receive { .. } => Err(nyi("receive in HIR/MIR pipeline")),
+            hir::RValue::PipelineNew { .. } => {
+                self.b.assign(dst, mir::RValue::PipelineNew);
+                Ok(())
+            }
+            hir::RValue::PipelineStage { id, name, actor, template, .. } => {
+                let i = self.lower_operand(id)?;
+                let n = self.lower_operand(name)?;
+                let a = self.lower_operand(actor)?;
+                let t = self.lower_operand(template)?;
+                self.b.assign(dst, mir::RValue::PipelineStage { id: i, name: n, actor: a, template: t });
+                Ok(())
+            }
+            hir::RValue::PipelineRun { id, input, .. } => {
+                let i = self.lower_operand(id)?;
+                let inp = self.lower_operand(input)?;
+                self.b.assign(dst, mir::RValue::PipelineRun { id: i, input: inp });
+                Ok(())
+            }
+            hir::RValue::SupervisorNew { .. } => {
+                self.b.assign(dst, mir::RValue::SupervisorNew);
+                Ok(())
+            }
+            hir::RValue::SupervisorWorker { id, name, actor, description, .. } => {
+                let i = self.lower_operand(id)?;
+                let n = self.lower_operand(name)?;
+                let a = self.lower_operand(actor)?;
+                let d = self.lower_operand(description)?;
+                self.b.assign(dst, mir::RValue::SupervisorWorker { id: i, name: n, actor: a, description: d });
+                Ok(())
+            }
+            hir::RValue::SupervisorRun { id, task, .. } => {
+                let i = self.lower_operand(id)?;
+                let t = self.lower_operand(task)?;
+                self.b.assign(dst, mir::RValue::SupervisorRun { id: i, task: t });
+                Ok(())
+            }
+            hir::RValue::DebateNew { topic, rounds, threshold, .. } => {
+                let top = self.lower_operand(topic)?;
+                let r = self.lower_operand(rounds)?;
+                let th = self.lower_operand(threshold)?;
+                self.b.assign(dst, mir::RValue::DebateNew { topic: top, rounds: r, threshold: th });
+                Ok(())
+            }
+            hir::RValue::DebateParticipant { id, name, stance, actor, .. } => {
+                let i = self.lower_operand(id)?;
+                let n = self.lower_operand(name)?;
+                let s = self.lower_operand(stance)?;
+                let a = self.lower_operand(actor)?;
+                self.b.assign(dst, mir::RValue::DebateParticipant { id: i, name: n, stance: s, actor: a });
+                Ok(())
+            }
+            hir::RValue::DebateRun { id, .. } => {
+                let i = self.lower_operand(id)?;
+                self.b.assign(dst, mir::RValue::DebateRun { id: i });
+                Ok(())
+            }
+            hir::RValue::Receive { .. } => {
+                self.b.assign(dst, mir::RValue::Const(crate::bytecode::Constant::Nil));
+                Ok(())
+            }
         }
     }
 
@@ -1189,5 +1248,38 @@ fn literal_to_constant(lit: &crate::ast::Literal) -> crate::bytecode::Constant {
         Literal::Bool(b) => Constant::Bool(*b),
         Literal::Nil => Constant::Nil,
         Literal::Unit => Constant::Unit,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_nyi_error() {
+        let err = nyi("feature_x");
+        match err {
+            NuError::NotYetImplemented { feature, span } => {
+                assert_eq!(feature, "feature_x");
+                assert_eq!(span, Span::default());
+            }
+            _ => panic!("expected NotYetImplemented"),
+        }
+    }
+
+    #[test]
+    fn test_compile_err() {
+        let err = compile_err("something broke");
+        match err {
+            NuError::VMError(msg) => assert_eq!(msg, "something broke"),
+            _ => panic!("expected VMError"),
+        }
+    }
+
+    #[test]
+    fn test_lower_empty_module() {
+        let hir_module = hir::Module::new("test");
+        let mir_module = lower_module(&hir_module).unwrap();
+        assert_eq!(mir_module.name, "test");
     }
 }

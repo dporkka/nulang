@@ -7,9 +7,8 @@
 //! - Graceful error handling
 
 use crate::ast::{AstModule, Decl, Expr};
-use crate::compiler::Compiler;
-use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
 use crate::lexer::Lexer;
+use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
 use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
 use crate::types::{Capability, NuError, NuResult, Span, Type, TypeContext};
@@ -28,16 +27,10 @@ pub struct Repl {
     last_bytecode: Option<String>,
     /// Last AST (for :ast command display)
     last_ast: Option<AstModule>,
-    /// Whether to try the experimental HIR/MIR pipeline before falling back
-    /// to the stable compiler, matching the CLI's `--experimental-mir` flag.
-    /// The REPL used to always try the new pipeline first regardless of this
-    /// flag; that silently gave `nulang --repl` different compiler behavior
-    /// than `nulang file.nu` for the same source.
-    experimental_mir: bool,
 }
 
 impl Repl {
-    pub fn new(experimental_mir: bool) -> Self {
+    pub fn new() -> Self {
         Repl {
             vm: VM::new(),
             accumulated_decls: Vec::new(),
@@ -45,7 +38,6 @@ impl Repl {
             type_checker: TypeChecker::new(),
             last_bytecode: None,
             last_ast: None,
-            experimental_mir,
         }
     }
 
@@ -113,6 +105,9 @@ impl Repl {
                         self.last_bytecode = None;
                         self.last_ast = None;
                         println!("Environment reset.");
+                    }
+                    "version" | "ver" => {
+                        println!("nulang v{}", env!("CARGO_PKG_VERSION"));
                     }
                     unknown => {
                         println!("Unknown command: :{}. Type :help for help.", unknown);
@@ -219,32 +214,14 @@ impl Repl {
             let _cap = cap_analyzer.infer_cap(&cap_ctx, expr)?;
         }
 
-        // Compile the combined module. The stable compiler is the default,
-        // matching the CLI; the experimental HIR/MIR pipeline only runs when
-        // `--experimental-mir` was passed, falling back loudly on anything
-        // it can't yet lower (see main.rs::run_source).
-        let code_module = if self.experimental_mir {
-            match compile_with_new_pipeline(&combined_module, "repl") {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("HIR/MIR pipeline failed (falling back): {}", e);
-                    let mut compiler = Compiler::new("repl");
-                    compiler.compile_module(&combined_module)?.clone()
-                }
-            }
-        } else {
-            let mut compiler = Compiler::new("repl");
-            compiler.compile_module(&combined_module)?.clone()
-        };
+        // Compile the combined module via the HIR/MIR pipeline.
+        let code_module = compile_with_new_pipeline(&combined_module, "repl")?;
         self.last_bytecode = Some(disassemble_module(&code_module));
-
-        // Each evaluation recompiles and reruns the full accumulated program
         // from scratch (see `combined_module` above), so no closure created
         // by a previous evaluation can still be reachable — safe to reclaim
         // their capture environments before this run instead of leaking them
         // for the life of the REPL session.
         self.vm.clear_closure_envs();
-
         // Load and execute
         self.vm.load_module(code_module);
         let value = self.vm.run()?;
@@ -338,6 +315,7 @@ impl Repl {
         println!("  :bytecode, :bc   Show bytecode for the last expression");
         println!("  :clear           Clear the screen");
         println!("  :reset           Reset the environment");
+        println!("  :version, :ver   Print version and exit (repl keeps running)");
     }
 
     fn print_error(&self, err: &NuError) {
@@ -359,13 +337,6 @@ impl Repl {
         self.vm.closure_env_count()
     }
 
-    /// Whether this REPL tries the experimental HIR/MIR pipeline before
-    /// falling back to the stable compiler. Exposed for testing that the
-    /// constructor's flag is actually honored, not silently ignored.
-    #[cfg(test)]
-    pub(crate) fn uses_experimental_mir(&self) -> bool {
-        self.experimental_mir
-    }
 
     /// The last evaluation's disassembled bytecode, if any. Exposed for
     /// testing which compiler backend actually ran (the two backends use
@@ -379,7 +350,7 @@ impl Repl {
 
 impl Default for Repl {
     fn default() -> Self {
-        Self::new(false)
+        Self::new()
     }
 }
 
@@ -387,8 +358,7 @@ impl Default for Repl {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Try the new HIR/MIR pipeline; on failure the caller can fall back to the
-/// legacy compiler.
+/// Compile via the HIR/MIR pipeline.
 fn compile_with_new_pipeline(ast: &AstModule, name: &str) -> NuResult<crate::bytecode::CodeModule> {
     let hir = crate::hir_lower::lower_module(ast);
     let mir = crate::mir_lower::lower_module(&hir)?;
@@ -581,7 +551,7 @@ mod tests {
     /// would accumulate in the VM forever.
     #[test]
     fn test_repl_does_not_leak_closure_envs_across_evaluations() {
-        let mut repl = Repl::new(false);
+        let mut repl = Repl::new();
         for _ in 0..20 {
             repl.execute("let a = 40 in let add = fn(x) { x + a } in add(2)")
                 .unwrap();
@@ -593,38 +563,11 @@ mod tests {
         );
     }
 
-    /// Regression test: the REPL used to always try the experimental
-    /// HIR/MIR pipeline first regardless of `--experimental-mir`, giving
-    /// `nulang --repl` different compiler behavior than `nulang file.nu` for
-    /// identical source. `Repl::new`'s flag must actually be stored and
-    /// honored, not silently dropped.
+    /// The REPL compiles through the HIR/MIR pipeline.
     #[test]
-    fn test_repl_honors_experimental_mir_flag() {
-        assert!(!Repl::new(false).uses_experimental_mir());
-        assert!(Repl::new(true).uses_experimental_mir());
-    }
-
-    /// Behavioral version of the above: the two backends use different
-    /// register-allocation schemes (MIR always wraps top-level code in a
-    /// synthetic `__main` function reached via `Call`, so its disassembly
-    /// includes a "Function Table" section even for a bare expression;
-    /// the stable compiler inlines top-level code directly and does not).
-    /// Confirms `experimental_mir` actually steers which compiler runs, not
-    /// just that the flag is stored.
-    #[test]
-    fn test_repl_experimental_mir_flag_selects_the_compiler_that_actually_runs() {
-        let mut legacy = Repl::new(false);
-        legacy.execute("1 + 2").unwrap();
-        assert!(
-            !legacy.last_bytecode().unwrap().contains("Function Table"),
-            "experimental_mir=false must compile through the stable compiler, not MIR"
-        );
-
-        let mut mir = Repl::new(true);
-        mir.execute("1 + 2").unwrap();
-        assert!(
-            mir.last_bytecode().unwrap().contains("Function Table"),
-            "experimental_mir=true must compile through the HIR/MIR pipeline"
-        );
+    fn test_repl_uses_mir_pipeline() {
+        let mut repl = Repl::new();
+        repl.execute("1 + 2").unwrap();
+        assert!(repl.last_bytecode().unwrap().contains("Function Table"));
     }
 }

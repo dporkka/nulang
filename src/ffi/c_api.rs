@@ -10,7 +10,6 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 
-use crate::compiler::Compiler;
 use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -135,8 +134,9 @@ fn compile_source(source: &str) -> Result<crate::bytecode::CodeModule, NuError> 
         }
     }
 
-    let mut compiler = Compiler::new("main");
-    let code_module = compiler.compile_module(&ast)?.clone();
+    let hir = crate::hir_lower::lower_module(&ast);
+    let mir = crate::mir_lower::lower_module(&hir)?;
+    let code_module = crate::mir_codegen::compile_mir(&mir, "main")?;
     Ok(code_module)
 }
 

@@ -1111,8 +1111,9 @@ impl Parser {
                     TokenKind::Send => self.parse_send_keyword(),
                     TokenKind::Ask => self.parse_ask(),
                     TokenKind::Perform => self.parse_perform(),
-                    TokenKind::Emit => self.parse_emit(),
                     TokenKind::Handle => self.parse_handle(),
+                    TokenKind::Emit => self.parse_emit(),
+                    TokenKind::Receive => self.parse_receive(),
                     TokenKind::For => self.parse_for(),
                     TokenKind::Migrate => self.parse_migrate(),
                     TokenKind::Return => {
@@ -1729,6 +1730,36 @@ impl Parser {
             handlers,
             span,
         })
+    }
+
+    fn parse_receive(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.expect(TokenKind::Receive)?;
+        self.expect(TokenKind::LBrace)?;
+        let mut arms = Vec::new();
+        self.skip_newlines();
+        while self.peek_kind() == &TokenKind::Pipe {
+            self.advance(); // consume '|'
+            let behavior_name = self.expect_ident("behavior name")?;
+            self.expect(TokenKind::LParen)?;
+            let mut params = Vec::new();
+            self.skip_newlines();
+            while self.peek_kind() != &TokenKind::RParen && !self.is_at_end() {
+                params.push(self.expect_ident("param name")?);
+                self.skip_newlines();
+                if !self.consume_if(&TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines();
+            }
+            self.expect(TokenKind::RParen)?;
+            self.expect(TokenKind::FatArrow)?;
+            let body = self.parse_expr()?;
+            arms.push((behavior_name, params, body));
+            self.skip_newlines_semicolons();
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Expr::Receive { arms, span })
     }
 
     fn parse_for(&mut self) -> NuResult<Expr> {

@@ -578,3 +578,21 @@ mod tests {
         assert!((sqrt(4.0) - 2.0).abs() < 1e-12);
     }
 }
+
+/// Map a Nulang type to its FFI representation.
+/// Moved from compiler.rs; shared with the MIR codegen.
+pub(crate) fn nulang_type_to_ffi_type(ty: &crate::types::Type) -> Option<crate::bytecode::FfiType> {
+    use crate::bytecode::FfiType;
+    use crate::types::Type;
+    match ty {
+        Type::Primitive(p) => match p {
+            crate::types::PrimitiveType::Int => Some(FfiType::Int),
+            crate::types::PrimitiveType::Float => Some(FfiType::Float),
+            crate::types::PrimitiveType::Bool => Some(FfiType::Bool),
+            crate::types::PrimitiveType::String => Some(FfiType::String),
+            crate::types::PrimitiveType::Unit => Some(FfiType::Unit),
+            _ => None,
+        },
+        _ => None,
+    }
+}

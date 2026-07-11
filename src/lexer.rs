@@ -23,7 +23,7 @@ pub enum TokenKind {
     Actor, Behavior, State, SelfKw, Spawn, Send, Ask,
     Persistent, Local, Durable, EventSourced, Crdt, Emit,
     Workflow, Step, Parallel, Compensate, Await, Subworkflow,
-    Agent,
+    Agent, Receive,
     Effect, Perform, Handle, Resume,
     Extern,
     Module, Import, Pub, Priv, Where,
@@ -735,6 +735,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "unit" => Some(TokenKind::UnitLit),
         "tool" => Some(TokenKind::Tool),
         "agent" => Some(TokenKind::Agent),
+        "receive" => Some(TokenKind::Receive),
         _ => None,
     }
 }

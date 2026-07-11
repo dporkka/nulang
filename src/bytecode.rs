@@ -526,3 +526,353 @@ impl CodeModule {
         self.instructions.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Instruction encoding / decoding round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_instruction_encode_decode_roundtrip() {
+        // new0: no operands
+        let i0 = Instruction::new0(OpCode::Halt);
+        let enc0 = i0.encode();
+        let dec0 = Instruction::decode(enc0).unwrap();
+        assert_eq!(i0, dec0);
+
+        // new1: one operand
+        let i1 = Instruction::new1(OpCode::Load, 0x42);
+        let enc1 = i1.encode();
+        let dec1 = Instruction::decode(enc1).unwrap();
+        assert_eq!(i1, dec1);
+
+        // new2: two operands
+        let i2 = Instruction::new2(OpCode::IAdd, 0x12, 0x34);
+        let enc2 = i2.encode();
+        let dec2 = Instruction::decode(enc2).unwrap();
+        assert_eq!(i2, dec2);
+
+        // new3: three operands
+        let i3 = Instruction::new3(OpCode::Call, 0xAA, 0xBB, 0xCC);
+        let enc3 = i3.encode();
+        let dec3 = Instruction::decode(enc3).unwrap();
+        assert_eq!(i3, dec3);
+    }
+
+    #[test]
+    fn test_instruction_imm16() {
+        let instr = Instruction::new2(OpCode::ConstU, 0x12, 0x34);
+        assert_eq!(instr.imm16(), 0x1234);
+    }
+
+    #[test]
+    fn test_instruction_simm16() {
+        // op1=0xFF, op2=0x00 -> imm16 = 0xFF00 = 65280, sign-extended = -256
+        let instr = Instruction::new2(OpCode::Jmp, 0xFF, 0x00);
+        assert_eq!(instr.simm16(), -256i16);
+
+        // positive: op1=0x00, op2=0x7F -> imm16 = 0x007F = 127
+        let instr2 = Instruction::new2(OpCode::Jmp, 0x00, 0x7F);
+        assert_eq!(instr2.simm16(), 127i16);
+    }
+
+    #[test]
+    fn test_instruction_offset16() {
+        // offset16 uses op2+op3: op2=0xAB, op3=0xCD -> 0xABCD
+        let instr = Instruction::new3(OpCode::JmpT, 0x01, 0xAB, 0xCD);
+        assert_eq!(instr.offset16(), 0xABCDu16 as i16);
+
+        // negative offset: op2=0xFF, op3=0x00 -> 0xFF00 = -256
+        let instr2 = Instruction::new3(OpCode::JmpF, 0x01, 0xFF, 0x00);
+        assert_eq!(instr2.offset16(), -256i16);
+    }
+
+    // -----------------------------------------------------------------------
+    // OpCode from_u8 / as_u8 round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_opcode_from_u8_all() {
+        // Known opcodes exist in 0x00..=0xF4; gaps return None.
+        // Build a set of all known byte values for verification.
+        let known: Vec<u8> = (0x00..=0x08).chain(0x10..=0x15)
+            .chain(0x20..=0x2D).chain(0x30..=0x38)
+            .chain(0x40..=0x4B).chain(0x50..=0x57)
+            .chain(0x60..=0x64).chain(0x70..=0x7F)
+            .chain(0x80..=0x8E).chain(0x90..=0x93)
+            .chain(0x94..=0x9F).chain(0xA0..=0xA3)
+            .chain(0xB0..=0xB0).chain(0xC0..=0xC5)
+            .chain(0xD0..=0xD5).chain(0xE0..=0xE7)
+            .chain(0xF0..=0xF4)
+            .collect();
+
+        for byte in 0..=0xF4u8 {
+            let result = OpCode::from_u8(byte);
+            if known.contains(&byte) {
+                assert!(result.is_some(), "expected Some(OpCode) for 0x{byte:02X}");
+                assert_eq!(result.unwrap().as_u8(), byte, "round-trip failed for 0x{byte:02X}");
+            } else {
+                assert!(result.is_none(), "expected None for gap byte 0x{byte:02X}, got {result:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_opcode_from_u8_invalid() {
+        for byte in 0xF5..=0xFFu8 {
+            assert_eq!(
+                OpCode::from_u8(byte),
+                None,
+                "byte 0x{byte:02X} should return None"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Constant variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_constant_variants() {
+        let c_int = Constant::Int(42);
+        assert_eq!(c_int, Constant::Int(42));
+        assert_ne!(c_int, Constant::Int(0));
+
+        let c_float = Constant::Float(3.14);
+        assert_eq!(c_float, Constant::Float(3.14));
+
+        let c_str = Constant::String("hello".into());
+        assert_eq!(c_str, Constant::String("hello".into()));
+
+        let c_true = Constant::Bool(true);
+        assert_eq!(c_true, Constant::Bool(true));
+
+        let c_false = Constant::Bool(false);
+        assert_eq!(c_false, Constant::Bool(false));
+        assert_ne!(c_true, c_false);
+
+        assert_eq!(Constant::Nil, Constant::Nil);
+        assert_eq!(Constant::Unit, Constant::Unit);
+        assert_ne!(Constant::Nil, Constant::Unit);
+
+        let c_type = Constant::TypeDescriptor("Int".into());
+        assert_eq!(c_type, Constant::TypeDescriptor("Int".into()));
+
+        let c_fn = Constant::FunctionRef(7);
+        assert_eq!(c_fn, Constant::FunctionRef(7));
+
+        let c_beh = Constant::BehaviorRef(3);
+        assert_eq!(c_beh, Constant::BehaviorRef(3));
+    }
+
+    // -----------------------------------------------------------------------
+    // CodeModule operations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_code_module_emit_and_patch() {
+        let mut modl = CodeModule::new("test");
+        assert!(modl.instructions.is_empty());
+
+        // Emit a Jmp (placeholder with zeros)
+        let idx = modl.emit(Instruction::new2(OpCode::Jmp, 0, 0));
+        assert_eq!(idx, 0);
+        assert_eq!(modl.instructions.len(), 1);
+
+        // Emit a second instruction so offsets make sense
+        modl.emit(Instruction::new0(OpCode::Nop));
+        assert_eq!(modl.instructions.len(), 2);
+
+        // Patch the jump at idx 0 to skip one instruction (offset +2 = from idx 0 to idx 2)
+        modl.patch_jump(0, 2);
+        assert_eq!(modl.instructions[0].op1, 0);
+        assert_eq!(modl.instructions[0].op2, 2);
+
+        // Decode round-trip
+        let enc = modl.instructions[0].encode();
+        let dec = Instruction::decode(enc).unwrap();
+        assert_eq!(dec.opcode, OpCode::Jmp);
+        assert_eq!(dec.op1, 0);
+        assert_eq!(dec.op2, 2);
+    }
+
+    #[test]
+    fn test_code_module_add_constant() {
+        let mut modl = CodeModule::new("test_const");
+        assert!(modl.constants.is_empty());
+
+        let idx0 = modl.add_constant(Constant::Int(100));
+        assert_eq!(idx0, 0);
+
+        let idx1 = modl.add_constant(Constant::String("foo".into()));
+        assert_eq!(idx1, 1);
+
+        let idx2 = modl.add_constant(Constant::Nil);
+        assert_eq!(idx2, 2);
+
+        assert_eq!(modl.constants.len(), 3);
+        assert_eq!(modl.constants[0], Constant::Int(100));
+        assert_eq!(modl.constants[1], Constant::String("foo".into()));
+        assert_eq!(modl.constants[2], Constant::Nil);
+    }
+
+    #[test]
+    fn test_code_module_add_behavior() {
+        let mut modl = CodeModule::new("test_beh");
+
+        let entry = BehaviorTableEntry {
+            name: "step1".into(),
+            param_count: 2,
+            code_offset: 10,
+            local_count: 8,
+            effect_mask: 0b0011,
+            compensate_offset: None,
+            parallel_branches: None,
+        };
+        let idx = modl.add_behavior(entry);
+        assert_eq!(idx, 0);
+
+        let entry2 = BehaviorTableEntry {
+            name: "step2".into(),
+            param_count: 1,
+            code_offset: 20,
+            local_count: 4,
+            effect_mask: 0,
+            compensate_offset: Some(30),
+            parallel_branches: Some(vec!["a".into(), "b".into()]),
+        };
+        let idx2 = modl.add_behavior(entry2);
+        assert_eq!(idx2, 1);
+
+        assert_eq!(modl.behaviors.len(), 2);
+        assert_eq!(modl.behaviors[0].name, "step1");
+        assert_eq!(modl.behaviors[1].name, "step2");
+        assert_eq!(modl.behaviors[1].compensate_offset, Some(30));
+    }
+
+    #[test]
+    fn test_code_module_add_handler_table() {
+        let mut modl = CodeModule::new("test_ht");
+
+        // Table with fallback
+        let ht_with = HandlerTable {
+            bindings: vec![HandlerBinding {
+                effect_name: "io.read".into(),
+                handler_offset: 100,
+                arg_count: 1,
+                result_reg: 0,
+            }],
+            fallback_offset: Some(200),
+        };
+        let idx0 = modl.add_handler_table(ht_with);
+        assert_eq!(idx0, 0);
+
+        // Table without fallback
+        let ht_without = HandlerTable {
+            bindings: vec![],
+            fallback_offset: None,
+        };
+        let idx1 = modl.add_handler_table(ht_without);
+        assert_eq!(idx1, 1);
+
+        assert_eq!(modl.handler_tables.len(), 2);
+        assert_eq!(modl.handler_tables[0].bindings.len(), 1);
+        assert_eq!(modl.handler_tables[0].fallback_offset, Some(200));
+        assert!(modl.handler_tables[1].bindings.is_empty());
+        assert_eq!(modl.handler_tables[1].fallback_offset, None);
+    }
+
+    #[test]
+    fn test_code_module_current_offset() {
+        let mut modl = CodeModule::new("test_off");
+        assert_eq!(modl.current_offset(), 0);
+
+        modl.emit(Instruction::new0(OpCode::Nop));
+        assert_eq!(modl.current_offset(), 1);
+
+        modl.emit(Instruction::new0(OpCode::Nop));
+        modl.emit(Instruction::new0(OpCode::Nop));
+        assert_eq!(modl.current_offset(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // ActorMeta
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_actor_meta_new() {
+        let meta = ActorMeta::new("my_actor");
+        assert_eq!(meta.name, "my_actor");
+        assert!(!meta.persistent);
+        assert!(meta.state_models.is_empty());
+        assert!(meta.state_defaults.is_empty());
+        assert!(meta.behavior_indices.is_empty());
+        assert!(!meta.is_workflow);
+        assert!(!meta.is_agent);
+        assert!(meta.tools.is_empty());
+        assert_eq!(meta.semantic_memory_dimensions, None);
+        assert_eq!(meta.procedural_memory_namespace, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // HandlerTable fallback
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_handler_table_fallback() {
+        // With fallback
+        let ht = HandlerTable {
+            bindings: vec![],
+            fallback_offset: Some(42),
+        };
+        assert!(ht.fallback_offset.is_some());
+        assert_eq!(ht.fallback_offset.unwrap(), 42);
+        assert!(ht.bindings.is_empty());
+
+        // Without fallback
+        let ht2 = HandlerTable {
+            bindings: vec![HandlerBinding {
+                effect_name: "test".into(),
+                handler_offset: 10,
+                arg_count: 2,
+                result_reg: 1,
+            }],
+            fallback_offset: None,
+        };
+        assert!(ht2.fallback_offset.is_none());
+        assert_eq!(ht2.bindings.len(), 1);
+        assert_eq!(ht2.bindings[0].effect_name, "test");
+    }
+
+    // -----------------------------------------------------------------------
+    // ForeignFunctionDef
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_foreign_function_def() {
+        let def = ForeignFunctionDef {
+            library: "mylib.so".into(),
+            symbol: "my_func".into(),
+            params: vec![FfiType::Int, FfiType::String],
+            ret: FfiType::Float,
+        };
+        assert_eq!(def.library, "mylib.so");
+        assert_eq!(def.symbol, "my_func");
+        assert_eq!(def.params.len(), 2);
+        assert_eq!(def.params[0], FfiType::Int);
+        assert_eq!(def.params[1], FfiType::String);
+        assert_eq!(def.ret, FfiType::Float);
+
+        // All FfiType variants
+        assert_eq!(FfiType::Int, FfiType::Int);
+        assert_eq!(FfiType::Float, FfiType::Float);
+        assert_eq!(FfiType::Bool, FfiType::Bool);
+        assert_eq!(FfiType::String, FfiType::String);
+        assert_eq!(FfiType::Unit, FfiType::Unit);
+        assert_eq!(FfiType::Pointer, FfiType::Pointer);
+        assert_ne!(FfiType::Int, FfiType::Float);
+    }
+}

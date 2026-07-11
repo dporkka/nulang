@@ -5,7 +5,7 @@
 
 ## Project Overview
 
-**Nulang** is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system (Hindley-Milner inference + reference capabilities + row-polymorphic algebraic effects), a register-based bytecode VM, a Cranelift JIT, BEAM/OTP primitives, CRDTs, location-transparent distribution, SQLite/JSON persistence, PyO3 Python interop, and a C-compatible FFI layer. Status: Alpha; ~590+ tests pass (`cargo test`). License: Apache-2.0.
+**Nulang** is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system (Hindley-Milner inference + reference capabilities + row-polymorphic algebraic effects), a register-based bytecode VM, a Cranelift JIT, BEAM/OTP primitives, CRDTs, location-transparent distribution, SQLite/JSON persistence, PyO3 Python interop, and a C-compatible FFI layer. Status: Alpha; ~789 tests pass (`cargo test`). License: Apache-2.0.
 
 ## Architecture & Data Flow
 
@@ -18,7 +18,9 @@ source &str
   -> TypeChecker::check_module()          -> Type                  src/typechecker.rs (HM Algorithm W)
   -> EffectChecker::infer_effects()       -> EffectRow             src/effect_checker.rs (per Function decl)
   -> CapabilityAnalyzer::infer_cap()      -> Capability            src/effect_checker.rs
-  -> Compiler::compile_module()           -> CodeModule            src/compiler.rs (two-pass)
+  -> HIR lowering (hir_lower::lower_module) -> HIR Module          src/hir_lower.rs
+  -> MIR lowering (mir_lower::lower_module) -> MIR Module          src/mir_lower.rs
+  -> MIR codegen (mir_codegen::compile_mir)  -> CodeModule         src/mir_codegen.rs
   -> VM::load_module() + VM::run()        -> Value                 src/vm.rs (register VM + JIT tiering)
 ```
 
@@ -78,7 +80,7 @@ python3 verify_report.py                          # gate: validates codebase_ana
 
 ## Code Conventions & Common Patterns
 
-- **Naming**: `snake_case` functions/methods/modules/files; `PascalCase` types/structs/enums and enum variants; `SCREAMING_SNAKE_CASE` consts (`HOT_THRESHOLD`, `TAG_INT`, `PAYLOAD_MASK`). `nulang_` prefix on `extern "C"` JIT runtime helpers. `__main` is the synthetic function wrapping a top-level expression (parser + compiler).
+- **Naming**: `snake_case` functions/methods/modules/files; `PascalCase` types/structs/enums and enum variants; `SCREAMING_SNAKE_CASE` consts (`HOT_THRESHOLD`, `TAG_INT`, `PAYLOAD_MASK`). `nulang_` prefix on `extern "C"` JIT runtime helpers. `__main` is the synthetic function wrapping a top-level expression (parser + HIR lowering).
 - **Error model**: one project-wide `NuError` enum (`src/types.rs:523`) aliased `NuResult<T> = Result<T, NuError>`. Compile-time variants (`LexError`/`ParseError`/`TypeError`/`EffectError`/`CapError`/`LinearTypeError`) carry `{ msg: String, span: Span }`; runtime variants (`RuntimeError`/`VMError`/`PythonError`) carry `String`. `Display` formats spanned errors as `<Kind> at <line>:<col>: <msg>`. First error aborts; no error collection/recovery. `?` propagates. `EffectChecker`/`CapabilityAnalyzer` accumulate `diagnostics: Vec<String>` instead of failing fast. Runtime subsystems use per-domain enums (`RegisterError`, `PgError`) impl `std::error::Error`; persistence/network use `io::Result`/`Option`; JIT uses `CompileError`. No `anyhow`/`thiserror`.
 - **Async**: only `main.rs` (`#[tokio::main]`) and `src/lsp/` are async. VM, runtime, JIT, Python, REPL are all synchronous. Actor concurrency is cooperative reduction-yielding, not async tasks.
 - **Unsafe / FFI**: raw `*mut` pointers with hand-written `unsafe Send/Sync` and `SAFETY` doc justifications (ORCA headers, foreign-ref ops, `BytecodeRuntimeCallbacks`). JIT function pointers obtained via `unsafe transmute` of `*const u8`; bytecode must not mutate during JIT execution. Python: GIL acquired via `Python::attach`; `PythonObjectId` is a non-owning `Copy` handle (real refcount in `PythonRegistry`); `get_object` acquires GIL **before** the registry `Mutex` to avoid lock-order deadlock.
@@ -89,13 +91,15 @@ python3 verify_report.py                          # gate: validates codebase_ana
 
 ## Important Files
 
-- `src/main.rs` — CLI entry; hand-rolled arg parser (no clap); `run_source`/`check_source` pipeline; `mimalloc` global allocator; `#[tokio::main]`.
-- `src/lib.rs` — crate root; declares all 17 public modules; re-exports `crate::jit::reset_hot_counters`.
-- `src/types.rs` — `NuError`/`NuResult`, `Type`, `Capability`, `Effect`/`EffectRow`, `TypeContext`, `Span`, `ExitReason`.
-- `src/bytecode.rs` — `OpCode` (~91), `Instruction` (32-bit), `Constant`, `CodeModule`, handler/behavior/actor tables.
-- `src/vm.rs` — NaN-boxed `Value`, `Frame`, `VM`, `step`/`run`, effect `handler_stack`/`Continuation`, JIT hook, callback traits.
-- `src/runtime/mod.rs` — `Runtime` god-object; spawn/send/step/schedule/GC/supervision/distribution/persistence/CRDT orchestration.
-- `Cargo.toml` — single crate, no workspace, no features; deps: mimalloc, crossbeam, serde+serde_json, cranelift 0.132, tower-lsp 0.20, tokio (full), pyo3 0.29, rusqlite 0.40 (bundled), libloading 0.8. `[lib]` produces both `rlib` and `cdylib`.
+- `src/main.rs` — CLI entry; hand-rolled arg parser; `run_source`/`check_source` pipeline; `#[tokio::main]`.
+- `src/lib.rs` — crate root; declares all public modules.
+- `src/hir.rs`, `src/mir.rs` — High-level and Mid-level IR type definitions.
+- `src/hir_lower.rs`, `src/mir_lower.rs`, `src/mir_codegen.rs` — AST → HIR → MIR → bytecode pipeline.
+- `src/vm.rs` — NaN-boxed `Value`, `Frame`, `VM`, `step`/`run`, effect handlers, JIT hook, callback traits.
+- `src/runtime/mod.rs` — `Runtime` god-object; actors, scheduler, GC, supervision, distribution, persistence.
+- `src/lsp/mod.rs` — Full-featured LSP server (11 features: hover, goto def, references, rename, signature help, etc.).
+- `src/types.rs` — `NuError`/`NuResult`, `Type`, `Capability`, `EffectRow`, `Span`.
+- `src/bytecode.rs` — `OpCode` (~91), `Instruction` (32-bit), `Constant`, `CodeModule`.
 
 ## Runtime/Tooling Preferences
 
@@ -110,7 +114,7 @@ python3 verify_report.py                          # gate: validates codebase_ana
 - **Framework**: standard Rust `#[test]` + `#[cfg(test)]`. No proptest/quickcheck/criterion. No `#[ignore]`/`#[should_panic]`/async tests.
 - **Organization**: two styles — (a) inline `mod tests` at file foot (`compiler.rs`, `lexer.rs`, `parser.rs`, `typechecker.rs`, `effect_checker.rs`, most `runtime/*.rs`, `jit/simd_*`, `python/*`, `lsp/mod.rs`); (b) dedicated test files (`src/integration_tests.rs`, `src/stress_tests.rs`, `src/runtime/tests.rs`, `src/jit/tests.rs`).
 - **Naming**: `test_<subject>` (unit/integration), `stress_<scenario>` (chaos).
-- **Counts**: `integration_tests.rs` ~52 (end-to-end pipeline via `run_source`/`assert_int`/`run_source_with_runtime`), `stress_tests.rs` exactly 10 (actor lifecycle/supervision/scheduler fairness under load), `runtime/tests.rs` 110 (83 pre-v0.7 + 24 v0.7 BEAM primitives + 3 v1.0 scheduler/cycle-detector checks), `jit/tests.rs` 18.
+- **Counts**: `integration_tests.rs` ~106 (end-to-end pipeline via `run_source`/`assert_int`/`run_source_with_runtime`, plus ~20 MIR-pipeline tests via `run_source_new`/`assert_int_new`/`run_source_new_with_runtime`), `stress_tests.rs` exactly 10 (actor lifecycle/supervision/scheduler fairness under load), `runtime/tests.rs` 110 (83 pre-v0.7 + 24 v0.7 BEAM primitives + 3 v1.0 scheduler/cycle-detector checks), `jit/tests.rs` 18.
 - **Helpers/fixtures**: `run_source`/`compile_source`/`assert_int` + `SharedMemoryStore` (`Arc<Mutex<MemoryStore>>` impl `PersistenceStore`) for restart simulation (`integration_tests.rs`); `TestContext {counters, log}` (`stress_tests.rs`); `make_jit()` (`jit/tests.rs`).
 - **Run**: `cargo test` (test profile: LTO off, 16 codegen-units for fast parallel builds). `cargo test --release` for optimized runs.
 - **Gate scripts**: `verify_implementation.py` (runs `cargo test` + forbidden-pattern scans for known anti-patterns + asserts JIT integration) and `verify_report.py` (validates `codebase_analysis_report.md`). Exits 0 only on full pass.
@@ -121,5 +125,7 @@ python3 verify_report.py                          # gate: validates codebase_ana
 - The `escape_analysis.rs` module was removed; its former tests and references have been cleaned up.
 - NaN-tag constants are **duplicated** between `src/vm.rs`, `src/jit/runtime.rs`, `src/jit/typed_compiler.rs`, and `src/python/marshal.rs`. `marshal.rs` imports `TAG_PYTHON` from `bridge.rs` (`0x7FF6`) so it does not collide with `TAG_CLOSURE` (`0x7FF7`) or `TAG_STRING` (`0x7FFE`).
 - Remote actor messages send `behavior_id=0` as a placeholder (remote side resolves the name) — a known stub in the distributed trait API.
-- `LamportTime`/`LamportClock` is defined twice (`crdt.rs` ~line 470 and `crdt_reg.rs` ~line 19) — potential dedup target.
-- LSP is MVP: inlay hints (regex-heuristic type/cap/effect) + completion (keywords/effects/`fun` names) + full sync. **No hover, no diagnostics, no goto/refs.**
+- `LamportTime`/`LamportClock` are defined in `crdt.rs` and imported by `crdt_reg.rs` — single definition, no duplication.
+- LSP: **13 features** — hover, goto definition, document symbols, references, prepare rename, rename, signature help, code actions, formatting, semantic tokens, inlay hints (typechecker-backed for well-formed programs, regex fallback), completion, diagnostics (full frontend). Zero compiler warnings.
+- The `receive` expression (`receive { | Behavior(params) => expr }`) is fully implemented through lexer→parser→HIR→MIR→VM. The VM handler calls `ActorVmCallbacks::try_receive()` which pops the next message from the actor's mailbox and returns its first payload value. Pattern-matching dispatch across arms is future work (currently evaluates all arms and returns the first message value).
+- The compiler pipeline is MIR-exclusive (AST → HIR → MIR → bytecode). The legacy AST compiler (`src/compiler.rs`) has been removed.

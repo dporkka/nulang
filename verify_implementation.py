@@ -63,17 +63,7 @@ def check_warnings():
     return True
 
 def verify_files():
-    # 1. Check compiler.rs for unsafe transmute
-    if os.path.exists("src/compiler.rs"):
-        with open("src/compiler.rs", "r", encoding="utf-8") as f:
-            content = f.read()
-            if "transmute" in content and "0x83" in content:
-                print("Error: src/compiler.rs still contains unsafe transmute for 0x83.")
-                return False
-    else:
-        print("Error: src/compiler.rs does not exist.")
-        return False
-
+    # 1. (compiler.rs has been removed; MIR pipeline is now exclusive.)
     # 2. Check vm.rs for Frame caller and leaked SConcat
     if os.path.exists("src/vm.rs"):
         with open("src/vm.rs", "r", encoding="utf-8") as f:
@@ -128,7 +118,7 @@ def verify_files():
     # compiler/runtime pipeline.
     integrated_jit = False
     escape_analysis_dead = True
-    for filename in ["src/main.rs", "src/compiler.rs", "src/vm.rs"]:
+    for filename in ["src/main.rs", "src/vm.rs"]:
         if os.path.exists(filename):
             with open(filename, "r", encoding="utf-8") as f:
                 content = f.read()

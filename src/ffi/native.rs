@@ -197,3 +197,60 @@ pub unsafe fn register_native_function(
     reg.register(func);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::marshal::{CType, Signature};
+    use std::ffi::c_void;
+
+    #[test]
+    fn test_ffi_registry_new() {
+        let registry = FfiRegistry::new();
+        assert!(registry.functions.is_empty());
+        assert!(registry.libraries.is_empty());
+    }
+
+    #[test]
+    fn test_registry_register_and_lookup() {
+        let mut registry = FfiRegistry::new();
+        let dummy_ptr = std::ptr::null::<c_void>();
+        // SAFETY: null pointer is never called.
+        let func = unsafe { NativeFunction::new(dummy_ptr, Signature::new(vec![], CType::Unit), None, "test_fn".to_string()) };
+        registry.register(func);
+        let found = registry.resolve(None, "test_fn");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().symbol, "test_fn");
+    }
+
+    #[test]
+    fn test_registry_list() {
+        let mut registry = FfiRegistry::new();
+        let dummy_ptr = std::ptr::null::<c_void>();
+        // SAFETY: null pointers are never called.
+        let func1 = unsafe { NativeFunction::new(dummy_ptr, Signature::new(vec![], CType::Unit), None, "fn_a".to_string()) };
+        let func2 = unsafe { NativeFunction::new(dummy_ptr, Signature::new(vec![], CType::Unit), None, "fn_b".to_string()) };
+        registry.register(func1);
+        registry.register(func2);
+        assert_eq!(registry.functions.len(), 2);
+        let names: Vec<&str> = registry.functions.values().map(|f| f.symbol.as_str()).collect();
+        assert!(names.contains(&"fn_a"));
+        assert!(names.contains(&"fn_b"));
+    }
+
+    #[test]
+    fn test_registry_duplicate_name() {
+        let mut registry = FfiRegistry::new();
+        let dummy_ptr = std::ptr::null::<c_void>();
+        // SAFETY: null pointers are never called.
+        let func1 = unsafe { NativeFunction::new(dummy_ptr, Signature::new(vec![], CType::Unit), None, "dup".to_string()) };
+        let func2 = unsafe { NativeFunction::new(dummy_ptr, Signature::new(vec![], CType::Unit), None, "dup".to_string()) };
+        registry.register(func1);
+        // Second registration with the same name does not panic (HashMap overwrite).
+        registry.register(func2);
+        assert_eq!(registry.functions.len(), 1);
+        let found = registry.resolve(None, "dup");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().symbol, "dup");
+    }
+}

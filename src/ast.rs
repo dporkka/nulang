@@ -437,3 +437,163 @@ pub struct AstModule {
     pub name: String,
     pub decls: Vec<Decl>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_literal_variants() {
+        // Construct each Literal variant and verify Debug output
+        let i = Literal::Int(42);
+        assert_eq!(format!("{:?}", i), "Int(42)");
+
+        let f = Literal::Float(3.14);
+        assert_eq!(format!("{:?}", f), "Float(3.14)");
+
+        let s = Literal::String("hello".to_string());
+        assert_eq!(format!("{:?}", s), "String(\"hello\")");
+
+        let b = Literal::Bool(true);
+        assert_eq!(format!("{:?}", b), "Bool(true)");
+
+        let n = Literal::Nil;
+        assert_eq!(format!("{:?}", n), "Nil");
+
+        let u = Literal::Unit;
+        assert_eq!(format!("{:?}", u), "Unit");
+    }
+
+    #[test]
+    fn test_binop_variants() {
+        // Construct each BinOp variant
+        let ops = vec![
+            (BinOp::Add, "Add"),
+            (BinOp::Sub, "Sub"),
+            (BinOp::Mul, "Mul"),
+            (BinOp::Div, "Div"),
+            (BinOp::Mod, "Mod"),
+            (BinOp::Eq, "Eq"),
+            (BinOp::Ne, "Ne"),
+            (BinOp::Lt, "Lt"),
+            (BinOp::Le, "Le"),
+            (BinOp::Gt, "Gt"),
+            (BinOp::Ge, "Ge"),
+            (BinOp::And, "And"),
+            (BinOp::Or, "Or"),
+            (BinOp::BitAnd, "BitAnd"),
+            (BinOp::BitOr, "BitOr"),
+            (BinOp::BitXor, "BitXor"),
+            (BinOp::Shl, "Shl"),
+            (BinOp::Shr, "Shr"),
+            (BinOp::Assign, "Assign"),
+            (BinOp::Pipe, "Pipe"),
+        ];
+        for (op, name) in ops {
+            assert_eq!(format!("{:?}", op), name);
+        }
+    }
+
+    #[test]
+    fn test_unop_variants() {
+        assert_eq!(format!("{:?}", UnOp::Neg), "Neg");
+        assert_eq!(format!("{:?}", UnOp::Not), "Not");
+        assert_eq!(format!("{:?}", UnOp::Deref), "Deref");
+        assert_eq!(format!("{:?}", UnOp::Ref(Capability::Val)), "Ref(Val)");
+    }
+
+    #[test]
+    fn test_state_model_default() {
+        assert_eq!(StateModel::default(), StateModel::Local);
+    }
+
+    #[test]
+    fn test_span_default() {
+        let s = Span::default();
+        assert_eq!(s.start, 0);
+        assert_eq!(s.end, 0);
+        assert_eq!(s.line, 0);
+        assert_eq!(s.column, 0);
+    }
+
+    #[test]
+    fn test_ast_module_new() {
+        let m = AstModule {
+            name: "test".to_string(),
+            decls: vec![],
+        };
+        assert_eq!(m.name, "test");
+        assert!(m.decls.is_empty());
+    }
+
+    #[test]
+    fn test_effect_handler_new() {
+        // Without resume offset
+        let h = EffectHandler {
+            effect_name: "IO".to_string(),
+            op_name: "print".to_string(),
+            params: vec!["msg".to_string()],
+            body: Expr::Literal(Literal::Unit, Span::default()),
+            resume: false,
+        };
+        assert_eq!(h.effect_name, "IO");
+        assert_eq!(h.op_name, "print");
+        assert_eq!(h.params, vec!["msg"]);
+        assert!(matches!(h.body, Expr::Literal(Literal::Unit, _)));
+        assert!(!h.resume);
+
+        // With resume offset
+        let h2 = EffectHandler {
+            effect_name: "Net".to_string(),
+            op_name: "fetch".to_string(),
+            params: vec!["url".to_string()],
+            body: Expr::Literal(Literal::Int(0), Span::default()),
+            resume: true,
+        };
+        assert_eq!(h2.effect_name, "Net");
+        assert!(h2.resume);
+    }
+
+    #[test]
+    fn test_behavior_new() {
+        let b = Behavior {
+            name: "handle_msg".to_string(),
+            params: vec![("x".to_string(), Some(Type::int()))],
+            body: Expr::Literal(Literal::Unit, Span::default()),
+            effect: Some(EffectRow::empty()),
+            cap: Capability::Val,
+            span: Span::default(),
+        };
+        assert_eq!(b.name, "handle_msg");
+        assert_eq!(b.params.len(), 1);
+        assert_eq!(b.params[0].0, "x");
+        assert_eq!(b.params[0].1, Some(Type::int()));
+        assert_eq!(b.effect, Some(EffectRow::empty()));
+        assert_eq!(b.cap, Capability::Val);
+    }
+
+    #[test]
+    fn test_agent_pricing_default() {
+        let p = AgentPricing {
+            input: 0.001,
+            output: 0.002,
+        };
+        assert_eq!(p.input, 0.001);
+        assert_eq!(p.output, 0.002);
+    }
+
+    #[test]
+    fn test_extern_func_new() {
+        let f = ExternFunc {
+            name: "sqrt".to_string(),
+            params: vec![("x".to_string(), Type::float())],
+            ret: Type::float(),
+            span: Span::default(),
+        };
+        assert_eq!(f.name, "sqrt");
+        assert_eq!(f.params.len(), 1);
+        assert_eq!(f.params[0].0, "x");
+        assert_eq!(f.params[0].1, Type::float());
+        assert_eq!(f.ret, Type::float());
+    }
+}

@@ -230,6 +230,16 @@ pub enum RValue {
     Migrate { actor: Operand, node: Operand, ty: Type },
     CapCheck { operand: Operand, required: Capability },
     FFICall { symbol: String, args: Vec<Operand>, ty: Type },
+    // AI runtime builtins (Pipeline, Supervisor, Debate)
+    PipelineNew { ty: Type },
+    PipelineStage { id: Operand, name: Operand, actor: Operand, template: Operand, ty: Type },
+    PipelineRun { id: Operand, input: Operand, ty: Type },
+    SupervisorNew { ty: Type },
+    SupervisorWorker { id: Operand, name: Operand, actor: Operand, description: Operand, ty: Type },
+    SupervisorRun { id: Operand, task: Operand, ty: Type },
+    DebateNew { topic: Operand, rounds: Operand, threshold: Operand, ty: Type },
+    DebateParticipant { id: Operand, name: Operand, stance: Operand, actor: Operand, ty: Type },
+    DebateRun { id: Operand, ty: Type },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -314,6 +324,15 @@ impl RValue {
             RValue::Migrate { ty, .. } => ty.clone(),
             RValue::CapCheck { .. } => Type::bool(),
             RValue::FFICall { ty, .. } => ty.clone(),
+            RValue::PipelineNew { ty } => ty.clone(),
+            RValue::PipelineStage { ty, .. } => ty.clone(),
+            RValue::PipelineRun { ty, .. } => ty.clone(),
+            RValue::SupervisorNew { ty } => ty.clone(),
+            RValue::SupervisorWorker { ty, .. } => ty.clone(),
+            RValue::SupervisorRun { ty, .. } => ty.clone(),
+            RValue::DebateNew { ty, .. } => ty.clone(),
+            RValue::DebateParticipant { ty, .. } => ty.clone(),
+            RValue::DebateRun { ty, .. } => ty.clone(),
         }
     }
 }
@@ -343,5 +362,88 @@ impl Body {
 impl Module {
     pub fn new(name: impl Into<String>) -> Self {
         Module { name: name.into(), decls: Vec::new() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Literal;
+
+    #[test]
+    fn test_body_default() {
+        let body = Body::default();
+        assert!(body.stmts.is_empty());
+        assert_eq!(body.terminator, Terminator::Yield(Operand::Unit));
+    }
+
+    #[test]
+    fn test_body_push_stmt() {
+        let mut body = Body::new();
+        let stmt = Stmt::Let {
+            name: "x".into(),
+            ty: Type::int(),
+            value: RValue::Use(Operand::Literal(Literal::Int(42), Type::int())),
+            span: Span::default(),
+        };
+        body.push(stmt.clone());
+        assert_eq!(body.stmts.len(), 1);
+        assert_eq!(body.stmts[0], stmt);
+    }
+
+    #[test]
+    fn test_body_set_terminator() {
+        let mut body = Body::new();
+        body.set_terminator(Terminator::FnReturn(Some(Operand::Unit)));
+        assert_eq!(body.terminator, Terminator::FnReturn(Some(Operand::Unit)));
+    }
+
+    #[test]
+    fn test_operand_variants() {
+        let _ = Operand::Var("x".into(), Type::int());
+        let _ = Operand::Literal(Literal::Int(42), Type::int());
+        let _ = Operand::Unit;
+    }
+
+    #[test]
+    fn test_module_new() {
+        let m = Module::new("test");
+        assert_eq!(m.name, "test");
+        assert!(m.decls.is_empty());
+    }
+
+    #[test]
+    fn test_function_def_new() {
+        let def = FunctionDef {
+            name: "f".into(),
+            type_params: vec![],
+            params: vec![],
+            ret: Type::unit(),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+            body: Body::default(),
+            public: true,
+            span: Span::default(),
+        };
+        assert_eq!(def.name, "f");
+    }
+
+    #[test]
+    fn test_actor_def_new() {
+        let def = ActorDef {
+            name: "a".into(),
+            type_params: vec![],
+            persistent: false,
+            state_fields: vec![],
+            behaviors: vec![],
+            init: vec![],
+            is_workflow: false,
+            is_agent: false,
+            tools: vec![],
+            semantic_memory_dimensions: None,
+            procedural_memory_namespace: None,
+            span: Span::default(),
+        };
+        assert_eq!(def.name, "a");
     }
 }

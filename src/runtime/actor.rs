@@ -207,3 +207,96 @@ impl Actor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_actor_new() {
+        let actor = Actor::new(1, "test", 256);
+        assert_eq!(actor.id, 1);
+        assert_eq!(actor.name, "test");
+        assert_eq!(actor.state, ActorState::Created);
+        assert!(!actor.persistent);
+        assert!(!actor.is_workflow);
+        assert!(!actor.is_agent);
+        assert_eq!(actor.max_reductions, 1000);
+        assert_eq!(actor.reduction_count, 0);
+    }
+
+    #[test]
+    fn test_actor_set_and_get_state_field() {
+        let mut actor = Actor::new(1, "test", 256);
+        actor.set_state_field("key", Value::int(42));
+        assert_eq!(actor.get_state_field("key"), Some(Value::int(42)));
+    }
+
+    #[test]
+    fn test_actor_get_state_field_missing() {
+        let actor = Actor::new(1, "test", 256);
+        assert_eq!(actor.get_state_field("missing"), None);
+    }
+
+    #[test]
+    fn test_actor_set_state_field_updates() {
+        let mut actor = Actor::new(1, "test", 256);
+        actor.set_state_field("key", Value::int(1));
+        actor.set_state_field("key", Value::int(2));
+        assert_eq!(actor.get_state_field("key"), Some(Value::int(2)));
+    }
+
+    #[test]
+    fn test_actor_should_yield_false() {
+        let actor = Actor::new(1, "test", 256);
+        assert!(!actor.should_yield());
+    }
+
+    #[test]
+    fn test_actor_should_yield_true() {
+        let mut actor = Actor::new(1, "test", 256);
+        actor.increment_reductions(1000);
+        assert!(actor.should_yield());
+    }
+
+    #[test]
+    fn test_actor_reset_reductions() {
+        let mut actor = Actor::new(1, "test", 256);
+        actor.increment_reductions(500);
+        assert_eq!(actor.reduction_count, 500);
+        actor.reset_reductions();
+        assert_eq!(actor.reduction_count, 0);
+    }
+
+    #[test]
+    fn test_actor_register_behavior() {
+        let mut actor = Actor::new(1, "test", 256);
+        fn handler(_actor: &mut Actor, _args: &[Value]) {}
+        actor.register_behavior("my_handler", handler);
+        assert_eq!(actor.behavior_table.len(), 1);
+        assert_eq!(actor.behavior_table[0].name, "my_handler");
+    }
+
+    #[test]
+    fn test_actor_allocate_string() {
+        let mut actor = Actor::new(1, "test", 256);
+        let val = actor.allocate_string("hello");
+        assert!(!val.is_nil(), "allocation should return a non-nil value");
+    }
+
+    #[test]
+    fn test_actor_send_receive() {
+        let mut actor = Actor::new(1, "test", 256);
+        let msg = Message {
+            behavior_id: 1,
+            payload: vec![Value::int(42)],
+            sender: 99,
+            priority: MessagePriority::Normal,
+        };
+        assert!(actor.send(msg.clone()).is_ok());
+        let received = actor.receive().expect("should receive a message");
+        assert_eq!(received.behavior_id, 1);
+        assert_eq!(received.sender, 99);
+        assert_eq!(received.payload, vec![Value::int(42)]);
+    }
+}

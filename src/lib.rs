@@ -1,6 +1,5 @@
 pub mod ast;
 pub mod bytecode;
-pub mod compiler;
 pub mod effect_checker;
 pub mod hir;
 pub mod hir_lower;

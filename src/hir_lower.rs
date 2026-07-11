@@ -708,6 +708,35 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             hir::Operand::Var(temp, ty)
         }
         Expr::App { func, args, span } => {
+            // Intercept AI runtime builtins: Pipeline.new(), Supervisor.new(),
+            // Debate.new(...), and their method chains. Also intercept .run()
+            // on pipeline/supervisor/debate instances.
+            if let Some((base, field)) = is_ai_builtin_call(func) {
+                let ty = Type::unit();
+                let temp = fresh_temp_name();
+                let rv = lower_ai_builtin(base, field, args, body, *span);
+                body.push(hir::Stmt::Let {
+                    name: temp.clone(),
+                    ty: ty.clone(),
+                    value: rv,
+                    span: *span,
+                });
+                return hir::Operand::Var(temp, ty);
+            }
+
+            // Heuristic: `.run()` on any variable → resolve via variable name.
+            if let Some(rv) = try_lower_run_call(func, args, body, *span) {
+                let ty = Type::unit();
+                let temp = fresh_temp_name();
+                body.push(hir::Stmt::Let {
+                    name: temp.clone(),
+                    ty: ty.clone(),
+                    value: rv,
+                    span: *span,
+                });
+                return hir::Operand::Var(temp, ty);
+            }
+
             let fop = lower_expr(func, body);
             let aops: Vec<_> = args.iter().map(|a| lower_expr(a, body)).collect();
             let ty = Type::unit();
@@ -1199,7 +1228,7 @@ fn lambda_captures(params: &[(String, Option<Type>)], body: &Expr) -> Vec<String
     let bound: std::collections::HashSet<String> =
         params.iter().map(|(n, _)| n.clone()).collect();
     let mut free = std::collections::HashSet::new();
-    crate::compiler::free_vars(body, &bound, &mut free);
+    free_vars(body, &bound, &mut free);
     let mut captures: Vec<String> = free.into_iter().collect();
     captures.sort(); // deterministic ordering shared with codegen
     captures
@@ -1234,6 +1263,111 @@ fn binary_type(op: &ast::BinOp) -> Type {
             Type::Primitive(PrimitiveType::Bool)
         }
         _ => Type::Primitive(PrimitiveType::Int),
+    }
+}
+/// Returns `Some(builtin_name)` if the call's func is a field access on a
+/// known builtin name (Pipeline, Supervisor, Debate), `None` otherwise.
+fn is_ai_builtin_call(func: &Expr) -> Option<(&str, &str)> {
+    match func {
+        Expr::FieldAccess { expr, field, .. } => match expr.as_ref() {
+            Expr::Var(name, _) => {
+                match name.as_str() {
+                    "Pipeline" | "Supervisor" | "Debate" => Some((name.as_str(), field.as_str())),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Lower an AI runtime builtin call into an HIR RValue, lowering args
+/// into the caller's body.
+fn lower_ai_builtin(
+    base_name: &str,
+    field: &str,
+    args: &[Expr],
+    body: &mut hir::Body,
+    _span: Span,
+) -> hir::RValue {
+    let ty = Type::unit();
+    let mut a = |i: usize| {
+        if i < args.len() {
+            lower_expr(&args[i], body)
+        } else {
+            hir::Operand::Literal(Literal::String(String::new()), Type::string())
+        }
+    };
+
+    match (base_name, field) {
+        ("Pipeline", "new") => hir::RValue::PipelineNew { ty },
+        ("Pipeline", "stage") => hir::RValue::PipelineStage {
+            id: a(0), name: a(1), actor: a(2), template: a(3), ty,
+        },
+        ("Pipeline", "run") => hir::RValue::PipelineRun {
+            id: a(0), input: a(1), ty,
+        },
+        ("Supervisor", "new") => hir::RValue::SupervisorNew { ty },
+        ("Supervisor", "worker") => hir::RValue::SupervisorWorker {
+            id: a(0), name: a(1), actor: a(2), description: a(3), ty,
+        },
+        ("Supervisor", "run") => hir::RValue::SupervisorRun {
+            id: a(0), task: a(1), ty,
+        },
+        ("Debate", "new") => hir::RValue::DebateNew {
+            topic: a(0), rounds: a(1), threshold: a(2), ty,
+        },
+        ("Debate", "participant") => hir::RValue::DebateParticipant {
+            id: a(0), name: a(1), stance: a(2), actor: a(3), ty,
+        },
+        ("Debate", "run") => hir::RValue::DebateRun {
+            id: a(0), ty,
+        },
+        _ => unreachable!("is_ai_builtin_call should filter before lower_ai_builtin"),
+    }
+}
+
+/// Heuristic: resolve `.run()` on a pipeline/supervisor/debate instance
+/// by inspecting the variable name, mirroring the legacy compiler.
+/// Lowers the receiver and args into `body`.
+fn try_lower_run_call(
+    func: &Expr,
+    args: &[Expr],
+    body: &mut hir::Body,
+    _span: Span,
+) -> Option<hir::RValue> {
+    // Extract receiver and field from func: FieldAccess { expr: Var(name), field }
+    let (base_name, receiver_expr, field) = match func {
+        Expr::FieldAccess { expr, field, .. } => match expr.as_ref() {
+            Expr::Var(name, _) => (name.as_str(), expr.as_ref(), field.as_str()),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if field != "run" {
+        return None;
+    }
+
+    let ty = Type::unit();
+    let lowered = base_name.to_lowercase();
+
+    // Lower the receiver (the pipeline/supervisor/debate variable) as the id.
+    let id = lower_expr(receiver_expr, body);
+    let mut a = |i: usize| {
+        if i < args.len() {
+            lower_expr(&args[i], body)
+        } else {
+            hir::Operand::Literal(Literal::String(String::new()), Type::string())
+        }
+    };
+
+    if lowered.contains("debate") {
+        Some(hir::RValue::DebateRun { id, ty })
+    } else if lowered.contains("supervisor") || lowered.contains("team") {
+        Some(hir::RValue::SupervisorRun { id, task: a(0), ty })
+    } else {
+        Some(hir::RValue::PipelineRun { id, input: a(0), ty })
     }
 }
 
@@ -1338,5 +1472,109 @@ mod tests {
             }
             other => panic!("expected Place::Field, got {:?}", other),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free variable analysis (moved from compiler.rs)
+// ---------------------------------------------------------------------------
+
+/// Collect all variable names bound by a pattern.
+fn pattern_bindings(pat: &crate::ast::Pattern, out: &mut std::collections::HashSet<String>) {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Wild | Pattern::Lit(_) => {}
+        Pattern::Var(name) | Pattern::Alias(name, _) => { out.insert(name.clone()); }
+        Pattern::Tuple(pats) => {
+            for p in pats { pattern_bindings(p, out); }
+        }
+        Pattern::Record(fields) => {
+            for (_, p) in fields { pattern_bindings(p, out); }
+        }
+        Pattern::Variant(_, Some(inner)) => pattern_bindings(inner, out),
+        Pattern::Variant(_, None) => {}
+    }
+}
+
+/// Collect free variables of an expression (variables used but not bound
+/// within the expression). Shared between compiler and HIR lowering.
+fn free_vars(expr: &crate::ast::Expr, bound: &std::collections::HashSet<String>, acc: &mut std::collections::HashSet<String>) {
+    use crate::ast::Expr;
+    match expr {
+        Expr::Var(name, _) => {
+            if !bound.contains(name) { acc.insert(name.clone()); }
+        }
+        Expr::Lambda { params, body, .. } => {
+            let mut new_bound = bound.clone();
+            for (p, _) in params { new_bound.insert(p.clone()); }
+            free_vars(body, &new_bound, acc);
+        }
+        Expr::App { func, args, .. } => {
+            free_vars(func, bound, acc);
+            for a in args { free_vars(a, bound, acc); }
+        }
+        Expr::Let { name, value, body, .. } => {
+            free_vars(value, bound, acc);
+            let mut new_bound = bound.clone();
+            new_bound.insert(name.clone());
+            free_vars(body, &new_bound, acc);
+        }
+        Expr::LetRec { name, params, value, body, .. } => {
+            let mut value_bound = bound.clone();
+            value_bound.insert(name.clone());
+            for (p, _) in params { value_bound.insert(p.clone()); }
+            free_vars(value, &value_bound, acc);
+            let mut body_bound = bound.clone();
+            body_bound.insert(name.clone());
+            free_vars(body, &body_bound, acc);
+        }
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            free_vars(cond, bound, acc);
+            free_vars(then_branch, bound, acc);
+            if let Some(e) = else_branch { free_vars(e, bound, acc); }
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            free_vars(scrutinee, bound, acc);
+            for (pat, arm_expr) in arms {
+                let mut arm_bound = bound.clone();
+                pattern_bindings(pat, &mut arm_bound);
+                free_vars(arm_expr, &arm_bound, acc);
+            }
+        }
+        Expr::Block { exprs, .. } | Expr::Tuple(exprs, _) | Expr::Array(exprs, _) => {
+            for e in exprs { free_vars(e, bound, acc); }
+        }
+        Expr::Record(fields, _) => {
+            for (_, e) in fields { free_vars(e, bound, acc); }
+        }
+        Expr::FieldAccess { expr, .. } => free_vars(expr, bound, acc),
+        Expr::Index { arr, idx, .. } => {
+            free_vars(arr, bound, acc);
+            free_vars(idx, bound, acc);
+        }
+        Expr::Binary { left, right, .. } => {
+            free_vars(left, bound, acc);
+            free_vars(right, bound, acc);
+        }
+        Expr::Unary { expr, .. } => free_vars(expr, bound, acc),
+        Expr::Pipe { left, right, .. } => {
+            free_vars(left, bound, acc);
+            free_vars(right, bound, acc);
+        }
+        Expr::Assign { target, value, .. } => {
+            free_vars(target, bound, acc);
+            free_vars(value, bound, acc);
+        }
+        Expr::For { var, iterable, body, .. } => {
+            free_vars(iterable, bound, acc);
+            let mut new_bound = bound.clone();
+            new_bound.insert(var.clone());
+            free_vars(body, &new_bound, acc);
+        }
+        Expr::Return(e, _) => {
+            if let Some(e) = e { free_vars(e, bound, acc); }
+        }
+        Expr::TypeAnnotate { expr, .. } | Expr::CapAnnotate { expr, .. } => free_vars(expr, bound, acc),
+        _ => {}
     }
 }

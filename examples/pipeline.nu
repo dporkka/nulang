@@ -1,0 +1,26 @@
+// Pipeline — demonstrates the AI runtime pipeline builtin.
+// Chain LLM calls through stages for sequential processing.
+//
+// Run with: nulang examples/pipeline.nu
+
+agent Researcher = {
+    model: "llama3.1",
+    system_prompt: "You are a researcher. Provide factual information.",
+    pricing: { input: 0.0, output: 0.0 }
+}
+
+agent Writer = {
+    model: "llama3.1",
+    system_prompt: "You are a writer. Create engaging content.",
+    pricing: { input: 0.0, output: 0.0 }
+}
+
+fn main() {
+    let researcher = spawn Researcher {} in
+    let writer = spawn Writer {} in
+    let pipeline = Pipeline.new()
+        |> Pipeline.stage("research", researcher, "Research: {input}")
+        |> Pipeline.stage("write", writer, "Write based on: {input}")
+    in
+    pipeline.run("CRDTs")
+}

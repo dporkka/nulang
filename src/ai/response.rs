@@ -49,3 +49,56 @@ pub struct ToolCall {
     /// Parsed tool arguments.
     pub arguments: serde_json::Map<String, serde_json::Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_llm_response_construction() {
+        let response = LlmResponse {
+            content: Some("Hello".to_string()),
+            tool_calls: vec![],
+            model: "gpt-4".to_string(),
+            finish_reason: "stop".to_string(),
+            usage: TokenUsage::new(10, 5),
+        };
+        assert_eq!(response.content.as_deref(), Some("Hello"));
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.model, "gpt-4");
+        assert_eq!(response.finish_reason, "stop");
+        assert_eq!(response.usage.prompt, 10);
+        assert_eq!(response.usage.completion, 5);
+        assert_eq!(response.usage.total, 15);
+    }
+
+    #[test]
+    fn test_token_usage_new() {
+        let usage = TokenUsage::new(100, 50);
+        assert_eq!(usage.prompt, 100);
+        assert_eq!(usage.completion, 50);
+        assert_eq!(usage.total, 150);
+    }
+
+    #[test]
+    fn test_token_usage_default() {
+        let usage = TokenUsage::default();
+        assert_eq!(usage.prompt, 0);
+        assert_eq!(usage.completion, 0);
+        assert_eq!(usage.total, 0);
+    }
+
+    #[test]
+    fn test_tool_call_construction() {
+        let mut args = serde_json::Map::new();
+        args.insert("location".to_string(), serde_json::Value::String("NYC".to_string()));
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "get_weather".to_string(),
+            arguments: args,
+        };
+        assert_eq!(call.id, "call_1");
+        assert_eq!(call.name, "get_weather");
+        assert_eq!(call.arguments.get("location").unwrap(), "NYC");
+    }
+}

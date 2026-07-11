@@ -369,3 +369,72 @@ impl Supervisor {
         self.children.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_supervisor_action_debug() {
+        let variants: Vec<SupervisorAction> = vec![
+            SupervisorAction::Restarted(42),
+            SupervisorAction::Shutdown,
+            SupervisorAction::Ignore,
+            SupervisorAction::Escalate,
+        ];
+        for v in &variants {
+            let _ = format!("{:?}", v);
+        }
+    }
+
+    #[test]
+    fn test_restart_strategy_debug() {
+        let variants = vec![
+            RestartStrategy::OneForOne,
+            RestartStrategy::OneForAll,
+            RestartStrategy::RestForOne,
+        ];
+        for v in &variants {
+            let _ = format!("{:?}", v);
+        }
+    }
+
+    #[test]
+    fn test_restart_policy_debug() {
+        let variants = vec![
+            RestartPolicy::Permanent,
+            RestartPolicy::Temporary,
+            RestartPolicy::Transient,
+        ];
+        for v in &variants {
+            let _ = format!("{:?}", v);
+        }
+    }
+
+    #[test]
+    fn test_child_spec_new() {
+        let spec = ChildSpec::new("test_child", RestartPolicy::Permanent);
+        assert_eq!(spec.id, "test_child");
+        assert_eq!(spec.restart_policy, RestartPolicy::Permanent);
+        assert_eq!(spec.max_restarts, 5);
+        assert_eq!(spec.restart_window_secs, 60);
+    }
+
+    #[test]
+    fn test_supervisor_new() {
+        let sup = Supervisor::new(1, "test_sup", RestartStrategy::OneForOne);
+        assert_eq!(sup.id, 1);
+        assert_eq!(sup.name, "test_sup");
+        assert_eq!(sup.strategy, RestartStrategy::OneForOne);
+        assert!(sup.children.is_empty());
+        assert!(sup.parent.is_none());
+    }
+
+    #[test]
+    fn test_supervisor_handle_exit_unknown() {
+        let mut sup = Supervisor::new(1, "test_sup", RestartStrategy::OneForOne);
+        let mut rt = Runtime::new();
+        let action = sup.handle_exit(999, ExitReason::Error("unknown".into()), &mut rt);
+        assert_eq!(action, SupervisorAction::Ignore);
+    }
+}

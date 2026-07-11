@@ -1168,13 +1168,20 @@ impl Runtime {
     pub fn behavior_id_for(&self, target_id: u64, behavior: &str) -> Option<u16> {
         let actor = self.actors.get(&target_id)?;
         let suffix = format!(".{}", behavior);
-        actor
-            .behavior_table
-            .iter()
+        // Search the per-actor behavior table first (native handlers).
+        if let Some(idx) = actor.behavior_table.iter()
             .position(|entry| entry.name == behavior || entry.name.ends_with(&suffix))
+        {
+            return Some(idx as u16);
+        }
+        // Fall back to the module-level behavior table (bytecode handlers).
+        // Returns the GLOBAL index into module.behaviors, which matches
+        // what bytecode_offsets expects.
+        let module = actor.bytecode_module.as_ref()?;
+        module.behaviors.iter()
+            .position(|b| b.name == behavior || b.name.ends_with(&suffix))
             .map(|idx| idx as u16)
     }
-
     pub fn send_message_by_id(&mut self, target_id: u64, behavior_id: u16, args: &[Value]) {
         let msg = Message {
             behavior_id,
@@ -2936,17 +2943,13 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         } else {
             rt.spawn_actor(Box::new(move || init))
         };
-        // Record bytecode behavior offsets so the runtime can execute bytecode handlers.
-        let mut offsets = vec![0; module.behaviors.len()];
-        let mut compensation_offsets: Vec<Option<usize>> = vec![None; module.behaviors.len()];
-        if let Some(meta) = meta {
-            for &idx in &meta.behavior_indices {
-                if let Some(entry) = module.behaviors.get(idx) {
-                    offsets[idx] = entry.code_offset;
-                    compensation_offsets[idx] = entry.compensate_offset;
-                }
-            }
-        }
+        // Record bytecode behavior offsets so the runtime can execute bytecode
+        // handlers. Populate ALL module-level behavior offsets (not just this
+        // actor's behavior_indices) so that behavior_id_for's module-level
+        // fallback indices work correctly.
+        let offsets: Vec<usize> = module.behaviors.iter().map(|b| b.code_offset).collect();
+        let compensation_offsets: Vec<Option<usize>> = module.behaviors.iter()
+            .map(|b| b.compensate_offset).collect();
         if let Some(actor) = rt.actors.get_mut(&id) {
             actor.bytecode_module = Some(module.clone());
             actor.bytecode_offsets = offsets.clone();
@@ -3118,6 +3121,16 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
 
     fn debate_run(&mut self, id: i64) -> Option<String> {
         self.runtime.borrow_mut().debate_run(id as u64).ok()
+    }
+
+    fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
+        let rt = self.runtime.borrow();
+        let actor_id = rt.current_actor?;
+        let actor = rt.actors.get(&actor_id)?;
+        actor.mailbox.pop().map(|msg| {
+            let val = msg.payload.into_iter().next().unwrap_or(crate::vm::Value::unit());
+            (msg.behavior_id, val)
+        })
     }
 }
 
@@ -3335,6 +3348,16 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
 
     fn debate_run(&mut self, id: i64) -> Option<String> {
         unsafe { (*self.runtime).debate_run(id as u64).ok() }
+    }
+
+    fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
+        unsafe {
+            let actor = (*self.runtime).actors.get(&self.actor_id)?;
+            actor.mailbox.pop().map(|msg| {
+                let val = msg.payload.into_iter().next().unwrap_or(crate::vm::Value::unit());
+                (msg.behavior_id, val)
+            })
+        }
     }
 }
 

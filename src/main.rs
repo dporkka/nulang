@@ -12,15 +12,13 @@
 //!   -e, --eval       Evaluate a code string
 //!   -c, --check      Type-check a file (don't run)
 //!   --lsp            Start Language Server (stdio)
+//!   --version, -V    Print version and exit
 //!   -v, --verbose    Show bytecode and AST
-//!   -h, --help       Show this help message
-
 use mimalloc::MiMalloc;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-use nulang::compiler::Compiler;
 use nulang::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
 use nulang::lexer::Lexer;
 use nulang::parser::Parser;
@@ -34,9 +32,8 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() <= 1 {
-        // Default: start REPL. No args were given, so `--experimental-mir`
-        // can't have been passed either — matches the file/eval paths' default.
-        let mut repl = Repl::new(false);
+        // Default: start REPL with the HIR/MIR pipeline.
+        let mut repl = Repl::new();
         repl.run();
         return;
     }
@@ -67,8 +64,10 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
-            "--lsp" => opts.lsp = true,
-            "--experimental-mir" => opts.experimental_mir = true,
+            "--version" | "-V" => {
+                println!("nulang v{}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
             "-v" | "--verbose" => opts.verbose = true,
             "-h" | "--help" => {
                 print_help();
@@ -98,13 +97,13 @@ async fn main() {
     }
 
     if opts.repl {
-        let mut repl = Repl::new(opts.experimental_mir);
+        let mut repl = Repl::new();
         repl.run();
         return;
     }
 
     if let Some(code) = opts.eval_code {
-        if let Err(e) = run_source(&code, opts.verbose, opts.experimental_mir) {
+        if let Err(e) = run_source(&code, opts.verbose) {
             print_error(&e);
             std::process::exit(1);
         }
@@ -137,7 +136,7 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) = run_source(&source, opts.verbose, opts.experimental_mir) {
+        if let Err(e) = run_source(&source, opts.verbose) {
             print_error(&e);
             std::process::exit(1);
         }
@@ -145,7 +144,7 @@ async fn main() {
     }
 
     // No arguments and no options: start REPL
-    let mut repl = Repl::new(opts.experimental_mir);
+    let mut repl = Repl::new();
     repl.run();
 }
 
@@ -156,7 +155,6 @@ struct Options {
     check_file: Option<String>,
     lsp: bool,
     verbose: bool,
-    experimental_mir: bool,
 }
 
 fn print_help() {
@@ -171,7 +169,7 @@ fn print_help() {
     println!("  -e, --eval       Evaluate a code string");
     println!("  -c, --check      Type-check a file (don't run)");
     println!("  --lsp            Start Language Server (stdio)");
-    println!("  --experimental-mir  Compile via the experimental HIR/MIR pipeline");
+    println!("  --version, -V    Print version and exit");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  -h, --help       Show this help message");
 }
@@ -322,47 +320,20 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
     Ok(ast)
 }
 
-fn compile_legacy(ast: &nulang::ast::AstModule, verbose: bool) -> NuResult<nulang::bytecode::CodeModule> {
-    let mut compiler = Compiler::new("main");
-    let m = compiler.compile_module(ast)?.clone();
-    if verbose {
-        println!("=== Bytecode ===");
-        println!("{}", disassemble(&m));
-    }
-    Ok(m)
-}
-
 /// Full pipeline: parse -> typecheck -> effect check -> compile -> vm.run()
-fn run_source(source: &str, verbose: bool, use_mir: bool) -> NuResult<()> {
+fn run_source(source: &str, verbose: bool) -> NuResult<()> {
     let ast = run_frontend(source, verbose)?;
 
-    // Compile. The stable compiler is the default; the experimental HIR/MIR
-    // pipeline covers the functional core (closures, effects, control flow),
-    // `actor` declarations (spawn/send/ask/state), `workflow`s (including
-    // `parallel` blocks and saga compensation), and `agent`s (including
-    // `@tool`-backed tools). It stays opt-in and falls back loudly to the
-    // stable compiler on anything it can't yet lower.
-    let code_module = if use_mir {
-        match compile_with_new_pipeline(&ast, "main") {
-            Ok(m) => {
-                if verbose {
-                    println!("=== Bytecode (HIR/MIR pipeline) ===");
-                    println!("{}", disassemble(&m));
-                }
-                m
-            }
-            Err(e) => {
-                eprintln!("warning: HIR/MIR pipeline failed ({}); falling back to stable compiler", e);
-                compile_legacy(&ast, verbose)?
-            }
-        }
-    } else {
-        compile_legacy(&ast, verbose)?
-    };
+    // Compile via HIR/MIR pipeline.
+    let m = compile_with_new_pipeline(&ast, "main")?;
+    if verbose {
+        println!("=== Bytecode (HIR/MIR pipeline) ===");
+        println!("{}", disassemble(&m));
+    }
 
     // Execute
     let mut vm = VM::new();
-    vm.load_module(code_module);
+    vm.load_module(m);
     let value = vm.run().map_err(|e| {
         eprintln!("Runtime error: {}", e);
         e

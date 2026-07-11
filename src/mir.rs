@@ -166,6 +166,16 @@ pub enum RValue {
     Send { actor: LocalId, behavior_idx: usize, args: Vec<LocalId> },
     /// `ask actor behavior(args...)`. Evaluates to the behavior's result.
     Ask { actor: LocalId, behavior_idx: usize, args: Vec<LocalId> },
+    // AI runtime builtins
+    PipelineNew,
+    PipelineStage { id: LocalId, name: LocalId, actor: LocalId, template: LocalId },
+    PipelineRun { id: LocalId, input: LocalId },
+    SupervisorNew,
+    SupervisorWorker { id: LocalId, name: LocalId, actor: LocalId, description: LocalId },
+    SupervisorRun { id: LocalId, task: LocalId },
+    DebateNew { topic: LocalId, rounds: LocalId, threshold: LocalId },
+    DebateParticipant { id: LocalId, name: LocalId, stance: LocalId, actor: LocalId },
+    DebateRun { id: LocalId },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -317,5 +327,103 @@ impl Module {
             parallel_branches_of: Vec::new(),
             foreign_functions: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{BinOp, UnOp};
+    use crate::bytecode::Constant;
+
+    #[test]
+    fn test_local_id() {
+        assert_eq!(LocalId(0), LocalId(0));
+        assert_ne!(LocalId(0), LocalId(42));
+    }
+
+    #[test]
+    fn test_block_id() {
+        assert_eq!(BlockId(0), BlockId(0));
+        assert_ne!(BlockId(0), BlockId(42));
+    }
+
+    #[test]
+    fn test_function_builder_new_block() {
+        let builder = FunctionBuilder::new("test", None);
+        assert_eq!(builder.current_block(), BlockId(0));
+    }
+
+    #[test]
+    fn test_function_builder_append_term() {
+        let mut builder = FunctionBuilder::new("test", None);
+        assert!(!builder.is_terminated());
+        builder.terminate(Terminator::Return(None));
+        assert!(builder.is_terminated());
+    }
+
+    #[test]
+    fn test_module_new() {
+        let m = Module::new("test");
+        assert_eq!(m.name, "test");
+        assert!(m.functions.is_empty());
+        assert!(m.behaviors.is_empty());
+        assert!(m.foreign_functions.is_empty());
+    }
+
+    #[test]
+    fn test_module_lookup_missing() {
+        let m = Module::new("test");
+        assert!(m.functions.is_empty());
+    }
+
+    #[test]
+    fn test_rvalue_variants() {
+        // Construct every RValue variant to confirm they compile.
+        let _ = RValue::Const(Constant::Int(42));
+        let _ = RValue::Load(LocalId(0));
+        let _ = RValue::LoadFieldNamed { obj: LocalId(0), field: "x".into() };
+        let _ = RValue::ArrayLoad { arr: LocalId(0), idx: LocalId(1) };
+        let _ = RValue::ArrayLen(LocalId(0));
+        let _ = RValue::ArrayLit(vec![LocalId(0)]);
+        let _ = RValue::Unary(UnOp::Neg, LocalId(0));
+        let _ = RValue::Binary(BinOp::Add, LocalId(0), LocalId(1));
+        let _ = RValue::StringEq(LocalId(0), LocalId(1));
+        let _ = RValue::Call { func: FuncRef::Index(0), args: vec![LocalId(0)] };
+        let _ = RValue::Closure { func: 0, captures: vec![LocalId(0)] };
+        let _ = RValue::Tuple(vec![LocalId(0)]);
+        let _ = RValue::Record(vec![("x".into(), LocalId(0))]);
+        let _ = RValue::Perform { effect: "eff".into(), op: "op".into(), args: vec![LocalId(0)] };
+        let _ = RValue::LlmAsk { prompt: LocalId(0) };
+        let _ = RValue::SignalWait { name: "sig".into() };
+        let _ = RValue::FFICall { idx: 0, args: vec![LocalId(0)] };
+        let _ = RValue::Migrate { actor: LocalId(0), node: LocalId(1) };
+        let _ = RValue::SelfRef;
+        let _ = RValue::CapabilityCheck { val: LocalId(0) };
+        let _ = RValue::StateGet { field: "f".into() };
+        let _ = RValue::Spawn { behavior_idx: 0 };
+        let _ = RValue::Send { actor: LocalId(0), behavior_idx: 0, args: vec![LocalId(0)] };
+        let _ = RValue::Ask { actor: LocalId(0), behavior_idx: 0, args: vec![LocalId(0)] };
+        let _ = RValue::PipelineNew;
+        let _ = RValue::PipelineStage { id: LocalId(0), name: LocalId(0), actor: LocalId(0), template: LocalId(0) };
+        let _ = RValue::PipelineRun { id: LocalId(0), input: LocalId(0) };
+        let _ = RValue::SupervisorNew;
+        let _ = RValue::SupervisorWorker { id: LocalId(0), name: LocalId(0), actor: LocalId(0), description: LocalId(0) };
+        let _ = RValue::SupervisorRun { id: LocalId(0), task: LocalId(0) };
+        let _ = RValue::DebateNew { topic: LocalId(0), rounds: LocalId(0), threshold: LocalId(0) };
+        let _ = RValue::DebateParticipant { id: LocalId(0), name: LocalId(0), stance: LocalId(0), actor: LocalId(0) };
+        let _ = RValue::DebateRun { id: LocalId(0) };
+    }
+
+    #[test]
+    fn test_local_new() {
+        let local = Local {
+            id: LocalId(0),
+            name: Some("x".into()),
+            ty: Type::int(),
+        };
+        assert_eq!(local.id, LocalId(0));
+        assert_eq!(local.name, Some("x".into()));
+        assert_eq!(local.ty, Type::int());
     }
 }

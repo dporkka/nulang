@@ -91,7 +91,7 @@ impl MirCodegen {
             let params = ff
                 .params
                 .iter()
-                .map(crate::compiler::nulang_type_to_ffi_type)
+                .map(crate::ffi::marshal::nulang_type_to_ffi_type)
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(|| {
                     compile_err(format!(
@@ -99,7 +99,7 @@ impl MirCodegen {
                         ff.symbol
                     ))
                 })?;
-            let ret = crate::compiler::nulang_type_to_ffi_type(&ff.ret).ok_or_else(|| {
+            let ret = crate::ffi::marshal::nulang_type_to_ffi_type(&ff.ret).ok_or_else(|| {
                 compile_err(format!(
                     "unsupported return type in extern function {}",
                     ff.symbol
@@ -118,13 +118,20 @@ impl MirCodegen {
         self.module.function_table.resize(mir.functions.len(), 0);
 
         let mut main_idx = None;
+        let mut user_main_idx = None;
         for (idx, func) in mir.functions.iter().enumerate() {
             let offset = self.compile_function(func)?;
             self.module.function_table[idx] = offset;
             if func.name == "__main" {
                 main_idx = Some(idx);
             }
+            if func.name == "main" {
+                user_main_idx = Some(idx);
+            }
         }
+        // If no synthetic __main wrapper exists but user declared fn main(),
+        // treat main as the entry point (matching the legacy compiler).
+        let effective_main = main_idx.or(user_main_idx);
 
         // Actor behaviors compile through the exact same machinery as
         // ordinary functions, but land in CodeModule.behaviors instead of
@@ -174,10 +181,22 @@ impl MirCodegen {
         }
         self.module.actor_metadata = mir.actor_metadata.clone();
 
-        // Entry prologue: call __main (if present) and halt.
-        if let Some(main_idx) = main_idx {
+        // Collect tools from agent actors into module.tools so the runtime
+        // can resolve @tool-annotated functions for agent LLM requests.
+        for meta in &self.module.actor_metadata {
+            if meta.is_agent {
+                for tool in &meta.tools {
+                    if !self.module.tools.iter().any(|t| t.name == tool.name) {
+                        self.module.tools.push(tool.clone());
+                    }
+                }
+            }
+        }
+
+        // Entry prologue: call the effective main function and halt.
+        if let Some(idx) = effective_main {
             let entry = self.module.instructions.len();
-            self.load_constant(SCRATCH0, &Constant::Int(main_idx as i64));
+            self.load_constant(SCRATCH0, &Constant::Int(idx as i64));
             self.emit(Instruction::new3(OpCode::Call, SCRATCH0, 0, 0));
             self.emit(Instruction::new0(OpCode::Halt));
             self.module.entry_point = Some(entry);
@@ -606,7 +625,6 @@ impl MirCodegen {
                 ));
                 // Send is fire-and-forget with no VM-level result register;
                 // the stable compiler yields 0 for send-as-expression.
-                self.load_constant(dst, &Constant::Int(0));
             }
             mir::RValue::Ask { actor, behavior_idx, args } => {
                 self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), FUNC_VALUE_REG));
@@ -619,6 +637,53 @@ impl MirCodegen {
                 ));
                 // Ask writes its result back into its own op1 register.
                 self.emit(Instruction::new2(OpCode::Move, FUNC_VALUE_REG, dst));
+            }
+            mir::RValue::PipelineNew => {
+                self.emit(Instruction::new1(OpCode::PipelineNew, dst));
+            }
+            mir::RValue::PipelineStage { id, name, actor, template } => {
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*name), SCRATCH0 + 1));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), SCRATCH0 + 2));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*template), SCRATCH0 + 3));
+                self.emit(Instruction::new1(OpCode::PipelineStage, dst));
+            }
+            mir::RValue::PipelineRun { id, input } => {
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*input), SCRATCH0 + 1));
+                self.emit(Instruction::new1(OpCode::PipelineRun, dst));
+            }
+            mir::RValue::SupervisorNew => {
+                self.emit(Instruction::new1(OpCode::SupervisorNew, dst));
+            }
+            mir::RValue::SupervisorWorker { id, name, actor, description } => {
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*name), SCRATCH0 + 1));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), SCRATCH0 + 2));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*description), SCRATCH0 + 3));
+                self.emit(Instruction::new1(OpCode::SupervisorWorker, dst));
+            }
+            mir::RValue::SupervisorRun { id, task } => {
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*task), SCRATCH0 + 1));
+                self.emit(Instruction::new1(OpCode::SupervisorRun, dst));
+            }
+            mir::RValue::DebateNew { topic, rounds, threshold } => {
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*topic), SCRATCH0));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*rounds), SCRATCH0 + 1));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*threshold), SCRATCH0 + 2));
+                self.emit(Instruction::new1(OpCode::DebateNew, dst));
+            }
+            mir::RValue::DebateParticipant { id, name, stance, actor } => {
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*name), SCRATCH0 + 1));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*stance), SCRATCH0 + 2));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), SCRATCH0 + 3));
+                self.emit(Instruction::new1(OpCode::DebateParticipant, dst));
+            }
+            mir::RValue::DebateRun { id } => {
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
+                self.emit(Instruction::new1(OpCode::DebateRun, dst));
             }
         }
         Ok(())
