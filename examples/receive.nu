@@ -1,21 +1,23 @@
-// Receive — demonstrates the receive expression for actor message handling.
+// Receive — demonstrates selective receive for actor message handling.
 //
-// STATUS (MVP): `receive` lexes, parses, and type-checks, but MIR lowering
-// currently yields `nil` — the arms are not yet dispatched, so this program
-// compiles and runs but the receive expression always evaluates to nil.
-// See README.md "Known limitations".
+// `receive` scans the actor's mailbox in FIFO order for the first message
+// whose behavior matches any arm, binds that message's payload values to
+// the arm's params, and evaluates the arm body. Non-matching messages are
+// skipped and stay queued. When nothing matches, the legacy non-blocking
+// fallback runs: pop the next message and yield its first payload value
+// (nil when the mailbox is empty).
 //
 // Run with: nulang examples/receive.nu
 
 actor Echo {
     behavior respond() {
-        // Planned semantics: pop the next message from the mailbox and
-        // return its first payload value (nil if the mailbox is empty).
-        // Today this evaluates to nil regardless of mailbox contents.
+        // Selective receive: wait-free scan for a `msg` message; binds the
+        // payload to `x`. Other queued messages are left in the mailbox.
         receive {
-            | Msg(x) => x
+            | msg(x) => x
         }
     }
+    behavior msg(x: Int) { x }
 }
 
 actor MainActor {

@@ -2198,6 +2198,234 @@ mod tests {
         );
     }
 
+    /// Selective receive: with two arms and messages for both queued, the
+    /// first message IN MAILBOX ORDER wins — arm order is irrelevant.
+    #[test]
+    fn test_receive_match_first_in_mailbox_wins() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | get() => 100
+                        | add(x, y) => x + y
+                    }
+                }
+                behavior add(x: Int, y: Int) { x }
+                behavior get() { 0 }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                send c add(1, 2)
+                send c get()
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        // `add(1, 2)` is queued ahead of `get()`, so the `add` arm wins even
+        // though `get` is listed first.
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(3),
+            "first matching message in mailbox order should win over arm order"
+        );
+    }
+
+    /// Selective receive: a queued message that matches no arm is skipped and
+    /// stays in the mailbox (the scheduler later dispatches it normally),
+    /// while the first matching message is consumed by the receive.
+    #[test]
+    fn test_receive_match_selective_skip() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                state heard = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | add(x, y) => x + y
+                    }
+                }
+                behavior add(x: Int, y: Int) { x }
+                behavior noise(n: Int) { self.heard = n }
+            }
+            let c = spawn Listener { seen = 0 heard = 0 } in {
+                send c drain()
+                send c noise(9)
+                send c add(4, 5)
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(9),
+            "receive should skip noise(9) and consume add(4, 5)"
+        );
+        assert_eq!(
+            actor.get_state_field("heard").and_then(|v| v.as_int()),
+            Some(9),
+            "the skipped noise(9) message should remain queued and dispatch normally"
+        );
+    }
+
+    /// Selective receive fallback: when no queued message matches any arm,
+    /// the legacy non-blocking behavior runs — pop the next message and
+    /// yield its first payload value.
+    #[test]
+    fn test_receive_match_no_match_fallback() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                state heard = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | add(x, y) => x + y
+                    }
+                }
+                behavior add(x: Int, y: Int) { x }
+                behavior noise(n: Int) { self.heard = n }
+            }
+            let c = spawn Listener { seen = 0 heard = 0 } in {
+                send c drain()
+                send c noise(33)
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(33),
+            "no-match fallback should pop the next message's first payload"
+        );
+        assert_eq!(
+            actor.get_state_field("heard").and_then(|v| v.as_int()),
+            Some(0),
+            "the fallback consumes the message, so noise must not also dispatch"
+        );
+    }
+
+    /// Selective receive on an empty mailbox evaluates to nil (non-blocking).
+    #[test]
+    fn test_receive_match_empty_mailbox_returns_nil() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | add(x, y) => x + y
+                    }
+                }
+                behavior add(x: Int, y: Int) { x }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert!(
+            actor.get_state_field("seen").map(|v| v.is_nil()).unwrap_or(false),
+            "receive with no matching message and empty mailbox should yield nil"
+        );
+    }
+
+    /// Arm params bind to the matched message's payload values.
+    #[test]
+    fn test_receive_match_binds_payload_params() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | add(x, y) => x * 10 + y
+                    }
+                }
+                behavior add(x: Int, y: Int) { x }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                send c add(7, 8)
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(78),
+            "arm params should bind to the matched message's payload values"
+        );
+    }
+
+    /// A matched message with fewer payload values than arm params binds the
+    /// missing params to nil.
+    #[test]
+    fn test_receive_match_missing_params_bind_nil() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | add(x, y) => y
+                    }
+                }
+                behavior add(x: Int, y: Int) { x }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+
+        // Enqueue add with only one payload value behind the pending drain.
+        rt.borrow_mut().send_message(actor_id, "add", &[Value::int(7)]);
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert!(
+            actor.get_state_field("seen").map(|v| v.is_nil()).unwrap_or(false),
+            "params beyond the payload length should bind to nil"
+        );
+    }
+
 
 
     /// Differential test: the legacy compiler and the HIR/MIR pipeline must

@@ -956,18 +956,91 @@ impl<'c> FnLowerer<'c> {
                 self.b.assign(dst, mir::RValue::DebateRun { id: i });
                 Ok(())
             }
-            hir::RValue::Receive { .. } => {
-                // Arm patterns are parsed and type-checked but not lowered:
-                // dispatch across arms is future work. The VM handler pops
-                // the next mailbox message and yields its first payload value
-                // (nil when empty or outside an actor context).
-                self.b.assign(dst, mir::RValue::Receive);
-                Ok(())
+            hir::RValue::Receive { arms, .. } => {
+                self.lower_receive(dst, arms)
             }
         }
     }
 
     // -- Control flow constructs ----------------------------------------------
+
+    /// Lower `receive { | Behavior(params) => expr ... }` to selective
+    /// receive dispatch: a `ReceiveMatch` rvalue scans the mailbox for the
+    /// first message matching any arm (mailbox order), then a compare chain
+    /// over the matched arm index selects the arm body, binding the arm's
+    /// params to the payload registers. When nothing matches, control falls
+    /// through to a fallback block that runs the legacy pop-any `Receive`.
+    fn lower_receive(
+        &mut self,
+        dst: mir::LocalId,
+        arms: &[(String, Vec<String>, Box<hir::Body>)],
+    ) -> NuResult<()> {
+        use crate::bytecode::Constant;
+        if arms.is_empty() {
+            self.b.assign(dst, mir::RValue::Receive);
+            return Ok(());
+        }
+        // Arm behavior names resolve to behavior-table indices exactly like
+        // `send` does (suffix match on "Actor.behavior"); message behavior
+        // ids are those same global indices.
+        let behavior_ids: Vec<u16> = arms
+            .iter()
+            .map(|(name, _, _)| self.ctx.send_behavior_idx("", name) as u16)
+            .collect();
+        let max_params = arms.iter().map(|(_, p, _)| p.len()).max().unwrap_or(0);
+        // dst of ReceiveMatch and the payload temps must form one contiguous
+        // register run: the VM writes payload[i] into reg dst+1+i.
+        let arm_idx = self.b.add_temp(Type::int());
+        let payload_temps: Vec<mir::LocalId> = (0..max_params)
+            .map(|_| self.b.add_temp(Type::unit()))
+            .collect();
+        self.b.assign(
+            arm_idx,
+            mir::RValue::ReceiveMatch {
+                behavior_ids,
+                max_params,
+            },
+        );
+
+        let join = self.b.create_block();
+        let fallback = self.b.create_block();
+        for (i, (_name, params, arm_body)) in arms.iter().enumerate() {
+            let test = self.b.add_temp(Type::bool());
+            let idx_const = self.b.add_temp(Type::int());
+            self.b.assign(idx_const, mir::RValue::Const(Constant::Int(i as i64)));
+            self.b.assign(
+                test,
+                mir::RValue::Binary(crate::ast::BinOp::Eq, arm_idx, idx_const),
+            );
+            let arm_bb = self.b.create_block();
+            let next_bb = if i == arms.len() - 1 {
+                fallback
+            } else {
+                self.b.create_block()
+            };
+            self.b.terminate(mir::Terminator::Branch {
+                cond: test,
+                then_: arm_bb,
+                else_: next_bb,
+            });
+            self.b.switch_to(arm_bb);
+            self.push_scope();
+            for (p, &temp) in params.iter().zip(payload_temps.iter()) {
+                self.bind(p, temp);
+            }
+            self.lower_body_into(arm_body, dst, join)?;
+            self.pop_scope();
+            self.b.switch_to(next_bb);
+        }
+
+        // Fallback: no queued message matched any arm. Preserve the legacy
+        // non-blocking behavior — pop the next message regardless of
+        // behavior and yield its first payload value (nil when empty).
+        self.b.assign(dst, mir::RValue::Receive);
+        self.b.terminate(mir::Terminator::Jump(join));
+        self.b.switch_to(join);
+        Ok(())
+    }
 
     fn lower_match(
         &mut self,

@@ -149,11 +149,18 @@ pub enum RValue {
     LlmAsk { prompt: LocalId },
     /// `perform Signal.wait("name")` — workflow signal wait.
     SignalWait { name: String },
-    /// `receive { | Behavior(params) => expr ... }` — pop the next message
-    /// from the actor's mailbox; evaluates to its first payload value (nil
-    /// when the mailbox is empty or outside an actor context). Arm patterns
-    /// are parsed and type-checked but dispatch across arms is future work.
+    /// `receive { | Behavior(params) => expr ... }` with no arms (or in the
+    /// no-match fallback block): pop the next message from the actor's
+    /// mailbox; evaluates to its first payload value (nil when the mailbox
+    /// is empty or outside an actor context).
     Receive,
+    /// Selective receive: scan the mailbox for the first message whose
+    /// behavior id is in `behavior_ids` (bytecode `ReceiveMatch`). Writes
+    /// the matched arm index to dst (or `behavior_ids.len()` when nothing
+    /// matches) and up to `max_params` payload values into the registers
+    /// immediately following dst — the lowering must allocate dst and the
+    /// `max_params` payload temps as one contiguous run of locals.
+    ReceiveMatch { behavior_ids: Vec<u16>, max_params: usize },
     FFICall { idx: usize, args: Vec<LocalId> },
     Migrate { actor: LocalId, node: LocalId },
     SelfRef,

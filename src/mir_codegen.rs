@@ -575,6 +575,26 @@ impl MirCodegen {
                 // writes its first payload value (or nil) to dst.
                 self.emit(Instruction::new1(OpCode::Receive, dst));
             }
+            mir::RValue::ReceiveMatch { behavior_ids, max_params } => {
+                // Selective receive: the spec constant encodes the reserved
+                // payload-register count and the candidate arm behavior ids
+                // as "max_params:id1,id2,...". The VM writes the matched arm
+                // index (or the arm count when nothing matched) to dst and
+                // payload values into the registers following dst.
+                let ids = behavior_ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let spec = format!("{}:{}", max_params, ids);
+                let spec_idx = self.module.add_constant(Constant::String(spec));
+                self.emit(Instruction::new3(
+                    OpCode::ReceiveMatch,
+                    ((spec_idx >> 8) & 0xFF) as u8,
+                    (spec_idx & 0xFF) as u8,
+                    dst,
+                ));
+            }
             mir::RValue::FFICall { idx, args } => {
                 self.stage_args(args)?;
                 self.emit(Instruction::new3(

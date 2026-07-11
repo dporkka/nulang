@@ -72,6 +72,32 @@ impl Mailbox {
         self.queue.pop()
     }
 
+    /// Selective receive: scan the mailbox in FIFO order for the first
+    /// message whose behavior id appears in `behavior_ids`.
+    ///
+    /// Matching is by mailbox order, not arm order: the first message that
+    /// matches ANY id wins. Skipped (non-matching) messages are requeued in
+    /// their original order, so relative FIFO order is preserved.
+    ///
+    /// Returns `Some((arm_index, payload))` where `arm_index` is the
+    /// position of the matched id within `behavior_ids`, or `None` when no
+    /// queued message matches.
+    pub fn receive_match(&self, behavior_ids: &[u16]) -> Option<(usize, Vec<Value>)> {
+        let mut skipped: Vec<Message> = Vec::new();
+        let mut found = None;
+        while let Some(msg) = self.queue.pop() {
+            if let Some(pos) = behavior_ids.iter().position(|&id| id == msg.behavior_id) {
+                found = Some((pos, msg.payload));
+                break;
+            }
+            skipped.push(msg);
+        }
+        for msg in skipped {
+            self.queue.push(msg);
+        }
+        found
+    }
+
     /// Return the current number of messages in the mailbox.
     ///
     /// Note: `SegQueue::len` is approximate — concurrent push/pop

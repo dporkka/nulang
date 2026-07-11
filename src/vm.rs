@@ -249,6 +249,14 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// Returns `Some((behavior_id, value))` if a message is available,
     /// or `None` if the mailbox is empty. Default returns `None`.
     fn try_receive(&mut self) -> Option<(u16, Value)> { None }
+
+    /// Selective receive: scan the current actor's mailbox in FIFO order
+    /// for the first message whose behavior id appears in `behavior_ids`.
+    /// Non-matching messages stay in the mailbox. Returns
+    /// `Some((arm_index, payload))` — `arm_index` is the position of the
+    /// matched id within `behavior_ids` — or `None` when nothing matches
+    /// (or there is no current actor). Default returns `None`.
+    fn try_receive_match(&mut self, _behavior_ids: &[u16]) -> Option<(usize, Vec<Value>)> { None }
 }
 
 /// Standalone callbacks used when the VM runs without an actor runtime.
@@ -490,6 +498,22 @@ fn constants_to_jit_bits(constants: &[Constant]) -> Vec<u64> {
             Constant::TypeDescriptor(_) => Value::nil().to_bits(),
         })
         .collect()
+}
+
+/// Parse a `ReceiveMatch` spec constant of the form
+/// `"max_params:id1,id2,..."` into (max_params, behavior ids).
+/// Malformed specs degrade to "no arms, no payload registers", which the
+/// VM treats as an unconditional no-match.
+fn parse_receive_spec(spec: &str) -> (usize, Vec<u16>) {
+    let Some((head, rest)) = spec.split_once(':') else {
+        return (0, Vec::new());
+    };
+    let max_params = head.parse::<usize>().unwrap_or(0);
+    let ids = rest
+        .split(',')
+        .filter_map(|s| s.parse::<u16>().ok())
+        .collect();
+    (max_params, ids)
 }
 
 // ---------------------------------------------------------------------------
@@ -2249,6 +2273,37 @@ impl VM {
                     .map(|(_bid, v)| v)
                     .unwrap_or(Value::nil());
                 self.frames[frame_idx].regs[dst as usize] = value;
+            }
+
+            // -- Selective receive (arm dispatch) --
+            // The spec constant is "max_params:id1,id2,..." — the candidate
+            // arm behavior ids and the number of payload registers reserved
+            // after dst. On a match, dst gets the matched arm index and
+            // payload values land in dst+1..dst+1+max_params (missing values
+            // bound to nil, extras ignored). On no match, dst gets the
+            // sentinel arm count and MIR-generated code falls through to the
+            // legacy `Receive` fallback block.
+            OpCode::ReceiveMatch => {
+                let const_idx = instr.imm16() as usize;
+                let dst = instr.op3 as usize;
+                let spec = self.module_const_string(module_idx, const_idx);
+                let (max_params, ids) = parse_receive_spec(&spec);
+                match self.actor_callbacks.try_receive_match(&ids) {
+                    Some((arm_idx, payload)) => {
+                        self.frames[frame_idx].regs[dst] = Value::int(arm_idx as i64);
+                        for i in 0..max_params {
+                            let r = dst + 1 + i;
+                            if r >= 256 {
+                                break;
+                            }
+                            self.frames[frame_idx].regs[r] =
+                                payload.get(i).copied().unwrap_or(Value::nil());
+                        }
+                    }
+                    None => {
+                        self.frames[frame_idx].regs[dst] = Value::int(ids.len() as i64);
+                    }
+                }
             }
 
             // All other opcodes are not yet implemented in the interpreter.

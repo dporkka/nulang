@@ -445,7 +445,7 @@ pub fn analyze_region(
             }
             // Actor / concurrency opcodes are not vectorizable.
             OpCode::Spawn | OpCode::Send | OpCode::Ask | OpCode::SelfOp
-            | OpCode::Receive | OpCode::Monitor | OpCode::Demon
+            | OpCode::Receive | OpCode::ReceiveMatch | OpCode::Monitor | OpCode::Demon
             | OpCode::Link | OpCode::Unlink | OpCode::Exit | OpCode::Yield => {
                 return None;
             }

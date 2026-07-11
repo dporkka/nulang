@@ -120,6 +120,7 @@ pub enum OpCode {
     StateSet = 0x8C, // Store to current actor state field by name (val_reg, field_const_idx)
     Emit     = 0x8D, // Emit event (event_name_const_idx, arg_count)
     SignalWait = 0x8E, // Workflow signal wait (signal_name_const_idx, dst)
+    ReceiveMatch = 0x8F, // Selective receive (spec_const_idx, dst); payload lands in dst+1..
 
     // == Effects (0x90-0x93) ==
     Perform = 0x90, // Perform effect operation (eff_id, op_id, args, dst)
@@ -224,6 +225,7 @@ impl OpCode {
             0x89 => Some(Exit), 0x8A => Some(Yield),
             0x8B => Some(StateGet), 0x8C => Some(StateSet), 0x8D => Some(Emit),
             0x8E => Some(SignalWait),
+            0x8F => Some(ReceiveMatch),
             0x90 => Some(Perform), 0x91 => Some(Handle), 0x92 => Some(Resume),
             0x93 => Some(Unwind),
             0x94 => Some(PyImport), 0x95 => Some(PyGetAttr), 0x96 => Some(PyCall),
@@ -602,7 +604,7 @@ mod tests {
             .chain(0x20..=0x2D).chain(0x30..=0x38)
             .chain(0x40..=0x4B).chain(0x50..=0x57)
             .chain(0x60..=0x64).chain(0x70..=0x7F)
-            .chain(0x80..=0x8E).chain(0x90..=0x93)
+            .chain(0x80..=0x8F).chain(0x90..=0x93)
             .chain(0x94..=0x9F).chain(0xA0..=0xA3)
             .chain(0xB0..=0xB0).chain(0xC0..=0xC5)
             .chain(0xD0..=0xD5).chain(0xE0..=0xE7)
