@@ -22,13 +22,13 @@ pub enum Literal {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
-    Wild,                       // _
-    Var(String),                // x
-    Lit(Literal),               // 42, "hello"
-    Tuple(Vec<Pattern>),        // (p1, p2)
-    Record(Vec<(String, Pattern)>), // { a: p1, b: p2 }
+    Wild,                                  // _
+    Var(String),                           // x
+    Lit(Literal),                          // 42, "hello"
+    Tuple(Vec<Pattern>),                   // (p1, p2)
+    Record(Vec<(String, Pattern)>),        // { a: p1, b: p2 }
     Variant(String, Option<Box<Pattern>>), // Some(x), None
-    Alias(String, Box<Pattern>), // x @ Pattern
+    Alias(String, Box<Pattern>),           // x @ Pattern
 }
 
 // ---------------------------------------------------------------------------
@@ -83,10 +83,7 @@ pub enum Expr {
         span: Span,
     },
     /// Block expression: { e1; e2 }
-    Block {
-        exprs: Vec<Expr>,
-        span: Span,
-    },
+    Block { exprs: Vec<Expr>, span: Span },
     /// Tuple: (e1, e2)
     Tuple(Vec<Expr>, Span),
     /// Record literal: { a: e1, b: e2 }
@@ -209,17 +206,34 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Mod,
-    Eq, Ne, Lt, Le, Gt, Ge,
-    And, Or,
-    BitAnd, BitOr, BitXor, Shl, Shr,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
     Assign,
     Pipe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
-    Neg, Not, Deref, Ref(Capability),
+    Neg,
+    Not,
+    Deref,
+    Ref(Capability),
 }
 
 #[derive(Debug, Clone, PartialEq)]

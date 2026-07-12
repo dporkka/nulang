@@ -4,16 +4,19 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::vm::{VM, Value};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+    use crate::runtime::{
+        ActorSnapshot, JournalEntry, MemoryStore, PersistenceStore, Runtime, RuntimeVmCallbacks,
+        WorkflowEvent,
+    };
     use crate::typechecker::TypeChecker;
-    use crate::types::Type;
     use crate::types::NuError;
+    use crate::types::Type;
+    use crate::vm::{Value, VM};
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
-    use crate::runtime::{Runtime, RuntimeVmCallbacks, MemoryStore, PersistenceStore, ActorSnapshot, JournalEntry, WorkflowEvent};
 
     /// Thread-safe, shareable in-memory persistence store for tests that need
     /// to simulate a runtime restart while keeping the same underlying storage.
@@ -42,8 +45,15 @@ mod tests {
         fn latest_sequence(&self, actor_id: u64) -> u64 {
             self.0.lock().unwrap().latest_sequence(actor_id)
         }
-        fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> std::io::Result<()> {
-            self.0.lock().unwrap().append_workflow_event(actor_id, event)
+        fn append_workflow_event(
+            &mut self,
+            actor_id: u64,
+            event: WorkflowEvent,
+        ) -> std::io::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .append_workflow_event(actor_id, event)
         }
         fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
             self.0.lock().unwrap().read_workflow_events(actor_id)
@@ -96,7 +106,12 @@ mod tests {
     /// Assert that running source produces an integer value.
     fn assert_int(source: &str, expected: i64) {
         let (value, _ty) = run_source(source).unwrap();
-        assert_eq!(value.as_int(), Some(expected), "Expected integer result for: {}", source);
+        assert_eq!(
+            value.as_int(),
+            Some(expected),
+            "Expected integer result for: {}",
+            source
+        );
     }
 
     /// Run source through the full compiler pipeline using a real actor runtime.
@@ -177,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_arithmetic_precedence() {
-        assert_int("1 + 2 * 3", 7);   // mul before add
+        assert_int("1 + 2 * 3", 7); // mul before add
         assert_int("(1 + 2) * 3", 9); // parens override
     }
 
@@ -341,7 +356,10 @@ mod tests {
     fn test_example_counter_actor_runs() {
         let source = include_str!("../examples/counter_actor.nu");
         let (value, _ty) = run_source(source).unwrap();
-        assert!(value.as_actor_id().is_some(), "spawn should return an actor reference");
+        assert!(
+            value.as_actor_id().is_some(),
+            "spawn should return an actor reference"
+        );
     }
 
     #[test]
@@ -364,7 +382,13 @@ mod tests {
         let ctx = EffectContext::empty();
         let mut checked = false;
         for decl in &ast.decls {
-            if let crate::ast::Decl::Function { name, body, effect: Some(declared), .. } = decl {
+            if let crate::ast::Decl::Function {
+                name,
+                body,
+                effect: Some(declared),
+                ..
+            } = decl
+            {
                 if name == "f" {
                     checked = true;
                     let result = checker.check_effects(&ctx, body, declared);
@@ -375,7 +399,10 @@ mod tests {
                 }
             }
         }
-        assert!(checked, "parser should surface the `! {{}}` annotation on fn f");
+        assert!(
+            checked,
+            "parser should surface the `! {{}}` annotation on fn f"
+        );
     }
 
     #[test]
@@ -396,7 +423,13 @@ mod tests {
         let ctx = EffectContext::empty();
         let mut checked = false;
         for decl in &ast.decls {
-            if let crate::ast::Decl::Function { name, body, effect: Some(declared), .. } = decl {
+            if let crate::ast::Decl::Function {
+                name,
+                body,
+                effect: Some(declared),
+                ..
+            } = decl
+            {
                 if name == "f" {
                     checked = true;
                     let result = checker.check_effects(&ctx, body, declared);
@@ -408,7 +441,10 @@ mod tests {
                 }
             }
         }
-        assert!(checked, "parser should surface the `! {{IO}}` annotation on fn f");
+        assert!(
+            checked,
+            "parser should surface the `! {{IO}}` annotation on fn f"
+        );
     }
 
     #[test]
@@ -434,7 +470,11 @@ mod tests {
             }
         "#;
         let (value, _ty) = run_source(source).unwrap();
-        assert_eq!(value.as_int(), Some(42), "Handler should return 42 via resume");
+        assert_eq!(
+            value.as_int(),
+            Some(42),
+            "Handler should return 42 via resume"
+        );
     }
 
     #[test]
@@ -745,7 +785,8 @@ mod tests {
 
     #[test]
     fn test_deep_nesting() {
-        let source = "let a = 1 in let b = 2 in let c = 3 in let d = 4 in let e = 5 in a + b + c + d + e";
+        let source =
+            "let a = 1 in let b = 2 in let c = 3 in let d = 4 in let e = 5 in a + b + c + d + e";
         assert_int(source, 15);
     }
 
@@ -829,7 +870,10 @@ mod tests {
                 !actor.bytecode_offsets.is_empty(),
                 "actor should have bytecode behavior offsets"
             );
-            assert!(actor.bytecode_module.is_some(), "actor should have a bytecode module");
+            assert!(
+                actor.bytecode_module.is_some(),
+                "actor should have a bytecode module"
+            );
         }
 
         rt.borrow_mut().run_scheduler();
@@ -861,7 +905,9 @@ mod tests {
         "#;
 
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         rt.borrow_mut().run_scheduler();
 
@@ -903,11 +949,18 @@ mod tests {
     #[test]
     fn test_legacy_index_and_field_assign() {
         let (value, _ty) = run_source("let arr = [1, 2, 3] in { arr[0] = 99 arr[0] }").unwrap();
-        assert_eq!(value.as_int(), Some(99), "arr[0] = 99 should actually mutate the array");
+        assert_eq!(
+            value.as_int(),
+            Some(99),
+            "arr[0] = 99 should actually mutate the array"
+        );
 
-        let (value, _ty) =
-            run_source("let r = { x: 1, y: 2 } in { r.x = 99 r.x + r.y }").unwrap();
-        assert_eq!(value.as_int(), Some(101), "r.x = 99 should actually mutate the record");
+        let (value, _ty) = run_source("let r = { x: 1, y: 2 } in { r.x = 99 r.x + r.y }").unwrap();
+        assert_eq!(
+            value.as_int(),
+            Some(101),
+            "r.x = 99 should actually mutate the record"
+        );
     }
 
     /// End-to-end regression for JIT type-guard stripping: a hot recursive
@@ -937,7 +990,11 @@ mod tests {
         let mut vm = VM::new();
         vm.load_module(module);
         let value = vm.run().unwrap();
-        assert_eq!(value.as_int(), Some(expected), "typed-path result must be exact");
+        assert_eq!(
+            value.as_int(),
+            Some(expected),
+            "typed-path result must be exact"
+        );
         assert!(
             vm.jit_typed_compiled_count() >= 1,
             "hot numeric function must compile through the type-directed JIT path"
@@ -998,7 +1055,12 @@ mod tests {
         rt1.borrow_mut().send_message(actor_id, "inc", &[]);
         rt1.borrow_mut().run_scheduler();
         assert_eq!(
-            rt1.borrow().actors.get(&actor_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
             Some(3)
         );
 
@@ -1015,7 +1077,12 @@ mod tests {
         rt2.borrow_mut().recover_actor(actor_id);
 
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
             Some(3),
             "recovered counter should still be 3"
         );
@@ -1025,7 +1092,12 @@ mod tests {
         rt2.borrow_mut().send_message(actor_id, "inc", &[]);
         rt2.borrow_mut().run_scheduler();
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
             Some(5),
             "counter should continue incrementing after recovery"
         );
@@ -1127,16 +1199,26 @@ mod tests {
         rt1.borrow_mut().run_scheduler();
 
         assert_eq!(
-            rt1.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(1),
             "first step should advance step_index to 1"
         );
 
         let events_before = store.read_workflow_events(actor_id);
-        assert!(events_before.iter().any(|e| matches!(e, WorkflowEvent::WorkflowStarted { .. })));
-        assert!(events_before.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "Started")));
-        assert!(events_before.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { .. })));
+        assert!(events_before
+            .iter()
+            .any(|e| matches!(e, WorkflowEvent::WorkflowStarted { .. })));
+        assert!(events_before
+            .iter()
+            .any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "Started")));
+        assert!(events_before
+            .iter()
+            .any(|e| matches!(e, WorkflowEvent::StepCompleted { .. })));
 
         // Simulate a node restart: new runtime sharing the same store,
         // register the bytecode module, then recover the workflow actor.
@@ -1151,8 +1233,12 @@ mod tests {
         rt2.borrow_mut().recover_actor(actor_id);
 
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(1),
             "recovered workflow should resume at step_index 1"
         );
@@ -1164,19 +1250,28 @@ mod tests {
         rt2.borrow_mut().run_scheduler();
 
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(2),
             "final step_index should be 2 after second step"
         );
 
         let events_after = store.read_workflow_events(actor_id);
         assert_eq!(
-            events_after.iter().filter(|e| matches!(e, WorkflowEvent::StepCompleted { .. })).count(),
+            events_after
+                .iter()
+                .filter(|e| matches!(e, WorkflowEvent::StepCompleted { .. }))
+                .count(),
             2,
             "two StepCompleted events should be persisted"
         );
-        assert!(events_after.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "Incremented")));
+        assert!(events_after
+            .iter()
+            .any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "Incremented")));
     }
 
     #[test]
@@ -1219,13 +1314,22 @@ mod tests {
 
         // Step has not completed yet; it is suspended waiting for the signal.
         assert_eq!(
-            rt1.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(0),
             "step should not advance before signal is received"
         );
         assert!(
-            rt1.borrow().actors.get(&actor_id).unwrap().suspended_execution.is_some(),
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .suspended_execution
+                .is_some(),
             "actor should have a suspended execution waiting for the signal"
         );
 
@@ -1246,8 +1350,12 @@ mod tests {
         rt2.borrow_mut().run_scheduler();
 
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(0),
             "step should still be waiting after recovery"
         );
@@ -1256,15 +1364,21 @@ mod tests {
         rt2.borrow_mut().signal_workflow(actor_id, "go", None);
 
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(1),
             "workflow should advance after the signal is received"
         );
 
         let events = store.read_workflow_events(actor_id);
         assert!(
-            events.iter().any(|e| matches!(e, WorkflowEvent::SignalReceived { name, .. } if name == "go")),
+            events
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::SignalReceived { name, .. } if name == "go")),
             "SignalReceived event should be persisted"
         );
         assert!(
@@ -1313,8 +1427,14 @@ mod tests {
         {
             let rt_ref = rt.borrow();
             let actor = rt_ref.actors.get(&actor_id).unwrap();
-            assert_eq!(actor.get_state_field("a_done").and_then(|v| v.as_int()), Some(1));
-            assert_eq!(actor.get_state_field("b_done").and_then(|v| v.as_int()), Some(1));
+            assert_eq!(
+                actor.get_state_field("a_done").and_then(|v| v.as_int()),
+                Some(1)
+            );
+            assert_eq!(
+                actor.get_state_field("b_done").and_then(|v| v.as_int()),
+                Some(1)
+            );
             assert_eq!(
                 actor.get_state_field("comp_order").and_then(|v| v.as_int()),
                 Some(21),
@@ -1324,11 +1444,17 @@ mod tests {
 
         let events = rt.borrow().persistence.read_workflow_events(actor_id);
         assert_eq!(
-            events.iter().filter(|e| matches!(e, WorkflowEvent::StepCompleted { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, WorkflowEvent::StepCompleted { .. }))
+                .count(),
             2,
             "only the first two steps should record StepCompleted"
         );
-        let saga_events: Vec<_> = events.iter().filter(|e| matches!(e, WorkflowEvent::SagaCompensated { .. })).collect();
+        let saga_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, WorkflowEvent::SagaCompensated { .. }))
+            .collect();
         assert_eq!(saga_events.len(), 2);
         assert!(
             matches!(&saga_events[0], WorkflowEvent::SagaCompensated { step_name, .. } if step_name == "b")
@@ -1378,12 +1504,18 @@ mod tests {
 
         let events_before = store.read_workflow_events(actor_id);
         assert!(
-            events_before.iter().any(|e| matches!(e, WorkflowEvent::TimerSet { name, .. } if name == "timeout1")),
+            events_before
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::TimerSet { name, .. } if name == "timeout1")),
             "TimerSet event should be persisted"
         );
         assert_eq!(
-            rt1.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(0),
             "step body does not increment step_index; the runtime records StepCompleted instead"
         );
@@ -1405,8 +1537,12 @@ mod tests {
             "timer should be re-armed after recovery"
         );
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(0),
             "recovered workflow should resume at the snapshot step_index"
         );
@@ -1418,12 +1554,18 @@ mod tests {
 
         let events_after = store.read_workflow_events(actor_id);
         assert!(
-            events_after.iter().any(|e| matches!(e, WorkflowEvent::TimerFired { name, .. } if name == "timeout1")),
+            events_after
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::TimerFired { name, .. } if name == "timeout1")),
             "TimerFired event should be persisted after the timer fires"
         );
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(1),
             "workflow should advance to step_index 1 after the timer fires"
         );
@@ -1460,15 +1602,22 @@ mod tests {
         rt.borrow_mut().run_scheduler();
 
         assert_eq!(
-            rt.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(3),
             "workflow should advance through before, parallel, and after"
         );
 
         let events = store.read_workflow_events(actor_id);
         assert_eq!(
-            events.iter().filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. }))
+                .count(),
             2,
             "both branches should emit ParallelBranchCompleted"
         );
@@ -1477,7 +1626,9 @@ mod tests {
             "parallel_0 should record StepCompleted"
         );
         assert!(
-            events.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "AfterDone")),
+            events
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "AfterDone")),
             "AfterDone should be persisted"
         );
     }
@@ -1528,8 +1679,12 @@ mod tests {
         rt1.borrow_mut().send_message_by_id(actor_id, 0, &[]);
         rt1.borrow_mut().run_scheduler();
         assert_eq!(
-            rt1.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(1),
             "before step should advance step_index to 1"
         );
@@ -1549,8 +1704,12 @@ mod tests {
             "branch_b should still be waiting"
         );
         assert_eq!(
-            rt1.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("parallel_progress").and_then(|v| v.as_int()),
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("parallel_progress")
+                .and_then(|v| v.as_int()),
             Some(1),
             "parallel_progress should reflect one completed branch"
         );
@@ -1583,21 +1742,32 @@ mod tests {
         rt2.borrow_mut().run_scheduler();
 
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(2),
             "parallel block should advance step_index to 2"
         );
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("parallel_progress").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("parallel_progress")
+                .and_then(|v| v.as_int()),
             Some(0),
             "parallel_progress should be reset after the block completes"
         );
 
         let events_after_signal = store.read_workflow_events(actor_id);
         assert_eq!(
-            events_after_signal.iter().filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. })).count(),
+            events_after_signal
+                .iter()
+                .filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. }))
+                .count(),
             2,
             "both branches should have ParallelBranchCompleted events"
         );
@@ -1611,14 +1781,20 @@ mod tests {
         rt2.borrow_mut().run_scheduler();
 
         assert_eq!(
-            rt2.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(3),
             "after step should advance step_index to 3"
         );
         let events_final = store.read_workflow_events(actor_id);
         assert!(
-            events_final.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "AfterDone")),
+            events_final
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "AfterDone")),
             "AfterDone event should be persisted"
         );
     }
@@ -1649,7 +1825,12 @@ mod tests {
 
     fn assert_int_new(source: &str, expected: i64) {
         let value = run_source_new(source).unwrap();
-        assert_eq!(value.as_int(), Some(expected), "new pipeline expected integer for: {}", source);
+        assert_eq!(
+            value.as_int(),
+            Some(expected),
+            "new pipeline expected integer for: {}",
+            source
+        );
     }
 
     /// Compile source through the HIR/MIR pipeline into a CodeModule without
@@ -1720,7 +1901,11 @@ mod tests {
             ask c get()
         "#;
         let value = run_source_new_with_runtime(source, rt).unwrap();
-        assert_eq!(value.as_int(), Some(2), "two increments should leave count at 2");
+        assert_eq!(
+            value.as_int(),
+            Some(2),
+            "two increments should leave count at 2"
+        );
     }
 
     #[test]
@@ -1738,7 +1923,9 @@ mod tests {
             }
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         rt.borrow_mut().run_scheduler();
 
@@ -1851,8 +2038,14 @@ mod tests {
 
         let rt_ref = rt.borrow();
         let actor = rt_ref.actors.get(&actor_id).unwrap();
-        assert_eq!(actor.get_state_field("a_done").and_then(|v| v.as_int()), Some(1));
-        assert_eq!(actor.get_state_field("b_done").and_then(|v| v.as_int()), Some(1));
+        assert_eq!(
+            actor.get_state_field("a_done").and_then(|v| v.as_int()),
+            Some(1)
+        );
+        assert_eq!(
+            actor.get_state_field("b_done").and_then(|v| v.as_int()),
+            Some(1)
+        );
         assert_eq!(
             actor.get_state_field("comp_order").and_then(|v| v.as_int()),
             Some(21),
@@ -2048,20 +2241,29 @@ mod tests {
         rt.borrow_mut().run_scheduler();
 
         assert_eq!(
-            rt.borrow().actors.get(&actor_id).unwrap()
-                .get_state_field("step_index").and_then(|v| v.as_int()),
+            rt.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
             Some(3),
             "workflow should advance through before, parallel, and after"
         );
 
         let events = store.read_workflow_events(actor_id);
         assert_eq!(
-            events.iter().filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. })).count(),
+            events
+                .iter()
+                .filter(|e| matches!(e, WorkflowEvent::ParallelBranchCompleted { .. }))
+                .count(),
             2,
             "both branches should emit ParallelBranchCompleted"
         );
         assert!(
-            events.iter().any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "AfterDone")),
+            events
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::Custom { name, .. } if name == "AfterDone")),
             "AfterDone should be persisted"
         );
     }
@@ -2141,7 +2343,6 @@ mod tests {
         assert_eq!(value.as_bool(), Some(true));
     }
 
-
     /// MIR pipeline fn main() entry point.
     #[test]
     fn test_mir_fn_main_entry_point() {
@@ -2155,8 +2356,10 @@ mod tests {
     #[test]
     fn test_mir_fn_main_with_runtime() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        rt.borrow_mut().set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
-        let v = run_source_new_with_runtime("fn main() { perform LLM.ask(\"hello\") }", rt).unwrap();
+        rt.borrow_mut()
+            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+        let v =
+            run_source_new_with_runtime("fn main() { perform LLM.ask(\"hello\") }", rt).unwrap();
         assert!(!v.is_nil());
     }
 
@@ -2165,7 +2368,10 @@ mod tests {
     fn test_mir_pipeline_with_runtime() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let v = run_source_new_with_runtime(
-            "fn main() { let p = Pipeline.new() in p.run(\"hello\") }", rt).unwrap();
+            "fn main() { let p = Pipeline.new() in p.run(\"hello\") }",
+            rt,
+        )
+        .unwrap();
         assert!(v.is_nil(), "empty pipeline returns nil");
     }
 
@@ -2185,16 +2391,15 @@ mod tests {
         assert_int_new(source, 42);
     }
 
-
-
-
-
     /// Receive parses and runs inside a function body.
     #[test]
     fn test_mir_receive_gets_message() {
         // receive returns nil outside actor context
         let v = run_source_new("fn main() { receive { | Msg(x) => x } }").unwrap();
-        assert!(v.is_nil(), "receive in fn main should return nil outside actor");
+        assert!(
+            v.is_nil(),
+            "receive in fn main should return nil outside actor"
+        );
     }
 
     /// End-to-end: a behavior using `receive` pops the next pending mailbox
@@ -2217,7 +2422,9 @@ mod tests {
             }
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         rt.borrow_mut().run_scheduler();
 
@@ -2257,7 +2464,9 @@ mod tests {
             }
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         rt.borrow_mut().run_scheduler();
 
@@ -2298,7 +2507,9 @@ mod tests {
             }
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         rt.borrow_mut().run_scheduler();
 
@@ -2341,7 +2552,9 @@ mod tests {
             }
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         rt.borrow_mut().run_scheduler();
 
@@ -2379,14 +2592,19 @@ mod tests {
             }
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         rt.borrow_mut().run_scheduler();
 
         let rt_ref = rt.borrow();
         let actor = rt_ref.actors.get(&actor_id).unwrap();
         assert!(
-            actor.get_state_field("seen").map(|v| v.is_nil()).unwrap_or(false),
+            actor
+                .get_state_field("seen")
+                .map(|v| v.is_nil())
+                .unwrap_or(false),
             "receive with no matching message and empty mailbox should yield nil"
         );
     }
@@ -2412,7 +2630,9 @@ mod tests {
             }
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         rt.borrow_mut().run_scheduler();
 
@@ -2446,21 +2666,25 @@ mod tests {
             }
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         // Enqueue add with only one payload value behind the pending drain.
-        rt.borrow_mut().send_message(actor_id, "add", &[Value::int(7)]);
+        rt.borrow_mut()
+            .send_message(actor_id, "add", &[Value::int(7)]);
         rt.borrow_mut().run_scheduler();
 
         let rt_ref = rt.borrow();
         let actor = rt_ref.actors.get(&actor_id).unwrap();
         assert!(
-            actor.get_state_field("seen").map(|v| v.is_nil()).unwrap_or(false),
+            actor
+                .get_state_field("seen")
+                .map(|v| v.is_nil())
+                .unwrap_or(false),
             "params beyond the payload length should bind to nil"
         );
     }
-
-
 
     /// Differential test: the legacy compiler and the HIR/MIR pipeline must
     /// produce identical results over a corpus of pure programs.
@@ -2543,7 +2767,8 @@ mod tests {
         let (module, _ty) = compile_source(source).unwrap();
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        rt.borrow_mut().set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+        rt.borrow_mut()
+            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
 
         let mut vm = VM::new();
         vm.load_module(module);
@@ -2562,7 +2787,10 @@ mod tests {
 
     /// Native counter handler for the non-blocking LLM ordering test.
     fn llm_test_counter_inc(actor: &mut crate::runtime::Actor, _args: &[Value]) {
-        let n = actor.get_state_field("count").and_then(|v| v.as_int()).unwrap_or(0);
+        let n = actor
+            .get_state_field("count")
+            .and_then(|v| v.as_int())
+            .unwrap_or(0);
         actor.set_state_field("count", Value::int(n + 1));
     }
 
@@ -2585,7 +2813,9 @@ mod tests {
             let a = spawn LlmActor { answer = "" } in a
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         rt.borrow_mut().send_message(actor_id, "go", &[]);
         rt.borrow_mut().run_scheduler();
@@ -2619,10 +2849,11 @@ mod tests {
     #[test]
     fn test_llm_ask_nonblocking_other_actors_run_first() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        rt.borrow_mut().set_llm_client(Box::new(crate::ai::MockLlmClient::delayed(
-            "done",
-            std::time::Duration::from_millis(100),
-        )));
+        rt.borrow_mut()
+            .set_llm_client(Box::new(crate::ai::MockLlmClient::delayed(
+                "done",
+                std::time::Duration::from_millis(100),
+            )));
 
         let source = r#"
             actor LlmActor {
@@ -2634,7 +2865,9 @@ mod tests {
             let a = spawn LlmActor { answer = "" } in a
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let llm_actor = value.as_actor_id().expect("spawn should return an actor reference");
+        let llm_actor = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         let counter = rt
             .borrow_mut()
@@ -2667,7 +2900,9 @@ mod tests {
             let rt_ref = rt.borrow();
             let counter_actor = rt_ref.actors.get(&counter).unwrap();
             assert_eq!(
-                counter_actor.get_state_field("count").and_then(|v| v.as_int()),
+                counter_actor
+                    .get_state_field("count")
+                    .and_then(|v| v.as_int()),
                 Some(20),
                 "all counter work must complete while the LLM call is in flight"
             );
@@ -2695,7 +2930,12 @@ mod tests {
             "LLM behavior should resume and store the delayed response"
         );
         assert_eq!(
-            rt_ref.actors.get(&counter).unwrap().get_state_field("count").and_then(|v| v.as_int()),
+            rt_ref
+                .actors
+                .get(&counter)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
             Some(20)
         );
     }
@@ -2731,7 +2971,9 @@ mod tests {
             let a = spawn Chained { first = ""; second = "" } in a
         "#;
         let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
-        let actor_id = value.as_actor_id().expect("spawn should return an actor reference");
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
 
         rt.borrow_mut().send_message(actor_id, "go", &[]);
         rt.borrow_mut().run_scheduler();
@@ -2818,10 +3060,8 @@ mod tests {
         let (module, _ty) = compile_source(source).unwrap();
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let client = crate::ai::MockLlmClient::with_usage(
-            "world",
-            crate::ai::TokenUsage::new(1000, 500),
-        );
+        let client =
+            crate::ai::MockLlmClient::with_usage("world", crate::ai::TokenUsage::new(1000, 500));
         let client_ref = client.clone();
         rt.borrow_mut().set_llm_client(Box::new(client));
 
@@ -2836,13 +3076,20 @@ mod tests {
 
         let rt = rt.borrow();
         let actor = rt.actors.values().next().expect("expected one actor");
-        assert_eq!(actor.get_state_field("usage_prompt").unwrap().as_int(), Some(1000));
+        assert_eq!(
+            actor.get_state_field("usage_prompt").unwrap().as_int(),
+            Some(1000)
+        );
         assert_eq!(
             actor.get_state_field("usage_completion").unwrap().as_int(),
             Some(500)
         );
         // 1000 * 0.01 / 1000 + 500 * 0.02 / 1000 = 0.01 + 0.01 = 0.02
-        let cost = actor.get_state_field("usage_cost").unwrap().as_float().unwrap();
+        let cost = actor
+            .get_state_field("usage_cost")
+            .unwrap()
+            .as_float()
+            .unwrap();
         assert!((cost - 0.02).abs() < 1e-9);
 
         // Pricing should be forwarded on the request.
@@ -2867,10 +3114,8 @@ mod tests {
         let (module, _ty) = compile_source(source).unwrap();
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let client = crate::ai::MockLlmClient::with_usage(
-            "world",
-            crate::ai::TokenUsage::new(1000, 500),
-        );
+        let client =
+            crate::ai::MockLlmClient::with_usage("world", crate::ai::TokenUsage::new(1000, 500));
         rt.borrow_mut().set_llm_client(Box::new(client));
 
         let mut vm = VM::new();
@@ -2958,9 +3203,7 @@ mod tests {
         let mut store_args = serde_json::Map::new();
         store_args.insert(
             "content".to_string(),
-            serde_json::Value::String(
-                "CRDTs are conflict-free replicated data types.".to_string(),
-            ),
+            serde_json::Value::String("CRDTs are conflict-free replicated data types.".to_string()),
         );
         store_args.insert(
             "topic".to_string(),
@@ -3066,28 +3309,24 @@ mod tests {
         let mut store_args = serde_json::Map::new();
         store_args.insert(
             "content".to_string(),
-            serde_json::Value::String(
-                "CRDTs are conflict-free replicated data types.".to_string(),
-            ),
+            serde_json::Value::String("CRDTs are conflict-free replicated data types.".to_string()),
         );
         store_args.insert(
             "topic".to_string(),
             serde_json::Value::String("CRDTs".to_string()),
         );
 
-        let client = crate::ai::MockLlmClient::sequence(vec![
-            crate::ai::LlmResponse {
-                content: None,
-                tool_calls: vec![crate::ai::ToolCall {
-                    id: String::new(),
-                    name: "store_fact".to_string(),
-                    arguments: store_args,
-                }],
-                model: "mock".to_string(),
-                finish_reason: "tool_calls".to_string(),
-                usage: crate::ai::TokenUsage::default(),
-            },
-        ]);
+        let client = crate::ai::MockLlmClient::sequence(vec![crate::ai::LlmResponse {
+            content: None,
+            tool_calls: vec![crate::ai::ToolCall {
+                id: String::new(),
+                name: "store_fact".to_string(),
+                arguments: store_args,
+            }],
+            model: "mock".to_string(),
+            finish_reason: "tool_calls".to_string(),
+            usage: crate::ai::TokenUsage::default(),
+        }]);
 
         let rt1 = Rc::new(RefCell::new(Runtime::new()));
         rt1.borrow_mut().set_llm_client(Box::new(client));
@@ -3106,8 +3345,7 @@ mod tests {
             let actor = rt1_ref.actors.get(&actor_id).unwrap();
             let memory_json = actor.get_state_field("semantic_memory").unwrap();
             let memory_json_str = VM::new().value_to_string(0, memory_json);
-            let memory: crate::ai::SemanticMemory =
-                serde_json::from_str(&memory_json_str).unwrap();
+            let memory: crate::ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
             assert_eq!(memory.len(), 1);
         }
 
@@ -3140,8 +3378,7 @@ mod tests {
         let module_idx = 0;
         let recalled_content = VM::new().value_to_string(module_idx, recalled);
         assert_eq!(
-            recalled_content,
-            "CRDTs are conflict-free replicated data types.",
+            recalled_content, "CRDTs are conflict-free replicated data types.",
             "recovered agent should recall the stored fact"
         );
     }
@@ -3178,7 +3415,10 @@ mod tests {
         let memory: crate::ai::ProceduralMemory = serde_json::from_str(&memory_json_str).unwrap();
         assert_eq!(memory.len(), 1);
         assert_eq!(memory.namespace, "my_app");
-        assert_eq!(memory.get_pattern("format").unwrap().output_template, "{title}\\n{summary}");
+        assert_eq!(
+            memory.get_pattern("format").unwrap().output_template,
+            "{title}\\n{summary}"
+        );
     }
 
     #[test]
@@ -3287,8 +3527,7 @@ mod tests {
         let module_idx = 0;
         let recalled_content = VM::new().value_to_string(module_idx, recalled);
         assert_eq!(
-            recalled_content,
-            "{title}",
+            recalled_content, "{title}",
             "recovered agent should return the stored pattern"
         );
     }

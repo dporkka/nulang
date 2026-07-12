@@ -146,10 +146,22 @@ mod tests {
 
     #[test]
     fn test_primitive_schemas() {
-        assert_eq!(type_to_json_schema(&Type::int()), serde_json::json!({"type": "integer"}));
-        assert_eq!(type_to_json_schema(&Type::float()), serde_json::json!({"type": "number"}));
-        assert_eq!(type_to_json_schema(&Type::bool()), serde_json::json!({"type": "boolean"}));
-        assert_eq!(type_to_json_schema(&Type::string()), serde_json::json!({"type": "string"}));
+        assert_eq!(
+            type_to_json_schema(&Type::int()),
+            serde_json::json!({"type": "integer"})
+        );
+        assert_eq!(
+            type_to_json_schema(&Type::float()),
+            serde_json::json!({"type": "number"})
+        );
+        assert_eq!(
+            type_to_json_schema(&Type::bool()),
+            serde_json::json!({"type": "boolean"})
+        );
+        assert_eq!(
+            type_to_json_schema(&Type::string()),
+            serde_json::json!({"type": "string"})
+        );
     }
 
     #[test]
@@ -168,10 +180,22 @@ mod tests {
         ]);
         let schema = type_to_json_schema(&ty);
         assert_eq!(schema["type"], "object");
-        assert_eq!(schema["properties"]["x"], serde_json::json!({"type": "integer"}));
-        assert_eq!(schema["properties"]["y"], serde_json::json!({"type": "integer"}));
-        assert!(schema["required"].as_array().unwrap().contains(&serde_json::json!("x")));
-        assert!(schema["required"].as_array().unwrap().contains(&serde_json::json!("y")));
+        assert_eq!(
+            schema["properties"]["x"],
+            serde_json::json!({"type": "integer"})
+        );
+        assert_eq!(
+            schema["properties"]["y"],
+            serde_json::json!({"type": "integer"})
+        );
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("x")));
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("y")));
     }
 
     #[test]
@@ -184,9 +208,21 @@ mod tests {
         assert_eq!(tool.name, "add");
         assert_eq!(tool.description, "Add two integers.");
         assert_eq!(tool.parameters["type"], "object");
-        assert_eq!(tool.parameters["properties"]["a"], serde_json::json!({"type": "integer"}));
-        assert_eq!(tool.parameters["properties"]["b"], serde_json::json!({"type": "integer"}));
-        assert!(tool.parameters["required"].as_array().unwrap().contains(&serde_json::json!("a")));
-        assert!(tool.parameters["required"].as_array().unwrap().contains(&serde_json::json!("b")));
+        assert_eq!(
+            tool.parameters["properties"]["a"],
+            serde_json::json!({"type": "integer"})
+        );
+        assert_eq!(
+            tool.parameters["properties"]["b"],
+            serde_json::json!({"type": "integer"})
+        );
+        assert!(tool.parameters["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("a")));
+        assert!(tool.parameters["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("b")));
     }
 }

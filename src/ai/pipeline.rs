@@ -55,8 +55,12 @@ impl PipelineRuntime for Runtime {
             .actors
             .get(&agent_id)
             .ok_or_else(|| format!("Actor {} disappeared during ask", agent_id))?;
-        value_to_string(&response, actor)
-            .ok_or_else(|| format!("Could not convert response from actor {} to string", agent_id))
+        value_to_string(&response, actor).ok_or_else(|| {
+            format!(
+                "Could not convert response from actor {} to string",
+                agent_id
+            )
+        })
     }
 }
 
@@ -132,11 +136,7 @@ impl Pipeline {
     /// Run the pipeline, returning the output of the final stage.
     ///
     /// Returns an error if any stage fails or if the pipeline has no stages.
-    pub fn run<R: PipelineRuntime>(
-        &self,
-        runtime: &mut R,
-        input: &str,
-    ) -> Result<String, String> {
+    pub fn run<R: PipelineRuntime>(&self, runtime: &mut R, input: &str) -> Result<String, String> {
         if self.stages.is_empty() {
             return Err("Pipeline has no stages".to_string());
         }
@@ -182,9 +182,7 @@ mod tests {
 
     impl PipelineRuntime for MockRuntime {
         fn ask_agent(&mut self, agent_id: u64, prompt: &str) -> Result<String, String> {
-            self.calls
-                .borrow_mut()
-                .push((agent_id, prompt.to_string()));
+            self.calls.borrow_mut().push((agent_id, prompt.to_string()));
             self.responses
                 .get(&agent_id)
                 .cloned()
@@ -198,11 +196,11 @@ mod tests {
             interpolate_template("Summarize: {input}", "hello world"),
             "Summarize: hello world"
         );
+        assert_eq!(interpolate_template("{input} and {input}", "x"), "x and x");
         assert_eq!(
-            interpolate_template("{input} and {input}", "x"),
-            "x and x"
+            interpolate_template("no placeholder", "x"),
+            "no placeholder"
         );
-        assert_eq!(interpolate_template("no placeholder", "x"), "no placeholder");
         assert_eq!(interpolate_template("{input}", ""), "");
     }
 
@@ -210,7 +208,10 @@ mod tests {
     fn test_empty_pipeline_errors() {
         let pipeline = Pipeline::new();
         let mut rt = MockRuntime::new(HashMap::new());
-        assert_eq!(pipeline.run(&mut rt, "hello"), Err("Pipeline has no stages".to_string()));
+        assert_eq!(
+            pipeline.run(&mut rt, "hello"),
+            Err("Pipeline has no stages".to_string())
+        );
     }
 
     #[test]
@@ -228,9 +229,11 @@ mod tests {
 
     #[test]
     fn test_multiple_stages_chain_output() {
-        let pipeline = Pipeline::new()
-            .stage("expand", 1, "Expand: {input}")
-            .stage("summarize", 2, "Summarize: {input}");
+        let pipeline = Pipeline::new().stage("expand", 1, "Expand: {input}").stage(
+            "summarize",
+            2,
+            "Summarize: {input}",
+        );
         let mut rt = MockRuntime::new(HashMap::from([
             (1, "expanded text".to_string()),
             (2, "final summary".to_string()),

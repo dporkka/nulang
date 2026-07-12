@@ -121,7 +121,9 @@ fn push_u32(buf: &mut Vec<u8>, v: u32) {
 #[inline]
 fn read_u64(bytes: &[u8], pos: usize) -> Option<(u64, usize)> {
     let end = pos.checked_add(8)?;
-    if end > bytes.len() { return None; }
+    if end > bytes.len() {
+        return None;
+    }
     let mut arr = [0u8; 8];
     arr.copy_from_slice(&bytes[pos..end]);
     Some((u64::from_be_bytes(arr), end))
@@ -130,7 +132,9 @@ fn read_u64(bytes: &[u8], pos: usize) -> Option<(u64, usize)> {
 #[inline]
 fn read_u32(bytes: &[u8], pos: usize) -> Option<(u32, usize)> {
     let end = pos.checked_add(4)?;
-    if end > bytes.len() { return None; }
+    if end > bytes.len() {
+        return None;
+    }
     let mut arr = [0u8; 4];
     arr.copy_from_slice(&bytes[pos..end]);
     Some((u32::from_be_bytes(arr), end))
@@ -147,7 +151,9 @@ fn read_string(bytes: &[u8], pos: usize) -> Option<(String, usize)> {
     let (len, pos) = read_u32(bytes, pos)?;
     let len = len as usize;
     let end = pos.checked_add(len)?;
-    if end > bytes.len() { return None; }
+    if end > bytes.len() {
+        return None;
+    }
     let s = String::from_utf8(bytes[pos..end].to_vec()).ok()?;
     Some((s, end))
 }
@@ -164,7 +170,10 @@ pub struct GCounter {
 
 impl GCounter {
     pub fn new(node_id: u64) -> Self {
-        Self { counts: HashMap::new(), node_id }
+        Self {
+            counts: HashMap::new(),
+            node_id,
+        }
     }
 
     pub fn increment(&mut self) {
@@ -189,7 +198,14 @@ impl GCounter {
                 counts.insert(*node_id, *count);
             }
         }
-        if counts.is_empty() { None } else { Some(Self { counts, node_id: self.node_id }) }
+        if counts.is_empty() {
+            None
+        } else {
+            Some(Self {
+                counts,
+                node_id: self.node_id,
+            })
+        }
     }
 }
 
@@ -203,8 +219,12 @@ impl Crdt for GCounter {
         }
     }
 
-    fn value(&self) -> Self::Value { self.value() }
-    fn clone_replica(&self) -> Self { self.clone() }
+    fn value(&self) -> Self::Value {
+        self.value()
+    }
+    fn clone_replica(&self) -> Self {
+        self.clone()
+    }
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -249,10 +269,18 @@ impl PNCounter {
         }
     }
 
-    pub fn increment(&mut self) { self.increments.increment(); }
-    pub fn decrement(&mut self) { self.decrements.increment(); }
-    pub fn increment_by(&mut self, delta: u64) { self.increments.increment_by(delta); }
-    pub fn decrement_by(&mut self, delta: u64) { self.decrements.increment_by(delta); }
+    pub fn increment(&mut self) {
+        self.increments.increment();
+    }
+    pub fn decrement(&mut self) {
+        self.decrements.increment();
+    }
+    pub fn increment_by(&mut self, delta: u64) {
+        self.increments.increment_by(delta);
+    }
+    pub fn decrement_by(&mut self, delta: u64) {
+        self.decrements.increment_by(delta);
+    }
 
     pub fn value(&self) -> i64 {
         self.increments.value() as i64 - self.decrements.value() as i64
@@ -282,8 +310,12 @@ impl Crdt for PNCounter {
         self.decrements.merge(&other.decrements);
     }
 
-    fn value(&self) -> Self::Value { self.value() }
-    fn clone_replica(&self) -> Self { self.clone() }
+    fn value(&self) -> Self::Value {
+        self.value()
+    }
+    fn clone_replica(&self) -> Self {
+        self.clone()
+    }
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = self.increments.to_bytes();
@@ -302,7 +334,10 @@ impl Crdt for PNCounter {
         if increments.node_id != node_id || decrements.node_id != node_id {
             return None;
         }
-        Some(Self { increments, decrements })
+        Some(Self {
+            increments,
+            decrements,
+        })
     }
 }
 
@@ -316,23 +351,43 @@ pub struct GSet<T: Clone + Eq + std::hash::Hash> {
 }
 
 impl<T: Clone + Eq + std::hash::Hash> GSet<T> {
-    pub fn new() -> Self { Self { elements: HashSet::new() } }
-    pub fn insert(&mut self, element: T) -> bool { self.elements.insert(element) }
-    pub fn contains(&self, element: &T) -> bool { self.elements.contains(element) }
-    pub fn len(&self) -> usize { self.elements.len() }
-    pub fn is_empty(&self) -> bool { self.elements.is_empty() }
-    pub fn value(&self) -> &HashSet<T> { &self.elements }
+    pub fn new() -> Self {
+        Self {
+            elements: HashSet::new(),
+        }
+    }
+    pub fn insert(&mut self, element: T) -> bool {
+        self.elements.insert(element)
+    }
+    pub fn contains(&self, element: &T) -> bool {
+        self.elements.contains(element)
+    }
+    pub fn len(&self) -> usize {
+        self.elements.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+    pub fn value(&self) -> &HashSet<T> {
+        &self.elements
+    }
 
     /// Delta relative to `base`: the elements added since `base`.
     /// `None` when the set did not grow.
     pub fn delta_since(&self, base: &Self) -> Option<Self> {
         let elements: HashSet<T> = self.elements.difference(&base.elements).cloned().collect();
-        if elements.is_empty() { None } else { Some(Self { elements }) }
+        if elements.is_empty() {
+            None
+        } else {
+            Some(Self { elements })
+        }
     }
 }
 
 impl<T: Clone + Eq + std::hash::Hash> Default for GSet<T> {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Crdt for GSet<String> {
@@ -342,8 +397,12 @@ impl Crdt for GSet<String> {
         self.elements.extend(other.elements.iter().cloned());
     }
 
-    fn value(&self) -> Self::Value { self.elements.clone() }
-    fn clone_replica(&self) -> Self { self.clone() }
+    fn value(&self) -> Self::Value {
+        self.elements.clone()
+    }
+    fn clone_replica(&self) -> Self {
+        self.clone()
+    }
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -385,18 +444,28 @@ pub struct ORSet<T: Clone + Eq + std::hash::Hash> {
 
 impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
     pub fn new(node_id: u32) -> Self {
-        Self { entries: HashMap::new(), tag_counter: 0, node_id }
+        Self {
+            entries: HashMap::new(),
+            tag_counter: 0,
+            node_id,
+        }
     }
 
     fn fresh_tag(&mut self) -> Tag {
-        let tag = Tag { node_id: self.node_id, counter: self.tag_counter };
+        let tag = Tag {
+            node_id: self.node_id,
+            counter: self.tag_counter,
+        };
         self.tag_counter = self.tag_counter.checked_add(1).expect("Counter overflow");
         tag
     }
 
     pub fn add(&mut self, element: T) {
         let tag = self.fresh_tag();
-        self.entries.entry(element).or_insert_with(HashSet::new).insert(tag);
+        self.entries
+            .entry(element)
+            .or_insert_with(HashSet::new)
+            .insert(tag);
     }
 
     pub fn remove(&mut self, element: &T) {
@@ -404,18 +473,25 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
     }
 
     pub fn contains(&self, element: &T) -> bool {
-        self.entries.get(element).map_or(false, |tags| !tags.is_empty())
+        self.entries
+            .get(element)
+            .map_or(false, |tags| !tags.is_empty())
     }
 
     pub fn value(&self) -> HashSet<T> {
-        self.entries.iter()
+        self.entries
+            .iter()
             .filter(|(_, tags)| !tags.is_empty())
             .map(|(elem, _)| elem.clone())
             .collect()
     }
 
-    pub fn len(&self) -> usize { self.value().len() }
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn len(&self) -> usize {
+        self.value().len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     /// Delta relative to `base`: for each element, the tags not present in
     /// `base`. Elements with no new tags are omitted. `None` when no tag
@@ -424,7 +500,8 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
     pub fn delta_since(&self, base: &Self) -> Option<Self> {
         let mut entries = HashMap::new();
         for (element, tags) in &self.entries {
-            let new_tags: HashSet<Tag> = tags.iter()
+            let new_tags: HashSet<Tag> = tags
+                .iter()
                 .filter(|t| base.entries.get(element).map_or(true, |bt| !bt.contains(t)))
                 .copied()
                 .collect();
@@ -435,7 +512,11 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
         if entries.is_empty() {
             None
         } else {
-            Some(Self { entries, tag_counter: self.tag_counter, node_id: self.node_id })
+            Some(Self {
+                entries,
+                tag_counter: self.tag_counter,
+                node_id: self.node_id,
+            })
         }
     }
 }
@@ -445,14 +526,21 @@ impl Crdt for ORSet<String> {
 
     fn merge(&mut self, other: &Self) {
         for (element, tags) in &other.entries {
-            let entry = self.entries.entry(element.clone()).or_insert_with(HashSet::new);
+            let entry = self
+                .entries
+                .entry(element.clone())
+                .or_insert_with(HashSet::new);
             entry.extend(tags);
         }
         self.tag_counter = self.tag_counter.max(other.tag_counter);
     }
 
-    fn value(&self) -> Self::Value { self.value() }
-    fn clone_replica(&self) -> Self { self.clone() }
+    fn value(&self) -> Self::Value {
+        self.value()
+    }
+    fn clone_replica(&self) -> Self {
+        self.clone()
+    }
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -462,7 +550,12 @@ impl Crdt for ORSet<String> {
         for (element, tags) in &self.entries {
             push_string(&mut buf, element);
             push_u32(&mut buf, tags.len() as u32);
-            for tag in tags { push_u64(&mut buf, ((tag.node_id as u64) << 32) | (tag.counter as u64)); }
+            for tag in tags {
+                push_u64(
+                    &mut buf,
+                    ((tag.node_id as u64) << 32) | (tag.counter as u64),
+                );
+            }
         }
         buf
     }
@@ -478,13 +571,20 @@ impl Crdt for ORSet<String> {
             let mut tags = HashSet::new();
             for _ in 0..tag_count {
                 let (tag_val, p2) = read_u64(bytes, p)?;
-                tags.insert(Tag { node_id: (tag_val >> 32) as u32, counter: tag_val as u32 });
+                tags.insert(Tag {
+                    node_id: (tag_val >> 32) as u32,
+                    counter: tag_val as u32,
+                });
                 p = p2;
             }
             entries.insert(element, tags);
             pos = p;
         }
-        Some(Self { entries, tag_counter: tag_counter as u32, node_id: node_id as u32 })
+        Some(Self {
+            entries,
+            tag_counter: tag_counter as u32,
+            node_id: node_id as u32,
+        })
     }
 }
 
@@ -517,12 +617,18 @@ pub struct LamportClock {
 
 impl LamportClock {
     pub fn new(node_id: u64) -> Self {
-        Self { node_id, counter: 0 }
+        Self {
+            node_id,
+            counter: 0,
+        }
     }
 
     pub fn tick(&mut self) -> LamportTime {
         self.counter += 1;
-        LamportTime { counter: self.counter, node_id: self.node_id }
+        LamportTime {
+            counter: self.counter,
+            node_id: self.node_id,
+        }
     }
 }
 
@@ -539,7 +645,11 @@ pub struct AWORSet<T: Clone + Eq + std::hash::Hash> {
 
 impl<T: Clone + Eq + std::hash::Hash> AWORSet<T> {
     pub fn new(node_id: u64) -> Self {
-        Self { entries: HashMap::new(), removed: HashMap::new(), clock: LamportClock::new(node_id) }
+        Self {
+            entries: HashMap::new(),
+            removed: HashMap::new(),
+            clock: LamportClock::new(node_id),
+        }
     }
 
     pub fn add(&mut self, element: T) {
@@ -561,11 +671,19 @@ impl<T: Clone + Eq + std::hash::Hash> AWORSet<T> {
     }
 
     pub fn value(&self) -> HashSet<T> {
-        self.entries.keys().filter(|e| self.contains(e)).cloned().collect()
+        self.entries
+            .keys()
+            .filter(|e| self.contains(e))
+            .cloned()
+            .collect()
     }
 
-    pub fn len(&self) -> usize { self.value().len() }
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn len(&self) -> usize {
+        self.value().len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     /// Delta relative to `base`: add/remove timestamps strictly newer than
     /// `base`'s for the same element. `None` when nothing changed. The
@@ -587,7 +705,11 @@ impl<T: Clone + Eq + std::hash::Hash> AWORSet<T> {
         if entries.is_empty() && removed.is_empty() {
             None
         } else {
-            Some(Self { entries, removed, clock: self.clock })
+            Some(Self {
+                entries,
+                removed,
+                clock: self.clock,
+            })
         }
     }
 }
@@ -599,20 +721,28 @@ impl Crdt for AWORSet<String> {
         for (element, ts) in &other.entries {
             match self.entries.get(element) {
                 Some(existing) if *ts <= *existing => {}
-                _ => { self.entries.insert(element.clone(), *ts); }
+                _ => {
+                    self.entries.insert(element.clone(), *ts);
+                }
             }
         }
         for (element, ts) in &other.removed {
             match self.removed.get(element) {
                 Some(existing) if *ts <= *existing => {}
-                _ => { self.removed.insert(element.clone(), *ts); }
+                _ => {
+                    self.removed.insert(element.clone(), *ts);
+                }
             }
         }
         self.clock.counter = self.clock.counter.max(other.clock.counter);
     }
 
-    fn value(&self) -> Self::Value { self.value() }
-    fn clone_replica(&self) -> Self { self.clone() }
+    fn value(&self) -> Self::Value {
+        self.value()
+    }
+    fn clone_replica(&self) -> Self {
+        self.clone()
+    }
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -642,7 +772,13 @@ impl Crdt for AWORSet<String> {
             let (element, p) = read_string(bytes, pos)?;
             let (cnt, p) = read_u64(bytes, p)?;
             let (nid, p) = read_u64(bytes, p)?;
-            entries.insert(element, LamportTime { counter: cnt, node_id: nid });
+            entries.insert(
+                element,
+                LamportTime {
+                    counter: cnt,
+                    node_id: nid,
+                },
+            );
             pos = p;
         }
         let (num_removed, mut pos) = read_u32(bytes, pos)?;
@@ -651,10 +787,20 @@ impl Crdt for AWORSet<String> {
             let (element, p) = read_string(bytes, pos)?;
             let (cnt, p) = read_u64(bytes, p)?;
             let (nid, p) = read_u64(bytes, p)?;
-            removed.insert(element, LamportTime { counter: cnt, node_id: nid });
+            removed.insert(
+                element,
+                LamportTime {
+                    counter: cnt,
+                    node_id: nid,
+                },
+            );
             pos = p;
         }
-        Some(Self { entries, removed, clock: LamportClock { node_id, counter } })
+        Some(Self {
+            entries,
+            removed,
+            clock: LamportClock { node_id, counter },
+        })
     }
 }
 
@@ -706,8 +852,10 @@ mod tests {
         let mut b = b_orig;
         b.merge(&c_orig);
         // They both merged with the same state
-        let mut a2 = GCounter::new(1); a2.increment_by(3);
-        let mut b2 = GCounter::new(2); b2.increment_by(5);
+        let mut a2 = GCounter::new(1);
+        a2.increment_by(3);
+        let mut b2 = GCounter::new(2);
+        b2.increment_by(5);
         a2.merge(&b2);
         b2.merge(&a2);
         assert_eq!(a2.value(), b2.value());
@@ -770,8 +918,10 @@ mod tests {
 
     #[test]
     fn test_pncounter_merge_commutative() {
-        let mut a = PNCounter::new(1); a.increment_by(3);
-        let mut b = PNCounter::new(2); b.increment_by(5);
+        let mut a = PNCounter::new(1);
+        a.increment_by(3);
+        let mut b = PNCounter::new(2);
+        b.increment_by(5);
         let a_snap = a.clone();
         let b_snap = b.clone();
         a.merge(&b_snap);
@@ -813,8 +963,10 @@ mod tests {
 
     #[test]
     fn test_gset_merge_commutative() {
-        let mut a = GSet::<String>::new(); a.insert("x".to_string());
-        let mut b = GSet::<String>::new(); b.insert("y".to_string());
+        let mut a = GSet::<String>::new();
+        a.insert("x".to_string());
+        let mut b = GSet::<String>::new();
+        b.insert("y".to_string());
         let a_snap = a.clone_replica();
         let b_snap = b.clone_replica();
         a.merge(&b_snap);
@@ -863,8 +1015,10 @@ mod tests {
 
     #[test]
     fn test_orset_merge() {
-        let mut a = ORSet::<String>::new(1_u32); a.add("x".to_string());
-        let mut b = ORSet::<String>::new(2_u32); b.add("y".to_string());
+        let mut a = ORSet::<String>::new(1_u32);
+        a.add("x".to_string());
+        let mut b = ORSet::<String>::new(2_u32);
+        b.add("y".to_string());
         a.merge(&b);
         assert!(a.contains(&"x".to_string()));
         assert!(a.contains(&"y".to_string()));
@@ -872,8 +1026,10 @@ mod tests {
 
     #[test]
     fn test_orset_merge_commutative() {
-        let mut a = ORSet::<String>::new(1_u32); a.add("x".to_string());
-        let mut b = ORSet::<String>::new(2_u32); b.add("y".to_string());
+        let mut a = ORSet::<String>::new(1_u32);
+        a.add("x".to_string());
+        let mut b = ORSet::<String>::new(2_u32);
+        b.add("y".to_string());
         let b_snap = b.clone_replica();
         a.merge(&b_snap);
         let mut b = b_snap.clone();
@@ -921,8 +1077,10 @@ mod tests {
 
     #[test]
     fn test_aworset_merge() {
-        let mut a = AWORSet::<String>::new(1); a.add("x".to_string());
-        let mut b = AWORSet::<String>::new(2); b.add("y".to_string());
+        let mut a = AWORSet::<String>::new(1);
+        a.add("x".to_string());
+        let mut b = AWORSet::<String>::new(2);
+        b.add("y".to_string());
         a.merge(&b);
         assert!(a.contains(&"x".to_string()));
         assert!(a.contains(&"y".to_string()));
@@ -930,8 +1088,10 @@ mod tests {
 
     #[test]
     fn test_aworset_merge_commutative() {
-        let mut a = AWORSet::<String>::new(1); a.add("x".to_string());
-        let mut b = AWORSet::<String>::new(2); b.add("y".to_string());
+        let mut a = AWORSet::<String>::new(1);
+        a.add("x".to_string());
+        let mut b = AWORSet::<String>::new(2);
+        b.add("y".to_string());
         let b_snap = b.clone_replica();
         a.merge(&b_snap);
         let mut b = b_snap.clone();
@@ -951,9 +1111,18 @@ mod tests {
 
     #[test]
     fn test_lamport_time_ordering() {
-        let a = LamportTime { counter: 1, node_id: 1 };
-        let b = LamportTime { counter: 2, node_id: 1 };
-        let c = LamportTime { counter: 2, node_id: 2 };
+        let a = LamportTime {
+            counter: 1,
+            node_id: 1,
+        };
+        let b = LamportTime {
+            counter: 2,
+            node_id: 1,
+        };
+        let c = LamportTime {
+            counter: 2,
+            node_id: 2,
+        };
         assert!(b.is_greater_than(&a));
         assert!(c.is_greater_than(&b));
     }

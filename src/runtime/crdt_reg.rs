@@ -25,7 +25,11 @@ impl<T: Clone> LWWRegister<T> {
     pub fn new(node_id: u64, initial: T) -> Self {
         let mut clock = LamportClock::new(node_id);
         let timestamp = clock.tick();
-        Self { value: initial, timestamp, clock }
+        Self {
+            value: initial,
+            timestamp,
+            clock,
+        }
     }
 
     pub fn write(&mut self, value: T) {
@@ -33,8 +37,12 @@ impl<T: Clone> LWWRegister<T> {
         self.value = value;
     }
 
-    pub fn read(&self) -> &T { &self.value }
-    pub fn value(&self) -> T { self.value.clone() }
+    pub fn read(&self) -> &T {
+        &self.value
+    }
+    pub fn value(&self) -> T {
+        self.value.clone()
+    }
 
     pub fn merge(&mut self, other: &Self) {
         if other.timestamp > self.timestamp {
@@ -48,7 +56,11 @@ impl<T: Clone> LWWRegister<T> {
     /// write than `base` (a register's delta *is* the winning write), or
     /// `None` when the timestamp did not advance.
     pub fn delta_since(&self, base: &Self) -> Option<Self> {
-        if self.timestamp > base.timestamp { Some(self.clone()) } else { None }
+        if self.timestamp > base.timestamp {
+            Some(self.clone())
+        } else {
+            None
+        }
     }
 }
 
@@ -65,18 +77,31 @@ impl LWWRegister<String> {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 24 { return None; }
+        if bytes.len() < 24 {
+            return None;
+        }
         let node_id = u64::from_be_bytes(bytes[0..8].try_into().ok()?);
         let ts_counter = u64::from_be_bytes(bytes[8..16].try_into().ok()?);
         let type_tag = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
-        if type_tag != 0 { return None; }
+        if type_tag != 0 {
+            return None;
+        }
         let str_len = u32::from_be_bytes(bytes[20..24].try_into().ok()?) as usize;
-        if bytes.len() < 24 + str_len { return None; }
+        if bytes.len() < 24 + str_len {
+            return None;
+        }
         let value = String::from_utf8(bytes[24..24 + str_len].to_vec()).ok()?;
         let mut clock = LamportClock::new(node_id);
         clock.counter = ts_counter;
-        let timestamp = LamportTime { counter: ts_counter, node_id };
-        Some(Self { value, timestamp, clock })
+        let timestamp = LamportTime {
+            counter: ts_counter,
+            node_id,
+        };
+        Some(Self {
+            value,
+            timestamp,
+            clock,
+        })
     }
 }
 
@@ -92,7 +117,10 @@ pub struct MVRegister<T: Clone + Eq + Hash> {
 
 impl<T: Clone + Eq + Hash> MVRegister<T> {
     pub fn new(node_id: u64) -> Self {
-        Self { values: HashSet::new(), clock: LamportClock::new(node_id) }
+        Self {
+            values: HashSet::new(),
+            clock: LamportClock::new(node_id),
+        }
     }
 
     pub fn write(&mut self, value: T) {
@@ -102,11 +130,13 @@ impl<T: Clone + Eq + Hash> MVRegister<T> {
     }
 
     pub fn read(&self) -> HashSet<T> {
-        self.values.iter()
+        self.values
+            .iter()
             .map(|(_, t)| *t)
             .max()
             .map(|max_ts| {
-                self.values.iter()
+                self.values
+                    .iter()
                     .filter(|(_, t)| *t == max_ts)
                     .map(|(v, _)| v.clone())
                     .collect()
@@ -114,7 +144,9 @@ impl<T: Clone + Eq + Hash> MVRegister<T> {
             .unwrap_or_default()
     }
 
-    pub fn is_conflicted(&self) -> bool { self.read().len() > 1 }
+    pub fn is_conflicted(&self) -> bool {
+        self.read().len() > 1
+    }
 
     pub fn merge(&mut self, other: &Self) {
         self.clock.counter = self.clock.counter.max(other.clock.counter);
@@ -134,7 +166,14 @@ impl<T: Clone + Eq + Hash> MVRegister<T> {
     pub fn delta_since(&self, base: &Self) -> Option<Self> {
         let values: HashSet<(T, LamportTime)> =
             self.values.difference(&base.values).cloned().collect();
-        if values.is_empty() { None } else { Some(Self { values, clock: self.clock }) }
+        if values.is_empty() {
+            None
+        } else {
+            Some(Self {
+                values,
+                clock: self.clock,
+            })
+        }
     }
 }
 
@@ -155,7 +194,9 @@ impl MVRegister<String> {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 20 { return None; }
+        if bytes.len() < 20 {
+            return None;
+        }
         let node_id = u64::from_be_bytes(bytes[0..8].try_into().ok()?);
         let clock_counter = u64::from_be_bytes(bytes[8..16].try_into().ok()?);
         let count = u32::from_be_bytes(bytes[16..20].try_into().ok()?) as usize;
@@ -164,15 +205,21 @@ impl MVRegister<String> {
         let mut values = HashSet::new();
         let mut offset = 20;
         for _ in 0..count {
-            if bytes.len() < offset + 16 { return None; }
-            let ts_counter = u64::from_be_bytes(bytes[offset..offset+8].try_into().ok()?);
-            let ts_node_id = u64::from_be_bytes(bytes[offset+8..offset+16].try_into().ok()?);
+            if bytes.len() < offset + 16 {
+                return None;
+            }
+            let ts_counter = u64::from_be_bytes(bytes[offset..offset + 8].try_into().ok()?);
+            let ts_node_id = u64::from_be_bytes(bytes[offset + 8..offset + 16].try_into().ok()?);
             offset += 16;
-            if bytes.len() < offset + 4 { return None; }
-            let str_len = u32::from_be_bytes(bytes[offset..offset+4].try_into().ok()?) as usize;
+            if bytes.len() < offset + 4 {
+                return None;
+            }
+            let str_len = u32::from_be_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
             offset += 4;
-            if bytes.len() < offset + str_len { return None; }
-            let value = String::from_utf8(bytes[offset..offset+str_len].to_vec()).ok()?;
+            if bytes.len() < offset + str_len {
+                return None;
+            }
+            let value = String::from_utf8(bytes[offset..offset + str_len].to_vec()).ok()?;
             offset += str_len;
             values.insert((value, LamportTime::new(ts_counter, ts_node_id)));
         }
@@ -185,7 +232,10 @@ impl MVRegister<String> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ElementId { pub node_id: u64, pub counter: u64 }
+pub struct ElementId {
+    pub node_id: u64,
+    pub counter: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct RGAElement<T: Clone> {
@@ -197,7 +247,10 @@ pub struct RGAElement<T: Clone> {
 
 impl<T: Clone + PartialEq> PartialEq for RGAElement<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && self.parent == other.parent && self.value == other.value && self.timestamp == other.timestamp
+        self.id == other.id
+            && self.parent == other.parent
+            && self.value == other.value
+            && self.timestamp == other.timestamp
     }
 }
 
@@ -208,12 +261,28 @@ pub struct RGA<T: Clone + PartialEq> {
 }
 
 impl<T: Clone + PartialEq> RGA<T> {
-    pub fn new(node_id: u64) -> Self { Self { elements: Vec::new(), clock: LamportClock::new(node_id) } }
+    pub fn new(node_id: u64) -> Self {
+        Self {
+            elements: Vec::new(),
+            clock: LamportClock::new(node_id),
+        }
+    }
 
     pub fn insert_after(&mut self, parent: Option<ElementId>, value: T) -> ElementId {
-        let id = ElementId { node_id: self.clock.node_id, counter: self.clock.tick().counter };
-        let ts = LamportTime { counter: id.counter, node_id: id.node_id };
-        let elem = RGAElement { id, parent, value: Some(value), timestamp: ts };
+        let id = ElementId {
+            node_id: self.clock.node_id,
+            counter: self.clock.tick().counter,
+        };
+        let ts = LamportTime {
+            counter: id.counter,
+            node_id: id.node_id,
+        };
+        let elem = RGAElement {
+            id,
+            parent,
+            value: Some(value),
+            timestamp: ts,
+        };
         self.insert_element_sorted(elem);
         id
     }
@@ -222,7 +291,8 @@ impl<T: Clone + PartialEq> RGA<T> {
         let parent = if index == 0 {
             None
         } else {
-            self.elements.iter()
+            self.elements
+                .iter()
                 .filter(|e| e.value.is_some())
                 .nth(index - 1)
                 .map(|e| e.id)
@@ -231,33 +301,52 @@ impl<T: Clone + PartialEq> RGA<T> {
     }
 
     pub fn delete(&mut self, id: ElementId) {
-        if let Some(elem) = self.elements.iter_mut().find(|e| e.id == id) { elem.value = None; }
+        if let Some(elem) = self.elements.iter_mut().find(|e| e.id == id) {
+            elem.value = None;
+        }
     }
 
     pub fn delete_at(&mut self, index: usize) {
-        if let Some(id) = self.elements.iter()
+        if let Some(id) = self
+            .elements
+            .iter()
             .filter(|e| e.value.is_some())
             .nth(index)
-            .map(|e| e.id) {
+            .map(|e| e.id)
+        {
             self.delete(id);
         }
     }
 
     pub fn get(&self, index: usize) -> Option<&T> {
-        self.elements.iter().filter(|e| e.value.is_some()).nth(index).and_then(|e| e.value.as_ref())
+        self.elements
+            .iter()
+            .filter(|e| e.value.is_some())
+            .nth(index)
+            .and_then(|e| e.value.as_ref())
     }
 
-    pub fn len(&self) -> usize { self.elements.iter().filter(|e| e.value.is_some()).count() }
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn len(&self) -> usize {
+        self.elements.iter().filter(|e| e.value.is_some()).count()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     pub fn value(&self) -> Vec<T> {
-        self.elements.iter().filter(|e| e.value.is_some()).map(|e| e.value.as_ref().unwrap().clone()).collect()
+        self.elements
+            .iter()
+            .filter(|e| e.value.is_some())
+            .map(|e| e.value.as_ref().unwrap().clone())
+            .collect()
     }
 
     pub fn merge(&mut self, other: &Self) {
         for other_elem in &other.elements {
             if let Some(existing) = self.elements.iter_mut().find(|e| e.id == other_elem.id) {
-                if other_elem.timestamp > existing.timestamp { *existing = other_elem.clone(); }
+                if other_elem.timestamp > existing.timestamp {
+                    *existing = other_elem.clone();
+                }
             } else {
                 self.insert_element_sorted(other_elem.clone());
             }
@@ -270,15 +359,25 @@ impl<T: Clone + PartialEq> RGA<T> {
     /// changed. New elements keep their relative order so merging the delta
     /// produces the same sorted sequence as merging the full state.
     pub fn delta_since(&self, base: &Self) -> Option<Self> {
-        let elements: Vec<RGAElement<T>> = self.elements.iter()
+        let elements: Vec<RGAElement<T>> = self
+            .elements
+            .iter()
             .filter(|e| {
-                base.elements.iter()
+                base.elements
+                    .iter()
                     .find(|b| b.id == e.id)
                     .map_or(true, |b| e.timestamp > b.timestamp)
             })
             .cloned()
             .collect();
-        if elements.is_empty() { None } else { Some(Self { elements, clock: self.clock }) }
+        if elements.is_empty() {
+            None
+        } else {
+            Some(Self {
+                elements,
+                clock: self.clock,
+            })
+        }
     }
 
     fn insert_element_sorted(&mut self, elem: RGAElement<T>) {
@@ -287,23 +386,35 @@ impl<T: Clone + PartialEq> RGA<T> {
     }
 
     fn find_insert_position(&self, elem: &RGAElement<T>) -> usize {
-        let parent_pos = elem.parent.and_then(|pid| self.elements.iter().position(|e| e.id == pid));
+        let parent_pos = elem
+            .parent
+            .and_then(|pid| self.elements.iter().position(|e| e.id == pid));
         match parent_pos {
             None => {
                 if elem.parent.is_none() {
                     let mut pos = 0;
                     for (i, e) in self.elements.iter().enumerate() {
-                        if e.parent.is_none() && e.timestamp <= elem.timestamp { pos = i + 1; } else { break; }
+                        if e.parent.is_none() && e.timestamp <= elem.timestamp {
+                            pos = i + 1;
+                        } else {
+                            break;
+                        }
                     }
                     pos
-                } else { self.elements.len() }
+                } else {
+                    self.elements.len()
+                }
             }
             Some(pidx) => {
                 let mut pos = pidx + 1;
                 for (i, e) in self.elements.iter().enumerate().skip(pidx + 1) {
-                    if e.parent == elem.parent && e.timestamp <= elem.timestamp { pos = i + 1; }
-                    else if e.parent == elem.parent && e.timestamp > elem.timestamp { break; }
-                    else if e.parent != elem.parent { break; }
+                    if e.parent == elem.parent && e.timestamp <= elem.timestamp {
+                        pos = i + 1;
+                    } else if e.parent == elem.parent && e.timestamp > elem.timestamp {
+                        break;
+                    } else if e.parent != elem.parent {
+                        break;
+                    }
                 }
                 pos
             }
@@ -324,13 +435,17 @@ impl RGA<String> {
                 buf.push(1);
                 buf.extend_from_slice(&p.node_id.to_be_bytes());
                 buf.extend_from_slice(&p.counter.to_be_bytes());
-            } else { buf.push(0); }
+            } else {
+                buf.push(0);
+            }
             if let Some(ref v) = elem.value {
                 buf.push(1);
                 let bytes = v.as_bytes();
                 buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
                 buf.extend_from_slice(bytes);
-            } else { buf.push(0); }
+            } else {
+                buf.push(0);
+            }
             buf.extend_from_slice(&elem.timestamp.counter.to_be_bytes());
             buf.extend_from_slice(&elem.timestamp.node_id.to_be_bytes());
         }
@@ -338,7 +453,9 @@ impl RGA<String> {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 20 { return None; }
+        if bytes.len() < 20 {
+            return None;
+        }
         let node_id = u64::from_be_bytes(bytes[0..8].try_into().ok()?);
         let clock_counter = u64::from_be_bytes(bytes[8..16].try_into().ok()?);
         let count = u32::from_be_bytes(bytes[16..20].try_into().ok()?) as usize;
@@ -347,35 +464,70 @@ impl RGA<String> {
         let mut elements = Vec::with_capacity(count);
         let mut offset = 20;
         for _ in 0..count {
-            if bytes.len() < offset + 16 { return None; }
-            let id_node_id = u64::from_be_bytes(bytes[offset..offset+8].try_into().ok()?);
-            let id_counter = u64::from_be_bytes(bytes[offset+8..offset+16].try_into().ok()?);
+            if bytes.len() < offset + 16 {
+                return None;
+            }
+            let id_node_id = u64::from_be_bytes(bytes[offset..offset + 8].try_into().ok()?);
+            let id_counter = u64::from_be_bytes(bytes[offset + 8..offset + 16].try_into().ok()?);
             offset += 16;
-            if bytes.len() < offset + 1 { return None; }
-            let has_parent = bytes[offset] != 0; offset += 1;
+            if bytes.len() < offset + 1 {
+                return None;
+            }
+            let has_parent = bytes[offset] != 0;
+            offset += 1;
             let parent = if has_parent {
-                if bytes.len() < offset + 16 { return None; }
-                let p_node_id = u64::from_be_bytes(bytes[offset..offset+8].try_into().ok()?);
-                let p_counter = u64::from_be_bytes(bytes[offset+8..offset+16].try_into().ok()?);
+                if bytes.len() < offset + 16 {
+                    return None;
+                }
+                let p_node_id = u64::from_be_bytes(bytes[offset..offset + 8].try_into().ok()?);
+                let p_counter = u64::from_be_bytes(bytes[offset + 8..offset + 16].try_into().ok()?);
                 offset += 16;
-                Some(ElementId { node_id: p_node_id, counter: p_counter })
-            } else { None };
-            if bytes.len() < offset + 1 { return None; }
-            let has_value = bytes[offset] != 0; offset += 1;
+                Some(ElementId {
+                    node_id: p_node_id,
+                    counter: p_counter,
+                })
+            } else {
+                None
+            };
+            if bytes.len() < offset + 1 {
+                return None;
+            }
+            let has_value = bytes[offset] != 0;
+            offset += 1;
             let value = if has_value {
-                if bytes.len() < offset + 4 { return None; }
-                let str_len = u32::from_be_bytes(bytes[offset..offset+4].try_into().ok()?) as usize;
+                if bytes.len() < offset + 4 {
+                    return None;
+                }
+                let str_len =
+                    u32::from_be_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
                 offset += 4;
-                if bytes.len() < offset + str_len { return None; }
-                let s = String::from_utf8(bytes[offset..offset+str_len].to_vec()).ok()?;
+                if bytes.len() < offset + str_len {
+                    return None;
+                }
+                let s = String::from_utf8(bytes[offset..offset + str_len].to_vec()).ok()?;
                 offset += str_len;
                 Some(s)
-            } else { None };
-            if bytes.len() < offset + 16 { return None; }
-            let ts_counter = u64::from_be_bytes(bytes[offset..offset+8].try_into().ok()?);
-            let ts_node_id = u64::from_be_bytes(bytes[offset+8..offset+16].try_into().ok()?);
+            } else {
+                None
+            };
+            if bytes.len() < offset + 16 {
+                return None;
+            }
+            let ts_counter = u64::from_be_bytes(bytes[offset..offset + 8].try_into().ok()?);
+            let ts_node_id = u64::from_be_bytes(bytes[offset + 8..offset + 16].try_into().ok()?);
             offset += 16;
-            elements.push(RGAElement { id: ElementId { node_id: id_node_id, counter: id_counter }, parent, value, timestamp: LamportTime { counter: ts_counter, node_id: ts_node_id } });
+            elements.push(RGAElement {
+                id: ElementId {
+                    node_id: id_node_id,
+                    counter: id_counter,
+                },
+                parent,
+                value,
+                timestamp: LamportTime {
+                    counter: ts_counter,
+                    node_id: ts_node_id,
+                },
+            });
         }
         Some(RGA { elements, clock })
     }
@@ -432,7 +584,8 @@ mod tests {
         let mut b = LWWRegister::new(2, "initial".to_string());
         a.write("from-a".to_string());
         b.write("from-b".to_string());
-        let mut a2 = a.clone(); a2.merge(&b);
+        let mut a2 = a.clone();
+        a2.merge(&b);
         assert_eq!(a2.read(), "from-b");
     }
 
@@ -505,7 +658,9 @@ mod tests {
     fn test_rga_insert_multiple() {
         let mut rga = RGA::new(1);
         rga.insert_after(None, "a".to_string());
-        let id_a = rga.elements.iter()
+        let id_a = rga
+            .elements
+            .iter()
             .filter(|e| e.value.is_some())
             .next()
             .map(|e| e.id)
@@ -557,13 +712,18 @@ mod tests {
 
     #[test]
     fn test_rga_merge_commutative() {
-        let mut a = RGA::new(1); a.insert_after(None, "alice".to_string());
-        let mut b = RGA::new(2); b.insert_after(None, "bob".to_string());
+        let mut a = RGA::new(1);
+        a.insert_after(None, "alice".to_string());
+        let mut b = RGA::new(2);
+        b.insert_after(None, "bob".to_string());
         let a_snap = a.clone();
         a.merge(&b);
-        let mut b2 = b.clone(); b2.merge(&a_snap);
-        let mut va = a.value(); let mut vb = b2.value();
-        va.sort(); vb.sort();
+        let mut b2 = b.clone();
+        b2.merge(&a_snap);
+        let mut va = a.value();
+        let mut vb = b2.value();
+        va.sort();
+        vb.sort();
         assert_eq!(va, vb);
     }
 
@@ -572,10 +732,12 @@ mod tests {
         let mut a = RGA::new(1);
         let mut b = RGA::new(2);
         let common_id = a.insert_after(None, "base".to_string());
-        b.elements = a.elements.clone(); b.clock.counter = a.clock.counter;
+        b.elements = a.elements.clone();
+        b.clock.counter = a.clock.counter;
         a.insert_after(Some(common_id), "a-first".to_string());
         b.insert_after(Some(common_id), "b-first".to_string());
-        let mut am = a.clone(); am.merge(&b);
+        let mut am = a.clone();
+        am.merge(&b);
         assert_eq!(am.len(), 3);
         let vals = am.value();
         let pos_a = vals.iter().position(|v| v == "a-first").unwrap();

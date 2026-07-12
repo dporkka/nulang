@@ -22,7 +22,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
-use crate::python::bridge::{register_object, get_object, PythonObjectId, PyBridge, TAG_PYTHON};
+use crate::python::bridge::{get_object, register_object, PyBridge, PythonObjectId, TAG_PYTHON};
 use crate::vm::Value;
 
 // ---------------------------------------------------------------------------
@@ -31,9 +31,9 @@ use crate::vm::Value;
 
 // `TAG_PYTHON` is defined in src/python/bridge.rs and imported here so the
 // canonical value is not duplicated.
-use crate::value_layout::{TAG_MASK, TAG_PTR, TAG_ACTOR, TAG_STRING};
 #[cfg(test)]
 use crate::value_layout::TAG_CLOSURE;
+use crate::value_layout::{TAG_ACTOR, TAG_MASK, TAG_PTR, TAG_STRING};
 
 // ---------------------------------------------------------------------------
 // Nulang → Python
@@ -98,7 +98,8 @@ pub fn nulang_to_python(value: Value) -> Result<Py<PyAny>, String> {
         let string_id = (value.as_raw() & 0x0000_FFFF_FFFF_FFFF) as u32;
         let repr = format!("<nulang_string:{}>", string_id);
         Python::attach(|py| -> Result<Py<PyAny>, String> {
-            Ok(repr.into_pyobject(py)
+            Ok(repr
+                .into_pyobject(py)
                 .map_err(|e| e.to_string())?
                 .unbind()
                 .into_any())
@@ -148,27 +149,29 @@ pub fn python_to_nulang(obj: &pyo3::Bound<'_, pyo3::PyAny>) -> Result<Value, Str
 
     // Check for bool (must come before int, since bool subclasses int in Python)
     if let Ok(b) = obj.cast::<PyBool>() {
-        let val: bool = b.extract().map_err(|e| format!("Failed to extract bool: {}", e))?;
+        let val: bool = b
+            .extract()
+            .map_err(|e| format!("Failed to extract bool: {}", e))?;
         return Ok(Value::bool(val));
     }
 
     // Check for int
     if let Ok(i) = obj.cast::<PyInt>() {
-        let val: i64 = i
-            .extract()
-            .unwrap_or_else(|_| {
-                // Big int — try to extract and clamp
-                Python::attach(|_py| {
-                    let big_int_str = i.str().map(|s| s.to_string()).unwrap_or_default();
-                    big_int_str.parse::<i64>().unwrap_or(i64::MAX)
-                })
-            });
+        let val: i64 = i.extract().unwrap_or_else(|_| {
+            // Big int — try to extract and clamp
+            Python::attach(|_py| {
+                let big_int_str = i.str().map(|s| s.to_string()).unwrap_or_default();
+                big_int_str.parse::<i64>().unwrap_or(i64::MAX)
+            })
+        });
         return Ok(Value::int(val));
     }
 
     // Check for float
     if let Ok(f) = obj.cast::<PyFloat>() {
-        let val: f64 = f.extract().map_err(|e| format!("Failed to extract float: {}", e))?;
+        let val: f64 = f
+            .extract()
+            .map_err(|e| format!("Failed to extract float: {}", e))?;
         return Ok(Value::float(val));
     }
 
@@ -298,7 +301,12 @@ mod tests {
             python_to_nulang(bound).expect("python_to_nulang failed")
         });
 
-        assert_eq!(restored.as_int(), Some(42), "Expected 42, got {:?}", restored.to_string_repr());
+        assert_eq!(
+            restored.as_int(),
+            Some(42),
+            "Expected 42, got {:?}",
+            restored.to_string_repr()
+        );
     }
 
     #[test]
@@ -333,7 +341,11 @@ mod tests {
         });
 
         let val = restored.as_float().expect("Expected float");
-        assert!((val - std::f64::consts::PI).abs() < 1e-5, "Expected ~pi, got {}", val);
+        assert!(
+            (val - std::f64::consts::PI).abs() < 1e-5,
+            "Expected ~pi, got {}",
+            val
+        );
     }
 
     // ------------------------------------------------------------------
@@ -486,7 +498,11 @@ mod tests {
 
         // Create a Python string
         let str_id = Python::attach(|py| {
-            let s: Py<PyAny> = "hello nulang".into_pyobject(py).unwrap().unbind().into_any();
+            let s: Py<PyAny> = "hello nulang"
+                .into_pyobject(py)
+                .unwrap()
+                .unbind()
+                .into_any();
             register_object(s)
         });
 
@@ -525,7 +541,11 @@ mod tests {
         let restored = python_object_id_to_value(py_id).expect("python_object_id_to_value failed");
 
         let val = restored.as_float().expect("Expected float");
-        assert!((val - std::f64::consts::E).abs() < 1e-5, "Expected ~e, got {}", val);
+        assert!(
+            (val - std::f64::consts::E).abs() < 1e-5,
+            "Expected ~e, got {}",
+            val
+        );
     }
 
     #[test]
@@ -557,12 +577,7 @@ mod tests {
 
             let val = restored.as_float().expect("Expected float");
             if special.is_infinite() {
-                assert_eq!(
-                    val.is_infinite(),
-                    true,
-                    "Expected infinite, got {}",
-                    val
-                );
+                assert_eq!(val.is_infinite(), true, "Expected infinite, got {}", val);
                 assert_eq!(
                     val.is_sign_positive(),
                     special.is_sign_positive(),
@@ -588,10 +603,14 @@ mod tests {
         ensure_python();
 
         // TAG_PYTHON must not collide with closure or string tags.
-        assert_ne!(TAG_PYTHON, TAG_CLOSURE,
-                   "TAG_PYTHON collides with TAG_CLOSURE");
-        assert_ne!(TAG_PYTHON, TAG_STRING,
-                   "TAG_PYTHON collides with TAG_STRING");
+        assert_ne!(
+            TAG_PYTHON, TAG_CLOSURE,
+            "TAG_PYTHON collides with TAG_CLOSURE"
+        );
+        assert_ne!(
+            TAG_PYTHON, TAG_STRING,
+            "TAG_PYTHON collides with TAG_STRING"
+        );
 
         // Converting a Python object must produce a value with TAG_PYTHON.
         let py_id = Python::attach(|py| {

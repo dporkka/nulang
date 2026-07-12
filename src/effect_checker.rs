@@ -9,6 +9,8 @@
 use crate::ast::*;
 use crate::types::*;
 
+use std::collections::HashSet;
+
 // ---------------------------------------------------------------------------
 // Effect Row Operations
 // ---------------------------------------------------------------------------
@@ -110,7 +112,9 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
                 free_vars(arg, bound, acc);
             }
         }
-        Expr::Let { name, value, body, .. } => {
+        Expr::Let {
+            name, value, body, ..
+        } => {
             free_vars(value, bound, acc);
             let mut new_bound = bound.clone();
             if !new_bound.contains(name) {
@@ -118,7 +122,13 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             }
             free_vars(body, &mut new_bound, acc);
         }
-        Expr::LetRec { name, params, value, body, .. } => {
+        Expr::LetRec {
+            name,
+            params,
+            value,
+            body,
+            ..
+        } => {
             let mut new_bound = bound.clone();
             if !new_bound.contains(name) {
                 new_bound.push(name.clone());
@@ -131,14 +141,21 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             free_vars(value, &mut new_bound, acc);
             free_vars(body, &mut new_bound, acc);
         }
-        Expr::If { cond, then_branch, else_branch, .. } => {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             free_vars(cond, bound, acc);
             free_vars(then_branch, bound, acc);
             if let Some(else_b) = else_branch {
                 free_vars(else_b, bound, acc);
             }
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             free_vars(scrutinee, bound, acc);
             for (pat, arm_expr) in arms {
                 let mut arm_bound = bound.clone();
@@ -185,7 +202,9 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             free_vars(target, bound, acc);
             free_vars(value, bound, acc);
         }
-        Expr::Spawn { actor_type, init, .. } => {
+        Expr::Spawn {
+            actor_type, init, ..
+        } => {
             free_vars(actor_type, bound, acc);
             for (_, e) in init {
                 free_vars(e, bound, acc);
@@ -251,7 +270,12 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             free_vars(left, bound, acc);
             free_vars(right, bound, acc);
         }
-        Expr::For { var, iterable, body, .. } => {
+        Expr::For {
+            var,
+            iterable,
+            body,
+            ..
+        } => {
             free_vars(iterable, bound, acc);
             let mut body_bound = bound.clone();
             if !body_bound.contains(var) {
@@ -420,7 +444,9 @@ impl EffectChecker {
             }
 
             // Match: union of scrutinee and all arm effects.
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 let mut row = self.infer_effects(ctx, scrutinee)?;
                 for (_, arm_expr) in arms {
                     row = effect_row_union(&row, &self.infer_effects(ctx, arm_expr)?);
@@ -492,7 +518,9 @@ impl EffectChecker {
             }
 
             // Spawn: adds the Spawn effect + effects of actor type and init args.
-            Expr::Spawn { actor_type, init, .. } => {
+            Expr::Spawn {
+                actor_type, init, ..
+            } => {
                 let mut row = EffectRow::singleton(Effect::Spawn);
                 row = effect_row_union(&row, &self.infer_effects(ctx, actor_type)?);
                 for (_, e) in init {
@@ -797,18 +825,75 @@ impl CapabilityAnalyzer {
     ///
     /// Returns the most precise capability we can determine for the value
     /// produced by the expression.
+    ///
+    /// This is the public entry point: it runs the analysis with a fresh
+    /// linear-consumption set, so consumption state never leaks between
+    /// top-level calls (the frontend reuses one analyzer across declarations).
     pub fn infer_cap(&mut self, ctx: &CapContext, expr: &Expr) -> NuResult<Capability> {
+        let mut consumed = HashSet::new();
+        self.infer_cap_tracked(ctx, expr, &mut consumed)
+    }
+
+    /// Mark a `LinearIso` binding as consumed, erroring if it already was.
+    ///
+    /// Any reference to a linear binding is a *use* that moves the value:
+    /// passing it to a function, sending it to an actor, storing it in a
+    /// structure, returning it, or capturing it in a closure all route
+    /// through `Expr::Var` (or the closure-capture rule in the Lambda arm).
+    fn consume_linear(
+        &mut self,
+        name: &str,
+        span: Span,
+        consumed: &mut HashSet<String>,
+    ) -> NuResult<()> {
+        if !consumed.insert(name.to_string()) {
+            let msg = format!(
+                "linear value `{}` used after being consumed (lineariso bindings may be used at most once)",
+                name
+            );
+            self.diagnostics.push(msg.clone());
+            return Err(NuError::CapError { msg, span });
+        }
+        Ok(())
+    }
+
+    /// Recursive worker for [`infer_cap`] that tracks which `LinearIso`
+    /// bindings have already been consumed along the current path.
+    ///
+    /// Linearity rules (conservative MVP — at-most-once use):
+    /// - Referencing a variable whose capability is `LinearIso` consumes the
+    ///   binding; a second reference on the same path is a `CapError`.
+    /// - Branches merge conservatively: a binding is consumed after an
+    ///   `if`/`match`/`receive` only if *every* fall-through path consumes
+    ///   it, so a use in one branch never poisons a sibling branch.
+    /// - Consuming an outer linear binding inside a `for` body errors, since
+    ///   the loop may iterate more than once.
+    /// - A binding that is never used is NOT an error: exactly-once
+    ///   (must-use on all paths) analysis is a documented follow-up.
+    fn infer_cap_tracked(
+        &mut self,
+        ctx: &CapContext,
+        expr: &Expr,
+        consumed: &mut HashSet<String>,
+    ) -> NuResult<Capability> {
         match expr {
             // Literals are immutable values.
             Expr::Literal(_, _) => Ok(Capability::Val),
 
-            // Variable: look up in the capability context.
-            Expr::Var(name, _) => Ok(ctx.lookup(name)),
+            // Variable: look up in the capability context. Referencing a
+            // linear binding consumes it.
+            Expr::Var(name, span) => {
+                let cap = ctx.lookup(name);
+                if cap.is_linear() {
+                    self.consume_linear(name, *span, consumed)?;
+                }
+                Ok(cap)
+            }
 
             // Lambda: capability is the join of all captured free variables.
             // If there are no captures, it defaults to `Val` (a pure function
             // with no mutable state is immutable).
-            Expr::Lambda { params, body, .. } => {
+            Expr::Lambda { params, body, span, .. } => {
                 let mut free = Vec::new();
                 let mut bound: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
                 free_vars(body, &mut bound, &mut free);
@@ -819,6 +904,13 @@ impl CapabilityAnalyzer {
                     for name in &free[1..] {
                         cap = cap.join(ctx.lookup(name));
                     }
+                    // Capturing a linear binding in a closure consumes it:
+                    // the closure may escape or be invoked multiple times.
+                    for name in &free {
+                        if ctx.lookup(name).is_linear() {
+                            self.consume_linear(name, *span, consumed)?;
+                        }
+                    }
                     Ok(cap)
                 }
             }
@@ -826,23 +918,39 @@ impl CapabilityAnalyzer {
             // Application: conservative join of function capability and all
             // argument capabilities.
             Expr::App { func, args, .. } => {
-                let mut cap = self.infer_cap(ctx, func)?;
+                let mut cap = self.infer_cap_tracked(ctx, func, consumed)?;
                 for arg in args {
-                    cap = cap.join(self.infer_cap(ctx, arg)?);
+                    cap = cap.join(self.infer_cap_tracked(ctx, arg, consumed)?);
                 }
                 Ok(cap)
             }
 
             // Let: capability of the body.
-            Expr::Let { name, value, body, .. } => {
-                let val_cap = self.infer_cap(ctx, value)?;
+            Expr::Let {
+                name, value, body, ..
+            } => {
+                let val_cap = self.infer_cap_tracked(ctx, value, consumed)?;
                 let body_ctx = ctx.with_binding(name.clone(), val_cap);
-                self.infer_cap(&body_ctx, body)
+                // Shadowing: the new binding hides any outer binding of the
+                // same name. Hide the outer consumption state while analyzing
+                // the body, then restore it; the inner binding's own
+                // consumption is scope-local and never leaks out.
+                let outer_consumed = consumed.remove(name);
+                let result = self.infer_cap_tracked(&body_ctx, body, consumed);
+                consumed.remove(name);
+                if outer_consumed {
+                    consumed.insert(name.clone());
+                }
+                result
             }
 
             // Let-rec: similar to let, but recursive.
             Expr::LetRec {
-                name, params, value, body, ..
+                name,
+                params,
+                value,
+                body,
+                ..
             } => {
                 // Recursive binding: we approximate the binding capability as
                 // the join of param capabilities (or Val if no params).
@@ -850,10 +958,22 @@ impl CapabilityAnalyzer {
                 for (_, _) in params {
                     rec_cap = rec_cap.join(Capability::Val);
                 }
+                // `name` is bound in both the value and the body; apply the
+                // same shadowing discipline as `let`.
+                let outer_consumed = consumed.remove(name);
                 let val_ctx = ctx.with_binding(name.clone(), rec_cap);
-                let val_cap = self.infer_cap(&val_ctx, value)?;
-                let body_ctx = ctx.with_binding(name.clone(), val_cap);
-                self.infer_cap(&body_ctx, body)
+                let result = match self.infer_cap_tracked(&val_ctx, value, consumed) {
+                    Ok(val_cap) => {
+                        let body_ctx = ctx.with_binding(name.clone(), val_cap);
+                        self.infer_cap_tracked(&body_ctx, body, consumed)
+                    }
+                    Err(e) => Err(e),
+                };
+                consumed.remove(name);
+                if outer_consumed {
+                    consumed.insert(name.clone());
+                }
+                result
             }
 
             // If: join of then and else capabilities.
@@ -863,29 +983,62 @@ impl CapabilityAnalyzer {
                 else_branch,
                 ..
             } => {
-                let _ = self.infer_cap(ctx, cond)?; // cond cap not part of result
-                let then_cap = self.infer_cap(ctx, then_branch)?;
-                match else_branch {
-                    Some(else_b) => {
-                        let else_cap = self.infer_cap(ctx, else_b)?;
-                        Ok(then_cap.join(else_cap))
-                    }
-                    None => Ok(then_cap),
-                }
+                let _ = self.infer_cap_tracked(ctx, cond, consumed)?; // cond cap not part of result
+                // Branch merge: analyze each branch from the same base set,
+                // then keep only the bindings consumed on *every* fall-through
+                // path (a use in one branch must not poison a sibling branch;
+                // a missing else branch consumes nothing).
+                let base = consumed.clone();
+                let then_cap = self.infer_cap_tracked(ctx, then_branch, consumed)?;
+                let then_set = std::mem::replace(consumed, base);
+                let else_cap = match else_branch {
+                    Some(else_b) => self.infer_cap_tracked(ctx, else_b, consumed)?,
+                    None => then_cap,
+                };
+                let else_set = std::mem::take(consumed);
+                *consumed = then_set.intersection(&else_set).cloned().collect();
+                Ok(then_cap.join(else_cap))
             }
 
             // Match: join of all arm capabilities.
-            Expr::Match { scrutinee, arms, .. } => {
-                let _ = self.infer_cap(ctx, scrutinee)?;
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                let _ = self.infer_cap_tracked(ctx, scrutinee, consumed)?;
                 if arms.is_empty() {
                     return Ok(Capability::Tag);
                 }
+                // Branch merge (same rule as `if`): a binding counts as
+                // consumed after the match only if every arm consumes it.
+                let base = consumed.clone();
                 let mut cap = Capability::Tag;
+                let mut merged: Option<HashSet<String>> = None;
                 for (pat, arm_expr) in arms {
+                    *consumed = base.clone();
                     let mut arm_ctx = ctx.clone();
                     add_pat_bindings(pat, &mut arm_ctx, Capability::Val);
-                    cap = cap.join(self.infer_cap(&arm_ctx, arm_expr)?);
+                    // Pattern-bound names shadow outer bindings inside the
+                    // arm; hide (and restore) their outer consumption state.
+                    let mut pat_names = Vec::new();
+                    pat_binding_names(pat, &mut pat_names);
+                    let saved: Vec<(String, bool)> = pat_names
+                        .iter()
+                        .map(|n| (n.clone(), consumed.remove(n)))
+                        .collect();
+                    let arm_result = self.infer_cap_tracked(&arm_ctx, arm_expr, consumed);
+                    for (n, was_consumed) in saved {
+                        consumed.remove(&n);
+                        if was_consumed {
+                            consumed.insert(n);
+                        }
+                    }
+                    cap = cap.join(arm_result?);
+                    merged = Some(match merged {
+                        None => consumed.clone(),
+                        Some(m) => m.intersection(consumed).cloned().collect(),
+                    });
                 }
+                *consumed = merged.unwrap_or(base);
                 Ok(cap)
             }
 
@@ -897,11 +1050,11 @@ impl CapabilityAnalyzer {
                     let block_ctx = ctx.clone();
                     for (i, e) in exprs.iter().enumerate() {
                         if i == exprs.len() - 1 {
-                            return self.infer_cap(&block_ctx, e);
+                            return self.infer_cap_tracked(&block_ctx, e, consumed);
                         }
                         // Intermediate expressions may bind variables.
                         // We don't track those for now; just infer.
-                        let _ = self.infer_cap(&block_ctx, e)?;
+                        let _ = self.infer_cap_tracked(&block_ctx, e, consumed)?;
                     }
                     Ok(Capability::Val)
                 }
@@ -911,7 +1064,7 @@ impl CapabilityAnalyzer {
             Expr::Tuple(elts, _) => {
                 let mut cap = Capability::Val;
                 for e in elts {
-                    cap = cap.join(self.infer_cap(ctx, e)?);
+                    cap = cap.join(self.infer_cap_tracked(ctx, e, consumed)?);
                 }
                 Ok(cap)
             }
@@ -920,30 +1073,30 @@ impl CapabilityAnalyzer {
             Expr::Record(fields, _) => {
                 let mut cap = Capability::Val;
                 for (_, e) in fields {
-                    cap = cap.join(self.infer_cap(ctx, e)?);
+                    cap = cap.join(self.infer_cap_tracked(ctx, e, consumed)?);
                 }
                 Ok(cap)
             }
 
             // Field access: same capability as the base expression.
-            Expr::FieldAccess { expr: e, .. } => self.infer_cap(ctx, e),
+            Expr::FieldAccess { expr: e, .. } => self.infer_cap_tracked(ctx, e, consumed),
 
             // Array: join of element capabilities.
             Expr::Array(elts, _) => {
                 let mut cap = Capability::Val;
                 for e in elts {
-                    cap = cap.join(self.infer_cap(ctx, e)?);
+                    cap = cap.join(self.infer_cap_tracked(ctx, e, consumed)?);
                 }
                 Ok(cap)
             }
 
             // Index: same capability as the array.
-            Expr::Index { arr, .. } => self.infer_cap(ctx, arr),
+            Expr::Index { arr, .. } => self.infer_cap_tracked(ctx, arr, consumed),
 
             // Binary: join of operand capabilities.
             Expr::Binary { left, right, .. } => {
-                let c1 = self.infer_cap(ctx, left)?;
-                let c2 = self.infer_cap(ctx, right)?;
+                let c1 = self.infer_cap_tracked(ctx, left, consumed)?;
+                let c2 = self.infer_cap_tracked(ctx, right, consumed)?;
                 Ok(c1.join(c2))
             }
 
@@ -952,39 +1105,42 @@ impl CapabilityAnalyzer {
             Expr::Unary { op, expr: e, .. } => {
                 match op {
                     UnOp::Ref(cap) => {
-                        let inner = self.infer_cap(ctx, e)?;
+                        let inner = self.infer_cap_tracked(ctx, e, consumed)?;
                         // Reference creation: the ref itself has the requested
                         // capability; we return that.  The inner expression
                         // capability is checked separately.
                         let _ = inner;
                         Ok(*cap)
                     }
-                    _ => self.infer_cap(ctx, e),
+                    _ => self.infer_cap_tracked(ctx, e, consumed),
                 }
             }
 
             // Assignment: returns Unit, which is Val.
             Expr::Assign { target, value, .. } => {
-                let _ = self.infer_cap(ctx, target)?;
-                let _ = self.infer_cap(ctx, value)?;
+                let _ = self.infer_cap_tracked(ctx, target, consumed)?;
+                let _ = self.infer_cap_tracked(ctx, value, consumed)?;
                 Ok(Capability::Val)
             }
 
             // Spawn: newly created actors are unique (Iso).
-            Expr::Spawn { actor_type, init, .. } => {
-                let _ = self.infer_cap(ctx, actor_type)?;
+            Expr::Spawn {
+                actor_type, init, ..
+            } => {
+                let _ = self.infer_cap_tracked(ctx, actor_type, consumed)?;
                 for (_, e) in init {
-                    let _ = self.infer_cap(ctx, e)?;
+                    let _ = self.infer_cap_tracked(ctx, e, consumed)?;
                 }
                 Ok(Capability::Iso)
             }
 
             // Send: returns Unit (Val).  The arguments must be sendable
-            // (checked separately by check_sendable).
+            // (checked separately by check_sendable).  Passing a linear
+            // value as a send argument consumes it (the spec'd linear move).
             Expr::Send { actor, args, .. } => {
-                let _ = self.infer_cap(ctx, actor)?;
+                let _ = self.infer_cap_tracked(ctx, actor, consumed)?;
                 for arg in args {
-                    let arg_cap = self.infer_cap(ctx, arg)?;
+                    let arg_cap = self.infer_cap_tracked(ctx, arg, consumed)?;
                     // The argument to send must be sendable.
                     if !arg_cap.is_sendable() {
                         let span = expr_span(arg);
@@ -993,7 +1149,10 @@ impl CapabilityAnalyzer {
                             arg_cap
                         ));
                         return Err(NuError::CapError {
-                            msg: format!("send argument must be sendable (iso, val, or tag), got {:?}", arg_cap),
+                            msg: format!(
+                                "send argument must be sendable (iso, val, or tag), got {:?}",
+                                arg_cap
+                            ),
                             span,
                         });
                     }
@@ -1005,9 +1164,9 @@ impl CapabilityAnalyzer {
             // Without type info we approximate conservatively as the join of
             // actor capability and argument capabilities.
             Expr::Ask { actor, args, .. } => {
-                let mut cap = self.infer_cap(ctx, actor)?;
+                let mut cap = self.infer_cap_tracked(ctx, actor, consumed)?;
                 for arg in args {
-                    cap = cap.join(self.infer_cap(ctx, arg)?);
+                    cap = cap.join(self.infer_cap_tracked(ctx, arg, consumed)?);
                 }
                 Ok(cap)
             }
@@ -1018,14 +1177,35 @@ impl CapabilityAnalyzer {
                 if arms.is_empty() {
                     return Ok(Capability::Tag);
                 }
+                // Branch merge (same rule as `match`): consumed-after only if
+                // every arm consumes the binding.
+                let base = consumed.clone();
                 let mut cap = Capability::Tag;
+                let mut merged: Option<HashSet<String>> = None;
                 for (_, params, body_expr) in arms {
+                    *consumed = base.clone();
                     let mut arm_ctx = ctx.clone();
+                    // Arm parameters shadow outer bindings; hide (and restore)
+                    // their outer consumption state.
+                    let mut saved = Vec::new();
                     for p in params {
                         arm_ctx = arm_ctx.with_binding(p.clone(), Capability::Val);
+                        saved.push((p.clone(), consumed.remove(p)));
                     }
-                    cap = cap.join(self.infer_cap(&arm_ctx, body_expr)?);
+                    let arm_result = self.infer_cap_tracked(&arm_ctx, body_expr, consumed);
+                    for (n, was_consumed) in saved {
+                        consumed.remove(&n);
+                        if was_consumed {
+                            consumed.insert(n);
+                        }
+                    }
+                    cap = cap.join(arm_result?);
+                    merged = Some(match merged {
+                        None => consumed.clone(),
+                        Some(m) => m.intersection(consumed).cloned().collect(),
+                    });
                 }
+                *consumed = merged.unwrap_or(base);
                 Ok(cap)
             }
 
@@ -1037,7 +1217,7 @@ impl CapabilityAnalyzer {
             Expr::Perform { args, .. } => {
                 let mut cap = Capability::Val;
                 for arg in args {
-                    cap = cap.join(self.infer_cap(ctx, arg)?);
+                    cap = cap.join(self.infer_cap_tracked(ctx, arg, consumed)?);
                 }
                 Ok(cap)
             }
@@ -1046,43 +1226,88 @@ impl CapabilityAnalyzer {
             Expr::Emit { args, .. } => {
                 let mut cap = Capability::Val;
                 for arg in args {
-                    cap = cap.join(self.infer_cap(ctx, arg)?);
+                    cap = cap.join(self.infer_cap_tracked(ctx, arg, consumed)?);
                 }
                 Ok(cap)
             }
 
             // Handle: capability of the body (handlers don't change the value
             // capability, only the effect row).
-            Expr::Handle { body, .. } => self.infer_cap(ctx, body),
+            Expr::Handle { body, .. } => self.infer_cap_tracked(ctx, body, consumed),
 
             // Migrate: returns Unit (Val).
             Expr::Migrate { actor, node, .. } => {
-                let _ = self.infer_cap(ctx, actor)?;
-                let _ = self.infer_cap(ctx, node)?;
+                let _ = self.infer_cap_tracked(ctx, actor, consumed)?;
+                let _ = self.infer_cap_tracked(ctx, node, consumed)?;
                 Ok(Capability::Val)
             }
 
             // Explicit capability annotation.
-            Expr::CapAnnotate { cap, .. } => Ok(*cap),
+            Expr::CapAnnotate { expr: inner, cap, span } => {
+                let inner_cap = self.infer_cap_tracked(ctx, inner, consumed)?;
+                // Re-annotating a linear value as an aliasable capability
+                // would duplicate the unique value; only `lineariso`
+                // (identity) and `iso` (discharging the linear obligation)
+                // are permitted targets.
+                if inner_cap.is_linear() && !matches!(cap, Capability::LinearIso | Capability::Iso)
+                {
+                    let msg = format!(
+                        "cannot downgrade linear capability LinearIso to {:?}",
+                        cap
+                    );
+                    self.diagnostics.push(msg.clone());
+                    return Err(NuError::CapError { msg, span: *span });
+                }
+                Ok(*cap)
+            }
 
             // Type annotation: capability of the inner expression.
-            Expr::TypeAnnotate { expr: e, .. } => self.infer_cap(ctx, e),
+            Expr::TypeAnnotate { expr: e, .. } => self.infer_cap_tracked(ctx, e, consumed),
 
             // Pipe: capability of the right-hand side applied to the left.
             Expr::Pipe { left, right, .. } => {
-                let _ = self.infer_cap(ctx, left)?;
-                self.infer_cap(ctx, right)
+                let _ = self.infer_cap_tracked(ctx, left, consumed)?;
+                self.infer_cap_tracked(ctx, right, consumed)
             }
 
             // For comprehension: capability of the body.
-            Expr::For { var, iterable, body, .. } => {
-                let _ = self.infer_cap(ctx, iterable)?;
+            Expr::For {
+                var,
+                iterable,
+                body,
+                span,
+            } => {
+                let _ = self.infer_cap_tracked(ctx, iterable, consumed)?;
                 let body_ctx = ctx.with_binding(var.clone(), Capability::Val);
-                self.infer_cap(&body_ctx, body)
+                let base = consumed.clone();
+                // The loop variable shadows any outer binding of the same name.
+                let outer_var = consumed.remove(var);
+                let body_result = self.infer_cap_tracked(&body_ctx, body, consumed);
+                consumed.remove(var);
+                if outer_var {
+                    consumed.insert(var.clone());
+                }
+                let body_cap = body_result?;
+                // A loop body may execute more than once, so consuming an
+                // outer linear binding inside the body could use it multiple
+                // times along a single path — reject it outright.
+                if let Some(name) = consumed.difference(&base).next() {
+                    let name = name.clone();
+                    let msg = format!(
+                        "linear value `{}` consumed in loop body may be used more than once",
+                        name
+                    );
+                    self.diagnostics.push(msg.clone());
+                    return Err(NuError::CapError { msg, span: *span });
+                }
+                // The loop may also execute zero times, so body consumption
+                // does not propagate past the loop.
+                *consumed = base;
+                Ok(body_cap)
             }
 
             // Return: capability of returned value.
-            Expr::Return(Some(e), _) => self.infer_cap(ctx, e),
+            Expr::Return(Some(e), _) => self.infer_cap_tracked(ctx, e, consumed),
             Expr::Return(None, _) => Ok(Capability::Val),
 
             // Break: never returns a value, use Tag.
@@ -1122,11 +1347,7 @@ impl CapabilityAnalyzer {
     /// Check sendability of an expression's result.
     ///
     /// Infers the expression's capability and then checks that it is sendable.
-    pub fn check_expr_sendable(
-        &mut self,
-        ctx: &CapContext,
-        expr: &Expr,
-    ) -> NuResult<()> {
+    pub fn check_expr_sendable(&mut self, ctx: &CapContext, expr: &Expr) -> NuResult<()> {
         let cap = self.infer_cap(ctx, expr)?;
         let span = expr_span(expr);
         self.check_sendable(cap, span)
@@ -1212,6 +1433,27 @@ fn add_pat_bindings(pat: &Pattern, ctx: &mut CapContext, cap: Capability) {
         Pattern::Variant(_, Some(inner)) => {
             add_pat_bindings(inner, ctx, cap);
         }
+        Pattern::Variant(_, None) => {}
+    }
+}
+
+/// Collect the variable names bound by a pattern (for scope/shadowing
+/// bookkeeping in the linear-consumption tracker).
+fn pat_binding_names(pat: &Pattern, acc: &mut Vec<String>) {
+    match pat {
+        Pattern::Wild | Pattern::Lit(_) => {}
+        Pattern::Var(name) | Pattern::Alias(name, _) => acc.push(name.clone()),
+        Pattern::Tuple(pats) => {
+            for p in pats {
+                pat_binding_names(p, acc);
+            }
+        }
+        Pattern::Record(fields) => {
+            for (_, p) in fields {
+                pat_binding_names(p, acc);
+            }
+        }
+        Pattern::Variant(_, Some(inner)) => pat_binding_names(inner, acc),
         Pattern::Variant(_, None) => {}
     }
 }
@@ -1499,7 +1741,9 @@ mod tests {
             args: vec![],
             span: s(),
         };
-        assert!(checker.check_effects(&ctx, &expr, &ctx.allowed_effects).is_ok());
+        assert!(checker
+            .check_effects(&ctx, &expr, &ctx.allowed_effects)
+            .is_ok());
     }
 
     #[test]
@@ -1516,7 +1760,11 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             NuError::EffectError { msg, .. } => {
-                assert!(msg.contains("FS"), "error message should mention FS: {}", msg);
+                assert!(
+                    msg.contains("FS"),
+                    "error message should mention FS: {}",
+                    msg
+                );
             }
             other => panic!("expected EffectError, got {:?}", other),
         }
@@ -1630,11 +1878,17 @@ mod tests {
     fn test_check_cap_sub_passes() {
         let mut analyzer = CapabilityAnalyzer::new();
         // Val <: Box (val can be read as box)
-        assert!(analyzer.check_cap_sub(Capability::Val, Capability::Box, s()).is_ok());
+        assert!(analyzer
+            .check_cap_sub(Capability::Val, Capability::Box, s())
+            .is_ok());
         // Tag <: Iso (tag is bottom of the lattice)
-        assert!(analyzer.check_cap_sub(Capability::Tag, Capability::Iso, s()).is_ok());
+        assert!(analyzer
+            .check_cap_sub(Capability::Tag, Capability::Iso, s())
+            .is_ok());
         // Ref <: Box (ref can be read as box)
-        assert!(analyzer.check_cap_sub(Capability::Ref, Capability::Box, s()).is_ok());
+        assert!(analyzer
+            .check_cap_sub(Capability::Ref, Capability::Box, s())
+            .is_ok());
     }
 
     #[test]
@@ -1822,5 +2076,240 @@ mod tests {
         };
         let result = checker.infer_effects(&ctx, &lam);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // LinearIso consumption tracking (at-most-once use)
+    // -----------------------------------------------------------------------
+
+    // Helpers for building linearity test expressions.
+    fn lvar(name: &str) -> Expr {
+        Expr::Var(name.to_string(), s())
+    }
+
+    fn call1(func: &str, arg: Expr) -> Expr {
+        Expr::App {
+            func: Box::new(Expr::Var(func.to_string(), s())),
+            args: vec![arg],
+            span: s(),
+        }
+    }
+
+    fn send_m(arg: Expr) -> Expr {
+        Expr::Send {
+            actor: Box::new(lvar("a")),
+            behavior: "m".to_string(),
+            args: vec![arg],
+            span: s(),
+        }
+    }
+
+    #[test]
+    fn test_lineariso_used_once_ok() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
+        let cap = analyzer.infer_cap(&ctx, &call1("f", lvar("x"))).unwrap();
+        assert_eq!(cap, Capability::Val); // Val (f) join LinearIso (x)
+        assert!(analyzer.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_lineariso_used_twice_errors() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
+        let expr = Expr::Block {
+            exprs: vec![call1("f", lvar("x")), call1("g", lvar("x"))],
+            span: s(),
+        };
+        let result = analyzer.infer_cap(&ctx, &expr);
+        match result {
+            Err(NuError::CapError { msg, .. }) => {
+                assert!(msg.contains("x"), "error should name the binding: {}", msg);
+                assert!(msg.contains("linear"), "error should mention linearity: {}", msg);
+            }
+            other => panic!("expected CapError, got {:?}", other),
+        }
+        assert!(!analyzer.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_lineariso_never_used_ok() {
+        // At-most-once MVP: an unused linear binding is NOT an error.
+        // Exactly-once (must-use on all paths) analysis is a follow-up.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
+        let expr = Expr::Literal(Literal::Int(1), s());
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_lineariso_consumed_on_both_branches_then_used_errors() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
+        // if c then f(x) else g(x); h(x) — both branches consume x, so the
+        // binding is consumed after the if and the later use must fail.
+        let expr = Expr::Block {
+            exprs: vec![
+                Expr::If {
+                    cond: Box::new(Expr::Literal(Literal::Bool(true), s())),
+                    then_branch: Box::new(call1("f", lvar("x"))),
+                    else_branch: Some(Box::new(call1("g", lvar("x")))),
+                    span: s(),
+                },
+                call1("h", lvar("x")),
+            ],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
+    }
+
+    #[test]
+    fn test_lineariso_consumed_on_one_branch_then_used_ok() {
+        // Conservative merge: a binding is consumed after an if only if ALL
+        // fall-through paths consume it. The else branch here does not, so
+        // the later use is fine.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
+        let expr = Expr::Block {
+            exprs: vec![
+                Expr::If {
+                    cond: Box::new(Expr::Literal(Literal::Bool(true), s())),
+                    then_branch: Box::new(call1("f", lvar("x"))),
+                    else_branch: Some(Box::new(Expr::Literal(Literal::Int(0), s()))),
+                    span: s(),
+                },
+                call1("h", lvar("x")),
+            ],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_lineariso_sent_once_ok() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new()
+            .with_binding("a", Capability::Iso)
+            .with_binding("x", Capability::LinearIso);
+        let cap = analyzer.infer_cap(&ctx, &send_m(lvar("x"))).unwrap();
+        assert_eq!(cap, Capability::Val);
+    }
+
+    #[test]
+    fn test_lineariso_sent_twice_errors() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new()
+            .with_binding("a", Capability::Iso)
+            .with_binding("x", Capability::LinearIso);
+        // Sending a linear value consumes it (the spec'd linear move), so the
+        // second send of the same binding must fail.
+        let expr = Expr::Block {
+            exprs: vec![send_m(lvar("x")), send_m(lvar("x"))],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
+    }
+
+    #[test]
+    fn test_lineariso_downgrade_to_ref_errors() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
+        let expr = Expr::CapAnnotate {
+            expr: Box::new(lvar("x")),
+            cap: Capability::Ref,
+            span: s(),
+        };
+        let result = analyzer.infer_cap(&ctx, &expr);
+        match result {
+            Err(NuError::CapError { msg, .. }) => {
+                assert!(msg.contains("downgrade"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected CapError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lineariso_promote_to_iso_consumes() {
+        let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
+        let promote = Expr::CapAnnotate {
+            expr: Box::new(lvar("x")),
+            cap: Capability::Iso,
+            span: s(),
+        };
+        // Promoting lineariso to iso discharges the linear obligation.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let cap = analyzer.infer_cap(&ctx, &promote).unwrap();
+        assert_eq!(cap, Capability::Iso);
+        // ...but it still consumes the binding: a later use must fail.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let expr = Expr::Block {
+            exprs: vec![promote, call1("f", lvar("x"))],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
+    }
+
+    #[test]
+    fn test_lineariso_captured_by_closure_consumes() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
+        let lam = Expr::Lambda {
+            params: vec![("y".to_string(), None)],
+            body: Box::new(lvar("x")),
+            effect: None,
+            span: s(),
+        };
+        let expr = Expr::Block {
+            exprs: vec![lam, call1("f", lvar("x"))],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
+    }
+
+    #[test]
+    fn test_lineariso_consumed_in_for_body_errors() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
+        let expr = Expr::For {
+            var: "i".to_string(),
+            iterable: Box::new(Expr::Array(
+                vec![Expr::Literal(Literal::Int(1), s())],
+                s(),
+            )),
+            body: Box::new(call1("f", lvar("x"))),
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
+    }
+
+    #[test]
+    fn test_lineariso_shadowed_by_let_ok() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
+        // let x = 1 in { f(x); g(x) } — the inner (Val) binding shadows the
+        // linear outer one, so both uses are fine and the outer binding is
+        // not consumed.
+        let expr = Expr::Let {
+            name: "x".to_string(),
+            value: Box::new(Expr::Literal(Literal::Int(1), s())),
+            body: Box::new(Expr::Block {
+                exprs: vec![call1("f", lvar("x")), call1("g", lvar("x"))],
+                span: s(),
+            }),
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_iso_used_twice_ok() {
+        // Regression: non-linear capabilities are unaffected.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::Iso);
+        let expr = Expr::Block {
+            exprs: vec![call1("f", lvar("x")), call1("g", lvar("x"))],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
     }
 }

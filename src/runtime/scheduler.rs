@@ -175,16 +175,24 @@ impl Scheduler {
         // 1. Try local deque first (LIFO — cache hot)
         if worker_idx < self.workers.len() {
             if let Some(task) = self.workers[worker_idx].pop() {
-                self.stats.total_tasks_processed.fetch_add(1, Ordering::Relaxed);
-                self.stats.tasks_from_local_queue.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_tasks_processed
+                    .fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .tasks_from_local_queue
+                    .fetch_add(1, Ordering::Relaxed);
                 return Some(task);
             }
         }
 
         // 2. Try the global injector
         if let Steal::Success(task) = self.global.steal() {
-            self.stats.total_tasks_processed.fetch_add(1, Ordering::Relaxed);
-            self.stats.tasks_from_global_queue.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .total_tasks_processed
+                .fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .tasks_from_global_queue
+                .fetch_add(1, Ordering::Relaxed);
             return Some(task);
         }
 
@@ -200,16 +208,22 @@ impl Scheduler {
             }
             steal_attempts += 1;
             if let Steal::Success(task) = self.stealers[steal_idx].steal() {
-                self.stats.total_tasks_processed.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_tasks_processed
+                    .fetch_add(1, Ordering::Relaxed);
                 self.stats.tasks_from_steal.fetch_add(1, Ordering::Relaxed);
                 self.stats.steal_successes.fetch_add(1, Ordering::Relaxed);
-                self.stats.steal_attempts.fetch_add(steal_attempts, Ordering::Relaxed);
+                self.stats
+                    .steal_attempts
+                    .fetch_add(steal_attempts, Ordering::Relaxed);
                 return Some(task);
             }
         }
 
         self.stats.empty_polls.fetch_add(1, Ordering::Relaxed);
-        self.stats.steal_attempts.fetch_add(steal_attempts, Ordering::Relaxed);
+        self.stats
+            .steal_attempts
+            .fetch_add(steal_attempts, Ordering::Relaxed);
         None
     }
 
@@ -227,8 +241,12 @@ impl Scheduler {
     pub fn steal_one(&self) -> Option<u64> {
         // Try global first
         if let Steal::Success(task) = self.global.steal() {
-            self.stats.total_tasks_processed.fetch_add(1, Ordering::Relaxed);
-            self.stats.tasks_from_global_queue.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .total_tasks_processed
+                .fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .tasks_from_global_queue
+                .fetch_add(1, Ordering::Relaxed);
             return Some(task);
         }
         // Try any worker
@@ -236,15 +254,21 @@ impl Scheduler {
         for stealer in &self.stealers {
             steal_attempts += 1;
             if let Steal::Success(task) = stealer.steal() {
-                self.stats.total_tasks_processed.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_tasks_processed
+                    .fetch_add(1, Ordering::Relaxed);
                 self.stats.tasks_from_steal.fetch_add(1, Ordering::Relaxed);
                 self.stats.steal_successes.fetch_add(1, Ordering::Relaxed);
-                self.stats.steal_attempts.fetch_add(steal_attempts, Ordering::Relaxed);
+                self.stats
+                    .steal_attempts
+                    .fetch_add(steal_attempts, Ordering::Relaxed);
                 return Some(task);
             }
         }
         self.stats.empty_polls.fetch_add(1, Ordering::Relaxed);
-        self.stats.steal_attempts.fetch_add(steal_attempts, Ordering::Relaxed);
+        self.stats
+            .steal_attempts
+            .fetch_add(steal_attempts, Ordering::Relaxed);
         None
     }
 
@@ -267,8 +291,7 @@ impl Scheduler {
             if let Some(actor_id) = self.next_task(worker_idx) {
                 empty_count = 0;
                 process_fn(actor_id);
-                self.processed_count
-                    .fetch_add(1, Ordering::Relaxed);
+                self.processed_count.fetch_add(1, Ordering::Relaxed);
             } else {
                 empty_count += 1;
 
@@ -297,8 +320,7 @@ impl Scheduler {
     {
         if let Some(actor_id) = self.next_task(worker_idx) {
             process_fn(actor_id);
-            self.processed_count
-                .fetch_add(1, Ordering::Relaxed);
+            self.processed_count.fetch_add(1, Ordering::Relaxed);
             true
         } else {
             false
@@ -361,10 +383,14 @@ mod scheduler_tests {
     fn test_run_one() {
         let s = Scheduler::new(2);
         let processed = Arc::new(AtomicU64::new(0));
-        s.enqueue(1); s.enqueue(2); s.enqueue(3);
+        s.enqueue(1);
+        s.enqueue(2);
+        s.enqueue(3);
         for _ in 0..3 {
             let p = Arc::clone(&processed);
-            s.run_one(0, |_id| { p.fetch_add(1, Ordering::Relaxed); });
+            s.run_one(0, |_id| {
+                p.fetch_add(1, Ordering::Relaxed);
+            });
         }
         assert_eq!(processed.load(Ordering::Relaxed), 3);
     }
@@ -397,18 +423,24 @@ mod scheduler_tests {
         for t in 0..4 {
             let tx_clone = tx.clone();
             handles.push(thread::spawn(move || {
-                for i in 0..100 { tx_clone.send((t * 100 + i) as u64).unwrap(); }
+                for i in 0..100 {
+                    tx_clone.send((t * 100 + i) as u64).unwrap();
+                }
             }));
         }
         drop(tx); // Close original sender; rx ends when all clones dropped.
         for val in rx {
             s.enqueue(val);
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         let count = Arc::new(AtomicU64::new(0));
         for _ in 0..400 {
             let c = Arc::clone(&count);
-            s.run_one(0, move |_id| { c.fetch_add(1, Ordering::Relaxed); });
+            s.run_one(0, move |_id| {
+                c.fetch_add(1, Ordering::Relaxed);
+            });
         }
         assert_eq!(count.load(Ordering::Relaxed), 400);
     }

@@ -85,15 +85,18 @@ mod tests {
     #[test]
     fn test_tags_are_unique() {
         let tags = [
-            TAG_NIL, TAG_UNIT, TAG_BOOL, TAG_INT, TAG_PTR, TAG_ACTOR, TAG_STRING, TAG_CLOSURE,
+            TAG_NIL,
+            TAG_UNIT,
+            TAG_BOOL,
+            TAG_INT,
+            TAG_PTR,
+            TAG_ACTOR,
+            TAG_STRING,
+            TAG_CLOSURE,
         ];
         for i in 0..tags.len() {
             for j in (i + 1)..tags.len() {
-                assert_ne!(
-                    tags[i], tags[j],
-                    "tags {} and {} collide",
-                    i, j
-                );
+                assert_ne!(tags[i], tags[j], "tags {} and {} collide", i, j);
             }
         }
     }
@@ -105,7 +108,14 @@ mod tests {
         let exponent_mask: u64 = 0x7FF0_0000_0000_0000;
         let mantissa_mask: u64 = 0x000F_FFFF_FFFF_FFFF;
         let tags = [
-            TAG_NIL, TAG_UNIT, TAG_BOOL, TAG_INT, TAG_PTR, TAG_ACTOR, TAG_STRING, TAG_CLOSURE,
+            TAG_NIL,
+            TAG_UNIT,
+            TAG_BOOL,
+            TAG_INT,
+            TAG_PTR,
+            TAG_ACTOR,
+            TAG_STRING,
+            TAG_CLOSURE,
         ];
         for tag in tags {
             assert!(

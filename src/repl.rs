@@ -7,8 +7,8 @@
 //! - Graceful error handling
 
 use crate::ast::{AstModule, Decl, Expr};
-use crate::lexer::Lexer;
 use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
+use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
 use crate::types::{Capability, NuError, NuResult, Span, Type, TypeContext};
@@ -337,7 +337,6 @@ impl Repl {
         self.vm.closure_env_count()
     }
 
-
     /// The last evaluation's disassembled bytecode, if any. Exposed for
     /// testing which compiler backend actually ran (the two backends use
     /// different register-allocation schemes, so their disassembly differs
@@ -448,10 +447,7 @@ pub fn type_to_string(ty: &Type) -> String {
             } else {
                 format!(" :{:?}", cap)
             };
-            format!(
-                "{} -> {}{}{}",
-                param_str, ret_str, eff_str, cap_str
-            )
+            format!("{} -> {}{}{}", param_str, ret_str, eff_str, cap_str)
         }
         Type::Actor { state, behavior } => {
             format!(
@@ -470,11 +466,7 @@ pub fn type_to_string(ty: &Type) -> String {
         }
         Type::Scheme { vars, body } => {
             let var_names: Vec<String> = vars.iter().map(|v| format!("'t{}", v.0)).collect();
-            format!(
-                "forall {}. {}",
-                var_names.join(", "),
-                type_to_string(body)
-            )
+            format!("forall {}. {}", var_names.join(", "), type_to_string(body))
         }
     }
 }
@@ -498,17 +490,16 @@ fn disassemble_module(module: &crate::bytecode::CodeModule) -> String {
         let comment = match instr.opcode {
             crate::bytecode::OpCode::ConstU => {
                 let idx = instr.imm16();
-                module.constants.get(idx as usize).map(|c| format!("; load {:?}", c))
+                module
+                    .constants
+                    .get(idx as usize)
+                    .map(|c| format!("; load {:?}", c))
             }
-            crate::bytecode::OpCode::Call => Some(format!(
-                "; call R{}",
-                instr.op1
-            )),
-            crate::bytecode::OpCode::Closure => Some(format!(
-                "; closure @{}",
-                instr.imm16()
-            )),
-            crate::bytecode::OpCode::Jmp | crate::bytecode::OpCode::JmpT | crate::bytecode::OpCode::JmpF => {
+            crate::bytecode::OpCode::Call => Some(format!("; call R{}", instr.op1)),
+            crate::bytecode::OpCode::Closure => Some(format!("; closure @{}", instr.imm16())),
+            crate::bytecode::OpCode::Jmp
+            | crate::bytecode::OpCode::JmpT
+            | crate::bytecode::OpCode::JmpF => {
                 Some(format!("; -> {}", i as i64 + instr.simm16() as i64))
             }
             _ => None,

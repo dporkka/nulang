@@ -821,16 +821,16 @@ pub fn process_network_packets(
 /// The full-state `Packet::CrdtSync` path remains available for
 /// join/reset and as the repair mechanism after message loss.
 pub fn sync_crdts_delta(runtime: &mut Runtime) {
-    if !runtime.distributed_enabled { return; }
+    if !runtime.distributed.enabled { return; }
     let ops = match &mut runtime.crdt_manager {
         Some(m) => m.generate_delta_sync_ops(),
         None => return,
     };
     if ops.is_empty() { return; }
     let packet = Packet::CrdtDeltaSync { ops };
-    if let Some(cluster) = &runtime.cluster {
+    if let Some(cluster) = &runtime.distributed.cluster {
         for member in cluster.healthy_members() {
-            if let Some(transport) = &mut runtime.transport {
+            if let Some(transport) = &mut runtime.distributed.transport {
                 let net_node_id = NodeId(member.node_id.0);
                 transport.send(net_node_id, member.address, packet.clone());
             }

@@ -24,22 +24,22 @@
 //! SIGN_EXT     = 0xFFFF_0000_0000_0000
 //! ```
 
-use cranelift::prelude::*;
 use cranelift::codegen::ir::FuncRef;
+use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
-use cranelift_module::{Linkage, Module};
 use cranelift_jit::JITModule;
+use cranelift_module::{Linkage, Module};
 
 use std::collections::HashMap;
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
-use crate::jit::compiler::CompileError;
+use crate::jit::compiler::{emit_arr_load, CompileError};
 
 // ---------------------------------------------------------------------------
 // NaN-tag constants (from src/value_layout.rs)
 // ---------------------------------------------------------------------------
 
-use crate::value_layout::{TAG_BOOL, TAG_INT, TAG_NIL, PAYLOAD_MASK, SIGN_BIT};
+use crate::value_layout::{PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT, TAG_NIL};
 
 const TAG_INT_I64: i64 = TAG_INT as i64;
 const TAG_BOOL_I64: i64 = TAG_BOOL as i64;
@@ -99,7 +99,10 @@ impl TypeMetadata {
 
     /// Get the known type for a register, defaulting to `Unknown`.
     pub fn get_type(&self, reg: usize) -> KnownType {
-        self.reg_types.get(&reg).copied().unwrap_or(KnownType::Unknown)
+        self.reg_types
+            .get(&reg)
+            .copied()
+            .unwrap_or(KnownType::Unknown)
     }
 
     /// Check whether both operands have the same known type.
@@ -183,7 +186,12 @@ pub fn infer_reg_types(module: &CodeModule, pc: usize) -> TypeMetadata {
     anchors.sort_unstable();
     anchors.dedup();
 
-    let start = anchors.iter().copied().rev().find(|&a| a <= pc).unwrap_or(0);
+    let start = anchors
+        .iter()
+        .copied()
+        .rev()
+        .find(|&a| a <= pc)
+        .unwrap_or(0);
     let end = anchors
         .iter()
         .copied()
@@ -355,6 +363,13 @@ fn apply_type_transfer(instr: &Instruction, module: &CodeModule, state: &mut [Kn
             state[op1] = KnownType::Int;
         }
 
+        // Drop writes nil into its register after releasing the reference
+        // (it is never JIT-compiled — regions stop before it — but the
+        // type analysis must not let it clobber the whole register file).
+        OpCode::Drop => {
+            state[op1] = KnownType::Unknown;
+        }
+
         // FDiv is excluded: the interpreter yields nil on a zero divisor.
         OpCode::FAdd | OpCode::FSub | OpCode::FMul | OpCode::FNeg => {
             state[op3] = KnownType::Float;
@@ -384,6 +399,13 @@ fn apply_type_transfer(instr: &Instruction, module: &CodeModule, state: &mut [Kn
             state[op2] = KnownType::Int;
         }
 
+
+        // ArrLoad result is Unknown (array elements have runtime-only types).
+        OpCode::ArrLoad => {
+            state[op3] = KnownType::Unknown;
+        }
+        // ArrStore writes to memory, not registers — no type transfer.
+        OpCode::ArrStore => {}
         // Unmodeled opcode: conservatively clobber everything.
         _ => {
             state.fill(KnownType::Unknown);
@@ -448,11 +470,25 @@ fn register_runtime_helpers<M: Module>(
     let mut helpers = HashMap::new();
 
     let bin_helpers: &[&str] = &[
-        "nulang_iadd", "nulang_isub", "nulang_imul", "nulang_idiv", "nulang_imod",
-        "nulang_icmp_eq", "nulang_icmp_lt", "nulang_icmp_gt", "nulang_icmp_le", "nulang_icmp_ge",
-        "nulang_fadd", "nulang_fsub", "nulang_fmul", "nulang_fdiv",
-        "nulang_fcmp_eq", "nulang_fcmp_lt", "nulang_fcmp_gt",
-        "nulang_and", "nulang_or",
+        "nulang_iadd",
+        "nulang_isub",
+        "nulang_imul",
+        "nulang_idiv",
+        "nulang_imod",
+        "nulang_icmp_eq",
+        "nulang_icmp_lt",
+        "nulang_icmp_gt",
+        "nulang_icmp_le",
+        "nulang_icmp_ge",
+        "nulang_fadd",
+        "nulang_fsub",
+        "nulang_fmul",
+        "nulang_fdiv",
+        "nulang_fcmp_eq",
+        "nulang_fcmp_lt",
+        "nulang_fcmp_gt",
+        "nulang_and",
+        "nulang_or",
     ];
 
     for name in bin_helpers {
@@ -464,8 +500,12 @@ fn register_runtime_helpers<M: Module>(
     }
 
     let unary_helpers: &[&str] = &[
-        "nulang_ineg", "nulang_iinc", "nulang_idec",
-        "nulang_not", "nulang_itof", "nulang_ftoi",
+        "nulang_ineg",
+        "nulang_iinc",
+        "nulang_idec",
+        "nulang_not",
+        "nulang_itof",
+        "nulang_ftoi",
     ];
 
     for name in unary_helpers {
@@ -811,12 +851,7 @@ enum TypedLogicOp {
 // ---------------------------------------------------------------------------
 
 /// Emit typed int-to-float conversion with direct CLIF.
-fn emit_typed_itof(
-    builder: &mut FunctionBuilder,
-    regs_ptr: Value,
-    src: usize,
-    dst: usize,
-) {
+fn emit_typed_itof(builder: &mut FunctionBuilder, regs_ptr: Value, src: usize, dst: usize) {
     let raw = load_reg(builder, regs_ptr, src);
     let val = emit_sext48(builder, raw);
     let float_val = builder.ins().fcvt_from_sint(types::F64, val);
@@ -825,12 +860,7 @@ fn emit_typed_itof(
 }
 
 /// Emit typed float-to-int conversion with direct CLIF.
-fn emit_typed_ftoi(
-    builder: &mut FunctionBuilder,
-    regs_ptr: Value,
-    src: usize,
-    dst: usize,
-) {
+fn emit_typed_ftoi(builder: &mut FunctionBuilder, regs_ptr: Value, src: usize, dst: usize) {
     let bits = load_reg(builder, regs_ptr, src);
     let float_val = emit_bitcast_i64_to_f64(builder, bits);
     let int_val = builder.ins().fcvt_to_sint_sat(types::I64, float_val);
@@ -891,19 +921,49 @@ fn emit_unary_runtime(
 pub fn is_opcode_supported_typed(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::Nop | OpCode::Halt
-        | OpCode::Const0 | OpCode::Const1 | OpCode::Const2 | OpCode::ConstM1 | OpCode::ConstU
-        | OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Swap | OpCode::Dup
-        | OpCode::IAdd | OpCode::ISub | OpCode::IMul | OpCode::IDiv | OpCode::IMod
-        | OpCode::INeg | OpCode::IInc | OpCode::IDec
-        | OpCode::FAdd | OpCode::FSub | OpCode::FMul | OpCode::FDiv
-        | OpCode::ICmpEq | OpCode::ICmpLt | OpCode::ICmpGt | OpCode::ICmpLe | OpCode::ICmpGe
-        | OpCode::FCmpEq | OpCode::FCmpLt | OpCode::FCmpGt
-        | OpCode::Not | OpCode::And | OpCode::Or
-        | OpCode::Jmp | OpCode::JmpT | OpCode::JmpF
-        | OpCode::IToF | OpCode::FToI
-        | OpCode::DbgPrint
-        | OpCode::Ret | OpCode::RetVal
+        OpCode::Nop
+            | OpCode::Halt
+            | OpCode::Const0
+            | OpCode::Const1
+            | OpCode::Const2
+            | OpCode::ConstM1
+            | OpCode::ConstU
+            | OpCode::Load
+            | OpCode::Store
+            | OpCode::Move
+            | OpCode::Swap
+            | OpCode::Dup
+            | OpCode::IAdd
+            | OpCode::ISub
+            | OpCode::IMul
+            | OpCode::IDiv
+            | OpCode::IMod
+            | OpCode::INeg
+            | OpCode::IInc
+            | OpCode::IDec
+            | OpCode::FAdd
+            | OpCode::FSub
+            | OpCode::FMul
+            | OpCode::FDiv
+            | OpCode::ICmpEq
+            | OpCode::ICmpLt
+            | OpCode::ICmpGt
+            | OpCode::ICmpLe
+            | OpCode::ICmpGe
+            | OpCode::FCmpEq
+            | OpCode::FCmpLt
+            | OpCode::FCmpGt
+            | OpCode::Not
+            | OpCode::And
+            | OpCode::Or
+            | OpCode::Jmp
+            | OpCode::JmpT
+            | OpCode::JmpF
+            | OpCode::IToF
+            | OpCode::FToI
+            | OpCode::DbgPrint
+            | OpCode::Ret
+            | OpCode::RetVal
     )
 }
 
@@ -947,7 +1007,10 @@ pub fn compile_bytecode_region_typed(
     // early return leaves the reusable contexts clean.
     for instr in &instructions[start_offset..end_offset] {
         if !is_opcode_supported_typed(instr.opcode) {
-            return Err(CompileError::UnsupportedOpcode(format!("{:?}", instr.opcode)));
+            return Err(CompileError::UnsupportedOpcode(format!(
+                "{:?}",
+                instr.opcode
+            )));
         }
     }
 
@@ -1055,50 +1118,124 @@ pub fn compile_bytecode_region_typed(
             OpCode::IAdd => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Int) {
-                    emit_typed_ibinop(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, TypedIntOp::Add);
+                    emit_typed_ibinop(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        TypedIntOp::Add,
+                    );
                     meta.set_type(dst, KnownType::Int);
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_iadd");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_iadd",
+                    );
                 }
             }
             OpCode::ISub => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Int) {
-                    emit_typed_ibinop(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, TypedIntOp::Sub);
+                    emit_typed_ibinop(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        TypedIntOp::Sub,
+                    );
                     meta.set_type(dst, KnownType::Int);
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_isub");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_isub",
+                    );
                 }
             }
             OpCode::IMul => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Int) {
-                    emit_typed_ibinop(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, TypedIntOp::Mul);
+                    emit_typed_ibinop(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        TypedIntOp::Mul,
+                    );
                     meta.set_type(dst, KnownType::Int);
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_imul");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_imul",
+                    );
                 }
             }
             OpCode::IDiv => {
                 // Always use the runtime helper: direct CLIF `sdiv` traps on a
                 // zero divisor, while the interpreter and the helper yield nil.
                 let dst = instr.op3 as usize;
-                emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_idiv");
+                emit_binop_runtime(
+                    &mut builder,
+                    &helpers,
+                    regs_ptr,
+                    instr.op1 as usize,
+                    instr.op2 as usize,
+                    dst,
+                    "nulang_idiv",
+                );
                 meta.set_type(dst, KnownType::Unknown);
             }
             OpCode::IMod => {
                 // Same reasoning as IDiv: keep the nil-on-zero semantics.
                 let dst = instr.op3 as usize;
-                emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_imod");
+                emit_binop_runtime(
+                    &mut builder,
+                    &helpers,
+                    regs_ptr,
+                    instr.op1 as usize,
+                    instr.op2 as usize,
+                    dst,
+                    "nulang_imod",
+                );
                 meta.set_type(dst, KnownType::Unknown);
             }
             OpCode::INeg => {
                 let dst = instr.op2 as usize;
                 if meta.is_known(instr.op1 as usize, KnownType::Int) {
-                    emit_typed_iunary(&mut builder, regs_ptr, instr.op1 as usize, dst, TypedIntUnaryOp::Neg);
+                    emit_typed_iunary(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        dst,
+                        TypedIntUnaryOp::Neg,
+                    );
                     meta.set_type(dst, KnownType::Int);
                 } else {
-                    emit_unary_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, dst, "nulang_ineg");
+                    emit_unary_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        dst,
+                        "nulang_ineg",
+                    );
                 }
             }
             OpCode::IInc => {
@@ -1122,37 +1259,97 @@ pub fn compile_bytecode_region_typed(
             OpCode::FAdd => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Float) {
-                    emit_typed_fbinop(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, TypedFloatOp::Add);
+                    emit_typed_fbinop(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        TypedFloatOp::Add,
+                    );
                     meta.set_type(dst, KnownType::Float);
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_fadd");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_fadd",
+                    );
                 }
             }
             OpCode::FSub => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Float) {
-                    emit_typed_fbinop(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, TypedFloatOp::Sub);
+                    emit_typed_fbinop(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        TypedFloatOp::Sub,
+                    );
                     meta.set_type(dst, KnownType::Float);
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_fsub");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_fsub",
+                    );
                 }
             }
             OpCode::FMul => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Float) {
-                    emit_typed_fbinop(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, TypedFloatOp::Mul);
+                    emit_typed_fbinop(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        TypedFloatOp::Mul,
+                    );
                     meta.set_type(dst, KnownType::Float);
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_fmul");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_fmul",
+                    );
                 }
             }
             OpCode::FDiv => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Float) {
-                    emit_typed_fbinop(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, TypedFloatOp::Div);
+                    emit_typed_fbinop(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        TypedFloatOp::Div,
+                    );
                     meta.set_type(dst, KnownType::Float);
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_fdiv");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_fdiv",
+                    );
                 }
             }
 
@@ -1160,45 +1357,120 @@ pub fn compile_bytecode_region_typed(
             OpCode::ICmpEq => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Int) {
-                    emit_typed_icmp(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, IntCC::Equal);
+                    emit_typed_icmp(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        IntCC::Equal,
+                    );
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_icmp_eq");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_icmp_eq",
+                    );
                 }
                 meta.set_bool_result(dst);
             }
             OpCode::ICmpLt => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Int) {
-                    emit_typed_icmp(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, IntCC::SignedLessThan);
+                    emit_typed_icmp(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        IntCC::SignedLessThan,
+                    );
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_icmp_lt");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_icmp_lt",
+                    );
                 }
                 meta.set_bool_result(dst);
             }
             OpCode::ICmpGt => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Int) {
-                    emit_typed_icmp(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, IntCC::SignedGreaterThan);
+                    emit_typed_icmp(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        IntCC::SignedGreaterThan,
+                    );
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_icmp_gt");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_icmp_gt",
+                    );
                 }
                 meta.set_bool_result(dst);
             }
             OpCode::ICmpLe => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Int) {
-                    emit_typed_icmp(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, IntCC::SignedLessThanOrEqual);
+                    emit_typed_icmp(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        IntCC::SignedLessThanOrEqual,
+                    );
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_icmp_le");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_icmp_le",
+                    );
                 }
                 meta.set_bool_result(dst);
             }
             OpCode::ICmpGe => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Int) {
-                    emit_typed_icmp(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, IntCC::SignedGreaterThanOrEqual);
+                    emit_typed_icmp(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        IntCC::SignedGreaterThanOrEqual,
+                    );
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_icmp_ge");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_icmp_ge",
+                    );
                 }
                 meta.set_bool_result(dst);
             }
@@ -1207,39 +1479,102 @@ pub fn compile_bytecode_region_typed(
                 // an epsilon tolerance, which direct CLIF `fcmp Equal` (exact
                 // bit equality) would not reproduce.
                 let dst = instr.op3 as usize;
-                emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_fcmp_eq");
+                emit_binop_runtime(
+                    &mut builder,
+                    &helpers,
+                    regs_ptr,
+                    instr.op1 as usize,
+                    instr.op2 as usize,
+                    dst,
+                    "nulang_fcmp_eq",
+                );
                 meta.set_bool_result(dst);
             }
             OpCode::FCmpLt => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Float) {
-                    emit_typed_fcmp(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, FloatCC::LessThan);
+                    emit_typed_fcmp(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        FloatCC::LessThan,
+                    );
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_fcmp_lt");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_fcmp_lt",
+                    );
                 }
                 meta.set_bool_result(dst);
             }
             OpCode::FCmpGt => {
                 let dst = instr.op3 as usize;
                 if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Float) {
-                    emit_typed_fcmp(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, FloatCC::GreaterThan);
+                    emit_typed_fcmp(
+                        &mut builder,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        FloatCC::GreaterThan,
+                    );
                 } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_fcmp_gt");
+                    emit_binop_runtime(
+                        &mut builder,
+                        &helpers,
+                        regs_ptr,
+                        instr.op1 as usize,
+                        instr.op2 as usize,
+                        dst,
+                        "nulang_fcmp_gt",
+                    );
                 }
                 meta.set_bool_result(dst);
             }
 
             // -- Logic --
             OpCode::Not => {
-                emit_unary_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, "nulang_not");
+                emit_unary_runtime(
+                    &mut builder,
+                    &helpers,
+                    regs_ptr,
+                    instr.op1 as usize,
+                    instr.op2 as usize,
+                    "nulang_not",
+                );
                 meta.set_bool_result(instr.op2 as usize);
             }
             OpCode::And => {
-                emit_typed_logic(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, TypedLogicOp::And, &helpers, &meta);
+                emit_typed_logic(
+                    &mut builder,
+                    regs_ptr,
+                    instr.op1 as usize,
+                    instr.op2 as usize,
+                    instr.op3 as usize,
+                    TypedLogicOp::And,
+                    &helpers,
+                    &meta,
+                );
                 meta.set_bool_result(instr.op3 as usize);
             }
             OpCode::Or => {
-                emit_typed_logic(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, TypedLogicOp::Or, &helpers, &meta);
+                emit_typed_logic(
+                    &mut builder,
+                    regs_ptr,
+                    instr.op1 as usize,
+                    instr.op2 as usize,
+                    instr.op3 as usize,
+                    TypedLogicOp::Or,
+                    &helpers,
+                    &meta,
+                );
                 meta.set_bool_result(instr.op3 as usize);
             }
 
@@ -1259,7 +1594,9 @@ pub fn compile_bytecode_region_typed(
                 let is_nonzero = builder.ins().icmp(IntCC::NotEqual, cond_val, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
-                    builder.ins().brif(is_nonzero, target_block, &[], fallthrough, &[]);
+                    builder
+                        .ins()
+                        .brif(is_nonzero, target_block, &[], fallthrough, &[]);
                 } else {
                     builder.ins().jump(fallthrough, &[]);
                 }
@@ -1271,7 +1608,9 @@ pub fn compile_bytecode_region_typed(
                 let is_zero = builder.ins().icmp(IntCC::Equal, cond_val, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
-                    builder.ins().brif(is_zero, target_block, &[], fallthrough, &[]);
+                    builder
+                        .ins()
+                        .brif(is_zero, target_block, &[], fallthrough, &[]);
                 } else {
                     builder.ins().jump(fallthrough, &[]);
                 }
@@ -1307,6 +1646,11 @@ pub fn compile_bytecode_region_typed(
             // -- Debug --
             OpCode::DbgPrint => {}
 
+
+            // -- Array operations (typed): same implementation as scalar --
+            OpCode::ArrLoad => {
+                emit_arr_load(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize);
+            }
             // Everything else
             _ => {
                 builder.ins().jump(return_block, &[]);
@@ -1316,8 +1660,7 @@ pub fn compile_bytecode_region_typed(
         // Fallthrough unless terminator
         let is_terminator = matches!(
             instr.opcode,
-            OpCode::Jmp | OpCode::JmpT | OpCode::JmpF | OpCode::Halt
-            | OpCode::Ret | OpCode::RetVal
+            OpCode::Jmp | OpCode::JmpT | OpCode::JmpF | OpCode::Halt | OpCode::Ret | OpCode::RetVal
         );
 
         if !is_terminator {
@@ -1390,12 +1733,15 @@ mod typed_tests {
         meta.set_type(1, KnownType::Int);
 
         let ptr = compile_bytecode_region_typed(
-                &mut jit.module,
-                &mut jit.builder_context,
-                &mut jit.ctx,
-                "test_typed_iadd",
-                0, 2, &instructions, Some(&meta),
-            );
+            &mut jit.module,
+            &mut jit.builder_context,
+            &mut jit.ctx,
+            "test_typed_iadd",
+            0,
+            2,
+            &instructions,
+            Some(&meta),
+        );
         assert!(ptr.is_ok(), "typed IAdd should compile: {:?}", ptr.err());
     }
 
@@ -1417,13 +1763,20 @@ mod typed_tests {
 
         // No type metadata — forces runtime fallback for all ops
         let ptr = compile_bytecode_region_typed(
-                &mut jit.module,
-                &mut jit.builder_context,
-                &mut jit.ctx,
-                "test_untyped_fallback",
-                0, 4, &instructions, None,
-            );
-        assert!(ptr.is_ok(), "untyped fallback should compile: {:?}", ptr.err());
+            &mut jit.module,
+            &mut jit.builder_context,
+            &mut jit.ctx,
+            "test_untyped_fallback",
+            0,
+            4,
+            &instructions,
+            None,
+        );
+        assert!(
+            ptr.is_ok(),
+            "untyped fallback should compile: {:?}",
+            ptr.err()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1448,13 +1801,20 @@ mod typed_tests {
         meta.set_type(1, KnownType::Float);
 
         let ptr = compile_bytecode_region_typed(
-                &mut jit.module,
-                &mut jit.builder_context,
-                &mut jit.ctx,
-                "test_typed_float",
-                0, 5, &instructions, Some(&meta),
-            );
-        assert!(ptr.is_ok(), "typed float ops should compile: {:?}", ptr.err());
+            &mut jit.module,
+            &mut jit.builder_context,
+            &mut jit.ctx,
+            "test_typed_float",
+            0,
+            5,
+            &instructions,
+            Some(&meta),
+        );
+        assert!(
+            ptr.is_ok(),
+            "typed float ops should compile: {:?}",
+            ptr.err()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1480,13 +1840,20 @@ mod typed_tests {
         meta.set_type(1, KnownType::Int);
 
         let ptr = compile_bytecode_region_typed(
-                &mut jit.module,
-                &mut jit.builder_context,
-                &mut jit.ctx,
-                "test_typed_icmp",
-                0, 6, &instructions, Some(&meta),
-            );
-        assert!(ptr.is_ok(), "typed int comparisons should compile: {:?}", ptr.err());
+            &mut jit.module,
+            &mut jit.builder_context,
+            &mut jit.ctx,
+            "test_typed_icmp",
+            0,
+            6,
+            &instructions,
+            Some(&meta),
+        );
+        assert!(
+            ptr.is_ok(),
+            "typed int comparisons should compile: {:?}",
+            ptr.err()
+        );
 
         // Also test float comparisons
         let mut jit2 = make_jit();
@@ -1502,13 +1869,20 @@ mod typed_tests {
         meta2.set_type(1, KnownType::Float);
 
         let ptr2 = compile_bytecode_region_typed(
-                &mut jit2.module,
-                &mut jit2.builder_context,
-                &mut jit2.ctx,
-                "test_typed_fcmp",
-                0, 4, &float_instrs, Some(&meta2),
-            );
-        assert!(ptr2.is_ok(), "typed float comparisons should compile: {:?}", ptr2.err());
+            &mut jit2.module,
+            &mut jit2.builder_context,
+            &mut jit2.ctx,
+            "test_typed_fcmp",
+            0,
+            4,
+            &float_instrs,
+            Some(&meta2),
+        );
+        assert!(
+            ptr2.is_ok(),
+            "typed float comparisons should compile: {:?}",
+            ptr2.err()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1534,13 +1908,20 @@ mod typed_tests {
         // R1 is deliberately left unknown
 
         let ptr = compile_bytecode_region_typed(
-                &mut jit.module,
-                &mut jit.builder_context,
-                &mut jit.ctx,
-                "test_mixed",
-                0, 3, &instructions, Some(&meta),
-            );
-        assert!(ptr.is_ok(), "mixed typed/untyped should compile: {:?}", ptr.err());
+            &mut jit.module,
+            &mut jit.builder_context,
+            &mut jit.ctx,
+            "test_mixed",
+            0,
+            3,
+            &instructions,
+            Some(&meta),
+        );
+        assert!(
+            ptr.is_ok(),
+            "mixed typed/untyped should compile: {:?}",
+            ptr.err()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1555,29 +1936,36 @@ mod typed_tests {
         let mut jit = make_jit();
         // Simulate: for i in 0..5 { sum = sum + i }
         let instructions = vec![
-            Instruction::new1(OpCode::Const0, 0),       // R0 = 0 (sum)
-            Instruction::new1(OpCode::Const0, 1),       // R1 = 0 (i)
+            Instruction::new1(OpCode::Const0, 0), // R0 = 0 (sum)
+            Instruction::new1(OpCode::Const0, 1), // R1 = 0 (i)
             // loop:
-            Instruction::new3(OpCode::IAdd, 0, 1, 0),   // sum = sum + i
-            Instruction::new1(OpCode::IInc, 1),         // i++
+            Instruction::new3(OpCode::IAdd, 0, 1, 0), // sum = sum + i
+            Instruction::new1(OpCode::IInc, 1),       // i++
             Instruction::new3(OpCode::ICmpLt, 1, 2, 2), // R2 = (i < 5)
-            Instruction::new2(OpCode::JmpT, 2, 0xFC),   // if R2, jmp -4
+            Instruction::new2(OpCode::JmpT, 2, 0xFC), // if R2, jmp -4
             Instruction::new0(OpCode::Halt),
         ];
 
         let mut meta = TypeMetadata::new();
         meta.set_type(0, KnownType::Int); // sum
         meta.set_type(1, KnownType::Int); // i
-        // R2 holds the comparison result; we mark it as Bool after ICmpLt
+                                          // R2 holds the comparison result; we mark it as Bool after ICmpLt
 
         let ptr = compile_bytecode_region_typed(
-                &mut jit.module,
-                &mut jit.builder_context,
-                &mut jit.ctx,
-                "test_typed_loop",
-                0, 7, &instructions, Some(&meta),
-            );
-        assert!(ptr.is_ok(), "typed int loop should compile: {:?}", ptr.err());
+            &mut jit.module,
+            &mut jit.builder_context,
+            &mut jit.ctx,
+            "test_typed_loop",
+            0,
+            7,
+            &instructions,
+            Some(&meta),
+        );
+        assert!(
+            ptr.is_ok(),
+            "typed int loop should compile: {:?}",
+            ptr.err()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1602,19 +1990,26 @@ mod typed_tests {
         meta.set_type(1, KnownType::Int);
 
         let ptr = compile_bytecode_region_typed(
-                &mut jit.module,
-                &mut jit.builder_context,
-                &mut jit.ctx,
-                "test_sext48",
-                0, 2, &instructions, Some(&meta),
-            );
-        assert!(ptr.is_ok(), "sext48 extraction pipeline should compile: {:?}", ptr.err());
+            &mut jit.module,
+            &mut jit.builder_context,
+            &mut jit.ctx,
+            "test_sext48",
+            0,
+            2,
+            &instructions,
+            Some(&meta),
+        );
+        assert!(
+            ptr.is_ok(),
+            "sext48 extraction pipeline should compile: {:?}",
+            ptr.err()
+        );
 
         // Also test with negative operand (sign bit set)
         let mut jit2 = make_jit();
         let instructions2 = vec![
-            Instruction::new1(OpCode::ConstM1, 0),     // R0 = -1
-            Instruction::new3(OpCode::IAdd, 0, 1, 2),  // R2 = -1 + R1
+            Instruction::new1(OpCode::ConstM1, 0),    // R0 = -1
+            Instruction::new3(OpCode::IAdd, 0, 1, 2), // R2 = -1 + R1
             Instruction::new0(OpCode::Halt),
         ];
 
@@ -1623,13 +2018,20 @@ mod typed_tests {
         meta2.set_type(1, KnownType::Int);
 
         let ptr2 = compile_bytecode_region_typed(
-                &mut jit2.module,
-                &mut jit2.builder_context,
-                &mut jit2.ctx,
-                "test_sext48_negative",
-                0, 3, &instructions2, Some(&meta2),
-            );
-        assert!(ptr2.is_ok(), "sext48 with negative should compile: {:?}", ptr2.err());
+            &mut jit2.module,
+            &mut jit2.builder_context,
+            &mut jit2.ctx,
+            "test_sext48_negative",
+            0,
+            3,
+            &instructions2,
+            Some(&meta2),
+        );
+        assert!(
+            ptr2.is_ok(),
+            "sext48 with negative should compile: {:?}",
+            ptr2.err()
+        );
     }
 
     // ------------------------------------------------------------------

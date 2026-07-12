@@ -349,31 +349,51 @@ pub unsafe fn call_native(func: &NativeFunction, args: &[Value]) -> Result<Value
             CType::I64 => with_returns!(arity_1_arms!(func.ptr, args, ret, i64)),
             CType::F64 => with_returns!(arity_1_arms!(func.ptr, args, ret, f64)),
             CType::Bool => with_returns!(arity_1_arms!(func.ptr, args, ret, bool)),
-            CType::CStr => with_returns!(arity_1_arms!(func.ptr, args, ret, *const std::ffi::c_char)),
-            CType::VoidPtr => with_returns!(arity_1_arms!(func.ptr, args, ret, *mut std::ffi::c_void)),
+            CType::CStr => {
+                with_returns!(arity_1_arms!(func.ptr, args, ret, *const std::ffi::c_char))
+            }
+            CType::VoidPtr => {
+                with_returns!(arity_1_arms!(func.ptr, args, ret, *mut std::ffi::c_void))
+            }
             CType::Unit => with_returns!(arity_1_arms!(func.ptr, args, ret, ())),
         },
         [p0, p1] => match (p0, p1) {
             // I64
             (CType::I64, CType::I64) => with_returns!(arity_2_arms!(func.ptr, args, ret, i64, i64)),
             (CType::I64, CType::F64) => with_returns!(arity_2_arms!(func.ptr, args, ret, i64, f64)),
-            (CType::I64, CType::Bool) => with_returns!(arity_2_arms!(func.ptr, args, ret, i64, bool)),
+            (CType::I64, CType::Bool) => {
+                with_returns!(arity_2_arms!(func.ptr, args, ret, i64, bool))
+            }
             // F64
             (CType::F64, CType::I64) => with_returns!(arity_2_arms!(func.ptr, args, ret, f64, i64)),
             (CType::F64, CType::F64) => with_returns!(arity_2_arms!(func.ptr, args, ret, f64, f64)),
-            (CType::F64, CType::Bool) => with_returns!(arity_2_arms!(func.ptr, args, ret, f64, bool)),
+            (CType::F64, CType::Bool) => {
+                with_returns!(arity_2_arms!(func.ptr, args, ret, f64, bool))
+            }
             // Bool
-            (CType::Bool, CType::I64) => with_returns!(arity_2_arms!(func.ptr, args, ret, bool, i64)),
-            (CType::Bool, CType::F64) => with_returns!(arity_2_arms!(func.ptr, args, ret, bool, f64)),
-            (CType::Bool, CType::Bool) => with_returns!(arity_2_arms!(func.ptr, args, ret, bool, bool)),
+            (CType::Bool, CType::I64) => {
+                with_returns!(arity_2_arms!(func.ptr, args, ret, bool, i64))
+            }
+            (CType::Bool, CType::F64) => {
+                with_returns!(arity_2_arms!(func.ptr, args, ret, bool, f64))
+            }
+            (CType::Bool, CType::Bool) => {
+                with_returns!(arity_2_arms!(func.ptr, args, ret, bool, bool))
+            }
             _ => Err("unsupported arity-2 parameter types".to_string()),
         },
         [p0, p1, p2] => match (p0, p1, p2) {
-            (CType::I64, CType::I64, CType::I64) => with_returns!(arity_3_arms!(func.ptr, args, ret, i64, i64, i64)),
-            _ => Err("unsupported arity-3 parameter types (only I64,I64,I64 supported)".to_string()),
+            (CType::I64, CType::I64, CType::I64) => {
+                with_returns!(arity_3_arms!(func.ptr, args, ret, i64, i64, i64))
+            }
+            _ => {
+                Err("unsupported arity-3 parameter types (only I64,I64,I64 supported)".to_string())
+            }
         },
         [p0, p1, p2, p3] => match (p0, p1, p2, p3) {
-            (CType::I64, CType::I64, CType::I64, CType::I64) => with_returns!(arity_4_arms!(func.ptr, args, ret, i64, i64, i64, i64)),
+            (CType::I64, CType::I64, CType::I64, CType::I64) => {
+                with_returns!(arity_4_arms!(func.ptr, args, ret, i64, i64, i64, i64))
+            }
             _ => Err("unsupported arity-4 parameter types (only I64x4 supported)".to_string()),
         },
         _ => Err(format!(
@@ -385,8 +405,8 @@ pub unsafe fn call_native(func: &NativeFunction, args: &[Value]) -> Result<Value
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::native::NativeLibrary;
+    use super::*;
     use std::ffi::CString;
 
     extern "C" fn add_two(a: i64, b: i64) -> i64 {
@@ -468,7 +488,10 @@ mod tests {
         let round = unsafe { cstr_to_value(borrowed) };
         let round_ptr = round.as_ptr().unwrap() as *const c_char;
         // SAFETY: round pointer is a valid C string.
-        assert_eq!(unsafe { CStr::from_ptr(round_ptr).to_str().unwrap() }, "hello ffi");
+        assert_eq!(
+            unsafe { CStr::from_ptr(round_ptr).to_str().unwrap() },
+            "hello ffi"
+        );
     }
 
     #[test]
@@ -543,10 +566,8 @@ mod tests {
             Signature::new(vec![CType::I64, CType::I64, CType::I64], CType::I64),
         );
         // SAFETY: pointer matches signature.
-        let result = unsafe {
-            call_native(&func, &[Value::int(1), Value::int(2), Value::int(3)])
-                .unwrap()
-        };
+        let result =
+            unsafe { call_native(&func, &[Value::int(1), Value::int(2), Value::int(3)]).unwrap() };
         assert_eq!(result.as_int(), Some(6));
     }
 
@@ -572,9 +593,8 @@ mod tests {
         }
         let lib = lib.unwrap();
         // SAFETY: sqrt has the expected signature.
-        let sqrt: libloading::Symbol<extern "C" fn(f64) -> f64> = unsafe {
-            lib.resolve(b"sqrt\0").unwrap()
-        };
+        let sqrt: libloading::Symbol<extern "C" fn(f64) -> f64> =
+            unsafe { lib.resolve(b"sqrt\0").unwrap() };
         assert!((sqrt(4.0) - 2.0).abs() < 1e-12);
     }
 }

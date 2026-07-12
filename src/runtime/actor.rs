@@ -1,10 +1,9 @@
 //! Actor definition and lifecycle.
 
-use super::*;
 use super::gc::OrcaGc;
+use super::*;
 use crate::vm::Value;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 
 /// Actor state machine: Created → Running → Waiting → Suspended → Terminated
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,12 +22,12 @@ pub struct Actor {
     pub state: ActorState,
     pub mailbox: Mailbox,
     pub heap: ActorHeap,
-    pub orca_gc: OrcaGc,                // ORCA GC engine for this actor
+    pub orca_gc: OrcaGc,                  // ORCA GC engine for this actor
     pub state_data: Vec<(String, Value)>, // Named actor state fields
     pub state_models: HashMap<String, StateModel>, // Persistence model per field
     pub event_log: Vec<(String, Vec<Value>)>, // Emitted events for event_sourced actors
-    pub persistent: bool,              // Whether this actor survives restarts
-    pub is_workflow: bool,             // True if generated from a workflow declaration
+    pub persistent: bool,                 // Whether this actor survives restarts
+    pub is_workflow: bool,                // True if generated from a workflow declaration
     pub behavior_table: Vec<BehaviorEntry>,
     /// Bytecode behavior offsets by behavior_id. Empty entries mean no bytecode
     /// handler for that behavior (native handler or missing).
@@ -42,15 +41,15 @@ pub struct Actor {
     pub bytecode_module: Option<crate::bytecode::CodeModule>,
     /// Index of the loaded bytecode module in the runtime VM.
     pub bytecode_module_idx: Option<usize>,
-    pub parent: Option<u64>,       // Supervisor
-    pub children: Vec<u64>,        // Supervised actors
-    pub monitors: Vec<u64>,        // Actors monitoring this one
-    pub links: Vec<u64>,           // Bidirectional links
-    pub trap_exits: bool,          // If true, exit signals become messages instead of killing this actor
-    pub reduction_count: u32,      // Lifetime messages handled (monotonic progress metric)
-    turn_reductions: u32,          // Messages handled in the current scheduling turn
-    pub max_reductions: u32,       // Max reductions per turn before yield (preemption)
-    pub sequence: u64,             // Last persisted sequence number
+    pub parent: Option<u64>,  // Supervisor
+    pub children: Vec<u64>,   // Supervised actors
+    pub monitors: Vec<u64>,   // Actors monitoring this one
+    pub links: Vec<u64>,      // Bidirectional links
+    pub trap_exits: bool,     // If true, exit signals become messages instead of killing this actor
+    pub reduction_count: u32, // Lifetime messages handled (monotonic progress metric)
+    turn_reductions: u32,     // Messages handled in the current scheduling turn
+    pub max_reductions: u32,  // Max reductions per turn before yield (preemption)
+    pub sequence: u64,        // Last persisted sequence number
     /// Sentinel heap object used by the cycle detector to represent this
     /// actor as a holder of foreign references.
     cycle_sentinel: Option<*mut OrcaHeader>,
@@ -99,7 +98,7 @@ impl Actor {
                 heap.set_actor_id(id);
                 heap
             },
-            orca_gc: OrcaGc::new(id),         // ORCA GC engine
+            orca_gc: OrcaGc::new(id), // ORCA GC engine
             state_data: Vec::new(),
             state_models: HashMap::new(),
             event_log: Vec::new(),
@@ -141,7 +140,9 @@ impl Actor {
             if let Some(ptr) = self.heap.alloc(8, TypeTag::Raw) {
                 let header = unsafe { ActorHeap::header_of(ptr) };
                 unsafe {
-                    (*header).sticky.store(true, Ordering::Relaxed);
+                    // SAFETY: fresh allocation on this actor's heap; the
+                    // single scheduler thread is the only mutator.
+                    (*header).sticky = true;
                 }
                 self.cycle_sentinel = Some(header);
             }
@@ -171,7 +172,10 @@ impl Actor {
 
     /// Get a named state field.
     pub fn get_state_field(&self, name: &str) -> Option<Value> {
-        self.state_data.iter().find(|(n, _)| n == name).map(|(_, v)| *v)
+        self.state_data
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| *v)
     }
 
     /// Check if the actor has exceeded its per-turn reduction quota and should yield.

@@ -127,7 +127,11 @@ impl Debate {
                     &arguments,
                 );
                 let response = runtime.ask_agent(participant.agent_id, &prompt)?;
-                arguments.push((participant.name.clone(), participant.stance.clone(), response));
+                arguments.push((
+                    participant.name.clone(),
+                    participant.stance.clone(),
+                    response,
+                ));
             }
         }
 
@@ -150,7 +154,10 @@ fn build_participant_prompt(
     arguments: &[(String, Stance, String)],
 ) -> String {
     let stance_text = match participant.stance {
-        Stance::Pro => format!("You are {} and you ARGUE IN FAVOR of the topic.", participant.name),
+        Stance::Pro => format!(
+            "You are {} and you ARGUE IN FAVOR of the topic.",
+            participant.name
+        ),
         Stance::Con => format!(
             "You are {} and you ARGUE AGAINST the topic.",
             participant.name
@@ -168,12 +175,7 @@ fn build_participant_prompt(
     } else {
         prompt.push_str("Previous arguments:\n");
         for (name, stance, argument) in arguments {
-            prompt.push_str(&format!(
-                "- {} ({}): {}\n",
-                name,
-                stance.as_str(),
-                argument
-            ));
+            prompt.push_str(&format!("- {} ({}): {}\n", name, stance.as_str(), argument));
         }
         prompt.push_str("\nRespond to the topic and the arguments above.");
     }
@@ -191,12 +193,7 @@ fn build_moderator_prompt(
         topic
     );
     for (name, stance, argument) in arguments {
-        prompt.push_str(&format!(
-            "- {} ({}): {}\n",
-            name,
-            stance.as_str(),
-            argument
-        ));
+        prompt.push_str(&format!("- {} ({}): {}\n", name, stance.as_str(), argument));
     }
     prompt.push_str(&format!(
         "\nSynthesize a final conclusion. Consensus threshold: {}. \
@@ -232,9 +229,7 @@ mod tests {
 
     impl DebateRuntime for MockRuntime {
         fn ask_agent(&mut self, agent_id: u64, prompt: &str) -> Result<String, String> {
-            self.calls
-                .borrow_mut()
-                .push((agent_id, prompt.to_string()));
+            self.calls.borrow_mut().push((agent_id, prompt.to_string()));
             self.responses
                 .get(&agent_id)
                 .cloned()

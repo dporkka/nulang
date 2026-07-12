@@ -40,7 +40,13 @@ fn collect_tool_schemas(decls: &[Decl]) -> Vec<ToolSchema> {
 fn collect_tool_schemas_into(decls: &[Decl], tools: &mut Vec<ToolSchema>) {
     for decl in decls {
         match decl {
-            Decl::Function { name, params, ret_type, annotations, .. } if name != "__main" => {
+            Decl::Function {
+                name,
+                params,
+                ret_type,
+                annotations,
+                ..
+            } if name != "__main" => {
                 if let Some(FunctionAnnotation::Tool { description }) = annotations
                     .iter()
                     .find(|a| matches!(a, FunctionAnnotation::Tool { .. }))
@@ -57,11 +63,18 @@ fn collect_tool_schemas_into(decls: &[Decl], tools: &mut Vec<ToolSchema>) {
                     }
                     if all_typed {
                         let ret = ret_type.clone().unwrap_or_else(Type::unit);
-                        tools.push(function_to_tool_schema(name, description, &typed_params, &ret));
+                        tools.push(function_to_tool_schema(
+                            name,
+                            description,
+                            &typed_params,
+                            &ret,
+                        ));
                     }
                 }
             }
-            Decl::Module { decls: subdecls, .. } => collect_tool_schemas_into(subdecls, tools),
+            Decl::Module {
+                decls: subdecls, ..
+            } => collect_tool_schemas_into(subdecls, tools),
             _ => {}
         }
     }
@@ -174,7 +187,11 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             ops: ops.clone(),
             span: *span,
         },
-        Decl::Extern { library, funcs, span } => hir::Decl::ExternBlock {
+        Decl::Extern {
+            library,
+            funcs,
+            span,
+        } => hir::Decl::ExternBlock {
             library: library.clone(),
             funcs: funcs
                 .iter()
@@ -207,7 +224,9 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             items: items.clone(),
             span: *span,
         },
-        Decl::Workflow { name, items, span, .. } => desugar_workflow(name, items, *span),
+        Decl::Workflow {
+            name, items, span, ..
+        } => desugar_workflow(name, items, *span),
         Decl::Agent {
             name,
             model,
@@ -297,11 +316,19 @@ fn desugar_agent(
     for tool_name in tool_names {
         match available_tools.iter().find(|t| &t.name == tool_name) {
             Some(schema) => resolved_tools.push(schema.clone()),
-            None => return hir::Decl::Agent { name: name.to_string(), span },
+            None => {
+                return hir::Decl::Agent {
+                    name: name.to_string(),
+                    span,
+                }
+            }
         }
     }
 
-    let agent_pricing = pricing.unwrap_or(ast::AgentPricing { input: 0.0, output: 0.0 });
+    let agent_pricing = pricing.unwrap_or(ast::AgentPricing {
+        input: 0.0,
+        output: 0.0,
+    });
     let max_turns = memory.as_ref().map(|m| m.max_turns).unwrap_or(50);
     let initial_memory = serde_json::to_string(&crate::ai::memory::EpisodicMemory::new(max_turns))
         .unwrap_or_else(|_| "{}".to_string());
@@ -334,7 +361,10 @@ fn desugar_agent(
             "system_prompt".to_string(),
             ast::StateModel::Durable,
             str_ty.clone(),
-            lit_op(Literal::String(system_prompt.clone().unwrap_or_default()), str_ty.clone()),
+            lit_op(
+                Literal::String(system_prompt.clone().unwrap_or_default()),
+                str_ty.clone(),
+            ),
         ),
         (
             "episodic_memory".to_string(),
@@ -455,7 +485,10 @@ fn desugar_agent(
         span,
     };
 
-    let mut behaviors = vec![lower_behavior(&ask_behavior), lower_behavior(&usage_behavior)];
+    let mut behaviors = vec![
+        lower_behavior(&ask_behavior),
+        lower_behavior(&usage_behavior),
+    ];
 
     if semantic_memory_dimensions.is_some() {
         behaviors.push(lower_behavior(&placeholder_behavior(
@@ -472,7 +505,11 @@ fn desugar_agent(
     if procedural_memory_namespace.is_some() {
         behaviors.push(lower_behavior(&placeholder_behavior(
             "store_pattern",
-            vec![("key", str_ty.clone()), ("input_pattern", str_ty.clone()), ("output_template", str_ty.clone())],
+            vec![
+                ("key", str_ty.clone()),
+                ("input_pattern", str_ty.clone()),
+                ("output_template", str_ty.clone()),
+            ],
             span,
         )));
         behaviors.push(lower_behavior(&placeholder_behavior(
@@ -482,12 +519,20 @@ fn desugar_agent(
         )));
         behaviors.push(lower_behavior(&placeholder_behavior(
             "add_example",
-            vec![("task", str_ty.clone()), ("input", str_ty.clone()), ("output", str_ty.clone())],
+            vec![
+                ("task", str_ty.clone()),
+                ("input", str_ty.clone()),
+                ("output", str_ty.clone()),
+            ],
             span,
         )));
         behaviors.push(lower_behavior(&placeholder_behavior(
             "get_examples",
-            vec![("task", str_ty.clone()), ("query", str_ty.clone()), ("top_k", int_ty.clone())],
+            vec![
+                ("task", str_ty.clone()),
+                ("query", str_ty.clone()),
+                ("top_k", int_ty.clone()),
+            ],
             span,
         )));
     }
@@ -587,13 +632,19 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
                     if comp_exprs.is_empty() {
                         None
                     } else {
-                        Some(Expr::Block { exprs: comp_exprs, span })
+                        Some(Expr::Block {
+                            exprs: comp_exprs,
+                            span,
+                        })
                     }
                 };
 
                 flattened_steps.push(ast::WorkflowStep {
                     name: parallel_name.clone(),
-                    body: Expr::Block { exprs: body_exprs, span },
+                    body: Expr::Block {
+                        exprs: body_exprs,
+                        span,
+                    },
                     compensate: combined_compensate,
                     span,
                 });
@@ -686,7 +737,12 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         Expr::SelfRef(_) => hir::Operand::Var("self".to_string(), Type::unit()),
         Expr::TypeAnnotate { expr, .. } => lower_expr(expr, body),
         Expr::CapAnnotate { expr, .. } => lower_expr(expr, body),
-        Expr::Lambda { params, body: lb, effect: _, span } => {
+        Expr::Lambda {
+            params,
+            body: lb,
+            effect: _,
+            span,
+        } => {
             let lambda_body = lower_body(lb);
             let ty = Type::unit();
             let captures = lambda_captures(params, lb);
@@ -753,12 +809,22 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
-        Expr::Let { name, value, body: b, span } => {
+        Expr::Let {
+            name,
+            value,
+            body: b,
+            span,
+        } => {
             // Let-bound lambdas may reference themselves (`let fac = fn(n) ...
             // fac(n-1)`); lower them like `let rec` so the self-reference
             // resolves. Non-self-referencing lambdas stay ordinary closures so
             // they can capture the enclosing scope.
-            if let Expr::Lambda { params, body: lam_body, .. } = value.as_ref() {
+            if let Expr::Lambda {
+                params,
+                body: lam_body,
+                ..
+            } = value.as_ref()
+            {
                 if lambda_references(name, params, lam_body) {
                     let func_body = lower_body(lam_body);
                     body.push(hir::Stmt::Let {
@@ -788,7 +854,13 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             lower_expr(b, body)
         }
-        Expr::LetRec { name, params, value, body: b, span } => {
+        Expr::LetRec {
+            name,
+            params,
+            value,
+            body: b,
+            span,
+        } => {
             let func_body = lower_body(value);
             body.push(hir::Stmt::Let {
                 name: name.clone(),
@@ -806,7 +878,12 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             lower_expr(b, body)
         }
-        Expr::If { cond, then_branch, else_branch, span } => {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            span,
+        } => {
             let cond_op = lower_expr(cond, body);
             let ty = Type::unit();
             let temp = fresh_temp_name();
@@ -825,7 +902,11 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
-        Expr::Match { scrutinee, arms, span } => {
+        Expr::Match {
+            scrutinee,
+            arms,
+            span,
+        } => {
             let scrut_op = lower_expr(scrutinee, body);
             let ty = Type::unit();
             let temp = fresh_temp_name();
@@ -932,10 +1013,18 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         // prefix) — everywhere else, `=` is picked up by the Pratt parser's
         // infix loop as an ordinary-looking BinOp::Assign. Route it through
         // the same assignment lowering as Expr::Assign below.
-        Expr::Binary { op: BinOp::Assign, left, right, span } => {
-            lower_assign_to(left, right, *span, body)
-        }
-        Expr::Binary { op, left, right, span } => {
+        Expr::Binary {
+            op: BinOp::Assign,
+            left,
+            right,
+            span,
+        } => lower_assign_to(left, right, *span, body),
+        Expr::Binary {
+            op,
+            left,
+            right,
+            span,
+        } => {
             let l = lower_expr(left, body);
             let r = lower_expr(right, body);
             let ty = binary_type(op);
@@ -960,8 +1049,16 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
-        Expr::Assign { target, value, span } => lower_assign_to(target, value, *span, body),
-        Expr::Spawn { actor_type, init, span } => {
+        Expr::Assign {
+            target,
+            value,
+            span,
+        } => lower_assign_to(target, value, *span, body),
+        Expr::Spawn {
+            actor_type,
+            init,
+            span,
+        } => {
             let name = actor_name_from_expr(actor_type).unwrap_or_default();
             let init_ops: Vec<_> = init
                 .iter()
@@ -981,7 +1078,12 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
-        Expr::Send { actor, behavior, args, span } => {
+        Expr::Send {
+            actor,
+            behavior,
+            args,
+            span,
+        } => {
             let aop = lower_expr(actor, body);
             let aops: Vec<_> = args.iter().map(|a| lower_expr(a, body)).collect();
             let ty = Type::unit();
@@ -999,7 +1101,12 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
-        Expr::Ask { actor, behavior, args, span } => {
+        Expr::Ask {
+            actor,
+            behavior,
+            args,
+            span,
+        } => {
             let aop = lower_expr(actor, body);
             let aops: Vec<_> = args.iter().map(|a| lower_expr(a, body)).collect();
             let ty = Type::unit();
@@ -1017,7 +1124,12 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
-        Expr::Perform { effect, op, args, span } => {
+        Expr::Perform {
+            effect,
+            op,
+            args,
+            span,
+        } => {
             let aops: Vec<_> = args.iter().map(|a| lower_expr(a, body)).collect();
             let ty = Type::unit();
             let temp = fresh_temp_name();
@@ -1034,18 +1146,18 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
-        Expr::Handle { body: hb, handlers, span } => {
+        Expr::Handle {
+            body: hb,
+            handlers,
+            span,
+        } => {
             let hbody = lower_body(hb);
             let hs: Vec<_> = handlers
                 .iter()
                 .map(|h| hir::EffectHandler {
                     effect_name: h.effect_name.clone(),
                     op_name: h.op_name.clone(),
-                    params: h
-                        .params
-                        .iter()
-                        .map(|p| (p.clone(), Type::unit()))
-                        .collect(),
+                    params: h.params.iter().map(|p| (p.clone(), Type::unit())).collect(),
                     resume: h.resume,
                     body: Box::new(lower_body(&h.body)),
                     span: *span,
@@ -1068,13 +1180,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         Expr::Receive { arms, span } => {
             let arms_hir: Vec<_> = arms
                 .iter()
-                .map(|(name, params, e)| {
-                    (
-                        name.clone(),
-                        params.clone(),
-                        Box::new(lower_body(e)),
-                    )
-                })
+                .map(|(name, params, e)| (name.clone(), params.clone(), Box::new(lower_body(e))))
                 .collect();
             let ty = Type::unit();
             let temp = fresh_temp_name();
@@ -1115,7 +1221,12 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Unit
         }
-        Expr::For { var, iterable, body: b, span } => {
+        Expr::For {
+            var,
+            iterable,
+            body: b,
+            span,
+        } => {
             let iop = lower_expr(iterable, body);
             let loop_body = lower_body(b);
             let temp = fresh_temp_name();
@@ -1135,7 +1246,11 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             // Lower `x |> f(a, b)` to `f(x, a, b)`, matching the stable
             // compiler's pipe semantics.
             let app = match right.as_ref() {
-                Expr::App { func, args, span: app_span } => {
+                Expr::App {
+                    func,
+                    args,
+                    span: app_span,
+                } => {
                     let mut new_args = vec![left.as_ref().clone()];
                     new_args.extend(args.iter().cloned());
                     Expr::App {
@@ -1191,7 +1306,11 @@ fn lower_place(expr: &Expr, body: &mut hir::Body) -> hir::Place {
         // temp-materializing case below and lose the "this is self" marker
         // that lower_assign's place_is_self check depends on.
         Expr::SelfRef(_) => hir::Place::Var("self".to_string(), Type::unit()),
-        Expr::FieldAccess { expr, field, span: _ } => {
+        Expr::FieldAccess {
+            expr,
+            field,
+            span: _,
+        } => {
             let base = lower_place(expr, body);
             hir::Place::Field {
                 base: Box::new(base),
@@ -1225,8 +1344,7 @@ fn lower_place(expr: &Expr, body: &mut hir::Body) -> hir::Place {
 /// Free variables of a lambda (candidates for capture). The MIR lowering
 /// filters this against what is actually in scope.
 fn lambda_captures(params: &[(String, Option<Type>)], body: &Expr) -> Vec<String> {
-    let bound: std::collections::HashSet<String> =
-        params.iter().map(|(n, _)| n.clone()).collect();
+    let bound: std::collections::HashSet<String> = params.iter().map(|(n, _)| n.clone()).collect();
     let mut free = std::collections::HashSet::new();
     free_vars(body, &bound, &mut free);
     let mut captures: Vec<String> = free.into_iter().collect();
@@ -1259,9 +1377,14 @@ fn binary_type(op: &ast::BinOp) -> Type {
     use crate::ast::BinOp;
     use crate::types::PrimitiveType;
     match op {
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::And | BinOp::Or => {
-            Type::Primitive(PrimitiveType::Bool)
-        }
+        BinOp::Eq
+        | BinOp::Ne
+        | BinOp::Lt
+        | BinOp::Le
+        | BinOp::Gt
+        | BinOp::Ge
+        | BinOp::And
+        | BinOp::Or => Type::Primitive(PrimitiveType::Bool),
         _ => Type::Primitive(PrimitiveType::Int),
     }
 }
@@ -1270,12 +1393,10 @@ fn binary_type(op: &ast::BinOp) -> Type {
 fn is_ai_builtin_call(func: &Expr) -> Option<(&str, &str)> {
     match func {
         Expr::FieldAccess { expr, field, .. } => match expr.as_ref() {
-            Expr::Var(name, _) => {
-                match name.as_str() {
-                    "Pipeline" | "Supervisor" | "Debate" => Some((name.as_str(), field.as_str())),
-                    _ => None,
-                }
-            }
+            Expr::Var(name, _) => match name.as_str() {
+                "Pipeline" | "Supervisor" | "Debate" => Some((name.as_str(), field.as_str())),
+                _ => None,
+            },
             _ => None,
         },
         _ => None,
@@ -1303,27 +1424,44 @@ fn lower_ai_builtin(
     match (base_name, field) {
         ("Pipeline", "new") => hir::RValue::PipelineNew { ty },
         ("Pipeline", "stage") => hir::RValue::PipelineStage {
-            id: a(0), name: a(1), actor: a(2), template: a(3), ty,
+            id: a(0),
+            name: a(1),
+            actor: a(2),
+            template: a(3),
+            ty,
         },
         ("Pipeline", "run") => hir::RValue::PipelineRun {
-            id: a(0), input: a(1), ty,
+            id: a(0),
+            input: a(1),
+            ty,
         },
         ("Supervisor", "new") => hir::RValue::SupervisorNew { ty },
         ("Supervisor", "worker") => hir::RValue::SupervisorWorker {
-            id: a(0), name: a(1), actor: a(2), description: a(3), ty,
+            id: a(0),
+            name: a(1),
+            actor: a(2),
+            description: a(3),
+            ty,
         },
         ("Supervisor", "run") => hir::RValue::SupervisorRun {
-            id: a(0), task: a(1), ty,
+            id: a(0),
+            task: a(1),
+            ty,
         },
         ("Debate", "new") => hir::RValue::DebateNew {
-            topic: a(0), rounds: a(1), threshold: a(2), ty,
+            topic: a(0),
+            rounds: a(1),
+            threshold: a(2),
+            ty,
         },
         ("Debate", "participant") => hir::RValue::DebateParticipant {
-            id: a(0), name: a(1), stance: a(2), actor: a(3), ty,
+            id: a(0),
+            name: a(1),
+            stance: a(2),
+            actor: a(3),
+            ty,
         },
-        ("Debate", "run") => hir::RValue::DebateRun {
-            id: a(0), ty,
-        },
+        ("Debate", "run") => hir::RValue::DebateRun { id: a(0), ty },
         _ => unreachable!("is_ai_builtin_call should filter before lower_ai_builtin"),
     }
 }
@@ -1367,7 +1505,11 @@ fn try_lower_run_call(
     } else if lowered.contains("supervisor") || lowered.contains("team") {
         Some(hir::RValue::SupervisorRun { id, task: a(0), ty })
     } else {
-        Some(hir::RValue::PipelineRun { id, input: a(0), ty })
+        Some(hir::RValue::PipelineRun {
+            id,
+            input: a(0),
+            ty,
+        })
     }
 }
 
@@ -1429,10 +1571,13 @@ mod tests {
         // The if lowers to a Let stmt with an RValue::If, then x's Let, and
         // the body yields x.
         assert!(matches!(body.terminator, hir::Terminator::Yield(_)));
-        assert!(body
-            .stmts
-            .iter()
-            .any(|s| matches!(s, hir::Stmt::Let { value: hir::RValue::If { .. }, .. })));
+        assert!(body.stmts.iter().any(|s| matches!(
+            s,
+            hir::Stmt::Let {
+                value: hir::RValue::If { .. },
+                ..
+            }
+        )));
     }
 
     /// Regression test: `self.field = value` must lower to an Assign whose
@@ -1484,12 +1629,18 @@ fn pattern_bindings(pat: &crate::ast::Pattern, out: &mut std::collections::HashS
     use crate::ast::Pattern;
     match pat {
         Pattern::Wild | Pattern::Lit(_) => {}
-        Pattern::Var(name) | Pattern::Alias(name, _) => { out.insert(name.clone()); }
+        Pattern::Var(name) | Pattern::Alias(name, _) => {
+            out.insert(name.clone());
+        }
         Pattern::Tuple(pats) => {
-            for p in pats { pattern_bindings(p, out); }
+            for p in pats {
+                pattern_bindings(p, out);
+            }
         }
         Pattern::Record(fields) => {
-            for (_, p) in fields { pattern_bindings(p, out); }
+            for (_, p) in fields {
+                pattern_bindings(p, out);
+            }
         }
         Pattern::Variant(_, Some(inner)) => pattern_bindings(inner, out),
         Pattern::Variant(_, None) => {}
@@ -1498,42 +1649,71 @@ fn pattern_bindings(pat: &crate::ast::Pattern, out: &mut std::collections::HashS
 
 /// Collect free variables of an expression (variables used but not bound
 /// within the expression). Shared between compiler and HIR lowering.
-fn free_vars(expr: &crate::ast::Expr, bound: &std::collections::HashSet<String>, acc: &mut std::collections::HashSet<String>) {
+fn free_vars(
+    expr: &crate::ast::Expr,
+    bound: &std::collections::HashSet<String>,
+    acc: &mut std::collections::HashSet<String>,
+) {
     use crate::ast::Expr;
     match expr {
         Expr::Var(name, _) => {
-            if !bound.contains(name) { acc.insert(name.clone()); }
+            if !bound.contains(name) {
+                acc.insert(name.clone());
+            }
         }
         Expr::Lambda { params, body, .. } => {
             let mut new_bound = bound.clone();
-            for (p, _) in params { new_bound.insert(p.clone()); }
+            for (p, _) in params {
+                new_bound.insert(p.clone());
+            }
             free_vars(body, &new_bound, acc);
         }
         Expr::App { func, args, .. } => {
             free_vars(func, bound, acc);
-            for a in args { free_vars(a, bound, acc); }
+            for a in args {
+                free_vars(a, bound, acc);
+            }
         }
-        Expr::Let { name, value, body, .. } => {
+        Expr::Let {
+            name, value, body, ..
+        } => {
             free_vars(value, bound, acc);
             let mut new_bound = bound.clone();
             new_bound.insert(name.clone());
             free_vars(body, &new_bound, acc);
         }
-        Expr::LetRec { name, params, value, body, .. } => {
+        Expr::LetRec {
+            name,
+            params,
+            value,
+            body,
+            ..
+        } => {
             let mut value_bound = bound.clone();
             value_bound.insert(name.clone());
-            for (p, _) in params { value_bound.insert(p.clone()); }
+            for (p, _) in params {
+                value_bound.insert(p.clone());
+            }
             free_vars(value, &value_bound, acc);
             let mut body_bound = bound.clone();
             body_bound.insert(name.clone());
             free_vars(body, &body_bound, acc);
         }
-        Expr::If { cond, then_branch, else_branch, .. } => {
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             free_vars(cond, bound, acc);
             free_vars(then_branch, bound, acc);
-            if let Some(e) = else_branch { free_vars(e, bound, acc); }
+            if let Some(e) = else_branch {
+                free_vars(e, bound, acc);
+            }
         }
-        Expr::Match { scrutinee, arms, .. } => {
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
             free_vars(scrutinee, bound, acc);
             for (pat, arm_expr) in arms {
                 let mut arm_bound = bound.clone();
@@ -1542,10 +1722,14 @@ fn free_vars(expr: &crate::ast::Expr, bound: &std::collections::HashSet<String>,
             }
         }
         Expr::Block { exprs, .. } | Expr::Tuple(exprs, _) | Expr::Array(exprs, _) => {
-            for e in exprs { free_vars(e, bound, acc); }
+            for e in exprs {
+                free_vars(e, bound, acc);
+            }
         }
         Expr::Record(fields, _) => {
-            for (_, e) in fields { free_vars(e, bound, acc); }
+            for (_, e) in fields {
+                free_vars(e, bound, acc);
+            }
         }
         Expr::FieldAccess { expr, .. } => free_vars(expr, bound, acc),
         Expr::Index { arr, idx, .. } => {
@@ -1565,16 +1749,25 @@ fn free_vars(expr: &crate::ast::Expr, bound: &std::collections::HashSet<String>,
             free_vars(target, bound, acc);
             free_vars(value, bound, acc);
         }
-        Expr::For { var, iterable, body, .. } => {
+        Expr::For {
+            var,
+            iterable,
+            body,
+            ..
+        } => {
             free_vars(iterable, bound, acc);
             let mut new_bound = bound.clone();
             new_bound.insert(var.clone());
             free_vars(body, &new_bound, acc);
         }
         Expr::Return(e, _) => {
-            if let Some(e) = e { free_vars(e, bound, acc); }
+            if let Some(e) = e {
+                free_vars(e, bound, acc);
+            }
         }
-        Expr::TypeAnnotate { expr, .. } | Expr::CapAnnotate { expr, .. } => free_vars(expr, bound, acc),
+        Expr::TypeAnnotate { expr, .. } | Expr::CapAnnotate { expr, .. } => {
+            free_vars(expr, bound, acc)
+        }
         _ => {}
     }
 }

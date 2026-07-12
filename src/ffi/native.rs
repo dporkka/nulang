@@ -39,9 +39,13 @@ impl NativeLibrary {
     /// # Safety
     /// The caller must ensure the symbol actually has the requested type.
     pub unsafe fn resolve<T>(&self, symbol: &[u8]) -> Result<libloading::Symbol<'_, T>, String> {
-        self.inner
-            .get(symbol)
-            .map_err(|e| format!("failed to resolve {}: {}", String::from_utf8_lossy(symbol), e))
+        self.inner.get(symbol).map_err(|e| {
+            format!(
+                "failed to resolve {}: {}",
+                String::from_utf8_lossy(symbol),
+                e
+            )
+        })
     }
 }
 
@@ -164,12 +168,7 @@ impl FfiRegistry {
         // SAFETY: caller guarantees the symbol exists and has the requested type.
         let sym = unsafe { lib.resolve::<unsafe extern "C" fn()>(symbol.as_bytes())? };
         let ptr: *const c_void = *sym as *const c_void;
-        let func = NativeFunction::new(
-            ptr,
-            signature,
-            Some(library.to_string()),
-            symbol_name,
-        );
+        let func = NativeFunction::new(ptr, signature, Some(library.to_string()), symbol_name);
         self.register(func.clone());
         Ok(func)
     }
@@ -216,7 +215,14 @@ mod tests {
         let mut registry = FfiRegistry::new();
         let dummy_ptr = std::ptr::null::<c_void>();
         // SAFETY: null pointer is never called.
-        let func = unsafe { NativeFunction::new(dummy_ptr, Signature::new(vec![], CType::Unit), None, "test_fn".to_string()) };
+        let func = unsafe {
+            NativeFunction::new(
+                dummy_ptr,
+                Signature::new(vec![], CType::Unit),
+                None,
+                "test_fn".to_string(),
+            )
+        };
         registry.register(func);
         let found = registry.resolve(None, "test_fn");
         assert!(found.is_some());
@@ -228,12 +234,30 @@ mod tests {
         let mut registry = FfiRegistry::new();
         let dummy_ptr = std::ptr::null::<c_void>();
         // SAFETY: null pointers are never called.
-        let func1 = unsafe { NativeFunction::new(dummy_ptr, Signature::new(vec![], CType::Unit), None, "fn_a".to_string()) };
-        let func2 = unsafe { NativeFunction::new(dummy_ptr, Signature::new(vec![], CType::Unit), None, "fn_b".to_string()) };
+        let func1 = unsafe {
+            NativeFunction::new(
+                dummy_ptr,
+                Signature::new(vec![], CType::Unit),
+                None,
+                "fn_a".to_string(),
+            )
+        };
+        let func2 = unsafe {
+            NativeFunction::new(
+                dummy_ptr,
+                Signature::new(vec![], CType::Unit),
+                None,
+                "fn_b".to_string(),
+            )
+        };
         registry.register(func1);
         registry.register(func2);
         assert_eq!(registry.functions.len(), 2);
-        let names: Vec<&str> = registry.functions.values().map(|f| f.symbol.as_str()).collect();
+        let names: Vec<&str> = registry
+            .functions
+            .values()
+            .map(|f| f.symbol.as_str())
+            .collect();
         assert!(names.contains(&"fn_a"));
         assert!(names.contains(&"fn_b"));
     }
@@ -243,8 +267,22 @@ mod tests {
         let mut registry = FfiRegistry::new();
         let dummy_ptr = std::ptr::null::<c_void>();
         // SAFETY: null pointers are never called.
-        let func1 = unsafe { NativeFunction::new(dummy_ptr, Signature::new(vec![], CType::Unit), None, "dup".to_string()) };
-        let func2 = unsafe { NativeFunction::new(dummy_ptr, Signature::new(vec![], CType::Unit), None, "dup".to_string()) };
+        let func1 = unsafe {
+            NativeFunction::new(
+                dummy_ptr,
+                Signature::new(vec![], CType::Unit),
+                None,
+                "dup".to_string(),
+            )
+        };
+        let func2 = unsafe {
+            NativeFunction::new(
+                dummy_ptr,
+                Signature::new(vec![], CType::Unit),
+                None,
+                "dup".to_string(),
+            )
+        };
         registry.register(func1);
         // Second registration with the same name does not panic (HashMap overwrite).
         registry.register(func2);

@@ -112,17 +112,36 @@ pub struct Block {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    Assign { dst: LocalId, op: RValue },
+    Assign {
+        dst: LocalId,
+        op: RValue,
+    },
     /// Store to a named record field (module-wide field id resolved by codegen).
-    StoreFieldNamed { obj: LocalId, field: String, src: LocalId },
-    ArrayStore { arr: LocalId, idx: LocalId, src: LocalId },
+    StoreFieldNamed {
+        obj: LocalId,
+        field: String,
+        src: LocalId,
+    },
+    ArrayStore {
+        arr: LocalId,
+        idx: LocalId,
+        src: LocalId,
+    },
     /// Install handler table `table` (index into `Function::handler_tables`).
-    EnterHandle { table: usize },
+    EnterHandle {
+        table: usize,
+    },
     /// Pop the innermost handler frame (bytecode `Unwind`).
     PopHandler,
-    Emit { event: String, args: Vec<LocalId> },
+    Emit {
+        event: String,
+        args: Vec<LocalId>,
+    },
     /// `self.field = src` inside a behavior body (bytecode `StateSet`).
-    StateSet { field: String, src: LocalId },
+    StateSet {
+        field: String,
+        src: LocalId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -130,8 +149,14 @@ pub enum RValue {
     Const(Constant),
     Load(LocalId),
     /// Read a named record field (module-wide field id resolved by codegen).
-    LoadFieldNamed { obj: LocalId, field: String },
-    ArrayLoad { arr: LocalId, idx: LocalId },
+    LoadFieldNamed {
+        obj: LocalId,
+        field: String,
+    },
+    ArrayLoad {
+        arr: LocalId,
+        idx: LocalId,
+    },
     ArrayLen(LocalId),
     /// Array literal: allocate and fill.
     ArrayLit(Vec<LocalId>),
@@ -139,16 +164,30 @@ pub enum RValue {
     Binary(BinOp, LocalId, LocalId),
     /// String equality (variant tag tests).
     StringEq(LocalId, LocalId),
-    Call { func: FuncRef, args: Vec<LocalId> },
+    Call {
+        func: FuncRef,
+        args: Vec<LocalId>,
+    },
     /// Create a closure over module function `func` capturing `captures`.
-    Closure { func: usize, captures: Vec<LocalId> },
+    Closure {
+        func: usize,
+        captures: Vec<LocalId>,
+    },
     Tuple(Vec<LocalId>),
     Record(Vec<(String, LocalId)>),
-    Perform { effect: String, op: String, args: Vec<LocalId> },
+    Perform {
+        effect: String,
+        op: String,
+        args: Vec<LocalId>,
+    },
     /// `perform LLM.ask(prompt)` — wired to the runtime's LLM client.
-    LlmAsk { prompt: LocalId },
+    LlmAsk {
+        prompt: LocalId,
+    },
     /// `perform Signal.wait("name")` — workflow signal wait.
-    SignalWait { name: String },
+    SignalWait {
+        name: String,
+    },
     /// `receive { | Behavior(params) => expr ... }` with no arms (or in the
     /// no-match fallback block): pop the next message from the actor's
     /// mailbox; evaluates to its first payload value (nil when the mailbox
@@ -160,34 +199,84 @@ pub enum RValue {
     /// matches) and up to `max_params` payload values into the registers
     /// immediately following dst — the lowering must allocate dst and the
     /// `max_params` payload temps as one contiguous run of locals.
-    ReceiveMatch { behavior_ids: Vec<u16>, max_params: usize },
-    FFICall { idx: usize, args: Vec<LocalId> },
-    Migrate { actor: LocalId, node: LocalId },
+    ReceiveMatch {
+        behavior_ids: Vec<u16>,
+        max_params: usize,
+    },
+    FFICall {
+        idx: usize,
+        args: Vec<LocalId>,
+    },
+    Migrate {
+        actor: LocalId,
+        node: LocalId,
+    },
     SelfRef,
-    CapabilityCheck { val: LocalId },
+    CapabilityCheck {
+        val: LocalId,
+    },
     /// `self.field` inside a behavior body (bytecode `StateGet`).
-    StateGet { field: String },
+    StateGet {
+        field: String,
+    },
     /// `spawn ActorName { ... }`. `behavior_idx` is the actor's first
     /// behavior's index into `Module::behaviors` — the VM resolves the rest
     /// of the actor's behaviors and state defaults from there via
     /// `ActorMeta`. Spawn-site init argument values are not passed through
     /// (matching the stable compiler): only literal `state` field defaults
     /// take effect.
-    Spawn { behavior_idx: usize },
+    Spawn {
+        behavior_idx: usize,
+    },
     /// `send actor behavior(args...)`. Fire-and-forget; evaluates to 0.
-    Send { actor: LocalId, behavior_idx: usize, args: Vec<LocalId> },
+    Send {
+        actor: LocalId,
+        behavior_idx: usize,
+        args: Vec<LocalId>,
+    },
     /// `ask actor behavior(args...)`. Evaluates to the behavior's result.
-    Ask { actor: LocalId, behavior_idx: usize, args: Vec<LocalId> },
+    Ask {
+        actor: LocalId,
+        behavior_idx: usize,
+        args: Vec<LocalId>,
+    },
     // AI runtime builtins
     PipelineNew,
-    PipelineStage { id: LocalId, name: LocalId, actor: LocalId, template: LocalId },
-    PipelineRun { id: LocalId, input: LocalId },
+    PipelineStage {
+        id: LocalId,
+        name: LocalId,
+        actor: LocalId,
+        template: LocalId,
+    },
+    PipelineRun {
+        id: LocalId,
+        input: LocalId,
+    },
     SupervisorNew,
-    SupervisorWorker { id: LocalId, name: LocalId, actor: LocalId, description: LocalId },
-    SupervisorRun { id: LocalId, task: LocalId },
-    DebateNew { topic: LocalId, rounds: LocalId, threshold: LocalId },
-    DebateParticipant { id: LocalId, name: LocalId, stance: LocalId, actor: LocalId },
-    DebateRun { id: LocalId },
+    SupervisorWorker {
+        id: LocalId,
+        name: LocalId,
+        actor: LocalId,
+        description: LocalId,
+    },
+    SupervisorRun {
+        id: LocalId,
+        task: LocalId,
+    },
+    DebateNew {
+        topic: LocalId,
+        rounds: LocalId,
+        threshold: LocalId,
+    },
+    DebateParticipant {
+        id: LocalId,
+        name: LocalId,
+        stance: LocalId,
+        actor: LocalId,
+    },
+    DebateRun {
+        id: LocalId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,7 +291,11 @@ pub enum FuncRef {
 pub enum Terminator {
     Return(Option<LocalId>),
     Jump(BlockId),
-    Branch { cond: LocalId, then_: BlockId, else_: BlockId },
+    Branch {
+        cond: LocalId,
+        then_: BlockId,
+        else_: BlockId,
+    },
     /// Resume from an effect handler with a result (bytecode `Resume`).
     Resume(LocalId),
     /// Builder placeholder; reaching codegen with this is an internal error.
@@ -259,7 +352,11 @@ impl FunctionBuilder {
     pub fn add_local(&mut self, name: impl Into<String>, ty: Type) -> LocalId {
         let id = LocalId(self.next_local);
         self.next_local += 1;
-        self.locals.push(Local { id, name: Some(name.into()), ty });
+        self.locals.push(Local {
+            id,
+            name: Some(name.into()),
+            ty,
+        });
         id
     }
 
@@ -282,7 +379,11 @@ impl FunctionBuilder {
     pub fn create_block(&mut self) -> BlockId {
         let id = BlockId(self.next_block);
         self.next_block += 1;
-        self.blocks.push(Block { id, stmts: Vec::new(), terminator: Terminator::Unterminated });
+        self.blocks.push(Block {
+            id,
+            stmts: Vec::new(),
+            terminator: Terminator::Unterminated,
+        });
         id
     }
 
@@ -394,36 +495,91 @@ mod tests {
         // Construct every RValue variant to confirm they compile.
         let _ = RValue::Const(Constant::Int(42));
         let _ = RValue::Load(LocalId(0));
-        let _ = RValue::LoadFieldNamed { obj: LocalId(0), field: "x".into() };
-        let _ = RValue::ArrayLoad { arr: LocalId(0), idx: LocalId(1) };
+        let _ = RValue::LoadFieldNamed {
+            obj: LocalId(0),
+            field: "x".into(),
+        };
+        let _ = RValue::ArrayLoad {
+            arr: LocalId(0),
+            idx: LocalId(1),
+        };
         let _ = RValue::ArrayLen(LocalId(0));
         let _ = RValue::ArrayLit(vec![LocalId(0)]);
         let _ = RValue::Unary(UnOp::Neg, LocalId(0));
         let _ = RValue::Binary(BinOp::Add, LocalId(0), LocalId(1));
         let _ = RValue::StringEq(LocalId(0), LocalId(1));
-        let _ = RValue::Call { func: FuncRef::Index(0), args: vec![LocalId(0)] };
-        let _ = RValue::Closure { func: 0, captures: vec![LocalId(0)] };
+        let _ = RValue::Call {
+            func: FuncRef::Index(0),
+            args: vec![LocalId(0)],
+        };
+        let _ = RValue::Closure {
+            func: 0,
+            captures: vec![LocalId(0)],
+        };
         let _ = RValue::Tuple(vec![LocalId(0)]);
         let _ = RValue::Record(vec![("x".into(), LocalId(0))]);
-        let _ = RValue::Perform { effect: "eff".into(), op: "op".into(), args: vec![LocalId(0)] };
+        let _ = RValue::Perform {
+            effect: "eff".into(),
+            op: "op".into(),
+            args: vec![LocalId(0)],
+        };
         let _ = RValue::LlmAsk { prompt: LocalId(0) };
         let _ = RValue::SignalWait { name: "sig".into() };
-        let _ = RValue::FFICall { idx: 0, args: vec![LocalId(0)] };
-        let _ = RValue::Migrate { actor: LocalId(0), node: LocalId(1) };
+        let _ = RValue::FFICall {
+            idx: 0,
+            args: vec![LocalId(0)],
+        };
+        let _ = RValue::Migrate {
+            actor: LocalId(0),
+            node: LocalId(1),
+        };
         let _ = RValue::SelfRef;
         let _ = RValue::CapabilityCheck { val: LocalId(0) };
         let _ = RValue::StateGet { field: "f".into() };
         let _ = RValue::Spawn { behavior_idx: 0 };
-        let _ = RValue::Send { actor: LocalId(0), behavior_idx: 0, args: vec![LocalId(0)] };
-        let _ = RValue::Ask { actor: LocalId(0), behavior_idx: 0, args: vec![LocalId(0)] };
+        let _ = RValue::Send {
+            actor: LocalId(0),
+            behavior_idx: 0,
+            args: vec![LocalId(0)],
+        };
+        let _ = RValue::Ask {
+            actor: LocalId(0),
+            behavior_idx: 0,
+            args: vec![LocalId(0)],
+        };
         let _ = RValue::PipelineNew;
-        let _ = RValue::PipelineStage { id: LocalId(0), name: LocalId(0), actor: LocalId(0), template: LocalId(0) };
-        let _ = RValue::PipelineRun { id: LocalId(0), input: LocalId(0) };
+        let _ = RValue::PipelineStage {
+            id: LocalId(0),
+            name: LocalId(0),
+            actor: LocalId(0),
+            template: LocalId(0),
+        };
+        let _ = RValue::PipelineRun {
+            id: LocalId(0),
+            input: LocalId(0),
+        };
         let _ = RValue::SupervisorNew;
-        let _ = RValue::SupervisorWorker { id: LocalId(0), name: LocalId(0), actor: LocalId(0), description: LocalId(0) };
-        let _ = RValue::SupervisorRun { id: LocalId(0), task: LocalId(0) };
-        let _ = RValue::DebateNew { topic: LocalId(0), rounds: LocalId(0), threshold: LocalId(0) };
-        let _ = RValue::DebateParticipant { id: LocalId(0), name: LocalId(0), stance: LocalId(0), actor: LocalId(0) };
+        let _ = RValue::SupervisorWorker {
+            id: LocalId(0),
+            name: LocalId(0),
+            actor: LocalId(0),
+            description: LocalId(0),
+        };
+        let _ = RValue::SupervisorRun {
+            id: LocalId(0),
+            task: LocalId(0),
+        };
+        let _ = RValue::DebateNew {
+            topic: LocalId(0),
+            rounds: LocalId(0),
+            threshold: LocalId(0),
+        };
+        let _ = RValue::DebateParticipant {
+            id: LocalId(0),
+            name: LocalId(0),
+            stance: LocalId(0),
+            actor: LocalId(0),
+        };
         let _ = RValue::DebateRun { id: LocalId(0) };
     }
 

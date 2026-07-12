@@ -38,16 +38,22 @@ impl std::error::Error for RegisterError {}
 /// Names are unique within a node. Registration fails if the name is already
 /// in use.
 pub struct ActorRegistry {
-    names: RwLock<HashMap<String, u64>>,
-    reverse: RwLock<HashMap<u64, String>>,
+    maps: RwLock<RegistryMaps>,
+}
+
+struct RegistryMaps {
+    names: HashMap<String, u64>,
+    reverse: HashMap<u64, String>,
 }
 
 impl ActorRegistry {
     /// Create a new empty registry.
     pub fn new() -> Self {
         ActorRegistry {
-            names: RwLock::new(HashMap::new()),
-            reverse: RwLock::new(HashMap::new()),
+            maps: RwLock::new(RegistryMaps {
+                names: HashMap::new(),
+                reverse: HashMap::new(),
+            }),
         }
     }
 
@@ -55,88 +61,77 @@ impl ActorRegistry {
     pub fn register(&self, name: &str, actor_id: u64) -> Result<(), RegisterError> {
         Self::validate_name(name)?;
 
-        let mut names = self.names.write().map_err(|_| {
-            RegisterError::InvalidName(name.to_string())
-        })?;
+        let mut maps = self
+            .maps
+            .write()
+            .map_err(|_| RegisterError::InvalidName(name.to_string()))?;
 
-        if names.contains_key(name) {
+        if maps.names.contains_key(name) {
             return Err(RegisterError::NameAlreadyRegistered(name.to_string()));
         }
 
-        names.insert(name.to_string(), actor_id);
-
-        // Update reverse mapping
-        if let Ok(mut reverse) = self.reverse.write() {
-            reverse.insert(actor_id, name.to_string());
-        }
+        maps.names.insert(name.to_string(), actor_id);
+        maps.reverse.insert(actor_id, name.to_string());
 
         Ok(())
     }
 
     /// Unregister a name.
     pub fn unregister(&self, name: &str) -> Result<(), RegisterError> {
-        let mut names = self.names.write().map_err(|_| {
-            RegisterError::InvalidName(name.to_string())
-        })?;
+        let mut maps = self
+            .maps
+            .write()
+            .map_err(|_| RegisterError::InvalidName(name.to_string()))?;
 
-        let actor_id = names.remove(name).ok_or_else(|| {
-            RegisterError::InvalidName(name.to_string())
-        })?;
+        let actor_id = maps
+            .names
+            .remove(name)
+            .ok_or_else(|| RegisterError::InvalidName(name.to_string()))?;
 
-        if let Ok(mut reverse) = self.reverse.write() {
-            reverse.remove(&actor_id);
-        }
+        maps.reverse.remove(&actor_id);
 
         Ok(())
     }
 
     /// Look up an actor ID by name.
     pub fn whereis(&self, name: &str) -> Option<u64> {
-        let names = self.names.read().ok()?;
-        names.get(name).copied()
+        let maps = self.maps.read().ok()?;
+        maps.names.get(name).copied()
     }
 
     /// List all registered names.
     pub fn registered(&self) -> Vec<String> {
-        let names = match self.names.read() {
-            Ok(n) => n,
+        let maps = match self.maps.read() {
+            Ok(m) => m,
             Err(_) => return Vec::new(),
         };
-        names.keys().cloned().collect()
+        maps.names.keys().cloned().collect()
     }
 
     /// Remove all names for a given actor (called on actor exit).
     pub fn unregister_by_actor(&self, actor_id: u64) -> Vec<String> {
+        let mut maps = match self.maps.write() {
+            Ok(m) => m,
+            Err(_) => return Vec::new(),
+        };
         let mut removed = Vec::new();
-
-        // Get the name from reverse mapping
-        if let Ok(reverse) = self.reverse.read() {
-            if let Some(name) = reverse.get(&actor_id) {
-                removed.push(name.clone());
-            }
+        if let Some(name) = maps.reverse.get(&actor_id) {
+            removed.push(name.clone());
         }
-
-        // Remove from both mappings
-        if let Ok(mut names) = self.names.write() {
-            for name in &removed {
-                names.remove(name);
-            }
+        for name in &removed {
+            maps.names.remove(name);
         }
-
-        if let Ok(mut reverse) = self.reverse.write() {
-            reverse.remove(&actor_id);
-        }
-
+        maps.reverse.remove(&actor_id);
         removed
     }
 
     /// Check if a name is registered.
     pub fn is_registered(&self, name: &str) -> bool {
-        let names = match self.names.read() {
-            Ok(n) => n,
+        let maps = match self.maps.read() {
+            Ok(m) => m,
             Err(_) => return false,
         };
-        names.contains_key(name)
+        maps.names.contains_key(name)
     }
 
     fn validate_name(name: &str) -> Result<(), RegisterError> {

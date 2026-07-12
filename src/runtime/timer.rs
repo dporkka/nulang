@@ -34,9 +34,7 @@ pub enum TimerMessage {
         context: String,
     },
     /// Exit the target actor with a reason.
-    Exit {
-        reason: String,
-    },
+    Exit { reason: String },
     /// Unconditionally kill the target actor.
     Kill,
 }

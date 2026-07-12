@@ -86,11 +86,7 @@ impl SupervisorTeam {
     /// Each worker receives a prompt that includes its description and the
     /// current accumulated state.  Returns an error if the team has no workers
     /// or if any worker call fails.
-    pub fn run<R: SupervisorRuntime>(
-        &self,
-        runtime: &mut R,
-        task: &str,
-    ) -> Result<String, String> {
+    pub fn run<R: SupervisorRuntime>(&self, runtime: &mut R, task: &str) -> Result<String, String> {
         if self.workers.is_empty() {
             return Err("Supervisor team has no workers".to_string());
         }
@@ -133,9 +129,7 @@ mod tests {
 
     impl SupervisorRuntime for MockRuntime {
         fn ask_agent(&mut self, agent_id: u64, prompt: &str) -> Result<String, String> {
-            self.calls
-                .borrow_mut()
-                .push((agent_id, prompt.to_string()));
+            self.calls.borrow_mut().push((agent_id, prompt.to_string()));
             self.responses
                 .get(&agent_id)
                 .cloned()

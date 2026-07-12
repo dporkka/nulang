@@ -30,6 +30,9 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Gate (forbidden patterns)
+        run: python3 verify_implementation.py
+
   minimal-build:
     name: Build without optional features
     runs-on: ubuntu-latest
@@ -67,14 +70,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # The codebase has not been rustfmt'd yet; the format check runs
-      # non-blocking so CI reports drift without failing the build. Flip to
-      # blocking once the existing findings are addressed.
+      # Format check is blocking — the codebase has been rustfmt'd.
       - name: Format check
         run: cargo fmt --check
-        continue-on-error: true
 
-      # Clippy is blocking: deny-level errors have been fixed. Warnings are
-      # still reported but do not fail the build.
+      # Clippy denies correctness lints; style/perf warnings are
+      # non-blocking until the existing findings are addressed.
       - name: Clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets -- -D clippy::correctness

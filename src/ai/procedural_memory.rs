@@ -88,21 +88,13 @@ impl ProceduralMemory {
             input: input.into(),
             output: output.into(),
         };
-        self.examples
-            .entry(task)
-            .or_default()
-            .push(example);
+        self.examples.entry(task).or_default().push(example);
     }
 
     /// Return up to `top_k` examples for a task, ranked by keyword overlap with
     /// the query. Falls back to the most recently added examples when the query
     /// is empty.
-    pub fn get_examples(
-        &self,
-        task: &str,
-        query: &str,
-        top_k: usize,
-    ) -> Vec<Example> {
+    pub fn get_examples(&self, task: &str, query: &str, top_k: usize) -> Vec<Example> {
         if top_k == 0 {
             return Vec::new();
         }
@@ -130,10 +122,7 @@ impl ProceduralMemory {
             })
             .collect();
 
-        scored.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| a.1.input.cmp(&b.1.input))
-        });
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.input.cmp(&b.1.input)));
         scored.truncate(top_k);
         scored.into_iter().map(|(_, example)| example).collect()
     }
@@ -187,7 +176,10 @@ mod tests {
 
         let pattern = memory.get_pattern("format_research_output").unwrap();
         assert_eq!(pattern.input_pattern, "research_*");
-        assert_eq!(pattern.output_template, "{title}\n\n{summary}\n\nSources: {sources}");
+        assert_eq!(
+            pattern.output_template,
+            "{title}\n\n{summary}\n\nSources: {sources}"
+        );
     }
 
     #[test]

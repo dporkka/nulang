@@ -17,6 +17,8 @@ mod supervisor;
 mod cluster;
 mod network;
 mod distributed;
+mod distributed_context;
+use distributed_context::DistributedContext;
 mod crdt;
 mod crdt_reg;
 mod crdt_manager;
@@ -103,11 +105,7 @@ pub struct Runtime {
     pub cycle_detector: CycleDetector,
 
     // Distributed actor system (v0.5)
-    pub transport: Option<NetworkTransport>,
-    pub cluster: Option<ClusterState>,
-    pub resolver: Option<AddressResolver>,
-    pub node_id: Option<NodeId>,
-    pub distributed_enabled: bool,
+    pub distributed: DistributedContext,
 
     // CRDT manager (v0.6)
     pub crdt_manager: Option<CrdtManager>,
@@ -184,11 +182,7 @@ impl Runtime {
             coordinator: OrcaCoordinator::new(),
             cycle_detector: CycleDetector::new(),
 
-            transport: None,
-            cluster: None,
-            resolver: None,
-            node_id: None,
-            distributed_enabled: false,
+            distributed: DistributedContext::new(),
 
             crdt_manager: None,
             crdt_sync_rounds: 0,
@@ -1494,27 +1488,18 @@ impl Runtime {
     }
 
     pub fn gc_stats(&self) -> GcStats {
-        let total = GcStats::default();
+        let mut total = GcStats::default();
         for actor in self.actors.values() {
             let stats = actor.orca_gc.stats();
-            total.objects_allocated.fetch_add(
-                stats.objects_allocated.load(Ordering::Relaxed), Ordering::Relaxed);
-            total.objects_freed.fetch_add(
-                stats.objects_freed.load(Ordering::Relaxed), Ordering::Relaxed);
-            total.local_refs_created.fetch_add(
-                stats.local_refs_created.load(Ordering::Relaxed), Ordering::Relaxed);
-            total.local_refs_dropped.fetch_add(
-                stats.local_refs_dropped.load(Ordering::Relaxed), Ordering::Relaxed);
-            total.foreign_refs_sent.fetch_add(
-                stats.foreign_refs_sent.load(Ordering::Relaxed), Ordering::Relaxed);
-            total.foreign_refs_received.fetch_add(
-                stats.foreign_refs_received.load(Ordering::Relaxed), Ordering::Relaxed);
-            total.cycles_detected.fetch_add(
-                stats.cycles_detected.load(Ordering::Relaxed), Ordering::Relaxed);
-            total.bytes_allocated.fetch_add(
-                stats.bytes_allocated.load(Ordering::Relaxed), Ordering::Relaxed);
-            total.bytes_freed.fetch_add(
-                stats.bytes_freed.load(Ordering::Relaxed), Ordering::Relaxed);
+            total.objects_allocated += stats.objects_allocated;
+            total.objects_freed += stats.objects_freed;
+            total.local_refs_created += stats.local_refs_created;
+            total.local_refs_dropped += stats.local_refs_dropped;
+            total.foreign_refs_sent += stats.foreign_refs_sent;
+            total.foreign_refs_received += stats.foreign_refs_received;
+            total.cycles_detected += stats.cycles_detected;
+            total.bytes_allocated += stats.bytes_allocated;
+            total.bytes_freed += stats.bytes_freed;
         }
         total
     }
@@ -2941,17 +2926,17 @@ impl Runtime {
         let node_id = NodeId(transport.node_id().0);
         let cluster = ClusterState::new(node_id, listen_addr);
         let resolver = AddressResolver::new(node_id);
-        self.transport = Some(transport);
-        self.cluster = Some(cluster);
-        self.resolver = Some(resolver);
-        self.node_id = Some(node_id);
-        self.distributed_enabled = true;
+        self.distributed.transport = Some(transport);
+        self.distributed.cluster = Some(cluster);
+        self.distributed.resolver = Some(resolver);
+        self.distributed.node_id = Some(node_id);
+        self.distributed.enabled = true;
         self.crdt_manager = Some(CrdtManager::new(node_id.0));
         Ok(())
     }
 
     pub fn join_cluster(&mut self, seed_addr: std::net::SocketAddr) {
-        if let Some(cluster) = &mut self.cluster {
+        if let Some(cluster) = &mut self.distributed.cluster {
             cluster.join_cluster(seed_addr);
         }
     }
@@ -2986,7 +2971,7 @@ impl Runtime {
     }
 
     pub fn send_distributed(&mut self, target: ActorAddress, behavior: &str, args: &[Value]) {
-        if !self.distributed_enabled {
+        if !self.distributed.enabled {
             let actor_id = match target {
                 ActorAddress::Local { actor_id } => actor_id,
                 ActorAddress::Remote { actor_id, .. } => actor_id,
@@ -2998,35 +2983,35 @@ impl Runtime {
             self.send_message(actor_id, behavior, args);
             return;
         }
-        let mut transport = self.transport.take().unwrap();
-        let cluster = self.cluster.take().unwrap();
-        let mut resolver = self.resolver.take().unwrap();
+        let mut transport = self.distributed.transport.take().unwrap();
+        let cluster = self.distributed.cluster.take().unwrap();
+        let mut resolver = self.distributed.resolver.take().unwrap();
         distributed::send_distributed(self, &mut transport, &cluster, &mut resolver, target, behavior, args);
-        self.transport = Some(transport);
-        self.cluster = Some(cluster);
-        self.resolver = Some(resolver);
+        self.distributed.transport = Some(transport);
+        self.distributed.cluster = Some(cluster);
+        self.distributed.resolver = Some(resolver);
     }
 
     pub fn process_network(&mut self) {
-        if !self.distributed_enabled { return; }
-        let mut transport = self.transport.take().unwrap();
-        let mut cluster = self.cluster.take().unwrap();
-        let mut resolver = self.resolver.take().unwrap();
+        if !self.distributed.enabled { return; }
+        let mut transport = self.distributed.transport.take().unwrap();
+        let mut cluster = self.distributed.cluster.take().unwrap();
+        let mut resolver = self.distributed.resolver.take().unwrap();
         distributed::process_network_packets(self, &mut transport, &mut cluster, &mut resolver);
-        self.transport = Some(transport);
-        self.cluster = Some(cluster);
-        self.resolver = Some(resolver);
+        self.distributed.transport = Some(transport);
+        self.distributed.cluster = Some(cluster);
+        self.distributed.resolver = Some(resolver);
         let actions = {
-            let cluster = self.cluster.as_mut().unwrap();
+            let cluster = self.distributed.cluster.as_mut().unwrap();
             cluster.tick()
         };
         for action in actions {
             match action {
                 ClusterAction::SendHeartbeat { to, addr } => {
-                    if let Some(transport) = &mut self.transport {
+                    if let Some(transport) = &mut self.distributed.transport {
                         // The heartbeat must identify the SENDER (us) —
                         // the receiver uses it for membership discovery.
-                        let local_id = self.node_id.unwrap_or(NodeId::LOCAL);
+                        let local_id = self.distributed.node_id.unwrap_or(NodeId::LOCAL);
                         let packet = Packet::Heartbeat {
                             node_id: local_id,
                             timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
@@ -3035,19 +3020,19 @@ impl Runtime {
                     }
                 }
                 ClusterAction::NodeJoined { node, addr } => {
-                    if let Some(transport) = &mut self.transport {
+                    if let Some(transport) = &mut self.distributed.transport {
                         let net_node_id = NodeId(node.0);
                         let _ = transport.connect(net_node_id, addr);
                     }
                 }
                 ClusterAction::NodeFailed { node } => {
-                    if let Some(transport) = &mut self.transport {
+                    if let Some(transport) = &mut self.distributed.transport {
                         let net_node_id = NodeId(node.0);
                         transport.disconnect(net_node_id);
                     }
                 }
                 ClusterAction::NodeLeft { node } => {
-                    if let Some(transport) = &mut self.transport {
+                    if let Some(transport) = &mut self.distributed.transport {
                         let net_node_id = NodeId(node.0);
                         transport.disconnect(net_node_id);
                     }
@@ -3058,7 +3043,7 @@ impl Runtime {
                     // what it learned from others, so a chain of pairwise
                     // seeds converges without a full mesh of join requests.
                     if let (Some(transport), Some(cluster)) =
-                        (&mut self.transport, &self.cluster)
+                        (&mut self.distributed.transport, &self.distributed.cluster)
                     {
                         let members = cluster.gossip_payload(GOSSIP_PAYLOAD_MAX_ENTRIES);
                         if !members.is_empty() {
@@ -3085,7 +3070,7 @@ impl Runtime {
     /// when deltas are generated, so a lost delta is never re-sent and
     /// these periodic full syncs are the repair mechanism.
     pub fn sync_crdts(&mut self) {
-        if !self.distributed_enabled { return; }
+        if !self.distributed.enabled { return; }
         self.crdt_sync_rounds = self.crdt_sync_rounds.wrapping_add(1);
         if crdt_sync_is_full_round(self.crdt_sync_rounds) {
             self.sync_crdts_full();
@@ -3102,9 +3087,9 @@ impl Runtime {
         };
         if ops.is_empty() { return; }
         let packet = Packet::CrdtSync { ops };
-        if let Some(cluster) = &self.cluster {
+        if let Some(cluster) = &self.distributed.cluster {
             for member in cluster.healthy_members() {
-                if let Some(transport) = &mut self.transport {
+                if let Some(transport) = &mut self.distributed.transport {
                     let net_node_id = NodeId(member.node_id.0);
                     transport.send(net_node_id, member.address, packet.clone());
                 }

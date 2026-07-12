@@ -14,7 +14,7 @@
 //! pointer — cloning it merely increments the Python reference count.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple, PyDictMethods};
+use pyo3::types::{PyDict, PyDictMethods, PyList, PyTuple};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -163,9 +163,7 @@ pub fn register_object(obj: Py<PyAny>) -> PythonObjectId {
 /// Acquires the GIL before locking the registry to avoid a lock-order
 /// deadlock with callers that hold the GIL and then touch the registry.
 pub fn get_object(id: PythonObjectId) -> Option<Py<PyAny>> {
-    Python::attach(|py| {
-        global_registry().get(id).map(|obj| obj.clone_ref(py))
-    })
+    Python::attach(|py| global_registry().get(id).map(|obj| obj.clone_ref(py)))
 }
 
 /// Convenience: remove a `Py<PyAny>` from the global registry.
@@ -554,7 +552,11 @@ mod tests {
             let obj = get_object(result_id).unwrap();
             let bound = obj.bind(py);
             let val: f64 = bound.extract().expect("Expected float result");
-            assert!((val - 4.0).abs() < f64::EPSILON, "Expected 4.0, got {}", val);
+            assert!(
+                (val - 4.0).abs() < f64::EPSILON,
+                "Expected 4.0, got {}",
+                val
+            );
         });
     }
 

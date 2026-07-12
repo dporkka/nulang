@@ -10,6 +10,11 @@
 //! # Design decisions
 //!
 //! * **Bump allocation** for speed on the fast path (most allocations).
+//! * **Chained bump blocks** — when the active bump block is exhausted, a new
+//!   block is allocated and chained onto the heap instead of failing.  Objects
+//!   never move (raw payload pointers are held in VM registers, foreign refs,
+//!   and JIT code), so growth must chain — never realloc/copy — the existing
+//!   block.
 //! * **Size-class free lists** (Tiny → Huge) so that freed objects can be
 //!   reused without touching the bump pointer.
 //! * **Large-object space (LOS)** — allocations whose total size exceeds the
@@ -22,10 +27,6 @@
 //! * **8-byte alignment** is enforced for every allocation (header + payload).
 //! * **Zero `actor_id` default** — the heap is created before the actor ID is
 //!   known; callers should invoke `set_actor_id` immediately after creation.
-
-use std::sync::atomic::{AtomicBool, AtomicU32};
-#[cfg(test)]
-use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -144,9 +145,9 @@ pub enum TypeTag {
 /// ```text
 ///  offset | field
 ///  -------+---------------
-///    0    | ref_count      (AtomicU32)
-///    4    | foreign_count  (AtomicU32)
-///    8    | sticky         (AtomicBool)
+///    0    | ref_count      (u32)
+///    4    | foreign_count  (u32)
+///    8    | sticky         (bool)
 ///    9    | size_class     (SizeClass   u8)
 ///   10    | gc_color       (GcColor     u8)
 ///   11    | type_tag       (TypeTag     u8)
@@ -159,17 +160,26 @@ pub enum TypeTag {
 ///  -------+---------------
 ///   56    | TOTAL
 /// ```
+///
+/// # Thread safety
+///
+/// The counts are **plain integers, not atomics**.  The runtime is a
+/// single-threaded synchronous coordinator: one scheduler thread runs all
+/// actor steps, `process_gc_ops`, and cycle detection, and it is the only
+/// thread that ever touches a heap.  Network reader threads and LLM worker
+/// threads never dereference an `OrcaHeader`.  (The header was never
+/// `Send`/`Sync` anyway — `live_next`/`live_prev` are raw pointers.)
 #[repr(C)]
 pub struct OrcaHeader {
     /// Local reference count — how many references exist *inside* the owning
     /// actor. When this drops to zero the object may be reclaimed.
-    pub ref_count: AtomicU32,
+    pub ref_count: u32,
     /// Foreign reference count — how many references exist in *other* actors.
     /// Part of the ORCA protocol for cross-actor reference tracking.
-    pub foreign_count: AtomicU32,
+    pub foreign_count: u32,
     /// When `true` the object is immortal (sticky) and must never be collected.
     /// Used for global constants and pinned FFI buffers.
-    pub sticky: AtomicBool,
+    pub sticky: bool,
     /// Size class bucket this object belongs to.
     pub size_class: SizeClass,
     /// GC tri-colour state.
@@ -196,7 +206,7 @@ impl OrcaHeader {
     ///
     /// # Safety
     /// The returned value must be copied into heap-backed storage (via
-    /// `ptr::write`) before any other thread can observe it.
+    /// `ptr::write`) before it is observed by any heap/GC code.
     pub(crate) fn new(
         actor_id: u64,
         type_tag: TypeTag,
@@ -205,9 +215,9 @@ impl OrcaHeader {
     ) -> Self {
         let (size_class, _) = classify_total_size(total_size);
         OrcaHeader {
-            ref_count: AtomicU32::new(1),
-            foreign_count: AtomicU32::new(0),
-            sticky: AtomicBool::new(false),
+            ref_count: 1,
+            foreign_count: 0,
+            sticky: false,
             size_class,
             gc_color: GcColor::White,
             type_tag,
@@ -237,20 +247,31 @@ impl OrcaHeader {
 /// `ActorHeap` is **not** `Sync` — it is designed to be owned by a single
 /// actor and accessed only while that actor is running.  It **is** `Send`
 /// so that an actor (and its heap) can be migrated between scheduler threads.
+/// In practice the runtime is a single-threaded synchronous coordinator, so
+/// all heap access happens on the one scheduler thread; header refcounts are
+/// therefore plain integers, not atomics (see [`OrcaHeader`]).
 #[derive(Debug)]
 pub struct ActorHeap {
     /// Owning actor ID (0 until `set_actor_id` is called).
     actor_id: u64,
-    /// Base pointer of the contiguous backing memory.
+    /// Base pointer of the *active* bump block (the one `current` bumps into).
     base: *mut u8,
-    /// Bump pointer — next free byte in the backing block.
+    /// Bump pointer — next free byte in the active block.
     current: *mut u8,
-    /// One-past-the-end pointer of the backing block.
+    /// One-past-the-end pointer of the active block.
     limit: *mut u8,
-    /// Total size of the backing block (bytes).
+    /// Total size of the active block (bytes).
     total_size: usize,
-    /// Bytes committed by the bump pointer (i.e. `current - base`).
+    /// Bytes committed by the bump pointer in the active block
+    /// (i.e. `current - base`).
     used_bytes: usize,
+    /// Cumulative `used_bytes` of retired (exhausted) bump blocks.
+    prior_used: usize,
+    /// `(base, size)` of every retired bump block.  Retired blocks are full:
+    /// their live objects stay put (objects never move) and their freed
+    /// objects sit in the shared size-class free lists.  They are deallocated
+    /// on `reset`/`drop`.
+    retired_blocks: Vec<(*mut u8, usize)>,
     /// Per-size-class intrusive free lists.
     /// Each entry is either `null_mut()` or points to the payload of the
     /// first free block in that class.  The first 8 bytes of a free payload
@@ -297,7 +318,10 @@ impl ActorHeap {
     /// Create a new per-actor heap with the given total backing size.
     ///
     /// The backing memory is allocated with the global allocator and is
-    /// 8-byte aligned.  The `actor_id` defaults to `0`; the caller should
+    /// 8-byte aligned.  The block is eagerly reserved but lazily committed
+    /// (the bump pointer touches pages on demand), and when it fills up the
+    /// heap grows by chaining another block — see [`ActorHeap::grow_bump_block`].
+    /// The `actor_id` defaults to `0`; the caller should
     /// invoke [`ActorHeap::set_actor_id`] as soon as the real actor ID is
     /// known.
     ///
@@ -319,6 +343,8 @@ impl ActorHeap {
             limit: unsafe { base.add(total_size) },
             total_size,
             used_bytes: 0,
+            prior_used: 0,
+            retired_blocks: Vec::new(),
             free_lists: [std::ptr::null_mut(); NUM_SIZE_CLASSES],
             los_blocks: Vec::new(),
             live_head: std::ptr::null_mut(),
@@ -365,10 +391,12 @@ impl ActorHeap {
     ///    Large-object-space (`Huge`) blocks are only reused on an exact
     ///    size match, because each LOS block is individually deallocated
     ///    with its original layout on `reset`/`drop`.
-    /// 5. Otherwise fall back to bump allocation from the contiguous region,
-    ///    or to a fresh LOS allocation when `total_size > LOS_THRESHOLD`.
+    /// 5. Otherwise fall back to bump allocation from the active block —
+    ///    chaining a fresh block when the active one is exhausted — or to a
+    ///    fresh LOS allocation when `total_size > LOS_THRESHOLD`.
     ///
-    /// Returns `None` if the backing memory is exhausted.
+    /// Returns `None` only if the global allocator fails (OS OOM); an
+    /// exhausted bump block triggers growth instead of failure.
     pub fn alloc(&mut self, payload_size: usize, type_tag: TypeTag) -> Option<*mut u8> {
         let aligned_payload = align_up(payload_size);
         let total_size = Self::HEADER_SIZE + aligned_payload;
@@ -417,13 +445,17 @@ impl ActorHeap {
             return self.alloc_los(total_size, payload_size, type_tag);
         }
 
-        // --- Slow path: bump allocation ---
+        // --- Slow path: bump allocation, chaining a new block on exhaustion ---
         unsafe {
-            let new_current = self.current.add(total_size);
-            if new_current > self.limit {
-                return None; // Out of memory.
+            if self.current.add(total_size) > self.limit {
+                // The active block is full.  Objects never move (raw payload
+                // pointers live in VM registers, foreign refs, and JIT code),
+                // so we chain a fresh block instead of reallocating.
+                self.grow_bump_block(total_size)?;
+                debug_assert!(self.current.add(total_size) <= self.limit);
             }
 
+            let new_current = self.current.add(total_size);
             let header_ptr = self.current as *mut OrcaHeader;
             let payload_ptr = self.current.add(Self::HEADER_SIZE);
             self.current = new_current;
@@ -439,8 +471,9 @@ impl ActorHeap {
             self.live_count += 1;
             self.total_allocs += 1;
 
-            if self.used_bytes > self.peak_used {
-                self.peak_used = self.used_bytes;
+            let committed = self.prior_used + self.used_bytes;
+            if committed > self.peak_used {
+                self.peak_used = committed;
             }
 
             Some(payload_ptr)
@@ -475,8 +508,8 @@ impl ActorHeap {
         self.total_frees += 1;
 
         // Read the size class so we know which free list to push to.
-        // We use a relaxed read because no other thread should be mutating
-        // this header concurrently (ActorHeap is !Sync).
+        // Plain read: the single scheduler thread is the only mutator of
+        // any header (ActorHeap is !Sync).
         let sc = (*header_ptr).size_class;
         let sc_idx = sc as usize;
 
@@ -518,12 +551,12 @@ impl ActorHeap {
     // Queries
     // ------------------------------------------------------------------
 
-    /// Total bytes committed by the bump allocator (`current - base`).
+    /// Total bytes committed by the bump allocator across all chained blocks.
     pub fn used(&self) -> usize {
-        self.used_bytes
+        self.prior_used + self.used_bytes
     }
 
-    /// Remaining free space in the bump region.
+    /// Remaining free space in the active bump block.
     pub fn free_bytes(&self) -> usize {
         self.total_size - self.used_bytes
     }
@@ -593,7 +626,9 @@ impl ActorHeap {
 
     /// Reset the heap to a pristine state.
     ///
-    /// * The bump pointer returns to `base`.
+    /// * The bump pointer returns to `base` of the active block.
+    /// * All retired (chained) blocks and large-object-space blocks are
+    ///   deallocated.
     /// * All free lists are discarded.
     /// * The live-object list is cleared.
     /// * Statistics are zeroed.
@@ -602,11 +637,13 @@ impl ActorHeap {
     /// outstanding pointers into this heap become dangling — the caller
     /// must ensure none exist.
     pub fn reset(&mut self) {
-        // Deallocate large-object-space blocks before discarding the free
-        // lists — the Huge list points into those blocks.
+        // Deallocate retired bump blocks and large-object-space blocks before
+        // discarding the free lists — the free lists point into those blocks.
+        self.release_retired_blocks();
         self.release_los_blocks();
         self.current = self.base;
         self.used_bytes = 0;
+        self.prior_used = 0;
         self.live_head = std::ptr::null_mut();
         self.live_tail = std::ptr::null_mut();
         self.live_count = 0;
@@ -619,6 +656,59 @@ impl ActorHeap {
     // ==================================================================
     // Internal helpers
     // ==================================================================
+
+    /// Chain a fresh bump block onto the heap and make it the active block.
+    ///
+    /// The exhausted block is retired — kept mapped, not copied — because its
+    /// live objects must never move (raw payload pointers are held in VM
+    /// registers, other actors' foreign refs, and JIT code).  Retired blocks
+    /// are deallocated on `reset`/`drop`.
+    ///
+    /// The new block is the same size as the exhausted one, or `min_capacity`
+    /// when a single allocation needs more.  Equal-size chaining (rather than
+    /// doubling) keeps per-actor memory growth linear and predictable: an
+    /// actor's footprint stays proportional to the data it actually holds.
+    ///
+    /// Returns `None` only when the global allocator fails.
+    fn grow_bump_block(&mut self, min_capacity: usize) -> Option<()> {
+        let new_size = self.total_size.max(min_capacity);
+        let layout = std::alloc::Layout::from_size_align(new_size, ALIGN).ok()?;
+        // SAFETY: layout has non-zero size (`total_size` > 0) and is valid.
+        let base = unsafe { std::alloc::alloc(layout) };
+        if base.is_null() {
+            // Report OS OOM as exhaustion, matching alloc's `None` contract.
+            return None;
+        }
+
+        // Retire the exhausted block; its contents stay exactly where they are.
+        self.retired_blocks.push((self.base, self.total_size));
+        self.prior_used += self.used_bytes;
+
+        self.base = base;
+        self.current = base;
+        self.limit = unsafe { base.add(new_size) };
+        self.total_size = new_size;
+        self.used_bytes = 0;
+        Some(())
+    }
+
+    /// Deallocate every retired (exhausted) bump block.
+    ///
+    /// Called from `reset` and `drop`.  Any live objects in these blocks are
+    /// abandoned — the caller must ensure no outstanding pointers exist.
+    fn release_retired_blocks(&mut self) {
+        for &(base, size) in &self.retired_blocks {
+            let layout =
+                std::alloc::Layout::from_size_align(size, ALIGN).expect("invalid block layout");
+            // SAFETY: `base` was allocated with this exact layout in
+            // `grow_bump_block` (or `ActorHeap::new` for the first block) and
+            // is deallocated exactly once here.
+            unsafe {
+                std::alloc::dealloc(base, layout);
+            }
+        }
+        self.retired_blocks.clear();
+    }
 
     /// Allocate a large-object-space block with the global allocator.
     ///
@@ -705,9 +795,8 @@ impl ActorHeap {
             // used for the matching `Layout`.
             unsafe {
                 let header_ptr = Self::header_of(payload_ptr);
-                let layout =
-                    std::alloc::Layout::from_size_align((*header_ptr).size, ALIGN)
-                        .expect("invalid LOS layout");
+                let layout = std::alloc::Layout::from_size_align((*header_ptr).size, ALIGN)
+                    .expect("invalid LOS layout");
                 std::alloc::dealloc(header_ptr as *mut u8, layout);
             }
         }
@@ -796,10 +885,11 @@ impl OrcaHeap for ActorHeap {
 
 impl Drop for ActorHeap {
     fn drop(&mut self) {
-        // Deallocate individually malloc'd large-object-space blocks first.
+        // Deallocate individually malloc'd large-object-space blocks and
+        // retired bump blocks first.
         self.release_los_blocks();
-        let layout =
-            std::alloc::Layout::from_size_align(self.total_size, ALIGN).unwrap();
+        self.release_retired_blocks();
+        let layout = std::alloc::Layout::from_size_align(self.total_size, ALIGN).unwrap();
         // SAFETY: `self.base` was allocated with the exact same layout in
         // `ActorHeap::new`.  After dealloc the pointer must not be used,
         // which is fine because the heap is being dropped.
@@ -838,7 +928,9 @@ fn test_alloc_multiple() {
         let p = heap.alloc(32, TypeTag::Tuple).expect("alloc failed");
         ptrs.push(p);
         // Write a marker so we can distinguish objects.
-        unsafe { *(p as *mut u64) = i as u64; }
+        unsafe {
+            *(p as *mut u64) = i as u64;
+        }
     }
 
     // Distinct pointers.
@@ -863,7 +955,9 @@ fn test_free_and_reuse() {
     let p1 = heap.alloc(64, TypeTag::Record).unwrap();
 
     // Free it — the block should go to the appropriate free list.
-    unsafe { heap.free(p1); }
+    unsafe {
+        heap.free(p1);
+    }
 
     // Allocate again with the same size class. We should get the same
     // payload pointer back because the free list is LIFO.
@@ -879,13 +973,13 @@ fn test_size_classes() {
     // HEADER_SIZE = 48, ALIGN = 8.
     // total = 48 + align_up(payload)
     let cases: Vec<(usize, SizeClass)> = vec![
-        (1,   SizeClass::Small),   // total = 64 → Small (33-64)
-        (16,  SizeClass::Medium),  // total = 72 → Medium (65-128)
-        (17,  SizeClass::Medium),  // total = 80 → Medium
-        (80,  SizeClass::Large),   // total = 136 → Large (129-256)
-        (81,  SizeClass::Large),   // total = 144 → Large
-        (200, SizeClass::Large),   // total = 256 → Large
-        (210, SizeClass::Huge),    // total = 272 → Huge (257+)
+        (1, SizeClass::Small),   // total = 64 → Small (33-64)
+        (16, SizeClass::Medium), // total = 72 → Medium (65-128)
+        (17, SizeClass::Medium), // total = 80 → Medium
+        (80, SizeClass::Large),  // total = 136 → Large (129-256)
+        (81, SizeClass::Large),  // total = 144 → Large
+        (200, SizeClass::Large), // total = 256 → Large
+        (210, SizeClass::Huge),  // total = 272 → Huge (257+)
     ];
 
     for (payload_size, expected_class) in cases {
@@ -893,9 +987,12 @@ fn test_size_classes() {
         unsafe {
             let header = ActorHeap::header_of(p);
             assert_eq!(
-                (*header).size_class, expected_class,
+                (*header).size_class,
+                expected_class,
                 "payload_size={} got {:?}, expected {:?}",
-                payload_size, (*header).size_class, expected_class
+                payload_size,
+                (*header).size_class,
+                expected_class
             );
         }
     }
@@ -909,9 +1006,9 @@ fn test_header_integrity() {
     let p = heap.alloc(42, TypeTag::Closure).unwrap();
     unsafe {
         let h = &*ActorHeap::header_of(p);
-        assert_eq!(h.ref_count.load(Ordering::Relaxed), 1);
-        assert_eq!(h.foreign_count.load(Ordering::Relaxed), 0);
-        assert_eq!(h.sticky.load(Ordering::Relaxed), false);
+        assert_eq!(h.ref_count, 1);
+        assert_eq!(h.foreign_count, 0);
+        assert_eq!(h.sticky, false);
         assert_eq!(h.actor_id, 99);
         assert_eq!(h.type_tag, TypeTag::Closure);
         assert_eq!(h.gc_color, GcColor::White);
@@ -967,16 +1064,131 @@ fn test_free_list_reuse() {
 }
 
 #[test]
-fn test_heap_exhaustion() {
-    // A tiny heap: can fit at most one 48-byte header + 8-byte payload.
+fn test_tiny_heap_grows_on_exhaustion() {
+    // A tiny heap: the first block fits exactly one 56-byte header + 8-byte
+    // payload.  Instead of failing, the second allocation must chain a new
+    // block and succeed.
     let mut heap = ActorHeap::new(64);
 
     let p1 = heap.alloc(8, TypeTag::Raw);
     assert!(p1.is_some());
 
-    // Second allocation should fail — not enough contiguous space.
     let p2 = heap.alloc(8, TypeTag::Raw);
-    assert!(p2.is_none(), "heap should be exhausted");
+    assert!(p2.is_some(), "heap should grow by chaining a new block");
+    assert_eq!(heap.retired_blocks.len(), 1);
+    // The first object stays put: growth never moves existing allocations.
+    assert_eq!(heap.live_count(), 2);
+}
+
+#[test]
+fn test_heap_grows_beyond_initial_block() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    // payload 64 → total 128 bytes; 64KB holds ~512, so 1200 allocations
+    // chain two extra blocks (≈150KB committed).
+    let mut ptrs = Vec::new();
+    for i in 0..1200usize {
+        let p = heap.alloc(64, TypeTag::Raw).expect("alloc past 64KB failed");
+        unsafe {
+            *(p as *mut u64) = i as u64;
+        }
+        ptrs.push(p);
+    }
+
+    assert!(heap.retired_blocks.len() >= 2, "heap should have chained blocks");
+    assert!(heap.used() > 64 * 1024, "used() is cumulative across blocks");
+    assert_eq!(heap.live_count(), 1200);
+
+    // Objects never move: every marker written before growth is intact.
+    for (i, p) in ptrs.iter().enumerate() {
+        unsafe {
+            assert_eq!(*(*p as *mut u64), i as u64);
+        }
+    }
+}
+
+#[test]
+fn test_live_count_spans_chained_blocks() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    let mut ptrs = Vec::new();
+    for _ in 0..1200 {
+        ptrs.push(heap.alloc(64, TypeTag::Raw).unwrap());
+    }
+    assert!(heap.retired_blocks.len() >= 2);
+    assert_eq!(heap.live_count(), 1200);
+
+    // iter_live_objects walks the intrusive live list, which spans blocks.
+    let mut seen = 0;
+    heap.iter_live_objects(|_header, _payload, _size| {
+        seen += 1;
+    });
+    assert_eq!(seen, 1200);
+
+    // Free every 12th object (spans all blocks) and re-check.
+    for &p in ptrs.iter().step_by(12) {
+        unsafe {
+            heap.free(p);
+        }
+    }
+    assert_eq!(heap.live_count(), 1100);
+    let mut seen = 0;
+    heap.iter_live_objects(|_header, _payload, _size| {
+        seen += 1;
+    });
+    assert_eq!(seen, 1100);
+}
+
+#[test]
+fn test_free_list_reuse_after_growth() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    // Allocate into the second chained block.
+    let mut ptrs = Vec::new();
+    for _ in 0..600 {
+        ptrs.push(heap.alloc(64, TypeTag::Raw).unwrap());
+    }
+    assert!(!heap.retired_blocks.is_empty());
+
+    // Free one object from the first block and one from the active block.
+    let p_early = ptrs[0];
+    let p_late = *ptrs.last().unwrap();
+    unsafe {
+        heap.free(p_early);
+        heap.free(p_late);
+    }
+    assert_eq!(heap.free_list_count(), 2);
+
+    // The shared free list is LIFO across blocks: last freed is reused first.
+    let r1 = heap.alloc(64, TypeTag::Raw).unwrap();
+    let r2 = heap.alloc(64, TypeTag::Raw).unwrap();
+    assert_eq!(r1, p_late, "free list must reach across chained blocks");
+    assert_eq!(r2, p_early);
+    assert_eq!(heap.free_list_count(), 0);
+}
+
+#[test]
+fn test_reset_after_growth() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    for _ in 0..1200 {
+        heap.alloc(64, TypeTag::Raw).unwrap();
+    }
+    assert!(heap.retired_blocks.len() >= 2);
+
+    heap.reset();
+    assert_eq!(heap.live_count(), 0);
+    assert_eq!(heap.used(), 0);
+    assert_eq!(heap.free_list_count(), 0);
+    assert!(heap.retired_blocks.is_empty(), "reset must release chained blocks");
+
+    // The heap is fully functional after reset, including growing again.
+    let mut ptrs = Vec::new();
+    for _ in 0..1200 {
+        ptrs.push(heap.alloc(64, TypeTag::Raw).expect("alloc after reset failed"));
+    }
+    assert_eq!(heap.live_count(), 1200);
+    assert!(heap.retired_blocks.len() >= 2);
 }
 
 #[test]
@@ -990,7 +1202,9 @@ fn test_reset() {
 
     // Free one object so it goes into the free list.
     let p = heap.alloc(64, TypeTag::String).unwrap();
-    unsafe { heap.free(p); }
+    unsafe {
+        heap.free(p);
+    }
     assert!(heap.free_list_count() > 0);
 
     // Reset everything.
@@ -1015,7 +1229,9 @@ fn test_live_object_iteration() {
     let p3 = heap.alloc(48, TypeTag::Map).unwrap();
 
     // Free the middle object.
-    unsafe { heap.free(p2); }
+    unsafe {
+        heap.free(p2);
+    }
     assert_eq!(heap.live_count(), 2);
 
     // Collect all live object payload pointers.
@@ -1070,7 +1286,9 @@ fn test_alignment() {
             p as usize % ALIGN,
             0,
             "payload pointer {:p} is not {}-byte aligned (size={})",
-            p, ALIGN, sz
+            p,
+            ALIGN,
+            sz
         );
         ptrs.push(p);
     }
@@ -1083,7 +1301,8 @@ fn test_alignment() {
                 h as usize % ALIGN,
                 0,
                 "header pointer {:p} is not {}-byte aligned",
-                h, ALIGN
+                h,
+                ALIGN
             );
         }
     }
@@ -1105,7 +1324,7 @@ fn test_alloc_zero_payload() {
     unsafe {
         let h = &*ActorHeap::header_of(p);
         assert_eq!(h.size, ActorHeap::HEADER_SIZE);
-        assert_eq!(h.ref_count.load(Ordering::Relaxed), 1);
+        assert_eq!(h.ref_count, 1);
     }
 }
 
@@ -1124,7 +1343,9 @@ fn test_statistics() {
     assert_eq!(heap.live_count(), 2);
     assert!(heap.used() >= ActorHeap::HEADER_SIZE * 2 + 100 + 200);
 
-    unsafe { heap.free(p1); }
+    unsafe {
+        heap.free(p1);
+    }
     assert_eq!(heap.live_count(), 1);
     assert_eq!(heap.free_list_count(), 1);
 }
@@ -1142,13 +1363,18 @@ fn test_los_alloc_free_reuse() {
     // LOS blocks must not consume the bump region.
     assert_eq!(heap.used(), 0);
 
-    unsafe { heap.free(p1); }
+    unsafe {
+        heap.free(p1);
+    }
     assert_eq!(heap.free_list_count(), 1);
     assert_eq!(heap.live_count(), 0);
 
     // Same size → the exact-match LOS free list returns the same block.
     let p2 = heap.alloc(512, TypeTag::Array).unwrap();
-    assert_eq!(p1, p2, "freed LOS block should be reused on exact size match");
+    assert_eq!(
+        p1, p2,
+        "freed LOS block should be reused on exact size match"
+    );
     assert_eq!(heap.free_list_count(), 0);
 }
 
@@ -1157,7 +1383,9 @@ fn test_los_exact_size_reuse_only() {
     let mut heap = ActorHeap::new(64 * 1024);
 
     let p512 = heap.alloc(512, TypeTag::Array).unwrap();
-    unsafe { heap.free(p512); }
+    unsafe {
+        heap.free(p512);
+    }
 
     // A different (larger) size must not reuse the 512-payload block.
     let p768 = heap.alloc(768, TypeTag::Array).unwrap();
@@ -1182,7 +1410,10 @@ fn test_los_interleaved_small_large() {
     // Small and large regions must not overlap: LOS payloads lie outside
     // the heap's contiguous backing block.
     let bump_used = heap.used();
-    assert!(bump_used > 0, "small allocations should use the bump region");
+    assert!(
+        bump_used > 0,
+        "small allocations should use the bump region"
+    );
     assert!(l1 < heap.base || l1 >= heap.limit);
     assert!(l2 < heap.base || l2 >= heap.limit);
 
@@ -1234,7 +1465,9 @@ fn test_los_alignment() {
             p as usize % ALIGN,
             0,
             "LOS payload pointer {:p} is not {}-byte aligned (size={})",
-            p, ALIGN, sz
+            p,
+            ALIGN,
+            sz
         );
         unsafe {
             let h = ActorHeap::header_of(p);
@@ -1242,7 +1475,8 @@ fn test_los_alignment() {
                 h as usize % ALIGN,
                 0,
                 "LOS header pointer {:p} is not {}-byte aligned",
-                h, ALIGN
+                h,
+                ALIGN
             );
             // Payload must be fully writable.
             let buf = std::slice::from_raw_parts_mut(p, sz);
@@ -1265,14 +1499,21 @@ fn test_los_threshold_boundary() {
     unsafe {
         assert_eq!((*ActorHeap::header_of(p_at)).size_class, SizeClass::Large);
     }
-    assert_eq!(used_after_small, 256, "boundary block should use the bump region");
+    assert_eq!(
+        used_after_small, 256,
+        "boundary block should use the bump region"
+    );
 
     // payload 201 → total 264 → Huge, served by the LOS.
     let p_over = heap.alloc(201, TypeTag::Raw).unwrap();
     unsafe {
         assert_eq!((*ActorHeap::header_of(p_over)).size_class, SizeClass::Huge);
     }
-    assert_eq!(heap.used(), used_after_small, "LOS must not touch the bump region");
+    assert_eq!(
+        heap.used(),
+        used_after_small,
+        "LOS must not touch the bump region"
+    );
 
     // Free/realloc cycle on both sides of the boundary reuses each block.
     unsafe {
@@ -1289,7 +1530,9 @@ fn test_los_reset_releases_blocks() {
 
     let l1 = heap.alloc(1024, TypeTag::Array).unwrap();
     let l2 = heap.alloc(2048, TypeTag::Array).unwrap();
-    unsafe { heap.free(l1); }
+    unsafe {
+        heap.free(l1);
+    }
     assert_eq!(heap.free_list_count(), 1);
     let _ = l2;
 

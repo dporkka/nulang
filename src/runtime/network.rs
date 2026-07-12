@@ -39,9 +39,9 @@ use std::time::{Duration, Instant};
 // Imports from the rest of the crate
 // ---------------------------------------------------------------------------
 
-use super::MessagePriority;
 use super::cluster::{NodeGossip, NodeStatus};
 use super::crdt_manager::{CrdtDeltaOp, CrdtOp};
+use super::MessagePriority;
 use super::NodeId;
 use crate::vm::Value;
 
@@ -114,9 +114,7 @@ pub enum Packet {
     },
 
     /// Acknowledge receipt of a packet.
-    Ack {
-        packet_seq: u64,
-    },
+    Ack { packet_seq: u64 },
 
     /// Request to spawn an actor remotely.
     SpawnRequest {
@@ -133,9 +131,7 @@ pub enum Packet {
     },
 
     /// CRDT synchronization packet.
-    CrdtSync {
-        ops: Vec<CrdtOp>,
-    },
+    CrdtSync { ops: Vec<CrdtOp> },
 
     /// Delta-state CRDT synchronization packet.
     ///
@@ -144,9 +140,7 @@ pub enum Packet {
     /// deltas into entries they already hold and apply full-state ops like
     /// [`CrdtSync`](Packet::CrdtSync). The full-state `CrdtSync` packet
     /// remains available as the join/reset fallback.
-    CrdtDeltaSync {
-        ops: Vec<CrdtDeltaOp>,
-    },
+    CrdtDeltaSync { ops: Vec<CrdtDeltaOp> },
 
     /// Cluster membership gossip.
     ///
@@ -155,9 +149,7 @@ pub enum Packet {
     /// where higher incarnation numbers win. This is what gives membership
     /// transitive propagation: a node relays what it knows, so a chain of
     /// pairwise seeds still converges to a full mesh.
-    Gossip {
-        members: Vec<NodeGossip>,
-    },
+    Gossip { members: Vec<NodeGossip> },
 }
 
 impl Packet {
@@ -201,8 +193,7 @@ impl Packet {
 
         let discriminant = bytes[4];
         let seq = u64::from_be_bytes([
-            bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10],
-            bytes[11], bytes[12],
+            bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12],
         ]);
 
         let payload = &bytes[PACKET_HEADER_LEN..];
@@ -358,10 +349,7 @@ impl Packet {
         }
         let node_id = NodeId(read_u64(payload, 0)?);
         let timestamp = read_u64(payload, 8)?;
-        Some(Packet::Heartbeat {
-            node_id,
-            timestamp,
-        })
+        Some(Packet::Heartbeat { node_id, timestamp })
     }
 
     fn read_ack(payload: &[u8]) -> Option<Self> {
@@ -424,8 +412,10 @@ impl Packet {
             }
             // Parse id + type + len manually to compute op byte length
             let op_payload_len = u32::from_be_bytes([
-                payload[offset + 9], payload[offset + 10],
-                payload[offset + 11], payload[offset + 12],
+                payload[offset + 9],
+                payload[offset + 10],
+                payload[offset + 11],
+                payload[offset + 12],
             ]) as usize;
             let total_op_len = 13 + op_payload_len;
             if offset + total_op_len > payload.len() {
@@ -452,8 +442,10 @@ impl Packet {
             }
             // Parse flag + id + type + len manually to compute op byte length
             let op_payload_len = u32::from_be_bytes([
-                payload[offset + 10], payload[offset + 11],
-                payload[offset + 12], payload[offset + 13],
+                payload[offset + 10],
+                payload[offset + 11],
+                payload[offset + 12],
+                payload[offset + 13],
             ]) as usize;
             let total_op_len = 14 + op_payload_len;
             if offset + total_op_len > payload.len() {
@@ -612,17 +604,19 @@ fn read_addr(bytes: &[u8], offset: usize) -> Option<(SocketAddr, usize)> {
     let addr = match family {
         ADDR_IPV4 => {
             let octets: [u8; 4] = bytes.get(offset + 1..offset + 5)?.try_into().ok()?;
-            let port = u16::from_be_bytes(
-                bytes.get(offset + 5..offset + 7)?.try_into().ok()?,
-            );
-            (SocketAddr::new(std::net::IpAddr::V4(octets.into()), port), 1 + 4 + 2)
+            let port = u16::from_be_bytes(bytes.get(offset + 5..offset + 7)?.try_into().ok()?);
+            (
+                SocketAddr::new(std::net::IpAddr::V4(octets.into()), port),
+                1 + 4 + 2,
+            )
         }
         ADDR_IPV6 => {
             let octets: [u8; 16] = bytes.get(offset + 1..offset + 17)?.try_into().ok()?;
-            let port = u16::from_be_bytes(
-                bytes.get(offset + 17..offset + 19)?.try_into().ok()?,
-            );
-            (SocketAddr::new(std::net::IpAddr::V6(octets.into()), port), 1 + 16 + 2)
+            let port = u16::from_be_bytes(bytes.get(offset + 17..offset + 19)?.try_into().ok()?);
+            (
+                SocketAddr::new(std::net::IpAddr::V6(octets.into()), port),
+                1 + 16 + 2,
+            )
         }
         _ => return None,
     };
@@ -1323,8 +1317,8 @@ fn connect_in_sender(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::crdt_manager::{CrdtId, CrdtType};
+    use super::*;
     use std::net::{IpAddr, Ipv4Addr};
     use std::thread::sleep;
 
@@ -1342,7 +1336,10 @@ mod tests {
         let id3 = NodeId::new(&addr3);
 
         assert_eq!(id1, id3, "same address must produce same NodeId");
-        assert_ne!(id1, id2, "different addresses must produce different NodeId");
+        assert_ne!(
+            id1, id2,
+            "different addresses must produce different NodeId"
+        );
         assert_ne!(id1.0, 0, "NodeId must not be zero");
     }
 
@@ -1354,10 +1351,7 @@ mod tests {
         let packet = Packet::ActorMessage {
             target_actor: 42,
             behavior_name: "handle_msg".to_string(),
-            payload: vec![
-                Value::int(123),
-                Value::string(456),
-            ],
+            payload: vec![Value::int(123), Value::string(456)],
             sender_actor: 99,
             sender_node: NodeId(0xDEAD_BEEF_CAFE_BABE),
             priority: MessagePriority::Normal,
@@ -1385,10 +1379,7 @@ mod tests {
                 },
                 NodeGossip {
                     node_id: NodeId(0xAAAA_BBBB_CCCC_DDDD),
-                    address: SocketAddr::new(
-                        IpAddr::V6("::1".parse().unwrap()),
-                        49152,
-                    ),
+                    address: SocketAddr::new(IpAddr::V6("::1".parse().unwrap()), 49152),
                     status: NodeStatus::Suspicious,
                     incarnation: u64::MAX,
                 },
@@ -1447,10 +1438,13 @@ mod tests {
             },
             is_delta: true,
         };
-        let packet = Packet::CrdtDeltaSync { ops: vec![full_op, delta_op] };
+        let packet = Packet::CrdtDeltaSync {
+            ops: vec![full_op, delta_op],
+        };
 
         let bytes = packet.to_bytes(42);
-        let (seq, decoded) = Packet::from_bytes(&bytes).expect("crdt delta sync deserialization failed");
+        let (seq, decoded) =
+            Packet::from_bytes(&bytes).expect("crdt delta sync deserialization failed");
 
         assert_eq!(seq, 42);
         assert_eq!(decoded, packet);
@@ -1577,8 +1571,15 @@ mod tests {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
         let transport = NetworkTransport::bind(addr).expect("bind failed");
 
-        assert_eq!(transport.listen_addr().ip(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
-        assert_ne!(transport.listen_addr().port(), 0, "ephemeral port must be assigned");
+        assert_eq!(
+            transport.listen_addr().ip(),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+        );
+        assert_ne!(
+            transport.listen_addr().port(),
+            0,
+            "ephemeral port must be assigned"
+        );
         assert_eq!(transport.connection_count(), 0);
         assert_eq!(transport.node_id(), NodeId::new(&transport.listen_addr()));
 
@@ -1600,7 +1601,9 @@ mod tests {
         let node_b_id = transport_b.node_id();
 
         // A connects to B.
-        transport_a.connect(node_b_id, addr_b_actual).expect("connect failed");
+        transport_a
+            .connect(node_b_id, addr_b_actual)
+            .expect("connect failed");
 
         // Give the listener thread a moment to accept and handshake.
         sleep(Duration::from_millis(100));
@@ -1685,25 +1688,13 @@ mod tests {
         // Send several packets and capture their sequence numbers on the wire
         // by serialising them locally with the transport's counter.
         let seq1 = transport_a.next_seq.load(Ordering::SeqCst);
-        transport_a.send(
-            node_b_id,
-            addr_b_actual,
-            Packet::Ack { packet_seq: 1 },
-        );
+        transport_a.send(node_b_id, addr_b_actual, Packet::Ack { packet_seq: 1 });
 
         let seq2 = transport_a.next_seq.load(Ordering::SeqCst);
-        transport_a.send(
-            node_b_id,
-            addr_b_actual,
-            Packet::Ack { packet_seq: 2 },
-        );
+        transport_a.send(node_b_id, addr_b_actual, Packet::Ack { packet_seq: 2 });
 
         let seq3 = transport_a.next_seq.load(Ordering::SeqCst);
-        transport_a.send(
-            node_b_id,
-            addr_b_actual,
-            Packet::Ack { packet_seq: 3 },
-        );
+        transport_a.send(node_b_id, addr_b_actual, Packet::Ack { packet_seq: 3 });
 
         assert_eq!(seq2, seq1 + 1, "sequence numbers must be monotonic");
         assert_eq!(seq3, seq2 + 1, "sequence numbers must be monotonic");
@@ -1758,7 +1749,9 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn test_packet_ack_roundtrip() {
-        let packet = Packet::Ack { packet_seq: 0xCAFE_BABE };
+        let packet = Packet::Ack {
+            packet_seq: 0xCAFE_BABE,
+        };
         let bytes = packet.to_bytes(42);
         let (seq, decoded) = Packet::from_bytes(&bytes).unwrap();
         assert_eq!(seq, 42);
@@ -1778,7 +1771,9 @@ mod tests {
 
         let node_b_id = transport_b.node_id();
 
-        transport_a.connect(node_b_id, transport_b.listen_addr()).unwrap();
+        transport_a
+            .connect(node_b_id, transport_b.listen_addr())
+            .unwrap();
         sleep(Duration::from_millis(100));
 
         assert!(transport_a.connection_count() >= 1);

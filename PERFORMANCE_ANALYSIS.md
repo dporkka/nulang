@@ -22,7 +22,7 @@
 | 1.4 | MLIR dialect | Deferred | No MLIR in tree |
 | 1.5 | SIMD auto-vectorization | **Shipped** | `src/jit/simd_analyzer.rs` + `src/jit/simd_compiler.rs` (I64x2/F64x2/I32x4/F32x4) |
 | 2.1 | Lock-free MPSC mailboxes | **Shipped differently** | `src/runtime/mailbox.rs` uses an unbounded `crossbeam::queue::SegQueue`, **not** the `ArrayQueue` recommended below — a bounded queue would force blocking or message drops, violating BEAM never-drop semantics. crossbeam's epoch-based reclamation (the Risk Register's ABA mitigation) comes with `SegQueue` |
-| 2.2 | Dual-region actor heaps | **Partial — LOS shipped** | No `bumpalo` dependency — `src/runtime/heap.rs` is a hand-rolled bump allocator with size-class free lists, now with a large-object space: allocations over the 256-byte `Huge` threshold are individually `std::alloc`'d outside the 64KB backing block, with exact-size free-list reuse and release on `reset()`/`Drop`. No nursery/tenured split |
+| 2.2 | Dual-region actor heaps | **Shipped differently — LOS + grow-on-demand** | No `bumpalo` dependency — `src/runtime/heap.rs` is a hand-rolled bump allocator with size-class free lists, a large-object space (allocations over the 256-byte `Huge` threshold individually `std::alloc`'d, exact-size free-list reuse, released on `reset()`/`Drop`), and grow-on-demand chaining: bump-block exhaustion chains a fresh 64KB block instead of failing, objects never move, all blocks released on `reset()`/`Drop` (2026-07-12). No nursery/tenured split |
 | 2.3 | mimalloc global allocator | **Shipped** | `mimalloc = "0.1"` in `Cargo.toml`; `#[global_allocator]` in `src/main.rs` |
 | 2.4 | Static escape analysis | **Reverted** | `src/escape_analysis.rs` was added and later removed; no escape analysis in the tree today |
 | 2.5 | Actor arenas | Deferred | Not present |
@@ -33,7 +33,7 @@
 | 3.4 | Native Raft | Deferred | No Raft code |
 | 3.5 | Content-addressable bytecode | Deferred | Not present |
 | 4.1 | Evidence-passing style | Not started | Effects remain runtime handler-stack based (`Handle`/`Perform`/`Resume`/`Unwind`) |
-| 4.2 | Linear moves for iso | **Partial** | `LinearIso` capability exists in `src/types.rs` with exactly-once tracking in the typechecker; capabilities are erased at runtime, so no runtime move mechanism as proposed |
+| 4.2 | Linear moves for iso | **Partial** | `LinearIso` capability in `src/types.rs` with at-most-once consumption enforcement wired into `CapabilityAnalyzer` (`src/effect_checker.rs`, 2026-07-12): second use of a consumed binding is a `CapError`, sends/captures consume, conservative branch merge; exactly-once must-use is a documented follow-up. Capabilities are still erased at runtime, so no runtime move mechanism as proposed |
 | 4.3 | Typestate analysis | Not started | Not present |
 | 4.4 | Implicit effect returns | Not found | No corresponding transform in the current effect checker / HIR lowering |
 | 5.1 | Unify actor/agent primitives | **Partial** | v0.9 AI runtime exists (`src/ai/`: OpenAI/Ollama providers, memory, pipelines, debates, supervisor) but agents are not actors with `capability llm` |
@@ -44,6 +44,11 @@
 | 6.2 | Deterministic simulation testing | Not started | No DST harness |
 | 6.3 | Causal profiling | Deferred | Not present |
 | 6.4 | Actor topology dashboard | Not started | Not present |
+
+**Memory-management changes (2026-07-12, outside the 28 proposals):**
+- **Intra-actor reclamation shipped.** `plan_drops` (liveness analysis in `src/mir_codegen.rs`) emits `OpCode::Drop` at conservative last-use/redefinition/branch-exit points; the `Drop` handler clears the register (idempotent); `ArrStore`/`RecS`/`FieldS` write barriers retain stored pointers and release overwritten slots; `OrcaGc::free_object` releases slot references on container free. Actor heaps no longer accumulate garbage until actor exit. This covers much of proposal 2.4's goal ("make ORCA GC effectively disappear") via liveness + barriers rather than escape analysis.
+- **Refcounts downgraded to plain integers.** `OrcaHeader` counts and `GcStats` are no longer atomic — all heap/GC access runs on the single scheduler thread (network/LLM/Python threads never touch heaps; verified). The single-thread invariant is documented in SAFETY comments.
+- **Heap growth shipped** — see row 2.2 above.
 
 ---
 

@@ -35,7 +35,7 @@
 //!    jump back to loop header).
 
 use crate::bytecode::{Instruction, OpCode};
-use crate::jit::typed_compiler::{TypeMetadata, KnownType};
+use crate::jit::typed_compiler::{KnownType, TypeMetadata};
 
 // ---------------------------------------------------------------------------
 // SimdElemType
@@ -193,7 +193,10 @@ pub enum BinopKind {
 impl BinopKind {
     /// Return true if this is a floating-point operation.
     pub fn is_float(&self) -> bool {
-        matches!(self, BinopKind::FAdd | BinopKind::FSub | BinopKind::FMul | BinopKind::FDiv)
+        matches!(
+            self,
+            BinopKind::FAdd | BinopKind::FSub | BinopKind::FMul | BinopKind::FDiv
+        )
     }
 
     /// Return true if this is an integer operation.
@@ -310,13 +313,21 @@ impl SimdAnalyzer {
             let backward_target = match instr.opcode {
                 OpCode::Jmp => {
                     let target = (pc as i64 + instr.simm16() as i64) as usize;
-                    if target < pc { Some(target) } else { None }
+                    if target < pc {
+                        Some(target)
+                    } else {
+                        None
+                    }
                 }
                 OpCode::JmpT | OpCode::JmpF => {
                     // The conditional jump may jump backward (loop back-edge)
                     // or forward (loop exit). We look at the backward case.
                     let target = (pc as i64 + instr.offset16() as i64) as usize;
-                    if target < pc { Some(target) } else { None }
+                    if target < pc {
+                        Some(target)
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };
@@ -336,9 +347,14 @@ impl SimdAnalyzer {
                     continue;
                 }
 
-                if let Some(region) = analyze_region(instructions, body_start, body_len, type_metadata) {
+                if let Some(region) =
+                    analyze_region(instructions, body_start, body_len, type_metadata)
+                {
                     // Avoid duplicate regions (same start offset).
-                    if !regions.iter().any(|r: &SimdRegion| r.start_offset == region.start_offset) {
+                    if !regions
+                        .iter()
+                        .any(|r: &SimdRegion| r.start_offset == region.start_offset)
+                    {
                         regions.push(region);
                     }
                 }
@@ -444,9 +460,18 @@ pub fn analyze_region(
                 return None;
             }
             // Actor / concurrency opcodes are not vectorizable.
-            OpCode::Spawn | OpCode::Send | OpCode::Ask | OpCode::SelfOp
-            | OpCode::Receive | OpCode::ReceiveMatch | OpCode::Monitor | OpCode::Demon
-            | OpCode::Link | OpCode::Unlink | OpCode::Exit | OpCode::Yield => {
+            OpCode::Spawn
+            | OpCode::Send
+            | OpCode::Ask
+            | OpCode::SelfOp
+            | OpCode::Receive
+            | OpCode::ReceiveMatch
+            | OpCode::Monitor
+            | OpCode::Demon
+            | OpCode::Link
+            | OpCode::Unlink
+            | OpCode::Exit
+            | OpCode::Yield => {
                 return None;
             }
             // Effect operations are not vectorizable.
@@ -454,8 +479,14 @@ pub fn analyze_region(
                 return None;
             }
             // IO / debug not vectorizable.
-            OpCode::SRead | OpCode::FOpen | OpCode::FRead | OpCode::FWrite | OpCode::FClose
-            | OpCode::DbgBreak | OpCode::DbgPrint | OpCode::DbgStack => {
+            OpCode::SRead
+            | OpCode::FOpen
+            | OpCode::FRead
+            | OpCode::FWrite
+            | OpCode::FClose
+            | OpCode::DbgBreak
+            | OpCode::DbgPrint
+            | OpCode::DbgStack => {
                 return None;
             }
             // Detect induction variable increment.
@@ -472,7 +503,10 @@ pub fn analyze_region(
                 }
                 // Forward jumps inside the loop body are also not allowed (except exit).
                 let target_usize = target as usize;
-                if target_usize >= start_offset && target_usize < end_offset && target_usize != start_offset {
+                if target_usize >= start_offset
+                    && target_usize < end_offset
+                    && target_usize != start_offset
+                {
                     // Jump to somewhere inside the loop body (not the header) — reject.
                     // This indicates complex control flow.
                     // However, allow it if it's just skipping past the back-edge.
@@ -534,13 +568,14 @@ pub fn analyze_region(
     }
 
     // --- Requirement 3: The induction variable must be incremented ---
-    let has_iinc = body.iter().any(|instr| {
-        instr.opcode == OpCode::IInc && instr.op1 == idx_reg
-    });
+    let has_iinc = body
+        .iter()
+        .any(|instr| instr.opcode == OpCode::IInc && instr.op1 == idx_reg);
 
     // Also accept IAdd idx_reg, Const1/Const0-like as induction increment.
     let has_iadd_inc = body.iter().any(|instr| {
-        instr.opcode == OpCode::IAdd && instr.op3 == idx_reg
+        instr.opcode == OpCode::IAdd
+            && instr.op3 == idx_reg
             && (instr.op1 == idx_reg || instr.op2 == idx_reg)
     });
 
@@ -672,9 +707,8 @@ fn try_detect_elementwise_binop(
                     if let Some(op) = op_kind {
                         // Check if the binop uses the loaded values as operands
                         // and produces the value that gets stored.
-                        let uses_operands =
-                            (instr.op1 == dst1 && instr.op2 == dst2)
-                                || (instr.op1 == dst2 && instr.op2 == dst1);
+                        let uses_operands = (instr.op1 == dst1 && instr.op2 == dst2)
+                            || (instr.op1 == dst2 && instr.op2 == dst1);
                         let produces_store_src = instr.op3 == store_src;
 
                         if uses_operands && produces_store_src {
@@ -782,9 +816,8 @@ fn try_detect_elementwise_cmp(
                     };
 
                     if let Some(op) = op_kind {
-                        let uses_operands =
-                            (instr.op1 == dst1 && instr.op2 == dst2)
-                                || (instr.op1 == dst2 && instr.op2 == dst1);
+                        let uses_operands = (instr.op1 == dst1 && instr.op2 == dst2)
+                            || (instr.op1 == dst2 && instr.op2 == dst1);
                         let produces_store_src = instr.op3 == store_src;
 
                         if uses_operands && produces_store_src {
@@ -884,7 +917,10 @@ fn has_loop_carried_dependency_cmp(
 // ---------------------------------------------------------------------------
 
 /// Infer the element type from a binary pattern, using type metadata if available.
-fn infer_elem_type(pattern: &VectorizablePattern, type_metadata: Option<&TypeMetadata>) -> SimdElemType {
+fn infer_elem_type(
+    pattern: &VectorizablePattern,
+    type_metadata: Option<&TypeMetadata>,
+) -> SimdElemType {
     match pattern {
         VectorizablePattern::ElementWiseBinop { op, result_reg, .. } => {
             // Use the operation kind to determine type category.
@@ -913,37 +949,43 @@ fn infer_elem_type(pattern: &VectorizablePattern, type_metadata: Option<&TypeMet
     }
 }
 
-fn infer_elem_type_unary(pattern: &VectorizablePattern, type_metadata: Option<&TypeMetadata>) -> SimdElemType {
+fn infer_elem_type_unary(
+    pattern: &VectorizablePattern,
+    type_metadata: Option<&TypeMetadata>,
+) -> SimdElemType {
     match pattern {
-        VectorizablePattern::ElementWiseUnary { op, result_reg, .. } => {
-            match op {
-                UnaryKind::FNeg => {
-                    if let Some(meta) = type_metadata {
-                        let ty = meta.get_type(*result_reg as usize);
-                        if ty == KnownType::Float {
-                            return SimdElemType::Float64;
-                        }
+        VectorizablePattern::ElementWiseUnary { op, result_reg, .. } => match op {
+            UnaryKind::FNeg => {
+                if let Some(meta) = type_metadata {
+                    let ty = meta.get_type(*result_reg as usize);
+                    if ty == KnownType::Float {
+                        return SimdElemType::Float64;
                     }
-                    SimdElemType::Float64
                 }
-                UnaryKind::INeg => {
-                    if let Some(meta) = type_metadata {
-                        let ty = meta.get_type(*result_reg as usize);
-                        if ty == KnownType::Int {
-                            return SimdElemType::Int64;
-                        }
-                    }
-                    SimdElemType::Int64
-                }
+                SimdElemType::Float64
             }
-        }
+            UnaryKind::INeg => {
+                if let Some(meta) = type_metadata {
+                    let ty = meta.get_type(*result_reg as usize);
+                    if ty == KnownType::Int {
+                        return SimdElemType::Int64;
+                    }
+                }
+                SimdElemType::Int64
+            }
+        },
         _ => SimdElemType::Int64,
     }
 }
 
-fn infer_elem_type_cmp(pattern: &VectorizablePattern, type_metadata: Option<&TypeMetadata>) -> SimdElemType {
+fn infer_elem_type_cmp(
+    pattern: &VectorizablePattern,
+    type_metadata: Option<&TypeMetadata>,
+) -> SimdElemType {
     match pattern {
-        VectorizablePattern::ElementWiseCmp { op, lhs_elem_reg, .. } => {
+        VectorizablePattern::ElementWiseCmp {
+            op, lhs_elem_reg, ..
+        } => {
             if op.is_float() {
                 if let Some(meta) = type_metadata {
                     let ty = meta.get_type(*lhs_elem_reg as usize);
@@ -1086,23 +1128,23 @@ mod simd_analyzer_tests {
     fn build_iadd_loop_body() -> Vec<Instruction> {
         vec![
             // Loop body starts here (offset 0):
-            Instruction::new3(OpCode::ArrLoad, 0, 3, 4),  // R4 = a[R3]
-            Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
-            Instruction::new3(OpCode::IAdd, 4, 5, 6),     // R6 = R4 + R5
+            Instruction::new3(OpCode::ArrLoad, 0, 3, 4), // R4 = a[R3]
+            Instruction::new3(OpCode::ArrLoad, 1, 3, 5), // R5 = b[R3]
+            Instruction::new3(OpCode::IAdd, 4, 5, 6),    // R6 = R4 + R5
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3),     // R3++
-            Instruction::new2(OpCode::Jmp, 0, 0),      // jmp back (patched later)
+            Instruction::new1(OpCode::IInc, 3),          // R3++
+            Instruction::new2(OpCode::Jmp, 0, 0),        // jmp back (patched later)
         ]
     }
 
     /// Build instructions for `c[i] = a[i] * b[i]` loop body.
     fn build_imul_loop_body() -> Vec<Instruction> {
         vec![
-            Instruction::new3(OpCode::ArrLoad, 0, 3, 4),  // R4 = a[R3]
-            Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
-            Instruction::new3(OpCode::IMul, 4, 5, 6),     // R6 = R4 * R5
+            Instruction::new3(OpCode::ArrLoad, 0, 3, 4), // R4 = a[R3]
+            Instruction::new3(OpCode::ArrLoad, 1, 3, 5), // R5 = b[R3]
+            Instruction::new3(OpCode::IMul, 4, 5, 6),    // R6 = R4 * R5
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new1(OpCode::IInc, 3),          // R3++
             Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
@@ -1110,11 +1152,11 @@ mod simd_analyzer_tests {
     /// Build instructions for `c[i] = a[i] + b[i]` with float addition.
     fn build_fadd_loop_body() -> Vec<Instruction> {
         vec![
-            Instruction::new3(OpCode::ArrLoad, 0, 3, 4),  // R4 = a[R3]
-            Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
-            Instruction::new3(OpCode::FAdd, 4, 5, 6),     // R6 = R4 + R5 (float)
+            Instruction::new3(OpCode::ArrLoad, 0, 3, 4), // R4 = a[R3]
+            Instruction::new3(OpCode::ArrLoad, 1, 3, 5), // R5 = b[R3]
+            Instruction::new3(OpCode::FAdd, 4, 5, 6),    // R6 = R4 + R5 (float)
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new1(OpCode::IInc, 3),          // R3++
             Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
@@ -1123,7 +1165,7 @@ mod simd_analyzer_tests {
     fn build_numeric_loop_no_arrays() -> Vec<Instruction> {
         vec![
             Instruction::new3(OpCode::IAdd, 3, 4, 5), // R5 = R3 + R4 (just arithmetic)
-            Instruction::new1(OpCode::IInc, 3), // R3++
+            Instruction::new1(OpCode::IInc, 3),       // R3++
             Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
@@ -1132,11 +1174,11 @@ mod simd_analyzer_tests {
     fn build_loop_carried_dep() -> Vec<Instruction> {
         vec![
             // sum[i] = sum[i] + a[i]  (loop-carried via same array)
-            Instruction::new3(OpCode::ArrLoad, 0, 3, 4),  // R4 = sum[R3]
-            Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = a[R3]
-            Instruction::new3(OpCode::IAdd, 4, 5, 6),     // R6 = R4 + R5
+            Instruction::new3(OpCode::ArrLoad, 0, 3, 4), // R4 = sum[R3]
+            Instruction::new3(OpCode::ArrLoad, 1, 3, 5), // R5 = a[R3]
+            Instruction::new3(OpCode::IAdd, 4, 5, 6),    // R6 = R4 + R5
             Instruction::new3(OpCode::ArrStore, 0, 3, 6), // sum[R3] = R6  (same as src!)
-            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new1(OpCode::IInc, 3),          // R3++
             Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
@@ -1144,10 +1186,10 @@ mod simd_analyzer_tests {
     /// Build a loop containing a function call.
     fn build_loop_with_call() -> Vec<Instruction> {
         vec![
-            Instruction::new3(OpCode::ArrLoad, 0, 3, 4),   // R4 = a[R3]
-            Instruction::new3(OpCode::Call, 7, 0, 5),      // R5 = call(R7)
-            Instruction::new3(OpCode::ArrStore, 1, 3, 5),  // b[R3] = R5
-            Instruction::new1(OpCode::IInc, 3),      // R3++
+            Instruction::new3(OpCode::ArrLoad, 0, 3, 4), // R4 = a[R3]
+            Instruction::new3(OpCode::Call, 7, 0, 5),    // R5 = call(R7)
+            Instruction::new3(OpCode::ArrStore, 1, 3, 5), // b[R3] = R5
+            Instruction::new1(OpCode::IInc, 3),          // R3++
             Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
@@ -1155,11 +1197,11 @@ mod simd_analyzer_tests {
     /// Build a comparison loop: `c[i] = a[i] < b[i]`.
     fn build_cmp_loop_body() -> Vec<Instruction> {
         vec![
-            Instruction::new3(OpCode::ArrLoad, 0, 3, 4),  // R4 = a[R3]
-            Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
-            Instruction::new3(OpCode::ICmpLt, 4, 5, 6),   // R6 = R4 < R5
+            Instruction::new3(OpCode::ArrLoad, 0, 3, 4), // R4 = a[R3]
+            Instruction::new3(OpCode::ArrLoad, 1, 3, 5), // R5 = b[R3]
+            Instruction::new3(OpCode::ICmpLt, 4, 5, 6),  // R6 = R4 < R5
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new1(OpCode::IInc, 3),          // R3++
             Instruction::new2(OpCode::Jmp, 0, 0),
         ]
     }
@@ -1172,7 +1214,10 @@ mod simd_analyzer_tests {
         let instructions = build_iadd_loop_body();
         let region = analyze_region(&instructions, 0, instructions.len(), None);
 
-        assert!(region.is_some(), "Should detect c[i] = a[i] + b[i] as vectorizable");
+        assert!(
+            region.is_some(),
+            "Should detect c[i] = a[i] + b[i] as vectorizable"
+        );
         let region = region.unwrap();
 
         assert_eq!(region.start_offset, 0);
@@ -1182,7 +1227,13 @@ mod simd_analyzer_tests {
         assert_eq!(region.width, SimdWidth::Width2);
 
         match &region.pattern {
-            VectorizablePattern::ElementWiseBinop { op, lhs_arr_reg, rhs_arr_reg, dst_arr_reg, .. } => {
+            VectorizablePattern::ElementWiseBinop {
+                op,
+                lhs_arr_reg,
+                rhs_arr_reg,
+                dst_arr_reg,
+                ..
+            } => {
                 assert_eq!(*op, BinopKind::IAdd);
                 assert_eq!(*lhs_arr_reg, 0);
                 assert_eq!(*rhs_arr_reg, 1);
@@ -1200,7 +1251,10 @@ mod simd_analyzer_tests {
         let instructions = build_imul_loop_body();
         let region = analyze_region(&instructions, 0, instructions.len(), None);
 
-        assert!(region.is_some(), "Should detect c[i] = a[i] * b[i] as vectorizable");
+        assert!(
+            region.is_some(),
+            "Should detect c[i] = a[i] * b[i] as vectorizable"
+        );
         let region = region.unwrap();
 
         assert_eq!(region.induction_var_reg, 3);
@@ -1222,7 +1276,10 @@ mod simd_analyzer_tests {
         let instructions = build_fadd_loop_body();
         let region = analyze_region(&instructions, 0, instructions.len(), None);
 
-        assert!(region.is_some(), "Should detect c[i] = a[i] + b[i] (float) as vectorizable");
+        assert!(
+            region.is_some(),
+            "Should detect c[i] = a[i] + b[i] (float) as vectorizable"
+        );
         let region = region.unwrap();
 
         assert_eq!(region.induction_var_reg, 3);
@@ -1245,7 +1302,10 @@ mod simd_analyzer_tests {
         let instructions = build_numeric_loop_no_arrays();
         let region = analyze_region(&instructions, 0, instructions.len(), None);
 
-        assert!(region.is_none(), "Numeric loop without arrays should NOT be vectorizable");
+        assert!(
+            region.is_none(),
+            "Numeric loop without arrays should NOT be vectorizable"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1256,7 +1316,10 @@ mod simd_analyzer_tests {
         let instructions = build_loop_with_call();
         let region = analyze_region(&instructions, 0, instructions.len(), None);
 
-        assert!(region.is_none(), "Loop with Call inside should NOT be vectorizable");
+        assert!(
+            region.is_none(),
+            "Loop with Call inside should NOT be vectorizable"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1269,7 +1332,10 @@ mod simd_analyzer_tests {
         let instructions = build_loop_carried_dep();
         let region = analyze_region(&instructions, 0, instructions.len(), None);
 
-        assert!(region.is_none(), "Loop with in-place array update (loop-carried dep) should NOT be vectorizable");
+        assert!(
+            region.is_none(),
+            "Loop with in-place array update (loop-carried dep) should NOT be vectorizable"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1282,11 +1348,11 @@ mod simd_analyzer_tests {
 
         // --- First loop: c[i] = a[i] + b[i] ---
         let loop1 = vec![
-            Instruction::new3(OpCode::ArrLoad, 0, 3, 4),  // R4 = a[R3]
-            Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
-            Instruction::new3(OpCode::IAdd, 4, 5, 6),     // R6 = R4 + R5
+            Instruction::new3(OpCode::ArrLoad, 0, 3, 4), // R4 = a[R3]
+            Instruction::new3(OpCode::ArrLoad, 1, 3, 5), // R5 = b[R3]
+            Instruction::new3(OpCode::IAdd, 4, 5, 6),    // R6 = R4 + R5
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new1(OpCode::IInc, 3),          // R3++
             // Back-edge: jump back to start of this loop (offset 0)
             // simm16 = -5 (jump back 5 instructions from pc=5 to target=0)
             Instruction::new3(OpCode::Jmp, 0xFF, 0xFB, 0), // jmp -5
@@ -1299,20 +1365,24 @@ mod simd_analyzer_tests {
         // --- Second loop: e[i] = d[i] * f[i] ---
         let loop2_start = instructions.len();
         let loop2 = vec![
-            Instruction::new3(OpCode::ArrLoad, 10, 13, 14),  // R14 = d[R13]
-            Instruction::new3(OpCode::ArrLoad, 11, 13, 15),  // R15 = f[R13]
-            Instruction::new3(OpCode::IMul, 14, 15, 16),     // R16 = R14 * R15
+            Instruction::new3(OpCode::ArrLoad, 10, 13, 14), // R14 = d[R13]
+            Instruction::new3(OpCode::ArrLoad, 11, 13, 15), // R15 = f[R13]
+            Instruction::new3(OpCode::IMul, 14, 15, 16),    // R16 = R14 * R15
             Instruction::new3(OpCode::ArrStore, 12, 13, 16), // e[R13] = R16
-            Instruction::new1(OpCode::IInc, 13),       // R13++
+            Instruction::new1(OpCode::IInc, 13),            // R13++
             // Back-edge: simm16 = -5 (pc = loop2_start+5, target = loop2_start)
-            Instruction::new3(OpCode::Jmp, 0xFF, 0xFB, 0),  // jmp -5
+            Instruction::new3(OpCode::Jmp, 0xFF, 0xFB, 0), // jmp -5
         ];
         instructions.extend_from_slice(&loop2);
 
         let analyzer = SimdAnalyzer::new();
         let regions = analyzer.find_all_vectorizable_regions(&instructions, None);
 
-        assert_eq!(regions.len(), 2, "Should find exactly 2 vectorizable regions");
+        assert_eq!(
+            regions.len(),
+            2,
+            "Should find exactly 2 vectorizable regions"
+        );
 
         // First region
         assert_eq!(regions[0].start_offset, 0);
@@ -1369,7 +1439,10 @@ mod simd_analyzer_tests {
         let instructions = build_cmp_loop_body();
         let region = analyze_region(&instructions, 0, instructions.len(), None);
 
-        assert!(region.is_some(), "Should detect c[i] = a[i] < b[i] as vectorizable");
+        assert!(
+            region.is_some(),
+            "Should detect c[i] = a[i] < b[i] as vectorizable"
+        );
         let region = region.unwrap();
 
         assert_eq!(region.induction_var_reg, 3);
@@ -1377,7 +1450,13 @@ mod simd_analyzer_tests {
         assert_eq!(region.elem_type, SimdElemType::Int64);
 
         match &region.pattern {
-            VectorizablePattern::ElementWiseCmp { op, lhs_arr_reg, rhs_arr_reg, dst_arr_reg, .. } => {
+            VectorizablePattern::ElementWiseCmp {
+                op,
+                lhs_arr_reg,
+                rhs_arr_reg,
+                dst_arr_reg,
+                ..
+            } => {
                 assert_eq!(*op, CmpKind::ICmpLt);
                 assert_eq!(*lhs_arr_reg, 0);
                 assert_eq!(*rhs_arr_reg, 1);
@@ -1394,14 +1473,17 @@ mod simd_analyzer_tests {
     fn test_reject_spawn_in_loop() {
         let instructions = vec![
             Instruction::new3(OpCode::ArrLoad, 0, 3, 4),
-            Instruction::new3(OpCode::Spawn, 0, 0, 0),    // actor spawn — not vectorizable
+            Instruction::new3(OpCode::Spawn, 0, 0, 0), // actor spawn — not vectorizable
             Instruction::new3(OpCode::ArrStore, 1, 3, 4),
             Instruction::new1(OpCode::IInc, 3),
             Instruction::new2(OpCode::Jmp, 0, 0),
         ];
 
         let region = analyze_region(&instructions, 0, instructions.len(), None);
-        assert!(region.is_none(), "Loop with Spawn should NOT be vectorizable");
+        assert!(
+            region.is_none(),
+            "Loop with Spawn should NOT be vectorizable"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1418,8 +1500,14 @@ mod simd_analyzer_tests {
         assert_eq!(SimdElemType::Int32.lane_count(), 4);
         assert_eq!(SimdElemType::Float32.lane_count(), 4);
 
-        assert_eq!(SimdWidth::from_elem_type(SimdElemType::Int64), SimdWidth::Width2);
-        assert_eq!(SimdWidth::from_elem_type(SimdElemType::Float32), SimdWidth::Width4);
+        assert_eq!(
+            SimdWidth::from_elem_type(SimdElemType::Int64),
+            SimdWidth::Width2
+        );
+        assert_eq!(
+            SimdWidth::from_elem_type(SimdElemType::Float32),
+            SimdWidth::Width4
+        );
 
         assert!(SimdElemType::Float64.is_float());
         assert!(!SimdElemType::Float64.is_int());
@@ -1442,7 +1530,10 @@ mod simd_analyzer_tests {
             Instruction::new3(OpCode::ArrStore, 1, 3, 4),
         ];
         let region = analyze_region(&short, 0, short.len(), None);
-        assert!(region.is_none(), "Too-short region (no IInc) should be rejected");
+        assert!(
+            region.is_none(),
+            "Too-short region (no IInc) should be rejected"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1464,16 +1555,19 @@ mod simd_analyzer_tests {
     fn test_reject_mismatched_index_regs() {
         // R3 indexes first array, R4 indexes second — must use same induction var.
         let instructions = vec![
-            Instruction::new3(OpCode::ArrLoad, 0, 3, 5),  // R5 = a[R3]
-            Instruction::new3(OpCode::ArrLoad, 1, 4, 6),  // R6 = b[R4]  (different idx!)
-            Instruction::new3(OpCode::IAdd, 5, 6, 7),     // R7 = R5 + R6
+            Instruction::new3(OpCode::ArrLoad, 0, 3, 5), // R5 = a[R3]
+            Instruction::new3(OpCode::ArrLoad, 1, 4, 6), // R6 = b[R4]  (different idx!)
+            Instruction::new3(OpCode::IAdd, 5, 6, 7),    // R7 = R5 + R6
             Instruction::new3(OpCode::ArrStore, 2, 3, 7), // c[R3] = R7
-            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new1(OpCode::IInc, 3),          // R3++
             Instruction::new2(OpCode::Jmp, 0, 0),
         ];
 
         let region = analyze_region(&instructions, 0, instructions.len(), None);
-        assert!(region.is_none(), "Mismatched index registers should be rejected");
+        assert!(
+            region.is_none(),
+            "Mismatched index registers should be rejected"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1482,11 +1576,11 @@ mod simd_analyzer_tests {
     #[test]
     fn test_detect_elementwise_sub() {
         let instructions = vec![
-            Instruction::new3(OpCode::ArrLoad, 0, 3, 4),  // R4 = a[R3]
-            Instruction::new3(OpCode::ArrLoad, 1, 3, 5),  // R5 = b[R3]
-            Instruction::new3(OpCode::ISub, 4, 5, 6),     // R6 = R4 - R5
+            Instruction::new3(OpCode::ArrLoad, 0, 3, 4), // R4 = a[R3]
+            Instruction::new3(OpCode::ArrLoad, 1, 3, 5), // R5 = b[R3]
+            Instruction::new3(OpCode::ISub, 4, 5, 6),    // R6 = R4 - R5
             Instruction::new3(OpCode::ArrStore, 2, 3, 6), // c[R3] = R6
-            Instruction::new1(OpCode::IInc, 3),     // R3++
+            Instruction::new1(OpCode::IInc, 3),          // R3++
             Instruction::new2(OpCode::Jmp, 0, 0),
         ];
 

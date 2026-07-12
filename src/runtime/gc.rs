@@ -42,7 +42,6 @@
 //! valid and that no data races occur when multiple actors access the same object.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::runtime::heap::{OrcaHeader, TypeTag};
 
@@ -82,58 +81,52 @@ pub trait OrcaHeap {
 
 /// Counters for GC-related events.
 ///
-/// All fields are atomics so the coordinator can safely aggregate stats from
-/// multiple actor GCs without extra synchronization.
+/// Plain `u64`s, not atomics: the runtime is a single-threaded synchronous
+/// coordinator, so the scheduler thread is the only reader and writer.
+/// Aggregation across actors (`Runtime::gc_stats`) also happens on that
+/// thread.
 #[derive(Debug)]
 pub struct GcStats {
     /// Total objects allocated.
-    pub objects_allocated: AtomicU64,
+    pub objects_allocated: u64,
     /// Total objects freed.
-    pub objects_freed: AtomicU64,
+    pub objects_freed: u64,
     /// Local reference creations.
-    pub local_refs_created: AtomicU64,
+    pub local_refs_created: u64,
     /// Local reference drops.
-    pub local_refs_dropped: AtomicU64,
+    pub local_refs_dropped: u64,
     /// Foreign reference sends.
-    pub foreign_refs_sent: AtomicU64,
+    pub foreign_refs_sent: u64,
     /// Foreign reference receives.
-    pub foreign_refs_received: AtomicU64,
+    pub foreign_refs_received: u64,
     /// Cycles detected (placeholder for future cycle collector).
-    pub cycles_detected: AtomicU64,
+    pub cycles_detected: u64,
     /// Total bytes allocated.
-    pub bytes_allocated: AtomicU64,
+    pub bytes_allocated: u64,
     /// Total bytes freed.
-    pub bytes_freed: AtomicU64,
+    pub bytes_freed: u64,
 }
 
 impl Default for GcStats {
     fn default() -> Self {
         GcStats {
-            objects_allocated: AtomicU64::new(0),
-            objects_freed: AtomicU64::new(0),
-            local_refs_created: AtomicU64::new(0),
-            local_refs_dropped: AtomicU64::new(0),
-            foreign_refs_sent: AtomicU64::new(0),
-            foreign_refs_received: AtomicU64::new(0),
-            cycles_detected: AtomicU64::new(0),
-            bytes_allocated: AtomicU64::new(0),
-            bytes_freed: AtomicU64::new(0),
+            objects_allocated: 0,
+            objects_freed: 0,
+            local_refs_created: 0,
+            local_refs_dropped: 0,
+            foreign_refs_sent: 0,
+            foreign_refs_received: 0,
+            cycles_detected: 0,
+            bytes_allocated: 0,
+            bytes_freed: 0,
         }
     }
 }
 
 impl GcStats {
     /// Reset all counters to zero.
-    pub fn reset(&self) {
-        self.objects_allocated.store(0, Ordering::Relaxed);
-        self.objects_freed.store(0, Ordering::Relaxed);
-        self.local_refs_created.store(0, Ordering::Relaxed);
-        self.local_refs_dropped.store(0, Ordering::Relaxed);
-        self.foreign_refs_sent.store(0, Ordering::Relaxed);
-        self.foreign_refs_received.store(0, Ordering::Relaxed);
-        self.cycles_detected.store(0, Ordering::Relaxed);
-        self.bytes_allocated.store(0, Ordering::Relaxed);
-        self.bytes_freed.store(0, Ordering::Relaxed);
+    pub fn reset(&mut self) {
+        *self = GcStats::default();
     }
 }
 
@@ -184,6 +177,11 @@ unsafe impl Send for ForeignRefOp {}
 /// `OrcaGc` is **not** `Send` nor `Sync`.  It should only be accessed from
 /// the thread that runs the owning actor.  Cross-actor communication happens
 /// via [`ForeignRefOp`] messages handled by the [`OrcaCoordinator`].
+///
+/// The runtime is a single-threaded synchronous coordinator (one scheduler
+/// thread runs every actor step, `process_gc_ops`, and cycle detection), so
+/// header refcounts and these stats are plain integers mutated through
+/// `&mut self` — no atomic operations are needed or used.
 #[derive(Debug)]
 pub struct OrcaGc {
     actor_id: u64,
@@ -242,12 +240,8 @@ impl OrcaGc {
             header.type_tag = type_tag;
         }
 
-        self.stats
-            .objects_allocated
-            .fetch_add(1, Ordering::Relaxed);
-        self.stats
-            .bytes_allocated
-            .fetch_add(payload_size as u64, Ordering::Relaxed);
+        self.stats.objects_allocated += 1;
+        self.stats.bytes_allocated += payload_size as u64;
 
         Some(payload_ptr)
     }
@@ -263,19 +257,16 @@ impl OrcaGc {
     /// * The caller must ensure there are no concurrent modifications to the
     ///   object's reference counts.
     pub unsafe fn local_ref(&mut self, heap: &dyn OrcaHeap, payload_ptr: *mut u8) {
-        // SAFETY: caller guarantees payload_ptr is valid.
-        let header = &*heap.header_ptr(payload_ptr);
+        // SAFETY: caller guarantees payload_ptr is valid. Single-threaded
+        // runtime: no other thread mutates this header concurrently.
+        let header = &mut *heap.header_ptr(payload_ptr);
         debug_assert_eq!(
             header.actor_id, self.actor_id,
             "local_ref called on object not owned by this actor"
         );
 
-        header
-            .ref_count
-            .fetch_add(1, Ordering::Relaxed);
-        self.stats
-            .local_refs_created
-            .fetch_add(1, Ordering::Relaxed);
+        header.ref_count += 1;
+        self.stats.local_refs_created += 1;
     }
 
     /// Drop a local reference to an object.
@@ -292,33 +283,23 @@ impl OrcaGc {
     /// * `payload_ptr` must be a valid payload pointer with at least one
     ///   outstanding local reference.
     /// * The object must be owned by this actor.
-    pub unsafe fn drop_local_ref(
-        &mut self,
-        heap: &mut dyn OrcaHeap,
-        payload_ptr: *mut u8,
-    ) -> bool {
-        // SAFETY: caller guarantees payload_ptr is valid.
-        let header = &*heap.header_ptr(payload_ptr);
+    pub unsafe fn drop_local_ref(&mut self, heap: &mut dyn OrcaHeap, payload_ptr: *mut u8) -> bool {
+        // SAFETY: caller guarantees payload_ptr is valid. Single-threaded
+        // runtime: no other thread mutates this header concurrently.
+        let header = &mut *heap.header_ptr(payload_ptr);
         debug_assert_eq!(
             header.actor_id, self.actor_id,
             "drop_local_ref called on object not owned by this actor"
         );
 
-        let prev = header
-            .ref_count
-            .fetch_sub(1, Ordering::Release);
+        header.ref_count -= 1;
 
-        self.stats
-            .local_refs_dropped
-            .fetch_add(1, Ordering::Relaxed);
+        self.stats.local_refs_dropped += 1;
 
-        // fetch_sub returns the *previous* value.  If it was 1, the count is
-        // now 0.
-        if prev == 1 {
-            let foreign = header
-                .foreign_count
-                .load(Ordering::Acquire);
-            let is_sticky = header.sticky.load(Ordering::Relaxed);
+        // If the count is now 0, the object may be reclaimable.
+        if header.ref_count == 0 {
+            let foreign = header.foreign_count;
+            let is_sticky = header.sticky;
 
             if foreign == 0 && !is_sticky {
                 // SAFETY: payload_ptr is a live allocation on this heap.
@@ -327,8 +308,7 @@ impl OrcaGc {
             } else {
                 // Cannot free yet — foreign refs exist or object is pinned.
                 // Defer and retry later.
-                self.deferred_decrements
-                    .push(heap.header_ptr(payload_ptr));
+                self.deferred_decrements.push(heap.header_ptr(payload_ptr));
                 false
             }
         } else {
@@ -351,9 +331,10 @@ impl OrcaGc {
         payload_ptr: *mut u8,
         target_actor: u64,
     ) -> ForeignRefOp {
-        // SAFETY: caller guarantees payload_ptr is valid.
+        // SAFETY: caller guarantees payload_ptr is valid. Single-threaded
+        // runtime: no other thread mutates this header concurrently.
         let header_ptr = heap.header_ptr(payload_ptr);
-        let header = &*header_ptr;
+        let header = &mut *header_ptr;
 
         debug_assert_eq!(
             header.actor_id, self.actor_id,
@@ -361,12 +342,8 @@ impl OrcaGc {
         );
 
         // Mark the reference as in-flight.
-        header
-            .foreign_count
-            .fetch_add(1, Ordering::Relaxed);
-        self.stats
-            .foreign_refs_sent
-            .fetch_add(1, Ordering::Relaxed);
+        header.foreign_count += 1;
+        self.stats.foreign_refs_sent += 1;
 
         ForeignRefOp {
             target_actor,
@@ -385,29 +362,21 @@ impl OrcaGc {
     /// # Safety
     /// * `payload_ptr` must point to an object on this actor's heap.
     pub unsafe fn receive_ref(&mut self, heap: &dyn OrcaHeap, payload_ptr: *mut u8) {
-        let header = &*heap.header_ptr(payload_ptr);
+        // SAFETY: caller guarantees payload_ptr is valid. Single-threaded
+        // runtime: no other thread mutates this header concurrently.
+        let header = &mut *heap.header_ptr(payload_ptr);
         debug_assert_eq!(
             header.actor_id, self.actor_id,
             "receive_ref called on object not owned by this actor"
         );
 
         // In-flight reference has arrived.
-        let prev_foreign = header
-            .foreign_count
-            .fetch_sub(1, Ordering::Release);
+        header.foreign_count -= 1;
 
         // We now hold a local reference.
-        header
-            .ref_count
-            .fetch_add(1, Ordering::Relaxed);
+        header.ref_count += 1;
 
-        self.stats
-            .foreign_refs_received
-            .fetch_add(1, Ordering::Relaxed);
-
-        // If foreign count just reached zero and local count is 1 (the one
-        // we just added), check deferred list to see if we can free anything.
-        let _ = prev_foreign; // used in debug builds
+        self.stats.foreign_refs_received += 1;
     }
 
     /// Process a foreign ref operation delivered from another actor.
@@ -418,35 +387,29 @@ impl OrcaGc {
     ///
     /// This method is called on the **target** actor's GC engine by the
     /// [`OrcaCoordinator::deliver_pending_ops`].
-    pub fn process_foreign_op(
-        &mut self,
-        heap: &mut dyn OrcaHeap,
-        op: ForeignRefOp,
-    ) {
+    pub fn process_foreign_op(&mut self, heap: &mut dyn OrcaHeap, op: ForeignRefOp) {
         // SAFETY: the coordinator only delivers ops whose object_header is
         // a live pointer into a sender heap.  The object stays alive because
         // the foreign_count was incremented when the ref was sent.
-        let header = unsafe { &*op.object_header };
+        // Single-threaded runtime: no other thread mutates this header
+        // concurrently.
+        let header = unsafe { &mut *op.object_header };
 
         let prev_foreign = if op.delta >= 0 {
-            header
-                .foreign_count
-                .fetch_add(op.delta as u32, Ordering::Relaxed);
-            header.foreign_count.load(Ordering::Relaxed)
+            header.foreign_count += op.delta as u32;
+            header.foreign_count
         } else {
             let delta = (-op.delta) as u32;
-            header
-                .foreign_count
-                .fetch_sub(delta, Ordering::Release);
-            // Return the count *after* subtraction.
-            header.foreign_count.load(Ordering::Acquire)
+            header.foreign_count -= delta;
+            // The count *after* subtraction.
+            header.foreign_count
         };
 
         // If foreign count reached zero and local count is also zero, free.
         let prev_foreign_for_check = prev_foreign;
         if prev_foreign_for_check == 0 {
-            let local = header.ref_count.load(Ordering::Acquire);
-            let is_sticky = header.sticky.load(Ordering::Relaxed);
+            let local = header.ref_count;
+            let is_sticky = header.sticky;
             if local == 0 && !is_sticky {
                 // We need the payload pointer to free.  Compute it from the
                 // header pointer.
@@ -457,8 +420,7 @@ impl OrcaGc {
 
                 // Remove from deferred list so process_deferred doesn't
                 // access freed memory.
-                self.deferred_decrements
-                    .retain(|&h| h != op.object_header);
+                self.deferred_decrements.retain(|&h| h != op.object_header);
             }
         }
     }
@@ -472,9 +434,11 @@ impl OrcaGc {
     /// # Safety
     /// `payload_ptr` must be a valid payload pointer owned by this actor.
     pub unsafe fn pin_object(&mut self, heap: &dyn OrcaHeap, payload_ptr: *mut u8) {
-        let header = &*heap.header_ptr(payload_ptr);
+        // SAFETY: caller guarantees payload_ptr is valid. Single-threaded
+        // runtime: no other thread mutates this header concurrently.
+        let header = &mut *heap.header_ptr(payload_ptr);
         debug_assert_eq!(header.actor_id, self.actor_id);
-        header.sticky.store(true, Ordering::Relaxed);
+        header.sticky = true;
     }
 
     /// Unset the sticky flag, allowing the object to be collected when its
@@ -483,9 +447,11 @@ impl OrcaGc {
     /// # Safety
     /// `payload_ptr` must be a valid payload pointer owned by this actor.
     pub unsafe fn unpin_object(&mut self, heap: &dyn OrcaHeap, payload_ptr: *mut u8) {
-        let header = &*heap.header_ptr(payload_ptr);
+        // SAFETY: caller guarantees payload_ptr is valid. Single-threaded
+        // runtime: no other thread mutates this header concurrently.
+        let header = &mut *heap.header_ptr(payload_ptr);
         debug_assert_eq!(header.actor_id, self.actor_id);
-        header.sticky.store(false, Ordering::Relaxed);
+        header.sticky = false;
     }
 
     /// Try to free all deferred deallocations.
@@ -494,29 +460,30 @@ impl OrcaGc {
     /// all mailbox messages).  Objects that were deferred because they had
     /// foreign references are rechecked; if `foreign_count` has since dropped
     /// to zero, they are freed.
+    ///
+    /// Entries are drained one at a time because freeing a container
+    /// recursively releases its children, which can push new entries onto —
+    /// or free objects still present in — this list mid-pass.
     pub fn process_deferred(&mut self, heap: &mut dyn OrcaHeap) {
-        // Retain only objects that still cannot be freed.
-        let mut still_deferred = Vec::new();
-
-        let deferred = std::mem::take(&mut self.deferred_decrements);
-        for &header_ptr in &deferred {
-            // SAFETY: header_ptr came from a valid payload pointer and the
-            // object is still alive (otherwise it wouldn't be in the list).
+        let mut i = 0;
+        while i < self.deferred_decrements.len() {
+            let header_ptr = self.deferred_decrements[i];
+            // SAFETY: entries are live headers; free_object removes an entry
+            // before its object is freed, so a retained entry is never stale.
             let header = unsafe { &*header_ptr };
-            let local = header.ref_count.load(Ordering::Acquire);
-            let foreign = header.foreign_count.load(Ordering::Acquire);
-            let is_sticky = header.sticky.load(Ordering::Relaxed);
+            let local = header.ref_count;
+            let foreign = header.foreign_count;
+            let is_sticky = header.sticky;
 
             if local == 0 && foreign == 0 && !is_sticky {
+                self.deferred_decrements.swap_remove(i);
                 let payload_ptr = Self::payload_from_header(header_ptr);
                 // SAFETY: payload_ptr is derived from a live header.
                 unsafe { self.free_object(heap, payload_ptr) };
             } else {
-                still_deferred.push(header_ptr);
+                i += 1;
             }
         }
-
-        self.deferred_decrements = still_deferred;
     }
 
     /// Drain and return the queued foreign-ref operations.
@@ -551,20 +518,57 @@ impl OrcaGc {
 
     /// Free an object and update statistics.
     ///
+    /// Container payloads (arrays, records, tuples) are `Value` arrays whose
+    /// slots each own a counted local reference (taken by the
+    /// `ArrStore`/`RecS`/`FieldS` write barriers in the VM). Freeing the
+    /// container must release those references or every element would leak.
+    /// Children are released before the block itself is freed; releasing a
+    /// child's last reference frees it recursively (nesting depth is bounded
+    /// by the number of live objects, which the fixed-size actor heap caps).
+    ///
+    /// Child release is skipped when the object is owned by a different
+    /// actor than this GC engine: `process_foreign_op` can free an object
+    /// that lives on the sender's heap, and touching its children here would
+    /// operate on the wrong heap (the cross-actor protocol reclaims such
+    /// objects through the owner side instead).
+    ///
     /// # Safety
     /// `payload_ptr` must be a live pointer returned by `alloc_object`.
     unsafe fn free_object(&mut self, heap: &mut dyn OrcaHeap, payload_ptr: *mut u8) {
-        let header = &*heap.header_ptr(payload_ptr);
-        let size = header.payload_size;
+        let header_ptr = heap.header_ptr(payload_ptr);
+        let (size, type_tag, owner) = {
+            let header = &*header_ptr;
+            (header.payload_size, header.type_tag, header.actor_id)
+        };
+
+        if owner == self.actor_id
+            && matches!(type_tag, TypeTag::Array | TypeTag::Record | TypeTag::Tuple)
+        {
+            let slot_count = size / std::mem::size_of::<crate::vm::Value>();
+            // SAFETY: container payloads are laid out as `slot_count` Values
+            // by the VM's ArrAlloc/RecMk/TupleMk.
+            let slots =
+                std::slice::from_raw_parts(payload_ptr as *const crate::vm::Value, slot_count);
+            for slot in slots {
+                if let Some(child) = slot.as_ptr() {
+                    // SAFETY: the slot held a counted local reference to an
+                    // object on this heap; releasing it balances the barrier
+                    // retain exactly once.
+                    self.drop_local_ref(heap, child);
+                }
+            }
+        }
 
         heap.free_payload(payload_ptr);
 
-        self.stats
-            .objects_freed
-            .fetch_add(1, Ordering::Relaxed);
-        self.stats
-            .bytes_freed
-            .fetch_add(size as u64, Ordering::Relaxed);
+        // A recursive child release above may have freed objects that were
+        // still queued here; never let the deferred list point at freed
+        // memory (process_deferred drains one entry at a time for the same
+        // reason).
+        self.deferred_decrements.retain(|&h| h != header_ptr);
+
+        self.stats.objects_freed += 1;
+        self.stats.bytes_freed += size as u64;
     }
 
     /// Given a header pointer, compute the payload pointer.
@@ -650,10 +654,7 @@ impl OrcaCoordinator {
         // Deliver to each actor.
         let actor_ids: Vec<u64> = self.per_actor_ops.keys().copied().collect();
         for actor_id in actor_ids {
-            let ops = self
-                .per_actor_ops
-                .remove(&actor_id)
-                .unwrap_or_default();
+            let ops = self.per_actor_ops.remove(&actor_id).unwrap_or_default();
 
             if let Some(actor) = runtime.actors.get_mut(&actor_id) {
                 let delivered = ops.len();
@@ -705,7 +706,6 @@ impl Default for OrcaCoordinator {
 mod tests {
     use super::*;
     use std::alloc;
-    use std::sync::atomic::Ordering;
 
     // ------------------------------------------------------------------
     // Mock heap and header for isolated testing
@@ -792,15 +792,15 @@ mod tests {
     // ------------------------------------------------------------------
 
     fn local_count(header: &OrcaHeader) -> u32 {
-        header.ref_count.load(Ordering::Relaxed)
+        header.ref_count
     }
 
     fn foreign_count(header: &OrcaHeader) -> u32 {
-        header.foreign_count.load(Ordering::Relaxed)
+        header.foreign_count
     }
 
     fn is_sticky(header: &OrcaHeader) -> bool {
-        header.sticky.load(Ordering::Relaxed)
+        header.sticky
     }
 
     // ------------------------------------------------------------------
@@ -826,7 +826,7 @@ mod tests {
         assert_eq!(header.payload_size, 64, "payload_size should match");
 
         assert_eq!(
-            gc.stats.objects_allocated.load(Ordering::Relaxed),
+            gc.stats.objects_allocated,
             1,
             "stats should track allocation"
         );
@@ -846,22 +846,29 @@ mod tests {
         assert_eq!(local_count(header), 1);
 
         // Create two more local refs.
-        unsafe { gc.local_ref(&heap, ptr); }
-        unsafe { gc.local_ref(&heap, ptr); }
+        unsafe {
+            gc.local_ref(&heap, ptr);
+        }
+        unsafe {
+            gc.local_ref(&heap, ptr);
+        }
         assert_eq!(local_count(header), 3);
-        assert_eq!(
-            gc.stats.local_refs_created.load(Ordering::Relaxed),
-            2
-        );
+        assert_eq!(gc.stats.local_refs_created, 2);
 
         // Drop all 3 refs.
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         assert_eq!(local_count(header), 2);
 
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         assert_eq!(local_count(header), 1);
 
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         // Object should be freed now.
         assert_eq!(heap.live_count(), 0, "object should be freed");
     }
@@ -882,10 +889,7 @@ mod tests {
         let freed = unsafe { gc.drop_local_ref(&mut heap, ptr) };
         assert!(freed, "object should be freed immediately");
         assert_eq!(heap.live_count(), 0);
-        assert_eq!(
-            gc.stats.objects_freed.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(gc.stats.objects_freed, 1);
     }
 
     // ------------------------------------------------------------------
@@ -906,10 +910,7 @@ mod tests {
 
         // Foreign count should have been incremented.
         assert_eq!(foreign_count(header), 1);
-        assert_eq!(
-            gc.stats.foreign_refs_sent.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(gc.stats.foreign_refs_sent, 1);
 
         // Verify the op fields.
         assert_eq!(op.target_actor, 2);
@@ -917,7 +918,9 @@ mod tests {
         assert!(!op.object_header.is_null());
 
         // Clean up: drop the remaining local ref and process the op.
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         gc.process_foreign_op(&mut heap, op);
         assert_eq!(heap.live_count(), 0);
     }
@@ -932,28 +935,31 @@ mod tests {
         let mut gc = OrcaGc::new(1);
 
         let ptr = gc.alloc_object(&mut heap, 24, TypeTag::Record).unwrap();
-        let header = unsafe { &*heap.header_ptr(ptr) };
+        let header = unsafe { &mut *heap.header_ptr(ptr) };
 
         // Simulate: foreign actor had a reference, now returns it to us.
         // Start with foreign_count = 1 (the foreign actor held a ref).
-        header.foreign_count.store(1, Ordering::Relaxed);
+        header.foreign_count = 1;
 
         // We receive the reference back.
-        unsafe { gc.receive_ref(&heap, ptr); }
+        unsafe {
+            gc.receive_ref(&heap, ptr);
+        }
 
         // Foreign count should be 0, local count should be 2 (original + received).
         assert_eq!(foreign_count(header), 0);
         assert_eq!(local_count(header), 2);
-        assert_eq!(
-            gc.stats.foreign_refs_received.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(gc.stats.foreign_refs_received, 1);
 
         // Drop both local refs → object freed.
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         assert_eq!(heap.live_count(), 1); // still 1 ref left
 
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         assert_eq!(heap.live_count(), 0);
     }
 
@@ -967,14 +973,17 @@ mod tests {
         let mut gc = OrcaGc::new(1);
 
         let ptr = gc.alloc_object(&mut heap, 32, TypeTag::Map).unwrap();
-        let header = unsafe { &*heap.header_ptr(ptr) };
+        let header = unsafe { &mut *heap.header_ptr(ptr) };
 
         // Simulate a foreign reference existing.
-        header.foreign_count.store(1, Ordering::Relaxed);
+        header.foreign_count = 1;
 
         // Drop the sole local ref.
         let freed = unsafe { gc.drop_local_ref(&mut heap, ptr) };
-        assert!(!freed, "object should NOT be freed while foreign refs exist");
+        assert!(
+            !freed,
+            "object should NOT be freed while foreign refs exist"
+        );
         assert_eq!(heap.live_count(), 1, "object should still be alive");
 
         // Object should be in the deferred list.
@@ -995,7 +1004,9 @@ mod tests {
         assert!(!is_sticky(header));
 
         // Pin the object.
-        unsafe { gc.pin_object(&heap, ptr); }
+        unsafe {
+            gc.pin_object(&heap, ptr);
+        }
         assert!(is_sticky(header));
 
         // Drop the local ref — object should NOT be freed.
@@ -1004,7 +1015,9 @@ mod tests {
         assert_eq!(heap.live_count(), 1);
 
         // Unpin and try again.
-        unsafe { gc.unpin_object(&heap, ptr); }
+        unsafe {
+            gc.unpin_object(&heap, ptr);
+        }
         assert!(!is_sticky(header));
 
         // Now try process_deferred — object should be freed.
@@ -1022,13 +1035,15 @@ mod tests {
         let mut gc = OrcaGc::new(1);
 
         let ptr = gc.alloc_object(&mut heap, 16, TypeTag::Tuple).unwrap();
-        let header = unsafe { &*heap.header_ptr(ptr) };
+        let header = unsafe { &mut *heap.header_ptr(ptr) };
 
         // Foreign ref exists.
-        header.foreign_count.store(1, Ordering::Relaxed);
+        header.foreign_count = 1;
 
         // Drop local ref → deferred.
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         assert_eq!(gc.deferred_decrements.len(), 1);
         assert_eq!(heap.live_count(), 1);
 
@@ -1063,20 +1078,30 @@ mod tests {
         let header = unsafe { &*heap.header_ptr(ptr) };
 
         // Create 2 additional refs (total 3).
-        unsafe { gc.local_ref(&heap, ptr); }
-        unsafe { gc.local_ref(&heap, ptr); }
+        unsafe {
+            gc.local_ref(&heap, ptr);
+        }
+        unsafe {
+            gc.local_ref(&heap, ptr);
+        }
         assert_eq!(local_count(header), 3);
 
         // Drop 2 refs.
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
 
         // Should still be alive with 1 ref.
         assert_eq!(heap.live_count(), 1);
         assert_eq!(local_count(header), 1);
 
         // Drop the last one.
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         assert_eq!(heap.live_count(), 0);
     }
 
@@ -1094,25 +1119,39 @@ mod tests {
         let p2 = gc.alloc_object(&mut heap, 20, TypeTag::String).unwrap();
         let p3 = gc.alloc_object(&mut heap, 30, TypeTag::String).unwrap();
 
-        assert_eq!(gc.stats.objects_allocated.load(Ordering::Relaxed), 3);
-        assert_eq!(gc.stats.bytes_allocated.load(Ordering::Relaxed), 60);
+        assert_eq!(gc.stats.objects_allocated, 3);
+        assert_eq!(gc.stats.bytes_allocated, 60);
 
         // Create and drop refs.
-        unsafe { gc.local_ref(&heap, p1); }
-        unsafe { gc.local_ref(&heap, p1); }
-        assert_eq!(gc.stats.local_refs_created.load(Ordering::Relaxed), 2);
+        unsafe {
+            gc.local_ref(&heap, p1);
+        }
+        unsafe {
+            gc.local_ref(&heap, p1);
+        }
+        assert_eq!(gc.stats.local_refs_created, 2);
 
-        unsafe { gc.drop_local_ref(&mut heap, p1); }
-        assert_eq!(gc.stats.local_refs_dropped.load(Ordering::Relaxed), 1);
+        unsafe {
+            gc.drop_local_ref(&mut heap, p1);
+        }
+        assert_eq!(gc.stats.local_refs_dropped, 1);
 
         // Free everything.
-        unsafe { gc.drop_local_ref(&mut heap, p1); }
-        unsafe { gc.drop_local_ref(&mut heap, p1); }
-        unsafe { gc.drop_local_ref(&mut heap, p2); }
-        unsafe { gc.drop_local_ref(&mut heap, p3); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, p1);
+        }
+        unsafe {
+            gc.drop_local_ref(&mut heap, p1);
+        }
+        unsafe {
+            gc.drop_local_ref(&mut heap, p2);
+        }
+        unsafe {
+            gc.drop_local_ref(&mut heap, p3);
+        }
 
-        assert_eq!(gc.stats.objects_freed.load(Ordering::Relaxed), 3);
-        assert_eq!(gc.stats.bytes_freed.load(Ordering::Relaxed), 60);
+        assert_eq!(gc.stats.objects_freed, 3);
+        assert_eq!(gc.stats.bytes_freed, 60);
     }
 
     // ------------------------------------------------------------------
@@ -1138,7 +1177,9 @@ mod tests {
         assert_eq!(foreign_count(header), 1);
 
         // Clean up.
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         gc.process_foreign_op(&mut heap, op);
     }
 
@@ -1152,10 +1193,10 @@ mod tests {
         let mut gc = OrcaGc::new(1);
 
         let ptr = gc.alloc_object(&mut heap, 16, TypeTag::Map).unwrap();
-        let header = unsafe { &*heap.header_ptr(ptr) };
+        let header = unsafe { &mut *heap.header_ptr(ptr) };
 
         // Start with foreign_count = 2 (two foreign refs).
-        header.foreign_count.store(2, Ordering::Relaxed);
+        header.foreign_count = 2;
 
         // Process a -1 op.
         let op1 = ForeignRefOp {
@@ -1168,7 +1209,9 @@ mod tests {
         assert_eq!(heap.live_count(), 1); // local_count still 1
 
         // Drop the local ref — should be deferred since foreign_count > 0.
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         assert_eq!(heap.live_count(), 1);
 
         // Process another -1 op → foreign_count becomes 0, and since local_count is also 0, the object is freed.
@@ -1193,10 +1236,12 @@ mod tests {
         let mut gc = OrcaGc::new(1);
 
         let ptr = gc.alloc_object(&mut heap, 8, TypeTag::Raw).unwrap();
-        let header = unsafe { &*heap.header_ptr(ptr) };
-        header.foreign_count.store(3, Ordering::Relaxed);
+        let header = unsafe { &mut *heap.header_ptr(ptr) };
+        header.foreign_count = 3;
 
-        unsafe { gc.drop_local_ref(&mut heap, ptr); }
+        unsafe {
+            gc.drop_local_ref(&mut heap, ptr);
+        }
         assert_eq!(gc.deferred_decrements.len(), 1);
 
         // process_deferred should not free because foreign_count is still 3.
@@ -1246,13 +1291,13 @@ mod tests {
 
     #[test]
     fn test_stats_reset() {
-        let stats = GcStats::default();
-        stats.objects_allocated.store(5, Ordering::Relaxed);
-        stats.bytes_freed.store(100, Ordering::Relaxed);
+        let mut stats = GcStats::default();
+        stats.objects_allocated = 5;
+        stats.bytes_freed = 100;
 
         stats.reset();
-        assert_eq!(stats.objects_allocated.load(Ordering::Relaxed), 0);
-        assert_eq!(stats.bytes_freed.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.objects_allocated, 0);
+        assert_eq!(stats.bytes_freed, 0);
     }
 
     // ------------------------------------------------------------------

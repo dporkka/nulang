@@ -22,11 +22,11 @@
 
 use std::collections::HashMap;
 
-use cranelift::prelude::*;
 use cranelift::codegen::ir::FuncRef;
+use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
-use cranelift_module::{Linkage, Module};
 use cranelift_jit::JITModule;
+use cranelift_module::{Linkage, Module};
 
 use crate::bytecode::{Instruction, OpCode};
 use crate::value_layout::{PAYLOAD_MASK, TAG_INT};
@@ -39,21 +39,57 @@ use crate::value_layout::{PAYLOAD_MASK, TAG_INT};
 pub fn is_opcode_compilable(op: OpCode) -> bool {
     matches!(
         op,
-        OpCode::Nop | OpCode::Halt
-        | OpCode::Const0 | OpCode::Const1 | OpCode::Const2 | OpCode::ConstM1 | OpCode::ConstU
-        | OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Swap | OpCode::Dup
-        | OpCode::IAdd | OpCode::ISub | OpCode::IMul | OpCode::IDiv | OpCode::IMod
-        | OpCode::INeg | OpCode::IInc | OpCode::IDec
-        | OpCode::Xor | OpCode::Shl | OpCode::Shr | OpCode::BitAnd | OpCode::BitOr
-        | OpCode::FAdd | OpCode::FSub | OpCode::FMul | OpCode::FDiv | OpCode::FNeg
-        | OpCode::ICmpEq | OpCode::ICmpLt | OpCode::ICmpGt | OpCode::ICmpLe | OpCode::ICmpGe
-        | OpCode::FCmpEq | OpCode::FCmpLt | OpCode::FCmpGt
-        | OpCode::Not | OpCode::And | OpCode::Or
-        | OpCode::Jmp | OpCode::JmpT | OpCode::JmpF
-        | OpCode::IToF | OpCode::FToI
-        | OpCode::DbgPrint
-        | OpCode::Ret | OpCode::RetVal
-    )
+        OpCode::Nop
+            | OpCode::Halt
+            | OpCode::Const0
+            | OpCode::Const1
+            | OpCode::Const2
+            | OpCode::ConstM1
+            | OpCode::ConstU
+            | OpCode::Load
+            | OpCode::Store
+            | OpCode::Move
+            | OpCode::Swap
+            | OpCode::Dup
+            | OpCode::IAdd
+            | OpCode::ISub
+            | OpCode::IMul
+            | OpCode::IDiv
+            | OpCode::IMod
+            | OpCode::INeg
+            | OpCode::IInc
+            | OpCode::IDec
+            | OpCode::Xor
+            | OpCode::Shl
+            | OpCode::Shr
+            | OpCode::BitAnd
+            | OpCode::BitOr
+            | OpCode::FAdd
+            | OpCode::FSub
+            | OpCode::FMul
+            | OpCode::FDiv
+            | OpCode::FNeg
+            | OpCode::ICmpEq
+            | OpCode::ICmpLt
+            | OpCode::ICmpGt
+            | OpCode::ICmpLe
+            | OpCode::ICmpGe
+            | OpCode::FCmpEq
+            | OpCode::FCmpLt
+            | OpCode::FCmpGt
+            | OpCode::Not
+            | OpCode::And
+            | OpCode::Or
+            | OpCode::Jmp
+            | OpCode::JmpT
+            | OpCode::JmpF
+            | OpCode::IToF
+            | OpCode::FToI
+            | OpCode::DbgPrint
+            | OpCode::Ret
+            | OpCode::RetVal
+            | OpCode::ArrLoad
+     )
 }
 
 // ---------------------------------------------------------------------------
@@ -81,59 +117,99 @@ fn make_unary_sig<M: Module>(module: &M) -> Signature {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeHelper {
-    IAdd, ISub, IMul, IDiv, IMod,
-    Xor, Shl, Shr, BitAnd, BitOr,
-    ICmpEq, ICmpLt, ICmpGt, ICmpLe, ICmpGe,
-    FAdd, FSub, FMul, FDiv, FNeg,
-    FCmpEq, FCmpLt, FCmpGt,
-    And, Or, INeg, IInc, IDec, Not, IToF, FToI,
+    IAdd,
+    ISub,
+    IMul,
+    IDiv,
+    IMod,
+    Xor,
+    Shl,
+    Shr,
+    BitAnd,
+    BitOr,
+    ICmpEq,
+    ICmpLt,
+    ICmpGt,
+    ICmpLe,
+    ICmpGe,
+    FAdd,
+    FSub,
+    FMul,
+    FDiv,
+    FNeg,
+    FCmpEq,
+    FCmpLt,
+    FCmpGt,
+    And,
+    Or,
+    INeg,
+    IInc,
+    IDec,
+    Not,
+    IToF,
+    FToI,
 }
 
 fn register_runtime_helpers<M: Module>(
     module: &mut M,
     builder: &mut FunctionBuilder,
-) -> HashMap<RuntimeHelper, FuncRef> {
+) -> Result<HashMap<RuntimeHelper, FuncRef>, CompileError> {
     let mut helpers = HashMap::new();
 
     let bin_helpers: &[(RuntimeHelper, &str)] = &[
-        (RuntimeHelper::IAdd, "nulang_iadd"), (RuntimeHelper::ISub, "nulang_isub"), 
-        (RuntimeHelper::IMul, "nulang_imul"), (RuntimeHelper::IDiv, "nulang_idiv"), 
+        (RuntimeHelper::IAdd, "nulang_iadd"),
+        (RuntimeHelper::ISub, "nulang_isub"),
+        (RuntimeHelper::IMul, "nulang_imul"),
+        (RuntimeHelper::IDiv, "nulang_idiv"),
         (RuntimeHelper::IMod, "nulang_imod"),
-        (RuntimeHelper::Xor, "nulang_xor"), (RuntimeHelper::Shl, "nulang_shl"),
-        (RuntimeHelper::Shr, "nulang_shr"), (RuntimeHelper::BitAnd, "nulang_bitand"),
+        (RuntimeHelper::Xor, "nulang_xor"),
+        (RuntimeHelper::Shl, "nulang_shl"),
+        (RuntimeHelper::Shr, "nulang_shr"),
+        (RuntimeHelper::BitAnd, "nulang_bitand"),
         (RuntimeHelper::BitOr, "nulang_bitor"),
-        (RuntimeHelper::ICmpEq, "nulang_icmp_eq"), (RuntimeHelper::ICmpLt, "nulang_icmp_lt"), 
-        (RuntimeHelper::ICmpGt, "nulang_icmp_gt"), (RuntimeHelper::ICmpLe, "nulang_icmp_le"), 
+        (RuntimeHelper::ICmpEq, "nulang_icmp_eq"),
+        (RuntimeHelper::ICmpLt, "nulang_icmp_lt"),
+        (RuntimeHelper::ICmpGt, "nulang_icmp_gt"),
+        (RuntimeHelper::ICmpLe, "nulang_icmp_le"),
         (RuntimeHelper::ICmpGe, "nulang_icmp_ge"),
-        (RuntimeHelper::FAdd, "nulang_fadd"), (RuntimeHelper::FSub, "nulang_fsub"), 
-        (RuntimeHelper::FMul, "nulang_fmul"), (RuntimeHelper::FDiv, "nulang_fdiv"),
-        (RuntimeHelper::FCmpEq, "nulang_fcmp_eq"), (RuntimeHelper::FCmpLt, "nulang_fcmp_lt"), 
+        (RuntimeHelper::FAdd, "nulang_fadd"),
+        (RuntimeHelper::FSub, "nulang_fsub"),
+        (RuntimeHelper::FMul, "nulang_fmul"),
+        (RuntimeHelper::FDiv, "nulang_fdiv"),
+        (RuntimeHelper::FCmpEq, "nulang_fcmp_eq"),
+        (RuntimeHelper::FCmpLt, "nulang_fcmp_lt"),
         (RuntimeHelper::FCmpGt, "nulang_fcmp_gt"),
-        (RuntimeHelper::And, "nulang_and"), (RuntimeHelper::Or, "nulang_or"),
+        (RuntimeHelper::And, "nulang_and"),
+        (RuntimeHelper::Or, "nulang_or"),
     ];
 
     for (helper, name) in bin_helpers {
-        let func_id = module.declare_function(name, Linkage::Import, &make_bin_sig(module))
-            .expect("failed to declare runtime helper");
+        let func_id = module
+            .declare_function(name, Linkage::Import, &make_bin_sig(module))
+            .map_err(|e| CompileError::Internal(format!("declare {}: {}", name, e)))?;
         let func_ref = module.declare_func_in_func(func_id, builder.func);
         helpers.insert(*helper, func_ref);
     }
 
     let unary_helpers: &[(RuntimeHelper, &str)] = &[
-        (RuntimeHelper::INeg, "nulang_ineg"), (RuntimeHelper::IInc, "nulang_iinc"), 
+        (RuntimeHelper::INeg, "nulang_ineg"),
+        (RuntimeHelper::IInc, "nulang_iinc"),
         (RuntimeHelper::IDec, "nulang_idec"),
-        (RuntimeHelper::Not, "nulang_not"), (RuntimeHelper::IToF, "nulang_itof"), 
-        (RuntimeHelper::FToI, "nulang_ftoi"), (RuntimeHelper::FNeg, "nulang_fneg"),
+        (RuntimeHelper::Not, "nulang_not"),
+        (RuntimeHelper::IToF, "nulang_itof"),
+        (RuntimeHelper::FToI, "nulang_ftoi"),
+        (RuntimeHelper::FNeg, "nulang_fneg"),
     ];
 
     for (helper, name) in unary_helpers {
-        let func_id = module.declare_function(name, Linkage::Import, &make_unary_sig(module))
-            .expect("failed to declare runtime helper");
+        let func_id = module
+            .declare_function(name, Linkage::Import, &make_unary_sig(module))
+            .map_err(|e| CompileError::Internal(format!("declare {}: {}", name, e)))?;
         let func_ref = module.declare_func_in_func(func_id, builder.func);
         helpers.insert(*helper, func_ref);
     }
 
-    helpers
+    Ok(helpers)
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +223,8 @@ pub enum CompileError {
     /// The region contains an opcode this compiler does not support;
     /// callers should fall back to another compiler.
     UnsupportedOpcode(String),
+    /// An internal invariant was violated (missing block, missing helper).
+    Internal(String),
 }
 
 impl std::fmt::Display for CompileError {
@@ -155,6 +233,7 @@ impl std::fmt::Display for CompileError {
             CompileError::DeclareFailed(msg) => write!(f, "function declaration failed: {}", msg),
             CompileError::CompileFailed(msg) => write!(f, "compilation failed: {}", msg),
             CompileError::UnsupportedOpcode(msg) => write!(f, "unsupported opcode: {}", msg),
+            CompileError::Internal(msg) => write!(f, "internal compiler error: {}", msg),
         }
     }
 }
@@ -187,7 +266,7 @@ pub fn compile_bytecode_region(
     let regs_ptr = builder.block_params(entry_block)[0];
     let consts_ptr = builder.block_params(entry_block)[1];
 
-    let helpers = register_runtime_helpers(module, &mut builder);
+    let helpers = register_runtime_helpers(module, &mut builder)?;
 
     let end_offset = (start_offset + num_instrs).min(instructions.len());
     let mut blocks: HashMap<usize, Block> = HashMap::new();
@@ -204,16 +283,28 @@ pub fn compile_bytecode_region(
 
     for pc in start_offset..end_offset {
         let instr = instructions[pc];
-        let block = *blocks.get(&pc).unwrap();
+        let block = *blocks
+            .get(&pc)
+            .ok_or_else(|| CompileError::Internal("missing block in compiled region".into()))?;
         builder.switch_to_block(block);
 
         match instr.opcode {
             OpCode::Nop => {}
-            OpCode::Halt => { builder.ins().jump(return_block, &[]); }
-            OpCode::Const0 => { emit_const(&mut builder, regs_ptr, instr.op1 as usize, 0); }
-            OpCode::Const1 => { emit_const(&mut builder, regs_ptr, instr.op1 as usize, 1); }
-            OpCode::Const2 => { emit_const(&mut builder, regs_ptr, instr.op1 as usize, 2); }
-            OpCode::ConstM1 => { emit_const(&mut builder, regs_ptr, instr.op1 as usize, -1); }
+            OpCode::Halt => {
+                builder.ins().jump(return_block, &[]);
+            }
+            OpCode::Const0 => {
+                emit_const(&mut builder, regs_ptr, instr.op1 as usize, 0);
+            }
+            OpCode::Const1 => {
+                emit_const(&mut builder, regs_ptr, instr.op1 as usize, 1);
+            }
+            OpCode::Const2 => {
+                emit_const(&mut builder, regs_ptr, instr.op1 as usize, 2);
+            }
+            OpCode::ConstM1 => {
+                emit_const(&mut builder, regs_ptr, instr.op1 as usize, -1);
+            }
             OpCode::ConstU => {
                 let idx = instr.imm16() as usize;
                 let offset = (idx * 8) as i32;
@@ -227,7 +318,10 @@ pub fn compile_bytecode_region(
                 store_reg(&mut builder, regs_ptr, instr.op3 as usize, val);
             }
 
-            OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Dup => { let v = load_reg(&mut builder, regs_ptr, instr.op1 as usize); store_reg(&mut builder, regs_ptr, instr.op2 as usize, v); }
+            OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Dup => {
+                let v = load_reg(&mut builder, regs_ptr, instr.op1 as usize);
+                store_reg(&mut builder, regs_ptr, instr.op2 as usize, v);
+            }
             OpCode::Swap => {
                 let v1 = load_reg(&mut builder, regs_ptr, instr.op1 as usize);
                 let v2 = load_reg(&mut builder, regs_ptr, instr.op2 as usize);
@@ -235,39 +329,264 @@ pub fn compile_bytecode_region(
                 store_reg(&mut builder, regs_ptr, instr.op2 as usize, v1);
             }
 
-            OpCode::IAdd => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::IAdd),
-            OpCode::ISub => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::ISub),
-            OpCode::IMul => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::IMul),
-            OpCode::IDiv => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::IDiv),
-            OpCode::IMod => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::IMod),
-            OpCode::INeg => emit_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, RuntimeHelper::INeg),
-            OpCode::IInc => emit_self_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, RuntimeHelper::IInc),
-            OpCode::IDec => emit_self_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, RuntimeHelper::IDec),
-            OpCode::Xor => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::Xor),
-            OpCode::Shl => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::Shl),
-            OpCode::Shr => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::Shr),
-            OpCode::BitAnd => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::BitAnd),
-            OpCode::BitOr => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::BitOr),
+            OpCode::IAdd => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::IAdd,
+            ),
+            OpCode::ISub => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::ISub,
+            ),
+            OpCode::IMul => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::IMul,
+            ),
+            OpCode::IDiv => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::IDiv,
+            ),
+            OpCode::IMod => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::IMod,
+            ),
+            OpCode::INeg => emit_unary(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                RuntimeHelper::INeg,
+            ),
+            OpCode::IInc => emit_self_unary(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                RuntimeHelper::IInc,
+            ),
+            OpCode::IDec => emit_self_unary(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                RuntimeHelper::IDec,
+            ),
+            OpCode::Xor => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::Xor,
+            ),
+            OpCode::Shl => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::Shl,
+            ),
+            OpCode::Shr => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::Shr,
+            ),
+            OpCode::BitAnd => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::BitAnd,
+            ),
+            OpCode::BitOr => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::BitOr,
+            ),
 
-            OpCode::FAdd => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FAdd),
-            OpCode::FSub => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FSub),
-            OpCode::FMul => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FMul),
-            OpCode::FDiv => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FDiv),
+            OpCode::FAdd => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::FAdd,
+            ),
+            OpCode::FSub => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::FSub,
+            ),
+            OpCode::FMul => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::FMul,
+            ),
+            OpCode::FDiv => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::FDiv,
+            ),
             // Interpreter reads src from op1 and writes dst to op3 for FNeg.
-            OpCode::FNeg => emit_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op3 as usize, RuntimeHelper::FNeg),
+            OpCode::FNeg => emit_unary(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::FNeg,
+            ),
 
-            OpCode::ICmpEq => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::ICmpEq),
-            OpCode::ICmpLt => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::ICmpLt),
-            OpCode::ICmpGt => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::ICmpGt),
-            OpCode::ICmpLe => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::ICmpLe),
-            OpCode::ICmpGe => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::ICmpGe),
-            OpCode::FCmpEq => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FCmpEq),
-            OpCode::FCmpLt => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FCmpLt),
-            OpCode::FCmpGt => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::FCmpGt),
+            OpCode::ICmpEq => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::ICmpEq,
+            ),
+            OpCode::ICmpLt => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::ICmpLt,
+            ),
+            OpCode::ICmpGt => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::ICmpGt,
+            ),
+            OpCode::ICmpLe => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::ICmpLe,
+            ),
+            OpCode::ICmpGe => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::ICmpGe,
+            ),
+            OpCode::FCmpEq => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::FCmpEq,
+            ),
+            OpCode::FCmpLt => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::FCmpLt,
+            ),
+            OpCode::FCmpGt => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::FCmpGt,
+            ),
 
-            OpCode::Not => emit_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, RuntimeHelper::Not),
-            OpCode::And => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::And),
-            OpCode::Or => emit_binop(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize, RuntimeHelper::Or),
+            OpCode::Not => emit_unary(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                RuntimeHelper::Not,
+            ),
+            OpCode::And => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::And,
+            ),
+            OpCode::Or => emit_binop(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                instr.op3 as usize,
+                RuntimeHelper::Or,
+            ),
 
             OpCode::Jmp => {
                 let target = (pc as i64 + instr.simm16() as i64) as usize;
@@ -284,7 +603,9 @@ pub fn compile_bytecode_region(
                 let is_nonzero = builder.ins().icmp(IntCC::NotEqual, cond_val, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
-                    builder.ins().brif(is_nonzero, target_block, &[], fallthrough, &[]);
+                    builder
+                        .ins()
+                        .brif(is_nonzero, target_block, &[], fallthrough, &[]);
                 } else {
                     builder.ins().jump(fallthrough, &[]);
                 }
@@ -296,25 +617,51 @@ pub fn compile_bytecode_region(
                 let is_zero = builder.ins().icmp(IntCC::Equal, cond_val, zero);
                 let fallthrough = *blocks.get(&(pc + 1)).unwrap_or(&return_block);
                 if let Some(&target_block) = blocks.get(&target) {
-                    builder.ins().brif(is_zero, target_block, &[], fallthrough, &[]);
+                    builder
+                        .ins()
+                        .brif(is_zero, target_block, &[], fallthrough, &[]);
                 } else {
                     builder.ins().jump(fallthrough, &[]);
                 }
             }
 
-            OpCode::IToF => emit_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, RuntimeHelper::IToF),
-            OpCode::FToI => emit_unary(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, RuntimeHelper::FToI),
+            OpCode::IToF => emit_unary(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                RuntimeHelper::IToF,
+            ),
+            OpCode::FToI => emit_unary(
+                &mut builder,
+                &helpers,
+                regs_ptr,
+                instr.op1 as usize,
+                instr.op2 as usize,
+                RuntimeHelper::FToI,
+            ),
 
-            OpCode::Ret | OpCode::RetVal => { builder.ins().jump(return_block, &[]); }
+            OpCode::Ret | OpCode::RetVal => {
+                builder.ins().jump(return_block, &[]);
+            }
             OpCode::DbgPrint => {}
 
-            _ => { builder.ins().jump(return_block, &[]); }
+
+            OpCode::ArrLoad => {
+                emit_arr_load(
+                    &mut builder, regs_ptr,
+                    instr.op1 as usize, instr.op2 as usize, instr.op3 as usize,
+                );
+            }
+            _ => {
+                builder.ins().jump(return_block, &[]);
+            }
         }
 
         let is_terminator = matches!(
             instr.opcode,
-            OpCode::Jmp | OpCode::JmpT | OpCode::JmpF | OpCode::Halt
-            | OpCode::Ret | OpCode::RetVal
+            OpCode::Jmp | OpCode::JmpT | OpCode::JmpF | OpCode::Halt | OpCode::Ret | OpCode::RetVal
         );
 
         if !is_terminator {
@@ -336,11 +683,15 @@ pub fn compile_bytecode_region(
 
     builder.finalize();
 
-    let func_id = module.declare_function(func_name, Linkage::Local, &ctx.func.signature.clone())
+    let func_id = module
+        .declare_function(func_name, Linkage::Local, &ctx.func.signature.clone())
         .map_err(|e| CompileError::DeclareFailed(format!("{}", e)))?;
-    module.define_function(func_id, ctx)
+    module
+        .define_function(func_id, ctx)
         .map_err(|e| CompileError::CompileFailed(format!("{}", e)))?;
-    module.finalize_definitions().unwrap();
+    module
+        .finalize_definitions()
+        .map_err(|e| CompileError::CompileFailed(format!("finalize: {}", e)))?;
 
     let code = module.get_finalized_function(func_id);
     Ok(code as *const u8)
@@ -352,7 +703,9 @@ pub fn compile_bytecode_region(
 
 fn load_reg(builder: &mut FunctionBuilder, regs_ptr: Value, idx: usize) -> Value {
     let offset = (idx * 8) as i32;
-    let addr = if offset == 0 { regs_ptr } else {
+    let addr = if offset == 0 {
+        regs_ptr
+    } else {
         let off = builder.ins().iconst(types::I64, offset as i64);
         builder.ins().iadd(regs_ptr, off)
     };
@@ -361,7 +714,9 @@ fn load_reg(builder: &mut FunctionBuilder, regs_ptr: Value, idx: usize) -> Value
 
 fn store_reg(builder: &mut FunctionBuilder, regs_ptr: Value, idx: usize, val: Value) {
     let offset = (idx * 8) as i32;
-    let addr = if offset == 0 { regs_ptr } else {
+    let addr = if offset == 0 {
+        regs_ptr
+    } else {
         let off = builder.ins().iconst(types::I64, offset as i64);
         builder.ins().iadd(regs_ptr, off)
     };
@@ -376,24 +731,74 @@ fn emit_const(builder: &mut FunctionBuilder, regs_ptr: Value, dst: usize, value:
     store_reg(builder, regs_ptr, dst, tagged);
 }
 
-fn emit_binop(builder: &mut FunctionBuilder, helpers: &HashMap<RuntimeHelper, FuncRef>, regs_ptr: Value, op1: usize, op2: usize, dst: usize, helper: RuntimeHelper) {
+pub(crate) fn emit_arr_load(builder: &mut FunctionBuilder, regs_ptr: Value, arr_reg: usize, idx_reg: usize, dst: usize) {
+    // Load NaN-boxed array pointer and index.
+    let arr_val = load_reg(builder, regs_ptr, arr_reg);
+    let idx_val = load_reg(builder, regs_ptr, idx_reg);
+
+    // Extract raw pointer (mask off tag bits from NaN-boxed pointer).
+    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
+    let arr_ptr = builder.ins().band(arr_val, mask);
+
+    // Extract int payload from NaN-boxed int (sext48 via shift-left-16 then sshr-16).
+    let shifted = builder.ins().ishl_imm(idx_val, 16);
+    let idx_raw = builder.ins().sshr_imm(shifted, 16);
+
+    // Scale: idx * sizeof(Value) = idx * 8.
+    let eight = builder.ins().iconst(types::I64, 8);
+    let offset = builder.ins().imul(idx_raw, eight);
+
+    // Compute effective address and load the tagged Value.
+    let addr = builder.ins().iadd(arr_ptr, offset);
+    let result = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
+
+    store_reg(builder, regs_ptr, dst, result);
+}
+
+
+
+fn emit_binop(
+    builder: &mut FunctionBuilder,
+    helpers: &HashMap<RuntimeHelper, FuncRef>,
+    regs_ptr: Value,
+    op1: usize,
+    op2: usize,
+    dst: usize,
+    helper: RuntimeHelper,
+) {
     let a = load_reg(builder, regs_ptr, op1);
     let b = load_reg(builder, regs_ptr, op2);
-    let func_ref = *helpers.get(&helper).unwrap();
+    let func_ref = *helpers
+        .get(&helper)
+        .expect("runtime helper not registered in helpers map");
     let call = builder.ins().call(func_ref, &[a, b]);
     let result = builder.inst_results(call)[0];
     store_reg(builder, regs_ptr, dst, result);
 }
 
-fn emit_unary(builder: &mut FunctionBuilder, helpers: &HashMap<RuntimeHelper, FuncRef>, regs_ptr: Value, src: usize, dst: usize, helper: RuntimeHelper) {
+fn emit_unary(
+    builder: &mut FunctionBuilder,
+    helpers: &HashMap<RuntimeHelper, FuncRef>,
+    regs_ptr: Value,
+    src: usize,
+    dst: usize,
+    helper: RuntimeHelper,
+) {
     let a = load_reg(builder, regs_ptr, src);
-    let func_ref = *helpers.get(&helper).unwrap();
+    let func_ref = *helpers
+        .get(&helper)
+        .expect("runtime helper not registered in helpers map");
     let call = builder.ins().call(func_ref, &[a]);
     let result = builder.inst_results(call)[0];
     store_reg(builder, regs_ptr, dst, result);
 }
-
-fn emit_self_unary(builder: &mut FunctionBuilder, helpers: &HashMap<RuntimeHelper, FuncRef>, regs_ptr: Value, reg: usize, helper: RuntimeHelper) {
+fn emit_self_unary(
+    builder: &mut FunctionBuilder,
+    helpers: &HashMap<RuntimeHelper, FuncRef>,
+    regs_ptr: Value,
+    reg: usize,
+    helper: RuntimeHelper,
+) {
     emit_unary(builder, helpers, regs_ptr, reg, reg, helper);
 }
 

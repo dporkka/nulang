@@ -11,7 +11,9 @@ pub mod marshal;
 pub mod native;
 
 pub use marshal::{call_native, CType, Signature};
-pub use native::{register_native_function, FfiRegistry, NativeFunction, NativeLibrary, FFI_REGISTRY};
+pub use native::{
+    register_native_function, FfiRegistry, NativeFunction, NativeLibrary, FFI_REGISTRY,
+};
 
 #[cfg(test)]
 mod tests {

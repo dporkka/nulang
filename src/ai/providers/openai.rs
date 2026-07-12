@@ -29,11 +29,8 @@ impl LlmClient for OpenAiClient {
             request.model
         };
 
-        let messages: Vec<LlmMessage> = request
-            .memory
-            .into_iter()
-            .chain(request.messages)
-            .collect();
+        let messages: Vec<LlmMessage> =
+            request.memory.into_iter().chain(request.messages).collect();
 
         let tools: Vec<OpenAiTool> = request.tools.into_iter().map(into_openai_tool).collect();
         let tool_choice = if tools.is_empty() {
@@ -69,7 +66,12 @@ impl LlmClient for OpenAiClient {
             .ok_or_else(|| "OpenAI response contained no choices".to_string())?;
 
         let message = choice.message;
-        let content = if message.content.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+        let content = if message
+            .content
+            .as_ref()
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+        {
             None
         } else {
             message.content
@@ -82,9 +84,7 @@ impl LlmClient for OpenAiClient {
             .map(|tc| {
                 let arguments = match tc.function.arguments {
                     serde_json::Value::Object(map) => map,
-                    serde_json::Value::String(s) => {
-                        serde_json::from_str(&s).unwrap_or_default()
-                    }
+                    serde_json::Value::String(s) => serde_json::from_str(&s).unwrap_or_default(),
                     _ => serde_json::Map::new(),
                 };
                 ToolCall {
@@ -271,7 +271,10 @@ mod tests {
         let response: OpenAiChatResponse = serde_json::from_value(json).unwrap();
         assert_eq!(response.model, "gpt-4o");
         assert_eq!(response.choices.len(), 1);
-        assert_eq!(response.choices[0].message.content.as_deref(), Some("Hello!"));
+        assert_eq!(
+            response.choices[0].message.content.as_deref(),
+            Some("Hello!")
+        );
         assert_eq!(response.choices[0].finish_reason.as_deref(), Some("stop"));
         let usage = response.usage.unwrap();
         assert_eq!(usage.prompt_tokens, 10);

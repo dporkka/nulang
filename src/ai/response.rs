@@ -91,7 +91,10 @@ mod tests {
     #[test]
     fn test_tool_call_construction() {
         let mut args = serde_json::Map::new();
-        args.insert("location".to_string(), serde_json::Value::String("NYC".to_string()));
+        args.insert(
+            "location".to_string(),
+            serde_json::Value::String("NYC".to_string()),
+        );
         let call = ToolCall {
             id: "call_1".to_string(),
             name: "get_weather".to_string(),

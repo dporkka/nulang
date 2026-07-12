@@ -26,7 +26,10 @@ pub enum StateModel {
 
 impl StateModel {
     pub fn is_persistent(self) -> bool {
-        matches!(self, StateModel::Durable | StateModel::EventSourced | StateModel::Crdt)
+        matches!(
+            self,
+            StateModel::Durable | StateModel::EventSourced | StateModel::Crdt
+        )
     }
 }
 
@@ -110,10 +113,7 @@ pub enum WorkflowEvent {
         state: Vec<PersistedValue>,
     },
     /// A workflow step completed successfully.
-    StepCompleted {
-        sequence: u64,
-        step_name: String,
-    },
+    StepCompleted { sequence: u64, step_name: String },
     /// A timer was set for a workflow.
     TimerSet {
         sequence: u64,
@@ -121,10 +121,7 @@ pub enum WorkflowEvent {
         duration_ms: u64,
     },
     /// A previously set timer fired.
-    TimerFired {
-        sequence: u64,
-        name: String,
-    },
+    TimerFired { sequence: u64, name: String },
     /// An external signal was delivered to the workflow.
     SignalReceived {
         sequence: u64,
@@ -132,10 +129,7 @@ pub enum WorkflowEvent {
         payload: Option<String>,
     },
     /// A saga step was compensated after failure.
-    SagaCompensated {
-        sequence: u64,
-        step_name: String,
-    },
+    SagaCompensated { sequence: u64, step_name: String },
     /// A branch of a synthetic parallel step completed.
     ParallelBranchCompleted {
         sequence: u64,
@@ -205,12 +199,7 @@ pub trait PersistenceStore: Send + Sync {
     }
 
     /// Append a `TimerFired` workflow event.
-    fn append_timer_fired(
-        &mut self,
-        actor_id: u64,
-        sequence: u64,
-        name: String,
-    ) -> io::Result<()> {
+    fn append_timer_fired(&mut self, actor_id: u64, sequence: u64, name: String) -> io::Result<()> {
         self.append_workflow_event(actor_id, WorkflowEvent::TimerFired { sequence, name })
     }
 
@@ -344,21 +333,33 @@ impl PersistenceStore for MemoryStore {
     }
 
     fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
-        self.workflow_events.entry(actor_id).or_default().push(event);
+        self.workflow_events
+            .entry(actor_id)
+            .or_default()
+            .push(event);
         Ok(())
     }
 
     fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
-        self.workflow_events.get(&actor_id).cloned().unwrap_or_default()
+        self.workflow_events
+            .get(&actor_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn latest_sequence(&self, actor_id: u64) -> u64 {
-        let snapshot_seq = self.snapshots.get(&actor_id).map(|s| s.sequence).unwrap_or(0);
-        let journal_seq = self.journals
+        let snapshot_seq = self
+            .snapshots
+            .get(&actor_id)
+            .map(|s| s.sequence)
+            .unwrap_or(0);
+        let journal_seq = self
+            .journals
             .get(&actor_id)
             .and_then(|j| j.last().map(|e| e.sequence))
             .unwrap_or(0);
-        let event_seq = self.workflow_events
+        let event_seq = self
+            .workflow_events
             .get(&actor_id)
             .and_then(|e| e.last().map(|ev| ev.sequence()))
             .unwrap_or(0);
@@ -427,7 +428,10 @@ impl PersistenceStore for JsonFileStore {
         let dir = self.actor_dir(actor_id);
         fs::create_dir_all(&dir)?;
         let path = self.journal_path(actor_id);
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         let json = serde_json::to_string(&entry)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         writeln!(file, "{}", json)?;
@@ -449,7 +453,10 @@ impl PersistenceStore for JsonFileStore {
         let dir = self.actor_dir(actor_id);
         fs::create_dir_all(&dir)?;
         let path = self.workflow_events_path(actor_id);
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         let json = serde_json::to_string(&event)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         writeln!(file, "{}", json)?;
@@ -468,12 +475,17 @@ impl PersistenceStore for JsonFileStore {
     }
 
     fn latest_sequence(&self, actor_id: u64) -> u64 {
-        let snapshot_seq = self.load_snapshot(actor_id).map(|s| s.sequence).unwrap_or(0);
-        let journal_seq = self.read_journal(actor_id)
+        let snapshot_seq = self
+            .load_snapshot(actor_id)
+            .map(|s| s.sequence)
+            .unwrap_or(0);
+        let journal_seq = self
+            .read_journal(actor_id)
             .last()
             .map(|e| e.sequence)
             .unwrap_or(0);
-        let event_seq = self.read_workflow_events(actor_id)
+        let event_seq = self
+            .read_workflow_events(actor_id)
             .last()
             .map(|e| e.sequence())
             .unwrap_or(0);
@@ -505,7 +517,9 @@ impl PersistenceStore for JsonFileStore {
 /// a best-effort `ROLLBACK` whenever we actually recover from poisoning, so
 /// the connection can't be left mid-transaction for whoever locks it next.
 #[cfg(feature = "sqlite")]
-fn lock_ignore_poison(m: &std::sync::Mutex<rusqlite::Connection>) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+fn lock_ignore_poison(
+    m: &std::sync::Mutex<rusqlite::Connection>,
+) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
     match m.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
@@ -549,10 +563,7 @@ impl SqliteStore {
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         // Migrate existing databases that were created without the
         // waiting_signal column.
-        let _ = conn.execute(
-            "ALTER TABLE snapshots ADD COLUMN waiting_signal TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE snapshots ADD COLUMN waiting_signal TEXT", []);
         conn.execute(
             "CREATE TABLE IF NOT EXISTS journal (
                 actor_id INTEGER NOT NULL,
@@ -597,7 +608,8 @@ impl PersistenceStore for SqliteStore {
         let mut conn = lock_ignore_poison(&self.conn);
         let state_json = serde_json::to_string(&snapshot.state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let tx = conn.transaction()
+        let tx = conn
+            .transaction()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         tx.execute(
             "INSERT INTO snapshots (actor_id, sequence, state, waiting_signal) VALUES (?1, ?2, ?3, ?4)
@@ -693,9 +705,7 @@ impl PersistenceStore for SqliteStore {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
-        let rows = stmt.query_map([actor_id as i64], |row| {
-            Ok(row.get::<_, String>(0)?)
-        });
+        let rows = stmt.query_map([actor_id as i64], |row| Ok(row.get::<_, String>(0)?));
         match rows {
             Ok(iter) => iter
                 .filter_map(|r| {
@@ -730,17 +740,26 @@ impl PersistenceStore for SqliteStore {
                 |row| row.get(0),
             )
             .ok();
-        snapshot_seq.unwrap_or(0).max(journal_seq.unwrap_or(0)).max(event_seq.unwrap_or(0)) as u64
+        snapshot_seq
+            .unwrap_or(0)
+            .max(journal_seq.unwrap_or(0))
+            .max(event_seq.unwrap_or(0)) as u64
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
         let conn = lock_ignore_poison(&self.conn);
-        conn.execute("DELETE FROM snapshots WHERE actor_id = ?1", [actor_id as i64])
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        conn.execute(
+            "DELETE FROM snapshots WHERE actor_id = ?1",
+            [actor_id as i64],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         conn.execute("DELETE FROM journal WHERE actor_id = ?1", [actor_id as i64])
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        conn.execute("DELETE FROM workflow_events WHERE actor_id = ?1", [actor_id as i64])
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        conn.execute(
+            "DELETE FROM workflow_events WHERE actor_id = ?1",
+            [actor_id as i64],
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(())
     }
 }

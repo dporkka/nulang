@@ -3,28 +3,30 @@
 //! Uses Pratt parser (precedence climbing) for expressions.
 //! Entry point: `Parser::parse_module()`.
 
-use std::collections::HashMap;
 use crate::ast::*;
 use crate::lexer::{Token, TokenKind};
-use crate::types::{Capability, Effect, EffectRow, NuError, NuResult, Span, Type, TypeVar, Region, PrimitiveType};
+use crate::types::{
+    Capability, Effect, EffectRow, NuError, NuResult, PrimitiveType, Region, Span, Type, TypeVar,
+};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Operator Precedence (13 levels, higher = tighter binding)
 // ---------------------------------------------------------------------------
 
 const PREC_LOWEST: u8 = 0;
-const PREC_ASSIGN: u8 = 1;  // = += -=
-const PREC_PIPE: u8 = 2;    // |>
-const PREC_OR: u8 = 3;      // ||
-const PREC_AND: u8 = 4;     // &&
-const PREC_EQ: u8 = 5;      // == !=
-const PREC_CMP: u8 = 6;     // < <= > >=
-const PREC_TERM: u8 = 7;    // + -
-const PREC_FACTOR: u8 = 8;  // * / %
-const PREC_SHIFT: u8 = 9;   // << >>
+const PREC_ASSIGN: u8 = 1; // = += -=
+const PREC_PIPE: u8 = 2; // |>
+const PREC_OR: u8 = 3; // ||
+const PREC_AND: u8 = 4; // &&
+const PREC_EQ: u8 = 5; // == !=
+const PREC_CMP: u8 = 6; // < <= > >=
+const PREC_TERM: u8 = 7; // + -
+const PREC_FACTOR: u8 = 8; // * / %
+const PREC_SHIFT: u8 = 9; // << >>
 const PREC_BITAND: u8 = 10; // &
 const PREC_BITXOR: u8 = 11; // ^
-const PREC_BITOR: u8 = 12;  // |
+const PREC_BITOR: u8 = 12; // |
 const PREC_PREFIX: u8 = 10; // ! - & (prefix)
 
 fn prefix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
@@ -85,7 +87,9 @@ impl Parser {
         self.skip_newlines();
         while !self.is_at_end() {
             self.skip_newlines();
-            if self.is_at_end() { break; }
+            if self.is_at_end() {
+                break;
+            }
 
             // Try declaration first, then expression
             match self.parse_decl() {
@@ -230,7 +234,11 @@ impl Parser {
         Ok(annotations)
     }
 
-    fn parse_function(&mut self, public: bool, annotations: Vec<FunctionAnnotation>) -> NuResult<Decl> {
+    fn parse_function(
+        &mut self,
+        public: bool,
+        annotations: Vec<FunctionAnnotation>,
+    ) -> NuResult<Decl> {
         let span = self.current_span();
         self.advance(); // consume 'fn'
         let name = self.expect_ident("function name")?;
@@ -788,7 +796,10 @@ impl Parser {
             }
             other => {
                 return Err(NuError::ParseError {
-                    msg: format!("Expected string literal for library path, found {:?}", other),
+                    msg: format!(
+                        "Expected string literal for library path, found {:?}",
+                        other
+                    ),
                     span: self.current_span(),
                 })
             }
@@ -1058,8 +1069,12 @@ impl Parser {
 
                 match kind {
                     // Literals
-                    TokenKind::IntLit(_) | TokenKind::FloatLit(_) | TokenKind::StringLit(_)
-                    | TokenKind::BoolLit(_) | TokenKind::NilLit | TokenKind::UnitLit => self.parse_literal(),
+                    TokenKind::IntLit(_)
+                    | TokenKind::FloatLit(_)
+                    | TokenKind::StringLit(_)
+                    | TokenKind::BoolLit(_)
+                    | TokenKind::NilLit
+                    | TokenKind::UnitLit => self.parse_literal(),
 
                     // Identifiers
                     TokenKind::Ident(name) => {
@@ -1452,11 +1467,7 @@ impl Parser {
         let event = self.expect_ident("event name")?;
         self.expect(TokenKind::LParen)?;
         let args = self.parse_arg_list()?;
-        Ok(Expr::Emit {
-            event,
-            args,
-            span,
-        })
+        Ok(Expr::Emit { event, args, span })
     }
 
     // === Helper Methods ===
@@ -1588,7 +1599,10 @@ impl Parser {
     }
 
     fn skip_newlines_semicolons(&mut self) {
-        while matches!(self.peek_kind(), &TokenKind::Newline | &TokenKind::Semicolon) {
+        while matches!(
+            self.peek_kind(),
+            &TokenKind::Newline | &TokenKind::Semicolon
+        ) {
             self.advance();
         }
     }
@@ -1843,7 +1857,8 @@ impl Parser {
                         if let Some(&tv) = self.local_type_params.get(&name) {
                             Type::Var(tv)
                         } else {
-                            let tv = *self.global_type_constructors
+                            let tv = *self
+                                .global_type_constructors
                                 .entry(name)
                                 .or_insert_with(TypeVar::fresh);
                             Type::Var(tv)
@@ -1928,15 +1943,39 @@ impl Parser {
     fn parse_capability(&mut self) -> NuResult<Capability> {
         let current_kind = self.peek_kind();
         match current_kind {
-            TokenKind::Iso => { self.advance(); Ok(Capability::Iso) }
-            TokenKind::Trn => { self.advance(); Ok(Capability::Trn) }
-            TokenKind::Ref => { self.advance(); Ok(Capability::Ref) }
-            TokenKind::Val => { self.advance(); Ok(Capability::Val) }
-            TokenKind::Box => { self.advance(); Ok(Capability::Box) }
-            TokenKind::Tag => { self.advance(); Ok(Capability::Tag) }
-            TokenKind::Ident(s) if s == "lineariso" => { self.advance(); Ok(Capability::LinearIso) }
+            TokenKind::Iso => {
+                self.advance();
+                Ok(Capability::Iso)
+            }
+            TokenKind::Trn => {
+                self.advance();
+                Ok(Capability::Trn)
+            }
+            TokenKind::Ref => {
+                self.advance();
+                Ok(Capability::Ref)
+            }
+            TokenKind::Val => {
+                self.advance();
+                Ok(Capability::Val)
+            }
+            TokenKind::Box => {
+                self.advance();
+                Ok(Capability::Box)
+            }
+            TokenKind::Tag => {
+                self.advance();
+                Ok(Capability::Tag)
+            }
+            TokenKind::Ident(s) if s == "lineariso" => {
+                self.advance();
+                Ok(Capability::LinearIso)
+            }
             _ => Err(NuError::ParseError {
-                msg: format!("Expected capability (iso, trn, ref, val, box, tag, lineariso), found {:?}", current_kind),
+                msg: format!(
+                    "Expected capability (iso, trn, ref, val, box, tag, lineariso), found {:?}",
+                    current_kind
+                ),
                 span: self.current_span(),
             }),
         }
@@ -2099,9 +2138,18 @@ impl Parser {
                 self.advance();
                 Ok(Pattern::Lit(Literal::Unit))
             }
-            TokenKind::True => { self.advance(); Ok(Pattern::Lit(Literal::Bool(true))) }
-            TokenKind::False => { self.advance(); Ok(Pattern::Lit(Literal::Bool(false))) }
-            TokenKind::Unit => { self.advance(); Ok(Pattern::Lit(Literal::Unit)) }
+            TokenKind::True => {
+                self.advance();
+                Ok(Pattern::Lit(Literal::Bool(true)))
+            }
+            TokenKind::False => {
+                self.advance();
+                Ok(Pattern::Lit(Literal::Bool(false)))
+            }
+            TokenKind::Unit => {
+                self.advance();
+                Ok(Pattern::Lit(Literal::Unit))
+            }
             _ => Err(NuError::ParseError {
                 msg: format!("Expected pattern, found {:?}", current_kind),
                 span: self.current_span(),
@@ -2518,15 +2566,13 @@ mod tests {
     fn test_parse_alias_pattern() {
         let expr = parse_expr("match v { n @ Some(x) => n }").unwrap();
         match expr {
-            Expr::Match { arms, .. } => {
-                match &arms[0].0 {
-                    Pattern::Alias(name, inner) => {
-                        assert_eq!(name, "n");
-                        assert!(matches!(inner.as_ref(), Pattern::Variant(v, _) if v == "Some"));
-                    }
-                    _ => panic!("Expected alias pattern"),
+            Expr::Match { arms, .. } => match &arms[0].0 {
+                Pattern::Alias(name, inner) => {
+                    assert_eq!(name, "n");
+                    assert!(matches!(inner.as_ref(), Pattern::Variant(v, _) if v == "Some"));
                 }
-            }
+                _ => panic!("Expected alias pattern"),
+            },
             _ => panic!("Expected match expression"),
         }
     }
@@ -2540,7 +2586,10 @@ mod tests {
     #[test]
     fn test_parse_error_missing_arrow_in_effect() {
         let result = parse("effect E { op: Int }");
-        assert!(result.is_err(), "Expected parse error for effect op missing arrow");
+        assert!(
+            result.is_err(),
+            "Expected parse error for effect op missing arrow"
+        );
     }
 
     #[test]
@@ -2557,7 +2606,10 @@ mod tests {
                 assert_eq!(funcs[1].name, "pow");
                 assert_eq!(
                     funcs[1].params,
-                    vec![("x".to_string(), Type::float()), ("y".to_string(), Type::float())]
+                    vec![
+                        ("x".to_string(), Type::float()),
+                        ("y".to_string(), Type::float())
+                    ]
                 );
                 assert_eq!(funcs[1].ret, Type::float());
             }
@@ -2580,15 +2632,24 @@ mod tests {
     #[test]
     fn test_parse_extern_missing_param_type_errors() {
         let result = parse(r#"extern "lib" { fn f(x) -> Int }"#);
-        assert!(result.is_err(), "Expected parse error for missing parameter type in extern");
+        assert!(
+            result.is_err(),
+            "Expected parse error for missing parameter type in extern"
+        );
     }
 
     #[test]
     fn test_parse_workflow_with_steps() {
-        let ast = parse("workflow PurchaseOrder { step validate { 1 } step charge { 2 } }").unwrap();
+        let ast =
+            parse("workflow PurchaseOrder { step validate { 1 } step charge { 2 } }").unwrap();
         assert_eq!(ast.decls.len(), 1);
         match &ast.decls[0] {
-            Decl::Workflow { name, items, compensate, .. } => {
+            Decl::Workflow {
+                name,
+                items,
+                compensate,
+                ..
+            } => {
                 assert_eq!(name, "PurchaseOrder");
                 assert_eq!(items.len(), 2);
                 match (&items[0], &items[1]) {
@@ -2606,9 +2667,13 @@ mod tests {
 
     #[test]
     fn test_parse_workflow_with_parallel_and_compensate() {
-        let ast = parse("workflow Booking { parallel { step a { 1 } step b { 2 } } compensate { 0 } }").unwrap();
+        let ast =
+            parse("workflow Booking { parallel { step a { 1 } step b { 2 } } compensate { 0 } }")
+                .unwrap();
         match &ast.decls[0] {
-            Decl::Workflow { items, compensate, .. } => {
+            Decl::Workflow {
+                items, compensate, ..
+            } => {
                 assert_eq!(items.len(), 1);
                 match &items[0] {
                     WorkflowItem::Parallel(branches) => {
@@ -2625,7 +2690,10 @@ mod tests {
     #[test]
     fn test_parse_workflow_invalid_body_errors() {
         let result = parse("workflow W { fn f() -> Int { 1 } }");
-        assert!(result.is_err(), "Expected parse error for invalid workflow body");
+        assert!(
+            result.is_err(),
+            "Expected parse error for invalid workflow body"
+        );
     }
 
     #[test]
@@ -2712,13 +2780,19 @@ mod tests {
     #[test]
     fn test_parse_agent_missing_model_errors() {
         let result = parse("agent MyAgent = { system_prompt: \"hi\" }");
-        assert!(result.is_err(), "Expected parse error for agent missing model");
+        assert!(
+            result.is_err(),
+            "Expected parse error for agent missing model"
+        );
     }
 
     #[test]
     fn test_parse_agent_unknown_field_errors() {
         let result = parse("agent MyAgent = { model: \"x\", unknown: 1 }");
-        assert!(result.is_err(), "Expected parse error for unknown agent field");
+        assert!(
+            result.is_err(),
+            "Expected parse error for unknown agent field"
+        );
     }
 
     #[test]
@@ -2732,8 +2806,7 @@ mod tests {
         let ast = parse(source).unwrap();
         match &ast.decls[0] {
             Decl::Agent {
-                procedural_memory,
-                ..
+                procedural_memory, ..
             } => {
                 assert_eq!(
                     procedural_memory.as_ref().map(|m| m.namespace.as_str()),
@@ -2750,8 +2823,7 @@ mod tests {
         let ast = parse(source).unwrap();
         match &ast.decls[0] {
             Decl::Agent {
-                procedural_memory,
-                ..
+                procedural_memory, ..
             } => {
                 assert_eq!(
                     procedural_memory.as_ref().map(|m| m.namespace.as_str()),

@@ -58,11 +58,13 @@ impl ProcessGroups {
             return Err(PgError::InvalidGroup(group.to_string()));
         }
 
-        let mut groups = self.groups.write().map_err(|_| {
-            PgError::InvalidGroup(group.to_string())
-        })?;
+        let mut groups = self
+            .groups
+            .write()
+            .map_err(|_| PgError::InvalidGroup(group.to_string()))?;
 
-        groups.entry(group.to_string())
+        groups
+            .entry(group.to_string())
             .or_insert_with(HashSet::new)
             .insert(actor_id);
 
@@ -132,7 +134,8 @@ impl ProcessGroups {
             Err(_) => return Vec::new(),
         };
 
-        groups.get(group)
+        groups
+            .get(group)
             .map(|members| members.iter().copied().collect())
             .unwrap_or_default()
     }
@@ -144,7 +147,8 @@ impl ProcessGroups {
             Err(_) => return false,
         };
 
-        groups.get(group)
+        groups
+            .get(group)
             .map(|members| members.contains(&actor_id))
             .unwrap_or(false)
     }
@@ -156,9 +160,7 @@ impl ProcessGroups {
             Err(_) => return 0,
         };
 
-        groups.get(group)
-            .map(|members| members.len())
-            .unwrap_or(0)
+        groups.get(group).map(|members| members.len()).unwrap_or(0)
     }
 
     /// Get a list of all non-empty group names.

@@ -1,6 +1,6 @@
 //! Shared type definitions used across all Nulang compiler and runtime modules.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -105,8 +105,15 @@ impl Capability {
             (Iso, Ref) | (Ref, Iso) | (Trn, Ref) | (Ref, Trn) | (Ref, Ref) => Ref,
             (Iso, Val) | (Val, Iso) | (Trn, Val) | (Val, Trn) | (Val, Val) => Val,
             (Ref, Val) | (Val, Ref) => Box,
-            (Iso, Box) | (Box, Iso) | (Trn, Box) | (Box, Trn) | (Ref, Box) | (Box, Ref)
-            | (Val, Box) | (Box, Val) | (Box, Box) => Box,
+            (Iso, Box)
+            | (Box, Iso)
+            | (Trn, Box)
+            | (Box, Trn)
+            | (Ref, Box)
+            | (Box, Ref)
+            | (Val, Box)
+            | (Box, Val)
+            | (Box, Box) => Box,
             (Tag, c) | (c, Tag) if c == Tag => Tag,
             (Tag, c) | (c, Tag) => c, // tag is bottom-ish for read-only
         }
@@ -274,7 +281,10 @@ pub enum Type {
         behavior: Box<Type>,
     },
     /// Generic type application: List[Int], Map[String, Int]
-    App { constructor: Box<Type>, args: Vec<Type> },
+    App {
+        constructor: Box<Type>,
+        args: Vec<Type>,
+    },
     /// Reference type with capability: &cap Type
     Reference { cap: Capability, inner: Box<Type> },
     /// Existential / type scheme: forall vars. Type
@@ -351,14 +361,11 @@ impl Type {
 
 /// Typing context: maps variable names to their (type, capability) bindings.
 ///
-/// Tracks linear variable consumption to enforce exactly-once use of linear
-/// (`LinearIso`) values. When a linear variable is consumed, it is recorded in
-/// `consumed`; subsequent attempts to use it will fail.
+/// Linear (`LinearIso`) consumption is tracked separately by the capability
+/// analyzer (`CapabilityAnalyzer` in `src/effect_checker.rs`), not here.
 #[derive(Debug, Clone, Default)]
 pub struct TypeContext {
     bindings: HashMap<String, (Type, Capability)>,
-    /// Set of linear variable names that have been consumed (used exactly once).
-    consumed: HashSet<String>,
 }
 
 impl TypeContext {
@@ -367,15 +374,8 @@ impl TypeContext {
     }
 
     /// Bind a variable name to a type and capability.
-    ///
-    /// If the capability is linear (`LinearIso`), resets its consumption state
-    /// so the variable can be consumed exactly once in the current scope.
     pub fn bind(&mut self, name: impl Into<String>, ty: Type, cap: Capability) {
         let name = name.into();
-        // Reset consumption state for linear variables on re-bind
-        if cap.is_linear() {
-            self.consumed.remove(&name);
-        }
         self.bindings.insert(name, (ty, cap));
     }
 
@@ -391,42 +391,6 @@ impl TypeContext {
         ctx
     }
 
-    /// Mark a linear variable as consumed.
-    ///
-    /// Returns `Ok(())` if the variable was not yet consumed and is linear.
-    /// Returns `Err(LinearTypeError)` if the variable is already consumed
-    /// or does not exist / is not linear.
-    pub fn consume(&mut self, name: &str) -> Result<(), NuError> {
-        match self.bindings.get(name) {
-            Some((_ty, cap)) if cap.is_linear() => {
-                if self.consumed.contains(name) {
-                    Err(NuError::LinearTypeError {
-                        msg: format!(
-                            "Linear variable '{}' consumed more than once",
-                            name
-                        ),
-                        span: Span::default(),
-                    })
-                } else {
-                    self.consumed.insert(name.to_string());
-                    Ok(())
-                }
-            }
-            Some((_ty, _cap)) => Err(NuError::LinearTypeError {
-                msg: format!("Variable '{}' is not linear and cannot be consumed", name),
-                span: Span::default(),
-            }),
-            None => Err(NuError::LinearTypeError {
-                msg: format!("Variable '{}' not found in context", name),
-                span: Span::default(),
-            }),
-        }
-    }
-
-    /// Check whether a linear variable has already been consumed.
-    pub fn is_consumed(&self, name: &str) -> bool {
-        self.consumed.contains(name)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -461,17 +425,35 @@ pub type NuResult<T> = Result<T, NuError>;
 
 #[derive(Debug, Clone)]
 pub enum NuError {
-    LexError { msg: String, span: Span },
-    ParseError { msg: String, span: Span },
-    TypeError { msg: String, span: Span },
-    EffectError { msg: String, span: Span },
-    CapError { msg: String, span: Span },
-    /// Linear type violation: a linear value was used more than once,
-    /// not consumed, or otherwise violated linearity constraints.
-    LinearTypeError { msg: String, span: Span },
-    FFIError { msg: String, span: Span },
+    LexError {
+        msg: String,
+        span: Span,
+    },
+    ParseError {
+        msg: String,
+        span: Span,
+    },
+    TypeError {
+        msg: String,
+        span: Span,
+    },
+    EffectError {
+        msg: String,
+        span: Span,
+    },
+    CapError {
+        msg: String,
+        span: Span,
+    },
+    FFIError {
+        msg: String,
+        span: Span,
+    },
     /// Feature is parsed/typed correctly but has no runtime implementation yet.
-    NotYetImplemented { feature: String, span: Span },
+    NotYetImplemented {
+        feature: String,
+        span: Span,
+    },
     RuntimeError(String),
     VMError(String),
     PythonError(String), // Python interop error
@@ -493,12 +475,9 @@ impl std::fmt::Display for NuError {
                 write!(f, "Effect error at {}:{}: {}", span.line, span.column, msg)
             }
             NuError::CapError { msg, span } => {
-                write!(f, "Capability error at {}:{}: {}", span.line, span.column, msg)
-            }
-            NuError::LinearTypeError { msg, span } => {
                 write!(
                     f,
-                    "Linear type error at {}:{}: {}",
+                    "Capability error at {}:{}: {}",
                     span.line, span.column, msg
                 )
             }
@@ -506,7 +485,11 @@ impl std::fmt::Display for NuError {
                 write!(f, "FFI error at {}:{}: {}", span.line, span.column, msg)
             }
             NuError::NotYetImplemented { feature, span } => {
-                write!(f, "Not yet implemented at {}:{}: {}", span.line, span.column, feature)
+                write!(
+                    f,
+                    "Not yet implemented at {}:{}: {}",
+                    span.line, span.column, feature
+                )
             }
             NuError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             NuError::VMError(msg) => write!(f, "VM error: {}", msg),
@@ -564,141 +547,3 @@ impl ExitReason {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Linear Type Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod linear_tests {
-    use super::*;
-
-    // Test 1: LinearIso capability exists and is_linear returns true
-    #[test]
-    fn test_linear_iso_is_linear() {
-        assert!(Capability::LinearIso.is_linear());
-    }
-
-    // Test 2: Regular Iso is NOT linear (no tracking)
-    #[test]
-    fn test_regular_iso_not_linear() {
-        assert!(!Capability::Iso.is_linear());
-        assert!(!Capability::Trn.is_linear());
-        assert!(!Capability::Ref.is_linear());
-        assert!(!Capability::Val.is_linear());
-        assert!(!Capability::Box.is_linear());
-        assert!(!Capability::Tag.is_linear());
-    }
-
-    // Test 3: TypeContext can bind and consume a linear variable
-    #[test]
-    fn test_typecontext_linear_bind_consume() {
-        let mut ctx = TypeContext::new();
-        ctx.bind("x", Type::int(), Capability::LinearIso);
-
-        // Initially not consumed
-        assert!(!ctx.is_consumed("x"));
-
-        // Consume succeeds
-        assert!(ctx.consume("x").is_ok());
-
-        // Now it is consumed
-        assert!(ctx.is_consumed("x"));
-    }
-
-    // Test 4: Double consumption of a linear variable fails
-    #[test]
-    fn test_linear_double_consume_fails() {
-        let mut ctx = TypeContext::new();
-        ctx.bind("x", Type::int(), Capability::LinearIso);
-
-        // First consume succeeds
-        assert!(ctx.consume("x").is_ok());
-
-        // Second consume fails with LinearTypeError
-        let result = ctx.consume("x");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            NuError::LinearTypeError { msg, .. } => {
-                assert!(msg.contains("consumed more than once"));
-            }
-            other => panic!("Expected LinearTypeError, got {:?}", other),
-        }
-    }
-
-    // Test 5: LinearIso is sendable (like Iso)
-    #[test]
-    fn test_linear_iso_is_sendable() {
-        assert!(Capability::LinearIso.is_sendable());
-        // Same sendability as Iso, Val, Tag
-        assert!(Capability::Iso.is_sendable());
-        assert!(Capability::Val.is_sendable());
-        assert!(Capability::Tag.is_sendable());
-        // Ref, Box, Trn are not sendable
-        assert!(!Capability::Ref.is_sendable());
-        assert!(!Capability::Box.is_sendable());
-        assert!(!Capability::Trn.is_sendable());
-    }
-
-    // Test 6: Promote LinearIso to Iso on send
-    #[test]
-    fn test_linear_iso_promote_to_iso() {
-        assert_eq!(Capability::LinearIso.promote_to_iso(), Capability::Iso);
-        // Non-linear capabilities are unchanged
-        assert_eq!(Capability::Iso.promote_to_iso(), Capability::Iso);
-        assert_eq!(Capability::Trn.promote_to_iso(), Capability::Trn);
-        assert_eq!(Capability::Ref.promote_to_iso(), Capability::Ref);
-        assert_eq!(Capability::Val.promote_to_iso(), Capability::Val);
-        assert_eq!(Capability::Box.promote_to_iso(), Capability::Box);
-        assert_eq!(Capability::Tag.promote_to_iso(), Capability::Tag);
-    }
-
-    // Test 7: LinearIso joins correctly with other capabilities
-    #[test]
-    fn test_linear_iso_join() {
-        // LinearIso ⊔ LinearIso = LinearIso
-        assert_eq!(
-            Capability::LinearIso.join(Capability::LinearIso),
-            Capability::LinearIso
-        );
-        // LinearIso ⊔ Iso = Iso
-        assert_eq!(
-            Capability::LinearIso.join(Capability::Iso),
-            Capability::Iso
-        );
-        assert_eq!(
-            Capability::Iso.join(Capability::LinearIso),
-            Capability::Iso
-        );
-        // LinearIso ⊔ Trn = Trn
-        assert_eq!(
-            Capability::LinearIso.join(Capability::Trn),
-            Capability::Trn
-        );
-        // LinearIso ⊔ Ref = Ref
-        assert_eq!(
-            Capability::LinearIso.join(Capability::Ref),
-            Capability::Ref
-        );
-        // LinearIso ⊔ Tag = LinearIso
-        assert_eq!(
-            Capability::LinearIso.join(Capability::Tag),
-            Capability::LinearIso
-        );
-        // Subtyping: LinearIso <: Iso
-        assert!(Capability::LinearIso.is_subtype_of(Capability::Iso));
-        assert!(!Capability::Iso.is_subtype_of(Capability::LinearIso));
-    }
-
-    // Test 8: Linear type error creation
-    #[test]
-    fn test_linear_type_error() {
-        let err = NuError::LinearTypeError {
-            msg: "test linear error".to_string(),
-            span: Span::new(0, 10, 1, 5),
-        };
-        let display = format!("{}", err);
-        assert!(display.contains("Linear type error"));
-        assert!(display.contains("test linear error"));
-        assert!(display.contains("1:5"));
-    }
-}

@@ -5,7 +5,6 @@
 //! scheduler fairness under load.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
@@ -48,22 +47,30 @@ fn stress_slow_worker_with_mailbox_flood() {
     let mut rt = Runtime::new();
     let _ctx = Arc::new(Mutex::new(TestContext::default()));
 
-    let slow_actor = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(),   Value::int(1)), // 1 = "slow_worker"
-        ("mode".into(),   Value::int(2)), // 2 = "slow_io"
-        ("quota".into(),  Value::int(1000)),
-    ]));
+    let slow_actor = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(1)), // 1 = "slow_worker"
+            ("mode".into(), Value::int(2)), // 2 = "slow_io"
+            ("quota".into(), Value::int(1000)),
+        ]
+    }));
 
-    let flood_sender = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(3)), // 3 = "flood_sender"
-    ]));
+    let flood_sender = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(3)), // 3 = "flood_sender"
+        ]
+    }));
 
     // Pre-seed the slow actor's mailbox with 10_000 messages
     for i in 0..10_000 {
-        rt.send_message(slow_actor, "work", &[
-            Value::int(i),
-            Value::int(42), // payload marker
-        ]);
+        rt.send_message(
+            slow_actor,
+            "work",
+            &[
+                Value::int(i),
+                Value::int(42), // payload marker
+            ],
+        );
     }
 
     // Inject a system-priority exit signal mid-flood via a linked actor
@@ -73,9 +80,7 @@ fn stress_slow_worker_with_mailbox_flood() {
 
     // Seed flood sender's mailbox
     for i in 10_000..15_000 {
-        rt.send_message(flood_sender, "forward", &[
-            Value::int(i),
-        ]);
+        rt.send_message(flood_sender, "forward", &[Value::int(i)]);
     }
 
     // Run scheduler to process all messages
@@ -108,7 +113,9 @@ fn stress_slow_worker_with_mailbox_flood() {
     // reaped from the actor table by handle_actor_exit, so anything still
     // registered must be in a live (non-Terminated) state.
     assert!(
-        rt.actors.values().all(|a| a.state != ActorState::Terminated),
+        rt.actors
+            .values()
+            .all(|a| a.state != ActorState::Terminated),
         "terminated actors should have been reaped from the runtime"
     );
 }
@@ -123,16 +130,20 @@ fn stress_actor_crash_during_scheduling() {
 
     let sup = rt.create_supervisor("test_sup", RestartStrategy::OneForOne);
 
-    let child = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(4)), // 4 = "effect_child"
-    ]));
+    let child = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(4)), // 4 = "effect_child"
+        ]
+    }));
 
     let child_spec = ChildSpec::new("child", RestartPolicy::Permanent);
     rt.supervise_child(sup, child_spec, child);
 
-    let sibling = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(5)), // 5 = "sibling"
-    ]));
+    let sibling = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(5)), // 5 = "sibling"
+        ]
+    }));
     rt.link_actors(child, sibling);
 
     // Simulate crash
@@ -146,7 +157,10 @@ fn stress_actor_crash_during_scheduling() {
     );
 
     // Supervisor should survive
-    assert!(rt.actors.contains_key(&sup), "supervisor should survive child crash");
+    assert!(
+        rt.actors.contains_key(&sup),
+        "supervisor should survive child crash"
+    );
 
     // Supervisor should have recorded the restart
     if let Some(supvisor) = rt.supervisors.get(&sup) {
@@ -200,14 +214,13 @@ fn stress_cascading_exit_under_load() {
     if supervisors.len() > 3 {
         for sup_l3 in &supervisors[3] {
             for leaf_idx in 0..2 {
-                let leaf = rt.spawn_actor(Box::new(move || vec![
-                    ("name".into(), Value::int(10 + leaf_idx as i64)),
-                    ("level".into(), Value::int(4)),
-                ]));
-                let spec = ChildSpec::new(
-                    format!("leaf_{}", leaf_idx),
-                    RestartPolicy::Temporary,
-                );
+                let leaf = rt.spawn_actor(Box::new(move || {
+                    vec![
+                        ("name".into(), Value::int(10 + leaf_idx as i64)),
+                        ("level".into(), Value::int(4)),
+                    ]
+                }));
+                let spec = ChildSpec::new(format!("leaf_{}", leaf_idx), RestartPolicy::Temporary);
                 rt.supervise_child(*sup_l3, spec, leaf);
                 leaf_actors.push(leaf);
             }
@@ -234,7 +247,8 @@ fn stress_cascading_exit_under_load() {
         post_crash_count,
         pre_crash_count - 1,
         "only the crashed leaf should be removed; pre={}, post={}",
-        pre_crash_count, post_crash_count
+        pre_crash_count,
+        post_crash_count
     );
 
     // All supervisors still exist
@@ -265,17 +279,21 @@ fn stress_cascading_exit_under_load() {
 fn stress_monitor_during_rapid_spawn_exit() {
     let mut rt = Runtime::new();
 
-    let watcher = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(6)), // 6 = "watcher"
-        ("role".into(), Value::int(7)), // 7 = "monitor_collector"
-    ]));
+    let watcher = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(6)), // 6 = "watcher"
+            ("role".into(), Value::int(7)), // 7 = "monitor_collector"
+        ]
+    }));
 
     let mut targets: Vec<u64> = Vec::with_capacity(100);
     for i in 0..100 {
-        let target = rt.spawn_actor(Box::new(move || vec![
-            ("name".into(), Value::int(100 + i as i64)),
-            ("seq".into(), Value::int(i as i64)),
-        ]));
+        let target = rt.spawn_actor(Box::new(move || {
+            vec![
+                ("name".into(), Value::int(100 + i as i64)),
+                ("seq".into(), Value::int(i as i64)),
+            ]
+        }));
         rt.monitor(watcher, target);
         targets.push(target);
     }
@@ -286,7 +304,11 @@ fn stress_monitor_during_rapid_spawn_exit() {
     }
 
     // Check mailbox BEFORE running scheduler (scheduler consumes messages)
-    let down_count_before = rt.actors.get(&watcher).map(|a| a.mailbox.len()).unwrap_or(0);
+    let down_count_before = rt
+        .actors
+        .get(&watcher)
+        .map(|a| a.mailbox.len())
+        .unwrap_or(0);
     assert!(
         down_count_before >= 100,
         "watcher should have at least 100 DOWN messages, got {}",
@@ -316,36 +338,47 @@ fn stress_monitor_during_rapid_spawn_exit() {
 fn stress_scheduler_with_mixed_workload() {
     let mut rt = Runtime::new();
 
-    let sink = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(8)),  // 8 = "sink"
-        ("role".into(), Value::int(9)),  // 9 = "message_collector"
-    ]));
+    let sink = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(8)), // 8 = "sink"
+            ("role".into(), Value::int(9)), // 9 = "message_collector"
+        ]
+    }));
 
-    let cpu_actor = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(),   Value::int(10)), // 10 = "cpu_heavy"
-        ("mode".into(),   Value::int(11)), // 11 = "cpu_bound"
-        ("quota".into(),  Value::int(500)),
-    ]));
+    let cpu_actor = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(10)), // 10 = "cpu_heavy"
+            ("mode".into(), Value::int(11)), // 11 = "cpu_bound"
+            ("quota".into(), Value::int(500)),
+        ]
+    }));
 
-    let io_actor = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(),   Value::int(12)), // 12 = "io_waiter"
-        ("mode".into(),   Value::int(13)), // 13 = "io_bound"
-        ("quota".into(),  Value::int(1)),
-    ]));
+    let io_actor = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(12)), // 12 = "io_waiter"
+            ("mode".into(), Value::int(13)), // 13 = "io_bound"
+            ("quota".into(), Value::int(1)),
+        ]
+    }));
 
     // Seed workloads: send messages to each actor type
     for i in 0..50 {
-        rt.send_message(cpu_actor, "compute", &[
-            Value::int(i),
-            Value::int(1_000_000),
-        ]);
+        rt.send_message(
+            cpu_actor,
+            "compute",
+            &[Value::int(i), Value::int(1_000_000)],
+        );
     }
 
     for i in 0..100 {
-        rt.send_message(io_actor, "io_op", &[
-            Value::int(i),
-            Value::int(20), // 20 = "read"
-        ]);
+        rt.send_message(
+            io_actor,
+            "io_op",
+            &[
+                Value::int(i),
+                Value::int(20), // 20 = "read"
+            ],
+        );
     }
 
     // Send 200 messages to the sink directly
@@ -393,9 +426,11 @@ fn stress_scheduler_with_mixed_workload() {
 fn stress_mailbox_never_drops_system_messages() {
     let mut rt = Runtime::new();
 
-    let actor = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(16)), // 16 = "mailbox_test"
-    ]));
+    let actor = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(16)), // 16 = "mailbox_test"
+        ]
+    }));
 
     // Push 1_000 normal-priority messages
     for i in 0..1_000 {
@@ -446,7 +481,7 @@ fn stress_mailbox_never_drops_system_messages() {
             match msg.priority {
                 MessagePriority::System => system_seen += 1,
                 MessagePriority::Normal => normal_seen += 1,
-                MessagePriority::Bulk   => bulk_seen   += 1,
+                MessagePriority::Bulk => bulk_seen += 1,
             }
         }
     }
@@ -480,10 +515,12 @@ fn stress_orphaned_actor_cleanup() {
 
     let mut actors: Vec<u64> = Vec::with_capacity(N);
     for i in 0..N {
-        let id = rt.spawn_actor(Box::new(move || vec![
-            ("name".into(), Value::int(50 + i as i64)),
-            ("idx".into(),  Value::int(i as i64)),
-        ]));
+        let id = rt.spawn_actor(Box::new(move || {
+            vec![
+                ("name".into(), Value::int(50 + i as i64)),
+                ("idx".into(), Value::int(i as i64)),
+            ]
+        }));
         actors.push(id);
     }
 
@@ -525,7 +562,8 @@ fn stress_orphaned_actor_cleanup() {
     assert!(
         terminated_count >= DEGREE,
         "at least {} neighbors should be terminated, got {}",
-        DEGREE, terminated_count
+        DEGREE,
+        terminated_count
     );
 
     // Remaining count should be consistent
@@ -545,15 +583,19 @@ fn stress_orphaned_actor_cleanup() {
 fn stress_reduction_quota_fairness() {
     let mut rt = Runtime::new();
 
-    let actor_a = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(30)), // 30 = "fair_a"
-        ("quota".into(), Value::int(10)),
-    ]));
+    let actor_a = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(30)), // 30 = "fair_a"
+            ("quota".into(), Value::int(10)),
+        ]
+    }));
 
-    let actor_b = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(31)), // 31 = "fair_b"
-        ("quota".into(), Value::int(10)),
-    ]));
+    let actor_b = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(31)), // 31 = "fair_b"
+            ("quota".into(), Value::int(10)),
+        ]
+    }));
 
     const MSG_COUNT: usize = 100;
     for i in 0..MSG_COUNT {
@@ -566,16 +608,10 @@ fn stress_reduction_quota_fairness() {
 
     // Both actors should have processed messages (reductions > 0)
     if let Some(a) = rt.actors.get(&actor_a) {
-        assert!(
-            a.reduction_count > 0,
-            "actor_a should have made progress"
-        );
+        assert!(a.reduction_count > 0, "actor_a should have made progress");
     }
     if let Some(b) = rt.actors.get(&actor_b) {
-        assert!(
-            b.reduction_count > 0,
-            "actor_b should have made progress"
-        );
+        assert!(b.reduction_count > 0, "actor_b should have made progress");
     }
 
     // Both mailboxes should be empty
@@ -595,10 +631,12 @@ fn stress_reduction_quota_fairness() {
 fn stress_effect_resume_after_mailbox_pressure() {
     let mut rt = Runtime::new();
 
-    let effect_actor = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(),   Value::int(40)), // 40 = "effect_resumer"
-        ("effect".into(), Value::int(41)), // 41 = "SimulatedRead"
-    ]));
+    let effect_actor = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(40)),   // 40 = "effect_resumer"
+            ("effect".into(), Value::int(41)), // 41 = "SimulatedRead"
+        ]
+    }));
 
     // Start an effect on the actor
     rt.send_message(effect_actor, "start_effect", &[]);
@@ -641,18 +679,26 @@ fn stress_supervisor_crash_during_recovery() {
     let mid = rt.create_supervisor("mid", RestartStrategy::OneForOne);
     rt.supervise_child(root, ChildSpec::new("mid", RestartPolicy::Permanent), mid);
 
-    let leaf = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(50)), // 50 = "leaf"
-    ]));
+    let leaf = rt.spawn_actor(Box::new(|| {
+        vec![
+            ("name".into(), Value::int(50)), // 50 = "leaf"
+        ]
+    }));
     rt.supervise_child(mid, ChildSpec::new("leaf", RestartPolicy::Permanent), leaf);
 
     let _pre_crash_count = rt.actors.len();
 
-    rt.exit_actor(mid, ExitReason::Error("supervisor_died_mid_recovery".into()));
+    rt.exit_actor(
+        mid,
+        ExitReason::Error("supervisor_died_mid_recovery".into()),
+    );
     rt.run_scheduler();
 
     // Root supervisor should survive
-    assert!(rt.actors.contains_key(&root), "root supervisor should survive");
+    assert!(
+        rt.actors.contains_key(&root),
+        "root supervisor should survive"
+    );
 
     // Actor count should be stable (root + replacement mid + replacement leaf)
     let post_count = rt.actors.len();
@@ -674,9 +720,9 @@ fn stress_registry_high_churn() {
     let mut ids = Vec::with_capacity(N);
 
     for i in 0..N {
-        let id = rt.spawn_actor(Box::new(move || vec![
-            ("name".into(), Value::int(200 + i as i64)),
-        ]));
+        let id = rt.spawn_actor(Box::new(move || {
+            vec![("name".into(), Value::int(200 + i as i64))]
+        }));
         ids.push(id);
         let name = format!("worker_{}", i);
         rt.registry.register(&name, id).unwrap();
@@ -718,9 +764,9 @@ fn stress_process_groups_membership_churn() {
     let mut ids = Vec::with_capacity(N);
 
     for i in 0..N {
-        let id = rt.spawn_actor(Box::new(move || vec![
-            ("name".into(), Value::int(300 + i as i64)),
-        ]));
+        let id = rt.spawn_actor(Box::new(move || {
+            vec![("name".into(), Value::int(300 + i as i64))]
+        }));
         ids.push(id);
     }
 
@@ -765,14 +811,14 @@ fn stress_process_groups_membership_churn() {
 #[test]
 fn stress_timer_wheel_overload() {
     let mut rt = Runtime::new();
-    let actor = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(400)),
-    ]));
+    let actor = rt.spawn_actor(Box::new(|| vec![("name".into(), Value::int(400))]));
 
     let mut ids = Vec::new();
     for i in 0..5_000 {
         let delay = std::time::Duration::from_nanos((i % 100 + 1) as u64);
-        let id = rt.timer_wheel.send_after(delay, actor, 1, vec![Value::int(i as i64)]);
+        let id = rt
+            .timer_wheel
+            .send_after(delay, actor, 1, vec![Value::int(i as i64)]);
         ids.push(id);
     }
 
@@ -800,10 +846,15 @@ fn stress_persistent_actor_checkpoint_recovery() {
     models.insert("counter".to_string(), StateModel::Durable);
     models.insert("scratch".to_string(), StateModel::Local);
 
-    let actor_id = rt.spawn_persistent_actor(Box::new(|| vec![
-        ("counter".into(), Value::int(0)),
-        ("scratch".into(), Value::int(0)),
-    ]), models);
+    let actor_id = rt.spawn_persistent_actor(
+        Box::new(|| {
+            vec![
+                ("counter".into(), Value::int(0)),
+                ("scratch".into(), Value::int(0)),
+            ]
+        }),
+        models,
+    );
 
     if let Some(actor) = rt.actors.get_mut(&actor_id) {
         actor.set_state_field("counter", Value::int(42));
@@ -817,12 +868,16 @@ fn stress_persistent_actor_checkpoint_recovery() {
     let recovered = rt.recover_actor(actor_id);
     assert_eq!(recovered, Some(actor_id));
 
-    let counter = rt.actors.get(&actor_id)
+    let counter = rt
+        .actors
+        .get(&actor_id)
         .and_then(|a| a.get_state_field("counter"))
         .and_then(|v| v.as_int());
     assert_eq!(counter, Some(42));
 
-    let scratch = rt.actors.get(&actor_id)
+    let scratch = rt
+        .actors
+        .get(&actor_id)
         .and_then(|a| a.get_state_field("scratch"));
     assert_eq!(scratch, None, "Local fields should not survive recovery");
 }
@@ -881,15 +936,13 @@ fn stress_crdt_manager_sync_ops() {
 #[test]
 fn stress_monitor_spawn_storm() {
     let mut rt = Runtime::new();
-    let watcher = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(500)),
-    ]));
+    let watcher = rt.spawn_actor(Box::new(|| vec![("name".into(), Value::int(500))]));
 
     let mut ids = Vec::with_capacity(100);
     for i in 0..100 {
-        let id = rt.spawn_actor(Box::new(move || vec![
-            ("name".into(), Value::int(600 + i as i64)),
-        ]));
+        let id = rt.spawn_actor(Box::new(move || {
+            vec![("name".into(), Value::int(600 + i as i64))]
+        }));
         rt.monitor(watcher, id);
         ids.push(id);
     }
@@ -918,10 +971,12 @@ fn stress_jit_hot_loop_then_cold_fallback() {
     module.emit(Instruction::new1(OpCode::Const0, 1)); // i = 0
 
     let limit_const = module.add_constant(Constant::Int(100));
-    module.emit(Instruction::new3(OpCode::ConstU,
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
         ((limit_const >> 8) & 0xFF) as u8,
         (limit_const & 0xFF) as u8,
-        2)); // r2 = 100
+        2,
+    )); // r2 = 100
 
     module.emit(Instruction::new1(OpCode::Const1, 3)); // r3 = 1
 
@@ -933,10 +988,12 @@ fn stress_jit_hot_loop_then_cold_fallback() {
     module.emit(Instruction::new3(OpCode::IAdd, 1, 3, 1)); // i += 1
     let jmp_back_idx = module.current_offset();
     let back_offset = loop_start as i64 - jmp_back_idx as i64;
-    module.emit(Instruction::new3(OpCode::Jmp,
+    module.emit(Instruction::new3(
+        OpCode::Jmp,
         ((back_offset as i16 >> 8) & 0xFF) as u8,
         (back_offset as i16 & 0xFF) as u8,
-        0));
+        0,
+    ));
 
     let after_loop = module.current_offset();
     if let Some(instr) = module.instructions.get_mut(jmpf_idx) {
@@ -951,7 +1008,11 @@ fn stress_jit_hot_loop_then_cold_fallback() {
     let mut vm = VM::new();
     vm.load_module(module.clone());
     let cold_result = vm.run_from(0, 0).unwrap();
-    assert_eq!(cold_result.as_int(), Some(4950), "sum 0..100 should be 4950");
+    assert_eq!(
+        cold_result.as_int(),
+        Some(4950),
+        "sum 0..100 should be 4950"
+    );
 
     // Heat the entry region until it is JIT-compiled.
     crate::jit::reset_hot_counters();
@@ -960,8 +1021,11 @@ fn stress_jit_hot_loop_then_cold_fallback() {
     }
 
     let hot_result = vm.run_from(0, 0).unwrap();
-    assert_eq!(hot_result.as_int(), cold_result.as_int(),
-        "JIT hot loop should match interpreter");
+    assert_eq!(
+        hot_result.as_int(),
+        cold_result.as_int(),
+        "JIT hot loop should match interpreter"
+    );
     assert_eq!(hot_result.as_int(), Some(4950));
 
     // A fresh VM with reset counters should still compute the same value.
@@ -1013,9 +1077,9 @@ fn stress_supervisor_restart_intensity() {
 
     let mut children = Vec::new();
     for i in 0..50 {
-        let child = rt.spawn_actor(Box::new(move || vec![
-            ("name".into(), Value::int(700 + i as i64)),
-        ]));
+        let child = rt.spawn_actor(Box::new(move || {
+            vec![("name".into(), Value::int(700 + i as i64))]
+        }));
         let spec = ChildSpec::new(format!("child_{}", i), RestartPolicy::Permanent);
         rt.supervise_child(sup, spec, child);
         children.push(child);
@@ -1028,7 +1092,10 @@ fn stress_supervisor_restart_intensity() {
 
     assert!(rt.actors.contains_key(&sup), "supervisor should survive");
     if let Some(supervisor) = rt.supervisors.get(&sup) {
-        assert!(supervisor.child_count() >= 50, "all children should be restarted");
+        assert!(
+            supervisor.child_count() >= 50,
+            "all children should be restarted"
+        );
     }
 }
 
@@ -1039,12 +1106,8 @@ fn stress_supervisor_restart_intensity() {
 #[test]
 fn stress_gc_foreign_ref_churn() {
     let mut rt = Runtime::new();
-    let source = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(800)),
-    ]));
-    let target = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(801)),
-    ]));
+    let source = rt.spawn_actor(Box::new(|| vec![("name".into(), Value::int(800))]));
+    let target = rt.spawn_actor(Box::new(|| vec![("name".into(), Value::int(801))]));
 
     rt.current_actor = Some(source);
 
@@ -1063,7 +1126,7 @@ fn stress_gc_foreign_ref_churn() {
 
     let stats = rt.gc_stats();
     assert!(
-        stats.foreign_refs_sent.load(Ordering::Relaxed) >= 500,
+        stats.foreign_refs_sent >= 500,
         "foreign refs should be sent"
     );
 
@@ -1084,17 +1147,18 @@ fn stress_gc_foreign_ref_churn() {
 #[test]
 fn stress_distribution_local_fallback_when_disabled() {
     let mut rt = Runtime::new();
-    let actor = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(900)),
-    ]));
+    let actor = rt.spawn_actor(Box::new(|| vec![("name".into(), Value::int(900))]));
 
-    assert!(!rt.distributed_enabled);
+    assert!(!rt.distributed.enabled);
 
     let local_addr = ActorAddress::local(actor);
     rt.send_distributed(local_addr, "ping", &[Value::int(1)]);
 
     assert!(
-        rt.actors.get(&actor).map(|a| !a.mailbox.is_empty()).unwrap_or(false),
+        rt.actors
+            .get(&actor)
+            .map(|a| !a.mailbox.is_empty())
+            .unwrap_or(false),
         "message should be delivered locally"
     );
 
@@ -1112,10 +1176,12 @@ fn stress_reduction_yield_under_pressure() {
     let mut actors = Vec::new();
 
     for i in 0..50 {
-        let id = rt.spawn_actor(Box::new(move || vec![
-            ("name".into(), Value::int(1000 + i as i64)),
-            ("quota".into(), Value::int(5)),
-        ]));
+        let id = rt.spawn_actor(Box::new(move || {
+            vec![
+                ("name".into(), Value::int(1000 + i as i64)),
+                ("quota".into(), Value::int(5)),
+            ]
+        }));
         actors.push(id);
     }
 
@@ -1127,7 +1193,8 @@ fn stress_reduction_yield_under_pressure() {
 
     rt.run_scheduler();
 
-    let total_reductions: u32 = actors.iter()
+    let total_reductions: u32 = actors
+        .iter()
         .filter_map(|id| rt.actors.get(id).map(|a| a.reduction_count))
         .sum();
     assert!(total_reductions > 0, "some work should have been performed");
@@ -1146,9 +1213,7 @@ fn stress_reduction_yield_under_pressure() {
 #[test]
 fn stress_actor_heap_allocation_pressure() {
     let mut rt = Runtime::new();
-    let actor = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(1100)),
-    ]));
+    let actor = rt.spawn_actor(Box::new(|| vec![("name".into(), Value::int(1100))]));
 
     let allocated = {
         let mut count = 0;
@@ -1163,7 +1228,11 @@ fn stress_actor_heap_allocation_pressure() {
     };
 
     assert!(allocated > 0, "some objects should allocate");
-    assert!(rt.actors.get(&actor).map(|a| a.heap.used() > 0).unwrap_or(false));
+    assert!(rt
+        .actors
+        .get(&actor)
+        .map(|a| a.heap.used() > 0)
+        .unwrap_or(false));
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,14 +1247,22 @@ fn stress_cascading_supervisor_shutdown() {
     let mut supervisors = Vec::new();
     for i in 0..5 {
         let sup = rt.create_supervisor(&format!("sub_{}", i), RestartStrategy::OneForOne);
-        rt.supervise_child(root, ChildSpec::new(format!("sub_{}", i), RestartPolicy::Permanent), sup);
+        rt.supervise_child(
+            root,
+            ChildSpec::new(format!("sub_{}", i), RestartPolicy::Permanent),
+            sup,
+        );
         supervisors.push(sup);
 
         for j in 0..5 {
-            let leaf = rt.spawn_actor(Box::new(move || vec![
-                ("name".into(), Value::int(1200 + i * 10 + j as i64)),
-            ]));
-            rt.supervise_child(sup, ChildSpec::new(format!("leaf_{}_{}", i, j), RestartPolicy::Permanent), leaf);
+            let leaf = rt.spawn_actor(Box::new(move || {
+                vec![("name".into(), Value::int(1200 + i * 10 + j as i64))]
+            }));
+            rt.supervise_child(
+                sup,
+                ChildSpec::new(format!("leaf_{}_{}", i, j), RestartPolicy::Permanent),
+                leaf,
+            );
         }
     }
 
@@ -1195,7 +1272,10 @@ fn stress_cascading_supervisor_shutdown() {
     rt.exit_actor(root, ExitReason::Error("root_shutdown".into()));
     rt.run_scheduler();
 
-    assert!(!rt.actors.contains_key(&root), "root supervisor should be removed");
+    assert!(
+        !rt.actors.contains_key(&root),
+        "root supervisor should be removed"
+    );
     let post_count = rt.actors.len();
     assert!(post_count < pre_count, "supervisor tree should shrink");
 }
@@ -1210,11 +1290,16 @@ fn stress_persistence_journal_replay_ordering() {
     let actor_id = 42u64;
 
     for seq in 1..=20 {
-        rt.persistence.append_journal(actor_id, JournalEntry {
-            sequence: seq,
-            behavior_id: (seq % 3) as u16,
-            payload: vec![PersistedValue::from_value(&Value::int(seq as i64))],
-        }).unwrap();
+        rt.persistence
+            .append_journal(
+                actor_id,
+                JournalEntry {
+                    sequence: seq,
+                    behavior_id: (seq % 3) as u16,
+                    payload: vec![PersistedValue::from_value(&Value::int(seq as i64))],
+                },
+            )
+            .unwrap();
     }
 
     let journal = rt.persistence.read_journal(actor_id);
@@ -1254,9 +1339,7 @@ fn stress_cycle_detector_epoch_gating() {
 #[test]
 fn stress_mailbox_system_priority_preservation() {
     let mut rt = Runtime::new();
-    let actor = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(1400)),
-    ]));
+    let actor = rt.spawn_actor(Box::new(|| vec![("name".into(), Value::int(1400))]));
 
     for i in 0..1_000 {
         let msg = Message {
@@ -1295,7 +1378,10 @@ fn stress_mailbox_system_priority_preservation() {
     }
 
     assert_eq!(system_seen, 10, "all system messages should be preserved");
-    assert_eq!(normal_seen, 1_000, "all normal messages should be preserved");
+    assert_eq!(
+        normal_seen, 1_000,
+        "all normal messages should be preserved"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1305,9 +1391,7 @@ fn stress_mailbox_system_priority_preservation() {
 #[test]
 fn stress_trap_exit_with_monitor_storm() {
     let mut rt = Runtime::new();
-    let trapper = rt.spawn_actor(Box::new(|| vec![
-        ("name".into(), Value::int(1500)),
-    ]));
+    let trapper = rt.spawn_actor(Box::new(|| vec![("name".into(), Value::int(1500))]));
 
     if let Some(actor) = rt.actors.get_mut(&trapper) {
         actor.trap_exits = true;
@@ -1315,9 +1399,9 @@ fn stress_trap_exit_with_monitor_storm() {
 
     let mut ids = Vec::with_capacity(100);
     for i in 0..100 {
-        let id = rt.spawn_actor(Box::new(move || vec![
-            ("name".into(), Value::int(1600 + i as i64)),
-        ]));
+        let id = rt.spawn_actor(Box::new(move || {
+            vec![("name".into(), Value::int(1600 + i as i64))]
+        }));
         rt.monitor(trapper, id);
         ids.push(id);
     }
@@ -1348,9 +1432,9 @@ fn stress_gc_cycle_detector_under_foreign_ref_load() {
 
     let mut actors: Vec<u64> = Vec::with_capacity(N);
     for i in 0..N {
-        let id = rt.spawn_actor(Box::new(move || vec![
-            ("name".into(), Value::int(1700 + i as i64)),
-        ]));
+        let id = rt.spawn_actor(Box::new(move || {
+            vec![("name".into(), Value::int(1700 + i as i64))]
+        }));
         actors.push(id);
     }
 
@@ -1415,7 +1499,7 @@ fn stress_gc_cycle_detector_under_foreign_ref_load() {
     // Foreign ref accounting should reflect the traffic we injected.
     let stats = rt.gc_stats();
     assert!(
-        stats.foreign_refs_sent.load(Ordering::Relaxed) >= (N * REFS_PER_ACTOR * 2) as u64,
+        stats.foreign_refs_sent >= (N * REFS_PER_ACTOR * 2) as u64,
         "foreign refs sent should match injected cross-actor references"
     );
 }

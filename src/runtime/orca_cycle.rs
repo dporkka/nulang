@@ -41,9 +41,11 @@
 //!
 //! # Thread Safety
 //!
-//! The cycle detector is designed to run on a single coordinator thread.
-//! It does **not** require internal locking for the graph itself. Statistics
-//! counters use atomic types so they can be read safely from other threads.
+//! The cycle detector runs on the single scheduler thread (the runtime is a
+//! single-threaded synchronous coordinator).  It does **not** require
+//! internal locking for the graph itself, and header refcounts plus the
+//! statistics counters are plain integers — no atomics anywhere in this
+//! module.
 //!
 //! # Safety
 //!
@@ -60,9 +62,6 @@
 use crate::runtime::gc::ForeignRefOp;
 use crate::runtime::heap::OrcaHeader;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
 
 // ---------------------------------------------------------------------------
 //  CycleRuntime trait
@@ -134,8 +133,7 @@ unsafe impl Sync for ForeignEdge {}
 
 impl PartialEq for ForeignEdge {
     fn eq(&self, other: &Self) -> bool {
-        self.target_actor == other.target_actor
-            && self.target_object == other.target_object
+        self.target_actor == other.target_actor && self.target_object == other.target_object
     }
 }
 
@@ -205,8 +203,8 @@ impl ForeignRefNode {
         // SAFETY: The runtime guarantees that headers are not freed until
         // the cycle detector processes the removal notification.
         let header = &*self.object_header;
-        let local = header.ref_count.load(Ordering::Acquire);
-        let foreign = header.foreign_count.load(Ordering::Acquire);
+        let local = header.ref_count;
+        let foreign = header.foreign_count;
         (local + foreign) > 0
     }
 
@@ -221,7 +219,7 @@ impl ForeignRefNode {
     /// Reads `self.object_header`. Caller must ensure the pointer is valid.
     pub unsafe fn compute_weight(&self) -> u32 {
         let header = &*self.object_header;
-        let foreign_count = header.foreign_count.load(Ordering::Acquire);
+        let foreign_count = header.foreign_count;
         let outgoing_sum: u32 = self.foreign_refs.iter().map(|e| e.ref_count).sum();
         // Saturating subtraction to avoid underflow.
         foreign_count.saturating_sub(outgoing_sum)
@@ -323,11 +321,10 @@ pub struct CycleDetector {
     detection_interval: u64,
 
     /// Number of cycles found and reclaimed (for statistics).
-    cycles_found: AtomicU64,
+    cycles_found: u64,
 
     /// Number of objects reclaimed from broken cycles (for statistics).
-    objects_reclaimed: AtomicU64,
-
+    objects_reclaimed: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -348,8 +345,8 @@ impl CycleDetector {
             suspect_threshold: 1,
             detection_interval: 10,
             local_actors: None,
-            cycles_found: AtomicU64::new(0),
-            objects_reclaimed: AtomicU64::new(0),
+            cycles_found: 0,
+            objects_reclaimed: 0,
         }
     }
 
@@ -572,9 +569,7 @@ impl CycleDetector {
                     // Quick check: if the memory has been unmapped, this could
                     // fault. The runtime guarantees it only frees objects after
                     // notifying the cycle detector, so this should be safe.
-                    (*node.object_header).ref_count.load(Ordering::Acquire)
-                        + (*node.object_header).foreign_count.load(Ordering::Acquire)
-                        > 0
+                    (*node.object_header).ref_count + (*node.object_header).foreign_count > 0
                 };
 
                 if !alive {
@@ -686,7 +681,8 @@ impl CycleDetector {
 
         // Run DFS from the suspect to find cycles.
         let mut path: Vec<(u64, *mut OrcaHeader)> = Vec::new();
-        if let Some(cycle) = self.dfs_find_cycle(suspect.actor_id, suspect.object_header, &mut path) {
+        if let Some(cycle) = self.dfs_find_cycle(suspect.actor_id, suspect.object_header, &mut path)
+        {
             // Cycle found! Send trial decrements.
             self.send_trial_decrements(&cycle);
 
@@ -809,12 +805,12 @@ impl CycleDetector {
     /// A vector of `ForeignRefOp` representing the trial decrements.
     fn send_trial_decrements(&mut self, cycle: &[(u64, *mut OrcaHeader)]) -> Vec<ForeignRefOp> {
         let mut ops = Vec::with_capacity(cycle.len());
- 
+
         // For a cycle [A, B, C], we send decrements along edges A->B, B->C, C->A.
         for i in 0..cycle.len() {
             let (_from_actor, _from_object) = cycle[i];
             let (to_actor, to_object) = cycle[(i + 1) % cycle.len()];
- 
+
             // SAFETY: We are constructing an operation, not yet applying it.
             // The header pointer is validated before any decrement is applied.
             let op = ForeignRefOp {
@@ -823,16 +819,17 @@ impl CycleDetector {
                 delta: -1,
             };
             ops.push(op);
- 
+
             // Decrement the target's foreign count
             // to simulate the reference being dropped within the cycle.
             unsafe {
-                // SAFETY: The objects were verified alive during DFS.
-                let target_header = &*to_object;
-                target_header.foreign_count.fetch_sub(1, Ordering::SeqCst);
+                // SAFETY: The objects were verified alive during DFS, and the
+                // single scheduler thread is the only mutator of any header.
+                let target_header = &mut *to_object;
+                target_header.foreign_count -= 1;
             }
         }
- 
+
         ops
     }
 
@@ -859,10 +856,7 @@ impl CycleDetector {
             // been freed (trial decrements prevent concurrent reclamation).
             let (local, foreign) = unsafe {
                 let header = &*object;
-                (
-                    header.ref_count.load(Ordering::Acquire),
-                    header.foreign_count.load(Ordering::Acquire),
-                )
+                (header.ref_count, header.foreign_count)
             };
 
             if local + foreign > 0 {
@@ -883,11 +877,13 @@ impl CycleDetector {
     ///
     /// - `cycle` — The confirmed garbage cycle.
     /// - `runtime` — The runtime context for freeing objects.
-    fn confirm_and_reclaim<R: CycleRuntime>(&mut self, cycle: &[(u64, *mut OrcaHeader)], runtime: &mut R) {
-        self.cycles_found
-            .fetch_add(1, Ordering::Relaxed);
-        self.objects_reclaimed
-            .fetch_add(cycle.len() as u64, Ordering::Relaxed);
+    fn confirm_and_reclaim<R: CycleRuntime>(
+        &mut self,
+        cycle: &[(u64, *mut OrcaHeader)],
+        runtime: &mut R,
+    ) {
+        self.cycles_found += 1;
+        self.objects_reclaimed += cycle.len() as u64;
 
         for &(actor_id, object) in cycle {
             let key = (actor_id, object as usize);
@@ -897,7 +893,9 @@ impl CycleDetector {
 
             // SAFETY: `object` was verified alive during DFS and the trial
             // decrements proved it has no remaining references.
-            unsafe { runtime.free_object(actor_id, object); }
+            unsafe {
+                runtime.free_object(actor_id, object);
+            }
         }
     }
 
@@ -917,10 +915,11 @@ impl CycleDetector {
             let (_to_actor, to_object) = cycle[(i + 1) % cycle.len()];
 
             // SAFETY: The object was alive during DFS and hasn't been freed
-            // (we only free after confirming garbage).
+            // (we only free after confirming garbage), and the single
+            // scheduler thread is the only mutator of any header.
             unsafe {
-                let target_header = &*to_object;
-                target_header.foreign_count.fetch_add(1, Ordering::SeqCst);
+                let target_header = &mut *to_object;
+                target_header.foreign_count += 1;
             }
         }
 
@@ -948,10 +947,7 @@ impl CycleDetector {
     ///
     /// Returns a tuple of `(cycles_found, objects_reclaimed)`.
     pub fn stats(&self) -> (u64, u64) {
-        (
-            self.cycles_found.load(Ordering::Relaxed),
-            self.objects_reclaimed.load(Ordering::Relaxed),
-        )
+        (self.cycles_found, self.objects_reclaimed)
     }
 
     /// Update the suspect threshold.
@@ -1012,7 +1008,6 @@ mod mock {
     use super::*;
     use crate::runtime::heap::{GcColor, SizeClass, TypeTag};
     use std::alloc::{alloc, dealloc, Layout};
-    use std::sync::atomic::AtomicU32;
 
     /// A mock runtime for testing.
     ///
@@ -1074,10 +1069,9 @@ mod mock {
             // public field through a raw pointer.
             unsafe {
                 std::ptr::write_bytes(ptr, 0, 1);
-                std::ptr::addr_of_mut!((*ptr).ref_count).write(AtomicU32::new(local_refs));
-                std::ptr::addr_of_mut!((*ptr).foreign_count)
-                    .write(AtomicU32::new(foreign_refs));
-                std::ptr::addr_of_mut!((*ptr).sticky).write(AtomicBool::new(false));
+                std::ptr::addr_of_mut!((*ptr).ref_count).write(local_refs);
+                std::ptr::addr_of_mut!((*ptr).foreign_count).write(foreign_refs);
+                std::ptr::addr_of_mut!((*ptr).sticky).write(false);
                 (*ptr).size_class = SizeClass::Small;
                 (*ptr).gc_color = GcColor::White;
                 (*ptr).type_tag = TypeTag::Record;
@@ -1087,10 +1081,7 @@ mod mock {
                 (*ptr).live_prev = std::ptr::null_mut();
             }
 
-            self.objects_by_actor
-                .entry(actor_id)
-                .or_default()
-                .push(ptr);
+            self.objects_by_actor.entry(actor_id).or_default().push(ptr);
 
             ptr
         }
@@ -1131,8 +1122,8 @@ mod mock {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::mock::MockRuntime;
+    use super::*;
 
     // ------------------------------------------------------------------
     // Test 1: Basic graph construction
@@ -1161,7 +1152,11 @@ mod tests {
 
         // Remove the foreign ref.
         detector.remove_foreign_ref(1, obj_a, 2, obj_b);
-        assert_eq!(detector.graph_size(), 0, "graph should be empty after removal");
+        assert_eq!(
+            detector.graph_size(),
+            0,
+            "graph should be empty after removal"
+        );
 
         // Clean up.
         unsafe {
@@ -1192,8 +1187,8 @@ mod tests {
         // Set up foreign counts: each object has one foreign ref from the other.
         // SAFETY: obj_a and obj_b are valid headers.
         unsafe {
-            (*obj_a).foreign_count.store(1, Ordering::Release);
-            (*obj_b).foreign_count.store(1, Ordering::Release);
+            (*obj_a).foreign_count = 1;
+            (*obj_b).foreign_count = 1;
         }
 
         // A -> B (actor 1's object references actor 2's object)
@@ -1207,14 +1202,25 @@ mod tests {
         // A cycle should have been found.
         let (cycles, reclaimed) = detector.stats();
         assert_eq!(cycles, 1, "should find exactly one cycle");
-        assert_eq!(reclaimed, 2, "both objects in the cycle should be reclaimed");
+        assert_eq!(
+            reclaimed, 2,
+            "both objects in the cycle should be reclaimed"
+        );
 
         // Clean up any remaining objects.
         unsafe {
-            if runtime.objects_by_actor.get(&1).map_or(false, |v| v.contains(&obj_a)) {
+            if runtime
+                .objects_by_actor
+                .get(&1)
+                .map_or(false, |v| v.contains(&obj_a))
+            {
                 runtime.free_object(obj_a);
             }
-            if runtime.objects_by_actor.get(&2).map_or(false, |v| v.contains(&obj_b)) {
+            if runtime
+                .objects_by_actor
+                .get(&2)
+                .map_or(false, |v| v.contains(&obj_b))
+            {
                 runtime.free_object(obj_b);
             }
         }
@@ -1580,7 +1586,10 @@ mod tests {
 
         // 10th call: should_detect becomes true.
         detector.incremental_detect(&mut runtime);
-        assert!(detector.should_detect(), "should_detect should be true at interval");
+        assert!(
+            detector.should_detect(),
+            "should_detect should be true at interval"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1633,8 +1642,14 @@ mod tests {
         // Without the restriction, the cycle would be reclaimed.
         detector.detect_cycles(&mut runtime);
         let (cycles_before, reclaimed_before) = detector.stats();
-        assert_eq!(cycles_before, 1, "cycle should be found without restriction");
-        assert_eq!(reclaimed_before, 2, "both objects should be reclaimed without restriction");
+        assert_eq!(
+            cycles_before, 1,
+            "cycle should be found without restriction"
+        );
+        assert_eq!(
+            reclaimed_before, 2,
+            "both objects should be reclaimed without restriction"
+        );
 
         // Create a fresh detector and restrict to actor 1 only.
         let mut detector2 = CycleDetector::new();
@@ -1650,7 +1665,10 @@ mod tests {
 
         detector2.detect_cycles(&mut runtime2);
         let (cycles_after, reclaimed_after) = detector2.stats();
-        assert_eq!(cycles_after, 0, "remote actor should be excluded from detection");
+        assert_eq!(
+            cycles_after, 0,
+            "remote actor should be excluded from detection"
+        );
         assert_eq!(reclaimed_after, 0, "remote objects should not be reclaimed");
 
         unsafe {

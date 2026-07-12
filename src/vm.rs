@@ -6,7 +6,6 @@
 //! - **NaN-boxing** for efficient tagged values (int/float/bool/nil/actor_ref)
 //! - **Bytecode modules** with constant pools and function tables
 //! - **Algebraic effects** via handler stack (Perform/Resume/Unwind/Handle)
-//! - **Capability tracking** via CapChk/CapUp/CapDown opcodes
 //!
 //! ## Effect System
 //!
@@ -1176,22 +1175,43 @@ impl VM {
             let constants = self.jit_constants.get(module_idx)
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
-            if let Some(ref mut jit) = self.jit_session {
-                let mut regs: [u64; 256] = [0; 256];
-                for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
-                    regs[i] = r.to_bits();
-                }
-                let action = jit::tiered_execute_step_typed(
-                    jit, module_idx, pc, module, &mut regs, constants,
-                );
-                if action != TieredAction::Interpret {
-                    for (i, bits) in regs.iter().enumerate() {
-                        self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
+            if let Some(jit) = &mut self.jit_session {
+                // Check cheap: already compiled or newly hot?
+                // Only snapshot registers when JIT will actually execute.
+                if jit.is_compiled(module_idx, pc) {
+                    let mut regs: [u64; 256] = [0; 256];
+                    for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
+                        regs[i] = r.to_bits();
                     }
-                    let region_len = jit::find_compilable_region(pc, instructions);
-                    self.frames[frame_idx].pc += region_len;
-                    return Ok(());
+                    let action = jit::tiered_execute_step_typed(
+                        jit, module_idx, pc, module, &mut regs, constants,
+                    );
+                    if action != TieredAction::Interpret {
+                        for (i, bits) in regs.iter().enumerate() {
+                            self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
+                        }
+                        let region_len = jit::find_compilable_region(pc, instructions);
+                        self.frames[frame_idx].pc += region_len;
+                        return Ok(());
+                    }
+                } else if jit::record_and_check_hot(module_idx, pc) {
+                    let mut regs: [u64; 256] = [0; 256];
+                    for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
+                        regs[i] = r.to_bits();
+                    }
+                    let action = jit::tiered_execute_step_typed(
+                        jit, module_idx, pc, module, &mut regs, constants,
+                    );
+                    if action != TieredAction::Interpret {
+                        for (i, bits) in regs.iter().enumerate() {
+                            self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
+                        }
+                        let region_len = jit::find_compilable_region(pc, instructions);
+                        self.frames[frame_idx].pc += region_len;
+                        return Ok(());
+                    }
                 }
+                // else: cold, not compiled — fall through to interpreter.
             }
         }
 
@@ -1746,7 +1766,18 @@ impl VM {
                             if let Some(ptr) = val.as_ptr() {
                                 self.actor_callbacks.retain_ref(ptr);
                             }
-                            unsafe { *((arr_ptr as *mut Value).add(idx)) = val; }
+                            unsafe {
+                                let slot = (arr_ptr as *mut Value).add(idx);
+                                let old = *slot;
+                                *slot = val;
+                                // Release the overwritten slot's old value:
+                                // the barrier retain that stored it is now
+                                // obsolete. Retain-before-release keeps
+                                // storing the same pointer twice a no-op.
+                                if let Some(old_ptr) = old.as_ptr() {
+                                    self.actor_callbacks.drop_ref(old_ptr);
+                                }
+                            }
                         }
                     }
                 }
@@ -1793,7 +1824,14 @@ impl VM {
                                 if let Some(ptr) = val.as_ptr() {
                                     self.actor_callbacks.retain_ref(ptr);
                                 }
-                                *((rec_ptr as *mut Value).add(field_id)) = val;
+                                let slot = (rec_ptr as *mut Value).add(field_id);
+                                let old = *slot;
+                                *slot = val;
+                                // Release the overwritten slot's old value
+                                // (see ArrStore).
+                                if let Some(old_ptr) = old.as_ptr() {
+                                    self.actor_callbacks.drop_ref(old_ptr);
+                                }
                             }
                         }
                     }
@@ -1850,7 +1888,21 @@ impl VM {
                             let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
                             let len = payload_size / std::mem::size_of::<Value>();
                             if idx < len {
-                                *((tup_ptr as *mut Value).add(idx)) = val;
+                                // Match RecS/ArrStore: the slot owns a
+                                // counted reference to the stored pointer.
+                                // This barrier is mandatory — free_object
+                                // releases slot references when the tuple is
+                                // reclaimed, so an uncounted store would
+                                // decrement a child that was never retained.
+                                if let Some(ptr) = val.as_ptr() {
+                                    self.actor_callbacks.retain_ref(ptr);
+                                }
+                                let slot = (tup_ptr as *mut Value).add(idx);
+                                let old = *slot;
+                                *slot = val;
+                                if let Some(old_ptr) = old.as_ptr() {
+                                    self.actor_callbacks.drop_ref(old_ptr);
+                                }
                             }
                         }
                     }
@@ -2043,11 +2095,6 @@ impl VM {
                 self.handler_stack.pop();
             }
 
-            // -- Capabilities (MVP) --
-            OpCode::CapChk => { self.frames[frame_idx].regs[instr.op2 as usize] = Value::bool(true); }
-            OpCode::CapUp => { self.frames[frame_idx].regs[instr.op2 as usize] = self.frames[frame_idx].regs[instr.op1 as usize]; }
-            OpCode::CapDown => { self.frames[frame_idx].regs[instr.op2 as usize] = self.frames[frame_idx].regs[instr.op1 as usize]; }
-            OpCode::CapSend => { self.frames[frame_idx].regs[instr.op2 as usize] = self.frames[frame_idx].regs[instr.op1 as usize]; }
 
             // -- Python Interop — RESERVED (see python/bridge.rs) --
             OpCode::PyImport | OpCode::PyGetAttr | OpCode::PyCall
@@ -2281,7 +2328,13 @@ impl VM {
 
             // -- Reference counting / deallocation --
             OpCode::Drop => {
-                let val = self.frames[frame_idx].regs[instr.op1 as usize];
+                let reg = &mut self.frames[frame_idx].regs[instr.op1 as usize];
+                let val = *reg;
+                // Clear the register first so a duplicate Drop of the same
+                // register (e.g. a last-use drop followed by a redefinition
+                // or block-entry drop from `plan_drops`) is a harmless no-op
+                // instead of a double decrement of the same reference count.
+                *reg = Value::nil();
                 if let Some(ptr) = val.as_ptr() {
                     self.actor_callbacks.drop_ref(ptr);
                 }
@@ -3295,5 +3348,151 @@ mod vm_tests {
             }
             Err(e) => panic!("unexpected FFI error: {}", e),
         }
+    }
+
+    /// Test 24: `Drop` clears the register, so a duplicate `Drop` of the same
+    /// register (as `plan_drops` can emit: last-use drop followed by a
+    /// redefinition or block-entry drop) is a no-op rather than a second
+    /// decrement of an already-freed object's reference count.
+    #[test]
+    fn test_drop_clears_register_and_double_drop_is_noop() {
+        let mut module = CodeModule::new("test_drop_idempotent");
+        module.emit(Instruction::new1(OpCode::Const1, 0)); // r0 = 1 (len)
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 1)); // r1 = array(1)
+        module.emit(Instruction::new1(OpCode::Drop, 1)); // free it
+        module.emit(Instruction::new1(OpCode::Drop, 1)); // must be a no-op
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 2)); // r2 = array(1)
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 3)); // r3 = array(1)
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "double Drop should not fail: {:?}", result.err());
+
+        let regs = &vm.frames[0].regs;
+        assert_eq!(regs[1].as_raw(), Value::nil().as_raw(), "Drop must clear the register to nil");
+        assert!(regs[2].as_ptr().is_some() && regs[3].as_ptr().is_some());
+        assert_ne!(
+            regs[2].as_raw(),
+            regs[3].as_raw(),
+            "fresh allocations must be distinct blocks (free-list corruption check)"
+        );
+
+        // Exactly one reference was actually dropped: the second Drop hit nil.
+        let cb_any: &dyn std::any::Any = &*vm.actor_callbacks;
+        let cb = cb_any
+            .downcast_ref::<StandaloneVmCallbacks>()
+            .expect("standalone callbacks");
+        let dropped = cb.gc.stats().local_refs_dropped;
+        assert_eq!(dropped, 1, "duplicate Drop must not decrement twice");
+    }
+
+    /// Test 25: `ArrStore` releases the overwritten slot's old value, so
+    /// repeatedly overwriting one slot does not leak the previous elements.
+    /// Observable via exact-size free-list reuse: once the overwritten object
+    /// is released and its register dropped, the next same-size allocation
+    /// recycles its block.
+    #[test]
+    fn test_arrstore_releases_overwritten_slot() {
+        let mut module = CodeModule::new("test_arrstore_release");
+        module.emit(Instruction::new1(OpCode::Const0, 6)); // r6 = 0 (idx)
+        module.emit(Instruction::new1(OpCode::Const1, 0)); // r0 = 1 (len)
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 1)); // r1 = container
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 2)); // r2 = X
+        module.emit(Instruction::new3(OpCode::ArrStore, 1, 6, 2)); // arr[0] = X (retain)
+        module.emit(Instruction::new3(OpCode::ArrLoad, 1, 6, 5)); // r5 = X's bits
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 3)); // r3 = Y
+        module.emit(Instruction::new3(OpCode::ArrStore, 1, 6, 3)); // arr[0] = Y (release X)
+        module.emit(Instruction::new1(OpCode::Drop, 2)); // drop register ref to X -> freed
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 4)); // r4 = Z: reuses X's block
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "ArrStore release test failed: {:?}", result.err());
+
+        let regs = &vm.frames[0].regs;
+        assert_eq!(
+            regs[4].as_raw(),
+            regs[5].as_raw(),
+            "released-and-dropped object should have been freed and its block reused"
+        );
+        assert_ne!(regs[4].as_raw(), regs[3].as_raw(), "Z must not alias the live Y");
+    }
+
+    /// Test 26: `RecS` releases the overwritten slot's old value (same
+    /// protocol as `ArrStore`).
+    #[test]
+    fn test_rec_s_releases_overwritten_slot() {
+        let mut module = CodeModule::new("test_rec_s_release");
+        module.emit(Instruction::new1(OpCode::Const1, 0)); // r0 = 1 (len)
+        module.emit(Instruction::new2(OpCode::RecMk, 1, 1)); // r1 = record(1 slot)
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 2)); // r2 = X
+        module.emit(Instruction::new3(OpCode::RecS, 1, 0, 2)); // rec.f0 = X (retain)
+        module.emit(Instruction::new3(OpCode::RecL, 1, 0, 5)); // r5 = X's bits
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 3)); // r3 = Y
+        module.emit(Instruction::new3(OpCode::RecS, 1, 0, 3)); // rec.f0 = Y (release X)
+        module.emit(Instruction::new1(OpCode::Drop, 2)); // drop register ref to X -> freed
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 4)); // r4 = Z: reuses X's block
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "RecS release test failed: {:?}", result.err());
+
+        let regs = &vm.frames[0].regs;
+        assert_eq!(
+            regs[4].as_raw(),
+            regs[5].as_raw(),
+            "released-and-dropped record field value should have been freed and reused"
+        );
+        assert_ne!(regs[4].as_raw(), regs[3].as_raw(), "Z must not alias the live Y");
+    }
+
+    /// Test 27: `FieldS` (tuple store) must retain the stored value — the
+    /// GC's `free_object` releases slot references when a container is
+    /// reclaimed, so an uncounted store would decrement a child that was
+    /// never retained. The full chain: child kept alive by the slot after
+    /// its register is dropped, then freed when the tuple is dropped, then
+    /// its block recycled.
+    #[test]
+    fn test_fields_retains_and_release_chain_frees_child() {
+        let mut module = CodeModule::new("test_fields_barrier");
+        module.emit(Instruction::new1(OpCode::Const1, 0)); // r0 = 1 (len)
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 2)); // r2 = X (child)
+        module.emit(Instruction::new2(OpCode::TupleMk, 1, 1)); // r1 = tuple(1)
+        module.emit(Instruction::new3(OpCode::FieldS, 1, 0, 2)); // tup.0 = X (must retain)
+        module.emit(Instruction::new1(OpCode::Drop, 2)); // drop register ref; slot keeps X alive
+        module.emit(Instruction::new3(OpCode::FieldL, 1, 0, 5)); // r5 = X's bits
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 3)); // r3: fresh block while X lives
+        module.emit(Instruction::new1(OpCode::Drop, 1)); // free tuple -> releases child X
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 4)); // r4: pops tuple's block (LIFO)
+        module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 7)); // r7: pops X's block
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "FieldS barrier test failed: {:?}", result.err());
+
+        let regs = &vm.frames[0].regs;
+        assert_ne!(
+            regs[3].as_raw(),
+            regs[5].as_raw(),
+            "X must still be alive (slot-owned) when r3 is allocated — Drop of the register must not free it"
+        );
+        assert_eq!(
+            regs[7].as_raw(),
+            regs[5].as_raw(),
+            "after the tuple is dropped the child's block must be freed and recycled"
+        );
+        assert_ne!(regs[4].as_raw(), regs[5].as_raw(), "sanity: tuple block and child block differ");
     }
 }

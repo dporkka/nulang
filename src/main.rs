@@ -220,8 +220,8 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
     let mut effect_checker = EffectChecker::new();
     let effect_ctx = EffectContext::empty();
     let check_body = |checker: &mut EffectChecker,
-                          body: &nulang::ast::Expr,
-                          declared: Option<&nulang::types::EffectRow>|
+                      body: &nulang::ast::Expr,
+                      declared: Option<&nulang::types::EffectRow>|
      -> NuResult<()> {
         match declared {
             Some(allowed) => checker.check_effects(&effect_ctx, body, allowed),
@@ -237,7 +237,12 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
             nulang::ast::Decl::Function { body, effect, .. } => {
                 check_body(&mut effect_checker, body, effect.as_ref())?;
             }
-            nulang::ast::Decl::Actor { behaviors, state_fields, init, .. } => {
+            nulang::ast::Decl::Actor {
+                behaviors,
+                state_fields,
+                init,
+                ..
+            } => {
                 for b in behaviors {
                     check_body(&mut effect_checker, &b.body, b.effect.as_ref())?;
                 }
@@ -248,7 +253,9 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
                     check_body(&mut effect_checker, expr, None)?;
                 }
             }
-            nulang::ast::Decl::Workflow { items, compensate, .. } => {
+            nulang::ast::Decl::Workflow {
+                items, compensate, ..
+            } => {
                 for item in items {
                     let steps: &[nulang::ast::WorkflowStep] = match item {
                         nulang::ast::WorkflowItem::Step(s) => std::slice::from_ref(s),
@@ -273,9 +280,7 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
     // 5. Capability analysis over the same body set.
     let mut cap_analyzer = CapabilityAnalyzer::new();
     let cap_ctx = CapContext::new();
-    let cap_body = |analyzer: &mut CapabilityAnalyzer,
-                        body: &nulang::ast::Expr|
-     -> NuResult<()> {
+    let cap_body = |analyzer: &mut CapabilityAnalyzer, body: &nulang::ast::Expr| -> NuResult<()> {
         analyzer.infer_cap(&cap_ctx, body).map(|_| ()).map_err(|e| {
             eprintln!("Capability error: {}", e);
             e
@@ -286,7 +291,12 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
             nulang::ast::Decl::Function { body, .. } => {
                 cap_body(&mut cap_analyzer, body)?;
             }
-            nulang::ast::Decl::Actor { behaviors, state_fields, init, .. } => {
+            nulang::ast::Decl::Actor {
+                behaviors,
+                state_fields,
+                init,
+                ..
+            } => {
                 for b in behaviors {
                     cap_body(&mut cap_analyzer, &b.body)?;
                 }
@@ -297,7 +307,9 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
                     cap_body(&mut cap_analyzer, expr)?;
                 }
             }
-            nulang::ast::Decl::Workflow { items, compensate, .. } => {
+            nulang::ast::Decl::Workflow {
+                items, compensate, ..
+            } => {
                 for item in items {
                     let steps: &[nulang::ast::WorkflowStep] = match item {
                         nulang::ast::WorkflowItem::Step(s) => std::slice::from_ref(s),
@@ -359,7 +371,10 @@ fn check_source(source: &str, verbose: bool) -> NuResult<()> {
     Ok(())
 }
 
-fn compile_with_new_pipeline(ast: &nulang::ast::AstModule, name: &str) -> NuResult<nulang::bytecode::CodeModule> {
+fn compile_with_new_pipeline(
+    ast: &nulang::ast::AstModule,
+    name: &str,
+) -> NuResult<nulang::bytecode::CodeModule> {
     // Anything this pipeline can't yet lower faithfully (see hir_lower.rs
     // and mir_lower.rs module docs) returns an honest NotYetImplemented
     // error, which the caller turns into a loud fallback to the stable
@@ -382,15 +397,51 @@ fn type_to_string(ty: &Type) -> String {
             nulang::types::PrimitiveType::Never => "Never".to_string(),
             nulang::types::PrimitiveType::Address => "Address".to_string(),
         },
-        Type::Tuple(ts) => format!("({})", ts.iter().map(type_to_string).collect::<Vec<_>>().join(", ")),
-        Type::Record(fs) => format!("{{ {} }}", fs.iter().map(|(n, t)| format!("{}: {}", n, type_to_string(t))).collect::<Vec<_>>().join(", ")),
-        Type::Variant(vs) => vs.iter().map(|(n, t)| match t { Some(t) => format!("{} {}", n, type_to_string(t)), None => n.clone() }).collect::<Vec<_>>().join(" | "),
+        Type::Tuple(ts) => format!(
+            "({})",
+            ts.iter().map(type_to_string).collect::<Vec<_>>().join(", ")
+        ),
+        Type::Record(fs) => format!(
+            "{{ {} }}",
+            fs.iter()
+                .map(|(n, t)| format!("{}: {}", n, type_to_string(t)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Type::Variant(vs) => vs
+            .iter()
+            .map(|(n, t)| match t {
+                Some(t) => format!("{} {}", n, type_to_string(t)),
+                None => n.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(" | "),
         Type::Array(t) => format!("[{}]", type_to_string(t)),
-        Type::Function { param, ret, .. } => format!("{} -> {}", type_to_string(param), type_to_string(ret)),
-        Type::Actor { state, behavior } => format!("Actor[{}, {}]", type_to_string(state), type_to_string(behavior)),
-        Type::App { constructor, args } => format!("{}[{}]", type_to_string(constructor), args.iter().map(type_to_string).collect::<Vec<_>>().join(", ")),
+        Type::Function { param, ret, .. } => {
+            format!("{} -> {}", type_to_string(param), type_to_string(ret))
+        }
+        Type::Actor { state, behavior } => format!(
+            "Actor[{}, {}]",
+            type_to_string(state),
+            type_to_string(behavior)
+        ),
+        Type::App { constructor, args } => format!(
+            "{}[{}]",
+            type_to_string(constructor),
+            args.iter()
+                .map(type_to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Type::Reference { cap, inner } => format!("&{:?} {}", cap, type_to_string(inner)),
-        Type::Scheme { vars, body } => format!("forall {}. {}", vars.iter().map(|v| format!("'t{}", v.0)).collect::<Vec<_>>().join(", "), type_to_string(body)),
+        Type::Scheme { vars, body } => format!(
+            "forall {}. {}",
+            vars.iter()
+                .map(|v| format!("'t{}", v.0))
+                .collect::<Vec<_>>()
+                .join(", "),
+            type_to_string(body)
+        ),
     }
 }
 
@@ -399,28 +450,48 @@ fn disassemble(module: &nulang::bytecode::CodeModule) -> String {
     let mut output = String::new();
     if !module.constants.is_empty() {
         writeln!(output, "Constants:").unwrap();
-        for (i, c) in module.constants.iter().enumerate() { writeln!(output, "  {}: {:?}", i, c).unwrap(); }
+        for (i, c) in module.constants.iter().enumerate() {
+            writeln!(output, "  {}: {:?}", i, c).unwrap();
+        }
         writeln!(output).unwrap();
     }
     writeln!(output, "Instructions:").unwrap();
     for (i, instr) in module.instructions.iter().enumerate() {
         let op_name = format!("{:?}", instr.opcode);
         let comment = match instr.opcode {
-            nulang::bytecode::OpCode::ConstU => module.constants.get(instr.imm16() as usize).map(|c| format!("; load {:?}", c)),
+            nulang::bytecode::OpCode::ConstU => module
+                .constants
+                .get(instr.imm16() as usize)
+                .map(|c| format!("; load {:?}", c)),
             nulang::bytecode::OpCode::Call => Some(format!("; call R{}", instr.op1)),
             nulang::bytecode::OpCode::Closure => Some(format!("; closure @{}", instr.imm16())),
-            nulang::bytecode::OpCode::Jmp | nulang::bytecode::OpCode::JmpT | nulang::bytecode::OpCode::JmpF => Some(format!("; -> {}", i as i64 + instr.simm16() as i64)),
+            nulang::bytecode::OpCode::Jmp
+            | nulang::bytecode::OpCode::JmpT
+            | nulang::bytecode::OpCode::JmpF => {
+                Some(format!("; -> {}", i as i64 + instr.simm16() as i64))
+            }
             _ => None,
         };
         match comment {
-            Some(c) => writeln!(output, "  {:4}: {:12} {:3} {:3} {:3}    {}", i, op_name, instr.op1, instr.op2, instr.op3, c),
-            None => writeln!(output, "  {:4}: {:12} {:3} {:3} {:3}", i, op_name, instr.op1, instr.op2, instr.op3),
-        }.unwrap();
+            Some(c) => writeln!(
+                output,
+                "  {:4}: {:12} {:3} {:3} {:3}    {}",
+                i, op_name, instr.op1, instr.op2, instr.op3, c
+            ),
+            None => writeln!(
+                output,
+                "  {:4}: {:12} {:3} {:3} {:3}",
+                i, op_name, instr.op1, instr.op2, instr.op3
+            ),
+        }
+        .unwrap();
     }
     if !module.function_table.is_empty() {
         writeln!(output).unwrap();
         writeln!(output, "Function Table:").unwrap();
-        for (i, offset) in module.function_table.iter().enumerate() { writeln!(output, "  {}: @{}", i, offset).unwrap(); }
+        for (i, offset) in module.function_table.iter().enumerate() {
+            writeln!(output, "  {}: @{}", i, offset).unwrap();
+        }
     }
     output
 }

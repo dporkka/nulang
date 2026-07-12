@@ -193,8 +193,16 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Place {
     Var(String, Type),
-    Field { base: Box<Place>, field: String, ty: Type },
-    Index { base: Box<Place>, idx: Operand, ty: Type },
+    Field {
+        base: Box<Place>,
+        field: String,
+        ty: Type,
+    },
+    Index {
+        base: Box<Place>,
+        idx: Operand,
+        ty: Type,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,43 +211,153 @@ pub enum RValue {
     Literal(Literal, Type),
     Binary(BinOp, Operand, Operand, Type),
     Unary(UnOp, Operand, Type),
-    Call { func: Operand, args: Vec<Operand>, ty: Type },
-    Closure { params: Vec<(String, Type)>, body: Box<Body>, captures: Vec<String>, ty: Type },
+    Call {
+        func: Operand,
+        args: Vec<Operand>,
+        ty: Type,
+    },
+    Closure {
+        params: Vec<(String, Type)>,
+        body: Box<Body>,
+        captures: Vec<String>,
+        ty: Type,
+    },
     /// A recursive function binding (`let rec f = ...` / self-referencing
     /// let-bound lambda). Unlike `Closure`, `name` is in scope inside `body`.
-    RecClosure { name: String, params: Vec<(String, Type)>, body: Box<Body>, ty: Type },
+    RecClosure {
+        name: String,
+        params: Vec<(String, Type)>,
+        body: Box<Body>,
+        ty: Type,
+    },
     Tuple(Vec<Operand>, Type),
     Record(Vec<(String, Operand)>, Type),
     Array(Vec<Operand>, Type),
-    FieldAccess { base: Operand, field: String, ty: Type },
-    Index { base: Operand, idx: Operand, ty: Type },
+    FieldAccess {
+        base: Operand,
+        field: String,
+        ty: Type,
+    },
+    Index {
+        base: Operand,
+        idx: Operand,
+        ty: Type,
+    },
     /// Expression-position conditional. Each branch body yields its value via
     /// a `Yield` terminator; the whole rvalue evaluates to that value.
-    If { cond: Operand, then_body: Box<Body>, else_body: Option<Box<Body>>, ty: Type },
+    If {
+        cond: Operand,
+        then_body: Box<Body>,
+        else_body: Option<Box<Body>>,
+        ty: Type,
+    },
     /// Expression-position match. Arm bodies yield their value via `Yield`.
-    Match { scrutinee: Operand, arms: Vec<(Pattern, Box<Body>)>, ty: Type },
+    Match {
+        scrutinee: Operand,
+        arms: Vec<(Pattern, Box<Body>)>,
+        ty: Type,
+    },
     /// Array iteration loop; evaluates to unit.
-    For { var: String, iterable: Operand, body: Box<Body> },
-    Spawn { actor_type: String, init: Vec<(String, Operand)>, ty: Type },
-    Send { actor: Operand, behavior: String, args: Vec<Operand>, ty: Type },
-    Ask { actor: Operand, behavior: String, args: Vec<Operand>, ty: Type },
+    For {
+        var: String,
+        iterable: Operand,
+        body: Box<Body>,
+    },
+    Spawn {
+        actor_type: String,
+        init: Vec<(String, Operand)>,
+        ty: Type,
+    },
+    Send {
+        actor: Operand,
+        behavior: String,
+        args: Vec<Operand>,
+        ty: Type,
+    },
+    Ask {
+        actor: Operand,
+        behavior: String,
+        args: Vec<Operand>,
+        ty: Type,
+    },
     SelfRef(Type),
-    Perform { effect: String, op: String, args: Vec<Operand>, ty: Type },
-    Handle { body: Box<Body>, handlers: Vec<EffectHandler>, ty: Type },
-    Receive { arms: Vec<(String, Vec<String>, Box<Body>)>, ty: Type },
-    Migrate { actor: Operand, node: Operand, ty: Type },
-    CapCheck { operand: Operand, required: Capability },
-    FFICall { symbol: String, args: Vec<Operand>, ty: Type },
+    Perform {
+        effect: String,
+        op: String,
+        args: Vec<Operand>,
+        ty: Type,
+    },
+    Handle {
+        body: Box<Body>,
+        handlers: Vec<EffectHandler>,
+        ty: Type,
+    },
+    Receive {
+        arms: Vec<(String, Vec<String>, Box<Body>)>,
+        ty: Type,
+    },
+    Migrate {
+        actor: Operand,
+        node: Operand,
+        ty: Type,
+    },
+    CapCheck {
+        operand: Operand,
+        required: Capability,
+    },
+    FFICall {
+        symbol: String,
+        args: Vec<Operand>,
+        ty: Type,
+    },
     // AI runtime builtins (Pipeline, Supervisor, Debate)
-    PipelineNew { ty: Type },
-    PipelineStage { id: Operand, name: Operand, actor: Operand, template: Operand, ty: Type },
-    PipelineRun { id: Operand, input: Operand, ty: Type },
-    SupervisorNew { ty: Type },
-    SupervisorWorker { id: Operand, name: Operand, actor: Operand, description: Operand, ty: Type },
-    SupervisorRun { id: Operand, task: Operand, ty: Type },
-    DebateNew { topic: Operand, rounds: Operand, threshold: Operand, ty: Type },
-    DebateParticipant { id: Operand, name: Operand, stance: Operand, actor: Operand, ty: Type },
-    DebateRun { id: Operand, ty: Type },
+    PipelineNew {
+        ty: Type,
+    },
+    PipelineStage {
+        id: Operand,
+        name: Operand,
+        actor: Operand,
+        template: Operand,
+        ty: Type,
+    },
+    PipelineRun {
+        id: Operand,
+        input: Operand,
+        ty: Type,
+    },
+    SupervisorNew {
+        ty: Type,
+    },
+    SupervisorWorker {
+        id: Operand,
+        name: Operand,
+        actor: Operand,
+        description: Operand,
+        ty: Type,
+    },
+    SupervisorRun {
+        id: Operand,
+        task: Operand,
+        ty: Type,
+    },
+    DebateNew {
+        topic: Operand,
+        rounds: Operand,
+        threshold: Operand,
+        ty: Type,
+    },
+    DebateParticipant {
+        id: Operand,
+        name: Operand,
+        stance: Operand,
+        actor: Operand,
+        ty: Type,
+    },
+    DebateRun {
+        id: Operand,
+        ty: Type,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -347,7 +465,10 @@ impl Body {
     }
 
     pub fn with_terminator(terminator: Terminator) -> Self {
-        Self { stmts: Vec::new(), terminator }
+        Self {
+            stmts: Vec::new(),
+            terminator,
+        }
     }
 
     pub fn push(&mut self, stmt: Stmt) {
@@ -361,7 +482,10 @@ impl Body {
 
 impl Module {
     pub fn new(name: impl Into<String>) -> Self {
-        Module { name: name.into(), decls: Vec::new() }
+        Module {
+            name: name.into(),
+            decls: Vec::new(),
+        }
     }
 }
 

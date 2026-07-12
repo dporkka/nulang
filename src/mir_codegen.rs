@@ -13,13 +13,20 @@
 //! arguments, transient values); each MIR local gets the fixed register
 //! `LOCAL_BASE + local_id`. A function whose locals exceed the register file
 //! fails to compile with an honest error.
+//!
+//! Intra-actor reclamation: `compile_function` runs a conservative
+//! liveness-based analysis (`plan_drops`) that emits `OpCode::Drop` when a
+//! local provably holding the sole counted reference to a heap object dies —
+//! overwritten by a new definition, dead after its last use, or dead at the
+//! entry of a block its value flows into unused. The VM clears the register
+//! on `Drop`, so duplicate drops are harmless no-ops.
 
 use crate::bytecode::{
     CodeModule, Constant, ForeignFunctionDef, HandlerBinding, HandlerTable, Instruction, OpCode,
 };
 use crate::mir;
-use crate::types::{NuError, NuResult, Span};
-use std::collections::HashMap;
+use crate::types::{NuError, NuResult, PrimitiveType, Span, Type};
+use std::collections::{HashMap, HashSet};
 
 const FUNC_VALUE_REG: u8 = 254;
 const LOCAL_BASE: u32 = 16;
@@ -51,6 +58,7 @@ struct JumpPatch {
     kind: JumpKind,
 }
 
+
 pub struct MirCodegen {
     module: CodeModule,
     /// Module-wide record field ids, mirroring the stable compiler's layout.
@@ -80,7 +88,9 @@ impl MirCodegen {
         if let Some(&idx) = self.state_field_constants.get(field) {
             return idx;
         }
-        let idx = self.module.add_constant(Constant::String(field.to_string()));
+        let idx = self
+            .module
+            .add_constant(Constant::String(field.to_string()));
         self.state_field_constants.insert(field.to_string(), idx);
         idx
     }
@@ -142,15 +152,17 @@ impl MirCodegen {
         // reordered or interleaved with function compilation.
         for func in &mir.behaviors {
             let offset = self.compile_function(func)?;
-            self.module.behaviors.push(crate::bytecode::BehaviorTableEntry {
-                name: func.name.clone(),
-                param_count: func.params.len(),
-                code_offset: offset,
-                local_count: LOCAL_BASE as usize + func.locals.len(),
-                effect_mask: 0,
-                compensate_offset: None,
-                parallel_branches: None,
-            });
+            self.module
+                .behaviors
+                .push(crate::bytecode::BehaviorTableEntry {
+                    name: func.name.clone(),
+                    param_count: func.params.len(),
+                    code_offset: offset,
+                    local_count: LOCAL_BASE as usize + func.locals.len(),
+                    effect_mask: 0,
+                    compensate_offset: None,
+                    parallel_branches: None,
+                });
         }
         // Saga compensation: patch each step's compensate_offset from its
         // already-compiled compensation function's code offset. Both
@@ -176,7 +188,9 @@ impl MirCodegen {
                 .module
                 .behaviors
                 .get_mut(*behavior_idx)
-                .ok_or_else(|| compile_err("internal: parallel-branch behavior index out of range"))?;
+                .ok_or_else(|| {
+                    compile_err("internal: parallel-branch behavior index out of range")
+                })?;
             entry.parallel_branches = Some(branches.clone());
         }
         self.module.actor_metadata = mir.actor_metadata.clone();
@@ -265,7 +279,11 @@ impl MirCodegen {
         // `Handle` instructions awaiting their table index (fn-relative idx).
         let mut handle_patches: Vec<(usize, usize)> = Vec::new();
 
-        for block in &func.blocks {
+        // Conservative liveness-based placement of `Drop` instructions (see
+        // the module docs and `plan_drops`).
+        let drop_plan = plan_drops(func);
+
+        for (bi, block) in func.blocks.iter().enumerate() {
             block_offsets.insert(block.id, self.module.instructions.len());
             if let Some(params) = handler_prologues.get(&block.id) {
                 // The VM delivers effect arguments in r0..rN.
@@ -276,8 +294,23 @@ impl MirCodegen {
                     }
                 }
             }
-            for stmt in &block.stmts {
+            if let Some(ids) = drop_plan.block_entry.get(&bi) {
+                for id in ids {
+                    self.emit(Instruction::new1(OpCode::Drop, reg_of(*id)));
+                }
+            }
+            for (si, stmt) in block.stmts.iter().enumerate() {
+                if let Some(ids) = drop_plan.before_stmt.get(&(bi, si)) {
+                    for id in ids {
+                        self.emit(Instruction::new1(OpCode::Drop, reg_of(*id)));
+                    }
+                }
                 self.compile_stmt(stmt, func, &mut handle_patches)?;
+                if let Some(ids) = drop_plan.after_stmt.get(&(bi, si)) {
+                    for id in ids {
+                        self.emit(Instruction::new1(OpCode::Drop, reg_of(*id)));
+                    }
+                }
             }
             self.compile_terminator(&block.terminator, &func.name, &block_offsets, &mut patches)?;
         }
@@ -356,7 +389,12 @@ impl MirCodegen {
             }
             mir::Stmt::StoreFieldNamed { obj, field, src } => {
                 let fid = self.field_id(field)?;
-                self.emit(Instruction::new3(OpCode::RecS, reg_of(*obj), fid, reg_of(*src)));
+                self.emit(Instruction::new3(
+                    OpCode::RecS,
+                    reg_of(*obj),
+                    fid,
+                    reg_of(*src),
+                ));
             }
             mir::Stmt::ArrayStore { arr, idx, src } => {
                 self.emit(Instruction::new3(
@@ -368,7 +406,9 @@ impl MirCodegen {
             }
             mir::Stmt::EnterHandle { table } => {
                 if *table >= func.handler_tables.len() {
-                    return Err(compile_err("internal: EnterHandle references unknown table"));
+                    return Err(compile_err(
+                        "internal: EnterHandle references unknown table",
+                    ));
                 }
                 let instr_idx = self.module.instructions.len();
                 self.emit(Instruction::new1(OpCode::Handle, 0));
@@ -449,7 +489,12 @@ impl MirCodegen {
                 self.emit(Instruction::new2(OpCode::ArrAlloc, SCRATCH0, dst));
                 for (i, e) in elems.iter().enumerate() {
                     self.load_constant(SCRATCH1, &Constant::Int(i as i64));
-                    self.emit(Instruction::new3(OpCode::ArrStore, dst, SCRATCH1, reg_of(*e)));
+                    self.emit(Instruction::new3(
+                        OpCode::ArrStore,
+                        dst,
+                        SCRATCH1,
+                        reg_of(*e),
+                    ));
                 }
             }
             mir::RValue::Unary(op, id) => {
@@ -480,7 +525,12 @@ impl MirCodegen {
                 }
             }
             mir::RValue::StringEq(l, r) => {
-                self.emit(Instruction::new3(OpCode::SCmpEq, reg_of(*l), reg_of(*r), dst));
+                self.emit(Instruction::new3(
+                    OpCode::SCmpEq,
+                    reg_of(*l),
+                    reg_of(*r),
+                    dst,
+                ));
             }
             mir::RValue::Call { func, args } => {
                 // Load the callee value first (it lives above the staging
@@ -509,7 +559,12 @@ impl MirCodegen {
                     dst,
                 ));
                 for (i, cap) in captures.iter().enumerate() {
-                    self.emit(Instruction::new3(OpCode::CapStore, dst, i as u8, reg_of(*cap)));
+                    self.emit(Instruction::new3(
+                        OpCode::CapStore,
+                        dst,
+                        i as u8,
+                        reg_of(*cap),
+                    ));
                 }
             }
             mir::RValue::Tuple(elems) => {
@@ -575,7 +630,10 @@ impl MirCodegen {
                 // writes its first payload value (or nil) to dst.
                 self.emit(Instruction::new1(OpCode::Receive, dst));
             }
-            mir::RValue::ReceiveMatch { behavior_ids, max_params } => {
+            mir::RValue::ReceiveMatch {
+                behavior_ids,
+                max_params,
+            } => {
                 // Selective receive: the spec constant encodes the reserved
                 // payload-register count and the candidate arm behavior ids
                 // as "max_params:id1,id2,...". The VM writes the matched arm
@@ -636,11 +694,19 @@ impl MirCodegen {
                     dst,
                 ));
             }
-            mir::RValue::Send { actor, behavior_idx, args } => {
+            mir::RValue::Send {
+                actor,
+                behavior_idx,
+                args,
+            } => {
                 // Protect the actor value in a register outside the 0..15
                 // staging zone before staging args, mirroring the Call/
                 // FUNC_VALUE_REG pattern.
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), FUNC_VALUE_REG));
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*actor),
+                    FUNC_VALUE_REG,
+                ));
                 self.stage_args(args)?;
                 self.emit(Instruction::new3(
                     OpCode::Send,
@@ -651,8 +717,16 @@ impl MirCodegen {
                 // Send is fire-and-forget with no VM-level result register;
                 // the stable compiler yields 0 for send-as-expression.
             }
-            mir::RValue::Ask { actor, behavior_idx, args } => {
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), FUNC_VALUE_REG));
+            mir::RValue::Ask {
+                actor,
+                behavior_idx,
+                args,
+            } => {
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*actor),
+                    FUNC_VALUE_REG,
+                ));
                 self.stage_args(args)?;
                 self.emit(Instruction::new3(
                     OpCode::Ask,
@@ -666,26 +740,56 @@ impl MirCodegen {
             mir::RValue::PipelineNew => {
                 self.emit(Instruction::new1(OpCode::PipelineNew, dst));
             }
-            mir::RValue::PipelineStage { id, name, actor, template } => {
+            mir::RValue::PipelineStage {
+                id,
+                name,
+                actor,
+                template,
+            } => {
                 self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
                 self.emit(Instruction::new2(OpCode::Move, reg_of(*name), SCRATCH0 + 1));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), SCRATCH0 + 2));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*template), SCRATCH0 + 3));
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*actor),
+                    SCRATCH0 + 2,
+                ));
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*template),
+                    SCRATCH0 + 3,
+                ));
                 self.emit(Instruction::new1(OpCode::PipelineStage, dst));
             }
             mir::RValue::PipelineRun { id, input } => {
                 self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*input), SCRATCH0 + 1));
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*input),
+                    SCRATCH0 + 1,
+                ));
                 self.emit(Instruction::new1(OpCode::PipelineRun, dst));
             }
             mir::RValue::SupervisorNew => {
                 self.emit(Instruction::new1(OpCode::SupervisorNew, dst));
             }
-            mir::RValue::SupervisorWorker { id, name, actor, description } => {
+            mir::RValue::SupervisorWorker {
+                id,
+                name,
+                actor,
+                description,
+            } => {
                 self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
                 self.emit(Instruction::new2(OpCode::Move, reg_of(*name), SCRATCH0 + 1));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), SCRATCH0 + 2));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*description), SCRATCH0 + 3));
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*actor),
+                    SCRATCH0 + 2,
+                ));
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*description),
+                    SCRATCH0 + 3,
+                ));
                 self.emit(Instruction::new1(OpCode::SupervisorWorker, dst));
             }
             mir::RValue::SupervisorRun { id, task } => {
@@ -693,17 +797,42 @@ impl MirCodegen {
                 self.emit(Instruction::new2(OpCode::Move, reg_of(*task), SCRATCH0 + 1));
                 self.emit(Instruction::new1(OpCode::SupervisorRun, dst));
             }
-            mir::RValue::DebateNew { topic, rounds, threshold } => {
+            mir::RValue::DebateNew {
+                topic,
+                rounds,
+                threshold,
+            } => {
                 self.emit(Instruction::new2(OpCode::Move, reg_of(*topic), SCRATCH0));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*rounds), SCRATCH0 + 1));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*threshold), SCRATCH0 + 2));
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*rounds),
+                    SCRATCH0 + 1,
+                ));
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*threshold),
+                    SCRATCH0 + 2,
+                ));
                 self.emit(Instruction::new1(OpCode::DebateNew, dst));
             }
-            mir::RValue::DebateParticipant { id, name, stance, actor } => {
+            mir::RValue::DebateParticipant {
+                id,
+                name,
+                stance,
+                actor,
+            } => {
                 self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
                 self.emit(Instruction::new2(OpCode::Move, reg_of(*name), SCRATCH0 + 1));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*stance), SCRATCH0 + 2));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*actor), SCRATCH0 + 3));
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*stance),
+                    SCRATCH0 + 2,
+                ));
+                self.emit(Instruction::new2(
+                    OpCode::Move,
+                    reg_of(*actor),
+                    SCRATCH0 + 3,
+                ));
                 self.emit(Instruction::new1(OpCode::DebateParticipant, dst));
             }
             mir::RValue::DebateRun { id } => {
@@ -883,6 +1012,455 @@ pub fn compile_mir(mir: &mir::Module, module_name: impl Into<String>) -> NuResul
     Ok(codegen.finish())
 }
 
+// ---------------------------------------------------------------------------
+// Liveness-based Drop planning
+// ---------------------------------------------------------------------------
+//
+// The VM's `Drop` opcode releases a register's local reference to a heap
+// object and clears the register to nil (so duplicate drops are no-ops).
+// This pass decides where to emit it. The goal is conservative correctness:
+// when in doubt, no drop is emitted and the value lives until actor exit.
+//
+// A local is a *candidate* when the analysis can prove its register always
+// holds the value's only counted reference (besides references taken by the
+// retaining store barriers, which keep the object alive independently):
+//
+//   - its type may hold a NaN-boxed heap pointer (MIR temp types are
+//     unreliable, so only definitely-scalar types are excluded);
+//   - it is not a parameter, closure capture, or effect-handler parameter
+//     (those arrive through plain, uncounted register copies);
+//   - it has at least one definition (never-assigned registers may hold
+//     VM-written values such as ReceiveMatch payloads, which follow the
+//     foreign-ref protocol and must not be dropped locally);
+//   - every definition is an owning rvalue — Tuple/Record/ArrayLit (fresh
+//     allocation) or Const (never a heap pointer) — that does not read the
+//     local itself;
+//   - no use copies the value through an uncounted channel: Move/Load,
+//     `&`/`*`, call or effect arguments, closure captures, sends/asks,
+//     returns/resumes, `StateSet`, or the AI builtins' staging moves.
+//
+// Uses through the retaining barriers (container element stores) and
+// read-only uses (container base/length, operands, branch conditions) do
+// not disqualify: after a retaining store the slot owns its own reference,
+// so releasing the register's duplicate is sound.
+//
+// Escapees: a local defined by a field/element load (`RecL`/`ArrLoad`) from
+// a candidate aliases that container's slots *without* a counted reference,
+// so a candidate is never dropped at a point where one of its (transitive)
+// escapees is still live.
+//
+// Drop points per candidate: before every redefinition (release the old
+// value; always sound — the register is nil after any earlier drop), after
+// a definition whose value is immediately dead, after a last read-only or
+// retaining use, and at the entry of blocks the value flows into but never
+// uses (branch-edge death). A value whose last use is a branch condition
+// cannot be dropped there (the terminator must run first) and simply lives
+// until actor exit.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UseKind {
+    /// Read without copying the value bits (container base, length, operand).
+    ReadOnly,
+    /// Copied into a heap container through a retaining barrier — the
+    /// register's own reference may be released afterwards.
+    Retaining,
+    /// Copied through a channel that takes no counted reference (Move/Load,
+    /// call staging, send, capture, return, actor state).
+    Copy,
+}
+
+/// Locals of these types can hold NaN-boxed heap pointers at runtime. MIR
+/// temps are often typed `Type::unit()` while carrying pointers, so only
+/// definitely-scalar types are excluded.
+fn may_hold_heap_ptr(ty: &Type) -> bool {
+    match ty {
+        Type::Primitive(p) => matches!(p, PrimitiveType::String | PrimitiveType::Unit),
+        Type::Tuple(_)
+        | Type::Record(_)
+        | Type::Array(_)
+        | Type::App { .. }
+        | Type::Var(_)
+        | Type::Scheme { .. }
+        | Type::Reference { .. } => true,
+        Type::Variant(_) | Type::Function { .. } | Type::Actor { .. } => false,
+    }
+}
+
+/// The rvalue forms whose result is a freshly allocated heap object (or a
+/// non-pointer constant) owned solely by the destination register.
+fn rvalue_is_owning(op: &mir::RValue) -> bool {
+    matches!(
+        op,
+        mir::RValue::Tuple(_)
+            | mir::RValue::Record(_)
+            | mir::RValue::ArrayLit(_)
+            | mir::RValue::Const(_)
+    )
+}
+
+/// Every occurrence of a local inside an rvalue, with how the value is used.
+fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
+    use mir::RValue::*;
+    let mut out = Vec::new();
+    let ro = |out: &mut Vec<(usize, UseKind)>, id: mir::LocalId| {
+        out.push((id.0 as usize, UseKind::ReadOnly))
+    };
+    let ret = |out: &mut Vec<(usize, UseKind)>, id: mir::LocalId| {
+        out.push((id.0 as usize, UseKind::Retaining))
+    };
+    let cp = |out: &mut Vec<(usize, UseKind)>, id: mir::LocalId| {
+        out.push((id.0 as usize, UseKind::Copy))
+    };
+    match op {
+        Const(_)
+        | SignalWait { .. }
+        | Receive
+        | ReceiveMatch { .. }
+        | PipelineNew
+        | SupervisorNew
+        | Spawn { .. }
+        | SelfRef
+        | StateGet { .. } => {}
+        Load(x) => cp(&mut out, *x),
+        LoadFieldNamed { obj, .. } => ro(&mut out, *obj),
+        ArrayLoad { arr, idx } => {
+            ro(&mut out, *arr);
+            ro(&mut out, *idx);
+        }
+        ArrayLen(x) => ro(&mut out, *x),
+        ArrayLit(elems) => {
+            for e in elems {
+                ret(&mut out, *e);
+            }
+        }
+        Unary(_, x) => cp(&mut out, *x),
+        Binary(_, l, r) => {
+            ro(&mut out, *l);
+            ro(&mut out, *r);
+        }
+        StringEq(l, r) => {
+            ro(&mut out, *l);
+            ro(&mut out, *r);
+        }
+        Call { func, args } => {
+            if let mir::FuncRef::Local(f) = func {
+                cp(&mut out, *f);
+            }
+            for a in args {
+                cp(&mut out, *a);
+            }
+        }
+        Closure { captures, .. } => {
+            for c in captures {
+                cp(&mut out, *c);
+            }
+        }
+        Tuple(elems) => {
+            for e in elems {
+                ret(&mut out, *e);
+            }
+        }
+        Record(fields) => {
+            for (_, e) in fields {
+                ret(&mut out, *e);
+            }
+        }
+        Perform { args, .. } | FFICall { args, .. } => {
+            for a in args {
+                cp(&mut out, *a);
+            }
+        }
+        LlmAsk { prompt } => cp(&mut out, *prompt),
+        Migrate { actor, node } => {
+            cp(&mut out, *actor);
+            cp(&mut out, *node);
+        }
+        CapabilityCheck { val } => cp(&mut out, *val),
+        Send { actor, args, .. } | Ask { actor, args, .. } => {
+            cp(&mut out, *actor);
+            for a in args {
+                cp(&mut out, *a);
+            }
+        }
+        PipelineStage { id, name, actor, template } => {
+            for x in [id, name, actor, template] {
+                cp(&mut out, *x);
+            }
+        }
+        PipelineRun { id, input } => {
+            cp(&mut out, *id);
+            cp(&mut out, *input);
+        }
+        SupervisorWorker { id, name, actor, description } => {
+            for x in [id, name, actor, description] {
+                cp(&mut out, *x);
+            }
+        }
+        SupervisorRun { id, task } => {
+            cp(&mut out, *id);
+            cp(&mut out, *task);
+        }
+        DebateNew { topic, rounds, threshold } => {
+            cp(&mut out, *topic);
+            cp(&mut out, *rounds);
+            cp(&mut out, *threshold);
+        }
+        DebateParticipant { id, name, stance, actor } => {
+            for x in [id, name, stance, actor] {
+                cp(&mut out, *x);
+            }
+        }
+        DebateRun { id } => cp(&mut out, *id),
+    }
+    out
+}
+
+/// Every occurrence of a local inside a statement (an assignment's
+/// destination is a definition, not a use).
+fn stmt_uses(stmt: &mir::Stmt) -> Vec<(usize, UseKind)> {
+    match stmt {
+        mir::Stmt::Assign { op, .. } => rvalue_uses(op),
+        mir::Stmt::StoreFieldNamed { obj, src, .. } => vec![
+            (obj.0 as usize, UseKind::ReadOnly),
+            (src.0 as usize, UseKind::Retaining),
+        ],
+        mir::Stmt::ArrayStore { arr, idx, src } => vec![
+            (arr.0 as usize, UseKind::ReadOnly),
+            (idx.0 as usize, UseKind::ReadOnly),
+            (src.0 as usize, UseKind::Retaining),
+        ],
+        mir::Stmt::EnterHandle { .. } | mir::Stmt::PopHandler => Vec::new(),
+        mir::Stmt::Emit { args, .. } => args
+            .iter()
+            .map(|a| (a.0 as usize, UseKind::Copy))
+            .collect(),
+        // StateSet stores into actor state without retaining, so the stored
+        // value must keep its register reference: treat it as a copy.
+        mir::Stmt::StateSet { src, .. } => vec![(src.0 as usize, UseKind::Copy)],
+    }
+}
+
+fn terminator_uses(term: &mir::Terminator) -> Vec<(usize, UseKind)> {
+    match term {
+        mir::Terminator::Return(Some(v)) | mir::Terminator::Resume(v) => {
+            vec![(v.0 as usize, UseKind::Copy)]
+        }
+        mir::Terminator::Branch { cond, .. } => vec![(cond.0 as usize, UseKind::ReadOnly)],
+        _ => Vec::new(),
+    }
+}
+
+/// Successor block indices of a terminator (block ids are dense indices
+/// into `Function::blocks`).
+fn terminator_successors(term: &mir::Terminator) -> Vec<usize> {
+    match term {
+        mir::Terminator::Jump(t) => vec![t.0 as usize],
+        mir::Terminator::Branch { then_, else_, .. } => {
+            vec![then_.0 as usize, else_.0 as usize]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Where to emit `Drop` instructions for one function.
+#[derive(Default)]
+struct DropPlan {
+    /// Before the block's first statement (after any handler prologue).
+    block_entry: HashMap<usize, Vec<mir::LocalId>>,
+    /// Before the first instruction of statement (block, stmt).
+    before_stmt: HashMap<(usize, usize), Vec<mir::LocalId>>,
+    /// After the last instruction of statement (block, stmt).
+    after_stmt: HashMap<(usize, usize), Vec<mir::LocalId>>,
+}
+
+/// Compute conservative `Drop` placements for one function; see the section
+/// docs above for the soundness argument.
+fn plan_drops(func: &mir::Function) -> DropPlan {
+    let mut plan = DropPlan::default();
+    let nlocals = func.locals.len();
+    let nblocks = func.blocks.len();
+    if nlocals == 0 || nblocks == 0 {
+        return plan;
+    }
+
+    let ptr_ty: Vec<bool> = func.locals.iter().map(|l| may_hold_heap_ptr(&l.ty)).collect();
+
+    // Locals that receive their value outside MIR assignments can never be
+    // proven solely owned.
+    let mut excluded = vec![false; nlocals];
+    for id in func.params.iter().chain(&func.captures) {
+        excluded[id.0 as usize] = true;
+    }
+    for table in &func.handler_tables {
+        for binding in &table.bindings {
+            for id in &binding.params {
+                excluded[id.0 as usize] = true;
+            }
+        }
+    }
+
+    // Scan defs and uses for the whole function.
+    let mut has_def = vec![false; nlocals];
+    let mut defs_owning = vec![true; nlocals];
+    let mut no_copy_use = vec![true; nlocals];
+    let mut block_defs: Vec<HashSet<usize>> = (0..nblocks).map(|_| HashSet::new()).collect();
+    let mut block_uses: Vec<HashSet<usize>> = (0..nblocks).map(|_| HashSet::new()).collect();
+    // (dst, base) pairs of field/element loads, for escapee tracking.
+    let mut loads: Vec<(usize, usize)> = Vec::new();
+
+    for (bi, block) in func.blocks.iter().enumerate() {
+        for stmt in &block.stmts {
+            for (u, kind) in stmt_uses(stmt) {
+                block_uses[bi].insert(u);
+                if kind == UseKind::Copy {
+                    no_copy_use[u] = false;
+                }
+            }
+            if let mir::Stmt::Assign { dst, op } = stmt {
+                let d = dst.0 as usize;
+                has_def[d] = true;
+                block_defs[bi].insert(d);
+                if !rvalue_is_owning(op) || rvalue_uses(op).iter().any(|(u, _)| *u == d) {
+                    defs_owning[d] = false;
+                }
+                match op {
+                    mir::RValue::LoadFieldNamed { obj, .. } => loads.push((d, obj.0 as usize)),
+                    mir::RValue::ArrayLoad { arr, .. } => loads.push((d, arr.0 as usize)),
+                    _ => {}
+                }
+            }
+        }
+        for (u, kind) in terminator_uses(&block.terminator) {
+            block_uses[bi].insert(u);
+            if kind == UseKind::Copy {
+                no_copy_use[u] = false;
+            }
+        }
+    }
+
+    let candidate: Vec<bool> = (0..nlocals)
+        .map(|i| ptr_ty[i] && !excluded[i] && has_def[i] && defs_owning[i] && no_copy_use[i])
+        .collect();
+
+    // Escapees: locals defined by field/element loads from a candidate or
+    // another escapee (transitively).
+    let mut escapees: Vec<Vec<usize>> = (0..nlocals).map(|_| Vec::new()).collect();
+    for c in 0..nlocals {
+        if !candidate[c] {
+            continue;
+        }
+        let mut seen = HashSet::new();
+        let mut frontier = vec![c];
+        while let Some(x) = frontier.pop() {
+            for &(dst, base) in &loads {
+                if base == x && ptr_ty[dst] && seen.insert(dst) {
+                    escapees[c].push(dst);
+                    frontier.push(dst);
+                }
+            }
+        }
+    }
+    let esc_clear = |c: usize, live: &HashSet<usize>| escapees[c].iter().all(|e| !live.contains(e));
+
+    // Backward may-liveness over all locals.
+    let mut live_in: Vec<HashSet<usize>> = (0..nblocks).map(|_| HashSet::new()).collect();
+    let mut live_out: Vec<HashSet<usize>> = (0..nblocks).map(|_| HashSet::new()).collect();
+    loop {
+        let mut changed = false;
+        for bi in (0..nblocks).rev() {
+            let mut out: HashSet<usize> = HashSet::new();
+            for succ in terminator_successors(&func.blocks[bi].terminator) {
+                for l in &live_in[succ] {
+                    out.insert(*l);
+                }
+            }
+            let mut inset = out.clone();
+            for d in &block_defs[bi] {
+                inset.remove(d);
+            }
+            for u in &block_uses[bi] {
+                inset.insert(*u);
+            }
+            if inset != live_in[bi] || out != live_out[bi] {
+                live_in[bi] = inset;
+                live_out[bi] = out;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Walk each block backward, emitting drops where a candidate's value
+    // dies.
+    for (bi, block) in func.blocks.iter().enumerate() {
+        let mut live: HashSet<usize> = live_out[bi].clone();
+        for (u, _) in terminator_uses(&block.terminator) {
+            live.insert(u);
+        }
+        for (si, stmt) in block.stmts.iter().enumerate().rev() {
+            let uses = stmt_uses(stmt);
+            // Last-use drops for candidates this statement reads.
+            for (u, _) in &uses {
+                if candidate[*u] && !live.contains(u) && esc_clear(*u, &live) {
+                    plan.after_stmt
+                        .entry((bi, si))
+                        .or_default()
+                        .push(func.locals[*u].id);
+                }
+            }
+            for (u, _) in &uses {
+                live.insert(*u);
+            }
+            if let mir::Stmt::Assign { dst, .. } = stmt {
+                let d = dst.0 as usize;
+                if candidate[d] {
+                    // The new value is dead on arrival: release it right
+                    // after the statement.
+                    if !live.contains(&d) && esc_clear(d, &live) {
+                        plan.after_stmt.entry((bi, si)).or_default().push(*dst);
+                    }
+                    // Release the overwritten old value before the
+                    // statement. Always sound for a candidate: the register
+                    // holds the previous definition's product (or nil after
+                    // an earlier drop), never an alias.
+                    if esc_clear(d, &live) {
+                        plan.before_stmt.entry((bi, si)).or_default().push(*dst);
+                    }
+                }
+                live.remove(&d);
+            }
+        }
+        // Entry drops: candidates held on some incoming edge but dead at
+        // this block's entry (their value died at the branch that led here).
+        let mut held_in: HashSet<usize> = HashSet::new();
+        for (pj, pred) in func.blocks.iter().enumerate() {
+            if terminator_successors(&pred.terminator).contains(&bi) {
+                for l in &live_out[pj] {
+                    held_in.insert(*l);
+                }
+            }
+        }
+        for c in 0..nlocals {
+            if candidate[c] && held_in.contains(&c) && !live_in[bi].contains(&c) && esc_clear(c, &live_in[bi]) {
+                plan.block_entry.entry(bi).or_default().push(func.locals[c].id);
+            }
+        }
+    }
+
+    for ids in plan
+        .block_entry
+        .values_mut()
+        .chain(plan.before_stmt.values_mut())
+        .chain(plan.after_stmt.values_mut())
+    {
+        ids.sort();
+        ids.dedup();
+    }
+    plan
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -958,11 +1536,18 @@ mod tests {
     #[test]
     fn test_mir_codegen_index_and_field_assign() {
         let value = run_mir_source("let arr = [1, 2, 3] in { arr[0] = 99 arr[0] }").unwrap();
-        assert_eq!(value.as_int(), Some(99), "arr[0] = 99 should actually mutate the array");
+        assert_eq!(
+            value.as_int(),
+            Some(99),
+            "arr[0] = 99 should actually mutate the array"
+        );
 
-        let value =
-            run_mir_source("let r = { x: 1, y: 2 } in { r.x = 99 r.x + r.y }").unwrap();
-        assert_eq!(value.as_int(), Some(101), "r.x = 99 should actually mutate the record");
+        let value = run_mir_source("let r = { x: 1, y: 2 } in { r.x = 99 r.x + r.y }").unwrap();
+        assert_eq!(
+            value.as_int(),
+            Some(101),
+            "r.x = 99 should actually mutate the record"
+        );
     }
 
     #[test]
@@ -971,13 +1556,25 @@ mod tests {
         // assigned value rather than unit — an assignment used as a block's
         // trailing expression must yield that value, not unit.
         let value = run_mir_source("let x = &1 in { x = 2 }").unwrap();
-        assert_eq!(value.as_int(), Some(2), "`x = 2` as an expression should yield 2");
+        assert_eq!(
+            value.as_int(),
+            Some(2),
+            "`x = 2` as an expression should yield 2"
+        );
 
         let value = run_mir_source("let r = { x: 1 } in { r.x = 5 }").unwrap();
-        assert_eq!(value.as_int(), Some(5), "`r.x = 5` as an expression should yield 5");
+        assert_eq!(
+            value.as_int(),
+            Some(5),
+            "`r.x = 5` as an expression should yield 5"
+        );
 
         let value = run_mir_source("let arr = [1, 2] in { arr[0] = 7 }").unwrap();
-        assert_eq!(value.as_int(), Some(7), "`arr[0] = 7` as an expression should yield 7");
+        assert_eq!(
+            value.as_int(),
+            Some(7),
+            "`arr[0] = 7` as an expression should yield 7"
+        );
     }
 
     #[test]
@@ -998,7 +1595,10 @@ mod tests {
         // is bounded by the same 16-arg staging limit), but a compile error
         // is the honest outcome, matching this pipeline's "no silent
         // misbehavior" guarantee.
-        let params = (0..17).map(|i| format!("a{}: Int", i)).collect::<Vec<_>>().join(", ");
+        let params = (0..17)
+            .map(|i| format!("a{}: Int", i))
+            .collect::<Vec<_>>()
+            .join(", ");
         let source = format!("fn f({}) -> Int {{ a0 }}\n0", params);
         let result = compile_mir_source(&source);
         assert!(
@@ -1032,10 +1632,8 @@ mod tests {
 
     #[test]
     fn test_mir_codegen_effect_handler() {
-        let value = run_mir_source(
-            "handle perform Math.getAnswer() { | Math.getAnswer() => 42 }",
-        )
-        .unwrap();
+        let value =
+            run_mir_source("handle perform Math.getAnswer() { | Math.getAnswer() => 42 }").unwrap();
         assert_eq!(value.as_int(), Some(42));
     }
 
@@ -1046,11 +1644,13 @@ mod tests {
         // actor_ref(0); real behavior semantics (state, ask) are covered by
         // src/integration_tests.rs's MIR-vs-legacy actor tests, which attach
         // a Runtime.
-        let value = run_mir_source(
-            "actor A { state x = 0 behavior get() { self.x } }\nspawn A { x = 0 }",
-        )
-        .unwrap();
-        assert!(value.as_actor_id().is_some(), "spawn should yield an actor reference");
+        let value =
+            run_mir_source("actor A { state x = 0 behavior get() { self.x } }\nspawn A { x = 0 }")
+                .unwrap();
+        assert!(
+            value.as_actor_id().is_some(),
+            "spawn should yield an actor reference"
+        );
     }
 
     #[test]
@@ -1079,18 +1679,28 @@ mod tests {
         // Sequential workflows and tool-less agents desugar to actors and
         // compile like any other actor declaration.
         let result = compile_mir_source("workflow W { step a { 1 } }");
-        assert!(result.is_ok(), "plain sequential workflow should compile: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "plain sequential workflow should compile: {:?}",
+            result
+        );
 
         let result = compile_mir_source(r#"agent Ag = { model: "gpt-4o" }"#);
-        assert!(result.is_ok(), "tool-less agent should compile: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "tool-less agent should compile: {:?}",
+            result
+        );
     }
 
     #[test]
     fn test_mir_codegen_parallel_workflow_compiles() {
-        let result = compile_mir_source(
-            "workflow W { parallel { step a { 1 } step b { 2 } } }",
+        let result = compile_mir_source("workflow W { parallel { step a { 1 } step b { 2 } } }");
+        assert!(
+            result.is_ok(),
+            "parallel workflow should compile: {:?}",
+            result
         );
-        assert!(result.is_ok(), "parallel workflow should compile: {:?}", result);
         let module = result.unwrap();
         assert_eq!(module.behaviors.len(), 1);
         assert_eq!(
@@ -1109,7 +1719,11 @@ mod tests {
             agent Ag = { model: "gpt-4o", tools: [search] }
             "#,
         );
-        assert!(result.is_ok(), "agent with a resolvable tool should compile: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "agent with a resolvable tool should compile: {:?}",
+            result
+        );
         let module = result.unwrap();
         assert_eq!(module.actor_metadata.len(), 1);
         assert_eq!(module.actor_metadata[0].tools.len(), 1);
@@ -1146,7 +1760,10 @@ mod tests {
                         name: "r".into(),
                         ty: crate::types::Type::unit(),
                         value: crate::hir::RValue::Call {
-                            func: crate::hir::Operand::Var("nope".into(), crate::types::Type::unit()),
+                            func: crate::hir::Operand::Var(
+                                "nope".into(),
+                                crate::types::Type::unit(),
+                            ),
                             args: vec![],
                             ty: crate::types::Type::unit(),
                         },
@@ -1249,6 +1866,10 @@ mod tests {
         let mut vm = VM::new();
         vm.load_module(module);
         let value = vm.run().unwrap();
-        assert_eq!(value.as_int(), Some(36), "nested module's function should be reachable unqualified");
+        assert_eq!(
+            value.as_int(),
+            Some(36),
+            "nested module's function should be reachable unqualified"
+        );
     }
 }

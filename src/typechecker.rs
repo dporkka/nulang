@@ -110,10 +110,8 @@ fn apply_subst_to_ctx(ctx: &TypeContext, _subst: &Substitution) -> TypeContext {
 /// Formally: (s2 ∘ s1)(t) = s2(s1(t))
 fn compose_subst(s2: &Substitution, s1: &Substitution) -> Substitution {
     // Apply s2 to all types in s1
-    let mut s1_substituted: Substitution = s1
-        .iter()
-        .map(|(v, t)| (*v, apply_subst(t, s2)))
-        .collect();
+    let mut s1_substituted: Substitution =
+        s1.iter().map(|(v, t)| (*v, apply_subst(t, s2))).collect();
     // Add s2 entries that don't conflict with s1
     let s1_vars: HashSet<TypeVar> = s1.iter().map(|(v, _)| *v).collect();
     for (v, t) in s2 {
@@ -287,7 +285,16 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
         }
 
         // Generic type application
-        (Type::App { constructor: c1, args: a1 }, Type::App { constructor: c2, args: a2 }) => {
+        (
+            Type::App {
+                constructor: c1,
+                args: a1,
+            },
+            Type::App {
+                constructor: c2,
+                args: a2,
+            },
+        ) => {
             let s1 = mgu(c1, c2, span)?;
             let applied1: Vec<Type> = a1.iter().map(|t| apply_subst(t, &s1)).collect();
             let applied2: Vec<Type> = a2.iter().map(|t| apply_subst(t, &s1)).collect();
@@ -369,7 +376,9 @@ fn occurs_in(v: TypeVar, t: &Type) -> bool {
         Type::Primitive(_) => false,
         Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t)),
         Type::Record(fs) => fs.iter().any(|(_, t)| occurs_in(v, t)),
-        Type::Variant(vs) => vs.iter().any(|(_, t)| t.as_ref().map_or(false, |t| occurs_in(v, t))),
+        Type::Variant(vs) => vs
+            .iter()
+            .any(|(_, t)| t.as_ref().map_or(false, |t| occurs_in(v, t))),
         Type::Array(t) => occurs_in(v, t),
         Type::Function { param, ret, .. } => occurs_in(v, param) || occurs_in(v, ret),
         Type::Actor { state, behavior } => occurs_in(v, state) || occurs_in(v, behavior),
@@ -389,7 +398,10 @@ fn occurs_in(v: TypeVar, t: &Type) -> bool {
 fn instantiate(ty: &Type) -> Type {
     match ty {
         Type::Scheme { vars, body } => {
-            let subst: Substitution = vars.iter().map(|v| (*v, Type::Var(TypeVar::fresh()))).collect();
+            let subst: Substitution = vars
+                .iter()
+                .map(|v| (*v, Type::Var(TypeVar::fresh())))
+                .collect();
             apply_subst(body, &subst)
         }
         _ => ty.clone(),
@@ -577,9 +589,12 @@ impl TypeChecker {
             Decl::RecordType { .. } => Ok((vec![], Type::unit())),
             Decl::VariantType { .. } => Ok((vec![], Type::unit())),
             Decl::EffectDecl { .. } => Ok((vec![], Type::unit())),
-            Decl::Actor { name, behaviors, span, .. } => {
-                self.infer_actor_decl(ctx, name, behaviors, *span)
-            }
+            Decl::Actor {
+                name,
+                behaviors,
+                span,
+                ..
+            } => self.infer_actor_decl(ctx, name, behaviors, *span),
             Decl::Agent { .. } => {
                 // An agent declaration is an opaque module-level binding with a
                 // synthetic actor type, just like actors and workflows.
@@ -638,7 +653,8 @@ impl TypeChecker {
                             for step in branches {
                                 let (_s, _body_ty) = self.infer_expr(&workflow_ctx, &step.body)?;
                                 if let Some(comp_expr) = &step.compensate {
-                                    let (_s, _comp_ty) = self.infer_expr(&workflow_ctx, comp_expr)?;
+                                    let (_s, _comp_ty) =
+                                        self.infer_expr(&workflow_ctx, comp_expr)?;
                                 }
                             }
                         }
@@ -700,7 +716,12 @@ impl TypeChecker {
             } => self.infer_if(ctx, cond, then_branch, else_branch.as_ref(), *span),
 
             // Binary operators: type-specific rules
-            Expr::Binary { op, left, right, span } => self.infer_binary(ctx, *op, left, right, *span),
+            Expr::Binary {
+                op,
+                left,
+                right,
+                span,
+            } => self.infer_binary(ctx, *op, left, right, *span),
 
             // Unary operators
             Expr::Unary { op, expr, span } => self.infer_unary(ctx, *op, expr, *span),
@@ -712,7 +733,9 @@ impl TypeChecker {
             Expr::Record(fields, span) => self.infer_record(ctx, fields, *span),
 
             // Field access: look up field in record type
-            Expr::FieldAccess { expr, field, span } => self.infer_field_access(ctx, expr, field, *span),
+            Expr::FieldAccess { expr, field, span } => {
+                self.infer_field_access(ctx, expr, field, *span)
+            }
 
             // Array literal
             Expr::Array(elems, span) => self.infer_array(ctx, elems, *span),
@@ -763,9 +786,12 @@ impl TypeChecker {
             Expr::SelfRef(_) => Ok((vec![], Type::Var(TypeVar::fresh()))),
 
             // Perform effect
-            Expr::Perform { effect, op: _, args, span } => {
-                self.infer_perform(ctx, effect, args, *span)
-            }
+            Expr::Perform {
+                effect,
+                op: _,
+                args,
+                span,
+            } => self.infer_perform(ctx, effect, args, *span),
 
             // Emit event
             Expr::Emit { args, .. } => {
@@ -786,7 +812,11 @@ impl TypeChecker {
             } => self.infer_handle(ctx, body, handlers, *span),
 
             // Migrate actor
-            Expr::Migrate { actor, node: _, span } => {
+            Expr::Migrate {
+                actor,
+                node: _,
+                span,
+            } => {
                 let (s1, actor_ty) = self.infer_expr(ctx, actor)?;
                 // Actor must be an actor type
                 match &actor_ty {
@@ -822,7 +852,10 @@ impl TypeChecker {
             Expr::TypeAnnotate { expr, ty, span } => {
                 let (s1, inferred) = self.infer_expr(ctx, expr)?;
                 let s2 = mgu(&apply_subst(&inferred, &s1), ty, *span)?;
-                Ok((compose_subst(&s2, &s1), apply_subst(ty, &compose_subst(&s2, &s1))))
+                Ok((
+                    compose_subst(&s2, &s1),
+                    apply_subst(ty, &compose_subst(&s2, &s1)),
+                ))
             }
 
             // Pipe operator: x |> f  ===  f(x), and x |> f(a, b) === f(x, a, b)
@@ -884,7 +917,11 @@ impl TypeChecker {
             }
 
             // Assignment: target must be a reference
-            Expr::Assign { target, value, span } => {
+            Expr::Assign {
+                target,
+                value,
+                span,
+            } => {
                 let (s1, target_ty) = self.infer_expr(ctx, target)?;
                 let ctx1 = apply_subst_to_ctx(ctx, &s1);
                 let (s2, value_ty) = self.infer_expr(&ctx1, value)?;
@@ -921,7 +958,12 @@ impl TypeChecker {
     }
 
     /// Infer the type of a variable reference.
-    fn infer_var(&mut self, ctx: &TypeContext, name: &str, span: Span) -> NuResult<(Substitution, Type)> {
+    fn infer_var(
+        &mut self,
+        ctx: &TypeContext,
+        name: &str,
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
         match ctx.lookup(name) {
             Some((ty, _cap)) => {
                 let instantiated = instantiate(ty);
@@ -1041,7 +1083,11 @@ impl TypeChecker {
             let rec_var = Type::Var(TypeVar::fresh());
             let ctx_with_rec = ctx.extend(name.to_string(), rec_var.clone(), Capability::Ref);
             let (s1, val_ty) = self.infer_expr(&ctx_with_rec, value)?;
-            let s2 = mgu(&apply_subst(&rec_var, &s1), &apply_subst(&val_ty, &s1), Span::default())?;
+            let s2 = mgu(
+                &apply_subst(&rec_var, &s1),
+                &apply_subst(&val_ty, &s1),
+                Span::default(),
+            )?;
             let s_combined = compose_subst(&s2, &s1);
             let gen_ty = self.do_generalize(ctx, &apply_subst(&val_ty, &s_combined));
             let new_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref);
@@ -1113,7 +1159,11 @@ impl TypeChecker {
         };
 
         // Unify the recursive variable with the inferred function type
-        let s2 = mgu(&apply_subst(&rec_var, &s1), &apply_subst(&func_ty, &s1), Span::default())?;
+        let s2 = mgu(
+            &apply_subst(&rec_var, &s1),
+            &apply_subst(&func_ty, &s1),
+            Span::default(),
+        )?;
         let s_combined = compose_subst(&s2, &s1);
 
         // Generalize
@@ -1189,7 +1239,11 @@ impl TypeChecker {
                 let s3 = mgu(&apply_subst(&left_ty, &s1), &num_var, span)?;
                 let s_combined = compose_subst(&s3, &compose_subst(&s2, &s1));
 
-                let s4 = mgu(&apply_subst(&right_ty, &s_combined), &apply_subst(&num_var, &s_combined), span)?;
+                let s4 = mgu(
+                    &apply_subst(&right_ty, &s_combined),
+                    &apply_subst(&num_var, &s_combined),
+                    span,
+                )?;
                 let final_subst = compose_subst(&s4, &s_combined);
 
                 Ok((final_subst.clone(), apply_subst(&num_var, &final_subst)))
@@ -1202,7 +1256,11 @@ impl TypeChecker {
                 let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
 
                 let combined = compose_subst(&s2, &s1);
-                let s3 = mgu(&apply_subst(&right_ty, &combined), &apply_subst(&left_ty, &combined), span)?;
+                let s3 = mgu(
+                    &apply_subst(&right_ty, &combined),
+                    &apply_subst(&left_ty, &combined),
+                    span,
+                )?;
                 let final_subst = compose_subst(&s3, &combined);
 
                 Ok((final_subst, Type::bool()))
@@ -1243,7 +1301,11 @@ impl TypeChecker {
                 let (s1, left_ty) = self.infer_expr(ctx, left)?;
                 let ctx1 = apply_subst_to_ctx(ctx, &s1);
                 let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
-                let s3 = mgu(&apply_subst(&right_ty, &s2), &apply_subst(&left_ty, &s1), span)?;
+                let s3 = mgu(
+                    &apply_subst(&right_ty, &s2),
+                    &apply_subst(&left_ty, &s1),
+                    span,
+                )?;
                 let final_subst = compose_subst(&s3, &compose_subst(&s2, &s1));
                 Ok((final_subst, Type::unit()))
             }
@@ -1528,11 +1590,18 @@ impl TypeChecker {
         for elem in &elems[1..] {
             let ctx_sub = apply_subst_to_ctx(ctx, &subst);
             let (s, ty) = self.infer_expr(&ctx_sub, elem)?;
-            let s_unify = mgu(&apply_subst(&ty, &s), &apply_subst(&first_ty, &subst), Span::default())?;
+            let s_unify = mgu(
+                &apply_subst(&ty, &s),
+                &apply_subst(&first_ty, &subst),
+                Span::default(),
+            )?;
             subst = compose_subst(&s_unify, &compose_subst(&s, &subst));
         }
 
-        Ok((subst.clone(), Type::Array(Box::new(apply_subst(&first_ty, &subst)))))
+        Ok((
+            subst.clone(),
+            Type::Array(Box::new(apply_subst(&first_ty, &subst))),
+        ))
     }
 
     /// Infer the type of an array index expression.
@@ -1581,7 +1650,8 @@ impl TypeChecker {
         for (pattern, arm_expr) in arms {
             let ctx_sub = apply_subst_to_ctx(ctx, &subst);
             // Bind pattern variables to the context
-            let pattern_ctx = self.bind_pattern(&ctx_sub, pattern, &apply_subst(&scrut_ty, &subst))?;
+            let pattern_ctx =
+                self.bind_pattern(&ctx_sub, pattern, &apply_subst(&scrut_ty, &subst))?;
             let (s_arm, arm_ty) = self.infer_expr(&pattern_ctx, arm_expr)?;
             subst = compose_subst(&s_arm, &subst);
             arm_types.push(apply_subst(&arm_ty, &subst));
@@ -1598,7 +1668,11 @@ impl TypeChecker {
         let first_arm = arm_types[0].clone();
         let mut final_subst = subst;
         for arm_ty in &arm_types[1..] {
-            let s = mgu(&apply_subst(arm_ty, &final_subst), &apply_subst(&first_arm, &final_subst), span)?;
+            let s = mgu(
+                &apply_subst(arm_ty, &final_subst),
+                &apply_subst(&first_arm, &final_subst),
+                span,
+            )?;
             final_subst = compose_subst(&s, &final_subst);
         }
 
@@ -1647,54 +1721,49 @@ impl TypeChecker {
                     }
                 }
             }
-            Pattern::Record(pats) => {
-                match scrut_ty {
-                    Type::Record(fields) => {
-                        let mut new_ctx = ctx.clone();
-                        let field_map: std::collections::HashMap<String, Type> = fields.iter()
-                            .map(|(n, t)| (n.clone(), t.clone()))
-                            .collect();
-                        for (field_name, pat) in pats {
-                            if let Some(ty) = field_map.get(field_name) {
-                                new_ctx = self.bind_pattern(&new_ctx, pat, ty)?;
-                            } else {
-                                let fresh = Type::Var(TypeVar::fresh());
-                                new_ctx = self.bind_pattern(&new_ctx, pat, &fresh)?;
-                            }
-                        }
-                        Ok(new_ctx)
-                    }
-                    _ => {
-                        let mut new_ctx = ctx.clone();
-                        for (_, pat) in pats {
+            Pattern::Record(pats) => match scrut_ty {
+                Type::Record(fields) => {
+                    let mut new_ctx = ctx.clone();
+                    let field_map: std::collections::HashMap<String, Type> =
+                        fields.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
+                    for (field_name, pat) in pats {
+                        if let Some(ty) = field_map.get(field_name) {
+                            new_ctx = self.bind_pattern(&new_ctx, pat, ty)?;
+                        } else {
                             let fresh = Type::Var(TypeVar::fresh());
                             new_ctx = self.bind_pattern(&new_ctx, pat, &fresh)?;
                         }
-                        Ok(new_ctx)
                     }
+                    Ok(new_ctx)
                 }
-            }
-            Pattern::Variant(name, pat) => {
-                match scrut_ty {
-                    Type::Variant(variants) => {
-                        let mut new_ctx = ctx.clone();
-                        if let Some((_, Some(ty))) = variants.iter().find(|(n, _)| n == name) {
-                            if let Some(p) = pat {
-                                new_ctx = self.bind_pattern(&new_ctx, p, ty)?;
-                            }
-                        }
-                        Ok(new_ctx)
+                _ => {
+                    let mut new_ctx = ctx.clone();
+                    for (_, pat) in pats {
+                        let fresh = Type::Var(TypeVar::fresh());
+                        new_ctx = self.bind_pattern(&new_ctx, pat, &fresh)?;
                     }
-                    _ => {
+                    Ok(new_ctx)
+                }
+            },
+            Pattern::Variant(name, pat) => match scrut_ty {
+                Type::Variant(variants) => {
+                    let mut new_ctx = ctx.clone();
+                    if let Some((_, Some(ty))) = variants.iter().find(|(n, _)| n == name) {
                         if let Some(p) = pat {
-                            let fresh = Type::Var(TypeVar::fresh());
-                            self.bind_pattern(ctx, p, &fresh)
-                        } else {
-                            Ok(ctx.clone())
+                            new_ctx = self.bind_pattern(&new_ctx, p, ty)?;
                         }
                     }
+                    Ok(new_ctx)
                 }
-            }
+                _ => {
+                    if let Some(p) = pat {
+                        let fresh = Type::Var(TypeVar::fresh());
+                        self.bind_pattern(ctx, p, &fresh)
+                    } else {
+                        Ok(ctx.clone())
+                    }
+                }
+            },
             Pattern::Alias(name, pat) => {
                 let mut new_ctx = ctx.extend(name.clone(), scrut_ty.clone(), Capability::Ref);
                 new_ctx = self.bind_pattern(&new_ctx, pat, scrut_ty)?;
@@ -1812,7 +1881,12 @@ impl TypeChecker {
     }
 
     /// Infer ask expression.
-    fn infer_ask(&mut self, ctx: &TypeContext, actor: &Expr, span: Span) -> NuResult<(Substitution, Type)> {
+    fn infer_ask(
+        &mut self,
+        ctx: &TypeContext,
+        actor: &Expr,
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
         let (s1, actor_ty) = self.infer_expr(ctx, actor)?;
 
         let fresh_actor = Type::Actor {
@@ -1894,7 +1968,11 @@ impl TypeChecker {
         let s_combined = compose_subst(&s2, &s1);
 
         // Bind the loop variable
-        let body_ctx = ctx.extend(var.to_string(), apply_subst(&elem_var, &s_combined), Capability::Ref);
+        let body_ctx = ctx.extend(
+            var.to_string(),
+            apply_subst(&elem_var, &s_combined),
+            Capability::Ref,
+        );
 
         // Infer body
         let (s3, _body_ty) = self.infer_expr(&body_ctx, body)?;
@@ -2049,7 +2127,10 @@ mod tests {
     // Helper for record
     fn record(fields: Vec<(&str, Expr)>) -> Expr {
         Expr::Record(
-            fields.into_iter().map(|(n, e)| (n.to_string(), e)).collect(),
+            fields
+                .into_iter()
+                .map(|(n, e)| (n.to_string(), e))
+                .collect(),
             sp(),
         )
     }
@@ -2248,11 +2329,7 @@ mod tests {
         let mut tc = TypeChecker::new();
         let ctx = TypeContext::new();
         // let x = 42 in x + 1
-        let expr = let_(
-            "x",
-            int_lit(42),
-            bin(BinOp::Add, var("x"), int_lit(1)),
-        );
+        let expr = let_("x", int_lit(42), bin(BinOp::Add, var("x"), int_lit(1)));
         let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
         assert_eq!(apply_subst(&ty, &s), Type::int());
     }
@@ -2264,7 +2341,10 @@ mod tests {
         // let id = fn x => x in (id(42), id(true))
         // This tests that 'id' is polymorphic
         let id = lambda("x", var("x"));
-        let body = tuple(vec![app(var("id"), int_lit(42)), app(var("id"), bool_lit(true))]);
+        let body = tuple(vec![
+            app(var("id"), int_lit(42)),
+            app(var("id"), bool_lit(true)),
+        ]);
         let expr = let_("id", id, body);
         let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
         match apply_subst(&ty, &s) {

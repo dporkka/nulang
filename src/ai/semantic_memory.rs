@@ -53,7 +53,11 @@ impl SemanticMemory {
     }
 
     /// Store a fact and return its deterministic document id.
-    pub fn store(&mut self, content: impl Into<String>, metadata: HashMap<String, String>) -> String {
+    pub fn store(
+        &mut self,
+        content: impl Into<String>,
+        metadata: HashMap<String, String>,
+    ) -> String {
         let content = content.into();
         let id = deterministic_id(&content);
         self.documents.push(Document {
@@ -83,10 +87,7 @@ impl SemanticMemory {
             })
             .collect();
 
-        results.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(top_k);
         results
     }
@@ -270,7 +271,10 @@ mod tests {
         assert_eq!(restored.len(), 2);
         assert_eq!(restored.documents[0].id, id1);
         assert_eq!(restored.documents[1].id, id2);
-        assert_eq!(restored.documents[1].metadata.get("source").unwrap(), "unit-test");
+        assert_eq!(
+            restored.documents[1].metadata.get("source").unwrap(),
+            "unit-test"
+        );
         assert_eq!(restored.dimensions, 32);
 
         let results = restored.search("alpha", 1);

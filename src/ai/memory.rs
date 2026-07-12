@@ -53,7 +53,14 @@ impl EpisodicMemory {
 
     /// Return the `n` most recent turns, oldest first.
     pub fn recent(&self, n: usize) -> Vec<&Turn> {
-        self.turns.iter().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect()
+        self.turns
+            .iter()
+            .rev()
+            .take(n)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 
     /// Materialize all stored turns as [`LlmMessage`] values.

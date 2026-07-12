@@ -498,7 +498,9 @@ impl<'c> FnLowerer<'c> {
             return Ok(());
         }
         match stmt {
-            hir::Stmt::Let { name, ty, value, .. } => {
+            hir::Stmt::Let {
+                name, ty, value, ..
+            } => {
                 let dst = self.b.add_local(name.clone(), ty.clone());
                 self.lower_rvalue(dst, value)?;
                 self.bind(name, dst);
@@ -507,7 +509,10 @@ impl<'c> FnLowerer<'c> {
             hir::Stmt::Assign { target, value, .. } => self.lower_assign(target, value),
             hir::Stmt::StateSet { field, value, .. } => {
                 let src = self.lower_operand(value)?;
-                self.b.emit(mir::Stmt::StateSet { field: field.clone(), src });
+                self.b.emit(mir::Stmt::StateSet {
+                    field: field.clone(),
+                    src,
+                });
                 Ok(())
             }
             hir::Stmt::Emit { event, args, .. } => {
@@ -515,7 +520,10 @@ impl<'c> FnLowerer<'c> {
                 for a in args {
                     ids.push(self.lower_operand(a)?);
                 }
-                self.b.emit(mir::Stmt::Emit { event: event.clone(), args: ids });
+                self.b.emit(mir::Stmt::Emit {
+                    event: event.clone(),
+                    args: ids,
+                });
                 Ok(())
             }
         }
@@ -536,7 +544,10 @@ impl<'c> FnLowerer<'c> {
             hir::Place::Field { base, field, .. } if place_is_self(base) => {
                 let src = self.b.add_temp(Type::unit());
                 self.lower_rvalue(src, value)?;
-                self.b.emit(mir::Stmt::StateSet { field: field.clone(), src });
+                self.b.emit(mir::Stmt::StateSet {
+                    field: field.clone(),
+                    src,
+                });
                 Ok(())
             }
             hir::Place::Field { base, field, .. } => {
@@ -555,7 +566,11 @@ impl<'c> FnLowerer<'c> {
                 let idx_id = self.lower_operand(idx)?;
                 let src = self.b.add_temp(Type::unit());
                 self.lower_rvalue(src, value)?;
-                self.b.emit(mir::Stmt::ArrayStore { arr, idx: idx_id, src });
+                self.b.emit(mir::Stmt::ArrayStore {
+                    arr,
+                    idx: idx_id,
+                    src,
+                });
                 Ok(())
             }
         }
@@ -569,15 +584,21 @@ impl<'c> FnLowerer<'c> {
             hir::Place::Field { base, field, .. } => {
                 let obj = self.read_place(base)?;
                 let dst = self.b.add_temp(Type::unit());
-                self.b
-                    .assign(dst, mir::RValue::LoadFieldNamed { obj, field: field.clone() });
+                self.b.assign(
+                    dst,
+                    mir::RValue::LoadFieldNamed {
+                        obj,
+                        field: field.clone(),
+                    },
+                );
                 Ok(dst)
             }
             hir::Place::Index { base, idx, .. } => {
                 let arr = self.read_place(base)?;
                 let idx_id = self.lower_operand(idx)?;
                 let dst = self.b.add_temp(Type::unit());
-                self.b.assign(dst, mir::RValue::ArrayLoad { arr, idx: idx_id });
+                self.b
+                    .assign(dst, mir::RValue::ArrayLoad { arr, idx: idx_id });
                 Ok(dst)
             }
         }
@@ -665,8 +686,13 @@ impl<'c> FnLowerer<'c> {
                         } else if let Some(&idx) = self.ctx.func_map.get(name) {
                             mir::FuncRef::Index(idx)
                         } else if let Some(&eidx) = self.ctx.extern_map.get(name) {
-                            self.b
-                                .assign(dst, mir::RValue::FFICall { idx: eidx, args: aids });
+                            self.b.assign(
+                                dst,
+                                mir::RValue::FFICall {
+                                    idx: eidx,
+                                    args: aids,
+                                },
+                            );
                             return Ok(());
                         } else {
                             return Err(compile_err(format!(
@@ -680,11 +706,21 @@ impl<'c> FnLowerer<'c> {
                         mir::FuncRef::Local(id)
                     }
                 };
-                self.b
-                    .assign(dst, mir::RValue::Call { func: func_ref, args: aids });
+                self.b.assign(
+                    dst,
+                    mir::RValue::Call {
+                        func: func_ref,
+                        args: aids,
+                    },
+                );
                 Ok(())
             }
-            hir::RValue::Closure { params, body, captures, .. } => {
+            hir::RValue::Closure {
+                params,
+                body,
+                captures,
+                ..
+            } => {
                 // Capture only names that are actually locals in scope here;
                 // top-level functions and externs resolve inside the lifted
                 // function without capturing.
@@ -699,18 +735,23 @@ impl<'c> FnLowerer<'c> {
                     .collect();
                 let lname = self.ctx.fresh_lambda_name();
                 let idx = self.ctx.reserve_function(&lname);
-                let lifted =
-                    lower_lifted(self.ctx, &lname, params, &capture_names, None, body)?;
+                let lifted = lower_lifted(self.ctx, &lname, params, &capture_names, None, body)?;
                 self.ctx.fill_function(idx, lifted);
-                self.b
-                    .assign(dst, mir::RValue::Closure { func: idx, captures: capture_ids });
+                self.b.assign(
+                    dst,
+                    mir::RValue::Closure {
+                        func: idx,
+                        captures: capture_ids,
+                    },
+                );
                 Ok(())
             }
-            hir::RValue::RecClosure { name, params, body, .. } => {
+            hir::RValue::RecClosure {
+                name, params, body, ..
+            } => {
                 let lname = format!("__rec_{}", name);
                 let idx = self.ctx.reserve_function(&lname);
-                let lifted =
-                    lower_lifted(self.ctx, &lname, params, &[], Some((name, idx)), body)?;
+                let lifted = lower_lifted(self.ctx, &lname, params, &[], Some((name, idx)), body)?;
                 self.ctx.fill_function(idx, lifted);
                 // The binding holds the function-table index as a value.
                 self.b
@@ -742,22 +783,38 @@ impl<'c> FnLowerer<'c> {
                 Ok(())
             }
             hir::RValue::FieldAccess { base, field, .. } if operand_is_self(base) => {
-                self.b.assign(dst, mir::RValue::StateGet { field: field.clone() });
+                self.b.assign(
+                    dst,
+                    mir::RValue::StateGet {
+                        field: field.clone(),
+                    },
+                );
                 Ok(())
             }
             hir::RValue::FieldAccess { base, field, .. } => {
                 let obj = self.lower_operand(base)?;
-                self.b
-                    .assign(dst, mir::RValue::LoadFieldNamed { obj, field: field.clone() });
+                self.b.assign(
+                    dst,
+                    mir::RValue::LoadFieldNamed {
+                        obj,
+                        field: field.clone(),
+                    },
+                );
                 Ok(())
             }
             hir::RValue::Index { base, idx, .. } => {
                 let arr = self.lower_operand(base)?;
                 let idx_id = self.lower_operand(idx)?;
-                self.b.assign(dst, mir::RValue::ArrayLoad { arr, idx: idx_id });
+                self.b
+                    .assign(dst, mir::RValue::ArrayLoad { arr, idx: idx_id });
                 Ok(())
             }
-            hir::RValue::If { cond, then_body, else_body, .. } => {
+            hir::RValue::If {
+                cond,
+                then_body,
+                else_body,
+                ..
+            } => {
                 let cid = self.lower_operand(cond)?;
                 let then_bb = self.b.create_block();
                 let else_bb = self.b.create_block();
@@ -789,13 +846,17 @@ impl<'c> FnLowerer<'c> {
                 self.b.switch_to(join);
                 Ok(())
             }
-            hir::RValue::Match { scrutinee, arms, .. } => {
-                self.lower_match(dst, scrutinee, arms)
-            }
-            hir::RValue::For { var, iterable, body } => {
-                self.lower_for(dst, var, iterable, body)
-            }
-            hir::RValue::Perform { effect, op, args, .. } => {
+            hir::RValue::Match {
+                scrutinee, arms, ..
+            } => self.lower_match(dst, scrutinee, arms),
+            hir::RValue::For {
+                var,
+                iterable,
+                body,
+            } => self.lower_for(dst, var, iterable, body),
+            hir::RValue::Perform {
+                effect, op, args, ..
+            } => {
                 // Mirror the stable compiler's special cases.
                 if effect == "LLM" && op == "ask" {
                     let prompt = match args.first() {
@@ -828,13 +889,12 @@ impl<'c> FnLowerer<'c> {
                 );
                 Ok(())
             }
-            hir::RValue::Handle { body, handlers, .. } => {
-                self.lower_handle(dst, body, handlers)
-            }
+            hir::RValue::Handle { body, handlers, .. } => self.lower_handle(dst, body, handlers),
             hir::RValue::Migrate { actor, node, .. } => {
                 let a = self.lower_operand(actor)?;
                 let n = self.lower_operand(node)?;
-                self.b.assign(dst, mir::RValue::Migrate { actor: a, node: n });
+                self.b
+                    .assign(dst, mir::RValue::Migrate { actor: a, node: n });
                 Ok(())
             }
             hir::RValue::CapCheck { operand, .. } => {
@@ -847,12 +907,10 @@ impl<'c> FnLowerer<'c> {
                 Ok(())
             }
             hir::RValue::FFICall { symbol, args, .. } => {
-                let idx = self
-                    .ctx
-                    .extern_map
-                    .get(symbol)
-                    .copied()
-                    .ok_or_else(|| compile_err(format!("unknown extern function '{}'", symbol)))?;
+                let idx =
+                    self.ctx.extern_map.get(symbol).copied().ok_or_else(|| {
+                        compile_err(format!("unknown extern function '{}'", symbol))
+                    })?;
                 let mut ids = Vec::with_capacity(args.len());
                 for a in args {
                     ids.push(self.lower_operand(a)?);
@@ -872,7 +930,12 @@ impl<'c> FnLowerer<'c> {
                 self.b.assign(dst, mir::RValue::Spawn { behavior_idx: idx });
                 Ok(())
             }
-            hir::RValue::Send { actor, behavior, args, .. } => {
+            hir::RValue::Send {
+                actor,
+                behavior,
+                args,
+                ..
+            } => {
                 let actor_hint = operand_name_hint(actor);
                 let idx = self.ctx.send_behavior_idx(&actor_hint, behavior);
                 let actor_id = self.lower_operand(actor)?;
@@ -882,11 +945,20 @@ impl<'c> FnLowerer<'c> {
                 }
                 self.b.assign(
                     dst,
-                    mir::RValue::Send { actor: actor_id, behavior_idx: idx, args: arg_ids },
+                    mir::RValue::Send {
+                        actor: actor_id,
+                        behavior_idx: idx,
+                        args: arg_ids,
+                    },
                 );
                 Ok(())
             }
-            hir::RValue::Ask { actor, behavior, args, .. } => {
+            hir::RValue::Ask {
+                actor,
+                behavior,
+                args,
+                ..
+            } => {
                 let actor_hint = operand_name_hint(actor);
                 let idx = self.ctx.send_behavior_idx(&actor_hint, behavior);
                 let actor_id = self.lower_operand(actor)?;
@@ -896,7 +968,11 @@ impl<'c> FnLowerer<'c> {
                 }
                 self.b.assign(
                     dst,
-                    mir::RValue::Ask { actor: actor_id, behavior_idx: idx, args: arg_ids },
+                    mir::RValue::Ask {
+                        actor: actor_id,
+                        behavior_idx: idx,
+                        args: arg_ids,
+                    },
                 );
                 Ok(())
             }
@@ -904,51 +980,107 @@ impl<'c> FnLowerer<'c> {
                 self.b.assign(dst, mir::RValue::PipelineNew);
                 Ok(())
             }
-            hir::RValue::PipelineStage { id, name, actor, template, .. } => {
+            hir::RValue::PipelineStage {
+                id,
+                name,
+                actor,
+                template,
+                ..
+            } => {
                 let i = self.lower_operand(id)?;
                 let n = self.lower_operand(name)?;
                 let a = self.lower_operand(actor)?;
                 let t = self.lower_operand(template)?;
-                self.b.assign(dst, mir::RValue::PipelineStage { id: i, name: n, actor: a, template: t });
+                self.b.assign(
+                    dst,
+                    mir::RValue::PipelineStage {
+                        id: i,
+                        name: n,
+                        actor: a,
+                        template: t,
+                    },
+                );
                 Ok(())
             }
             hir::RValue::PipelineRun { id, input, .. } => {
                 let i = self.lower_operand(id)?;
                 let inp = self.lower_operand(input)?;
-                self.b.assign(dst, mir::RValue::PipelineRun { id: i, input: inp });
+                self.b
+                    .assign(dst, mir::RValue::PipelineRun { id: i, input: inp });
                 Ok(())
             }
             hir::RValue::SupervisorNew { .. } => {
                 self.b.assign(dst, mir::RValue::SupervisorNew);
                 Ok(())
             }
-            hir::RValue::SupervisorWorker { id, name, actor, description, .. } => {
+            hir::RValue::SupervisorWorker {
+                id,
+                name,
+                actor,
+                description,
+                ..
+            } => {
                 let i = self.lower_operand(id)?;
                 let n = self.lower_operand(name)?;
                 let a = self.lower_operand(actor)?;
                 let d = self.lower_operand(description)?;
-                self.b.assign(dst, mir::RValue::SupervisorWorker { id: i, name: n, actor: a, description: d });
+                self.b.assign(
+                    dst,
+                    mir::RValue::SupervisorWorker {
+                        id: i,
+                        name: n,
+                        actor: a,
+                        description: d,
+                    },
+                );
                 Ok(())
             }
             hir::RValue::SupervisorRun { id, task, .. } => {
                 let i = self.lower_operand(id)?;
                 let t = self.lower_operand(task)?;
-                self.b.assign(dst, mir::RValue::SupervisorRun { id: i, task: t });
+                self.b
+                    .assign(dst, mir::RValue::SupervisorRun { id: i, task: t });
                 Ok(())
             }
-            hir::RValue::DebateNew { topic, rounds, threshold, .. } => {
+            hir::RValue::DebateNew {
+                topic,
+                rounds,
+                threshold,
+                ..
+            } => {
                 let top = self.lower_operand(topic)?;
                 let r = self.lower_operand(rounds)?;
                 let th = self.lower_operand(threshold)?;
-                self.b.assign(dst, mir::RValue::DebateNew { topic: top, rounds: r, threshold: th });
+                self.b.assign(
+                    dst,
+                    mir::RValue::DebateNew {
+                        topic: top,
+                        rounds: r,
+                        threshold: th,
+                    },
+                );
                 Ok(())
             }
-            hir::RValue::DebateParticipant { id, name, stance, actor, .. } => {
+            hir::RValue::DebateParticipant {
+                id,
+                name,
+                stance,
+                actor,
+                ..
+            } => {
                 let i = self.lower_operand(id)?;
                 let n = self.lower_operand(name)?;
                 let s = self.lower_operand(stance)?;
                 let a = self.lower_operand(actor)?;
-                self.b.assign(dst, mir::RValue::DebateParticipant { id: i, name: n, stance: s, actor: a });
+                self.b.assign(
+                    dst,
+                    mir::RValue::DebateParticipant {
+                        id: i,
+                        name: n,
+                        stance: s,
+                        actor: a,
+                    },
+                );
                 Ok(())
             }
             hir::RValue::DebateRun { id, .. } => {
@@ -956,9 +1088,7 @@ impl<'c> FnLowerer<'c> {
                 self.b.assign(dst, mir::RValue::DebateRun { id: i });
                 Ok(())
             }
-            hir::RValue::Receive { arms, .. } => {
-                self.lower_receive(dst, arms)
-            }
+            hir::RValue::Receive { arms, .. } => self.lower_receive(dst, arms),
         }
     }
 
@@ -1007,7 +1137,8 @@ impl<'c> FnLowerer<'c> {
         for (i, (_name, params, arm_body)) in arms.iter().enumerate() {
             let test = self.b.add_temp(Type::bool());
             let idx_const = self.b.add_temp(Type::int());
-            self.b.assign(idx_const, mir::RValue::Const(Constant::Int(i as i64)));
+            self.b
+                .assign(idx_const, mir::RValue::Const(Constant::Int(i as i64)));
             self.b.assign(
                 test,
                 mir::RValue::Binary(crate::ast::BinOp::Eq, arm_idx, idx_const),
@@ -1098,10 +1229,8 @@ impl<'c> FnLowerer<'c> {
                 let lit_id = self.b.add_temp(Type::unit());
                 self.b
                     .assign(lit_id, mir::RValue::Const(literal_to_constant(lit)));
-                self.b.assign(
-                    dst,
-                    mir::RValue::Binary(crate::ast::BinOp::Eq, sid, lit_id),
-                );
+                self.b
+                    .assign(dst, mir::RValue::Binary(crate::ast::BinOp::Eq, sid, lit_id));
             }
             Pattern::Variant(tag, _) => {
                 let tag_id = self.b.add_temp(Type::unit());
@@ -1172,7 +1301,8 @@ impl<'c> FnLowerer<'c> {
 
         self.b.switch_to(body_bb);
         let elem = self.b.add_temp(Type::unit());
-        self.b.assign(elem, mir::RValue::ArrayLoad { arr: iter, idx });
+        self.b
+            .assign(elem, mir::RValue::ArrayLoad { arr: iter, idx });
         self.push_scope();
         self.bind(var, elem);
         self.loop_exits.push(exit);
@@ -1216,7 +1346,9 @@ impl<'c> FnLowerer<'c> {
         handlers: &[hir::EffectHandler],
     ) -> NuResult<()> {
         let join = self.b.create_block();
-        let table_idx = self.b.add_handler_table(mir::HandlerTableDef { bindings: Vec::new() });
+        let table_idx = self.b.add_handler_table(mir::HandlerTableDef {
+            bindings: Vec::new(),
+        });
         self.b.emit(mir::Stmt::EnterHandle { table: table_idx });
 
         // Body: yielded value lands in dst, then pop the handler frame.

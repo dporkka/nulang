@@ -4,11 +4,10 @@
 //! Full history in local commit 1c2cde9.
 
 use super::*;
-use std::time::{Duration, Instant};
-use std::sync::atomic::Ordering;
-use crate::vm::Frame;
-use crate::runtime::heap::{ActorHeap, TypeTag};
 use crate::runtime::gc::OrcaGc;
+use crate::runtime::heap::{ActorHeap, TypeTag};
+use crate::vm::Frame;
+use std::time::{Duration, Instant};
 
 // ========================================================================
 // Core Runtime Tests
@@ -17,9 +16,7 @@ use crate::runtime::gc::OrcaGc;
 #[test]
 fn test_spawn_send_step_sequence() {
     let mut rt = Runtime::new();
-    let actor_id = rt.spawn_actor(Box::new(|| {
-        vec![("count".to_string(), Value::int(0))]
-    }));
+    let actor_id = rt.spawn_actor(Box::new(|| vec![("count".to_string(), Value::int(0))]));
     assert!(rt.actors.contains_key(&actor_id));
     {
         let actor = rt.actors.get_mut(&actor_id).unwrap();
@@ -39,7 +36,12 @@ fn test_spawn_send_step_sequence() {
 #[test]
 fn test_mailbox_push_pop() {
     let mb = Mailbox::new(4);
-    let msg = Message { behavior_id: 0, payload: vec![Value::int(42)], sender: 1, priority: MessagePriority::Normal };
+    let msg = Message {
+        behavior_id: 0,
+        payload: vec![Value::int(42)],
+        sender: 1,
+        priority: MessagePriority::Normal,
+    };
     assert!(mb.push(msg.clone()).is_ok());
     assert_eq!(mb.len(), 1);
     let popped = mb.pop().unwrap();
@@ -114,7 +116,10 @@ fn test_supervisor_restart_rate_limiting() {
 
     // Crash 3: max_restarts=2 exceeded → supervisor shuts down
     rt.exit_actor(child_id_3, ExitReason::Error("crash3".to_string()));
-    assert!(!rt.supervisors.contains_key(&sup_id), "supervisor should shut down after max restarts");
+    assert!(
+        !rt.supervisors.contains_key(&sup_id),
+        "supervisor should shut down after max restarts"
+    );
 }
 
 #[test]
@@ -129,7 +134,10 @@ fn test_supervisor_escalate_to_parent() {
     rt.supervise_child(child_sup, spec, grandchild);
 
     rt.exit_actor(grandchild, ExitReason::Error("boom".to_string()));
-    assert!(rt.actors.contains_key(&child_sup), "child supervisor should still exist after one restart");
+    assert!(
+        rt.actors.contains_key(&child_sup),
+        "child supervisor should still exist after one restart"
+    );
 
     let gc2 = rt.supervisors[&child_sup].children[0].1;
     rt.exit_actor(gc2, ExitReason::Error("boom2".to_string()));
@@ -158,15 +166,15 @@ fn test_orca_ref_counting_basic() {
     assert!(obj.is_some());
     // local_count starts at 1 (creator holds one ref)
     let header_ptr = unsafe { heap.header_ptr(obj.unwrap()) };
-    let local_count = unsafe { (*header_ptr).ref_count.load(Ordering::Relaxed) };
+    let local_count = unsafe { (*header_ptr).ref_count };
     assert_eq!(local_count, 1);
 
     unsafe { gc.local_ref(&heap, obj.unwrap()) };
-    let local_count2 = unsafe { (*header_ptr).ref_count.load(Ordering::Relaxed) };
+    let local_count2 = unsafe { (*header_ptr).ref_count };
     assert_eq!(local_count2, 2);
 
     unsafe { gc.drop_local_ref(&mut heap, obj.unwrap()) };
-    let local_count3 = unsafe { (*header_ptr).ref_count.load(Ordering::Relaxed) };
+    let local_count3 = unsafe { (*header_ptr).ref_count };
     assert_eq!(local_count3, 1);
 }
 
@@ -193,8 +201,8 @@ fn test_orca_cycle_detection() {
     // Verify both objects are alive with ref count 1 each
     let header_a = unsafe { &*heap.header_ptr(a.unwrap()) };
     let header_b = unsafe { &*heap.header_ptr(b.unwrap()) };
-    assert_eq!(header_a.ref_count.load(Ordering::Relaxed), 1);
-    assert_eq!(header_b.ref_count.load(Ordering::Relaxed), 1);
+    assert_eq!(header_a.ref_count, 1);
+    assert_eq!(header_b.ref_count, 1);
 }
 
 // ========================================================================
@@ -438,7 +446,10 @@ fn test_exit_propagates_to_linked_actors() {
     rt.link_actors(a, b);
     rt.exit_actor(a, ExitReason::Error("kaboom".to_string()));
     assert!(!rt.actors.contains_key(&a));
-    assert!(!rt.actors.contains_key(&b), "linked actor b should also exit");
+    assert!(
+        !rt.actors.contains_key(&b),
+        "linked actor b should also exit"
+    );
 }
 
 #[test]
@@ -449,7 +460,10 @@ fn test_exit_does_not_propagate_for_normal_exit() {
     rt.link_actors(a, b);
     rt.exit_actor(a, ExitReason::Normal);
     assert!(!rt.actors.contains_key(&a));
-    assert!(rt.actors.contains_key(&b), "linked actor b should NOT exit on normal exit");
+    assert!(
+        rt.actors.contains_key(&b),
+        "linked actor b should NOT exit on normal exit"
+    );
 }
 
 #[test]
@@ -461,8 +475,14 @@ fn test_trap_exit_converts_to_message() {
     rt.link_actors(a, b);
     rt.exit_actor(a, ExitReason::Error("boom".to_string()));
     assert!(!rt.actors.contains_key(&a));
-    assert!(rt.actors.contains_key(&b), "actor with trap_exits should survive");
-    assert!(!rt.actors[&b].mailbox.is_empty(), "exit signal should become message");
+    assert!(
+        rt.actors.contains_key(&b),
+        "actor with trap_exits should survive"
+    );
+    assert!(
+        !rt.actors[&b].mailbox.is_empty(),
+        "exit signal should become message"
+    );
 }
 
 // ========================================================================
@@ -719,8 +739,7 @@ fn test_sqlite_store_clear() {
 #[cfg(feature = "sqlite")]
 #[test]
 fn test_sqlite_store_persists_to_disk() {
-    let path = std::env::temp_dir()
-        .join(format!("nulang_sqlite_test_{}.db", std::process::id()));
+    let path = std::env::temp_dir().join(format!("nulang_sqlite_test_{}.db", std::process::id()));
     {
         let mut store = SqliteStore::new(&path).unwrap();
         let mut state = HashMap::new();
@@ -793,11 +812,13 @@ fn test_persistent_actor_with_sqlite_store() {
 
 #[test]
 fn test_vm_spawn_creates_persistent_actor() {
+    use crate::bytecode::{
+        ActorMeta, BehaviorTableEntry, CodeModule, Constant, Instruction, OpCode,
+    };
+    use crate::runtime::persistence::StateModel as RuntimeStateModel;
+    use crate::vm::{Value, VM};
     use std::cell::RefCell;
     use std::rc::Rc;
-    use crate::bytecode::{ActorMeta, BehaviorTableEntry, CodeModule, Constant, Instruction, OpCode};
-    use crate::runtime::persistence::StateModel as RuntimeStateModel;
-    use crate::vm::{VM, Value};
 
     let mut module = CodeModule::new("test");
     module.add_actor_meta(ActorMeta {
@@ -838,15 +859,20 @@ fn test_vm_spawn_creates_persistent_actor() {
     let actor = rt_ref.actors.get(&actor_id).expect("actor should exist");
     assert!(actor.persistent);
     assert_eq!(actor.get_state_field("balance"), Some(Value::int(100)));
-    assert_eq!(actor.state_models.get("balance"), Some(&RuntimeStateModel::Durable));
+    assert_eq!(
+        actor.state_models.get("balance"),
+        Some(&RuntimeStateModel::Durable)
+    );
 }
 
 #[test]
 fn test_vm_spawn_creates_non_persistent_actor() {
+    use crate::bytecode::{
+        ActorMeta, BehaviorTableEntry, CodeModule, Constant, Instruction, OpCode,
+    };
+    use crate::vm::{Value, VM};
     use std::cell::RefCell;
     use std::rc::Rc;
-    use crate::bytecode::{ActorMeta, BehaviorTableEntry, CodeModule, Constant, Instruction, OpCode};
-    use crate::vm::{VM, Value};
 
     let mut module = CodeModule::new("test");
     module.add_actor_meta(ActorMeta {
@@ -889,11 +915,11 @@ fn test_vm_spawn_creates_non_persistent_actor() {
 
 #[test]
 fn test_vm_arr_alloc_uses_actor_heap() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
     use crate::runtime::heap::{ActorHeap, TypeTag};
     use crate::vm::VM;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     let rt = Rc::new(RefCell::new(Runtime::new()));
     let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
@@ -920,7 +946,9 @@ fn test_vm_arr_alloc_uses_actor_heap() {
     let actor = rt_ref.actors.get(&actor_id).unwrap();
     assert_eq!(actor.heap.live_count(), 1);
     let mut ptrs = Vec::new();
-    actor.heap.iter_live_objects(|_h, payload, _size| ptrs.push(payload));
+    actor
+        .heap
+        .iter_live_objects(|_h, payload, _size| ptrs.push(payload));
     assert_eq!(ptrs.len(), 1);
     unsafe {
         let header = &*ActorHeap::header_of(ptrs[0]);
@@ -930,10 +958,10 @@ fn test_vm_arr_alloc_uses_actor_heap() {
 
 #[test]
 fn test_vm_arr_load_store_and_len_on_actor_heap() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
     use crate::vm::VM;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     let rt = Rc::new(RefCell::new(Runtime::new()));
     let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
@@ -944,10 +972,25 @@ fn test_vm_arr_load_store_and_len_on_actor_heap() {
     let idx_idx = module.add_constant(Constant::Int(1));
     let val_idx = module.add_constant(Constant::Int(42));
 
-    module.emit(Instruction::new3(OpCode::ConstU, ((len_idx >> 8) & 0xFF) as u8, (len_idx & 0xFF) as u8, 1));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((len_idx >> 8) & 0xFF) as u8,
+        (len_idx & 0xFF) as u8,
+        1,
+    ));
     module.emit(Instruction::new2(OpCode::ArrAlloc, 1, 0)); // r0 = arr
-    module.emit(Instruction::new3(OpCode::ConstU, ((idx_idx >> 8) & 0xFF) as u8, (idx_idx & 0xFF) as u8, 2));
-    module.emit(Instruction::new3(OpCode::ConstU, ((val_idx >> 8) & 0xFF) as u8, (val_idx & 0xFF) as u8, 3));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((idx_idx >> 8) & 0xFF) as u8,
+        (idx_idx & 0xFF) as u8,
+        2,
+    ));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((val_idx >> 8) & 0xFF) as u8,
+        (val_idx & 0xFF) as u8,
+        3,
+    ));
     module.emit(Instruction::new3(OpCode::ArrStore, 0, 2, 3));
     module.emit(Instruction::new3(OpCode::ArrLoad, 0, 2, 4));
     module.emit(Instruction::new3(OpCode::ArrLen, 0, 0, 5)); // r5 = len
@@ -965,10 +1008,10 @@ fn test_vm_arr_load_store_and_len_on_actor_heap() {
 
 #[test]
 fn test_vm_drop_frees_actor_heap_object() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
     use crate::vm::VM;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     let rt = Rc::new(RefCell::new(Runtime::new()));
     let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
@@ -976,7 +1019,12 @@ fn test_vm_drop_frees_actor_heap_object() {
 
     let mut module = CodeModule::new("test");
     let len_idx = module.add_constant(Constant::Int(4));
-    module.emit(Instruction::new3(OpCode::ConstU, ((len_idx >> 8) & 0xFF) as u8, (len_idx & 0xFF) as u8, 1));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((len_idx >> 8) & 0xFF) as u8,
+        (len_idx & 0xFF) as u8,
+        1,
+    ));
     module.emit(Instruction::new2(OpCode::ArrAlloc, 1, 0));
     module.emit(Instruction::new1(OpCode::Drop, 0));
     module.emit(Instruction::new0(OpCode::Halt));
@@ -998,10 +1046,10 @@ fn test_vm_drop_frees_actor_heap_object() {
 /// trigger the moment any codegen path emits `Drop` for a captured local.
 #[test]
 fn test_closure_capture_retains_heap_object_across_drop() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
     use crate::vm::VM;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     let rt = Rc::new(RefCell::new(Runtime::new()));
     let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
@@ -1021,18 +1069,22 @@ fn test_closure_capture_retains_heap_object_across_drop() {
     //   7: Halt
     // fn0 (at offset 8): just returns unit; the object's survival is
     // checked on the actor heap directly after run() completes.
-    module.emit(Instruction::new3(OpCode::ConstU,
-        ((len_idx >> 8) & 0xFF) as u8, (len_idx & 0xFF) as u8, 2)); // 0
-    module.emit(Instruction::new2(OpCode::ArrAlloc, 2, 1));          // 1
-    module.emit(Instruction::new3(OpCode::Closure, 0, 0, 3));        // 2
-    module.emit(Instruction::new3(OpCode::CapStore, 3, 0, 1));       // 3
-    module.emit(Instruction::new1(OpCode::Drop, 1));                 // 4
-    module.emit(Instruction::new2(OpCode::Move, 3, 4));              // 5
-    module.emit(Instruction::new3(OpCode::Call, 4, 0, 0));           // 6
-    module.emit(Instruction::new0(OpCode::Halt));                    // 7
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((len_idx >> 8) & 0xFF) as u8,
+        (len_idx & 0xFF) as u8,
+        2,
+    )); // 0
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 2, 1)); // 1
+    module.emit(Instruction::new3(OpCode::Closure, 0, 0, 3)); // 2
+    module.emit(Instruction::new3(OpCode::CapStore, 3, 0, 1)); // 3
+    module.emit(Instruction::new1(OpCode::Drop, 1)); // 4
+    module.emit(Instruction::new2(OpCode::Move, 3, 4)); // 5
+    module.emit(Instruction::new3(OpCode::Call, 4, 0, 0)); // 6
+    module.emit(Instruction::new0(OpCode::Halt)); // 7
     let fn0_offset = module.current_offset();
-    module.emit(Instruction::new1(OpCode::Const0, 0));               // 8
-    module.emit(Instruction::new1(OpCode::RetVal, 0));                // 9
+    module.emit(Instruction::new1(OpCode::Const0, 0)); // 8
+    module.emit(Instruction::new1(OpCode::RetVal, 0)); // 9
     module.function_table.push(fn0_offset);
     module.entry_point = Some(0);
 
@@ -1057,10 +1109,10 @@ fn test_closure_capture_retains_heap_object_across_drop() {
 /// protected against but ArrStore wasn't.
 #[test]
 fn test_array_store_retains_heap_object_across_drop() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
     use crate::vm::VM;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     let rt = Rc::new(RefCell::new(Runtime::new()));
     let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
@@ -1079,16 +1131,24 @@ fn test_array_store_retains_heap_object_across_drop() {
     //   5: ArrStore r4[0] = r2 (must retain r2: ref_count -> 2)
     //   6: Drop r2 (ref_count -> 1; must NOT free)
     //   7: Halt
-    module.emit(Instruction::new3(OpCode::ConstU,
-        ((inner_len_idx >> 8) & 0xFF) as u8, (inner_len_idx & 0xFF) as u8, 1)); // 0
-    module.emit(Instruction::new2(OpCode::ArrAlloc, 1, 2));                     // 1
-    module.emit(Instruction::new3(OpCode::ConstU,
-        ((outer_len_idx >> 8) & 0xFF) as u8, (outer_len_idx & 0xFF) as u8, 3)); // 2
-    module.emit(Instruction::new2(OpCode::ArrAlloc, 3, 4));                     // 3
-    module.emit(Instruction::new1(OpCode::Const0, 5));                         // 4
-    module.emit(Instruction::new3(OpCode::ArrStore, 4, 5, 2));                 // 5
-    module.emit(Instruction::new1(OpCode::Drop, 2));                           // 6
-    module.emit(Instruction::new0(OpCode::Halt));                             // 7
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((inner_len_idx >> 8) & 0xFF) as u8,
+        (inner_len_idx & 0xFF) as u8,
+        1,
+    )); // 0
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 1, 2)); // 1
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((outer_len_idx >> 8) & 0xFF) as u8,
+        (outer_len_idx & 0xFF) as u8,
+        3,
+    )); // 2
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 3, 4)); // 3
+    module.emit(Instruction::new1(OpCode::Const0, 5)); // 4
+    module.emit(Instruction::new3(OpCode::ArrStore, 4, 5, 2)); // 5
+    module.emit(Instruction::new1(OpCode::Drop, 2)); // 6
+    module.emit(Instruction::new0(OpCode::Halt)); // 7
     module.entry_point = Some(0);
 
     let mut vm = VM::new();
@@ -1110,10 +1170,10 @@ fn test_array_store_retains_heap_object_across_drop() {
 /// it too, mirroring CapStore/ArrStore.
 #[test]
 fn test_record_field_store_retains_heap_object_across_drop() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
     use crate::vm::VM;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     let rt = Rc::new(RefCell::new(Runtime::new()));
     let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
@@ -1129,13 +1189,17 @@ fn test_record_field_store_retains_heap_object_across_drop() {
     //   3: RecS r3[field 0] = r2 (must retain r2: ref_count -> 2)
     //   4: Drop r2 (ref_count -> 1; must NOT free)
     //   5: Halt
-    module.emit(Instruction::new3(OpCode::ConstU,
-        ((inner_len_idx >> 8) & 0xFF) as u8, (inner_len_idx & 0xFF) as u8, 1)); // 0
-    module.emit(Instruction::new2(OpCode::ArrAlloc, 1, 2));                     // 1
-    module.emit(Instruction::new2(OpCode::RecMk, 1, 3));                        // 2
-    module.emit(Instruction::new3(OpCode::RecS, 3, 0, 2));                     // 3
-    module.emit(Instruction::new1(OpCode::Drop, 2));                           // 4
-    module.emit(Instruction::new0(OpCode::Halt));                             // 5
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((inner_len_idx >> 8) & 0xFF) as u8,
+        (inner_len_idx & 0xFF) as u8,
+        1,
+    )); // 0
+    module.emit(Instruction::new2(OpCode::ArrAlloc, 1, 2)); // 1
+    module.emit(Instruction::new2(OpCode::RecMk, 1, 3)); // 2
+    module.emit(Instruction::new3(OpCode::RecS, 3, 0, 2)); // 3
+    module.emit(Instruction::new1(OpCode::Drop, 2)); // 4
+    module.emit(Instruction::new0(OpCode::Halt)); // 5
     module.entry_point = Some(0);
 
     let mut vm = VM::new();
@@ -1154,11 +1218,11 @@ fn test_record_field_store_retains_heap_object_across_drop() {
 
 #[test]
 fn test_vm_sconcat_uses_actor_heap() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
     use crate::runtime::heap::{ActorHeap, TypeTag};
     use crate::vm::VM;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     let rt = Rc::new(RefCell::new(Runtime::new()));
     let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
@@ -1167,8 +1231,18 @@ fn test_vm_sconcat_uses_actor_heap() {
     let mut module = CodeModule::new("test");
     let a_idx = module.add_constant(Constant::Int(12));
     let b_idx = module.add_constant(Constant::Int(34));
-    module.emit(Instruction::new3(OpCode::ConstU, ((a_idx >> 8) & 0xFF) as u8, (a_idx & 0xFF) as u8, 1));
-    module.emit(Instruction::new3(OpCode::ConstU, ((b_idx >> 8) & 0xFF) as u8, (b_idx & 0xFF) as u8, 2));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((a_idx >> 8) & 0xFF) as u8,
+        (a_idx & 0xFF) as u8,
+        1,
+    ));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((b_idx >> 8) & 0xFF) as u8,
+        (b_idx & 0xFF) as u8,
+        2,
+    ));
     module.emit(Instruction::new3(OpCode::SConcat, 1, 2, 0));
     module.emit(Instruction::new0(OpCode::Halt));
     module.entry_point = Some(0);
@@ -1182,7 +1256,9 @@ fn test_vm_sconcat_uses_actor_heap() {
     let actor = rt_ref.actors.get(&actor_id).unwrap();
     assert_eq!(actor.heap.live_count(), 1);
     let mut ptrs = Vec::new();
-    actor.heap.iter_live_objects(|_h, payload, _size| ptrs.push(payload));
+    actor
+        .heap
+        .iter_live_objects(|_h, payload, _size| ptrs.push(payload));
     unsafe {
         let header = &*ActorHeap::header_of(ptrs[0]);
         assert_eq!(header.type_tag, TypeTag::String);
@@ -1275,7 +1351,10 @@ fn test_runtime_cycle_detector_intra_node_restriction() {
     }
 
     let local = rt.cycle_detector.local_actors();
-    assert!(local.is_some(), "local-actor restriction should be set by Runtime");
+    assert!(
+        local.is_some(),
+        "local-actor restriction should be set by Runtime"
+    );
     let set = local.unwrap();
     assert!(set.contains(&a1), "actor a1 should be considered local");
     assert!(set.contains(&a2), "actor a2 should be considered local");
@@ -1294,15 +1373,20 @@ fn test_runtime_scheduler_stats() {
     rt.run_scheduler();
 
     let stats = rt.scheduler_stats();
-    assert_eq!(stats.total_tasks_processed, 4, "spawn + send should produce four actor tasks");
-    assert_eq!(stats.empty_polls, 1, "scheduler should poll empty once after draining");
+    assert_eq!(
+        stats.total_tasks_processed, 4,
+        "spawn + send should produce four actor tasks"
+    );
+    assert_eq!(
+        stats.empty_polls, 1,
+        "scheduler should poll empty once after draining"
+    );
 
     rt.reset_scheduler_stats();
     let cleared = rt.scheduler_stats();
     assert_eq!(cleared.total_tasks_processed, 0);
     assert_eq!(cleared.empty_polls, 0);
 }
-
 
 // ========================================================================
 // ORCA cycle-detector wiring tests
@@ -1317,11 +1401,17 @@ fn test_cycle_detector_registers_real_cross_actor_ref() {
 
     let ptr = {
         let actor = rt.actors.get_mut(&a).unwrap();
-        actor.heap.alloc(16, crate::runtime::heap::TypeTag::Raw).unwrap()
+        actor
+            .heap
+            .alloc(16, crate::runtime::heap::TypeTag::Raw)
+            .unwrap()
     };
     unsafe {
         let header = &*ActorHeap::header_of(ptr);
-        assert_eq!(header.actor_id, a, "heap actor_id should be set on creation");
+        assert_eq!(
+            header.actor_id, a,
+            "heap actor_id should be set on creation"
+        );
     }
 
     let v = Value::ptr(ptr);
@@ -1347,7 +1437,13 @@ fn test_cycle_detector_accumulates_edge_ref_count() {
     let b = rt.spawn_actor(Box::new(|| vec![]));
     rt.current_actor = Some(a);
 
-    let ptr = rt.actors.get_mut(&a).unwrap().heap.alloc(16, crate::runtime::heap::TypeTag::Raw).unwrap();
+    let ptr = rt
+        .actors
+        .get_mut(&a)
+        .unwrap()
+        .heap
+        .alloc(16, crate::runtime::heap::TypeTag::Raw)
+        .unwrap();
     let v = Value::ptr(ptr);
 
     rt.send_message_by_id(b, 0, &[v]);
@@ -1371,11 +1467,17 @@ fn test_cross_actor_send_foreign_count_lifecycle() {
     let b = rt.spawn_actor(Box::new(|| vec![]));
     rt.current_actor = Some(a);
 
-    let ptr = rt.actors.get_mut(&a).unwrap().heap.alloc(16, TypeTag::Raw).unwrap();
+    let ptr = rt
+        .actors
+        .get_mut(&a)
+        .unwrap()
+        .heap
+        .alloc(16, TypeTag::Raw)
+        .unwrap();
     unsafe {
         let header = &*ActorHeap::header_of(ptr);
-        assert_eq!(header.ref_count.load(Ordering::Relaxed), 1);
-        assert_eq!(header.foreign_count.load(Ordering::Relaxed), 0);
+        assert_eq!(header.ref_count, 1);
+        assert_eq!(header.foreign_count, 0);
     }
 
     let v = Value::ptr(ptr);
@@ -1383,31 +1485,45 @@ fn test_cross_actor_send_foreign_count_lifecycle() {
 
     unsafe {
         let header = &*ActorHeap::header_of(ptr);
-        assert_eq!(header.ref_count.load(Ordering::Relaxed), 1);
-        assert_eq!(header.foreign_count.load(Ordering::Relaxed), 1, "foreign_count should increment when ref is sent");
+        assert_eq!(header.ref_count, 1);
+        assert_eq!(
+            header.foreign_count,
+            1,
+            "foreign_count should increment when ref is sent"
+        );
     }
 
     rt.process_gc_ops();
 
     unsafe {
         let header = &*ActorHeap::header_of(ptr);
-        assert_eq!(header.ref_count.load(Ordering::Relaxed), 1);
-        assert_eq!(header.foreign_count.load(Ordering::Relaxed), 0, "foreign_count should decrement after op is processed on owning actor");
+        assert_eq!(header.ref_count, 1);
+        assert_eq!(
+            header.foreign_count,
+            0,
+            "foreign_count should decrement after op is processed on owning actor"
+        );
     }
 
     // Drop the local ref on the owning actor; object should be freed.
     let actor = rt.actors.get_mut(&a).unwrap();
-    unsafe { actor.orca_gc.drop_local_ref(&mut actor.heap, ptr); }
-    assert_eq!(actor.heap.live_count(), 0, "object should be freed after local+foreign counts hit zero");
+    unsafe {
+        actor.orca_gc.drop_local_ref(&mut actor.heap, ptr);
+    }
+    assert_eq!(
+        actor.heap.live_count(),
+        0,
+        "object should be freed after local+foreign counts hit zero"
+    );
 }
 
 /// Regression test: the VM `Drop` callback must honor ORCA foreign counts.
 /// An object another actor still references must be deferred, not freed.
 #[test]
 fn test_vm_drop_ref_defers_object_with_foreign_refs() {
+    use crate::vm::ActorVmCallbacks;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use crate::vm::ActorVmCallbacks;
 
     let rt = Rc::new(RefCell::new(Runtime::new()));
     let actor_id = rt.borrow_mut().spawn_actor(Box::new(|| vec![]));
@@ -1418,7 +1534,7 @@ fn test_vm_drop_ref_defers_object_with_foreign_refs() {
 
     // Simulate an in-flight foreign reference held by another actor.
     unsafe {
-        (*ActorHeap::header_of(ptr)).foreign_count.store(1, Ordering::Relaxed);
+(*ActorHeap::header_of(ptr)).foreign_count = 1;
     }
 
     cb.drop_ref(ptr);
@@ -1430,7 +1546,7 @@ fn test_vm_drop_ref_defers_object_with_foreign_refs() {
 
     // Once the foreign reference goes away, the deferred pass reclaims it.
     unsafe {
-        (*ActorHeap::header_of(ptr)).foreign_count.store(0, Ordering::Relaxed);
+(*ActorHeap::header_of(ptr)).foreign_count = 0;
     }
     {
         let mut rt_mut = rt.borrow_mut();
@@ -1454,7 +1570,13 @@ fn test_run_scheduler_pumps_gc() {
     let b = rt.spawn_actor(Box::new(|| vec![]));
     rt.current_actor = Some(a);
 
-    let ptr = rt.actors.get_mut(&a).unwrap().heap.alloc(16, TypeTag::Raw).unwrap();
+    let ptr = rt
+        .actors
+        .get_mut(&a)
+        .unwrap()
+        .heap
+        .alloc(16, TypeTag::Raw)
+        .unwrap();
     let v = Value::ptr(ptr);
     rt.send_message_by_id(b, 0, &[v]);
 
@@ -1462,8 +1584,14 @@ fn test_run_scheduler_pumps_gc() {
     // object must be deferred, not freed.
     {
         let actor = rt.actors.get_mut(&a).unwrap();
-        unsafe { actor.orca_gc.drop_local_ref(&mut actor.heap, ptr); }
-        assert_eq!(actor.heap.live_count(), 1, "object should be deferred while foreign ref is live");
+        unsafe {
+            actor.orca_gc.drop_local_ref(&mut actor.heap, ptr);
+        }
+        assert_eq!(
+            actor.heap.live_count(),
+            1,
+            "object should be deferred while foreign ref is live"
+        );
     }
 
     // Draining the scheduler must deliver the pending foreign-ref decrement
@@ -1499,7 +1627,10 @@ fn test_workflow_actor_emits_started_event() {
     );
 
     let snapshot = rt.persistence.load_snapshot(actor_id).unwrap();
-    assert_eq!(snapshot.state.get("step_index"), Some(&PersistedValue::Int(0)));
+    assert_eq!(
+        snapshot.state.get("step_index"),
+        Some(&PersistedValue::Int(0))
+    );
 }
 
 #[test]
@@ -1530,7 +1661,10 @@ fn test_workflow_actor_step_event_and_checkpoint() {
     assert!(matches!(&events[1], WorkflowEvent::StepCompleted { .. }));
 
     let snapshot = rt.persistence.load_snapshot(actor_id).unwrap();
-    assert_eq!(snapshot.state.get("step_index"), Some(&PersistedValue::Int(1)));
+    assert_eq!(
+        snapshot.state.get("step_index"),
+        Some(&PersistedValue::Int(1))
+    );
 }
 
 #[test]
@@ -1593,7 +1727,6 @@ fn test_workflow_actor_recovery_replays_step_index() {
     assert_eq!(step_index, 4);
 }
 
-
 // ---------------------------------------------------------------------------
 // Workflow event journal foundation tests (timer / signal / saga)
 // ---------------------------------------------------------------------------
@@ -1606,7 +1739,9 @@ fn test_memory_store_append_read_timer_events() {
 
     let timers = store.read_timer_events(1);
     assert_eq!(timers.len(), 2);
-    assert!(matches!(&timers[0], WorkflowEvent::TimerSet { name, duration_ms, .. } if name == "t1" && *duration_ms == 100));
+    assert!(
+        matches!(&timers[0], WorkflowEvent::TimerSet { name, duration_ms, .. } if name == "t1" && *duration_ms == 100)
+    );
     assert!(matches!(&timers[1], WorkflowEvent::TimerFired { name, .. } if name == "t1"));
 }
 
@@ -1673,16 +1808,22 @@ fn test_runtime_append_workflow_timer_signal_saga_events() {
         models,
     );
 
-    rt.append_timer_set(actor_id, "payment_timeout", 5000).unwrap();
+    rt.append_timer_set(actor_id, "payment_timeout", 5000)
+        .unwrap();
     rt.append_timer_fired(actor_id, "payment_timeout").unwrap();
     rt.append_signal_received(actor_id, "cancel", Some("user_123".to_string()))
         .unwrap();
-    rt.append_saga_compensated(actor_id, "authorize_payment").unwrap();
+    rt.append_saga_compensated(actor_id, "authorize_payment")
+        .unwrap();
 
     let events = rt.persistence.read_workflow_events(actor_id);
     assert_eq!(events.len(), 5); // WorkflowStarted + 4 new events
-    assert!(matches!(&events[1], WorkflowEvent::TimerSet { name, duration_ms, .. } if name == "payment_timeout" && *duration_ms == 5000));
-    assert!(matches!(&events[2], WorkflowEvent::TimerFired { name, .. } if name == "payment_timeout"));
+    assert!(
+        matches!(&events[1], WorkflowEvent::TimerSet { name, duration_ms, .. } if name == "payment_timeout" && *duration_ms == 5000)
+    );
+    assert!(
+        matches!(&events[2], WorkflowEvent::TimerFired { name, .. } if name == "payment_timeout")
+    );
     assert!(
         matches!(&events[3], WorkflowEvent::SignalReceived { name, payload, .. } if name == "cancel" && payload == &Some("user_123".to_string()))
     );
@@ -1792,7 +1933,7 @@ fn pump_until_converged(nodes: &mut [&mut Runtime], expected: usize, timeout: Du
         let mut counts = Vec::new();
         for rt in nodes.iter_mut() {
             rt.process_network();
-            counts.push(rt.cluster.as_ref().unwrap().healthy_node_count());
+            counts.push(rt.distributed.cluster.as_ref().unwrap().healthy_node_count());
         }
         if counts.iter().all(|&c| c == expected) {
             return;
@@ -1810,7 +1951,7 @@ fn pump_until_converged(nodes: &mut [&mut Runtime], expected: usize, timeout: Du
 /// Shut down the transports of the given nodes.
 fn shutdown_nodes(nodes: &mut [&mut Runtime]) {
     for rt in nodes.iter_mut() {
-        if let Some(transport) = rt.transport.take() {
+        if let Some(transport) = rt.distributed.transport.take() {
             transport.shutdown();
         }
     }
@@ -1822,16 +1963,21 @@ fn test_three_node_cluster_membership_converges() {
     let mut rt_b = start_distributed_node();
     let mut rt_c = start_distributed_node();
 
-    let addr_a = rt_a.transport.as_ref().unwrap().listen_addr();
-    let addr_b = rt_b.transport.as_ref().unwrap().listen_addr();
-    let node_a = rt_a.node_id.unwrap();
-    let node_b = rt_b.node_id.unwrap();
-    let node_c = rt_c.node_id.unwrap();
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.distributed.node_id.unwrap();
+    let node_b = rt_b.distributed.node_id.unwrap();
+    let node_c = rt_c.distributed.node_id.unwrap();
 
     // The local node's own cluster entry must carry the real listen
     // address, not the port-0 bind address.
     assert_eq!(
-        rt_a.cluster.as_ref().unwrap().get_node(node_a).unwrap().address,
+        rt_a.distributed.cluster
+            .as_ref()
+            .unwrap()
+            .get_node(node_a)
+            .unwrap()
+            .address,
         addr_a
     );
 
@@ -1851,22 +1997,37 @@ fn test_three_node_cluster_membership_converges() {
 
     // Every node sees every other node as a healthy member.
     for rt in [&rt_a, &rt_b, &rt_c] {
-        let cluster = rt.cluster.as_ref().unwrap();
+        let cluster = rt.distributed.cluster.as_ref().unwrap();
         for peer in [node_a, node_b, node_c] {
             let info = cluster
                 .get_node(peer)
                 .expect("peer missing from membership table");
-            assert_eq!(info.status, NodeStatus::Healthy, "peer {:?} not healthy", peer);
+            assert_eq!(
+                info.status,
+                NodeStatus::Healthy,
+                "peer {:?} not healthy",
+                peer
+            );
         }
     }
 
     // Addresses learned by seeding carry the peer's real listen address.
     assert_eq!(
-        rt_b.cluster.as_ref().unwrap().get_node(node_a).unwrap().address,
+        rt_b.distributed.cluster
+            .as_ref()
+            .unwrap()
+            .get_node(node_a)
+            .unwrap()
+            .address,
         addr_a
     );
     assert_eq!(
-        rt_c.cluster.as_ref().unwrap().get_node(node_b).unwrap().address,
+        rt_c.distributed.cluster
+            .as_ref()
+            .unwrap()
+            .get_node(node_b)
+            .unwrap()
+            .address,
         addr_b
     );
 
@@ -1879,9 +2040,9 @@ fn test_three_node_remote_actor_message_delivery() {
     let mut rt_b = start_distributed_node();
     let mut rt_c = start_distributed_node();
 
-    let addr_a = rt_a.transport.as_ref().unwrap().listen_addr();
-    let addr_b = rt_b.transport.as_ref().unwrap().listen_addr();
-    let node_a = rt_a.node_id.unwrap();
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.distributed.node_id.unwrap();
 
     rt_b.join_cluster(addr_a);
     rt_c.join_cluster(addr_a);
@@ -1898,9 +2059,7 @@ fn test_three_node_remote_actor_message_delivery() {
     // behavior table (see process_network_packets), so dispatch must run
     // "store" — if it ever fell back to index-based dispatch the decoy
     // would run and fail this test.
-    let actor_id = rt_a.spawn_actor(Box::new(|| {
-        vec![("received".to_string(), Value::int(0))]
-    }));
+    let actor_id = rt_a.spawn_actor(Box::new(|| vec![("received".to_string(), Value::int(0))]));
     {
         let actor = rt_a.actors.get_mut(&actor_id).unwrap();
         actor.register_behavior("decoy", |actor, _args| {
@@ -1961,10 +2120,10 @@ fn test_three_node_gossip_converges_chain_seeded() {
     let mut rt_b = start_distributed_node();
     let mut rt_c = start_distributed_node();
 
-    let addr_a = rt_a.transport.as_ref().unwrap().listen_addr();
-    let addr_b = rt_b.transport.as_ref().unwrap().listen_addr();
-    let node_a = rt_a.node_id.unwrap();
-    let node_c = rt_c.node_id.unwrap();
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.distributed.node_id.unwrap();
+    let node_c = rt_c.distributed.node_id.unwrap();
 
     // Chain seeding only: B joins A, C joins B. Without gossip on the
     // wire, A and C could never learn about each other.
@@ -1980,7 +2139,7 @@ fn test_three_node_gossip_converges_chain_seeded() {
     // A learned about C (and vice versa) purely through B's gossip relay,
     // and both views consider the relayed peer healthy.
     let info_c_on_a = rt_a
-        .cluster
+        .distributed.cluster
         .as_ref()
         .unwrap()
         .get_node(node_c)
@@ -1991,7 +2150,7 @@ fn test_three_node_gossip_converges_chain_seeded() {
         "A should see C as healthy"
     );
     let info_a_on_c = rt_c
-        .cluster
+        .distributed.cluster
         .as_ref()
         .unwrap()
         .get_node(node_a)
@@ -2002,7 +2161,7 @@ fn test_three_node_gossip_converges_chain_seeded() {
         "C should see A as healthy"
     );
     // Sanity: the middle node sees both ends.
-    let cluster_b = rt_b.cluster.as_ref().unwrap();
+    let cluster_b = rt_b.distributed.cluster.as_ref().unwrap();
     assert!(cluster_b.is_member(node_a));
     assert!(cluster_b.is_member(node_c));
 
@@ -2024,8 +2183,8 @@ fn test_remote_spawn_request_delivery() {
     let mut rt_a = start_distributed_node();
     let mut rt_b = start_distributed_node();
 
-    let addr_b = rt_b.transport.as_ref().unwrap().listen_addr();
-    let node_b = rt_b.node_id.unwrap();
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_b = rt_b.distributed.node_id.unwrap();
 
     // Node B offers one behavior for remote spawn.
     rt_b.register_spawnable_behavior("store", remote_spawn_store_handler);
@@ -2036,9 +2195,9 @@ fn test_remote_spawn_request_delivery() {
     // Issue the remote spawn. The placeholder address carries the request
     // id; the real actor id arrives with the SpawnResponse.
     let request_id = {
-        let mut transport = rt_a.transport.take().unwrap();
-        let cluster = rt_a.cluster.take().unwrap();
-        let resolver = rt_a.resolver.take().unwrap();
+        let mut transport = rt_a.distributed.transport.take().unwrap();
+        let cluster = rt_a.distributed.cluster.take().unwrap();
+        let resolver = rt_a.distributed.resolver.take().unwrap();
         let placeholder = spawn_on_node(
             &mut rt_a,
             &mut transport,
@@ -2048,9 +2207,9 @@ fn test_remote_spawn_request_delivery() {
             "store",
             vec![("received".to_string(), Value::int(0))],
         );
-        rt_a.transport = Some(transport);
-        rt_a.cluster = Some(cluster);
-        rt_a.resolver = Some(resolver);
+        rt_a.distributed.transport = Some(transport);
+        rt_a.distributed.cluster = Some(cluster);
+        rt_a.distributed.resolver = Some(resolver);
         assert_eq!(placeholder.node_id(), node_b);
         placeholder.actor_id()
     };
@@ -2111,9 +2270,9 @@ fn test_remote_spawn_request_delivery() {
     // Unknown behavior names are rejected, not spawned — the no-crash
     // counterpart of the local unknown-behavior fallback.
     let reject_id = {
-        let mut transport = rt_a.transport.take().unwrap();
-        let cluster = rt_a.cluster.take().unwrap();
-        let resolver = rt_a.resolver.take().unwrap();
+        let mut transport = rt_a.distributed.transport.take().unwrap();
+        let cluster = rt_a.distributed.cluster.take().unwrap();
+        let resolver = rt_a.distributed.resolver.take().unwrap();
         let placeholder = spawn_on_node(
             &mut rt_a,
             &mut transport,
@@ -2123,9 +2282,9 @@ fn test_remote_spawn_request_delivery() {
             "no_such_behavior",
             vec![],
         );
-        rt_a.transport = Some(transport);
-        rt_a.cluster = Some(cluster);
-        rt_a.resolver = Some(resolver);
+        rt_a.distributed.transport = Some(transport);
+        rt_a.distributed.cluster = Some(cluster);
+        rt_a.distributed.resolver = Some(resolver);
         placeholder.actor_id()
     };
     let actors_before = rt_b.actors.len();
@@ -2181,7 +2340,10 @@ fn test_crdt_sync_round_schedule() {
 fn test_sync_crdts_round_counting() {
     let mut rt = Runtime::new();
     rt.sync_crdts();
-    assert_eq!(rt.crdt_sync_rounds, 0, "disabled runtime must not count rounds");
+    assert_eq!(
+        rt.crdt_sync_rounds, 0,
+        "disabled runtime must not count rounds"
+    );
 
     let mut rt = start_distributed_node();
     rt.sync_crdts();
@@ -2198,7 +2360,7 @@ fn test_sync_crdts_full_then_delta_converges_two_nodes() {
     let mut rt_a = start_distributed_node();
     let mut rt_b = start_distributed_node();
 
-    let addr_a = rt_a.transport.as_ref().unwrap().listen_addr();
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
     rt_b.join_cluster(addr_a);
     pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
 
@@ -2212,14 +2374,21 @@ fn test_sync_crdts_full_then_delta_converges_two_nodes() {
     // Round 1 ships full state: a brand-new counter created on A must
     // appear on B with the right value.
     let id = rt_a.crdt_manager.as_mut().unwrap().create_gcounter().0;
-    rt_a.crdt_manager.as_mut().unwrap().get_gcounter_mut(id).unwrap().increment();
+    rt_a.crdt_manager
+        .as_mut()
+        .unwrap()
+        .get_gcounter_mut(id)
+        .unwrap()
+        .increment();
     rt_a.sync_crdts();
 
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         rt_a.process_network();
         rt_b.process_network();
-        if counter_value(&mut rt_b, id) == Some(1) { break; }
+        if counter_value(&mut rt_b, id) == Some(1) {
+            break;
+        }
         assert!(
             Instant::now() < deadline,
             "full-state CRDT sync did not converge on node B"
@@ -2229,13 +2398,20 @@ fn test_sync_crdts_full_then_delta_converges_two_nodes() {
 
     // Rounds 2..=16 ship deltas: further increments must still propagate.
     for expected in 2..=3u64 {
-        rt_a.crdt_manager.as_mut().unwrap().get_gcounter_mut(id).unwrap().increment();
+        rt_a.crdt_manager
+            .as_mut()
+            .unwrap()
+            .get_gcounter_mut(id)
+            .unwrap()
+            .increment();
         rt_a.sync_crdts();
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             rt_a.process_network();
             rt_b.process_network();
-            if counter_value(&mut rt_b, id) == Some(expected) { break; }
+            if counter_value(&mut rt_b, id) == Some(expected) {
+                break;
+            }
             assert!(
                 Instant::now() < deadline,
                 "delta CRDT sync did not converge on node B at value {expected}"

@@ -85,7 +85,7 @@ impl NulangRuntime {
             Some(msg) => {
                 let cstr = CString::new(msg.clone()).unwrap_or_else(|_| {
                     // The message should never contain interior nuls in practice.
-                    CString::new("<invalid error message>").unwrap()
+                    CString::new("<invalid error message>").unwrap_or(CString::new("").unwrap())
                 });
                 let ptr = cstr.as_ptr();
                 self.error_cstring = Some(cstr);
@@ -156,7 +156,9 @@ pub struct NulangValue {
 
 impl From<Value> for NulangValue {
     fn from(value: Value) -> Self {
-        NulangValue { raw: value.to_bits() }
+        NulangValue {
+            raw: value.to_bits(),
+        }
     }
 }
 
@@ -200,10 +202,7 @@ pub unsafe extern "C" fn nulang_runtime_free(runtime: *mut NulangRuntime) {
 /// # Safety
 /// `source` must be a valid, null-terminated UTF-8 string.
 #[no_mangle]
-pub unsafe extern "C" fn nulang_compile(
-    runtime: *mut NulangRuntime,
-    source: *const c_char,
-) -> i64 {
+pub unsafe extern "C" fn nulang_compile(runtime: *mut NulangRuntime, source: *const c_char) -> i64 {
     if runtime.is_null() || source.is_null() {
         return -1;
     }

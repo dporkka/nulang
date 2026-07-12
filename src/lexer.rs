@@ -19,19 +19,67 @@ pub enum TokenKind {
     UnitLit,
 
     // Keywords
-    Fn, Let, Rec, In, If, Then, Else, Match, With, Case,
-    Actor, Behavior, State, SelfKw, Spawn, Send, Ask,
-    Persistent, Local, Durable, EventSourced, Crdt, Emit,
-    Workflow, Step, Parallel, Compensate, Await, Subworkflow,
-    Agent, Receive,
-    Effect, Perform, Handle, Resume,
+    Fn,
+    Let,
+    Rec,
+    In,
+    If,
+    Then,
+    Else,
+    Match,
+    With,
+    Case,
+    Actor,
+    Behavior,
+    State,
+    SelfKw,
+    Spawn,
+    Send,
+    Ask,
+    Persistent,
+    Local,
+    Durable,
+    EventSourced,
+    Crdt,
+    Emit,
+    Workflow,
+    Step,
+    Parallel,
+    Compensate,
+    Await,
+    Subworkflow,
+    Agent,
+    Receive,
+    Effect,
+    Perform,
+    Handle,
+    Resume,
     Extern,
-    Module, Import, Pub, Priv, Where,
-    Migrate, Node, Monitor, Link, Exit,
-    For, Loop, Break, Return,
-    Type, Alias,
-    Iso, Trn, Ref, Val, Box, Tag,
-    True, False, Unit,
+    Module,
+    Import,
+    Pub,
+    Priv,
+    Where,
+    Migrate,
+    Node,
+    Monitor,
+    Link,
+    Exit,
+    For,
+    Loop,
+    Break,
+    Return,
+    Type,
+    Alias,
+    Iso,
+    Trn,
+    Ref,
+    Val,
+    Box,
+    Tag,
+    True,
+    False,
+    Unit,
     Tool,
 
     // Identifiers
@@ -39,22 +87,51 @@ pub enum TokenKind {
     UpperIdent(String), // Type/actor names (convention)
 
     // Operators
-    Plus, Minus, Star, Slash, Percent,       // + - * / %
-    Eq, Ne, Lt, Le, Gt, Ge,                 // == != < <= > >=
-    And, Or, Not,                            // && || !
-    Ampersand, Pipe, PipeOp, Pipe3, Caret, Tilde,  // & | |> ||| ^ ~
-    Shl, Shr,                               // << >>
-    Assign, PlusAssign, MinusAssign,        // = += -=
-    Arrow, FatArrow, ThinArrow,             // -> => <-
-    Dot, DotDot, Colon, DoubleColon,        // . .. : ::
-    At,                                     // @
-    Bang, Question,                         // ! ?
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent, // + - * / %
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge, // == != < <= > >=
+    And,
+    Or,
+    Not, // && || !
+    Ampersand,
+    Pipe,
+    PipeOp,
+    Pipe3,
+    Caret,
+    Tilde, // & | |> ||| ^ ~
+    Shl,
+    Shr, // << >>
+    Assign,
+    PlusAssign,
+    MinusAssign, // = += -=
+    Arrow,
+    FatArrow,
+    ThinArrow, // -> => <-
+    Dot,
+    DotDot,
+    Colon,
+    DoubleColon, // . .. : ::
+    At,          // @
+    Bang,
+    Question, // ! ?
 
     // Delimiters
-    LParen, RParen,                         // ( )
-    LBrace, RBrace,                         // { }
-    LBracket, RBracket,                     // [ ]
-    Comma, Semicolon,                       // , ;
+    LParen,
+    RParen, // ( )
+    LBrace,
+    RBrace, // { }
+    LBracket,
+    RBracket, // [ ]
+    Comma,
+    Semicolon, // , ;
 
     // Special
     Newline,
@@ -156,8 +233,8 @@ impl<'a> Lexer<'a> {
             b'A'..=b'Z' => self.read_identifier(),
             b'0'..=b'9' => self.read_number()?,
             b'"' => self.read_string()?,
-            b'+' | b'-' | b'*' | b'%' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|'
-            | b'^' | b'~' | b'.' | b':' | b'#' => self.read_operator()?,
+            b'+' | b'-' | b'*' | b'%' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'^' | b'~'
+            | b'.' | b':' | b'#' => self.read_operator()?,
             b'(' => {
                 self.advance();
                 Token {
@@ -746,12 +823,7 @@ mod tests {
 
     fn lex(source: &str) -> Vec<TokenKind> {
         let mut lexer = Lexer::new(source);
-        lexer
-            .lex()
-            .unwrap()
-            .into_iter()
-            .map(|t| t.kind)
-            .collect()
+        lexer.lex().unwrap().into_iter().map(|t| t.kind).collect()
     }
 
     #[test]
@@ -809,7 +881,10 @@ mod tests {
         let kinds = lex(r#""a\nb\tc\"d""#);
         assert_eq!(
             kinds,
-            vec![TokenKind::StringLit("a\nb\tc\"d".to_string()), TokenKind::Eof]
+            vec![
+                TokenKind::StringLit("a\nb\tc\"d".to_string()),
+                TokenKind::Eof
+            ]
         );
     }
 

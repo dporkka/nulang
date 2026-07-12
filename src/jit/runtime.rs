@@ -1,7 +1,7 @@
 //! Runtime helper functions callable from JIT-compiled code.
 
-use crate::vm::Value;
 use crate::value_layout::{sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK};
+use crate::vm::Value;
 
 #[no_mangle]
 pub extern "C" fn nulang_iadd(a: u64, b: u64) -> u64 {
@@ -21,21 +21,29 @@ pub extern "C" fn nulang_imul(a: u64, b: u64) -> u64 {
 #[no_mangle]
 pub extern "C" fn nulang_idiv(a: u64, b: u64) -> u64 {
     let bv = sext48(b & PAYLOAD_MASK);
-    if bv == 0 { return Value::nil().as_raw(); }
+    if bv == 0 {
+        return Value::nil().as_raw();
+    }
     tag_int(sext48(a & PAYLOAD_MASK) / bv)
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_imod(a: u64, b: u64) -> u64 {
     let bv = sext48(b & PAYLOAD_MASK);
-    if bv == 0 { return Value::nil().as_raw(); }
+    if bv == 0 {
+        return Value::nil().as_raw();
+    }
     tag_int(sext48(a & PAYLOAD_MASK) % bv)
 }
 
 /// Extract the integer payload like the interpreter's `as_int().unwrap_or(0)`:
 /// non-int-tagged values contribute 0.
 fn as_int_or_zero(v: u64) -> i64 {
-    if (v & TAG_MASK) == TAG_INT { sext48(v & PAYLOAD_MASK) } else { 0 }
+    if (v & TAG_MASK) == TAG_INT {
+        sext48(v & PAYLOAD_MASK)
+    } else {
+        0
+    }
 }
 
 #[no_mangle]

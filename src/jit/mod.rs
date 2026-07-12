@@ -29,10 +29,10 @@
 //! branches.
 
 mod compiler;
-pub mod typed_compiler;
 pub mod runtime;
 pub mod simd_analyzer;
 pub mod simd_compiler;
+pub mod typed_compiler;
 
 #[cfg(test)]
 mod tests;
@@ -64,7 +64,7 @@ fn get_hot_counters() -> &'static Mutex<HashMap<(usize, usize), u64>> {
 
 /// Record execution at `(module_idx, offset)`. Returns true if region is hot.
 pub fn record_and_check_hot(module_idx: usize, offset: usize) -> bool {
-    let mut map = get_hot_counters().lock().unwrap();
+    let mut map = get_hot_counters().lock().unwrap_or_else(|e| e.into_inner());
     let count = map.entry((module_idx, offset)).or_insert(0);
     *count += 1;
     *count >= HOT_THRESHOLD
@@ -72,7 +72,7 @@ pub fn record_and_check_hot(module_idx: usize, offset: usize) -> bool {
 
 /// Reset hot counters.
 pub fn reset_hot_counters() {
-    let mut map = get_hot_counters().lock().unwrap();
+    let mut map = get_hot_counters().lock().unwrap_or_else(|e| e.into_inner());
     map.clear();
 }
 
@@ -110,7 +110,7 @@ impl JitSession {
         });
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
-            .unwrap();
+            .expect("failed to finalize Cranelift ISA");
 
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
@@ -122,18 +122,42 @@ impl JitSession {
             ("nulang_imul", crate::jit::runtime::nulang_imul as *const u8),
             ("nulang_idiv", crate::jit::runtime::nulang_idiv as *const u8),
             ("nulang_imod", crate::jit::runtime::nulang_imod as *const u8),
-            ("nulang_icmp_eq", crate::jit::runtime::nulang_icmp_eq as *const u8),
-            ("nulang_icmp_lt", crate::jit::runtime::nulang_icmp_lt as *const u8),
-            ("nulang_icmp_gt", crate::jit::runtime::nulang_icmp_gt as *const u8),
-            ("nulang_icmp_le", crate::jit::runtime::nulang_icmp_le as *const u8),
-            ("nulang_icmp_ge", crate::jit::runtime::nulang_icmp_ge as *const u8),
+            (
+                "nulang_icmp_eq",
+                crate::jit::runtime::nulang_icmp_eq as *const u8,
+            ),
+            (
+                "nulang_icmp_lt",
+                crate::jit::runtime::nulang_icmp_lt as *const u8,
+            ),
+            (
+                "nulang_icmp_gt",
+                crate::jit::runtime::nulang_icmp_gt as *const u8,
+            ),
+            (
+                "nulang_icmp_le",
+                crate::jit::runtime::nulang_icmp_le as *const u8,
+            ),
+            (
+                "nulang_icmp_ge",
+                crate::jit::runtime::nulang_icmp_ge as *const u8,
+            ),
             ("nulang_fadd", crate::jit::runtime::nulang_fadd as *const u8),
             ("nulang_fsub", crate::jit::runtime::nulang_fsub as *const u8),
             ("nulang_fmul", crate::jit::runtime::nulang_fmul as *const u8),
             ("nulang_fdiv", crate::jit::runtime::nulang_fdiv as *const u8),
-            ("nulang_fcmp_eq", crate::jit::runtime::nulang_fcmp_eq as *const u8),
-            ("nulang_fcmp_lt", crate::jit::runtime::nulang_fcmp_lt as *const u8),
-            ("nulang_fcmp_gt", crate::jit::runtime::nulang_fcmp_gt as *const u8),
+            (
+                "nulang_fcmp_eq",
+                crate::jit::runtime::nulang_fcmp_eq as *const u8,
+            ),
+            (
+                "nulang_fcmp_lt",
+                crate::jit::runtime::nulang_fcmp_lt as *const u8,
+            ),
+            (
+                "nulang_fcmp_gt",
+                crate::jit::runtime::nulang_fcmp_gt as *const u8,
+            ),
             ("nulang_ineg", crate::jit::runtime::nulang_ineg as *const u8),
             ("nulang_iinc", crate::jit::runtime::nulang_iinc as *const u8),
             ("nulang_idec", crate::jit::runtime::nulang_idec as *const u8),
@@ -145,8 +169,14 @@ impl JitSession {
             ("nulang_xor", crate::jit::runtime::nulang_xor as *const u8),
             ("nulang_shl", crate::jit::runtime::nulang_shl as *const u8),
             ("nulang_shr", crate::jit::runtime::nulang_shr as *const u8),
-            ("nulang_bitand", crate::jit::runtime::nulang_bitand as *const u8),
-            ("nulang_bitor", crate::jit::runtime::nulang_bitor as *const u8),
+            (
+                "nulang_bitand",
+                crate::jit::runtime::nulang_bitand as *const u8,
+            ),
+            (
+                "nulang_bitor",
+                crate::jit::runtime::nulang_bitor as *const u8,
+            ),
             ("nulang_fneg", crate::jit::runtime::nulang_fneg as *const u8),
         ];
         for (name, ptr) in helpers {
@@ -317,7 +347,13 @@ impl JitSession {
 
         // Only attempt SIMD if host CPU supports it
         if !is_simd_supported() {
-            return self.compile_region_typed(module_idx, start_offset, num_instrs, instructions, type_metadata);
+            return self.compile_region_typed(
+                module_idx,
+                start_offset,
+                num_instrs,
+                instructions,
+                type_metadata,
+            );
         }
 
         // Analyze for vectorizable patterns
@@ -337,7 +373,13 @@ impl JitSession {
                 self.compiled.insert((module_idx, start_offset), ptr);
                 Some(std::mem::transmute(ptr))
             }
-            Err(_) => self.compile_region_typed(module_idx, start_offset, num_instrs, instructions, type_metadata),
+            Err(_) => self.compile_region_typed(
+                module_idx,
+                start_offset,
+                num_instrs,
+                instructions,
+                type_metadata,
+            ),
         }
     }
 }
@@ -390,7 +432,7 @@ pub fn tiered_execute_step(
     if record_and_check_hot(module_idx, pc) {
         // Try to compile from PC to the end of the function or a unsupported opcode
         let region_len = find_compilable_region(pc, instructions);
-        if region_len > 5 {
+        if region_len >= 3 {
             // Try SIMD-vectorized compilation first, fall back to scalar
             if let Some(func) = unsafe {
                 jit.compile_region_simd(module_idx, pc, region_len, instructions, type_metadata)
@@ -401,9 +443,9 @@ pub fn tiered_execute_step(
             // The region has no vectorizable pattern (or SIMD emission
             // failed): compile it with the scalar compiler so hot
             // non-array code still tiers up instead of interpreting forever.
-            if let Some(func) = unsafe {
-                jit.compile_region(module_idx, pc, region_len, instructions)
-            } {
+            if let Some(func) =
+                unsafe { jit.compile_region(module_idx, pc, region_len, instructions) }
+            {
                 func(regs.as_mut_ptr(), constants.as_ptr());
                 return TieredAction::RanJit;
             }
@@ -442,11 +484,15 @@ pub fn tiered_execute_step_typed(
     if record_and_check_hot(module_idx, pc) {
         // Try to compile from PC to the end of the function or a unsupported opcode
         let region_len = find_compilable_region(pc, instructions);
-        if region_len > 5 {
+        if region_len >= 3 {
             // Infer register types at pc; empty metadata keeps the
             // untyped scalar behavior for both compile paths.
             let meta = typed_compiler::infer_reg_types(module, pc);
-            let meta_ref = if meta.reg_types.is_empty() { None } else { Some(&meta) };
+            let meta_ref = if meta.reg_types.is_empty() {
+                None
+            } else {
+                Some(&meta)
+            };
             // Try SIMD-vectorized compilation first, fall back to scalar
             if let Some(func) = unsafe {
                 jit.compile_region_simd(module_idx, pc, region_len, instructions, meta_ref)
@@ -516,5 +562,3 @@ pub enum TieredAction {
     /// The region was SIMD-vectorized, compiled, and executed.
     CompiledSimdAndRan,
 }
-
-

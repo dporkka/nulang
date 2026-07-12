@@ -13,8 +13,8 @@
 //! Backpressure is handled at the language level (actor-level flow
 //! control) rather than at the mailbox transport level.
 
-use crossbeam::queue::SegQueue;
 use crate::vm::Value;
+use crossbeam::queue::SegQueue;
 
 /// Message sent between actors.
 #[derive(Debug, Clone, PartialEq)]
@@ -27,9 +27,9 @@ pub struct Message {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessagePriority {
-    System = 0,  // Urgent (failure signals, monitoring)
-    Normal = 1,  // Regular messages
-    Bulk = 2,    // Bulk/non-urgent
+    System = 0, // Urgent (failure signals, monitoring)
+    Normal = 1, // Regular messages
+    Bulk = 2,   // Bulk/non-urgent
 }
 
 /// Unbounded MPSC mailbox backed by `crossbeam::queue::SegQueue`.
@@ -178,7 +178,11 @@ mod tests {
 
         for i in 0..10000 {
             let result = mb.push(make_msg(i as u16, i as u64));
-            assert!(result.is_ok(), "push {} should never fail on unbounded queue", i);
+            assert!(
+                result.is_ok(),
+                "push {} should never fail on unbounded queue",
+                i
+            );
         }
         assert_eq!(mb.len(), 10000);
 
@@ -275,7 +279,9 @@ mod tests {
             let mb_clone = Arc::clone(&mb);
             handles.push(thread::spawn(move || {
                 for i in 0..100 {
-                    mb_clone.push(make_msg((t * 100 + i) as u16, (t * 100 + i) as u64)).unwrap();
+                    mb_clone
+                        .push(make_msg((t * 100 + i) as u16, (t * 100 + i) as u64))
+                        .unwrap();
                 }
             }));
         }

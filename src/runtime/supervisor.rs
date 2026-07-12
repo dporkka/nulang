@@ -327,12 +327,10 @@ impl Supervisor {
             return SupervisorAction::Ignore;
         }
         match self.strategy {
-            RestartStrategy::OneForOne => {
-                match self.restart_child(actor_id, runtime) {
-                    Some(new_id) => SupervisorAction::Restarted(new_id),
-                    None => SupervisorAction::Shutdown,
-                }
-            }
+            RestartStrategy::OneForOne => match self.restart_child(actor_id, runtime) {
+                Some(new_id) => SupervisorAction::Restarted(new_id),
+                None => SupervisorAction::Shutdown,
+            },
             RestartStrategy::OneForAll => {
                 self.restart_all(runtime);
                 match self.children.iter().find(|(s, _)| s.id == spec.id) {
