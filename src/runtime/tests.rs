@@ -1964,7 +1964,6 @@ fn test_three_node_gossip_converges_chain_seeded() {
     let addr_a = rt_a.transport.as_ref().unwrap().listen_addr();
     let addr_b = rt_b.transport.as_ref().unwrap().listen_addr();
     let node_a = rt_a.node_id.unwrap();
-    let node_b = rt_b.node_id.unwrap();
     let node_c = rt_c.node_id.unwrap();
 
     // Chain seeding only: B joins A, C joins B. Without gossip on the
