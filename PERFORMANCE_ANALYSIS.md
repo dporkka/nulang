@@ -28,7 +28,7 @@
 | 2.5 | Actor arenas | Deferred | Not present |
 | 2.6 | Cache-locality scheduling | Not started | Scheduler remains single-threaded cooperative |
 | 3.1 | rkyv zero-copy serialization | Not started | No rkyv dep; wire format is hand-rolled big-endian in `src/runtime/network.rs` |
-| 3.2 | Delta-state CRDT replication | **Shipped** | All 8 CRDTs expose `delta_since(base)`; `CrdtManager::generate_delta_sync_ops` ships first-seen entries full and changed entries as deltas over `Packet::CrdtDeltaSync` (type 7, `CrdtDeltaOp`), applied via `apply_delta_op` (merge-only). `sync_crdts_delta` in `src/runtime/distributed.rs` broadcasts deltas; `Runtime::sync_crdts` still ships full `CrdtSync` state as the join/repair path |
+| 3.2 | Delta-state CRDT replication | **Shipped** | All 8 CRDTs expose `delta_since(base)`; `CrdtManager::generate_delta_sync_ops` ships first-seen entries full and changed entries as deltas over `Packet::CrdtDeltaSync` (type 7, `CrdtDeltaOp`), applied via `apply_delta_op` (merge-only). `Runtime::sync_crdts` ships deltas every round except round 1 and every 16th round thereafter, which ship full `CrdtSync` state as the repair path |
 | 3.3 | io_uring / RDMA | Deferred | Not present |
 | 3.4 | Native Raft | Deferred | No Raft code |
 | 3.5 | Content-addressable bytecode | Deferred | Not present |

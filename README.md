@@ -38,7 +38,7 @@ It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired t
 Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
 
 - ✅ Builds with `cargo build`
-- ✅ All 921 tests pass with `cargo test`
+- ✅ All 924 tests pass with `cargo test`
 - ✅ NaN-boxed `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`)
 - ✅ 141-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, capabilities, FFI, Python, distribution)
 - ✅ Hindley-Milner type inference with algebraic effects
@@ -297,7 +297,7 @@ let processed =
 | `main` | CLI entry point (run, repl, eval, check, lsp modes) | ~425 |
 | `integration_tests` / `stress_tests` / `runtime/tests` | End-to-end pipeline, chaos, and runtime test suites | ~6,170 |
 
-**Total: ~54,400 lines of Rust across 69 source files with 921 tests.**
+**Total: ~54,400 lines of Rust across 69 source files with 924 tests.**
 
 ---
 

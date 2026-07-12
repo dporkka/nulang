@@ -1,6 +1,6 @@
 //! Runtime integration tests.
 //!
-//! 81 tests total (see AGENTS.md "Testing & QA" for the suite-wide counts).
+//! 84 tests total (see AGENTS.md "Testing & QA" for the suite-wide counts).
 //! Full history in local commit 1c2cde9.
 
 use super::*;
@@ -2147,6 +2147,105 @@ fn test_remote_spawn_request_delivery() {
         rt_b.actors.len(),
         actors_before,
         "rejected spawn must not create an actor"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
+}
+
+// ========================================================================
+// CRDT delta-sync round schedule tests
+// ========================================================================
+
+/// `sync_crdts` round schedule: round 1 and every
+/// `CRDT_FULL_SYNC_INTERVAL`-th round thereafter ship full state; all
+/// other rounds ship deltas.
+#[test]
+fn test_crdt_sync_round_schedule() {
+    assert!(crdt_sync_is_full_round(1), "first sync must be full");
+    for round in 2..=CRDT_FULL_SYNC_INTERVAL {
+        assert!(
+            !crdt_sync_is_full_round(round),
+            "round {round} should ship deltas"
+        );
+    }
+    assert!(
+        crdt_sync_is_full_round(CRDT_FULL_SYNC_INTERVAL + 1),
+        "round after the interval must be a full repair sync"
+    );
+    assert!(!crdt_sync_is_full_round(CRDT_FULL_SYNC_INTERVAL + 2));
+}
+
+/// `sync_crdts` is a no-op that does not count rounds when distribution
+/// is disabled; once enabled, every call counts exactly one round.
+#[test]
+fn test_sync_crdts_round_counting() {
+    let mut rt = Runtime::new();
+    rt.sync_crdts();
+    assert_eq!(rt.crdt_sync_rounds, 0, "disabled runtime must not count rounds");
+
+    let mut rt = start_distributed_node();
+    rt.sync_crdts();
+    rt.sync_crdts();
+    assert_eq!(rt.crdt_sync_rounds, 2);
+    shutdown_nodes(&mut [&mut rt]);
+}
+
+/// End-to-end: CRDT changes propagate between two clustered nodes through
+/// `sync_crdts`, across both the initial full-state round (which creates
+/// the entry on the receiver) and subsequent delta rounds.
+#[test]
+fn test_sync_crdts_full_then_delta_converges_two_nodes() {
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+
+    let addr_a = rt_a.transport.as_ref().unwrap().listen_addr();
+    rt_b.join_cluster(addr_a);
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
+
+    let counter_value = |rt: &mut Runtime, id| {
+        rt.crdt_manager
+            .as_mut()
+            .and_then(|m| m.get_gcounter_mut(id))
+            .map(|c| c.value())
+    };
+
+    // Round 1 ships full state: a brand-new counter created on A must
+    // appear on B with the right value.
+    let id = rt_a.crdt_manager.as_mut().unwrap().create_gcounter().0;
+    rt_a.crdt_manager.as_mut().unwrap().get_gcounter_mut(id).unwrap().increment();
+    rt_a.sync_crdts();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        if counter_value(&mut rt_b, id) == Some(1) { break; }
+        assert!(
+            Instant::now() < deadline,
+            "full-state CRDT sync did not converge on node B"
+        );
+        sleep(Duration::from_millis(50));
+    }
+
+    // Rounds 2..=16 ship deltas: further increments must still propagate.
+    for expected in 2..=3u64 {
+        rt_a.crdt_manager.as_mut().unwrap().get_gcounter_mut(id).unwrap().increment();
+        rt_a.sync_crdts();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            rt_a.process_network();
+            rt_b.process_network();
+            if counter_value(&mut rt_b, id) == Some(expected) { break; }
+            assert!(
+                Instant::now() < deadline,
+                "delta CRDT sync did not converge on node B at value {expected}"
+            );
+            sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(
+        rt_a.crdt_sync_rounds >= 3,
+        "test must have exercised at least one delta round"
     );
 
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);

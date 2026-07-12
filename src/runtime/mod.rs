@@ -112,6 +112,10 @@ pub struct Runtime {
     // CRDT manager (v0.6)
     pub crdt_manager: Option<CrdtManager>,
 
+    // Number of `sync_crdts` calls made; delta-state syncs run on most
+    // rounds, with a full-state repair sync every CRDT_FULL_SYNC_INTERVAL.
+    crdt_sync_rounds: u64,
+
     // Timer wheel (v0.7)
     pub timer_wheel: TimerWheel,
 
@@ -187,6 +191,7 @@ impl Runtime {
             distributed_enabled: false,
 
             crdt_manager: None,
+            crdt_sync_rounds: 0,
 
             timer_wheel: TimerWheel::new(),
             registry: ActorRegistry::new(),
@@ -3070,8 +3075,27 @@ impl Runtime {
 
     // -- CRDT Synchronization (v0.6) --
 
+    /// Synchronize CRDT state with all healthy cluster members.
+    ///
+    /// Most rounds ship **delta-state** ops (`Packet::CrdtDeltaSync`) —
+    /// only the changes since the previous round, with never-synced
+    /// entries sent in full (the join fallback). Every
+    /// `CRDT_FULL_SYNC_INTERVAL`-th round (starting with the first) ships
+    /// full state (`Packet::CrdtSync`) instead: the sync base advances
+    /// when deltas are generated, so a lost delta is never re-sent and
+    /// these periodic full syncs are the repair mechanism.
     pub fn sync_crdts(&mut self) {
         if !self.distributed_enabled { return; }
+        self.crdt_sync_rounds = self.crdt_sync_rounds.wrapping_add(1);
+        if crdt_sync_is_full_round(self.crdt_sync_rounds) {
+            self.sync_crdts_full();
+        } else {
+            sync_crdts_delta(self);
+        }
+    }
+
+    /// Full-state CRDT sync: ship every entry to all healthy members.
+    fn sync_crdts_full(&mut self) {
         let ops = match &mut self.crdt_manager {
             Some(m) => m.generate_sync_ops(),
             None => return,
@@ -3087,6 +3111,15 @@ impl Runtime {
             }
         }
     }
+}
+
+/// Interval (in `sync_crdts` rounds) between full-state repair syncs.
+/// Round 1 is full; rounds 2..=N are delta; round N+1 is full again.
+const CRDT_FULL_SYNC_INTERVAL: u64 = 16;
+
+/// True when the given 1-based sync round should ship full state.
+fn crdt_sync_is_full_round(round: u64) -> bool {
+    round % CRDT_FULL_SYNC_INTERVAL == 1
 }
 
 // ---------------------------------------------------------------------------
