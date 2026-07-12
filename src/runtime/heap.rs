@@ -12,6 +12,10 @@
 //! * **Bump allocation** for speed on the fast path (most allocations).
 //! * **Size-class free lists** (Tiny → Huge) so that freed objects can be
 //!   reused without touching the bump pointer.
+//! * **Large-object space (LOS)** — allocations whose total size exceeds the
+//!   largest size class (256 bytes) are individually allocated with the
+//!   global allocator instead of consuming the contiguous bump region, and
+//!   are reused on an exact-size match from the `Huge` free list.
 //! * **Intrusive live list** — every live object is a node in a doubly-linked
 //!   list embedded in the header. This makes `iter_live_objects` O(live) and
 //!   avoids auxiliary hash maps or bitmaps.
@@ -32,6 +36,12 @@ const ALIGN: usize = 8;
 
 /// Number of discrete size classes.
 const NUM_SIZE_CLASSES: usize = 5;
+
+/// Total-size threshold (header + aligned payload) above which allocations
+/// go to the large-object space instead of the bump region.  Set just above
+/// the largest size-class block (256 bytes), so exactly the `Huge` class
+/// is served by the LOS.
+const LOS_THRESHOLD: usize = 256;
 
 // ---------------------------------------------------------------------------
 // SizeClass
@@ -244,8 +254,14 @@ pub struct ActorHeap {
     /// Per-size-class intrusive free lists.
     /// Each entry is either `null_mut()` or points to the payload of the
     /// first free block in that class.  The first 8 bytes of a free payload
-    /// store a `*mut u8` to the next free block.
+    /// store a `*mut u8` to the next free block.  The `Huge` list doubles as
+    /// the large-object-space free list.
     free_lists: [*mut u8; NUM_SIZE_CLASSES],
+    /// Payload pointers of every large-object-space block ever allocated by
+    /// this heap (live or sitting in the `Huge` free list).  Each block is
+    /// individually malloc'd and must be individually deallocated on
+    /// `reset`/`drop`.
+    los_blocks: Vec<*mut u8>,
     /// Head of the live-object doubly-linked list.
     live_head: *mut OrcaHeader,
     /// Tail of the live-object doubly-linked list.
@@ -304,6 +320,7 @@ impl ActorHeap {
             total_size,
             used_bytes: 0,
             free_lists: [std::ptr::null_mut(); NUM_SIZE_CLASSES],
+            los_blocks: Vec::new(),
             live_head: std::ptr::null_mut(),
             live_tail: std::ptr::null_mut(),
             live_count: 0,
@@ -345,7 +362,11 @@ impl ActorHeap {
     /// 3. Determine the size class.
     /// 4. Check the corresponding free list — if a block is available, pop
     ///    it, rewrite the header fields, and return the payload pointer.
-    /// 5. Otherwise fall back to bump allocation from the contiguous region.
+    ///    Large-object-space (`Huge`) blocks are only reused on an exact
+    ///    size match, because each LOS block is individually deallocated
+    ///    with its original layout on `reset`/`drop`.
+    /// 5. Otherwise fall back to bump allocation from the contiguous region,
+    ///    or to a fresh LOS allocation when `total_size > LOS_THRESHOLD`.
     ///
     /// Returns `None` if the backing memory is exhausted.
     pub fn alloc(&mut self, payload_size: usize, type_tag: TypeTag) -> Option<*mut u8> {
@@ -355,31 +376,45 @@ impl ActorHeap {
         let sc_idx = size_class as usize;
 
         // --- Fast path: try the free list for this size class ---
-        if sc_idx < NUM_SIZE_CLASSES {
-            unsafe {
-                if !self.free_lists[sc_idx].is_null() {
-                    // Pop the first block from the intrusive list.
-                    let payload_ptr = self.free_lists[sc_idx];
-                    // The first 8 bytes of the free payload hold the next pointer.
-                    let next_free = *(payload_ptr as *mut *mut u8);
-                    self.free_lists[sc_idx] = next_free;
-
-                    // Rewrite header (the old header values are stale).
-                    let header_ptr = Self::header_of(payload_ptr);
-                    // SAFETY: payload_ptr came from a previous alloc on this
-                    // heap, so header_ptr points to a valid OrcaHeader inside
-                    // our backing block.
-                    std::ptr::write(
-                        header_ptr,
-                        OrcaHeader::new(self.actor_id, type_tag, total_size, payload_size),
-                    );
-
-                    self.add_to_live_list(header_ptr);
-                    self.live_count += 1;
-                    self.total_allocs += 1;
-                    return Some(payload_ptr);
-                }
+        let reuse = unsafe {
+            if size_class == SizeClass::Huge {
+                // LOS blocks carry their original total size in the header;
+                // only an exact match keeps reset/drop deallocation correct.
+                self.take_los_block(total_size)
+            } else if !self.free_lists[sc_idx].is_null() {
+                // Pop the first block from the intrusive list.
+                let payload_ptr = self.free_lists[sc_idx];
+                // The first 8 bytes of the free payload hold the next pointer.
+                let next_free = *(payload_ptr as *mut *mut u8);
+                self.free_lists[sc_idx] = next_free;
+                Some(payload_ptr)
+            } else {
+                None
             }
+        };
+
+        if let Some(payload_ptr) = reuse {
+            unsafe {
+                // Rewrite header (the old header values are stale).
+                let header_ptr = Self::header_of(payload_ptr);
+                // SAFETY: payload_ptr came from a previous alloc on this
+                // heap, so header_ptr points to a valid OrcaHeader inside
+                // our backing block or LOS region.
+                std::ptr::write(
+                    header_ptr,
+                    OrcaHeader::new(self.actor_id, type_tag, total_size, payload_size),
+                );
+
+                self.add_to_live_list(header_ptr);
+            }
+            self.live_count += 1;
+            self.total_allocs += 1;
+            return Some(payload_ptr);
+        }
+
+        // --- Large-object space: individually malloc'd block ---
+        if total_size > LOS_THRESHOLD {
+            return self.alloc_los(total_size, payload_size, type_tag);
         }
 
         // --- Slow path: bump allocation ---
@@ -420,7 +455,9 @@ impl ActorHeap {
     ///
     /// `payload_ptr` must be a pointer previously returned by [`alloc`].
     /// The object is removed from the live list and its payload memory is
-    /// repurposed as an intrusive linked-list node.
+    /// repurposed as an intrusive linked-list node.  Large-object-space
+    /// (`Huge`) blocks go onto the same intrusive list (they stay tracked in
+    /// `los_blocks` and are deallocated on `reset`/`drop`, not here).
     ///
     /// # Safety
     ///
@@ -565,6 +602,9 @@ impl ActorHeap {
     /// outstanding pointers into this heap become dangling — the caller
     /// must ensure none exist.
     pub fn reset(&mut self) {
+        // Deallocate large-object-space blocks before discarding the free
+        // lists — the Huge list points into those blocks.
+        self.release_los_blocks();
         self.current = self.base;
         self.used_bytes = 0;
         self.live_head = std::ptr::null_mut();
@@ -579,6 +619,100 @@ impl ActorHeap {
     // ==================================================================
     // Internal helpers
     // ==================================================================
+
+    /// Allocate a large-object-space block with the global allocator.
+    ///
+    /// The block is tracked in `los_blocks` so it can be individually
+    /// deallocated on `reset`/`drop`.  `total_size` must already include the
+    /// header and be 8-byte aligned.
+    fn alloc_los(
+        &mut self,
+        total_size: usize,
+        payload_size: usize,
+        type_tag: TypeTag,
+    ) -> Option<*mut u8> {
+        let layout = std::alloc::Layout::from_size_align(total_size, ALIGN).ok()?;
+        // SAFETY: layout is non-zero (total_size >= HEADER_SIZE) and valid.
+        let base = unsafe { std::alloc::alloc(layout) };
+        if base.is_null() {
+            // Report OOM as exhaustion, matching alloc's `None` contract.
+            return None;
+        }
+
+        let header_ptr = base as *mut OrcaHeader;
+        // SAFETY: `base` points to a fresh block of at least HEADER_SIZE +
+        // aligned payload bytes, so the payload region is in bounds.
+        let payload_ptr = unsafe { base.add(Self::HEADER_SIZE) };
+
+        // SAFETY: header_ptr points to writable memory we just allocated.
+        unsafe {
+            std::ptr::write(
+                header_ptr,
+                OrcaHeader::new(self.actor_id, type_tag, total_size, payload_size),
+            );
+            self.add_to_live_list(header_ptr);
+        }
+        self.los_blocks.push(payload_ptr);
+        self.live_count += 1;
+        self.total_allocs += 1;
+        Some(payload_ptr)
+    }
+
+    /// Pop a large-object-space block whose total size exactly matches
+    /// `total_size` from the `Huge` free list.
+    ///
+    /// Exact-size matching is required because each LOS block is deallocated
+    /// with its original layout; reusing a larger block for a smaller request
+    /// would lose the true allocation size.
+    ///
+    /// # Safety
+    /// The `Huge` free list must contain only payload pointers from previous
+    /// `free` calls on this heap.
+    unsafe fn take_los_block(&mut self, total_size: usize) -> Option<*mut u8> {
+        let huge_idx = SizeClass::Huge as usize;
+        let mut prev: *mut u8 = std::ptr::null_mut();
+        let mut cursor = self.free_lists[huge_idx];
+        while !cursor.is_null() {
+            // SAFETY: cursor is a payload pointer from a previous free() on
+            // this heap. The first 8 bytes hold the next pointer and the
+            // header one stride back holds the block's original total size.
+            let next = *(cursor as *mut *mut u8);
+            let header = Self::header_of(cursor);
+            if (*header).size == total_size {
+                if prev.is_null() {
+                    self.free_lists[huge_idx] = next;
+                } else {
+                    *(prev as *mut *mut u8) = next;
+                }
+                return Some(cursor);
+            }
+            prev = cursor;
+            cursor = next;
+        }
+        None
+    }
+
+    /// Deallocate every tracked large-object-space block.
+    ///
+    /// Called from `reset` and `drop`.  The `Huge` free list must already
+    /// have been discarded (or be discarded immediately after) so no stale
+    /// pointers into the released blocks survive.
+    fn release_los_blocks(&mut self) {
+        for &payload_ptr in &self.los_blocks {
+            // SAFETY: every pointer in `los_blocks` was returned by
+            // `alloc_los` on this heap and is deallocated exactly once here;
+            // the header one stride back records the original total size
+            // used for the matching `Layout`.
+            unsafe {
+                let header_ptr = Self::header_of(payload_ptr);
+                let layout =
+                    std::alloc::Layout::from_size_align((*header_ptr).size, ALIGN)
+                        .expect("invalid LOS layout");
+                std::alloc::dealloc(header_ptr as *mut u8, layout);
+            }
+        }
+        self.los_blocks.clear();
+    }
 
     /// Append `header_ptr` to the tail of the live-object doubly-linked list.
     ///
@@ -662,6 +796,8 @@ impl OrcaHeap for ActorHeap {
 
 impl Drop for ActorHeap {
     fn drop(&mut self) {
+        // Deallocate individually malloc'd large-object-space blocks first.
+        self.release_los_blocks();
         let layout =
             std::alloc::Layout::from_size_align(self.total_size, ALIGN).unwrap();
         // SAFETY: `self.base` was allocated with the exact same layout in
@@ -991,4 +1127,179 @@ fn test_statistics() {
     unsafe { heap.free(p1); }
     assert_eq!(heap.live_count(), 1);
     assert_eq!(heap.free_list_count(), 1);
+}
+
+#[test]
+fn test_los_alloc_free_reuse() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    // 512-byte payload → total 568 > LOS_THRESHOLD → large-object space.
+    let p1 = heap.alloc(512, TypeTag::Array).unwrap();
+    unsafe {
+        assert_eq!((*ActorHeap::header_of(p1)).size_class, SizeClass::Huge);
+    }
+
+    // LOS blocks must not consume the bump region.
+    assert_eq!(heap.used(), 0);
+
+    unsafe { heap.free(p1); }
+    assert_eq!(heap.free_list_count(), 1);
+    assert_eq!(heap.live_count(), 0);
+
+    // Same size → the exact-match LOS free list returns the same block.
+    let p2 = heap.alloc(512, TypeTag::Array).unwrap();
+    assert_eq!(p1, p2, "freed LOS block should be reused on exact size match");
+    assert_eq!(heap.free_list_count(), 0);
+}
+
+#[test]
+fn test_los_exact_size_reuse_only() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    let p512 = heap.alloc(512, TypeTag::Array).unwrap();
+    unsafe { heap.free(p512); }
+
+    // A different (larger) size must not reuse the 512-payload block.
+    let p768 = heap.alloc(768, TypeTag::Array).unwrap();
+    assert_ne!(p512, p768, "LOS reuse requires an exact size match");
+    assert_eq!(heap.free_list_count(), 1, "512-byte block still queued");
+
+    // The original size is still available for reuse afterwards.
+    let p512_again = heap.alloc(512, TypeTag::Array).unwrap();
+    assert_eq!(p512, p512_again);
+}
+
+#[test]
+fn test_los_interleaved_small_large() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    // Interleave small (bump/size-class) and large (LOS) allocations.
+    let s1 = heap.alloc(32, TypeTag::Tuple).unwrap();
+    let l1 = heap.alloc(1024, TypeTag::Array).unwrap();
+    let s2 = heap.alloc(32, TypeTag::Tuple).unwrap();
+    let l2 = heap.alloc(2048, TypeTag::Array).unwrap();
+
+    // Small and large regions must not overlap: LOS payloads lie outside
+    // the heap's contiguous backing block.
+    let bump_used = heap.used();
+    assert!(bump_used > 0, "small allocations should use the bump region");
+    assert!(l1 < heap.base || l1 >= heap.limit);
+    assert!(l2 < heap.base || l2 >= heap.limit);
+
+    // Write markers into every region and verify they stay intact.
+    unsafe {
+        *(s1 as *mut u64) = 0x51;
+        *(s2 as *mut u64) = 0x52;
+        *(l1 as *mut u64) = 0xA1;
+        *(l2 as *mut u64) = 0xA2;
+        assert_eq!(*(s1 as *mut u64), 0x51);
+        assert_eq!(*(s2 as *mut u64), 0x52);
+        assert_eq!(*(l1 as *mut u64), 0xA1);
+        assert_eq!(*(l2 as *mut u64), 0xA2);
+    }
+
+    // Free all, then re-allocate: small blocks reuse their size class,
+    // large blocks reuse the LOS exact-match list.
+    unsafe {
+        heap.free(s1);
+        heap.free(l1);
+        heap.free(s2);
+        heap.free(l2);
+    }
+    assert_eq!(heap.live_count(), 0);
+    assert_eq!(heap.free_list_count(), 4);
+
+    let s2r = heap.alloc(32, TypeTag::Tuple).unwrap();
+    let l2r = heap.alloc(2048, TypeTag::Array).unwrap();
+    let s1r = heap.alloc(32, TypeTag::Tuple).unwrap();
+    let l1r = heap.alloc(1024, TypeTag::Array).unwrap();
+
+    assert_eq!(s2r, s2, "LIFO reuse within the small size class");
+    assert_eq!(s1r, s1);
+    assert_eq!(l2r, l2, "exact-match reuse within the LOS");
+    assert_eq!(l1r, l1);
+    assert_eq!(heap.free_list_count(), 0);
+}
+
+#[test]
+fn test_los_alignment() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    // Odd payload sizes above the threshold — every LOS payload and header
+    // must remain 8-byte aligned.
+    let sizes = [257, 300, 511, 513, 1000, 4097];
+    for &sz in &sizes {
+        let p = heap.alloc(sz, TypeTag::Raw).unwrap();
+        assert_eq!(
+            p as usize % ALIGN,
+            0,
+            "LOS payload pointer {:p} is not {}-byte aligned (size={})",
+            p, ALIGN, sz
+        );
+        unsafe {
+            let h = ActorHeap::header_of(p);
+            assert_eq!(
+                h as usize % ALIGN,
+                0,
+                "LOS header pointer {:p} is not {}-byte aligned",
+                h, ALIGN
+            );
+            // Payload must be fully writable.
+            let buf = std::slice::from_raw_parts_mut(p, sz);
+            buf[0] = 0xAB;
+            buf[sz - 1] = 0xCD;
+            assert_eq!(buf[0], 0xAB);
+            assert_eq!(buf[sz - 1], 0xCD);
+        }
+    }
+}
+
+#[test]
+fn test_los_threshold_boundary() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    // total = HEADER_SIZE + align_up(payload); LOS kicks in above 256.
+    // payload 200 → total 256 → Largest size-class block, bump path.
+    let p_at = heap.alloc(200, TypeTag::Raw).unwrap();
+    let used_after_small = heap.used();
+    unsafe {
+        assert_eq!((*ActorHeap::header_of(p_at)).size_class, SizeClass::Large);
+    }
+    assert_eq!(used_after_small, 256, "boundary block should use the bump region");
+
+    // payload 201 → total 264 → Huge, served by the LOS.
+    let p_over = heap.alloc(201, TypeTag::Raw).unwrap();
+    unsafe {
+        assert_eq!((*ActorHeap::header_of(p_over)).size_class, SizeClass::Huge);
+    }
+    assert_eq!(heap.used(), used_after_small, "LOS must not touch the bump region");
+
+    // Free/realloc cycle on both sides of the boundary reuses each block.
+    unsafe {
+        heap.free(p_at);
+        heap.free(p_over);
+    }
+    assert_eq!(heap.alloc(200, TypeTag::Raw).unwrap(), p_at);
+    assert_eq!(heap.alloc(201, TypeTag::Raw).unwrap(), p_over);
+}
+
+#[test]
+fn test_los_reset_releases_blocks() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    let l1 = heap.alloc(1024, TypeTag::Array).unwrap();
+    let l2 = heap.alloc(2048, TypeTag::Array).unwrap();
+    unsafe { heap.free(l1); }
+    assert_eq!(heap.free_list_count(), 1);
+    let _ = l2;
+
+    heap.reset();
+    assert_eq!(heap.live_count(), 0);
+    assert_eq!(heap.free_list_count(), 0);
+
+    // Heap is fully functional after reset; LOS allocation still works.
+    let l3 = heap.alloc(1024, TypeTag::Array).unwrap();
+    unsafe {
+        assert_eq!((*ActorHeap::header_of(l3)).size_class, SizeClass::Huge);
+    }
 }
