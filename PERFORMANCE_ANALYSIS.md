@@ -17,18 +17,18 @@
 | # | Proposal | Status | Where / notes |
 |---|----------|--------|---------------|
 | 1.1 | Cranelift JIT backend | **Shipped** | `src/jit/` (~5,500 lines, cranelift 0.132), tiered into `VM::step` at `src/vm.rs:1115-1140` |
-| 1.2 | Type guard stripping | **Partial** | `src/jit/typed_compiler.rs` emits guard-stripped CLIF from `TypeMetadata`, but the live tiering path passes `None` (`src/vm.rs:1129`) — typechecker output is not yet threaded in, so stripping is dormant in production runs |
+| 1.2 | Type guard stripping | **Shipped** | `src/jit/typed_compiler.rs` emits guard-stripped CLIF; the live tiering path (`jit::tiered_execute_step_typed`, called from `VM::step`) recovers register types at tier-up via `typed_compiler::infer_reg_types` (conservative bytecode must-analysis) and compiles hot regions through the typed path when types are provable, falling back to scalar otherwise. Typed `IDiv`/`IMod`/`FCmpEq` always use runtime helpers to match interpreter semantics exactly |
 | 1.3 | Linear scan regalloc | Deferred | Still correct — Cranelift's own regalloc is used |
 | 1.4 | MLIR dialect | Deferred | No MLIR in tree |
 | 1.5 | SIMD auto-vectorization | **Shipped** | `src/jit/simd_analyzer.rs` + `src/jit/simd_compiler.rs` (I64x2/F64x2/I32x4/F32x4) |
 | 2.1 | Lock-free MPSC mailboxes | **Shipped differently** | `src/runtime/mailbox.rs` uses an unbounded `crossbeam::queue::SegQueue`, **not** the `ArrayQueue` recommended below — a bounded queue would force blocking or message drops, violating BEAM never-drop semantics. crossbeam's epoch-based reclamation (the Risk Register's ABA mitigation) comes with `SegQueue` |
-| 2.2 | Dual-region actor heaps | Not started; premise stale | No `bumpalo` dependency exists — `src/runtime/heap.rs` is a hand-rolled bump allocator with size-class free lists. No LOS split yet |
+| 2.2 | Dual-region actor heaps | **Partial — LOS shipped** | No `bumpalo` dependency — `src/runtime/heap.rs` is a hand-rolled bump allocator with size-class free lists, now with a large-object space: allocations over the 256-byte `Huge` threshold are individually `std::alloc`'d outside the 64KB backing block, with exact-size free-list reuse and release on `reset()`/`Drop`. No nursery/tenured split |
 | 2.3 | mimalloc global allocator | **Shipped** | `mimalloc = "0.1"` in `Cargo.toml`; `#[global_allocator]` in `src/main.rs` |
 | 2.4 | Static escape analysis | **Reverted** | `src/escape_analysis.rs` was added and later removed; no escape analysis in the tree today |
 | 2.5 | Actor arenas | Deferred | Not present |
 | 2.6 | Cache-locality scheduling | Not started | Scheduler remains single-threaded cooperative |
 | 3.1 | rkyv zero-copy serialization | Not started | No rkyv dep; wire format is hand-rolled big-endian in `src/runtime/network.rs` |
-| 3.2 | Delta-state CRDT replication | Not started as specified | No delta-state code in `src/runtime/crdt_manager.rs`; replication uses `CrdtSync` packets |
+| 3.2 | Delta-state CRDT replication | **Shipped** | All 8 CRDTs expose `delta_since(base)`; `CrdtManager::generate_delta_sync_ops` ships first-seen entries full and changed entries as deltas over `Packet::CrdtDeltaSync` (type 7, `CrdtDeltaOp`), applied via `apply_delta_op` (merge-only). `sync_crdts_delta` in `src/runtime/distributed.rs` broadcasts deltas; `Runtime::sync_crdts` still ships full `CrdtSync` state as the join/repair path |
 | 3.3 | io_uring / RDMA | Deferred | Not present |
 | 3.4 | Native Raft | Deferred | No Raft code |
 | 3.5 | Content-addressable bytecode | Deferred | Not present |
@@ -70,7 +70,7 @@
 
 **Recommendation:** **Bundle with 1.1.** Free once Cranelift backend exists.
 
-**Status (2026-07-11): PARTIAL.** `src/jit/typed_compiler.rs` implements guard stripping, but the VM passes no type metadata into the tiering path (`src/vm.rs:1129`), so it is not active in production runs. The "~30%" figure is the module's own design estimate, unmeasured.
+**Status (2026-07-12): SHIPPED.** The VM's tiering entry point (`jit::tiered_execute_step_typed`) recovers register types at tier-up via `typed_compiler::infer_reg_types` (a conservative must-analysis over the enclosing function's bytecode) and compiles hot regions through the guard-stripped path when types are provable, with scalar fallback otherwise. Typed `IDiv`/`IMod`/`FCmpEq` route through runtime helpers to stay bit-identical with the interpreter. The "~30%" figure remains the module's own design estimate, unmeasured.
 
 ### 1.3 Linear Scan Register Allocation
 **Recommendation:** **DEFER.** Cranelift's regalloc2 is already excellent.
@@ -149,7 +149,7 @@ No whole-function or ahead-of-time compilation; no inlining; no deoptimization o
 ### 2.2 Dual-Region Actor Heaps (LOS Split)
 **Recommendation:** **DO.** Natural evolution of the existing per-actor heap.
 
-**Status (2026-07-11): NOT STARTED; premise corrected.** There is no `bumpalo` dependency — `src/runtime/heap.rs` is a hand-rolled bump allocator with per-size-class intrusive free lists and ORCA headers. No large-object split exists yet.
+**Status (2026-07-12): LOS SHIPPED.** There is no `bumpalo` dependency — `src/runtime/heap.rs` is a hand-rolled bump allocator with per-size-class intrusive free lists and ORCA headers, plus a large-object space: allocations over the 256-byte `Huge` threshold are individually `std::alloc`'d outside the 64KB backing block, with exact-size free-list reuse and release on `reset()`/`Drop`. No nursery/tenured split.
 
 ### 2.3 Global Memory Arena via mimalloc
 **Recommendation:** **DO RIGHT NOW.** Literally a one-line change. Instant 10-20% win.
@@ -178,6 +178,8 @@ No whole-function or ahead-of-time compilation; no inlining; no deoptimization o
 
 ### 3.2 Delta-State & Op-Based CRDT Replication (CmRDT)
 **Recommendation:** **DO.** 10-100x bandwidth reduction for large CRDTs.
+
+**Status (2026-07-12): SHIPPED (delta-state).** All 8 CRDTs expose `delta_since(base)`; `CrdtManager::generate_delta_sync_ops` ships deltas over `Packet::CrdtDeltaSync` (type 7) via `sync_crdts_delta` in `src/runtime/distributed.rs`, with full-state `CrdtSync` retained as the join/repair path. Op-based (CmRDT) replication was not implemented.
 
 ### 3.3 Kernel-Bypass Networking (io_uring & RDMA)
 **Recommendation:** **DEFER.** Platform-specific; significant complexity increase.

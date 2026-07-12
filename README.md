@@ -38,7 +38,7 @@ It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired t
 Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
 
 - ✅ Builds with `cargo build`
-- ✅ All 884 tests pass with `cargo test`
+- ✅ All 921 tests pass with `cargo test`
 - ✅ NaN-boxed `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`)
 - ✅ 141-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, capabilities, FFI, Python, distribution)
 - ✅ Hindley-Milner type inference with algebraic effects
@@ -207,7 +207,7 @@ let processed =
                               v                       v
                     +-------------------------+  +-------------------+
                     |  Type Checker (H-M)     |  | Bytecode Module   |
-                    |  Effect Checker         |  | (140 opcodes)     |
+                    |  Effect Checker         |  | (141 opcodes)     |
                     +-------------------------+  +-------------------+
                                                            |
                                                            v
@@ -263,14 +263,14 @@ let processed =
 | `hir` / `hir_lower` | High-level IR and AST → HIR lowering | ~2,030 |
 | `mir` / `mir_lower` | Mid-level IR and HIR → MIR lowering | ~1,715 |
 | `mir_codegen` | MIR-to-bytecode compilation with register allocation | ~1,230 |
-| `bytecode` | 140 opcodes, 32-bit fixed-width instructions | ~880 |
+| `bytecode` | 141 opcodes, 32-bit fixed-width instructions | ~880 |
 | `value_layout` | Canonical NaN-boxing tag/mask constants (single source of truth) | ~140 |
 | `vm` | Register-based virtual machine, effect handlers, JIT tiering hook | ~3,100 |
 | `jit/mod` | JIT session manager, tiered execution, hot-counter tracking | ~375 |
 | `jit/compiler` | Bytecode → Cranelift IR (41 opcodes) | ~400 |
 | `jit/typed_compiler` | Type-directed JIT: direct CLIF when operand types are known | ~1,390 |
 | `jit/simd_analyzer` / `jit/simd_compiler` | Vectorizable-loop detection + SIMD CLIF emission | ~2,960 |
-| `jit/runtime` | NaN-tag-aware runtime helpers for JIT (25 extern C functions) | ~140 |
+| `jit/runtime` | NaN-tag-aware runtime helpers for JIT (31 extern C functions) | ~140 |
 | `runtime/mod` | Runtime coordinator: actors, scheduling, GC, supervision, distribution | ~3,400 |
 | `runtime/actor` | Actor struct, lifecycle, state management | ~300 |
 | `runtime/scheduler` | Work-stealing queues + reduction-bounded cooperative scheduler | ~500 |
@@ -292,12 +292,12 @@ let processed =
 | `python/bridge` + `python/marshal` | PyO3 interpreter bridge + Value↔Python marshalling | ~1,290 |
 | `ffi` | C-compatible FFI layer, native-library registry, embedder C API | ~1,380 |
 | `ai` | LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams | ~2,590 |
-| `lsp` | tower-lsp language server (13 features incl. hover, inlay hints, completion) | ~1,160 |
+| `lsp` | tower-lsp language server (12 features incl. hover, inlay hints, completion) | ~1,160 |
 | `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~570 |
-| `main` | CLI entry point (run, repl, eval, check modes) | ~425 |
+| `main` | CLI entry point (run, repl, eval, check, lsp modes) | ~425 |
 | `integration_tests` / `stress_tests` / `runtime/tests` | End-to-end pipeline, chaos, and runtime test suites | ~6,170 |
 
-**Total: ~54,400 lines of Rust across 69 source files with 884 tests.**
+**Total: ~54,400 lines of Rust across 69 source files with 921 tests.**
 
 ---
 
@@ -391,7 +391,7 @@ Tiered execution system with Cranelift 0.132:
 |-----------|-------------|
 | `JitSession` | Manages Cranelift JIT module, compiled function cache |
 | `compiler.rs` | Bytecode → CLIF for 41 opcodes (arith, compare, control flow) |
-| `runtime.rs` | 25 `extern "C"` NaN-tag-aware runtime helpers |
+| `runtime.rs` | 31 `extern "C"` NaN-tag-aware runtime helpers |
 | Tiered execution | Interpreter (cold) → JIT compile (hot threshold: 1,000) |
 | Graceful fallback | Unsupported opcodes → continue interpreting |
 
@@ -525,11 +525,11 @@ This is an active implementation with the following components functional:
 - [x] AST (complete node types)
 - [x] Hindley-Milner type checker (Algorithm W with full inference)
 - [x] Algebraic effect checker (effect row compatibility, capability analysis)
-- [x] Bytecode (140 opcodes, constant pool, behavior table)
+- [x] Bytecode (141 opcodes, constant pool, behavior table)
 - [x] Compiler (AST → HIR → MIR → bytecode with register allocation)
 - [x] VM (register-based execution, arithmetic, comparisons, control flow)
 - [x] REPL (parse-typecheck-compile-execute cycle with introspection)
-- [x] Integration tests (121 end-to-end pipeline tests)
+- [x] Integration tests (122 end-to-end pipeline tests)
 - [x] Actor runtime (spawn, send, links, monitors, selective receive)
 - [x] Work-stealing scheduler (cooperative, reduction quotas)
 - [x] ORCA garbage collector (per-actor heap, 3-count protocol, cycle detection)
@@ -584,7 +584,6 @@ This is an active implementation with the following components functional:
 
 - **`receive` uses non-blocking selective matching.** `receive { | Behavior(params) => expr }` scans the mailbox in FIFO order for the first message matching any arm (`src/mir_lower.rs` `lower_receive` → `OpCode::ReceiveMatch` → `ActorVmCallbacks::try_receive_match`), binds payload values to the arm's params (missing values bind to nil, extras ignored), and skips non-matching messages, which stay queued. Unlike Erlang's `receive`, it never blocks: when nothing matches, a legacy fallback pops the next message and yields its first payload value (nil when the mailbox is empty or outside an actor context). Payload matching is by behavior name and arity-free — no guard expressions or payload patterns yet.
 - Actor messaging that *is* fully wired goes through named behavior dispatch (`send actor behavior(args)`) — see `examples/counter_actor.nu`.
-- **`nulang --lsp` is not reachable from the CLI.** `main.rs` declares the option and lists it in `--help`, but the argument parser has no `--lsp` arm, so the flag is rejected as an unknown option even in `lsp`-feature builds. The LSP server itself (`src/lsp/`, behind the `lsp` Cargo feature) is implemented.
 
 ---
 
