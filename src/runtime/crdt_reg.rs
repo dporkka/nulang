@@ -231,16 +231,11 @@ impl MVRegister<String> {
 // 3. RGA
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ElementId {
-    pub node_id: u64,
-    pub counter: u64,
-}
 
 #[derive(Debug, Clone)]
 pub struct RGAElement<T: Clone> {
-    pub id: ElementId,
-    pub parent: Option<ElementId>,
+    pub id: LamportTime,
+    pub parent: Option<LamportTime>,
     pub value: Option<T>,
     pub timestamp: LamportTime,
 }
@@ -268,8 +263,8 @@ impl<T: Clone + PartialEq> RGA<T> {
         }
     }
 
-    pub fn insert_after(&mut self, parent: Option<ElementId>, value: T) -> ElementId {
-        let id = ElementId {
+    pub fn insert_after(&mut self, parent: Option<LamportTime>, value: T) -> LamportTime {
+        let id = LamportTime {
             node_id: self.clock.node_id,
             counter: self.clock.tick().counter,
         };
@@ -287,7 +282,7 @@ impl<T: Clone + PartialEq> RGA<T> {
         id
     }
 
-    pub fn insert_at(&mut self, index: usize, value: T) -> ElementId {
+    pub fn insert_at(&mut self, index: usize, value: T) -> LamportTime {
         let parent = if index == 0 {
             None
         } else {
@@ -300,7 +295,7 @@ impl<T: Clone + PartialEq> RGA<T> {
         self.insert_after(parent, value)
     }
 
-    pub fn delete(&mut self, id: ElementId) {
+    pub fn delete(&mut self, id: LamportTime) {
         if let Some(elem) = self.elements.iter_mut().find(|e| e.id == id) {
             elem.value = None;
         }
@@ -482,7 +477,7 @@ impl RGA<String> {
                 let p_node_id = u64::from_be_bytes(bytes[offset..offset + 8].try_into().ok()?);
                 let p_counter = u64::from_be_bytes(bytes[offset + 8..offset + 16].try_into().ok()?);
                 offset += 16;
-                Some(ElementId {
+                Some(LamportTime {
                     node_id: p_node_id,
                     counter: p_counter,
                 })
@@ -517,7 +512,7 @@ impl RGA<String> {
             let ts_node_id = u64::from_be_bytes(bytes[offset + 8..offset + 16].try_into().ok()?);
             offset += 16;
             elements.push(RGAElement {
-                id: ElementId {
+                id: LamportTime {
                     node_id: id_node_id,
                     counter: id_counter,
                 },

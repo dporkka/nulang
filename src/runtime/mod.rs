@@ -41,7 +41,7 @@ pub use cluster::*;
 pub use distributed::*;
 pub use network::*;
 pub use crdt::*;
-pub use crdt_reg::{ElementId, LWWRegister, MVRegister, RGA, RGAElement};
+pub use crdt_reg::{LWWRegister, MVRegister, RGA, RGAElement};
 pub use crdt_manager::*;
 pub use timer::*;
 pub use registry::*;

@@ -23,7 +23,7 @@ pub struct Actor {
     pub mailbox: Mailbox,
     pub heap: ActorHeap,
     pub orca_gc: OrcaGc,                  // ORCA GC engine for this actor
-    pub state_data: Vec<(String, Value)>, // Named actor state fields
+    pub state_data: HashMap<String, Value>, // Named actor state fields
     pub state_models: HashMap<String, StateModel>, // Persistence model per field
     pub event_log: Vec<(String, Vec<Value>)>, // Emitted events for event_sourced actors
     pub persistent: bool,                 // Whether this actor survives restarts
@@ -99,7 +99,7 @@ impl Actor {
                 heap
             },
             orca_gc: OrcaGc::new(id), // ORCA GC engine
-            state_data: Vec::new(),
+            state_data: HashMap::new(),
             state_models: HashMap::new(),
             event_log: Vec::new(),
             persistent: false,
@@ -162,20 +162,12 @@ impl Actor {
 
     /// Set or update a named state field.
     pub fn set_state_field(&mut self, name: impl Into<String>, value: Value) {
-        let name = name.into();
-        if let Some(existing) = self.state_data.iter_mut().find(|(n, _)| n == &name) {
-            existing.1 = value;
-        } else {
-            self.state_data.push((name, value));
-        }
+        self.state_data.insert(name.into(), value);
     }
 
     /// Get a named state field.
     pub fn get_state_field(&self, name: &str) -> Option<Value> {
-        self.state_data
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, v)| *v)
+        self.state_data.get(name).copied()
     }
 
     /// Check if the actor has exceeded its per-turn reduction quota and should yield.
