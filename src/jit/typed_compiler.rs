@@ -32,7 +32,7 @@ use cranelift_jit::JITModule;
 
 use std::collections::HashMap;
 
-use crate::bytecode::{Instruction, OpCode};
+use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::jit::compiler::CompileError;
 
 // ---------------------------------------------------------------------------
@@ -125,6 +125,269 @@ impl TypeMetadata {
     /// Mark the destination register as Bool (used after comparisons).
     pub fn set_bool_result(&mut self, dst: usize) {
         self.reg_types.insert(dst, KnownType::Bool);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bytecode-level type inference
+// ---------------------------------------------------------------------------
+
+/// Infer register types at `pc` via a conservative forward dataflow over the
+/// enclosing function's bytecode.
+///
+/// This is the bridge between the compiler frontend and the JIT tiering
+/// path: the MIR pipeline allocates each typed local to a fixed register, so
+/// the type of a register at a given pc can be recovered statically from the
+/// instruction stream itself (constants, arithmetic results, moves). The
+/// analysis is a *must* analysis — a register is only marked `Int`/`Float`/
+/// `Bool` when every static path to `pc` proves it — so wrong metadata is
+/// impossible by construction; missing precision simply yields `Unknown`,
+/// which makes the typed compiler fall back to the same runtime helper calls
+/// as the scalar compiler.
+///
+/// Rules:
+/// - Anchors (function entries, behavior offsets, effect-handler bodies, the
+///   module entry point) start with all registers `Unknown`: function
+///   arguments arrive in r0..r15 with statically unknowable types.
+/// - Modeled opcodes propagate the result type their interpreter semantics
+///   guarantee unconditionally (e.g. `IAdd` always writes a tagged int,
+///   comparisons always write a tagged bool; `IDiv`/`IMod`/`FDiv` can yield
+///   nil, so their destination becomes `Unknown`).
+/// - Any unmodeled opcode conservatively clobbers ALL registers — soundness
+///   over precision.
+/// - Functions containing effect opcodes (`Handle`/`Perform`/`Resume`/
+///   `Unwind`) yield empty metadata: `Resume` restores a captured
+///   continuation whose target pc is not statically known, so no fact about
+///   registers is reliable there.
+pub fn infer_reg_types(module: &CodeModule, pc: usize) -> TypeMetadata {
+    let mut meta = TypeMetadata::new();
+    let instructions = &module.instructions;
+    if pc >= instructions.len() {
+        return meta;
+    }
+
+    // Candidate function-entry anchors. The enclosing function starts at the
+    // greatest anchor at or below `pc`; the next anchor above it bounds the
+    // analysis window.
+    let mut anchors: Vec<usize> = Vec::with_capacity(module.function_table.len() + 2);
+    anchors.push(0);
+    anchors.extend(module.function_table.iter().copied());
+    anchors.extend(module.behaviors.iter().map(|b| b.code_offset));
+    for table in &module.handler_tables {
+        anchors.extend(table.bindings.iter().map(|b| b.handler_offset));
+    }
+    if let Some(entry) = module.entry_point {
+        anchors.push(entry);
+    }
+    anchors.retain(|&a| a < instructions.len());
+    anchors.sort_unstable();
+    anchors.dedup();
+
+    let start = anchors.iter().copied().rev().find(|&a| a <= pc).unwrap_or(0);
+    let end = anchors
+        .iter()
+        .copied()
+        .find(|&a| a > start)
+        .unwrap_or(instructions.len());
+
+    // Cap the window: enormous functions would make the fixpoint expensive,
+    // and hot JIT regions are capped at 500 instructions anyway.
+    const MAX_ANALYSIS_WINDOW: usize = 2000;
+    if end - start > MAX_ANALYSIS_WINDOW {
+        return meta;
+    }
+
+    // Soundness guard: effect opcodes transfer control dynamically.
+    for instr in &instructions[start..end] {
+        if matches!(
+            instr.opcode,
+            OpCode::Handle | OpCode::Perform | OpCode::Resume | OpCode::Unwind
+        ) {
+            return meta;
+        }
+    }
+
+    // Forward dataflow. `states[i]` is the register-type state *before*
+    // `instructions[start + i]`; `None` marks a not-yet-reached pc (the top
+    // of the meet lattice, so the first incoming state is adopted as-is —
+    // this is what lets loop-carried types survive the back-edge merge).
+    let n = end - start;
+    let mut states: Vec<Option<[KnownType; 256]>> = vec![None; n];
+    let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    let mut in_queue: Vec<bool> = vec![false; n];
+    states[0] = Some([KnownType::Unknown; 256]);
+    queue.push_back(start);
+    in_queue[0] = true;
+
+    while let Some(at) = queue.pop_front() {
+        in_queue[at - start] = false;
+        let instr = instructions[at];
+        let mut next = states[at - start].unwrap_or([KnownType::Unknown; 256]);
+        apply_type_transfer(&instr, module, &mut next);
+
+        let push_succ = |succ: usize,
+                         states: &mut Vec<Option<[KnownType; 256]>>,
+                         queue: &mut std::collections::VecDeque<usize>,
+                         in_queue: &mut Vec<bool>,
+                         next: &[KnownType; 256]| {
+            let slot = &mut states[succ - start];
+            let changed = match slot {
+                None => {
+                    *slot = Some(*next);
+                    true
+                }
+                Some(cur) => {
+                    let mut changed = false;
+                    for (c, &nv) in cur.iter_mut().zip(next.iter()) {
+                        // Meet: keep a known type only when both predecessors
+                        // agree. `Unknown` is absorbing and never counts as a
+                        // change, so the fixpoint always terminates.
+                        if *c != nv && *c != KnownType::Unknown {
+                            *c = KnownType::Unknown;
+                            changed = true;
+                        }
+                    }
+                    changed
+                }
+            };
+            if changed && !in_queue[succ - start] {
+                queue.push_back(succ);
+                in_queue[succ - start] = true;
+            }
+        };
+
+        let in_window = |target: usize| target >= start && target < end;
+        match instr.opcode {
+            OpCode::Jmp => {
+                let target = (at as i64 + instr.simm16() as i64) as usize;
+                if in_window(target) {
+                    push_succ(target, &mut states, &mut queue, &mut in_queue, &next);
+                }
+            }
+            OpCode::JmpT | OpCode::JmpF => {
+                let target = (at as i64 + instr.offset16() as i64) as usize;
+                if in_window(target) {
+                    push_succ(target, &mut states, &mut queue, &mut in_queue, &next);
+                }
+                if at + 1 < end {
+                    push_succ(at + 1, &mut states, &mut queue, &mut in_queue, &next);
+                }
+            }
+            OpCode::Halt | OpCode::Ret | OpCode::RetVal => {}
+            _ => {
+                if at + 1 < end {
+                    push_succ(at + 1, &mut states, &mut queue, &mut in_queue, &next);
+                }
+            }
+        }
+    }
+
+    if let Some(state) = &states[pc - start] {
+        for (reg, &ty) in state.iter().enumerate() {
+            if ty != KnownType::Unknown {
+                meta.set_type(reg, ty);
+            }
+        }
+    }
+    meta
+}
+
+/// Apply one instruction's register-write effect to a type state.
+///
+/// Only opcodes whose result type is guaranteed by the interpreter's
+/// semantics propagate a known type; everything else conservatively
+/// clobbers the whole register file to `Unknown`.
+fn apply_type_transfer(instr: &Instruction, module: &CodeModule, state: &mut [KnownType; 256]) {
+    let op1 = instr.op1 as usize;
+    let op2 = instr.op2 as usize;
+    let op3 = instr.op3 as usize;
+    match instr.opcode {
+        // No register writes.
+        OpCode::Nop
+        | OpCode::Halt
+        | OpCode::DbgPrint
+        | OpCode::Jmp
+        | OpCode::JmpT
+        | OpCode::JmpF
+        | OpCode::Ret
+        | OpCode::RetVal => {}
+
+        OpCode::Const0 | OpCode::Const1 | OpCode::Const2 | OpCode::ConstM1 => {
+            state[op1] = KnownType::Int;
+        }
+        OpCode::ConstU => {
+            state[op3] = match module.constants.get(instr.imm16() as usize) {
+                Some(Constant::Int(_)) => KnownType::Int,
+                Some(Constant::Float(_)) => KnownType::Float,
+                Some(Constant::Bool(_)) => KnownType::Bool,
+                _ => KnownType::Unknown,
+            };
+        }
+
+        // Register copies (Load/Store are plain copies in this pipeline).
+        OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Dup => {
+            state[op2] = state[op1];
+        }
+        OpCode::Swap => {
+            state.swap(op1, op2);
+        }
+
+        // Integer results are unconditional: the interpreter and the JIT
+        // helpers tag any operand payload as an int.
+        OpCode::IAdd
+        | OpCode::ISub
+        | OpCode::IMul
+        | OpCode::Xor
+        | OpCode::Shl
+        | OpCode::Shr
+        | OpCode::BitAnd
+        | OpCode::BitOr => {
+            state[op3] = KnownType::Int;
+        }
+        // Division/remainder by zero yields nil in the interpreter.
+        OpCode::IDiv | OpCode::IMod => {
+            state[op3] = KnownType::Unknown;
+        }
+        OpCode::INeg => {
+            state[op2] = KnownType::Int;
+        }
+        OpCode::IInc | OpCode::IDec => {
+            state[op1] = KnownType::Int;
+        }
+
+        // FDiv is excluded: the interpreter yields nil on a zero divisor.
+        OpCode::FAdd | OpCode::FSub | OpCode::FMul | OpCode::FNeg => {
+            state[op3] = KnownType::Float;
+        }
+
+        OpCode::ICmpEq
+        | OpCode::ICmpLt
+        | OpCode::ICmpGt
+        | OpCode::ICmpLe
+        | OpCode::ICmpGe
+        | OpCode::FCmpEq
+        | OpCode::FCmpLt
+        | OpCode::FCmpGt => {
+            state[op3] = KnownType::Bool;
+        }
+        OpCode::Not => {
+            state[op2] = KnownType::Bool;
+        }
+        OpCode::And | OpCode::Or => {
+            state[op3] = KnownType::Bool;
+        }
+
+        OpCode::IToF => {
+            state[op2] = KnownType::Float;
+        }
+        OpCode::FToI => {
+            state[op2] = KnownType::Int;
+        }
+
+        // Unmodeled opcode: conservatively clobber everything.
+        _ => {
+            state.fill(KnownType::Unknown);
+        }
     }
 }
 
@@ -326,8 +589,6 @@ fn emit_typed_ibinop(
         TypedIntOp::Add => builder.ins().iadd(a, b),
         TypedIntOp::Sub => builder.ins().isub(a, b),
         TypedIntOp::Mul => builder.ins().imul(a, b),
-        TypedIntOp::Sdiv => builder.ins().sdiv(a, b),
-        TypedIntOp::Srem => builder.ins().srem(a, b),
     };
 
     let tagged = emit_tag_int(builder, result);
@@ -370,13 +631,16 @@ fn emit_typed_fbinop(
 }
 
 /// CLIF integer binary operations supported by the typed compiler.
+///
+/// Division and remainder are deliberately absent: direct `sdiv`/`srem`
+/// trap on a zero divisor, but the interpreter and the `nulang_idiv`/
+/// `nulang_imod` runtime helpers yield nil — so those always go through
+/// the helpers to keep typed code behaviorally identical to scalar code.
 #[derive(Debug, Clone, Copy)]
 enum TypedIntOp {
     Add,
     Sub,
     Mul,
-    Sdiv,
-    Srem,
 }
 
 /// CLIF float binary operations supported by the typed compiler.
@@ -616,6 +880,33 @@ fn emit_unary_runtime(
 // Main Compilation Entry Point (typed)
 // ---------------------------------------------------------------------------
 
+/// Opcodes the typed compiler knows how to emit.
+///
+/// This is deliberately a subset of `compiler::is_opcode_compilable`: the
+/// typed compiler's catch-all arm jumps to the return block, so an
+/// unsupported opcode in the middle of a region would silently drop the
+/// remaining instructions. Callers must pre-check regions with this
+/// function (as `compile_bytecode_region_typed` does) and fall back to the
+/// scalar compiler for anything outside the set.
+pub fn is_opcode_supported_typed(op: OpCode) -> bool {
+    matches!(
+        op,
+        OpCode::Nop | OpCode::Halt
+        | OpCode::Const0 | OpCode::Const1 | OpCode::Const2 | OpCode::ConstM1 | OpCode::ConstU
+        | OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Swap | OpCode::Dup
+        | OpCode::IAdd | OpCode::ISub | OpCode::IMul | OpCode::IDiv | OpCode::IMod
+        | OpCode::INeg | OpCode::IInc | OpCode::IDec
+        | OpCode::FAdd | OpCode::FSub | OpCode::FMul | OpCode::FDiv
+        | OpCode::ICmpEq | OpCode::ICmpLt | OpCode::ICmpGt | OpCode::ICmpLe | OpCode::ICmpGe
+        | OpCode::FCmpEq | OpCode::FCmpLt | OpCode::FCmpGt
+        | OpCode::Not | OpCode::And | OpCode::Or
+        | OpCode::Jmp | OpCode::JmpT | OpCode::JmpF
+        | OpCode::IToF | OpCode::FToI
+        | OpCode::DbgPrint
+        | OpCode::Ret | OpCode::RetVal
+    )
+}
+
 /// Compile a bytecode region to native code with optional type-directed
 /// optimization (type guard stripping).
 ///
@@ -647,6 +938,19 @@ pub fn compile_bytecode_region_typed(
     instructions: &[Instruction],
     type_metadata: Option<&TypeMetadata>,
 ) -> Result<*const u8, CompileError> {
+    let end_offset = (start_offset + num_instrs).min(instructions.len());
+
+    // Reject regions containing opcodes this compiler does not model: the
+    // catch-all arm below terminates at the return block, which would drop
+    // the rest of the region. Callers fall back to the scalar compiler.
+    // This check must run before the FunctionBuilder is created so an
+    // early return leaves the reusable contexts clean.
+    for instr in &instructions[start_offset..end_offset] {
+        if !is_opcode_supported_typed(instr.opcode) {
+            return Err(CompileError::UnsupportedOpcode(format!("{:?}", instr.opcode)));
+        }
+    }
+
     // Clear the codegen context
     ctx.clear();
 
@@ -672,7 +976,6 @@ pub fn compile_bytecode_region_typed(
     let helpers = register_runtime_helpers(module, &mut builder);
 
     // Create blocks for each instruction offset
-    let end_offset = (start_offset + num_instrs).min(instructions.len());
     let mut blocks: HashMap<usize, Block> = HashMap::new();
     for i in start_offset..end_offset {
         blocks.insert(i, builder.create_block());
@@ -723,17 +1026,16 @@ pub fn compile_bytecode_region_typed(
                     builder.ins().iadd(consts_ptr, off)
                 };
                 let val = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
-                store_reg(&mut builder, regs_ptr, instr.op1 as usize, val);
-                meta.set_type(instr.op1 as usize, KnownType::Unknown);
+                // Destination is op3, matching the interpreter and the scalar
+                // compiler (op1/op2 hold the 16-bit constant index).
+                store_reg(&mut builder, regs_ptr, instr.op3 as usize, val);
+                meta.set_type(instr.op3 as usize, KnownType::Unknown);
             }
 
             // -- Register --
-            OpCode::Move => {
-                let val = load_reg(&mut builder, regs_ptr, instr.op1 as usize);
-                store_reg(&mut builder, regs_ptr, instr.op2 as usize, val);
-                meta.propagate_result(instr.op2 as usize, instr.op1 as usize);
-            }
-            OpCode::Dup => {
+            // Load/Store are plain register copies in this pipeline, exactly
+            // like Move/Dup (mirroring the scalar compiler).
+            OpCode::Load | OpCode::Store | OpCode::Move | OpCode::Dup => {
                 let val = load_reg(&mut builder, regs_ptr, instr.op1 as usize);
                 store_reg(&mut builder, regs_ptr, instr.op2 as usize, val);
                 meta.propagate_result(instr.op2 as usize, instr.op1 as usize);
@@ -778,22 +1080,17 @@ pub fn compile_bytecode_region_typed(
                 }
             }
             OpCode::IDiv => {
+                // Always use the runtime helper: direct CLIF `sdiv` traps on a
+                // zero divisor, while the interpreter and the helper yield nil.
                 let dst = instr.op3 as usize;
-                if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Int) {
-                    emit_typed_ibinop(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, TypedIntOp::Sdiv);
-                    meta.set_type(dst, KnownType::Int);
-                } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_idiv");
-                }
+                emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_idiv");
+                meta.set_type(dst, KnownType::Unknown);
             }
             OpCode::IMod => {
+                // Same reasoning as IDiv: keep the nil-on-zero semantics.
                 let dst = instr.op3 as usize;
-                if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Int) {
-                    emit_typed_ibinop(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, TypedIntOp::Srem);
-                    meta.set_type(dst, KnownType::Int);
-                } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_imod");
-                }
+                emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_imod");
+                meta.set_type(dst, KnownType::Unknown);
             }
             OpCode::INeg => {
                 let dst = instr.op2 as usize;
@@ -906,12 +1203,11 @@ pub fn compile_bytecode_region_typed(
                 meta.set_bool_result(dst);
             }
             OpCode::FCmpEq => {
+                // Always use the runtime helper: `nulang_fcmp_eq` compares with
+                // an epsilon tolerance, which direct CLIF `fcmp Equal` (exact
+                // bit equality) would not reproduce.
                 let dst = instr.op3 as usize;
-                if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Float) {
-                    emit_typed_fcmp(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, FloatCC::Equal);
-                } else {
-                    emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_fcmp_eq");
-                }
+                emit_binop_runtime(&mut builder, &helpers, regs_ptr, instr.op1 as usize, instr.op2 as usize, dst, "nulang_fcmp_eq");
                 meta.set_bool_result(dst);
             }
             OpCode::FCmpLt => {

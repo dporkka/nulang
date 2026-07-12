@@ -90,6 +90,9 @@ pub struct JitSession {
     module: JITModule,
     /// Map from `(module_idx, bytecode offset)` → compiled function pointer.
     compiled: HashMap<(usize, usize), *const u8>,
+    /// Regions compiled through the type-directed (guard-stripped) path in
+    /// `typed_compiler`, i.e. where inferred register types were available.
+    typed_regions: std::collections::HashSet<(usize, usize)>,
     /// Reusable function builder context.
     builder_context: FunctionBuilderContext,
     /// Reusable codegen context.
@@ -156,6 +159,7 @@ impl JitSession {
         JitSession {
             module,
             compiled: HashMap::new(),
+            typed_regions: std::collections::HashSet::new(),
             builder_context: FunctionBuilderContext::new(),
             ctx,
         }
@@ -201,6 +205,72 @@ impl JitSession {
         }
     }
 
+    /// Compile a bytecode region with optional type-directed guard stripping.
+    ///
+    /// When `type_metadata` proves at least one register's type, the region
+    /// goes through `typed_compiler::compile_bytecode_region_typed`, which
+    /// emits direct CLIF for statically typed operations instead of
+    /// NaN-tag-aware runtime helper calls. Absent/empty metadata — or any
+    /// typed-compilation failure — falls back to the scalar
+    /// [`JitSession::compile_region`], so this never compiles *less* code
+    /// than the untyped path.
+    ///
+    /// # Safety
+    /// Same safety requirements as `compile_region`.
+    pub unsafe fn compile_region_typed(
+        &mut self,
+        module_idx: usize,
+        start_offset: usize,
+        num_instrs: usize,
+        instructions: &[crate::bytecode::Instruction],
+        type_metadata: Option<&crate::jit::typed_compiler::TypeMetadata>,
+    ) -> Option<JitFunctionPtr> {
+        // Check if already compiled
+        if let Some(&ptr) = self.compiled.get(&(module_idx, start_offset)) {
+            return Some(std::mem::transmute(ptr));
+        }
+
+        let has_known_types = type_metadata
+            .map(|m| {
+                m.reg_types
+                    .values()
+                    .any(|&t| t != crate::jit::typed_compiler::KnownType::Unknown)
+            })
+            .unwrap_or(false);
+
+        if has_known_types {
+            let func_name = format!("nulang_tjit_{}_{}", module_idx, start_offset);
+            if let Ok(ptr) = typed_compiler::compile_bytecode_region_typed(
+                &mut self.module,
+                &mut self.builder_context,
+                &mut self.ctx,
+                &func_name,
+                start_offset,
+                num_instrs,
+                instructions,
+                type_metadata,
+            ) {
+                self.compiled.insert((module_idx, start_offset), ptr);
+                self.typed_regions.insert((module_idx, start_offset));
+                return Some(std::mem::transmute(ptr));
+            }
+            // Typed compilation failed: fall through to the scalar compiler.
+        }
+
+        self.compile_region(module_idx, start_offset, num_instrs, instructions)
+    }
+
+    /// Return the number of regions compiled through the type-directed path.
+    pub fn typed_compiled_count(&self) -> usize {
+        self.typed_regions.len()
+    }
+
+    /// Check whether a `(module_idx, offset)` region was compiled with
+    /// type-directed guard stripping.
+    pub fn is_typed_compiled(&self, module_idx: usize, offset: usize) -> bool {
+        self.typed_regions.contains(&(module_idx, offset))
+    }
+
     /// Check if a `(module_idx, offset)` region has already been compiled.
     pub fn is_compiled(&self, module_idx: usize, offset: usize) -> bool {
         self.compiled.contains_key(&(module_idx, offset))
@@ -221,10 +291,11 @@ impl JitSession {
     /// Compile a SIMD-vectorizable bytecode region.
     ///
     /// First analyzes the region for vectorizable array loop patterns. If found,
-    /// emits SIMD CLIF (I64x2/F64x2/I32x4/F32x4), falling back to the scalar
-    /// compiler if SIMD emission fails. Returns `None` when the region has no
-    /// vectorizable pattern at all — callers (e.g. `tiered_execute_step`) must
-    /// then fall back to `compile_region` for scalar compilation.
+    /// emits SIMD CLIF (I64x2/F64x2/I32x4/F32x4), falling back to the
+    /// type-directed scalar compiler if SIMD emission fails. Returns `None`
+    /// when the region has no vectorizable pattern at all — callers (e.g.
+    /// `tiered_execute_step`) must then fall back to `compile_region_typed`
+    /// for scalar compilation.
     ///
     /// # Safety
     /// Same safety requirements as `compile_region`.
@@ -246,7 +317,7 @@ impl JitSession {
 
         // Only attempt SIMD if host CPU supports it
         if !is_simd_supported() {
-            return self.compile_region(module_idx, start_offset, num_instrs, instructions);
+            return self.compile_region_typed(module_idx, start_offset, num_instrs, instructions, type_metadata);
         }
 
         // Analyze for vectorizable patterns
@@ -266,7 +337,7 @@ impl JitSession {
                 self.compiled.insert((module_idx, start_offset), ptr);
                 Some(std::mem::transmute(ptr))
             }
-            Err(_) => self.compile_region(module_idx, start_offset, num_instrs, instructions),
+            Err(_) => self.compile_region_typed(module_idx, start_offset, num_instrs, instructions, type_metadata),
         }
     }
 }
@@ -332,6 +403,63 @@ pub fn tiered_execute_step(
             // non-array code still tiers up instead of interpreting forever.
             if let Some(func) = unsafe {
                 jit.compile_region(module_idx, pc, region_len, instructions)
+            } {
+                func(regs.as_mut_ptr(), constants.as_ptr());
+                return TieredAction::RanJit;
+            }
+        }
+    }
+
+    TieredAction::Interpret
+}
+
+/// Execute a bytecode instruction with type-directed tiered compilation.
+///
+/// Identical to [`tiered_execute_step`], except that when a region becomes
+/// hot the register types at `pc` are inferred from the module's bytecode
+/// (`typed_compiler::infer_reg_types`) and handed to both the SIMD analyzer
+/// and the scalar compiler, so hot numeric regions are compiled with NaN-tag
+/// guards stripped. Regions whose types cannot be proven compile exactly as
+/// before. This is the entry point used by the VM's interpreter loop.
+pub fn tiered_execute_step_typed(
+    jit: &mut JitSession,
+    module_idx: usize,
+    pc: usize,
+    module: &crate::bytecode::CodeModule,
+    regs: &mut [u64; 256],
+    constants: &[u64],
+) -> TieredAction {
+    let instructions = &module.instructions;
+
+    // Check if already compiled
+    if let Some(func) = jit.get_compiled(module_idx, pc) {
+        // Execute JIT-compiled code
+        func(regs.as_mut_ptr(), constants.as_ptr());
+        return TieredAction::RanJit;
+    }
+
+    // Record execution for hotness
+    if record_and_check_hot(module_idx, pc) {
+        // Try to compile from PC to the end of the function or a unsupported opcode
+        let region_len = find_compilable_region(pc, instructions);
+        if region_len > 5 {
+            // Infer register types at pc; empty metadata keeps the
+            // untyped scalar behavior for both compile paths.
+            let meta = typed_compiler::infer_reg_types(module, pc);
+            let meta_ref = if meta.reg_types.is_empty() { None } else { Some(&meta) };
+            // Try SIMD-vectorized compilation first, fall back to scalar
+            if let Some(func) = unsafe {
+                jit.compile_region_simd(module_idx, pc, region_len, instructions, meta_ref)
+            } {
+                func(regs.as_mut_ptr(), constants.as_ptr());
+                return TieredAction::CompiledSimdAndRan;
+            }
+            // The region has no vectorizable pattern (or SIMD emission
+            // failed): compile it with the type-directed scalar compiler so
+            // hot non-array code still tiers up instead of interpreting
+            // forever.
+            if let Some(func) = unsafe {
+                jit.compile_region_typed(module_idx, pc, region_len, instructions, meta_ref)
             } {
                 func(regs.as_mut_ptr(), constants.as_ptr());
                 return TieredAction::RanJit;

@@ -910,6 +910,40 @@ mod tests {
         assert_eq!(value.as_int(), Some(101), "r.x = 99 should actually mutate the record");
     }
 
+    /// End-to-end regression for JIT type-guard stripping: a hot recursive
+    /// numeric function must tier up through the type-directed
+    /// (guard-stripped) compiler and produce exactly the same result the
+    /// interpreter computes. The arithmetic-heavy body gives the tiering
+    /// path a straight-line region longer than the 5-instruction minimum.
+    #[test]
+    fn test_jit_typed_guard_stripping_hot_function() {
+        let source = r#"
+            fn hot(n: Int, acc: Int) -> Int {
+                if n < 1 then acc else {
+                    let a = acc + n in
+                    let b = a + 1 in
+                    let c = b + 2 in
+                    let d = c + 3 in
+                    let e = d + 4 in
+                    hot(n - 1, e + 5)
+                }
+            }
+            hot(2000, 0)
+        "#;
+        // Per call: acc += n + (1+2+3+4+5); n runs 2000..1.
+        let expected: i64 = (1..=2000).sum::<i64>() + 15 * 2000;
+
+        let (module, _ty) = compile_source(source).unwrap();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let value = vm.run().unwrap();
+        assert_eq!(value.as_int(), Some(expected), "typed-path result must be exact");
+        assert!(
+            vm.jit_typed_compiled_count() >= 1,
+            "hot numeric function must compile through the type-directed JIT path"
+        );
+    }
+
     #[test]
     fn test_register_overflow_errors() {
         // 20 nested let bindings — the MIR pipeline allocates isolated

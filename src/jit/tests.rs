@@ -554,3 +554,380 @@ fn test_jit_iinc_idec_match_interpreter() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Type-directed (guard-stripped) tiering
+// ---------------------------------------------------------------------------
+
+/// Helper: build the standard hot integer loop module used by the typed-path
+/// tests. Layout:
+/// ```text
+/// 0: r0 = 0 (acc)          7:  r0 += 1        (filler)
+/// 1: r1 = 0 (i)            8:  r8 *= 1        (filler, stays 2)
+/// 2: r7 = 1 (one)          9:  r9 = r8 + 1    (filler)
+/// 3: r6 = LIMIT            10: r10 = r9 - r8  (filler)
+/// 4: r8 = 2                11: r5 = i < LIMIT
+/// 5: r0 += i   <- region   12: JmpT r5 -> pc 5
+/// 6: r1 += 1               13: Halt
+/// ```
+/// The loop body at pc 5 is a straight-line region of 7 compilable opcodes.
+fn make_int_loop_module(limit: i64) -> CodeModule {
+    let mut module = CodeModule::new("typed_int_loop");
+    let c_limit = module.add_constant(Constant::Int(limit));
+    module.emit(Instruction::new1(OpCode::Const0, 0));
+    module.emit(Instruction::new1(OpCode::Const0, 1));
+    module.emit(Instruction::new1(OpCode::Const1, 7));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((c_limit >> 8) & 0xFF) as u8,
+        (c_limit & 0xFF) as u8,
+        6,
+    ));
+    module.emit(Instruction::new1(OpCode::Const2, 8));
+    // Loop body (pc 5..=11).
+    module.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0));    // 5:  acc += i
+    module.emit(Instruction::new3(OpCode::IAdd, 1, 7, 1));    // 6:  i += 1
+    module.emit(Instruction::new3(OpCode::IAdd, 0, 7, 0));    // 7:  acc += 1
+    module.emit(Instruction::new3(OpCode::IMul, 8, 7, 8));    // 8:  r8 *= 1
+    module.emit(Instruction::new3(OpCode::IAdd, 9, 8, 9));    // 9:  r9 += r8 (r9 starts 0 -> 2)
+    module.emit(Instruction::new3(OpCode::ISub, 9, 8, 10));   // 10: r10 = r9 - r8
+    module.emit(Instruction::new3(OpCode::ICmpLt, 1, 6, 5));  // 11: r5 = i < LIMIT
+    let back: i16 = -7; // 12: JmpT r5 -> pc 5
+    module.emit(Instruction::new3(
+        OpCode::JmpT,
+        5,
+        ((back as u16) >> 8) as u8,
+        (back as u16 & 0xFF) as u8,
+    ));
+    module.emit(Instruction::new0(OpCode::Halt)); // 13
+    module.entry_point = Some(0);
+    module
+}
+
+/// Expected accumulator for `make_int_loop_module`: the loop adds `i` and 1
+/// per iteration with i running 0..LIMIT.
+fn int_loop_expected(limit: i64) -> i64 {
+    (0..limit).sum::<i64>() + limit
+}
+
+/// The type inference must prove the loop-carried integer registers at the
+/// start of the hot region (pc 5), including the register loaded from an
+/// Int constant and the ones written by arithmetic inside the loop.
+#[test]
+fn test_infer_reg_types_int_loop() {
+    use crate::jit::typed_compiler::{infer_reg_types, KnownType};
+
+    let module = make_int_loop_module(2000);
+    let meta = infer_reg_types(&module, 5);
+
+    assert_eq!(meta.get_type(0), KnownType::Int, "accumulator r0");
+    assert_eq!(meta.get_type(1), KnownType::Int, "counter r1");
+    assert_eq!(meta.get_type(6), KnownType::Int, "constant-loaded r6");
+    assert_eq!(meta.get_type(7), KnownType::Int, "constant r7");
+    assert_eq!(meta.get_type(8), KnownType::Int, "loop-written r8");
+    // r9/r10 are only ever written inside the loop body, so on the first
+    // entry they hold nil: the must-analysis must conservatively report
+    // Unknown at the region start.
+    assert_eq!(meta.get_type(9), KnownType::Unknown, "loop-internal r9");
+    assert_eq!(meta.get_type(10), KnownType::Unknown, "loop-internal r10");
+}
+
+/// Conservative cases: IDiv can yield nil (div by zero) so its destination
+/// must stay Unknown, and an unmodeled opcode must clobber all facts.
+#[test]
+fn test_infer_reg_types_conservative() {
+    use crate::jit::typed_compiler::{infer_reg_types, KnownType};
+
+    let mut module = CodeModule::new("typed_conservative");
+    module.emit(Instruction::new1(OpCode::Const1, 0));       // 0: r0 = 1
+    module.emit(Instruction::new1(OpCode::Const0, 1));       // 1: r1 = 0
+    module.emit(Instruction::new3(OpCode::IDiv, 0, 1, 2));   // 2: r2 = r0 / r1 (nil!)
+    module.emit(Instruction::new3(OpCode::IAdd, 0, 1, 3));   // 3: r3 = r0 + r1
+    module.emit(Instruction::new0(OpCode::Halt));            // 4
+    module.entry_point = Some(0);
+
+    let meta = infer_reg_types(&module, 4);
+    assert_eq!(meta.get_type(0), KnownType::Int);
+    assert_eq!(meta.get_type(2), KnownType::Unknown, "IDiv may produce nil");
+    assert_eq!(meta.get_type(3), KnownType::Int);
+
+    // An unmodeled opcode (CapChk) clobbers every register fact.
+    let mut module2 = CodeModule::new("typed_clobber");
+    module2.emit(Instruction::new1(OpCode::Const1, 0));      // 0: r0 = 1
+    module2.emit(Instruction::new2(OpCode::CapChk, 0, 9));   // 1: unmodeled -> clobber all
+    module2.emit(Instruction::new0(OpCode::Halt));           // 2
+    module2.entry_point = Some(0);
+
+    let meta2 = infer_reg_types(&module2, 2);
+    assert!(
+        meta2.reg_types.is_empty(),
+        "unmodeled opcodes must clobber all register types, got {:?}",
+        meta2.reg_types
+    );
+}
+
+/// Float constants and float arithmetic must be inferred as Float.
+#[test]
+fn test_infer_reg_types_float() {
+    use crate::jit::typed_compiler::{infer_reg_types, KnownType};
+
+    let mut module = CodeModule::new("typed_float");
+    let c0 = module.add_constant(Constant::Float(1.5));
+    let c1 = module.add_constant(Constant::Float(2.5));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((c0 >> 8) & 0xFF) as u8,
+        (c0 & 0xFF) as u8,
+        0,
+    ));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((c1 >> 8) & 0xFF) as u8,
+        (c1 & 0xFF) as u8,
+        1,
+    ));
+    module.emit(Instruction::new3(OpCode::FAdd, 0, 1, 2));   // r2 = r0 + r1
+    module.emit(Instruction::new3(OpCode::FCmpLt, 0, 1, 3)); // r3 = r0 < r1
+    module.emit(Instruction::new0(OpCode::Halt));
+    module.entry_point = Some(0);
+
+    let meta = infer_reg_types(&module, 4);
+    assert_eq!(meta.get_type(0), KnownType::Float);
+    assert_eq!(meta.get_type(1), KnownType::Float);
+    assert_eq!(meta.get_type(2), KnownType::Float);
+    assert_eq!(meta.get_type(3), KnownType::Bool, "comparisons yield Bool");
+}
+
+/// (a) A hot integer loop running through the VM's tiering path must be
+/// compiled by the type-directed (guard-stripped) compiler, and (b) produce
+/// exactly the same result as the interpreter/scalar path.
+#[test]
+fn test_typed_tiering_hot_int_loop() {
+    use crate::vm::VM;
+
+    const LIMIT: i64 = 2000;
+    let module = make_int_loop_module(LIMIT);
+
+    let mut vm = VM::new();
+    vm.load_module(module);
+    let result = vm.run().expect("typed int loop should run");
+    assert_eq!(
+        result.as_int(),
+        Some(int_loop_expected(LIMIT)),
+        "typed-path result must match the interpreter semantics"
+    );
+    assert!(
+        vm.jit_typed_compiled_count() >= 1,
+        "hot int loop region must be compiled through the type-directed path"
+    );
+
+    // Sanity: the plain interpreter result (no JIT tier-up) is identical.
+    let mut module2 = make_int_loop_module(LIMIT);
+    module2.name = "typed_int_loop_ref".to_string();
+    let mut vm2 = VM::new();
+    vm2.load_module(module2);
+    let result2 = vm2.run().expect("reference int loop should run");
+    assert_eq!(result2.as_int(), result.as_int());
+}
+
+/// (a/b) A hot float loop must also take the typed path and stay exact:
+/// whole-number f64 sums below 2^53 are represented exactly.
+#[test]
+fn test_typed_tiering_hot_float_loop() {
+    use crate::vm::VM;
+
+    const LIMIT: f64 = 2000.0;
+
+    let mut module = CodeModule::new("typed_float_loop");
+    let c_zero = module.add_constant(Constant::Float(0.0));
+    let c_one = module.add_constant(Constant::Float(1.0));
+    let c_limit = module.add_constant(Constant::Float(LIMIT));
+    let emit_const = |module: &mut CodeModule, idx: usize, dst: u8| {
+        module.emit(Instruction::new3(
+            OpCode::ConstU,
+            ((idx >> 8) & 0xFF) as u8,
+            (idx & 0xFF) as u8,
+            dst,
+        ));
+    };
+    emit_const(&mut module, c_zero, 0);   // 0: r0 = 0.0 (acc)
+    emit_const(&mut module, c_zero, 1);   // 1: r1 = 0.0 (i)
+    emit_const(&mut module, c_one, 7);    // 2: r7 = 1.0
+    emit_const(&mut module, c_limit, 6);  // 3: r6 = LIMIT
+    // Loop body (pc 4..=9): 6 straight-line compilable opcodes.
+    module.emit(Instruction::new3(OpCode::FAdd, 0, 1, 0));    // 4: acc += i
+    module.emit(Instruction::new3(OpCode::FAdd, 1, 7, 1));    // 5: i += 1.0
+    module.emit(Instruction::new3(OpCode::FAdd, 8, 7, 8));    // 6: filler r8 += 1.0
+    module.emit(Instruction::new3(OpCode::FAdd, 9, 8, 9));    // 7: filler r9 += r8
+    module.emit(Instruction::new3(OpCode::FAdd, 10, 9, 10));  // 8: filler r10 += r9
+    module.emit(Instruction::new3(OpCode::FCmpLt, 1, 6, 5));  // 9: r5 = i < LIMIT
+    let back: i16 = -6; // 10: JmpT r5 -> pc 4
+    module.emit(Instruction::new3(
+        OpCode::JmpT,
+        5,
+        ((back as u16) >> 8) as u8,
+        (back as u16 & 0xFF) as u8,
+    ));
+    module.emit(Instruction::new0(OpCode::Halt)); // 11
+    module.entry_point = Some(0);
+
+    let expected: f64 = (0..2000).map(|i| i as f64).sum();
+
+    let mut vm = VM::new();
+    vm.load_module(module);
+    let result = vm.run().expect("typed float loop should run");
+    assert_eq!(result.as_float(), Some(expected));
+    assert!(
+        vm.jit_typed_compiled_count() >= 1,
+        "hot float loop region must be compiled through the type-directed path"
+    );
+}
+
+/// (b) The guard-stripped region must be bit-for-bit identical to the scalar
+/// JIT region for the same inputs: drive both compiled functions from Rust
+/// with identical register files and compare the entire register state.
+#[test]
+fn test_typed_path_matches_scalar_path() {
+    use crate::jit::typed_compiler::infer_reg_types;
+    use crate::vm::Value;
+
+    const LIMIT: i64 = 2000;
+    let module = make_int_loop_module(LIMIT);
+    let consts: Vec<u64> = module
+        .constants
+        .iter()
+        .map(|c| match *c {
+            Constant::Int(n) => Value::int(n).as_raw(),
+            _ => Value::nil().as_raw(),
+        })
+        .collect();
+
+    let run_region = |func: JitFunctionPtr| -> [u64; 256] {
+        let mut regs = [0u64; 256];
+        regs[6] = Value::int(LIMIT).as_raw();
+        regs[7] = Value::int(1).as_raw();
+        regs[8] = Value::int(2).as_raw();
+        loop {
+            func(regs.as_mut_ptr(), consts.as_ptr());
+            if Value::from_bits(regs[5]).as_bool() != Some(true) {
+                break;
+            }
+        }
+        regs
+    };
+
+    // Scalar path.
+    let mut scalar_jit = make_jit();
+    let scalar = unsafe { scalar_jit.compile_region(0, 5, 7, &module.instructions) }
+        .expect("scalar region should compile");
+    let scalar_regs = run_region(scalar);
+
+    // Typed path.
+    let meta = infer_reg_types(&module, 5);
+    assert!(!meta.reg_types.is_empty(), "int loop registers must be typed");
+    let mut typed_jit = make_jit();
+    let typed = unsafe {
+        typed_jit.compile_region_typed(0, 5, 7, &module.instructions, Some(&meta))
+    }
+    .expect("typed region should compile");
+    assert!(
+        typed_jit.is_typed_compiled(0, 5),
+        "region with proven types must use the guard-stripped compiler"
+    );
+    let typed_regs = run_region(typed);
+
+    assert_eq!(
+        typed_regs,
+        scalar_regs,
+        "guard-stripped code must be bit-for-bit identical to scalar code"
+    );
+}
+
+/// (c) Absent or unprovable metadata must keep the scalar behavior:
+/// `compile_region_typed` with `None` compiles via the scalar compiler, and
+/// a loop whose register types are clobbered by an unmodeled opcode runs
+/// correctly without ever taking the typed path.
+#[test]
+fn test_absent_metadata_uses_scalar_path() {
+    use crate::vm::{Value, VM};
+
+    const LIMIT: i64 = 2000;
+    let module = make_int_loop_module(LIMIT);
+
+    // None metadata: compiles, but is NOT recorded as typed.
+    let mut jit = make_jit();
+    let func = unsafe { jit.compile_region_typed(0, 5, 7, &module.instructions, None) }
+        .expect("region should compile without metadata");
+    assert_eq!(jit.typed_compiled_count(), 0, "no metadata -> scalar path");
+    assert!(!jit.is_typed_compiled(0, 5));
+
+    // The scalar-compiled function still computes the right thing.
+    let consts: Vec<u64> = module
+        .constants
+        .iter()
+        .map(|c| match *c {
+            Constant::Int(n) => Value::int(n).as_raw(),
+            _ => Value::nil().as_raw(),
+        })
+        .collect();
+    let mut regs = [0u64; 256];
+    regs[6] = Value::int(LIMIT).as_raw();
+    regs[7] = Value::int(1).as_raw();
+    regs[8] = Value::int(2).as_raw();
+    loop {
+        func(regs.as_mut_ptr(), consts.as_ptr());
+        if Value::from_bits(regs[5]).as_bool() != Some(true) {
+            break;
+        }
+    }
+    assert_eq!(
+        Value::from_bits(regs[0]).as_int(),
+        Some(int_loop_expected(LIMIT))
+    );
+
+    // Unprovable metadata: an unmodeled opcode (CapChk) right before the
+    // loop clobbers every register fact, so the VM must stay on the scalar
+    // path while still producing the correct result.
+    let mut clobbered = CodeModule::new("typed_clobbered_loop");
+    let c_limit = clobbered.add_constant(Constant::Int(LIMIT));
+    clobbered.emit(Instruction::new1(OpCode::Const0, 0));   // 0
+    clobbered.emit(Instruction::new1(OpCode::Const0, 1));   // 1
+    clobbered.emit(Instruction::new1(OpCode::Const1, 7));   // 2
+    clobbered.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((c_limit >> 8) & 0xFF) as u8,
+        (c_limit & 0xFF) as u8,
+        6,
+    ));                                                     // 3
+    clobbered.emit(Instruction::new1(OpCode::Const2, 8));   // 4
+    // Clobber AFTER all constant setup so no register fact survives the
+    // meet at the loop head: forward state is all-Unknown here.
+    clobbered.emit(Instruction::new2(OpCode::CapChk, 0, 9)); // 5: clobbers analysis state
+    // Loop body (pc 6..=12): same shape as make_int_loop_module.
+    clobbered.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0));
+    clobbered.emit(Instruction::new3(OpCode::IAdd, 1, 7, 1));
+    clobbered.emit(Instruction::new3(OpCode::IAdd, 0, 7, 0));
+    clobbered.emit(Instruction::new3(OpCode::IMul, 8, 7, 8));
+    clobbered.emit(Instruction::new3(OpCode::IAdd, 9, 8, 9));
+    clobbered.emit(Instruction::new3(OpCode::ISub, 9, 8, 10));
+    clobbered.emit(Instruction::new3(OpCode::ICmpLt, 1, 6, 5));
+    let back: i16 = -7; // 13: JmpT r5 -> pc 6
+    clobbered.emit(Instruction::new3(
+        OpCode::JmpT,
+        5,
+        ((back as u16) >> 8) as u8,
+        (back as u16 & 0xFF) as u8,
+    ));
+    clobbered.emit(Instruction::new0(OpCode::Halt)); // 14
+    clobbered.entry_point = Some(0);
+
+    let mut vm = VM::new();
+    vm.load_module(clobbered);
+    let result = vm.run().expect("clobbered loop should run");
+    assert_eq!(result.as_int(), Some(int_loop_expected(LIMIT)));
+    assert_eq!(
+        vm.jit_typed_compiled_count(),
+        0,
+        "loop with unprovable register types must not use the typed path"
+    );
+}

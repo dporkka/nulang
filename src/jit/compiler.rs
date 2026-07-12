@@ -144,6 +144,9 @@ fn register_runtime_helpers<M: Module>(
 pub enum CompileError {
     DeclareFailed(String),
     CompileFailed(String),
+    /// The region contains an opcode this compiler does not support;
+    /// callers should fall back to another compiler.
+    UnsupportedOpcode(String),
 }
 
 impl std::fmt::Display for CompileError {
@@ -151,6 +154,7 @@ impl std::fmt::Display for CompileError {
         match self {
             CompileError::DeclareFailed(msg) => write!(f, "function declaration failed: {}", msg),
             CompileError::CompileFailed(msg) => write!(f, "compilation failed: {}", msg),
+            CompileError::UnsupportedOpcode(msg) => write!(f, "unsupported opcode: {}", msg),
         }
     }
 }

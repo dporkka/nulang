@@ -884,6 +884,16 @@ impl VM {
         self.jit_constants.push(bits);
     }
 
+    /// Number of hot regions compiled through the type-directed JIT path
+    /// (NaN-tag guard stripping) since this VM was created. Exposed for
+    /// testing the tiering pipeline.
+    pub fn jit_typed_compiled_count(&self) -> usize {
+        self.jit_session
+            .as_ref()
+            .map(|j| j.typed_compiled_count())
+            .unwrap_or(0)
+    }
+
     /// Discard all closure capture environments.
     ///
     /// Only call this when no live value can reference an existing
@@ -1171,8 +1181,8 @@ impl VM {
                 for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
                     regs[i] = r.to_bits();
                 }
-                let action = jit::tiered_execute_step(
-                    jit, module_idx, pc, instructions, &mut regs, constants, None,
+                let action = jit::tiered_execute_step_typed(
+                    jit, module_idx, pc, module, &mut regs, constants,
                 );
                 if action != TieredAction::Interpret {
                     for (i, bits) in regs.iter().enumerate() {
