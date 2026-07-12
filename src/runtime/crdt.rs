@@ -35,6 +35,24 @@
 //! least-upper-bound (LUB) operator and the CRDT state is ordered by the
 //! "happens-before" relation. The LUB of any two states always exists and is
 //! unique, guaranteeing convergence.
+//!
+//! # Delta-state replication
+//!
+//! Every CRDT additionally provides `delta_since(&self, base) -> Option<Self>`:
+//! the minimal state that, when merged into any replica that already contains
+//! `base`, produces the same result as merging this full state. Formally, for
+//! any replica `r` with `base ⊑ r`:
+//!
+//! ```text
+//! r.merge(self.delta_since(base)) == r.merge(self)
+//! ```
+//!
+//! A delta is itself a valid CRDT state (serialized with the usual
+//! `to_bytes`), so receivers merge it through the same code path as a
+//! full-state merge. `None` means nothing changed since `base`. Deltas are
+//! only meaningful to a peer that already holds `base`; a peer seeing an
+//! entry for the first time must receive a full-state snapshot instead
+//! (the join fallback, see `CrdtManager::generate_delta_sync_ops`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -160,6 +178,19 @@ impl GCounter {
     pub fn value(&self) -> u64 {
         self.counts.values().sum()
     }
+
+    /// Delta relative to `base`: only the per-node entries that grew since
+    /// `base`. `None` when no entry changed.
+    pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        let mut counts = HashMap::new();
+        for (node_id, count) in &self.counts {
+            let base_count = base.counts.get(node_id).copied().unwrap_or(0);
+            if *count > base_count {
+                counts.insert(*node_id, *count);
+            }
+        }
+        if counts.is_empty() { None } else { Some(Self { counts, node_id: self.node_id }) }
+    }
 }
 
 impl Crdt for GCounter {
@@ -226,6 +257,21 @@ impl PNCounter {
     pub fn value(&self) -> i64 {
         self.increments.value() as i64 - self.decrements.value() as i64
     }
+
+    /// Delta relative to `base`: the deltas of both underlying GCounters.
+    /// `None` when neither side changed.
+    pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        match (
+            self.increments.delta_since(&base.increments),
+            self.decrements.delta_since(&base.decrements),
+        ) {
+            (None, None) => None,
+            (inc, dec) => Some(Self {
+                increments: inc.unwrap_or_else(|| GCounter::new(self.increments.node_id)),
+                decrements: dec.unwrap_or_else(|| GCounter::new(self.decrements.node_id)),
+            }),
+        }
+    }
 }
 
 impl Crdt for PNCounter {
@@ -276,6 +322,13 @@ impl<T: Clone + Eq + std::hash::Hash> GSet<T> {
     pub fn len(&self) -> usize { self.elements.len() }
     pub fn is_empty(&self) -> bool { self.elements.is_empty() }
     pub fn value(&self) -> &HashSet<T> { &self.elements }
+
+    /// Delta relative to `base`: the elements added since `base`.
+    /// `None` when the set did not grow.
+    pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        let elements: HashSet<T> = self.elements.difference(&base.elements).cloned().collect();
+        if elements.is_empty() { None } else { Some(Self { elements }) }
+    }
 }
 
 impl<T: Clone + Eq + std::hash::Hash> Default for GSet<T> {
@@ -363,6 +416,28 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
 
     pub fn len(&self) -> usize { self.value().len() }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
+
+    /// Delta relative to `base`: for each element, the tags not present in
+    /// `base`. Elements with no new tags are omitted. `None` when no tag
+    /// changed. The current `tag_counter` rides along so merging the delta
+    /// advances the receiver's counter exactly like a full-state merge.
+    pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        let mut entries = HashMap::new();
+        for (element, tags) in &self.entries {
+            let new_tags: HashSet<Tag> = tags.iter()
+                .filter(|t| base.entries.get(element).map_or(true, |bt| !bt.contains(t)))
+                .copied()
+                .collect();
+            if !new_tags.is_empty() {
+                entries.insert(element.clone(), new_tags);
+            }
+        }
+        if entries.is_empty() {
+            None
+        } else {
+            Some(Self { entries, tag_counter: self.tag_counter, node_id: self.node_id })
+        }
+    }
 }
 
 impl Crdt for ORSet<String> {
@@ -491,6 +566,30 @@ impl<T: Clone + Eq + std::hash::Hash> AWORSet<T> {
 
     pub fn len(&self) -> usize { self.value().len() }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
+
+    /// Delta relative to `base`: add/remove timestamps strictly newer than
+    /// `base`'s for the same element. `None` when nothing changed. The
+    /// current clock rides along so merging the delta advances the
+    /// receiver's clock exactly like a full-state merge.
+    pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        let mut entries = HashMap::new();
+        for (element, ts) in &self.entries {
+            if base.entries.get(element).map_or(true, |bts| ts > bts) {
+                entries.insert(element.clone(), *ts);
+            }
+        }
+        let mut removed = HashMap::new();
+        for (element, ts) in &self.removed {
+            if base.removed.get(element).map_or(true, |bts| ts > bts) {
+                removed.insert(element.clone(), *ts);
+            }
+        }
+        if entries.is_empty() && removed.is_empty() {
+            None
+        } else {
+            Some(Self { entries, removed, clock: self.clock })
+        }
+    }
 }
 
 impl Crdt for AWORSet<String> {
@@ -857,5 +956,120 @@ mod tests {
         let c = LamportTime { counter: 2, node_id: 2 };
         assert!(b.is_greater_than(&a));
         assert!(c.is_greater_than(&b));
+    }
+
+    // ---- Delta-state replication ----
+    //
+    // For each type: merging the delta into a replica that already holds
+    // `base` must produce exactly the same state as merging the full state.
+
+    #[test]
+    fn test_gcounter_delta_since_unchanged() {
+        let mut c = GCounter::new(1);
+        c.increment_by(5);
+        assert!(c.delta_since(&c.clone()).is_none());
+    }
+
+    #[test]
+    fn test_gcounter_delta_merge_equals_full_merge() {
+        let mut base = GCounter::new(1);
+        base.increment_by(3);
+        let mut full = base.clone();
+        full.increment_by(4);
+
+        let delta = full.delta_since(&base).expect("counter grew");
+        // The delta carries only the updated entry, not the whole map.
+        assert_eq!(delta.counts.len(), 1);
+
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
+    }
+
+    #[test]
+    fn test_pncounter_delta_merge_equals_full_merge() {
+        let mut base = PNCounter::new(1);
+        base.increment_by(5);
+        let mut full = base.clone();
+        full.decrement_by(2);
+
+        let delta = full.delta_since(&base).expect("decrements grew");
+        assert!(delta.increments.counts.is_empty());
+
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
+    }
+
+    #[test]
+    fn test_gset_delta_merge_equals_full_merge() {
+        let mut base = GSet::<String>::new();
+        base.insert("a".to_string());
+        let mut full = base.clone();
+        full.insert("b".to_string());
+
+        let delta = full.delta_since(&base).expect("set grew");
+        assert_eq!(delta.elements.len(), 1);
+
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
+    }
+
+    #[test]
+    fn test_orset_delta_merge_equals_full_merge() {
+        let mut base = ORSet::<String>::new(1_u32);
+        base.add("a".to_string());
+        let mut full = base.clone();
+        full.add("b".to_string());
+        full.add("a".to_string()); // second tag on an existing element
+
+        let delta = full.delta_since(&base).expect("tags added");
+        // Only the new tags travel: one for "a", one for "b".
+        assert_eq!(delta.entries.values().map(|t| t.len()).sum::<usize>(), 2);
+
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
+    }
+
+    #[test]
+    fn test_aworset_delta_merge_equals_full_merge() {
+        let mut base = AWORSet::<String>::new(1);
+        base.add("a".to_string());
+        let mut full = base.clone();
+        full.add("b".to_string());
+        full.remove(&"a".to_string());
+
+        let delta = full.delta_since(&base).expect("timestamps advanced");
+        assert_eq!(delta.entries.len(), 1);
+        assert_eq!(delta.removed.len(), 1);
+
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
+    }
+
+    #[test]
+    fn test_delta_since_empty_base_is_full_state() {
+        // With an empty base every entry is new: the delta must carry the
+        // complete state (this is what makes the join fallback work).
+        let mut c = GCounter::new(1);
+        c.increment_by(9);
+        let delta = c.delta_since(&GCounter::new(1)).expect("everything is new");
+        let mut merged = GCounter::new(2);
+        merged.merge(&delta);
+        // Merge does not transfer node identity — compare the state.
+        assert_eq!(merged.counts, c.counts);
     }
 }

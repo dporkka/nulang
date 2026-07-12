@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 
 use super::MessagePriority;
 use super::cluster::{NodeGossip, NodeStatus};
-use super::crdt_manager::CrdtOp;
+use super::crdt_manager::{CrdtDeltaOp, CrdtOp};
 use super::NodeId;
 use crate::vm::Value;
 
@@ -77,6 +77,7 @@ const TYPE_SPAWN_REQUEST: u8 = 3;
 const TYPE_SPAWN_RESPONSE: u8 = 4;
 const TYPE_CRDT_SYNC: u8 = 5;
 const TYPE_GOSSIP: u8 = 6;
+const TYPE_CRDT_DELTA_SYNC: u8 = 7;
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -134,6 +135,17 @@ pub enum Packet {
     /// CRDT synchronization packet.
     CrdtSync {
         ops: Vec<CrdtOp>,
+    },
+
+    /// Delta-state CRDT synchronization packet.
+    ///
+    /// Each op is tagged as a delta (changes since the sender's last sync)
+    /// or a full-state snapshot — see [`CrdtDeltaOp`]. Receivers merge
+    /// deltas into entries they already hold and apply full-state ops like
+    /// [`CrdtSync`](Packet::CrdtSync). The full-state `CrdtSync` packet
+    /// remains available as the join/reset fallback.
+    CrdtDeltaSync {
+        ops: Vec<CrdtDeltaOp>,
     },
 
     /// Cluster membership gossip.
@@ -201,6 +213,7 @@ impl Packet {
             TYPE_SPAWN_REQUEST => Self::read_spawn_request(payload)?,
             TYPE_SPAWN_RESPONSE => Self::read_spawn_response(payload)?,
             TYPE_CRDT_SYNC => Self::read_crdt_sync(payload)?,
+            TYPE_CRDT_DELTA_SYNC => Self::read_crdt_delta_sync(payload)?,
             TYPE_GOSSIP => Self::read_gossip(payload)?,
             _ => return None,
         };
@@ -220,6 +233,7 @@ impl Packet {
             Packet::SpawnRequest { .. } => TYPE_SPAWN_REQUEST,
             Packet::SpawnResponse { .. } => TYPE_SPAWN_RESPONSE,
             Packet::CrdtSync { .. } => TYPE_CRDT_SYNC,
+            Packet::CrdtDeltaSync { .. } => TYPE_CRDT_DELTA_SYNC,
             Packet::Gossip { .. } => TYPE_GOSSIP,
         }
     }
@@ -274,6 +288,12 @@ impl Packet {
                 buf.push(if *success { 1 } else { 0 });
             }
             Packet::CrdtSync { ops } => {
+                buf.extend_from_slice(&(ops.len() as u32).to_be_bytes());
+                for op in ops {
+                    buf.extend_from_slice(&op.to_bytes());
+                }
+            }
+            Packet::CrdtDeltaSync { ops } => {
                 buf.extend_from_slice(&(ops.len() as u32).to_be_bytes());
                 for op in ops {
                     buf.extend_from_slice(&op.to_bytes());
@@ -416,6 +436,34 @@ impl Packet {
             ops.push(op);
         }
         Some(Packet::CrdtSync { ops })
+    }
+
+    fn read_crdt_delta_sync(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 4 {
+            return None;
+        }
+        let count = read_u32(payload, 0)? as usize;
+        let mut offset = 4usize;
+        let mut ops = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            // Each CrdtDeltaOp: [is_delta:u8][id:u64][type:u8][len:u32][payload]
+            if offset + 14 > payload.len() {
+                return None;
+            }
+            // Parse flag + id + type + len manually to compute op byte length
+            let op_payload_len = u32::from_be_bytes([
+                payload[offset + 10], payload[offset + 11],
+                payload[offset + 12], payload[offset + 13],
+            ]) as usize;
+            let total_op_len = 14 + op_payload_len;
+            if offset + total_op_len > payload.len() {
+                return None;
+            }
+            let op = CrdtDeltaOp::from_bytes(&payload[offset..offset + total_op_len])?;
+            offset += total_op_len;
+            ops.push(op);
+        }
+        Some(Packet::CrdtDeltaSync { ops })
     }
 
     fn read_gossip(payload: &[u8]) -> Option<Self> {
@@ -1276,6 +1324,7 @@ fn connect_in_sender(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::crdt_manager::{CrdtId, CrdtType};
     use std::net::{IpAddr, Ipv4Addr};
     use std::thread::sleep;
 
@@ -1374,6 +1423,54 @@ mod tests {
         let bytes = packet.to_bytes(1);
         // Keep the header + count, chop the entry in half.
         let truncated = &bytes[..bytes.len() - 5];
+        assert!(Packet::from_bytes(truncated).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // 3d. CRDT delta sync roundtrip
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_packet_serialize_deserialize_crdt_delta_sync() {
+        let full_op = CrdtDeltaOp {
+            op: CrdtOp {
+                crdt_id: CrdtId(7),
+                crdt_type: CrdtType::GCounter,
+                payload: vec![0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            },
+            is_delta: false,
+        };
+        let delta_op = CrdtDeltaOp {
+            op: CrdtOp {
+                crdt_id: CrdtId(7),
+                crdt_type: CrdtType::GCounter,
+                payload: vec![1, 2, 3],
+            },
+            is_delta: true,
+        };
+        let packet = Packet::CrdtDeltaSync { ops: vec![full_op, delta_op] };
+
+        let bytes = packet.to_bytes(42);
+        let (seq, decoded) = Packet::from_bytes(&bytes).expect("crdt delta sync deserialization failed");
+
+        assert_eq!(seq, 42);
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn test_packet_crdt_delta_sync_rejects_truncated_payload() {
+        let packet = Packet::CrdtDeltaSync {
+            ops: vec![CrdtDeltaOp {
+                op: CrdtOp {
+                    crdt_id: CrdtId(1),
+                    crdt_type: CrdtType::GSet,
+                    payload: vec![0xAB; 8],
+                },
+                is_delta: true,
+            }],
+        };
+        let bytes = packet.to_bytes(1);
+        // Keep the header + count, chop the op in half.
+        let truncated = &bytes[..bytes.len() - 3];
         assert!(Packet::from_bytes(truncated).is_none());
     }
 

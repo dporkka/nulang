@@ -779,6 +779,16 @@ pub fn process_network_packets(
                     }
                 }
             }
+            Packet::CrdtDeltaSync { ops } => {
+                // Delta ops merge into entries this node already holds;
+                // full-state-tagged ops behave exactly like CrdtSync above
+                // (including entry creation on first sight).
+                if let Some(manager) = &mut runtime.crdt_manager {
+                    for op in ops {
+                        manager.apply_delta_op(op);
+                    }
+                }
+            }
             _ => {
                 if let Some((target_actor, behavior_name, mut msg)) =
                     resolver.parse_packet(incoming.packet)
@@ -796,6 +806,33 @@ pub fn process_network_packets(
                         runtime.scheduler.enqueue(target_actor);
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Broadcast delta-state CRDT sync ops to all healthy cluster members.
+///
+/// This is the delta-state counterpart of `Runtime::sync_crdts`: entries
+/// that have never been synced ship as full-state ops (the join fallback),
+/// all others ship only the changes since the last call, and unchanged
+/// entries ship nothing. Receivers apply the packet via
+/// [`CrdtManager::apply_delta_op`](crate::runtime::crdt_manager::CrdtManager::apply_delta_op).
+/// The full-state `Packet::CrdtSync` path remains available for
+/// join/reset and as the repair mechanism after message loss.
+pub fn sync_crdts_delta(runtime: &mut Runtime) {
+    if !runtime.distributed_enabled { return; }
+    let ops = match &mut runtime.crdt_manager {
+        Some(m) => m.generate_delta_sync_ops(),
+        None => return,
+    };
+    if ops.is_empty() { return; }
+    let packet = Packet::CrdtDeltaSync { ops };
+    if let Some(cluster) = &runtime.cluster {
+        for member in cluster.healthy_members() {
+            if let Some(transport) = &mut runtime.transport {
+                let net_node_id = NodeId(member.node_id.0);
+                transport.send(net_node_id, member.address, packet.clone());
             }
         }
     }

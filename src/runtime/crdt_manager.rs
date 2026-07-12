@@ -70,6 +70,41 @@ impl CrdtOp {
     }
 }
 
+/// A CRDT sync op tagged as either a **delta** (changes since the sender's
+/// last sync) or a **full-state** snapshot.
+///
+/// Deltas are produced by [`CrdtManager::generate_delta_sync_ops`] and ride
+/// in `Packet::CrdtDeltaSync`. A delta payload is itself a valid serialized
+/// CRDT state, so receivers merge it with the same `merge` used for full
+/// states — the difference is only that a delta for an *unknown* entry id
+/// is ignored (there is no base to apply it onto), while a full-state op
+/// creates the entry, exactly like `CrdtManager::apply_op`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrdtDeltaOp {
+    pub op: CrdtOp,
+    pub is_delta: bool,
+}
+
+impl CrdtDeltaOp {
+    /// Wire layout: `[is_delta:u8][CrdtOp bytes]`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.op.payload.len() + 14);
+        buf.push(if self.is_delta { 1 } else { 0 });
+        buf.extend_from_slice(&self.op.to_bytes());
+        buf
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let is_delta = match bytes.first()? {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        let op = CrdtOp::from_bytes(&bytes[1..])?;
+        Some(CrdtDeltaOp { op, is_delta })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CrdtEntry {
     GCounter(GCounter), PNCounter(PNCounter),
@@ -110,6 +145,24 @@ impl CrdtEntry {
         }
     }
 
+    /// Compute the delta-state of this entry relative to `base` (the state
+    /// last shipped to peers). Returns `None` when the entry did not change
+    /// since `base`. A type mismatch between `self` and `base` yields the
+    /// full state as a safe fallback.
+    pub fn delta_since(&self, base: &CrdtEntry) -> Option<CrdtEntry> {
+        match (self, base) {
+            (CrdtEntry::GCounter(a), CrdtEntry::GCounter(b)) => a.delta_since(b).map(CrdtEntry::GCounter),
+            (CrdtEntry::PNCounter(a), CrdtEntry::PNCounter(b)) => a.delta_since(b).map(CrdtEntry::PNCounter),
+            (CrdtEntry::GSet(a), CrdtEntry::GSet(b)) => a.delta_since(b).map(CrdtEntry::GSet),
+            (CrdtEntry::ORSet(a), CrdtEntry::ORSet(b)) => a.delta_since(b).map(CrdtEntry::ORSet),
+            (CrdtEntry::AWORSet(a), CrdtEntry::AWORSet(b)) => a.delta_since(b).map(CrdtEntry::AWORSet),
+            (CrdtEntry::LWWRegister(a), CrdtEntry::LWWRegister(b)) => a.delta_since(b).map(CrdtEntry::LWWRegister),
+            (CrdtEntry::MVRegister(a), CrdtEntry::MVRegister(b)) => a.delta_since(b).map(CrdtEntry::MVRegister),
+            (CrdtEntry::RGA(a), CrdtEntry::RGA(b)) => a.delta_since(b).map(CrdtEntry::RGA),
+            _ => Some(self.clone()),
+        }
+    }
+
     /// Rewrite the replica's *local* node identity so that future local
     /// operations are tagged with `node_id`.  This is used when a replica is
     /// created from a remote sync payload: the remote counts/tags/timestamps
@@ -137,11 +190,33 @@ pub struct CrdtManager {
     entries: HashMap<CrdtId, CrdtEntry>,
     pending_ops: Vec<CrdtOp>,
     ops_synced: u64,
+    /// Per-entry snapshot of the state last shipped by
+    /// [`generate_delta_sync_ops`](CrdtManager::generate_delta_sync_ops).
+    /// Deltas are computed against this base; entries without a base (freshly
+    /// created or just learned from a peer) ship as full-state ops — the
+    /// join fallback.
+    sync_base: HashMap<CrdtId, CrdtEntry>,
+}
+
+/// Merge a serialized CRDT state (full state or delta — both are valid
+/// serialized states) into `entry`. Returns `false` when the payload is
+/// malformed.
+fn merge_payload(entry: &mut CrdtEntry, payload: &[u8]) -> bool {
+    match entry {
+        CrdtEntry::GCounter(c) => GCounter::from_bytes(payload).map(|r| { c.merge(&r); }).is_some(),
+        CrdtEntry::PNCounter(c) => PNCounter::from_bytes(payload).map(|r| { c.merge(&r); }).is_some(),
+        CrdtEntry::GSet(c) => GSet::<String>::from_bytes(payload).map(|r| { c.merge(&r); }).is_some(),
+        CrdtEntry::ORSet(c) => ORSet::<String>::from_bytes(payload).map(|r| { c.merge(&r); }).is_some(),
+        CrdtEntry::AWORSet(c) => AWORSet::<String>::from_bytes(payload).map(|r| { c.merge(&r); }).is_some(),
+        CrdtEntry::LWWRegister(c) => LWWRegister::<String>::from_bytes(payload).map(|r| { c.merge(&r); }).is_some(),
+        CrdtEntry::MVRegister(c) => MVRegister::<String>::from_bytes(payload).map(|r| { c.merge(&r); }).is_some(),
+        CrdtEntry::RGA(c) => RGA::<String>::from_bytes(payload).map(|r| { c.merge(&r); }).is_some(),
+    }
 }
 
 impl CrdtManager {
     pub fn new(node_id: u64) -> Self {
-        CrdtManager { node_id, entries: HashMap::new(), pending_ops: Vec::new(), ops_synced: 0 }
+        CrdtManager { node_id, entries: HashMap::new(), pending_ops: Vec::new(), ops_synced: 0, sync_base: HashMap::new() }
     }
 
     pub fn create_gcounter(&mut self) -> (CrdtId, GCounter) {
@@ -232,17 +307,7 @@ impl CrdtManager {
             if entry.crdt_type() != op.crdt_type {
                 return;
             }
-            let merged = match entry {
-                CrdtEntry::GCounter(c) => GCounter::from_bytes(&op.payload).map(|r| { c.merge(&r); }).is_some(),
-                CrdtEntry::PNCounter(c) => PNCounter::from_bytes(&op.payload).map(|r| { c.merge(&r); }).is_some(),
-                CrdtEntry::GSet(c) => GSet::<String>::from_bytes(&op.payload).map(|r| { c.merge(&r); }).is_some(),
-                CrdtEntry::ORSet(c) => ORSet::<String>::from_bytes(&op.payload).map(|r| { c.merge(&r); }).is_some(),
-                CrdtEntry::AWORSet(c) => AWORSet::<String>::from_bytes(&op.payload).map(|r| { c.merge(&r); }).is_some(),
-                CrdtEntry::LWWRegister(c) => LWWRegister::<String>::from_bytes(&op.payload).map(|r| { c.merge(&r); }).is_some(),
-                CrdtEntry::MVRegister(c) => MVRegister::<String>::from_bytes(&op.payload).map(|r| { c.merge(&r); }).is_some(),
-                CrdtEntry::RGA(c) => RGA::<String>::from_bytes(&op.payload).map(|r| { c.merge(&r); }).is_some(),
-            };
-            if merged { self.ops_synced += 1; }
+            if merge_payload(entry, &op.payload) { self.ops_synced += 1; }
         } else {
             let mut entry = match op.crdt_type {
                 CrdtType::GCounter => GCounter::from_bytes(&op.payload).map(CrdtEntry::GCounter),
@@ -266,6 +331,70 @@ impl CrdtManager {
         self.entries.iter().map(|(id, entry)| CrdtOp {
             crdt_id: *id, crdt_type: entry.crdt_type(), payload: entry.payload_bytes(),
         }).collect()
+    }
+
+    /// Generate delta-state sync ops for all entries.
+    ///
+    /// Entries without a recorded sync base (never synced before — e.g.
+    /// freshly created or learned during join) ship as full-state ops; all
+    /// others ship only the changes since the last call. Unchanged entries
+    /// produce no op at all. The current state becomes the new base for the
+    /// next round.
+    ///
+    /// Convergence is identical to shipping full states: for a peer that
+    /// holds the base, merging the delta produces exactly the state that
+    /// merging the full entry would.
+    ///
+    /// **Delivery assumption:** the base advances when the ops are
+    /// *generated*, so a delta lost in transit is not re-sent. Periodic
+    /// full-state syncs ([`generate_sync_ops`](CrdtManager::generate_sync_ops))
+    /// remain the repair mechanism after message loss.
+    pub fn generate_delta_sync_ops(&mut self) -> Vec<CrdtDeltaOp> {
+        let mut ops = Vec::new();
+        for (id, entry) in &self.entries {
+            match self.sync_base.get(id) {
+                None => ops.push(CrdtDeltaOp {
+                    op: CrdtOp { crdt_id: *id, crdt_type: entry.crdt_type(), payload: entry.payload_bytes() },
+                    is_delta: false,
+                }),
+                Some(base) => {
+                    if let Some(delta) = entry.delta_since(base) {
+                        ops.push(CrdtDeltaOp {
+                            op: CrdtOp { crdt_id: *id, crdt_type: delta.crdt_type(), payload: delta.payload_bytes() },
+                            is_delta: true,
+                        });
+                    }
+                }
+            }
+        }
+        // Record the new base: the next delta covers changes from now on.
+        // Merged-in remote state is deliberately *not* folded into the base
+        // here (only `generate_delta_sync_ops` advances it), so a delta may
+        // echo a peer's own state back to it — a harmless idempotent no-op.
+        self.sync_base = self.entries.clone();
+        ops
+    }
+
+    /// Apply a delta-tagged sync op received from a peer.
+    ///
+    /// Full-state ops behave exactly like [`apply_op`](CrdtManager::apply_op)
+    /// (including creating the entry on first sight). Delta ops only merge
+    /// into an entry this manager already has: a delta is meaningless
+    /// without the base it was computed against, so unknown ids are ignored
+    /// — the entry will arrive via a full-state op (the join fallback).
+    pub fn apply_delta_op(&mut self, delta_op: CrdtDeltaOp) {
+        if !delta_op.is_delta {
+            self.apply_op(delta_op.op);
+            return;
+        }
+        let op = delta_op.op;
+        if let Some(entry) = self.entries.get_mut(&op.crdt_id) {
+            // Same staleness guard as apply_op.
+            if entry.crdt_type() != op.crdt_type {
+                return;
+            }
+            if merge_payload(entry, &op.payload) { self.ops_synced += 1; }
+        }
     }
 
     pub fn queue_sync(&mut self, id: CrdtId) {
@@ -600,5 +729,220 @@ mod tests {
         let mut b = CrdtManager::new(2);
         b.apply_op(round_tripped);
         assert_eq!(b.get_gcounter_mut(id).unwrap().value(), 42);
+    }
+
+    // -----------------------------------------------------------------------
+    // Delta-state replication
+    // -----------------------------------------------------------------------
+
+    /// Apply every generated delta sync op from `source` to `target`
+    /// (the mock-network counterpart of `sync_all`).
+    fn sync_all_delta(source: &mut CrdtManager, target: &mut CrdtManager) {
+        let ops = source.generate_delta_sync_ops();
+        for op in ops {
+            target.apply_delta_op(op);
+        }
+    }
+
+    #[test]
+    fn test_delta_op_round_trip() {
+        let mut a = CrdtManager::new(1);
+        let (id, mut counter) = a.create_gcounter();
+        counter.increment_by(42);
+        a.entries.insert(id, CrdtEntry::GCounter(counter));
+
+        let ops = a.generate_delta_sync_ops();
+        assert_eq!(ops.len(), 1);
+        let bytes = ops[0].to_bytes();
+        let round_tripped = CrdtDeltaOp::from_bytes(&bytes).expect("CrdtDeltaOp round-trips");
+        assert_eq!(round_tripped, ops[0]);
+    }
+
+    #[test]
+    fn test_first_delta_sync_ships_full_state() {
+        // Join fallback: an entry that was never synced must ship whole.
+        let mut a = CrdtManager::new(1);
+        let (id, mut counter) = a.create_gcounter();
+        counter.increment_by(7);
+        a.entries.insert(id, CrdtEntry::GCounter(counter));
+
+        let ops = a.generate_delta_sync_ops();
+        assert_eq!(ops.len(), 1);
+        assert!(!ops[0].is_delta, "first sync must be a full-state op");
+
+        let mut b = CrdtManager::new(2);
+        b.apply_delta_op(ops[0].clone());
+        assert_eq!(b.get_gcounter_mut(id).unwrap().value(), 7);
+    }
+
+    #[test]
+    fn test_second_delta_sync_ships_only_changes() {
+        let mut a = CrdtManager::new(1);
+        let (id, mut counter) = a.create_gcounter();
+        counter.increment_by(7);
+        // Give the counter a second per-node entry (as if learned from a
+        // peer) so a one-entry delta is strictly smaller than full state.
+        let mut foreign = GCounter::new(2);
+        foreign.increment_by(100);
+        counter.merge(&foreign);
+        a.entries.insert(id, CrdtEntry::GCounter(counter));
+
+        let full = a.generate_delta_sync_ops();
+        a.get_gcounter_mut(id).unwrap().increment_by(3);
+        let delta = a.generate_delta_sync_ops();
+
+        assert_eq!(delta.len(), 1);
+        assert!(delta[0].is_delta, "second sync must be a delta op");
+        // The delta carries only the changed entry; the full state carries
+        // both per-node entries.
+        assert!(delta[0].op.payload.len() < full[0].op.payload.len());
+        // An unchanged entry produces no op at all.
+        assert!(a.generate_delta_sync_ops().is_empty());
+    }
+
+    #[test]
+    fn test_delta_ignored_for_unknown_entry() {
+        // A delta without its base is meaningless: it must not create the
+        // entry (that is what the full-state join fallback is for).
+        let mut a = CrdtManager::new(1);
+        let mut b = CrdtManager::new(2);
+        let (id, mut counter) = a.create_gcounter();
+        counter.increment_by(7);
+        a.entries.insert(id, CrdtEntry::GCounter(counter));
+
+        // Establish A's base, then produce a genuine delta B has no base for.
+        let _ = a.generate_delta_sync_ops();
+        a.get_gcounter_mut(id).unwrap().increment_by(1);
+        let delta = a.generate_delta_sync_ops();
+        assert!(delta[0].is_delta);
+
+        let synced_before = b.ops_synced();
+        b.apply_delta_op(delta[0].clone());
+        assert!(b.is_empty(), "delta must not create an unknown entry");
+        assert_eq!(b.ops_synced(), synced_before);
+    }
+
+    #[test]
+    fn test_gcounter_delta_convergence() {
+        let mut a = CrdtManager::new(1);
+        let mut b = CrdtManager::new(2);
+
+        let id = {
+            let (id, mut counter) = a.create_gcounter();
+            counter.increment_by(3);
+            a.entries.insert(id, CrdtEntry::GCounter(counter));
+            id
+        };
+
+        // B joins: first delta sync ships the full state.
+        sync_all_delta(&mut a, &mut b);
+        assert_eq!(b.len(), 1);
+
+        // Divergent updates, then delta exchange in both directions.
+        a.get_gcounter_mut(id).unwrap().increment_by(2);
+        b.get_gcounter_mut(id).unwrap().increment_by(5);
+
+        sync_all_delta(&mut a, &mut b);
+        sync_all_delta(&mut b, &mut a);
+
+        assert_eq!(
+            a.get_gcounter_mut(id).unwrap().value(),
+            b.get_gcounter_mut(id).unwrap().value()
+        );
+        assert_eq!(a.get_gcounter_mut(id).unwrap().value(), 10);
+    }
+
+    #[test]
+    fn test_orset_delta_convergence() {
+        let mut a = CrdtManager::new(1);
+        let mut b = CrdtManager::new(2);
+
+        let id = {
+            let (id, mut set) = a.create_orset();
+            set.add("apple".to_string());
+            a.entries.insert(id, CrdtEntry::ORSet(set));
+            id
+        };
+
+        sync_all_delta(&mut a, &mut b);
+
+        a.get_orset_mut(id).unwrap().add("banana".to_string());
+        b.get_orset_mut(id).unwrap().add("cherry".to_string());
+
+        sync_all_delta(&mut a, &mut b);
+        sync_all_delta(&mut b, &mut a);
+
+        let va = a.get_orset_mut(id).unwrap().value();
+        let vb = b.get_orset_mut(id).unwrap().value();
+        assert_eq!(va, vb);
+        assert!(va.contains("apple"));
+        assert!(va.contains("banana"));
+        assert!(va.contains("cherry"));
+    }
+
+    #[test]
+    fn test_delta_sync_matches_full_sync_result() {
+        // Same workload converged two ways — full-state ops vs delta ops —
+        // must yield identical resulting state.
+        let build = |m: &mut CrdtManager| -> CrdtId {
+            let (id, mut counter) = m.create_pncounter();
+            counter.increment_by(4);
+            m.entries.insert(id, CrdtEntry::PNCounter(counter));
+            id
+        };
+
+        // Full-state path.
+        let mut a_full = CrdtManager::new(1);
+        let mut b_full = CrdtManager::new(2);
+        let id_full = build(&mut a_full);
+        sync_all(&mut a_full, &mut b_full);
+        a_full.get_pncounter_mut(id_full).unwrap().increment_by(3);
+        b_full.get_pncounter_mut(id_full).unwrap().decrement_by(2);
+        sync_all(&mut a_full, &mut b_full);
+        sync_all(&mut b_full, &mut a_full);
+
+        // Delta path.
+        let mut a_delta = CrdtManager::new(1);
+        let mut b_delta = CrdtManager::new(2);
+        let id_delta = build(&mut a_delta);
+        sync_all_delta(&mut a_delta, &mut b_delta);
+        a_delta.get_pncounter_mut(id_delta).unwrap().increment_by(3);
+        b_delta.get_pncounter_mut(id_delta).unwrap().decrement_by(2);
+        sync_all_delta(&mut a_delta, &mut b_delta);
+        sync_all_delta(&mut b_delta, &mut a_delta);
+
+        assert_eq!(
+            a_full.get_pncounter_mut(id_full).unwrap(),
+            a_delta.get_pncounter_mut(id_delta).unwrap()
+        );
+        assert_eq!(
+            b_full.get_pncounter_mut(id_full).unwrap(),
+            b_delta.get_pncounter_mut(id_delta).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_full_sync_repairs_after_delta_loss() {
+        // A dropped delta is not re-sent (the base already advanced), but a
+        // full-state sync repairs the divergence — the documented fallback.
+        let mut a = CrdtManager::new(1);
+        let mut b = CrdtManager::new(2);
+
+        let id = {
+            let (id, mut counter) = a.create_gcounter();
+            counter.increment_by(3);
+            a.entries.insert(id, CrdtEntry::GCounter(counter));
+            id
+        };
+        sync_all_delta(&mut a, &mut b);
+
+        // This update's delta is "lost": generated (advancing the base) but
+        // never applied to B.
+        a.get_gcounter_mut(id).unwrap().increment_by(5);
+        let _lost = a.generate_delta_sync_ops();
+
+        // Full-state fallback repairs B.
+        sync_all(&mut a, &mut b);
+        assert_eq!(b.get_gcounter_mut(id).unwrap().value(), 8);
     }
 }

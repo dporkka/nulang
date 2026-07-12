@@ -43,6 +43,13 @@ impl<T: Clone> LWWRegister<T> {
         }
         self.clock.counter = self.clock.counter.max(other.clock.counter);
     }
+
+    /// Delta relative to `base`: the whole register when it holds a newer
+    /// write than `base` (a register's delta *is* the winning write), or
+    /// `None` when the timestamp did not advance.
+    pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        if self.timestamp > base.timestamp { Some(self.clone()) } else { None }
+    }
 }
 
 impl LWWRegister<String> {
@@ -118,6 +125,16 @@ impl<T: Clone + Eq + Hash> MVRegister<T> {
             let max_ts = self.values.iter().map(|(_, t)| *t).max().unwrap();
             self.values.retain(|(_, t)| *t == max_ts);
         }
+    }
+
+    /// Delta relative to `base`: the `(value, timestamp)` pairs not present
+    /// in `base`. `None` when no value was added. Because `merge` prunes to
+    /// the maximum timestamp, a receiver holding `base` ends up with the
+    /// same retained set whether it merges this delta or the full state.
+    pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        let values: HashSet<(T, LamportTime)> =
+            self.values.difference(&base.values).cloned().collect();
+        if values.is_empty() { None } else { Some(Self { values, clock: self.clock }) }
     }
 }
 
@@ -246,6 +263,22 @@ impl<T: Clone + PartialEq> RGA<T> {
             }
         }
         self.clock.counter = self.clock.counter.max(other.clock.counter);
+    }
+
+    /// Delta relative to `base`: the elements whose id is unknown to `base`
+    /// or whose timestamp advanced (e.g. a tombstone). `None` when nothing
+    /// changed. New elements keep their relative order so merging the delta
+    /// produces the same sorted sequence as merging the full state.
+    pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        let elements: Vec<RGAElement<T>> = self.elements.iter()
+            .filter(|e| {
+                base.elements.iter()
+                    .find(|b| b.id == e.id)
+                    .map_or(true, |b| e.timestamp > b.timestamp)
+            })
+            .cloned()
+            .collect();
+        if elements.is_empty() { None } else { Some(Self { elements, clock: self.clock }) }
     }
 
     fn insert_element_sorted(&mut self, elem: RGAElement<T>) {
@@ -561,5 +594,108 @@ mod tests {
         let restored = RGA::from_bytes(&bytes).unwrap();
         assert_eq!(rga.value(), restored.value());
         assert_eq!(rga.len(), restored.len());
+    }
+
+    // ---- Delta-state replication ----
+    //
+    // Merging the delta into a replica that already holds `base` must
+    // produce exactly the same state as merging the full state.
+
+    #[test]
+    fn test_lww_delta_since_unchanged() {
+        let reg = LWWRegister::new(1, "hello".to_string());
+        assert!(reg.delta_since(&reg.clone()).is_none());
+    }
+
+    #[test]
+    fn test_lww_delta_merge_equals_full_merge() {
+        let base = LWWRegister::new(1, "v1".to_string());
+        let mut full = base.clone();
+        full.write("v2".to_string());
+
+        let delta = full.delta_since(&base).expect("newer write");
+
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
+    }
+
+    #[test]
+    fn test_mv_delta_merge_equals_full_merge() {
+        let mut base = MVRegister::new(1);
+        base.write("old".to_string());
+        let mut full = base.clone();
+        full.write("new".to_string());
+
+        let delta = full.delta_since(&base).expect("new value");
+        assert_eq!(delta.values.len(), 1);
+
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
+    }
+
+    #[test]
+    fn test_mv_delta_carries_concurrent_conflict() {
+        // A conflict set (two values at the same max timestamp) that grew
+        // since the base must travel whole so the receiver sees the same
+        // conflict as a full-state merge would show.
+        let mut base = MVRegister::new(1);
+        base.write("base".to_string());
+        let mut full = base.clone();
+        let ts = full.values.iter().map(|(_, t)| *t).max().unwrap();
+        full.values.insert(("conflict".to_string(), ts));
+
+        let delta = full.delta_since(&base).expect("conflict value added");
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
+        assert_eq!(via_delta.read().len(), 2);
+    }
+
+    #[test]
+    fn test_rga_delta_merge_equals_full_merge() {
+        let mut base = RGA::new(1);
+        base.insert_after(None, "a".to_string());
+        let mut full = base.clone();
+        full.insert_at(1, "b".to_string());
+        full.insert_at(2, "c".to_string());
+
+        let delta = full.delta_since(&base).expect("elements added");
+        assert_eq!(delta.elements.len(), 2);
+
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
+    }
+
+    #[test]
+    fn test_rga_delta_carries_tombstone() {
+        let mut base = RGA::new(1);
+        let id_a = base.insert_after(None, "a".to_string());
+        let id_b = base.insert_after(None, "b".to_string());
+        // Simulate a replica that merged a tombstone for `a` from elsewhere:
+        // the element id is known to `base` but its timestamp advanced.
+        let mut full = base.clone();
+        if let Some(elem) = full.elements.iter_mut().find(|e| e.id == id_a) {
+            elem.value = None;
+            elem.timestamp = LamportTime::new(elem.timestamp.counter + 10, 99);
+        }
+        full.delete(id_b);
+
+        let delta = full.delta_since(&base).expect("tombstone travels");
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
     }
 }
