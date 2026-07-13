@@ -2983,9 +2983,25 @@ impl Runtime {
             self.send_message(actor_id, behavior, args);
             return;
         }
-        let mut transport = self.distributed.transport.take().unwrap();
-        let cluster = self.distributed.cluster.take().unwrap();
-        let mut resolver = self.distributed.resolver.take().unwrap();
+        let mut transport = match self.distributed.transport.take() {
+            Some(t) => t,
+            None => return,
+        };
+        let cluster = match self.distributed.cluster.take() {
+            Some(c) => c,
+            None => {
+                self.distributed.transport = Some(transport);
+                return;
+            }
+        };
+        let mut resolver = match self.distributed.resolver.take() {
+            Some(r) => r,
+            None => {
+                self.distributed.transport = Some(transport);
+                self.distributed.cluster = Some(cluster);
+                return;
+            }
+        };
         distributed::send_distributed(self, &mut transport, &cluster, &mut resolver, target, behavior, args);
         self.distributed.transport = Some(transport);
         self.distributed.cluster = Some(cluster);
@@ -2994,16 +3010,35 @@ impl Runtime {
 
     pub fn process_network(&mut self) {
         if !self.distributed.enabled { return; }
-        let mut transport = self.distributed.transport.take().unwrap();
-        let mut cluster = self.distributed.cluster.take().unwrap();
-        let mut resolver = self.distributed.resolver.take().unwrap();
+        let mut transport = match self.distributed.transport.take() {
+            Some(t) => t,
+            None => return,
+        };
+        let mut cluster = match self.distributed.cluster.take() {
+            Some(c) => c,
+            None => {
+                self.distributed.transport = Some(transport);
+                return;
+            }
+        };
+        let mut resolver = match self.distributed.resolver.take() {
+            Some(r) => r,
+            None => {
+                self.distributed.transport = Some(transport);
+                self.distributed.cluster = Some(cluster);
+                return;
+            }
+        };
         distributed::process_network_packets(self, &mut transport, &mut cluster, &mut resolver);
         self.distributed.transport = Some(transport);
         self.distributed.cluster = Some(cluster);
         self.distributed.resolver = Some(resolver);
         let actions = {
-            let cluster = self.distributed.cluster.as_mut().unwrap();
-            cluster.tick()
+            if let Some(cluster) = self.distributed.cluster.as_mut() {
+                cluster.tick()
+            } else {
+                Vec::new()
+            }
         };
         for action in actions {
             match action {
