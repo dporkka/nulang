@@ -41,7 +41,7 @@ Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM 
 - ✅ All 1096 tests pass with `cargo test`
 - ✅ NaN-boxed `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`)
 - ✅ 137-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, FFI, Python, distribution)
-- ✅ Hindley-Milner type inference with algebraic effects
+- ✅ Hindley-Milner type inference with algebraic effects and user-declared variant types (construction + pattern matching)
 - ✅ Actor runtime: spawn, send, monitors, links, supervision, timers, registry, process groups, selective `receive`
 - ✅ ORCA-style per-actor GC with cycle detection
 - ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams
@@ -118,6 +118,7 @@ Runnable programs live in [`examples/`](examples/):
 cargo run -- examples/fibonacci.nu       # closures + recursion
 cargo run -- examples/effects.nu         # algebraic effect handlers
 cargo run -- examples/counter_actor.nu   # actor declaration + spawn
+cargo run -- examples/variant_option.nu  # user-declared variant types (Option)
 ```
 
 ---

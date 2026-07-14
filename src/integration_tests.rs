@@ -136,6 +136,18 @@ mod tests {
         );
     }
 
+    /// Assert that running source produces the given string value.
+    fn assert_string(source: &str, expected: &str) {
+        let (module, _ty) = compile_source(source).unwrap();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let value = vm.run().unwrap();
+        let string_id = value.as_string_id().expect("expected string result");
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.constant_string(module_idx, string_id).unwrap();
+        assert_eq!(content, expected, "unexpected string for: {}", source);
+    }
+
     /// Run source through the full compiler pipeline using a real actor runtime.
     fn run_source_with_runtime(
         source: &str,
@@ -1082,6 +1094,167 @@ code
 "#;
         let (value, _ty) = run_source(source).unwrap();
         assert!(value.as_int().is_some(), "expected function-index value");
+    }
+
+    #[test]
+    fn test_variant_spec_example_end_to_end() {
+        // The canonical SPEC2 §3.4.1 example, run end-to-end: generic
+        // two-parameter variant declaration, construction in if-branches,
+        // variant type annotations, and a match that binds the payload.
+        let source = r#"
+type Result[T, E] = Ok(T) | Error(E)
+
+fn safe_divide(a: Float, b: Float) -> Result[Float, String] {
+  if b == 0.0 then
+    Error("Division by zero")
+  else
+    Ok(a / b)
+}
+
+fn describe(r: Result[Float, String]) -> String {
+  match r with {
+    | Ok(value) => "ok"
+    | Error(msg) => msg
+  }
+}
+
+match safe_divide(6.0, 2.0) with {
+  | Ok(value) => value
+  | Error(msg) => 0.0
+}
+"#;
+        assert_float(source, 3.0);
+    }
+
+    #[test]
+    fn test_variant_spec_example_error_arm_binds_string() {
+        // The Error arm of the §3.4.1 example: the String payload must be
+        // constructed, matched by tag, and bound into the arm body.
+        let source = r#"
+type Result[T, E] = Ok(T) | Error(E)
+
+fn safe_divide(a: Float, b: Float) -> Result[Float, String] {
+  if b == 0.0 then
+    Error("Division by zero")
+  else
+    Ok(a / b)
+}
+
+fn describe(r: Result[Float, String]) -> String {
+  match r with {
+    | Ok(value) => "ok"
+    | Error(msg) => msg
+  }
+}
+
+describe(safe_divide(1.0, 0.0))
+"#;
+        assert_string(source, "Division by zero");
+    }
+
+    #[test]
+    fn test_variant_construction_match_binds_payload() {
+        // Core construction test: `Some(41)` builds a value and the match
+        // binds the payload; the None arm must not be taken.
+        let source = r#"
+type Option[T] = Some(T) | None
+match Some(41) with {
+  | Some(x) => x
+  | None => 0
+}
+"#;
+        assert_int(source, 41);
+    }
+
+    #[test]
+    fn test_variant_match_payload_arithmetic() {
+        // The tag comparison lowering (record `ctor` field vs tag string
+        // via OpCode::SCmpEq) must select the `Some` arm and the payload
+        // must flow into arm-body arithmetic.
+        let source = r#"
+type Option[T] = Some(T) | None
+match Some(41) with {
+  | Some(x) => x + 1
+  | None => 0
+}
+"#;
+        assert_int(source, 42);
+    }
+
+    #[test]
+    fn test_variant_nullary_ctor_arm_taken() {
+        // A payload-less constructor is the bare tag; `None` must dispatch
+        // to the `None` arm and not to `Some(x)`.
+        let source = r#"
+type Option[T] = Some(T) | None
+match None with {
+  | Some(x) => 1
+  | None => 0
+}
+"#;
+        assert_int(source, 0);
+    }
+
+    #[test]
+    fn test_variant_nested_construction() {
+        // Nested construction `Some(Some(2))` matched by a nested pattern:
+        // the outer tag selects the arm and the inner payload binds.
+        let source = r#"
+type Option[T] = Some(T) | None
+match Some(Some(2)) with {
+  | Some(Some(x)) => x
+  | Some(None) => 0
+  | None => 0
+}
+"#;
+        assert_int(source, 2);
+    }
+
+    #[test]
+    fn test_variant_returned_from_function() {
+        // A variant built inside a function must survive the return and be
+        // matched by the caller.
+        let source = r#"
+type Option[T] = Some(T) | None
+fn wrap(x: Int) -> Option[Int] { Some(x) }
+match wrap(7) with {
+  | Some(v) => v + 1
+  | None => 0
+}
+"#;
+        assert_int(source, 8);
+    }
+
+    #[test]
+    fn test_variant_let_bound_matched_later() {
+        // A let-bound variant value is matched in a later expression.
+        let source = r#"
+type Option[T] = Some(T) | None
+let v = Some(5) in
+match v with {
+  | Some(x) => x * 2
+  | None => 0
+}
+"#;
+        assert_int(source, 10);
+    }
+
+    #[test]
+    fn test_variant_int_and_string_payloads() {
+        // One variant type exercised with payloads of different types:
+        // the Int payload is bound and returned; the String-payload
+        // constructor is matched by tag.
+        let source = r#"
+type Result[T, E] = Ok(T) | Error(E)
+fn code(r: Result[Int, String]) -> Int {
+  match r with {
+    | Ok(v) => v
+    | Error(msg) => 0
+  }
+}
+code(Ok(3)) + code(Error("boom"))
+"#;
+        assert_int(source, 3);
     }
 
     // -----------------------------------------------------------------------

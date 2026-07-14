@@ -753,6 +753,8 @@ fn describe(r: Result[Float, String]) -> String {
 }
 ```
 
+> **Implementation status.** Declared variants work end-to-end: constructors create values, constructor names are first-class values (a payload constructor used as a value, such as `let f = Some in f(1)`, behaves as a one-argument function), and `match` destructures them with payload binding. At runtime a payload-less constructor is the bare tag string and a payload-carrying constructor is a record `{ ctor: <name>, payload: <value> }`; matching string-compares the tag. One limitation remains: a match arm tests only its outermost constructor tag — a nested pattern such as `Some(Some(x))` binds the inner payload but does not reject an inner `None` (Section 6.7).
+
 ### 3.4.2 Enums
 
 An enum is a variant type where no constructor carries data. Enums use the same concise syntax:
@@ -1441,7 +1443,7 @@ match tree {
 }
 ```
 
-Pattern guards (`| pat if cond => ...`) and list-cons patterns are planned for a future version.
+Pattern guards (`| pat if cond => ...`) and list-cons patterns are planned for a future version. Two structural limitations apply today: a variant-pattern arm tests only its outermost constructor tag — a nested pattern like `Some(Some(x))` binds the inner payload but does not reject a non-matching inner constructor — and tuple patterns are not matched structurally: the arm always matches and its element bindings are not wired up, so the `Node((l, v, r))` form above parses but an arm body referencing `l`, `v`, or `r` fails to compile.
 
 ## 6.8 Lambda Expressions
 
