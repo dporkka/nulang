@@ -3,7 +3,7 @@
 use crate::ai::request::ToolSchema;
 
 // ---------------------------------------------------------------------------
-// Opcodes (140 total across 18 categories)
+// Opcodes (137 total across 17 categories)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

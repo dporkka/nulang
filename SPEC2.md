@@ -877,7 +877,7 @@ String interpolation (`"Welcome to {name}!"`) is likewise **Planned**: the curre
 
 ## 3.8 Reference Types
 
-Nulang's reference type system is adapted from Pony's capability system. Every reference to an object carries a *reference capability* that determines how it may be read, written, and shared. Capabilities are checked entirely at compile time and **erased at runtime** — the virtual machine does not re-check them (the `CapChk`/`CapUp`/`CapDown`/`CapSend` opcodes are currently no-ops).
+Nulang's reference type system is adapted from Pony's capability system. Every reference to an object carries a *reference capability* that determines how it may be read, written, and shared. Capabilities are checked entirely at compile time and **erased at runtime** — the virtual machine does not re-check them (there are no capability opcodes; `mir::RValue::CapabilityCheck` compiles to `Const1`, i.e. `true`, in `src/mir_codegen.rs`).
 
 ### 3.8.1 The Seven Reference Capabilities
 
@@ -1205,7 +1205,7 @@ The effect system guarantees several safety properties:
 
 Nulang employs two complementary capability systems that together provide comprehensive security and safety guarantees:
 
-1. **Reference capabilities** control how data can be read, written, and shared across actor boundaries. They are part of the type system and are checked at compile time. **Implemented** — and erased at runtime (the VM's capability opcodes are no-ops).
+1. **Reference capabilities** control how data can be read, written, and shared across actor boundaries. They are part of the type system and are checked at compile time. **Implemented** — and erased at runtime (no capability opcodes exist; capability checks compile to `Const1` in `src/mir_codegen.rs`).
 
 2. **Authority capabilities** control what effects an actor can perform. They are declared on actors and checked both at compile time and runtime. **Planned** — the `capability` keyword does not exist in the current implementation; effect authority is currently expressed only through effect rows (Chapter 4).
 

@@ -741,15 +741,15 @@ let hash = crypto_lib.call("sha256", data)
 
 ## 16. Design Principles for BEAM Primitives in Nulang
 
-1. **Type safety first.** *(Target.)* As implemented, `spawn`/`send`/`ask` do not return `Result` — spawn is infallible and actor identity is a bare `u64` carried as a NaN-boxed `ActorRef`. Remote sends to unresolvable targets are silently dropped (`runtime/distributed.rs:677`). The `Result[T, Error]` surface remains the design goal.
+1. **Type safety first.** *(Target.)* As implemented, `spawn`/`send`/`ask` do not return `Result` — spawn is infallible and actor identity is a bare `u64` carried as a NaN-boxed `ActorRef`. Remote sends to unresolvable targets are silently dropped (`runtime/distributed.rs:682`). The `Result[T, Error]` surface remains the design goal.
 
-2. **Capability-gated.** *(Target.)* No capability checks gate actor operations today; capability opcodes (`CapChk`/`CapUp`/`CapDown`/`CapSend`) are MVP no-ops in the VM.
+2. **Capability-gated.** *(Target.)* No capability checks gate actor operations today; capabilities are compile-time only — there are no capability opcodes (checks compile to `Const1` in `src/mir_codegen.rs`).
 
 3. **Effect-tracked.** Implemented with dedicated effects: `spawn` adds `Spawn`, `send` adds `Send`, `receive` adds `Receive`, `ask` adds `Send + Receive` (`src/effect_checker.rs`) — not `[IO]` as earlier drafts stated.
 
 4. **Virtual actor compatible.** *(Target.)* All primitives are planned to work with local and virtual actors; only `ActorAddress::Local`/`Remote` routing exists today.
 
-5. **Mailbox-first.** *(Target.)* Behaviors currently run as message handlers dispatched by `Runtime::step_actor`; `receive` is not yet a real consumption mechanism (§2.2).
+5. **Mailbox-first.** *(Target.)* Behaviors currently run as message handlers dispatched by `Runtime::step_actor`; selective `receive` (`ReceiveMatch` 0x8F) shipped as a non-blocking mailbox scan — it never suspends the actor the way Erlang's `receive` does (§17.5 item 4).
 
 6. **No `apply/3`.** Dynamic function application is intentionally omitted. Nulang's typed system uses behavior dispatch instead. (Holds today.)
 
@@ -765,22 +765,22 @@ Verified by reading `src/runtime/`, `src/bytecode.rs`, and `src/vm.rs` (post-v0.
 
 | Area | Implementation | Where |
 |------|----------------|-------|
-| Actor lifecycle | `Runtime::spawn_actor` / `spawn_persistent_actor` / `spawn_workflow_actor`; ids from a global `AtomicU64` (`fresh_actor_id`); state machine `Created → Running → Waiting → Suspended → Terminated` | `runtime/mod.rs:175`, `runtime/actor.rs:11` |
-| Language surface | `spawn Actor { field = v }`, `send a b(args)`, `ask a b(args)`, `self`, `receive { \| B(p) => e }` (syntax only), `emit`, `migrate a to node` | `parser.rs:1363`, `lexer.rs:699` |
-| VM actor opcodes (handled) | `Spawn` 0x80, `Send` 0x81, `Ask` 0x82, `SelfOp` 0x83, `Receive` 0x84 (unreachable — §17.5 item 4), `StateGet` 0x8B, `StateSet` 0x8C, `Emit` 0x8D, `SignalWait` 0x8E | `bytecode.rs:108`, `vm.rs:1297` |
-| VM actor opcodes (defined, **unhandled** — fall to "unimplemented opcode") | `Monitor` 0x85, `Demon` 0x86, `Link` 0x87, `Unlink` 0x88, `Exit` 0x89, `Yield` 0x8A | `vm.rs:2222` |
+| Actor lifecycle | `Runtime::spawn_actor` / `spawn_persistent_actor` / `spawn_workflow_actor`; ids from a global `AtomicU64` (`fresh_actor_id`); state machine `Created → Running → Waiting → Suspended → Terminated` | `runtime/mod.rs:212`, `runtime/actor.rs:10` |
+| Language surface | `spawn Actor { field = v }`, `send a b(args)`, `ask a b(args)`, `self`, `receive { \| B(p) => e }` (selective receive shipped — §17.5 item 4), `emit`, `migrate a to node` | `parser.rs:1749`, `lexer.rs:815` |
+| VM actor opcodes (handled) | `Spawn` 0x80, `Send` 0x81, `Ask` 0x82, `SelfOp` 0x83, `Receive` 0x84 (no-match fallback emitted by MIR lowering), `StateGet` 0x8B, `StateSet` 0x8C, `Emit` 0x8D, `SignalWait` 0x8E, `ReceiveMatch` 0x8F | `bytecode.rs:108`, `vm.rs:1373` |
+| VM actor opcodes (defined, **unhandled** — fall to "unimplemented opcode") | `Monitor` 0x85, `Demon` 0x86, `Link` 0x87, `Unlink` 0x88, `Exit` 0x89, `Yield` 0x8A | `vm.rs:2387` |
 | Mailbox | Unbounded lock-free MPSC via `crossbeam::queue::SegQueue`; push never fails, never drops; epoch-based reclamation; `Message { behavior_id: u16, payload: Vec<Value>, sender: u64, priority }` with `MessagePriority::{System=0, Normal=1, Bulk=2}` (stored, not scheduling-affecting) | `runtime/mailbox.rs` |
 | Scheduler | Work-stealing: Chase-Lev `Worker` deque per worker (LIFO local, FIFO steal) + global `Injector`; `Runtime::new` configures **4 workers**; idle backoff (3 empty polls → 100 µs sleep); profiling counters (`SchedulerStats`) | `runtime/scheduler.rs` |
-| Preemption | Reduction counting: +1 per message processed; yield at `max_reductions = 1000`; actor re-enqueued only while mailbox non-empty | `runtime/actor.rs:110`, `runtime/mod.rs:1644` |
-| GC | Per-actor ORCA: 64 KiB bump-allocator heaps (5 size classes, free lists), `local_count`/`foreign_count` per object; cross-actor sends bump `foreign_count` via `OrcaCoordinator`; deferred frees pumped every **256 scheduler ticks** and on run-queue drain | `runtime/heap.rs`, `runtime/gc.rs`, `runtime/mod.rs:1320` |
+| Preemption | Reduction counting: +1 per message processed; yield at `max_reductions = 1000`; actor re-enqueued only while mailbox non-empty | `runtime/actor.rs:120`, `runtime/mod.rs:1894` |
+| GC | Per-actor ORCA: 64 KiB bump-allocator heaps (5 size classes, free lists), `local_count`/`foreign_count` per object; cross-actor sends bump `foreign_count` via `OrcaCoordinator`; deferred frees pumped every **256 scheduler ticks** and on run-queue drain | `runtime/heap.rs`, `runtime/gc.rs`, `runtime/mod.rs:1514` |
 | Cycle detection | Incremental `CycleDetector`: per-actor pinned sentinel node, foreign-ref edge graph with ref counts, full scan every **10 epochs**, suspect marking, DFS, trial decrements, reclamation | `runtime/orca_cycle.rs` |
 | Links/monitors/exit | `link_actors`/`unlink_actors`/`monitor`/`demonitor`/`exit_actor`/`kill_actor`; abnormal exit cascades to non-trapping links; trapping actors get a `System` message `[dead_id, linked_id]`; monitors get DOWN `[target_id, watcher_id, reason_code]` (codes: Normal 0, Error 1, Kill 2, Killed 3, Shutdown 4, Custom 5), all with `behavior_id = 0`; monitoring a dead actor → immediate DOWN `Error("noproc")` | `runtime/mod.rs:2461` |
 | Supervision | 3 strategies (`OneForOne`, `OneForAll`, `RestForOne`), 3 policies (`Permanent`, `Temporary`, `Transient`), per-spec rate limits (default 5 restarts / 60 s), escalation with cascading supervisor shutdown | `runtime/supervisor.rs` |
 | Registry | `ActorRegistry`: register/unregister/whereis/registered + name validation + auto-cleanup on exit | `runtime/registry.rs` |
 | Process groups | `ProcessGroups`: join/leave/leave_all/members/is_member/member_count/which_groups; empty-group pruning; auto-leave on exit | `runtime/process_groups.rs` |
-| Timers | `TimerWheel` (min-heap, lazy cancel): `send_after`, `send_after_with_context`, `exit_after`, `kill_after`, `cancel`, `remaining`, `tick`; driven every scheduler iteration; durable workflow timers via `perform Timer.sleep(name, ms)` (journaled, re-armed on recovery) | `runtime/timer.rs`, `runtime/mod.rs:1925` |
-| Persistence | `PersistenceStore` trait + `MemoryStore`, `JsonFileStore`, `SqliteStore` (rusqlite); per-field `StateModel` (`Local`/`Durable`/`EventSourced`/`Crdt`); journal (`JournalEntry`) + snapshot (`ActorSnapshot`, incl. `waiting_signal`); 8-variant `WorkflowEvent` journal; `recover_actor` replays journal + restores bytecode via `register_recovery_module`; pointers/strings normalize to `Nil` across restarts | `runtime/persistence.rs`, `runtime/mod.rs:1974` |
-| Event sourcing | `emit` opcode → `Runtime::emit_event` appends to `Actor.event_log`; saga compensation for failed workflow steps; workflow signals (`SignalWait` suspend/resume) | `runtime/mod.rs:785`, `vm.rs:1371` |
+| Timers | `TimerWheel` (min-heap, lazy cancel): `send_after`, `send_after_with_context`, `exit_after`, `kill_after`, `cancel`, `remaining`, `tick`; driven every scheduler iteration; durable workflow timers via `perform Timer.sleep(name, ms)` (journaled, re-armed on recovery) | `runtime/timer.rs`, `runtime/mod.rs:2185` |
+| Persistence | `PersistenceStore` trait + `MemoryStore`, `JsonFileStore`, `SqliteStore` (rusqlite); per-field `StateModel` (`Local`/`Durable`/`EventSourced`/`Crdt`); journal (`JournalEntry`) + snapshot (`ActorSnapshot`, incl. `waiting_signal`); 8-variant `WorkflowEvent` journal; `recover_actor` replays journal + restores bytecode via `register_recovery_module`; pointers/strings normalize to `Nil` across restarts | `runtime/persistence.rs`, `runtime/mod.rs:2498` |
+| Event sourcing | `emit` opcode → `Runtime::emit_event` appends to `Actor.event_log`; saga compensation for failed workflow steps; workflow signals (`SignalWait` suspend/resume) | `runtime/mod.rs:893`, `vm.rs:1438` |
 
 ### 17.2 Distribution wire protocol (implemented, previously undocumented here)
 
@@ -796,7 +796,7 @@ Custom TCP protocol in `src/runtime/network.rs`. Every frame:
 
 An **8-byte node-id handshake** (big-endian `u64`) is exchanged immediately after TCP connect, before any framed packets; a mismatch aborts the connection. Limits: `MAX_PACKET_LEN` 16 MiB, per-connection I/O timeout 30 s, internal channel capacity 1024.
 
-Packet types: `ActorMessage` = 0, `Heartbeat` = 1, `Ack` = 2 (serde-complete but unused in delivery paths), `SpawnRequest` = 3, `SpawnResponse` = 4, `CrdtSync` = 5, `Gossip` = 6. All serde is hand-rolled big-endian. `Value` payloads serialize under five tags — int / float / bool / string-id (u32) / unit; anything else (nil, actor refs, pointers) is written as raw-bit float and does **not** round-trip on read (see §17.5 item 12).
+Packet types: `ActorMessage` = 0, `Heartbeat` = 1, `Ack` = 2 (serde-complete but unused in delivery paths), `SpawnRequest` = 3, `SpawnResponse` = 4, `CrdtSync` = 5, `Gossip` = 6, `CrdtDeltaSync` = 7. All serde is hand-rolled big-endian. `Value` payloads serialize under five tags — int / float / bool / string-id (u32) / unit; anything else (nil, actor refs, pointers) is written as raw-bit float and does **not** round-trip on read (see §17.5 item 12).
 
 Cluster membership (`src/runtime/cluster.rs`) is gossip/SWIM-style: heartbeat every **500 ms**, heartbeat timeout **2 s**, suspicion **5 s**, failed-node retention **60 s**, gossip fanout **2**. `NodeStatus`: `Joining`, `Healthy`, `Suspicious`, `Failed`, `Leaving`. `ClusterState::tick` returns `ClusterAction::{SendHeartbeat, NodeJoined, NodeFailed, NodeLeft, SendGossip}` which `Runtime::process_network` executes. `SendGossip` is wired: `Packet::Gossip` carries the sender's compact membership view (`Vec<NodeGossip>` — node id, address, status, incarnation per member; address = family byte + octets + port), merged on receipt by `ClusterState::merge_membership` (higher incarnation wins; equal incarnation refreshes `last_heartbeat` as a liveness hint, which keeps relay-only nodes from being suspected). Transitive propagation works — a chain of pairwise seeds (B joins A, C joins B) converges without a full mesh; see `test_three_node_gossip_converges_chain_seeded`.
 
@@ -817,32 +817,32 @@ Location transparency (`src/runtime/distributed.rs`): `ActorAddress::{Local, Rem
 
 | Constant | Value | Where |
 |----------|-------|-------|
-| `max_reductions` (preemption) | 1000 | `runtime/actor.rs:110` |
-| Scheduler workers (`Runtime::new`) | 4 | `runtime/mod.rs:145` |
-| GC deferred-free pump interval | 256 scheduler ticks | `runtime/mod.rs:1320` |
-| Cycle-detection full-scan interval | 10 epochs | `runtime/orca_cycle.rs:348` |
-| Initial actor heap | 64 KiB | `runtime/actor.rs:88` |
+| `max_reductions` (preemption) | 1000 | `runtime/actor.rs:120` |
+| Scheduler workers (`Runtime::new`) | 4 | `runtime/mod.rs:179` |
+| GC deferred-free pump interval | 256 scheduler ticks | `runtime/mod.rs:1514` |
+| Cycle-detection full-scan interval | 10 epochs | `runtime/orca_cycle.rs:347` |
+| Initial actor heap | 64 KiB | `runtime/actor.rs:91` |
 | Mailbox capacity | unbounded (`SegQueue`; constructor arg ignored) | `runtime/mailbox.rs:49` |
 | Remote actor cache | 10,000 entries (LRU) | `runtime/distributed.rs:56` |
 | Supervisor restart defaults | 5 restarts / 60 s window | `runtime/supervisor.rs:82` |
 | Heartbeat interval / timeout / suspicion / retention | 500 ms / 2 s / 5 s / 60 s | `runtime/cluster.rs:38` |
 | Gossip fanout | 2 | `runtime/cluster.rs:50` |
-| `remote_ask` timeout | 5000 ms | `vm.rs:2015` |
+| `remote_ask` timeout | 5000 ms | `vm.rs:2132` |
 
 ### 17.5 Stubs and known gaps (flag for fixing)
 
 1. ~~**Remote send drops the behavior name.**~~ **FIXED.** `Packet::ActorMessage` now carries `behavior_name: String` on the wire (length-prefixed UTF-8, replacing the `behavior_id: u16` field); `process_network_packets` resolves it via `Runtime::behavior_id_for` against the target actor's behavior table, falling back to behavior 0 for unknown names — mirroring local `send_message`'s `unwrap_or(0)` (`runtime/distributed.rs`, `runtime/network.rs`).
-2. ~~**Remote spawn is send-only.**~~ **FIXED (MVP).** `process_network_packets` now handles `Packet::SpawnRequest`: the receiving node spawns a fresh actor with the request's `initial_state` and registers the requested behavior — but only if that behavior was explicitly offered via `Runtime::register_spawnable_behavior` (MVP scope: remote spawn supports native behaviors the receiver opted into, not arbitrary or bytecode behaviors). Unknown names are answered with `SpawnResponse{success:false}` and no actor is created — the no-crash counterpart of the local unknown-behavior fallback. The reply carries the real actor id; the requester collects it via `Runtime::take_spawn_response(request_id)` (recorded by the `SpawnResponse` arm of `process_network_packets`; the address returned by `spawn_on_node` is still a placeholder whose `actor_id` is the request id). `RSpawn` (0xD4) still returns `actor_ref(0)` (`vm.rs:1392`); `DistributedRuntimeImpl::spawn_on_node` still returns placeholder addresses.
-3. **`RSend` (0xD2) is a no-op** in the VM (`vm.rs:1389`).
-4. **`receive` has no semantics.** MIR lowering discards arms and yields `nil` (`mir_lower.rs:959`); the VM's `Receive` handler (`vm.rs:2213`, pops next message, returns first payload or `nil`) is never emitted by the compiler. No `after` timeout in the grammar.
-5. **Fault-tolerance opcodes unhandled.** `Monitor`/`Demon`/`Link`/`Unlink`/`Exit`/`Yield` hit the VM's "unimplemented opcode" catch-all (`vm.rs:2222`); the functionality exists only as Rust runtime API.
+2. ~~**Remote spawn is send-only.**~~ **FIXED (MVP).** `process_network_packets` now handles `Packet::SpawnRequest`: the receiving node spawns a fresh actor with the request's `initial_state` and registers the requested behavior — but only if that behavior was explicitly offered via `Runtime::register_spawnable_behavior` (MVP scope: remote spawn supports native behaviors the receiver opted into, not arbitrary or bytecode behaviors). Unknown names are answered with `SpawnResponse{success:false}` and no actor is created — the no-crash counterpart of the local unknown-behavior fallback. The reply carries the real actor id; the requester collects it via `Runtime::take_spawn_response(request_id)` (recorded by the `SpawnResponse` arm of `process_network_packets`; the address returned by `spawn_on_node` is still a placeholder whose `actor_id` is the request id). `RSpawn` (0xD4) still returns `actor_ref(0)` (`vm.rs:1468`); `DistributedRuntimeImpl::spawn_on_node` still returns placeholder addresses.
+3. **`RSend` (0xD2) is a no-op** in the VM (`vm.rs:1465`).
+4. ~~**`receive` has no semantics.**~~ **FIXED — selective receive shipped.** MIR lowering (`lower_receive`, `mir_lower.rs:1098`) resolves arm behavior names to behavior-table indices and emits `ReceiveMatch` (0x8F) with a `"max_params:id1,id2,..."` spec constant; the VM calls `ActorVmCallbacks::try_receive_match` (mailbox scan `Mailbox::receive_match`, FIFO order, non-matching messages requeued), writes the matched arm index plus payload values to registers, and a MIR compare chain dispatches to the arm body. No-match falls through to the legacy pop-any `Receive` handler (`vm.rs:2347`, nil when the mailbox is empty or outside an actor context) — non-blocking, no suspension. Still no `after` timeout in the grammar.
+5. **Fault-tolerance opcodes unhandled.** `Monitor`/`Demon`/`Link`/`Unlink`/`Exit`/`Yield` hit the VM's "unimplemented opcode" catch-all (`vm.rs:2387`); the functionality exists only as Rust runtime API.
 6. **`trap_exits` is Rust-only** (public `Actor` field, no setter/builtin); same for registry, process groups, and `TimerWheel`.
 7. **No actor scheduling priority.** `MessagePriority` is stored on messages but never consulted by the scheduler or mailbox (FIFO segmented queue).
-8. **Unresolvable remote sends are silently dropped** (`ResolveResult::Unresolvable` → ignored, `runtime/distributed.rs:677`).
+8. **Unresolvable remote sends are silently dropped** (`ResolveResult::Unresolvable` → ignored, `runtime/distributed.rs:682`).
 9. **`Ack` packets** serialize/deserialize and are tested, but nothing sends or consumes them.
 10. **Supervisor restarts recreate bare actors**: `Supervisor::restart_child` builds a fresh `Actor` with no behavior table or bytecode; restarted children cannot process messages until behavior restoration is wired up.
-11. **`Kill` is trappable in practice.** `handle_actor_exit` special-cases nothing for `ExitReason::Kill` — linked actors with `trap_exits` receive it as a message instead of dying, contradicting the "cannot be trapped" doc comment (`runtime/mod.rs:2533`). `ExitReason::Killed` is never constructed; link cascades use `Error("linked actor ... exited with ...")` instead.
-12. **Wire `Value` serde lossy.** Only int/float/bool/string-id/unit round-trip; nil, actor refs, and pointers serialize as raw-bit `VAL_FLOAT` and read back as floats (`runtime/network.rs:401`, `:426`).
+11. **`Kill` is trappable in practice.** `handle_actor_exit` special-cases nothing for `ExitReason::Kill` — linked actors with `trap_exits` receive it as a message instead of dying, contradicting the "cannot be trapped" doc comment (`types.rs:515`, `runtime/mod.rs:2751`). `ExitReason::Killed` is never constructed; link cascades use `Error("linked actor ... exited with ...")` instead.
+12. **Wire `Value` serde lossy.** Only int/float/bool/string-id/unit round-trip; nil, actor refs, and pointers serialize as raw-bit `VAL_FLOAT` and read back as floats (`runtime/network.rs:522`, `:538`).
 13. No: `spawn_link`/`spawn_monitor`, `is_alive`/`process_info`/`processes` builtins, actor hibernation, explicit GC triggers, group broadcast, `monitor_node`, cluster RPC family (`call`/`multicall`/`cast`/`broadcast`), ETS tables, `persistent_term`, `simple_one_for_one`, virtual actors, application lifecycle, tracing, ports, binary/bit syntax, hot code loading.
 
 ### 17.6 Implemented but previously undocumented in this file

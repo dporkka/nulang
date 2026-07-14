@@ -253,9 +253,9 @@ iso ─ lineariso ─ trn ─ ref ─ val ─ box ─ tag
 computed via `join` on the lattice, and `is_sendable` is
 `LinearIso | Iso | Val | Tag`.
 
-**Capabilities are erased at runtime.** The capability opcodes are MVP
-no-ops: `CapChk` writes `true` into its destination register; `CapUp`,
-`CapDown`, and `CapSend` copy their input register (`src/vm.rs`). There is no
+**Capabilities are erased at runtime.** There are no capability opcodes at
+all: `mir::RValue::CapabilityCheck` compiles to `Const1` (`true`) in
+`src/mir_codegen.rs`, so nothing capability-related reaches the VM. There is no
 runtime revocation list, no capability tokens in message headers, and no
 cross-node capability verification today. When §3–§5 below mention
 capability managers, narrowing, or revocation, they are describing the
@@ -308,7 +308,7 @@ the instructions, the constant pool, `function_table` (code offsets),
 block), `actor_metadata` (`ActorMeta`, incl. the agent flags in §6.3),
 `foreign_functions`, and `tools` (`@tool` schemas, §6.5).
 
-**Opcode space:** 140 opcodes in 18 categories (`OpCode`, `src/bytecode.rs`,
+**Opcode space:** 137 opcodes in 17 categories (`OpCode`, `src/bytecode.rs`,
 counting the source's comment-header groups):
 
 | Range | Category | Count | Examples |
@@ -321,10 +321,9 @@ counting the source's comment-header groups):
 | 0x50–0x57 | Control flow | 8 | `Jmp`, `JmpT/F`, `Switch`, `Call`, `TailCall`, `Ret*` |
 | 0x60–0x64 | Closures | 5 | `Closure`, `CapLoad/Store`, `FreeVar`, `ClosureCall` |
 | 0x70–0x7F | Memory & objects | 16 | `Alloc`, `Field*`, `Arr*`, `Tuple*`, `Rec*`, `IsTag`, `Unpack`, `Copy`, `Drop` |
-| 0x80–0x8E | Actor & concurrency | 15 | `Spawn`, `Send`, `Ask`, `Receive`, `Monitor`…`Unlink`, `StateGet/Set`, `Emit`, `SignalWait` |
+| 0x80–0x8F | Actor & concurrency | 16 | `Spawn`, `Send`, `Ask`, `Receive`, `Monitor`…`Unlink`, `StateGet/Set`, `Emit`, `SignalWait`, `ReceiveMatch` |
 | 0x90–0x93 | Effects | 4 | `Perform`, `Handle`, `Resume`, `Unwind` |
 | 0x94–0x9F | Python interop & AI | 12 | `PyImport`…`PyRelease`, `LlmAsk`, `PipelineNew/Stage/Run` |
-| 0xA0–0xA3 | Capabilities | 4 | `CapChk`, `CapUp`, `CapDown`, `CapSend` |
 | 0xB0 | FFI | 1 | `FFICall` |
 | 0xC0–0xC2 | Supervisor teams | 3 | `SupervisorNew/Worker/Run` |
 | 0xC3–0xC5 | Debates | 3 | `DebateNew/Participant/Run` |
@@ -377,27 +376,35 @@ alloc/drop, spawn/send/ask, `try_receive`, `perform_effect`, and the AI hooks
 Standalone execution installs `StandaloneVmCallbacks`, which owns a private
 `ActorHeap`; the actor runtime installs bridges back into `Runtime`.
 
-**MVP stubs worth knowing about:** capability opcodes are no-ops (§2.4); the
-`Py*` opcodes error in the standalone VM ("Python opcodes require native
-actor runtime — use `perform Python.call(...)`"); `Receive` stores the next
-message's first payload value or `nil` (pattern dispatch across arms is
-future work); `FOpen`/`FRead`/`FWrite`/`FClose` are stubs.
+**MVP stubs worth knowing about:** capability checks compile to `Const1`
+(§2.4); the `Py*` opcodes error in the standalone VM ("Python opcodes require
+native actor runtime — use `perform Python.call(...)`"); `Receive` stores the
+next message's first payload value or `nil` and serves as the non-blocking
+fallback when selective receive (`ReceiveMatch` 0x8F, shipped — see
+`lower_receive` in `src/mir_lower.rs`) finds no matching arm;
+`FOpen`/`FRead`/`FWrite`/`FClose` are stubs.
 
 **JIT tiering** (`src/jit/`): the VM keeps an optional `JitSession`. Before
 each instruction it snapshots the frame registers into a `[u64; 256]` and
-calls `tiered_execute_step`:
+calls `jit::tiered_execute_step_typed`:
 
 1. If a compiled function exists for `(module, pc)`, run it — its ABI is
    `extern "C" fn(*mut u64 regs, *const u64 constants)`.
 2. Otherwise bump the hot counter; at `HOT_THRESHOLD = 1000` executions,
    `find_compilable_region` collects up to 500 instructions (stopping at the
    first non-compilable opcode, and *before* `Ret` so the VM still pops the
-   frame); regions longer than 5 instructions are compiled.
+   frame); regions of 3 or more instructions (`region_len >= 3`) are compiled.
 3. SIMD first: `simd_analyzer` recognizes element-wise binop/unary/compare
    loops and `simd_compiler` emits vectorized Cranelift IR
    (`I64x2`/`F64x2`/`I32x4`/`F32x4`); otherwise the scalar
    `compiler::compile_region` path is used.
-4. Helpers callable from JIT code are `extern "C"` functions in
+4. The **typed path is live**: at tier-up, `typed_compiler::infer_reg_types`
+   recovers register types from the enclosing function's bytecode (a
+   conservative forward must-analysis), and hot regions compile through
+   `compile_region_typed` with NaN-tag guards stripped when types are
+   provable — falling back to the scalar path on absent/empty metadata or
+   compile error.
+5. Helpers callable from JIT code are `extern "C"` functions in
    `src/jit/runtime.rs`, NaN-tag-aware (e.g. division by zero yields `nil`).
 
 Cold code always interprets; there is no whole-module AOT compilation.

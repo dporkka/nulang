@@ -38,11 +38,15 @@ def check_warnings():
         return False
 
     # Count individual warning lines, excluding cargo's summary lines.
+    # With --message-format=short, cargo prefixes each diagnostic with
+    # path:line:col:, so warnings do NOT start the line — match the
+    # "warning: " diagnostic marker as a substring instead, while still
+    # excluding the "generated N warning(s)" summary lines.
     count = len(
         [
             line
             for line in res.stderr.splitlines()
-            if line.startswith("warning:")
+            if "warning: " in line
             and "generated" not in line
             and "warnings" not in line
         ]

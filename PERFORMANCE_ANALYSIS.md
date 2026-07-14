@@ -16,7 +16,7 @@
 
 | # | Proposal | Status | Where / notes |
 |---|----------|--------|---------------|
-| 1.1 | Cranelift JIT backend | **Shipped** | `src/jit/` (~5,500 lines, cranelift 0.132), tiered into `VM::step` at `src/vm.rs:1115-1140` |
+| 1.1 | Cranelift JIT backend | **Shipped** | `src/jit/` (~7,900 lines, cranelift 0.132), tiered into `VM::step` at `src/vm.rs:1170-1216` |
 | 1.2 | Type guard stripping | **Shipped** | `src/jit/typed_compiler.rs` emits guard-stripped CLIF; the live tiering path (`jit::tiered_execute_step_typed`, called from `VM::step`) recovers register types at tier-up via `typed_compiler::infer_reg_types` (conservative bytecode must-analysis) and compiles hot regions through the typed path when types are provable, falling back to scalar otherwise. Typed `IDiv`/`IMod`/`FCmpEq` always use runtime helpers to match interpreter semantics exactly |
 | 1.3 | Linear scan regalloc | Deferred | Still correct — Cranelift's own regalloc is used |
 | 1.4 | MLIR dialect | Deferred | No MLIR in tree |
@@ -94,14 +94,14 @@
 
 ## Track 1 as built (verified 2026-07-11)
 
-The JIT backend lives in `src/jit/` (~5,500 lines across 7 files, cranelift 0.132) and is wired into the interpreter loop at `src/vm.rs:1115-1140`.
+The JIT backend lives in `src/jit/` (~7,900 lines across 7 files, cranelift 0.132) and is wired into the interpreter loop at `src/vm.rs:1170-1216`.
 
 ### Tiering mechanics (`src/jit/mod.rs`)
 
-- `VM` holds `jit_session: Option<JitSession>` (`src/vm.rs:650`). A session builds the Cranelift `JITModule` for the host ISA with the `enable_simd` flag set, and registers 25 `nulang_*` runtime helpers as importable symbols.
-- Before each interpreted instruction, the VM snapshots the current frame's 256 registers into a `[u64; 256]` array and calls `jit::tiered_execute_step`. If the result is not `TieredAction::Interpret`, the array is copied back into the frame and `pc` is advanced by the compiled region's length.
+- `VM` holds `jit_session: Option<JitSession>` (`src/vm.rs:695`). A session builds the Cranelift `JITModule` for the host ISA with the `enable_simd` flag set, and registers 31 `nulang_*` runtime helpers as importable symbols.
+- Before each interpreted instruction, the VM snapshots the current frame's 256 registers into a `[u64; 256]` array and calls `jit::tiered_execute_step_typed`. If the result is not `TieredAction::Interpret`, the array is copied back into the frame and `pc` is advanced by the compiled region's length.
 - Hotness is tracked in a global `Mutex<HashMap<(usize, usize), u64>>` keyed by `(module_idx, offset)` so identical offsets in different modules do not share counts. `HOT_THRESHOLD = 1000` (`src/jit/mod.rs:55`): a region compiles on its 1000th interpreted hit.
-- `find_compilable_region` scans at most **500 instructions** from the hot offset and stops at the first unsupported opcode and *before* `Ret`/`RetVal`/`Jmp`/`JmpT`/`JmpF`/`Halt`. Regions are therefore **straight-line only** — branches and returns stay interpreted (loop *bodies* still compile, since the back-edge jump terminates the region). Regions of ≤5 instructions are not compiled.
+- `find_compilable_region` scans at most **500 instructions** from the hot offset and stops at the first unsupported opcode and *before* `Ret`/`RetVal`/`Jmp`/`JmpT`/`JmpF`/`Halt`. Regions are therefore **straight-line only** — branches and returns stay interpreted (loop *bodies* still compile, since the back-edge jump terminates the region). Regions shorter than 3 instructions are not compiled (`region_len >= 3`).
 - Compiled functions are cached per `(module_idx, offset)`; a region is compiled at most once per session.
 
 ### Compiled-function ABI
@@ -110,17 +110,17 @@ The JIT backend lives in `src/jit/` (~5,500 lines across 7 files, cranelift 0.13
 pub type JitFunctionPtr = extern "C" fn(*mut u64, *const u64);
 ```
 
-Argument 1 is the 256-entry register file (read/write), argument 2 the module's constant pool pre-converted to raw NaN-boxed bits (`constants_to_jit_bits`, `src/vm.rs:456`). JIT function pointers are obtained by transmuting the finalized `*const u8`; bytecode must not be mutated while JIT code is executing.
+Argument 1 is the 256-entry register file (read/write), argument 2 the module's constant pool pre-converted to raw NaN-boxed bits (`constants_to_jit_bits`, `src/vm.rs:485`). JIT function pointers are obtained by transmuting the finalized `*const u8`; bytecode must not be mutated while JIT code is executing.
 
 ### Scalar path (`src/jit/compiler.rs`)
 
-MVP opcode subset: `Nop`/`Halt`, `Const0/1/2/M1`/`ConstU`, `Move`/`Swap`/`Dup`, integer and float arithmetic, integer/float compares, `Not`/`And`/`Or`, `Jmp`/`JmpT`/`JmpF`, `IToF`/`FToI`, `DbgPrint`, `Ret`/`RetVal`. Everything else (actors, effects, FFI, Python, strings, capabilities) forces interpretation.
+MVP opcode subset (50 opcodes): `Nop`/`Halt`, `Const0/1/2/M1`/`ConstU`, `Load`/`Store`/`Move`/`Swap`/`Dup`, integer and float arithmetic, integer/float compares, `Not`/`And`/`Or`, `Jmp`/`JmpT`/`JmpF`, `IToF`/`FToI`, `DbgPrint`, `Ret`/`RetVal`, `ArrLoad`. Everything else (actors, effects, FFI, Python, strings) forces interpretation.
 
-Arithmetic lowers to calls to 25 `#[no_mangle] extern "C"` helpers in `src/jit/runtime.rs`. These are NaN-tag aware via the canonical layout in `src/value_layout.rs` (`sext48`, `tag_int`, `PAYLOAD_MASK`). Integer `idiv`/`imod` by zero return `nil` instead of trapping; float `fdiv` is raw IEEE-754. `fcmp_eq` compares with `f64::EPSILON` tolerance.
+Arithmetic lowers to calls to 31 `#[no_mangle] extern "C"` helpers in `src/jit/runtime.rs`. These are NaN-tag aware via the canonical layout in `src/value_layout.rs` (`sext48`, `tag_int`, `PAYLOAD_MASK`). Integer `idiv`/`imod` by zero return `nil` instead of trapping; float `fdiv` is raw IEEE-754. `fcmp_eq` compares with `f64::EPSILON` tolerance.
 
 ### Typed path (`src/jit/typed_compiler.rs`)
 
-Given `TypeMetadata` (register → `KnownType::{Int, Float, Bool, Unknown}`), the typed compiler emits direct CLIF (`iadd`, `fadd`, …) instead of helper calls, stripping NaN-tag manipulation for statically known operands and falling back to helpers for `Unknown`. **Not yet active**: `tiered_execute_step` receives `None` for type metadata (`src/vm.rs:1129`); threading typechecker output into the JIT is the remaining half of proposal 1.2.
+Given `TypeMetadata` (register → `KnownType::{Int, Float, Bool, Unknown}`), the typed compiler emits direct CLIF (`iadd`, `fadd`, …) instead of helper calls, stripping NaN-tag manipulation for statically known operands and falling back to helpers for `Unknown`. **Live**: the tiering entry point is `jit::tiered_execute_step_typed` (called from `VM::step`, `src/vm.rs:1170-1216`); at tier-up it runs `typed_compiler::infer_reg_types` — a conservative forward must-analysis over the enclosing function's bytecode — and compiles the hot region through the guard-stripped path when at least one register type is provable, falling back to the scalar `compile_region` on absent/empty metadata or compile error. Typed `IDiv`/`IMod`/`FCmpEq` always emit runtime-helper calls (never raw `sdiv`/`srem`/`fcmp`) to stay bit-identical with the interpreter (div-by-zero → `nil`, epsilon float equality).
 
 ### SIMD path (`src/jit/simd_analyzer.rs`, `src/jit/simd_compiler.rs`)
 
@@ -130,7 +130,7 @@ The SIMD compiler emits 128-bit vectors — `I64x2`/`F64x2` (2-wide) and `I32x4`
 
 ### Testing
 
-54 `#[test]`s under `src/jit/` (19 in `tests.rs`, 2 in `compiler.rs`, 15 in `simd_analyzer.rs`, 10 in `simd_compiler.rs`, 8 in `typed_compiler.rs`) plus 2 VM-level regression tests in `src/vm.rs` (`test_jit_hot_loop_matches_interpreter`, `test_jit_hot_loop_with_early_exit_branch`) that assert JIT-compiled hot loops produce exactly the interpreter's result. There is **no performance benchmark harness** anywhere in the repository — all speedup numbers in this document are estimates.
+71 `#[test]`s under `src/jit/` (35 in `tests.rs`, 3 in `compiler.rs`, 15 in `simd_analyzer.rs`, 10 in `simd_compiler.rs`, 8 in `typed_compiler.rs`) plus 2 VM-level regression tests in `src/vm.rs` (`test_jit_hot_loop_matches_interpreter`, `test_jit_hot_loop_with_early_exit_branch`) and a typed-path test in `src/integration_tests.rs` (`test_jit_typed_guard_stripping_hot_function`) that assert JIT-compiled hot loops produce exactly the interpreter's result. There is **no performance benchmark harness** anywhere in the repository — all speedup numbers in this document are estimates.
 
 ### Not implemented (do not claim)
 
