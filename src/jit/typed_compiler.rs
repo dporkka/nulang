@@ -663,7 +663,6 @@ fn emit_typed_fbinop(
         TypedFloatOp::Add => builder.ins().fadd(a, b),
         TypedFloatOp::Sub => builder.ins().fsub(a, b),
         TypedFloatOp::Mul => builder.ins().fmul(a, b),
-        TypedFloatOp::Div => builder.ins().fdiv(a, b),
     };
 
     let result_bits = emit_bitcast_f64_to_i64(builder, result);
@@ -684,12 +683,16 @@ enum TypedIntOp {
 }
 
 /// CLIF float binary operations supported by the typed compiler.
+///
+/// Division is deliberately absent: direct `fdiv` produces inf/NaN on a
+/// zero divisor, but the interpreter and the `nulang_fdiv` runtime helper
+/// yield nil — so FDiv always goes through the helper, exactly like
+/// IDiv/IMod above.
 #[derive(Debug, Clone, Copy)]
 enum TypedFloatOp {
     Add,
     Sub,
     Mul,
-    Div,
 }
 
 // ---------------------------------------------------------------------------
@@ -1126,7 +1129,6 @@ pub fn compile_bytecode_region_typed(
                         dst,
                         TypedIntOp::Add,
                     );
-                    meta.set_type(dst, KnownType::Int);
                 } else {
                     emit_binop_runtime(
                         &mut builder,
@@ -1138,6 +1140,9 @@ pub fn compile_bytecode_region_typed(
                         "nulang_iadd",
                     );
                 }
+                // Both branches always produce an Int-tagged result; the
+                // destination's type must not stay stale after a fallback.
+                meta.set_type(dst, KnownType::Int);
             }
             OpCode::ISub => {
                 let dst = instr.op3 as usize;
@@ -1150,7 +1155,6 @@ pub fn compile_bytecode_region_typed(
                         dst,
                         TypedIntOp::Sub,
                     );
-                    meta.set_type(dst, KnownType::Int);
                 } else {
                     emit_binop_runtime(
                         &mut builder,
@@ -1162,6 +1166,7 @@ pub fn compile_bytecode_region_typed(
                         "nulang_isub",
                     );
                 }
+                meta.set_type(dst, KnownType::Int);
             }
             OpCode::IMul => {
                 let dst = instr.op3 as usize;
@@ -1174,7 +1179,6 @@ pub fn compile_bytecode_region_typed(
                         dst,
                         TypedIntOp::Mul,
                     );
-                    meta.set_type(dst, KnownType::Int);
                 } else {
                     emit_binop_runtime(
                         &mut builder,
@@ -1186,6 +1190,7 @@ pub fn compile_bytecode_region_typed(
                         "nulang_imul",
                     );
                 }
+                meta.set_type(dst, KnownType::Int);
             }
             OpCode::IDiv => {
                 // Always use the runtime helper: direct CLIF `sdiv` traps on a
@@ -1226,7 +1231,6 @@ pub fn compile_bytecode_region_typed(
                         dst,
                         TypedIntUnaryOp::Neg,
                     );
-                    meta.set_type(dst, KnownType::Int);
                 } else {
                     emit_unary_runtime(
                         &mut builder,
@@ -1237,6 +1241,7 @@ pub fn compile_bytecode_region_typed(
                         "nulang_ineg",
                     );
                 }
+                meta.set_type(dst, KnownType::Int);
             }
             OpCode::IInc => {
                 let reg = instr.op1 as usize;
@@ -1245,6 +1250,7 @@ pub fn compile_bytecode_region_typed(
                 } else {
                     emit_unary_runtime(&mut builder, &helpers, regs_ptr, reg, reg, "nulang_iinc");
                 }
+                meta.set_type(reg, KnownType::Int);
             }
             OpCode::IDec => {
                 let reg = instr.op1 as usize;
@@ -1253,6 +1259,7 @@ pub fn compile_bytecode_region_typed(
                 } else {
                     emit_unary_runtime(&mut builder, &helpers, regs_ptr, reg, reg, "nulang_idec");
                 }
+                meta.set_type(reg, KnownType::Int);
             }
 
             // -- Float Arithmetic (typed when both operands known Float) --
@@ -1267,7 +1274,6 @@ pub fn compile_bytecode_region_typed(
                         dst,
                         TypedFloatOp::Add,
                     );
-                    meta.set_type(dst, KnownType::Float);
                 } else {
                     emit_binop_runtime(
                         &mut builder,
@@ -1279,6 +1285,7 @@ pub fn compile_bytecode_region_typed(
                         "nulang_fadd",
                     );
                 }
+                meta.set_type(dst, KnownType::Float);
             }
             OpCode::FSub => {
                 let dst = instr.op3 as usize;
@@ -1291,7 +1298,6 @@ pub fn compile_bytecode_region_typed(
                         dst,
                         TypedFloatOp::Sub,
                     );
-                    meta.set_type(dst, KnownType::Float);
                 } else {
                     emit_binop_runtime(
                         &mut builder,
@@ -1303,6 +1309,7 @@ pub fn compile_bytecode_region_typed(
                         "nulang_fsub",
                     );
                 }
+                meta.set_type(dst, KnownType::Float);
             }
             OpCode::FMul => {
                 let dst = instr.op3 as usize;
@@ -1315,7 +1322,6 @@ pub fn compile_bytecode_region_typed(
                         dst,
                         TypedFloatOp::Mul,
                     );
-                    meta.set_type(dst, KnownType::Float);
                 } else {
                     emit_binop_runtime(
                         &mut builder,
@@ -1327,30 +1333,24 @@ pub fn compile_bytecode_region_typed(
                         "nulang_fmul",
                     );
                 }
+                meta.set_type(dst, KnownType::Float);
             }
             OpCode::FDiv => {
+                // Always use the runtime helper: direct CLIF `fdiv` produces
+                // inf/NaN on a zero divisor, while the interpreter and the
+                // helper yield nil — same reasoning as IDiv/IMod. The result
+                // type is Unknown because it may be nil.
                 let dst = instr.op3 as usize;
-                if meta.both_known(instr.op1 as usize, instr.op2 as usize, KnownType::Float) {
-                    emit_typed_fbinop(
-                        &mut builder,
-                        regs_ptr,
-                        instr.op1 as usize,
-                        instr.op2 as usize,
-                        dst,
-                        TypedFloatOp::Div,
-                    );
-                    meta.set_type(dst, KnownType::Float);
-                } else {
-                    emit_binop_runtime(
-                        &mut builder,
-                        &helpers,
-                        regs_ptr,
-                        instr.op1 as usize,
-                        instr.op2 as usize,
-                        dst,
-                        "nulang_fdiv",
-                    );
-                }
+                emit_binop_runtime(
+                    &mut builder,
+                    &helpers,
+                    regs_ptr,
+                    instr.op1 as usize,
+                    instr.op2 as usize,
+                    dst,
+                    "nulang_fdiv",
+                );
+                meta.set_type(dst, KnownType::Unknown);
             }
 
             // -- Typed Comparisons --
@@ -1622,20 +1622,20 @@ pub fn compile_bytecode_region_typed(
                 let dst = instr.op2 as usize;
                 if meta.is_known(src, KnownType::Int) {
                     emit_typed_itof(&mut builder, regs_ptr, src, dst);
-                    meta.set_type(dst, KnownType::Float);
                 } else {
                     emit_unary_runtime(&mut builder, &helpers, regs_ptr, src, dst, "nulang_itof");
                 }
+                meta.set_type(dst, KnownType::Float);
             }
             OpCode::FToI => {
                 let src = instr.op1 as usize;
                 let dst = instr.op2 as usize;
                 if meta.is_known(src, KnownType::Float) {
                     emit_typed_ftoi(&mut builder, regs_ptr, src, dst);
-                    meta.set_type(dst, KnownType::Int);
                 } else {
                     emit_unary_runtime(&mut builder, &helpers, regs_ptr, src, dst, "nulang_ftoi");
                 }
+                meta.set_type(dst, KnownType::Int);
             }
 
             // -- Return --
@@ -1783,8 +1783,12 @@ mod typed_tests {
     // Test 3: Typed float operations emit direct CLIF
     // ------------------------------------------------------------------
 
-    /// When both operands are known Float, FAdd/FSub/FMul/FDiv should emit
-    /// direct CLIF float ops (fadd/fsub/fmul/fdiv) without runtime calls.
+    /// When both operands are known Float, FAdd/FSub/FMul should emit
+    /// direct CLIF float ops (fadd/fsub/fmul) without runtime calls.
+    /// FDiv always goes through the `nulang_fdiv` runtime helper instead:
+    /// direct CLIF `fdiv` would produce inf/NaN on a zero divisor, while
+    /// the interpreter and the helper yield nil (same reasoning as
+    /// IDiv/IMod).
     #[test]
     fn test_typed_float_ops() {
         let mut jit = make_jit();
@@ -1815,6 +1819,97 @@ mod typed_tests {
             "typed float ops should compile: {:?}",
             ptr.err()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Test 3b: FDiv yields nil on a zero divisor (both paths)
+    // ------------------------------------------------------------------
+
+    /// The interpreter's FDiv yields nil on a zero divisor. The typed
+    /// compiler must never emit a raw CLIF `fdiv` (which would produce
+    /// inf/NaN): both the typed-metadata path and the unknown-type
+    /// fallback route through the zero-guarded `nulang_fdiv` helper.
+    /// Executes the compiled region directly, mirroring the execution
+    /// tests in src/jit/tests.rs.
+    #[test]
+    fn test_typed_fdiv_zero_divisor_yields_nil() {
+        use crate::vm::Value;
+        let mut jit = make_jit();
+        let instructions = vec![
+            Instruction::new3(OpCode::FDiv, 0, 1, 2), // R2 = R0 / R1
+            Instruction::new0(OpCode::Halt),
+        ];
+
+        let mut meta = TypeMetadata::new();
+        meta.set_type(0, KnownType::Float);
+        meta.set_type(1, KnownType::Float);
+
+        let ptr = compile_bytecode_region_typed(
+            &mut jit.module,
+            &mut jit.builder_context,
+            &mut jit.ctx,
+            "test_typed_fdiv_nil",
+            0,
+            2,
+            &instructions,
+            Some(&meta),
+        )
+        .expect("typed FDiv region should compile");
+        let func: extern "C" fn(*mut u64, *const u64) = unsafe { std::mem::transmute(ptr) };
+        let consts: [u64; 0] = [];
+        let mut regs = [0u64; 256];
+        regs[0] = Value::float(7.0).as_raw();
+        regs[1] = Value::float(0.0).as_raw();
+
+        func(regs.as_mut_ptr(), consts.as_ptr());
+        assert_eq!(
+            regs[2],
+            Value::nil().as_raw(),
+            "typed FDiv by zero must yield nil, not inf/NaN"
+        );
+
+        regs[1] = Value::float(2.0).as_raw();
+        func(regs.as_mut_ptr(), consts.as_ptr());
+        assert_eq!(Value::from_bits(regs[2]).as_float(), Some(3.5));
+    }
+
+    #[test]
+    fn test_untyped_fdiv_zero_divisor_yields_nil() {
+        use crate::vm::Value;
+        let mut jit = make_jit();
+        let instructions = vec![
+            Instruction::new3(OpCode::FDiv, 0, 1, 2), // R2 = R0 / R1
+            Instruction::new0(OpCode::Halt),
+        ];
+
+        // No type metadata: forces the runtime-helper fallback branch.
+        let ptr = compile_bytecode_region_typed(
+            &mut jit.module,
+            &mut jit.builder_context,
+            &mut jit.ctx,
+            "test_untyped_fdiv_nil",
+            0,
+            2,
+            &instructions,
+            None,
+        )
+        .expect("fallback FDiv region should compile");
+        let func: extern "C" fn(*mut u64, *const u64) = unsafe { std::mem::transmute(ptr) };
+        let consts: [u64; 0] = [];
+        let mut regs = [0u64; 256];
+        regs[0] = Value::float(7.0).as_raw();
+        regs[1] = Value::float(0.0).as_raw();
+
+        func(regs.as_mut_ptr(), consts.as_ptr());
+        assert_eq!(
+            regs[2],
+            Value::nil().as_raw(),
+            "fallback FDiv by zero must yield nil, not inf/NaN"
+        );
+
+        regs[1] = Value::float(2.0).as_raw();
+        func(regs.as_mut_ptr(), consts.as_ptr());
+        assert_eq!(Value::from_bits(regs[2]).as_float(), Some(3.5));
     }
 
     // ------------------------------------------------------------------

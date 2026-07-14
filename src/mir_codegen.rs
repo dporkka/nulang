@@ -70,6 +70,10 @@ pub struct MirCodegen {
     /// string every time (unlike record fields, `state` is string-keyed at
     /// runtime, not a positional slot `field_id` could cover).
     state_field_constants: HashMap<String, usize>,
+    /// Per-function float-ness of MIR locals (see `float_locals`), used to
+    /// pick float opcode variants for arithmetic and comparisons. Rebuilt
+    /// at the start of every `compile_function`.
+    float_locals: Vec<bool>,
 }
 
 impl MirCodegen {
@@ -79,7 +83,14 @@ impl MirCodegen {
             field_map: HashMap::new(),
             next_field_id: 0,
             state_field_constants: HashMap::new(),
+            float_locals: Vec::new(),
         }
+    }
+
+    /// Whether the given local of the function currently being compiled is
+    /// known to hold a Float at runtime.
+    fn is_float_local(&self, id: mir::LocalId) -> bool {
+        self.float_locals.get(id.0 as usize).copied().unwrap_or(false)
     }
 
     /// Constant-pool index for a `self.field` name, reusing an existing
@@ -254,6 +265,11 @@ impl MirCodegen {
             )));
         }
 
+        // Type-directed opcode selection: the VM's integer handlers coerce
+        // float operands to 0, so float arithmetic/comparisons must be
+        // emitted as their F* variants.
+        self.float_locals = float_locals(func);
+
         // Prologue: move incoming arguments from r0..rN to their fixed local
         // registers, then load closure captures.
         for (i, param) in func.params.iter().enumerate() {
@@ -273,6 +289,20 @@ impl MirCodegen {
         let mut handler_prologues: HashMap<mir::BlockId, Vec<mir::LocalId>> = HashMap::new();
         for table in &func.handler_tables {
             for binding in &table.bindings {
+                if binding.params.len() > MAX_STAGED_ARGS {
+                    // The VM delivers effect arguments in r0..r15; beyond
+                    // that the prologue moves below would alias into
+                    // LOCAL_BASE-mapped locals — the same corruption the
+                    // function-parameter check above rejects.
+                    self.module.instructions = saved_instructions;
+                    return Err(compile_err(format!(
+                        "handler for effect '{}' in function '{}' has {} parameters, exceeding the MIR staging limit of {}",
+                        binding.effect_name,
+                        func.name,
+                        binding.params.len(),
+                        MAX_STAGED_ARGS
+                    )));
+                }
                 handler_prologues.insert(binding.body, binding.params.clone());
             }
         }
@@ -506,22 +536,54 @@ impl MirCodegen {
                 // bytecode level — the type checker is what restricts
                 // reassignment to Ref-typed locals.
                 let opcode = match op {
-                    crate::ast::UnOp::Neg => OpCode::INeg,
+                    crate::ast::UnOp::Neg => {
+                        if self.is_float_local(*id) {
+                            OpCode::FNeg
+                        } else {
+                            OpCode::INeg
+                        }
+                    }
                     crate::ast::UnOp::Not => OpCode::Not,
                     crate::ast::UnOp::Deref => OpCode::Load,
                     crate::ast::UnOp::Ref(_) => OpCode::Move,
                 };
-                self.emit(Instruction::new2(opcode, src, dst));
+                if opcode == OpCode::FNeg {
+                    // The interpreter reads the source from op1 and writes
+                    // the destination to op3 for FNeg (unlike INeg's op2).
+                    self.emit(Instruction::new3(OpCode::FNeg, src, 0, dst));
+                } else {
+                    self.emit(Instruction::new2(opcode, src, dst));
+                }
             }
             mir::RValue::Binary(op, l, r) => {
                 let lr = reg_of(*l);
                 let rr = reg_of(*r);
-                if *op == crate::ast::BinOp::Ne {
-                    self.emit(Instruction::new3(OpCode::ICmpEq, lr, rr, SCRATCH0));
-                    self.emit(Instruction::new2(OpCode::Not, SCRATCH0, dst));
-                } else {
-                    let opcode = binary_opcode(op)?;
-                    self.emit(Instruction::new3(opcode, lr, rr, dst));
+                // The type checker rejects mixed int/float arithmetic, so
+                // operands are homogeneous: one float operand means both
+                // are floats and the F* opcode variants are required (the
+                // integer handlers coerce float operands to 0).
+                let is_float = self.is_float_local(*l) || self.is_float_local(*r);
+                use crate::ast::BinOp;
+                match (op, is_float) {
+                    (BinOp::Ne, f) => {
+                        let eq = if f { OpCode::FCmpEq } else { OpCode::ICmpEq };
+                        self.emit(Instruction::new3(eq, lr, rr, SCRATCH0));
+                        self.emit(Instruction::new2(OpCode::Not, SCRATCH0, dst));
+                    }
+                    // Float Le/Ge have no dedicated opcodes: expand to the
+                    // negated inverse comparison (a <= b == !(a > b)).
+                    (BinOp::Le, true) => {
+                        self.emit(Instruction::new3(OpCode::FCmpGt, lr, rr, SCRATCH0));
+                        self.emit(Instruction::new2(OpCode::Not, SCRATCH0, dst));
+                    }
+                    (BinOp::Ge, true) => {
+                        self.emit(Instruction::new3(OpCode::FCmpLt, lr, rr, SCRATCH0));
+                        self.emit(Instruction::new2(OpCode::Not, SCRATCH0, dst));
+                    }
+                    _ => {
+                        let opcode = binary_opcode(op, is_float)?;
+                        self.emit(Instruction::new3(opcode, lr, rr, dst));
+                    }
                 }
             }
             mir::RValue::StringEq(l, r) => {
@@ -983,27 +1045,97 @@ fn reg_of(id: mir::LocalId) -> u8 {
     (LOCAL_BASE + id.0) as u8
 }
 
-fn binary_opcode(op: &crate::ast::BinOp) -> NuResult<OpCode> {
-    match op {
-        crate::ast::BinOp::Add => Ok(OpCode::IAdd),
-        crate::ast::BinOp::Sub => Ok(OpCode::ISub),
-        crate::ast::BinOp::Mul => Ok(OpCode::IMul),
-        crate::ast::BinOp::Div => Ok(OpCode::IDiv),
-        crate::ast::BinOp::Mod => Ok(OpCode::IMod),
-        crate::ast::BinOp::Eq => Ok(OpCode::ICmpEq),
-        crate::ast::BinOp::Lt => Ok(OpCode::ICmpLt),
-        crate::ast::BinOp::Gt => Ok(OpCode::ICmpGt),
-        crate::ast::BinOp::Le => Ok(OpCode::ICmpLe),
-        crate::ast::BinOp::Ge => Ok(OpCode::ICmpGe),
-        crate::ast::BinOp::And => Ok(OpCode::And),
-        crate::ast::BinOp::Or => Ok(OpCode::Or),
-        crate::ast::BinOp::BitAnd => Ok(OpCode::BitAnd),
-        crate::ast::BinOp::BitOr => Ok(OpCode::BitOr),
-        crate::ast::BinOp::BitXor => Ok(OpCode::Xor),
-        crate::ast::BinOp::Shl => Ok(OpCode::Shl),
-        crate::ast::BinOp::Shr => Ok(OpCode::Shr),
-        other => Err(not_yet_implemented(&format!("binary operator {:?}", other))),
+fn binary_opcode(op: &crate::ast::BinOp, is_float: bool) -> NuResult<OpCode> {
+    use crate::ast::BinOp;
+    match (op, is_float) {
+        (BinOp::Add, false) => Ok(OpCode::IAdd),
+        (BinOp::Add, true) => Ok(OpCode::FAdd),
+        (BinOp::Sub, false) => Ok(OpCode::ISub),
+        (BinOp::Sub, true) => Ok(OpCode::FSub),
+        (BinOp::Mul, false) => Ok(OpCode::IMul),
+        (BinOp::Mul, true) => Ok(OpCode::FMul),
+        (BinOp::Div, false) => Ok(OpCode::IDiv),
+        (BinOp::Div, true) => Ok(OpCode::FDiv),
+        (BinOp::Mod, false) => Ok(OpCode::IMod),
+        (BinOp::Mod, true) => Err(not_yet_implemented(
+            "float modulo: the FMod opcode has no interpreter or JIT implementation",
+        )),
+        (BinOp::Eq, false) => Ok(OpCode::ICmpEq),
+        (BinOp::Eq, true) => Ok(OpCode::FCmpEq),
+        (BinOp::Lt, false) => Ok(OpCode::ICmpLt),
+        (BinOp::Lt, true) => Ok(OpCode::FCmpLt),
+        (BinOp::Gt, false) => Ok(OpCode::ICmpGt),
+        (BinOp::Gt, true) => Ok(OpCode::FCmpGt),
+        (BinOp::Le, false) => Ok(OpCode::ICmpLe),
+        (BinOp::Ge, false) => Ok(OpCode::ICmpGe),
+        // Float Le/Ge are expanded to negated inverse comparisons by the
+        // caller (there are no FCmpLe/FCmpGe opcodes).
+        (BinOp::Le, true) | (BinOp::Ge, true) => Err(compile_err(
+            "internal: float Le/Ge must be expanded by the caller",
+        )),
+        (BinOp::And, _) => Ok(OpCode::And),
+        (BinOp::Or, _) => Ok(OpCode::Or),
+        (BinOp::BitAnd, _) => Ok(OpCode::BitAnd),
+        (BinOp::BitOr, _) => Ok(OpCode::BitOr),
+        (BinOp::BitXor, _) => Ok(OpCode::Xor),
+        (BinOp::Shl, _) => Ok(OpCode::Shl),
+        (BinOp::Shr, _) => Ok(OpCode::Shr),
+        (other, _) => Err(not_yet_implemented(&format!("binary operator {:?}", other))),
     }
+}
+
+/// Compute which locals of a function may hold a Float at runtime, so
+/// binary/unary opcode emission can pick the float opcode variants.
+///
+/// Seeds: locals declared with a Float type and locals assigned a float
+/// constant. Propagates to a fixpoint through register copies, float
+/// arithmetic, and unary negation. Best-effort: MIR temp types are
+/// unreliable (see hir_lower's fallbacks), so float values arriving via
+/// paths with no Float-typed origin — unannotated function parameters,
+/// call results, array/record loads — are not tracked, and operations on
+/// them keep the legacy integer opcodes. That is a limitation, not a
+/// regression: pre-fix behavior for those cases was the same.
+fn float_locals(func: &mir::Function) -> Vec<bool> {
+    let mut is_float = vec![false; func.locals.len()];
+    for local in &func.locals {
+        if local.ty == Type::Primitive(PrimitiveType::Float) {
+            is_float[local.id.0 as usize] = true;
+        }
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for block in &func.blocks {
+            for stmt in &block.stmts {
+                let mir::Stmt::Assign { dst, op } = stmt else {
+                    continue;
+                };
+                let result = match op {
+                    mir::RValue::Const(Constant::Float(_)) => true,
+                    mir::RValue::Load(src) => is_float[src.0 as usize],
+                    mir::RValue::Unary(crate::ast::UnOp::Neg, src) => is_float[src.0 as usize],
+                    mir::RValue::Binary(op, l, r)
+                        if matches!(
+                            op,
+                            crate::ast::BinOp::Add
+                                | crate::ast::BinOp::Sub
+                                | crate::ast::BinOp::Mul
+                                | crate::ast::BinOp::Div
+                                | crate::ast::BinOp::Mod
+                        ) =>
+                    {
+                        is_float[l.0 as usize] || is_float[r.0 as usize]
+                    }
+                    _ => false,
+                };
+                if result && !is_float[dst.0 as usize] {
+                    is_float[dst.0 as usize] = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+    is_float
 }
 
 pub fn compile_mir(mir: &mir::Module, module_name: impl Into<String>) -> NuResult<CodeModule> {
@@ -1635,6 +1767,109 @@ mod tests {
         let value =
             run_mir_source("handle perform Math.getAnswer() { | Math.getAnswer() => 42 }").unwrap();
         assert_eq!(value.as_int(), Some(42));
+    }
+
+    #[test]
+    fn test_mir_codegen_float_arithmetic() {
+        // Binary/unary opcode emission is type-directed: float operands
+        // must compile to FAdd/FSub/FMul/FDiv/FNeg — the integer handlers
+        // coerce float operands to 0.
+        let value = run_mir_source("1.5 + 2.5").unwrap();
+        assert_eq!(value.as_float(), Some(4.0));
+        let value = run_mir_source("5.5 - 2.0").unwrap();
+        assert_eq!(value.as_float(), Some(3.5));
+        let value = run_mir_source("1.5 * 2.0").unwrap();
+        assert_eq!(value.as_float(), Some(3.0));
+        let value = run_mir_source("7.0 / 2.0").unwrap();
+        assert_eq!(value.as_float(), Some(3.5));
+        let value = run_mir_source("-1.5").unwrap();
+        assert_eq!(value.as_float(), Some(-1.5));
+    }
+
+    #[test]
+    fn test_mir_codegen_float_arithmetic_through_locals() {
+        // Float-ness propagates through let bindings and intermediate
+        // temps: `y` holds a float even though hir_lower types binary
+        // results as Int.
+        let value = run_mir_source("let x = 1.5 in let y = x + 2.5 in y * 2.0").unwrap();
+        assert_eq!(value.as_float(), Some(8.0));
+        let value = run_mir_source("let a = 6.0 in let b = a / 4.0 in b").unwrap();
+        assert_eq!(value.as_float(), Some(1.5));
+    }
+
+    #[test]
+    fn test_mir_codegen_float_comparisons() {
+        // Integer comparisons on float operands coerce both sides to 0,
+        // making `2.0 == 3.0` true and every ordering comparison false
+        // (or always-true for Le/Ge/Ne); floats need FCmp*.
+        let value = run_mir_source("1.5 < 2.5").unwrap();
+        assert_eq!(value.as_bool(), Some(true));
+        let value = run_mir_source("2.5 > 1.5").unwrap();
+        assert_eq!(value.as_bool(), Some(true));
+        let value = run_mir_source("2.5 <= 1.5").unwrap();
+        assert_eq!(value.as_bool(), Some(false));
+        let value = run_mir_source("1.5 >= 2.5").unwrap();
+        assert_eq!(value.as_bool(), Some(false));
+        let value = run_mir_source("2.0 == 3.0").unwrap();
+        assert_eq!(value.as_bool(), Some(false));
+        let value = run_mir_source("2.0 != 3.0").unwrap();
+        assert_eq!(value.as_bool(), Some(true));
+        let value = run_mir_source("2.0 == 2.0").unwrap();
+        assert_eq!(value.as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_mir_codegen_float_div_by_zero_yields_nil() {
+        // Matches the interpreter's FDiv semantics: a zero float divisor
+        // yields nil, not a trap or inf.
+        let value = run_mir_source("7.0 / 0.0").unwrap();
+        assert_eq!(value.as_raw(), crate::vm::Value::nil().as_raw());
+    }
+
+    #[test]
+    fn test_mir_codegen_float_modulo_is_honest_error() {
+        // The FMod opcode has no interpreter or JIT implementation, so
+        // float `%` must fail at compile time rather than silently
+        // evaluating as integer mod (which coerced operands to 0).
+        let result = compile_mir_source("7.5 % 2.0");
+        assert!(
+            matches!(result, Err(NuError::NotYetImplemented { .. })),
+            "float modulo should be an honest compile error, got {:?}",
+            result
+        );
+        // Integer modulo is unaffected.
+        let value = run_mir_source("7 % 2").unwrap();
+        assert_eq!(value.as_int(), Some(1));
+    }
+
+    #[test]
+    fn test_mir_codegen_over_limit_handler_params_is_honest_error() {
+        // A handler binding with more than MAX_STAGED_ARGS (16) parameters
+        // used to compile a prologue moving r16.. into LOCAL_BASE-mapped
+        // registers, silently aliasing the enclosing function's locals —
+        // the VM only ever stages effect arguments in r0..r15. Like the
+        // 17-parameter function check, this must be a compile error.
+        let params = (0..17)
+            .map(|i| format!("p{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!("handle 0 {{ | E.op({}) => p0 }}", params);
+        let result = compile_mir_source(&source);
+        assert!(
+            matches!(result, Err(NuError::VMError(_))),
+            "a 17-parameter handler binding should be an honest compile error, got {:?}",
+            result
+        );
+        // A 16-parameter binding stays legal.
+        let params = (0..16)
+            .map(|i| format!("p{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!("handle 0 {{ | E.op({}) => p0 }}", params);
+        assert!(
+            compile_mir_source(&source).is_ok(),
+            "a 16-parameter handler binding should compile"
+        );
     }
 
     #[test]

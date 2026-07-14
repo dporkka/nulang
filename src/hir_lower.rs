@@ -814,6 +814,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             value,
             body: b,
             span,
+            ..
         } => {
             // Let-bound lambdas may reference themselves (`let fac = fn(n) ...
             // fac(n-1)`); lower them like `let rec` so the self-reference
@@ -1558,6 +1559,7 @@ mod tests {
         // statements after it stay in evaluation order.
         let source_body = Expr::Let {
             name: "x".to_string(),
+            ty: None,
             value: Box::new(Expr::If {
                 cond: Box::new(Expr::Literal(Literal::Bool(true), Span::default())),
                 then_branch: Box::new(Expr::Literal(Literal::Int(1), Span::default())),
@@ -1617,6 +1619,111 @@ mod tests {
             }
             other => panic!("expected Place::Field, got {:?}", other),
         }
+    }
+
+    /// Regression test: `free_vars` must descend into the effect/actor
+    /// expression families (perform, handle, spawn, send, ask, receive,
+    /// migrate, emit). Before that, variables used only inside those
+    /// expressions were never captured by closures, and MIR lowering
+    /// failed with "undefined variable".
+    #[test]
+    fn test_free_vars_covers_effect_and_actor_exprs() {
+        use std::collections::HashSet;
+        let span = Span::default();
+        let var = |n: &str| Expr::Var(n.to_string(), span);
+        let used = |expr: &Expr| {
+            let mut acc = HashSet::new();
+            free_vars(expr, &HashSet::new(), &mut acc);
+            acc
+        };
+
+        // perform Effect.op(k)
+        let perform = Expr::Perform {
+            effect: "IO".to_string(),
+            op: "print".to_string(),
+            args: vec![var("k")],
+            span,
+        };
+        assert!(used(&perform).contains("k"), "perform arg must be free");
+
+        // emit Event(k)
+        let emit = Expr::Emit {
+            event: "E".to_string(),
+            args: vec![var("k")],
+            span,
+        };
+        assert!(used(&emit).contains("k"), "emit arg must be free");
+
+        // a ! beh(k) and ask a beh(k): receiver and args are free
+        let send = Expr::Send {
+            actor: Box::new(var("a")),
+            behavior: "beh".to_string(),
+            args: vec![var("k")],
+            span,
+        };
+        let send_vars = used(&send);
+        assert!(send_vars.contains("a") && send_vars.contains("k"));
+        let ask = Expr::Ask {
+            actor: Box::new(var("a")),
+            behavior: "beh".to_string(),
+            args: vec![var("k")],
+            span,
+        };
+        let ask_vars = used(&ask);
+        assert!(ask_vars.contains("a") && ask_vars.contains("k"));
+
+        // spawn Actor { count = k }
+        let spawn = Expr::Spawn {
+            actor_type: Box::new(var("Counter")),
+            init: vec![("count".to_string(), var("k"))],
+            span,
+        };
+        assert!(used(&spawn).contains("k"), "spawn init must be free");
+
+        // migrate a to n
+        let migrate = Expr::Migrate {
+            actor: Box::new(var("a")),
+            node: Box::new(var("n")),
+            span,
+        };
+        let migrate_vars = used(&migrate);
+        assert!(migrate_vars.contains("a") && migrate_vars.contains("n"));
+
+        // handle k { | IO.print(m) => h }: body and handler-body vars are
+        // free; the handler param is bound.
+        let handle = Expr::Handle {
+            body: Box::new(var("k")),
+            handlers: vec![ast::EffectHandler {
+                effect_name: "IO".to_string(),
+                op_name: "print".to_string(),
+                params: vec!["m".to_string()],
+                body: var("h"),
+                resume: true,
+            }],
+            span,
+        };
+        let handle_vars = used(&handle);
+        assert!(handle_vars.contains("k"), "handle body var must be free");
+        assert!(handle_vars.contains("h"), "handler body var must be free");
+        assert!(!handle_vars.contains("m"), "handler param is bound");
+
+        // receive { | Msg(p) => k + p }: arm var free, arm params bound.
+        let receive = Expr::Receive {
+            arms: vec![(
+                "Msg".to_string(),
+                vec!["p".to_string()],
+                Expr::Binary {
+                    op: BinOp::Add,
+                    left: Box::new(var("k")),
+                    right: Box::new(var("p")),
+                    span,
+                },
+            )],
+            span,
+        };
+        let receive_vars = used(&receive);
+        assert!(receive_vars.contains("k"), "receive arm var must be free");
+        assert!(!receive_vars.contains("p"), "receive arm param is bound");
     }
 }
 
@@ -1767,6 +1874,50 @@ fn free_vars(
         }
         Expr::TypeAnnotate { expr, .. } | Expr::CapAnnotate { expr, .. } => {
             free_vars(expr, bound, acc)
+        }
+        Expr::Spawn {
+            actor_type, init, ..
+        } => {
+            free_vars(actor_type, bound, acc);
+            for (_, e) in init {
+                free_vars(e, bound, acc);
+            }
+        }
+        Expr::Send { actor, args, .. } | Expr::Ask { actor, args, .. } => {
+            free_vars(actor, bound, acc);
+            for a in args {
+                free_vars(a, bound, acc);
+            }
+        }
+        Expr::Emit { args, .. } | Expr::Perform { args, .. } => {
+            for a in args {
+                free_vars(a, bound, acc);
+            }
+        }
+        Expr::Handle {
+            body, handlers, ..
+        } => {
+            free_vars(body, bound, acc);
+            for h in handlers {
+                let mut handler_bound = bound.clone();
+                for p in &h.params {
+                    handler_bound.insert(p.clone());
+                }
+                free_vars(&h.body, &handler_bound, acc);
+            }
+        }
+        Expr::Receive { arms, .. } => {
+            for (_, params, arm_expr) in arms {
+                let mut arm_bound = bound.clone();
+                for p in params {
+                    arm_bound.insert(p.clone());
+                }
+                free_vars(arm_expr, &arm_bound, acc);
+            }
+        }
+        Expr::Migrate { actor, node, .. } => {
+            free_vars(actor, bound, acc);
+            free_vars(node, bound, acc);
         }
         _ => {}
     }

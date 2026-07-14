@@ -22,7 +22,7 @@ use crate::ast::Pattern;
 use crate::hir;
 use crate::mir;
 use crate::types::{NuError, NuResult, Span, Type};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn nyi(feature: &str) -> NuError {
     NuError::NotYetImplemented {
@@ -343,13 +343,30 @@ fn lower_lifted(
         lowerer.bind(cname, id);
     }
     if let Some((rec_name, rec_idx)) = rec {
-        // The function refers to itself by name: bind the name to a local
-        // holding the function-table index (callable like any function value).
+        // The function refers to itself by name. Without captures a raw
+        // function-table index suffices (callable like any function value);
+        // with captures the self-reference must be a closure carrying the
+        // same environment, otherwise recursive calls would lose the
+        // captured values (CapLoad would fail outside a closure call).
         let id = lowerer.b.add_local(rec_name, Type::unit());
-        lowerer.b.assign(
-            id,
-            mir::RValue::Const(crate::bytecode::Constant::Int(rec_idx as i64)),
-        );
+        if captures.is_empty() {
+            lowerer.b.assign(
+                id,
+                mir::RValue::Const(crate::bytecode::Constant::Int(rec_idx as i64)),
+            );
+        } else {
+            let cap_ids: Vec<mir::LocalId> = captures
+                .iter()
+                .map(|n| lowerer.lookup(n).expect("capture just bound"))
+                .collect();
+            lowerer.b.assign(
+                id,
+                mir::RValue::Closure {
+                    func: rec_idx,
+                    captures: cap_ids,
+                },
+            );
+        }
         lowerer.bind(rec_name, id);
     }
     lowerer.lower_body_top(body)?;
@@ -386,6 +403,11 @@ struct FnLowerer<'c> {
     b: mir::FunctionBuilder,
     scopes: Vec<Vec<(String, mir::LocalId)>>,
     loop_exits: Vec<mir::BlockId>,
+    /// Number of `handle` bodies currently being lowered. Each one pushed a
+    /// handler frame at runtime, so an explicit `return` emitted while this
+    /// is > 0 must unwind that many frames first (the VM does not unwind
+    /// `handler_stack` on `Ret`).
+    handle_depth: usize,
 }
 
 impl<'c> FnLowerer<'c> {
@@ -395,6 +417,7 @@ impl<'c> FnLowerer<'c> {
             b: mir::FunctionBuilder::new(name, ret),
             scopes: vec![Vec::new()],
             loop_exits: Vec::new(),
+            handle_depth: 0,
         }
     }
 
@@ -425,6 +448,18 @@ impl<'c> FnLowerer<'c> {
     }
 
     // -- Body lowering ------------------------------------------------------
+
+    /// Terminate the current block with a function return, first unwinding
+    /// any handler frames installed by enclosing `handle` bodies. Without
+    /// this the frame would outlive the function on the VM's
+    /// `handler_stack`, and a later unhandled perform of the same effect
+    /// would dispatch into the dead function's handler code.
+    fn emit_return(&mut self, id: mir::LocalId) {
+        for _ in 0..self.handle_depth {
+            self.b.emit(mir::Stmt::PopHandler);
+        }
+        self.b.terminate(mir::Terminator::Return(Some(id)));
+    }
 
     /// Lower a body in function-return position.
     fn lower_body_top(&mut self, body: &hir::Body) -> NuResult<()> {
@@ -476,7 +511,7 @@ impl<'c> FnLowerer<'c> {
                     Some(op) => self.lower_operand(op)?,
                     None => self.unit_temp(),
                 };
-                self.b.terminate(mir::Terminator::Return(Some(id)));
+                self.emit_return(id);
             }
             hir::Terminator::Break => {
                 let exit = self
@@ -751,11 +786,40 @@ impl<'c> FnLowerer<'c> {
             } => {
                 let lname = format!("__rec_{}", name);
                 let idx = self.ctx.reserve_function(&lname);
-                let lifted = lower_lifted(self.ctx, &lname, params, &[], Some((name, idx)), body)?;
+                // Like ordinary closures, recursive closures capture the
+                // enclosing locals they use: free vars of the body minus
+                // params and the self name, filtered to what is actually
+                // in scope here.
+                let mut exclude: HashSet<String> =
+                    params.iter().map(|(n, _)| n.clone()).collect();
+                exclude.insert(name.clone());
+                let capture_names: Vec<String> = hir_body_used_vars(body, &exclude)
+                    .into_iter()
+                    .filter(|n| self.lookup(n).is_some())
+                    .collect();
+                let capture_ids: Vec<mir::LocalId> = capture_names
+                    .iter()
+                    .map(|n| self.lookup(n).expect("capture just resolved"))
+                    .collect();
+                let lifted =
+                    lower_lifted(self.ctx, &lname, params, &capture_names, Some((name, idx)), body)?;
                 self.ctx.fill_function(idx, lifted);
-                // The binding holds the function-table index as a value.
-                self.b
-                    .assign(dst, mir::RValue::Const(Constant::Int(idx as i64)));
+                if capture_ids.is_empty() {
+                    // No captures: the binding holds the function-table
+                    // index as a value (callable like any function value).
+                    self.b
+                        .assign(dst, mir::RValue::Const(Constant::Int(idx as i64)));
+                } else {
+                    // With captures the binding must be a real closure so
+                    // the captured environment travels with every call.
+                    self.b.assign(
+                        dst,
+                        mir::RValue::Closure {
+                            func: idx,
+                            captures: capture_ids,
+                        },
+                    );
+                }
                 Ok(())
             }
             hir::RValue::Tuple(elems, _) => {
@@ -1189,9 +1253,10 @@ impl<'c> FnLowerer<'c> {
 
         for (i, (pat, arm_body)) in arms.iter().enumerate() {
             let is_last = i == arms.len() - 1;
-            if is_last {
-                // Last arm is entered unconditionally (mirrors the stable
-                // compiler's fallback semantics).
+            if is_last && matches!(pat, Pattern::Wild | Pattern::Var(_)) {
+                // An irrefutable last pattern (wildcard or variable binding)
+                // is a catch-all: enter it unconditionally (mirrors the
+                // stable compiler's fallback semantics).
                 self.push_scope();
                 self.bind_pattern(pat, sid);
                 self.lower_body_into(arm_body, dst, join)?;
@@ -1211,6 +1276,23 @@ impl<'c> FnLowerer<'c> {
                 self.lower_body_into(arm_body, dst, join)?;
                 self.pop_scope();
                 self.b.switch_to(next_bb);
+                if is_last {
+                    // Final else-edge: no arm matched. A refutable last
+                    // pattern means the match can be non-exhaustive; fail
+                    // with a runtime error instead of silently running the
+                    // last arm. Raised as a perform of a reserved effect
+                    // name that no source-declared handler can intercept,
+                    // so the VM reports it as an unhandled effect.
+                    self.b.assign(
+                        dst,
+                        mir::RValue::Perform {
+                            effect: "non-exhaustive match".to_string(),
+                            op: "raise".to_string(),
+                            args: Vec::new(),
+                        },
+                    );
+                    self.b.terminate(mir::Terminator::Jump(join));
+                }
             }
         }
 
@@ -1322,7 +1404,7 @@ impl<'c> FnLowerer<'c> {
                         Some(op) => self.lower_operand(op)?,
                         None => self.unit_temp(),
                     };
-                    self.b.terminate(mir::Terminator::Return(Some(id)));
+                    self.emit_return(id);
                 }
                 hir::Terminator::Break => {
                     self.b.terminate(mir::Terminator::Jump(exit));
@@ -1352,6 +1434,10 @@ impl<'c> FnLowerer<'c> {
         self.b.emit(mir::Stmt::EnterHandle { table: table_idx });
 
         // Body: yielded value lands in dst, then pop the handler frame.
+        // The depth is tracked so a `return` inside the body (or inside
+        // nested branches/loops) unwinds every frame still on the stack —
+        // see emit_return.
+        self.handle_depth += 1;
         for stmt in &body.stmts {
             self.lower_stmt(stmt)?;
         }
@@ -1368,13 +1454,14 @@ impl<'c> FnLowerer<'c> {
                         Some(op) => self.lower_operand(op)?,
                         None => self.unit_temp(),
                     };
-                    self.b.terminate(mir::Terminator::Return(Some(id)));
+                    self.emit_return(id);
                 }
                 hir::Terminator::Break => {
                     return Err(compile_err("break out of an effect handler body"));
                 }
             }
         }
+        self.handle_depth -= 1;
 
         // Handler bodies: entered only by the VM's effect dispatch; each ends
         // with Resume.
@@ -1457,6 +1544,226 @@ fn literal_to_constant(lit: &crate::ast::Literal) -> crate::bytecode::Constant {
         Literal::Bool(b) => Constant::Bool(*b),
         Literal::Nil => Constant::Nil,
         Literal::Unit => Constant::Unit,
+    }
+}
+
+/// Variable names used anywhere in a HIR body, minus `exclude` (the
+/// function's parameters and recursive self-name). Conservative: names
+/// bound *inside* the body may be included spuriously — callers filter
+/// against what is actually in scope, and capture locals are bound before
+/// the body so internal bindings still shadow them correctly. Sorted for
+/// a deterministic capture order shared with codegen.
+fn hir_body_used_vars(body: &hir::Body, exclude: &HashSet<String>) -> Vec<String> {
+    let mut acc = HashSet::new();
+    walk_hir_body(body, &mut acc);
+    let mut names: Vec<String> = acc
+        .into_iter()
+        .filter(|n| !exclude.contains(n))
+        .collect();
+    names.sort();
+    names
+}
+
+fn walk_hir_body(body: &hir::Body, acc: &mut HashSet<String>) {
+    for stmt in &body.stmts {
+        match stmt {
+            hir::Stmt::Let { value, .. } => walk_hir_rvalue(value, acc),
+            hir::Stmt::Assign { target, value, .. } => {
+                walk_hir_place(target, acc);
+                walk_hir_rvalue(value, acc);
+            }
+            hir::Stmt::StateSet { value, .. } => walk_hir_operand(value, acc),
+            hir::Stmt::Emit { args, .. } => {
+                for a in args {
+                    walk_hir_operand(a, acc);
+                }
+            }
+        }
+    }
+    match &body.terminator {
+        hir::Terminator::Yield(op) => walk_hir_operand(op, acc),
+        hir::Terminator::FnReturn(op) => {
+            if let Some(op) = op {
+                walk_hir_operand(op, acc);
+            }
+        }
+        hir::Terminator::Break => {}
+    }
+}
+
+fn walk_hir_place(place: &hir::Place, acc: &mut HashSet<String>) {
+    match place {
+        hir::Place::Var(name, _) => {
+            acc.insert(name.clone());
+        }
+        hir::Place::Field { base, .. } => walk_hir_place(base, acc),
+        hir::Place::Index { base, idx, .. } => {
+            walk_hir_place(base, acc);
+            walk_hir_operand(idx, acc);
+        }
+    }
+}
+
+fn walk_hir_operand(op: &hir::Operand, acc: &mut HashSet<String>) {
+    if let hir::Operand::Var(name, _) = op {
+        acc.insert(name.clone());
+    }
+}
+
+fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
+    match rv {
+        hir::RValue::Use(op) => walk_hir_operand(op, acc),
+        hir::RValue::Literal(_, _) | hir::RValue::SelfRef(_) => {}
+        hir::RValue::Binary(_, l, r, _) => {
+            walk_hir_operand(l, acc);
+            walk_hir_operand(r, acc);
+        }
+        hir::RValue::Unary(_, op, _) => walk_hir_operand(op, acc),
+        hir::RValue::Call { func, args, .. } => {
+            walk_hir_operand(func, acc);
+            for a in args {
+                walk_hir_operand(a, acc);
+            }
+        }
+        hir::RValue::Closure { body, .. } | hir::RValue::RecClosure { body, .. } => {
+            walk_hir_body(body, acc)
+        }
+        hir::RValue::Tuple(ops, _) | hir::RValue::Array(ops, _) => {
+            for op in ops {
+                walk_hir_operand(op, acc);
+            }
+        }
+        hir::RValue::Record(fields, _) => {
+            for (_, op) in fields {
+                walk_hir_operand(op, acc);
+            }
+        }
+        hir::RValue::FieldAccess { base, .. } => walk_hir_operand(base, acc),
+        hir::RValue::Index { base, idx, .. } => {
+            walk_hir_operand(base, acc);
+            walk_hir_operand(idx, acc);
+        }
+        hir::RValue::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            walk_hir_operand(cond, acc);
+            walk_hir_body(then_body, acc);
+            if let Some(e) = else_body {
+                walk_hir_body(e, acc);
+            }
+        }
+        hir::RValue::Match {
+            scrutinee, arms, ..
+        } => {
+            walk_hir_operand(scrutinee, acc);
+            for (_, arm_body) in arms {
+                walk_hir_body(arm_body, acc);
+            }
+        }
+        hir::RValue::For {
+            iterable, body, ..
+        } => {
+            walk_hir_operand(iterable, acc);
+            walk_hir_body(body, acc);
+        }
+        hir::RValue::Spawn { init, .. } => {
+            for (_, op) in init {
+                walk_hir_operand(op, acc);
+            }
+        }
+        hir::RValue::Send { actor, args, .. } | hir::RValue::Ask { actor, args, .. } => {
+            walk_hir_operand(actor, acc);
+            for a in args {
+                walk_hir_operand(a, acc);
+            }
+        }
+        hir::RValue::Perform { args, .. } => {
+            for a in args {
+                walk_hir_operand(a, acc);
+            }
+        }
+        hir::RValue::Handle {
+            body, handlers, ..
+        } => {
+            walk_hir_body(body, acc);
+            for h in handlers {
+                walk_hir_body(&h.body, acc);
+            }
+        }
+        hir::RValue::Receive { arms, .. } => {
+            for (_, _, arm_body) in arms {
+                walk_hir_body(arm_body, acc);
+            }
+        }
+        hir::RValue::Migrate { actor, node, .. } => {
+            walk_hir_operand(actor, acc);
+            walk_hir_operand(node, acc);
+        }
+        hir::RValue::CapCheck { operand, .. } => walk_hir_operand(operand, acc),
+        hir::RValue::FFICall { args, .. } => {
+            for a in args {
+                walk_hir_operand(a, acc);
+            }
+        }
+        hir::RValue::PipelineNew { .. } | hir::RValue::SupervisorNew { .. } => {}
+        hir::RValue::PipelineStage {
+            id,
+            name,
+            actor,
+            template,
+            ..
+        } => {
+            walk_hir_operand(id, acc);
+            walk_hir_operand(name, acc);
+            walk_hir_operand(actor, acc);
+            walk_hir_operand(template, acc);
+        }
+        hir::RValue::PipelineRun { id, input, .. } => {
+            walk_hir_operand(id, acc);
+            walk_hir_operand(input, acc);
+        }
+        hir::RValue::SupervisorWorker {
+            id,
+            name,
+            actor,
+            description,
+            ..
+        } => {
+            walk_hir_operand(id, acc);
+            walk_hir_operand(name, acc);
+            walk_hir_operand(actor, acc);
+            walk_hir_operand(description, acc);
+        }
+        hir::RValue::SupervisorRun { id, task, .. } => {
+            walk_hir_operand(id, acc);
+            walk_hir_operand(task, acc);
+        }
+        hir::RValue::DebateNew {
+            topic,
+            rounds,
+            threshold,
+            ..
+        } => {
+            walk_hir_operand(topic, acc);
+            walk_hir_operand(rounds, acc);
+            walk_hir_operand(threshold, acc);
+        }
+        hir::RValue::DebateParticipant {
+            id,
+            name,
+            stance,
+            actor,
+            ..
+        } => {
+            walk_hir_operand(id, acc);
+            walk_hir_operand(name, acc);
+            walk_hir_operand(stance, acc);
+            walk_hir_operand(actor, acc);
+        }
+        hir::RValue::DebateRun { id, .. } => walk_hir_operand(id, acc),
     }
 }
 
