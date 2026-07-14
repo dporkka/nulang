@@ -59,6 +59,12 @@ pub struct Actor {
     pub waiting_signal: Option<String>,
     /// Signals that have been received by this workflow actor (name, payload).
     pub received_signals: Vec<(String, Option<String>)>,
+    /// Read-only query handlers registered on a workflow actor, keyed by
+    /// query name.  A handler is either a function/closure value invoked
+    /// with the actor bound as `self`, or a plain value returned as-is.
+    /// Handlers are ephemeral: they are not journaled and must be
+    /// re-registered after a node restart.
+    pub query_handlers: HashMap<String, Value>,
     /// True if this actor was generated from an `agent` declaration.
     pub is_agent: bool,
     /// True while a background worker thread holds an in-flight LLM request
@@ -123,6 +129,7 @@ impl Actor {
             suspended_execution: None,
             waiting_signal: None,
             received_signals: Vec::new(),
+            query_handlers: HashMap::new(),
             is_agent: false,
             llm_inflight: false,
             llm_pending_prompt: None,

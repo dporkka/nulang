@@ -555,6 +555,7 @@ pub enum NuError {
     RuntimeError(String),
     VMError(String),
     PythonError(String), // Python interop error
+    PackageError(String), // `nula` package manager error (manifest/lockfile/resolution)
 }
 
 impl std::fmt::Display for NuError {
@@ -592,6 +593,7 @@ impl std::fmt::Display for NuError {
             NuError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             NuError::VMError(msg) => write!(f, "VM error: {}", msg),
             NuError::PythonError(msg) => write!(f, "Python error: {}", msg),
+            NuError::PackageError(msg) => write!(f, "Package error: {}", msg),
         }
     }
 }

@@ -6,11 +6,13 @@
 //!   nulang --eval <CODE>
 //!   nulang --check <FILE>
 //!   nulang --lsp       Start LSP server
+//!   nulang --doc       Generate docs/api.md for the current project
 //!
 //! Options:
 //!   -r, --repl       Start interactive REPL
 //!   -e, --eval       Evaluate a code string
 //!   -c, --check      Type-check a file (don't run)
+//!   --doc            Generate Markdown API docs (docs/api.md)
 //!   --lsp            Start Language Server (stdio)
 //!   --version, -V    Print version and exit
 //!   -v, --verbose    Show bytecode and AST
@@ -35,6 +37,15 @@ async fn main() {
         // Default: start REPL with the HIR/MIR pipeline.
         let mut repl = Repl::new();
         repl.run();
+        return;
+    }
+
+    // `nulang nula <cmd>` dispatches to the package manager.
+    if args[1] == "nula" {
+        if let Err(e) = nulang::package::commands::run(&args[2..]) {
+            print_error(&e);
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -69,6 +80,7 @@ async fn main() {
                 return;
             }
             "--lsp" => opts.lsp = true,
+            "--doc" => opts.doc = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-h" | "--help" => {
                 print_help();
@@ -82,6 +94,24 @@ async fn main() {
             arg => positional.push(arg.to_string()),
         }
         i += 1;
+    }
+
+    if opts.doc {
+        let root = match std::env::current_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                eprintln!("Error: Cannot determine current directory: {}", e);
+                std::process::exit(1);
+            }
+        };
+        match nulang::docgen::write_project_docs(&root) {
+            Ok(path) => println!("Wrote {}", path.display()),
+            Err(e) => {
+                print_error(&e);
+                std::process::exit(1);
+            }
+        }
+        return;
     }
 
     if opts.lsp {
@@ -155,6 +185,7 @@ struct Options {
     eval_code: Option<String>,
     check_file: Option<String>,
     lsp: bool,
+    doc: bool,
     verbose: bool,
 }
 
@@ -164,12 +195,16 @@ fn print_help() {
     println!("       nulang --eval <CODE>");
     println!("       nulang --check <FILE>");
     println!("       nulang --lsp");
+    println!("       nulang nula <new|build|test|run>");
+    println!("       nulang --doc");
     println!();
     println!("Options:");
     println!("  -r, --repl       Start interactive REPL");
     println!("  -e, --eval       Evaluate a code string");
     println!("  -c, --check      Type-check a file (don't run)");
+    println!("  --doc            Generate Markdown API docs (docs/api.md)");
     println!("  --lsp            Start Language Server (stdio)");
+    println!("  nula <cmd>       Package manager (new, build, test, run)");
     println!("  --version, -V    Print version and exit");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  -h, --help       Show this help message");

@@ -5,7 +5,7 @@
 
 ## Project Overview
 
-**Nulang** is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system (Hindley-Milner inference + reference capabilities + row-polymorphic algebraic effects), a register-based bytecode VM, a Cranelift JIT, BEAM/OTP primitives, CRDTs, location-transparent distribution, SQLite/JSON persistence, PyO3 Python interop, a C-compatible FFI layer, and a v0.9 AI runtime (`src/ai/` — LLM providers, memory, pipelines, debates, supervisor teams). Status: Alpha; 1143 tests pass (`cargo test`). License: Apache-2.0.
+**Nulang** is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system (Hindley-Milner inference + reference capabilities + row-polymorphic algebraic effects), a register-based bytecode VM, a Cranelift JIT, BEAM/OTP primitives, CRDTs, location-transparent distribution, SQLite/JSON persistence, PyO3 Python interop, a C-compatible FFI layer, and a v0.9 AI runtime (`src/ai/` — LLM providers, memory, pipelines, debates, supervisor teams). Status: Alpha; 1181 tests pass (`cargo test`). License: Apache-2.0.
 
 ## Architecture & Data Flow
 
@@ -56,6 +56,9 @@ Custom TCP wire protocol (`src/runtime/network.rs`): length-prefixed frames, mag
 - `src/python/` — PyO3 interop: `bridge.rs` (GIL + `PythonRegistry`), `marshal.rs` (Value↔Py).
 - `src/ai/` — v0.9 AI runtime: provider-agnostic LLM API (`client.rs`/`request.rs`/`response.rs`; async `LlmClient` + sync `complete_sync`), `providers/` (`ollama.rs`, `openai.rs`), memory (`memory.rs` episodic, `semantic_memory.rs`, `procedural_memory.rs`), `pipeline.rs` (sequential agent stages), `debate.rs`, `supervisor.rs` (worker teams), `schema.rs` (tool/JSON schema), `usage.rs` (token cost), `mock.rs`.
 - `src/ffi/` — C-compatible FFI layer: `mod.rs` (module root + Rust registration API), `native.rs` (dynamic library registry), `marshal.rs` (Value↔C ABI), `c_api.rs` (stable C embedder API).
+- `src/package/` — `nula` package manager (MVP): `manifest.rs` (`Nulang.toml` via the `toml` crate), `lockfile.rs` (`Nulang.lock`), `resolver.rs` (local-path + git deps only, simple semver checks, topo order, no network registry), `commands.rs` (`nulang nula new|build|test|run`, dispatched from `main.rs`; build/test/run shell out to the current `nulang` executable).
+- `src/docgen.rs` — documentation generator: scans `.nula` files for `///`/`//!` comments, extracts `fn`/`actor`/`type`/`workflow` declarations, and emits `docs/api.md`.
+- `src/stdlib.rs` — standard-library inventory: documents built-in effects/functions (`IO.print`, `IO.read`, `Timer.sleep`, `Signal.wait`, `LLM.ask`, `Workflow.query`) with signatures and descriptions.
 - `.cargo/` — `config.toml` (bfd linker + PyO3 abi3 env), `audit.toml` (one ignored advisory).
 - `build.rs` — Fedora libpython symlink workaround for PyO3 linking.
 - `.agents/` — orchestration scratch/handoff artifacts from a prior multi-agent analysis run; **not language source**.
@@ -65,13 +68,15 @@ Custom TCP wire protocol (`src/runtime/network.rs`): length-prefixed frames, mag
 ```bash
 cargo build                      # dev build (opt-level 0, debug)
 cargo build --release            # release (opt-level 3, LTO, codegen-units 1)
-cargo test                       # run all 1143 tests (test profile: no LTO, 16 codegen-units for speed)
+cargo test                       # run all 1181 tests (test profile: no LTO, 16 codegen-units for speed)
 cargo test --release             # run tests under the release profile
 cargo run -- --repl              # interactive REPL (prompt `nulang>`)
 cargo run -- --eval 'perform IO.print("Hello")'   # evaluate a string
 cargo run -- --check myprogram.nula                 # type+effect+cap check only (no run)
 cargo run -- myprogram.nula                          # compile and run a file
 cargo run -- --lsp                                 # start the LSP server on stdin/stdout
+cargo run -- nula new my-app                        # package manager: scaffold a package (also: nula build|test|run)
+cargo run -- --doc                                  # generate docs/api.md from .nula doc comments
 cargo run -- -v myprogram.nula                       # verbose: print AST/bytecode/inferred type
 python3 verify_implementation.py                  # gate: cargo test + forbidden-pattern scans + integration checks
 python3 verify_report.py                          # gate: validates codebase_analysis_report.md structure
@@ -117,7 +122,7 @@ python3 verify_report.py                          # gate: validates codebase_ana
 - **Framework**: standard Rust `#[test]` + `#[cfg(test)]`. No proptest/quickcheck/criterion. No `#[ignore]`/`#[should_panic]`/async tests.
 - **Organization**: two styles — (a) inline `mod tests` at file foot (`lexer.rs`, `parser.rs`, `typechecker.rs`, `effect_checker.rs`, `value_layout.rs`, `vm.rs`, most `runtime/*.rs`, `jit/*`, `python/*`, `ffi/*`, `ai/*`, `lsp/mod.rs`); (b) dedicated test files (`src/integration_tests.rs`, `src/stress_tests.rs`, `src/runtime/tests.rs`, `src/jit/tests.rs`).
 - **Naming**: `test_<subject>` (unit/integration), `stress_<scenario>` (chaos).
-- **Counts** (1143 total, lib suite): `integration_tests.rs` 199 (end-to-end pipeline via `run_source`/`assert_int`/`run_source_with_runtime`, plus MIR-pipeline variants via `run_source_new`/`assert_int_new`/`run_source_new_with_runtime`, plus selective-receive, non-blocking LLM suspend/resume, typed-JIT tiering tests, and float-threading regression tests), `stress_tests.rs` 30 (`stress_*` chaos: mailbox floods, crash/exit cascades, scheduler fairness, CRDT/persistence, GC/cycle-detector churn), `runtime/tests.rs` 93, `jit/tests.rs` 38; the remaining 783 are inline unit tests (`src/ai/` alone has 47). Doc-tests: 3 run, 8 ignored.
+- **Counts** (1181 total, lib suite): `integration_tests.rs` 202 (end-to-end pipeline via `run_source`/`assert_int`/`run_source_with_runtime`, plus MIR-pipeline variants via `run_source_new`/`assert_int_new`/`run_source_new_with_runtime`, plus selective-receive, non-blocking LLM suspend/resume, typed-JIT tiering tests, float-threading regression tests, and workflow query tests), `stress_tests.rs` 30 (`stress_*` chaos: mailbox floods, crash/exit cascades, scheduler fairness, CRDT/persistence, GC/cycle-detector churn), `runtime/tests.rs` 93, `jit/tests.rs` 38, `src/package/` 17, `src/docgen.rs` 11, `src/stdlib.rs` 7; the remaining 783 are inline unit tests (`src/ai/` alone has 47). Doc-tests: 3 run, 8 ignored.
 - **Helpers/fixtures**: `run_source`/`compile_source`/`assert_int` + `SharedMemoryStore` (`Arc<Mutex<MemoryStore>>` impl `PersistenceStore`) for restart simulation (`integration_tests.rs`); `TestContext {counters, log}` (`stress_tests.rs`); `make_jit()` (`jit/tests.rs`).
 - **Run**: `cargo test` (test profile: LTO off, 16 codegen-units for fast parallel builds). `cargo test --release` for optimized runs.
 - **Gate scripts**: `verify_implementation.py` (forbidden-pattern scans for known anti-patterns — Box'd frames, string leaks, `crdt_reg` temp Vec, timer BinaryHeap rebuild, check-then-unwrap — + asserts JIT integration, escape-analysis deadness, scheduler-stats and cycle-detector wiring, then runs `cargo test` and `cargo check --tests` against a zero-warning baseline) and `verify_report.py` (validates `codebase_analysis_report.md`: required sections, ≥5 code snippets, referenced `src/*.rs` paths exist). Each exits 0 only on full pass.

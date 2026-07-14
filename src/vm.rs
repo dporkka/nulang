@@ -2663,6 +2663,22 @@ impl VM {
 
     // === Function Resolution ===
 
+    /// Resolve a function/closure value to its code offset in the given
+    /// module's function table.
+    ///
+    /// Immediate closures (payload = function index) and plain function
+    /// indices resolve directly; env-carrying closures resolve through this
+    /// VM's captured environments, so they can only run on the VM that
+    /// created them. Used by the runtime to invoke workflow query handlers.
+    pub fn function_offset_for_value(&self, module_idx: usize, func: Value) -> NuResult<usize> {
+        let (func_idx, _) = self.resolve_function(func, module_idx)?;
+        self.modules
+            .get(module_idx)
+            .and_then(|m| m.function_table.get(func_idx))
+            .copied()
+            .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))
+    }
+
     /// Resolve a function value to a (function_table_index, closure_env).
     fn resolve_function(&self, func_val: Value, _module_idx: usize) -> NuResult<(usize, Option<Value>)> {
         if let Some(func_idx) = func_val.as_int() {

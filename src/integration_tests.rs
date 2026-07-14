@@ -2789,6 +2789,161 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    #[test]
+    fn test_workflow_query_handler_reads_state() {
+        // A query handler is a plain function that reads `self` state; the
+        // runtime invokes it with the workflow actor bound as `self`, so it
+        // observes the actor's current state without mutating it.  The
+        // program entry returns the handler as a first-class function value
+        // (a function-table index, the representation the MIR pipeline
+        // emits for function references).
+        let source = r#"
+            workflow Counter {
+                step bump { self.step_index = self.step_index + 1 }
+            }
+            fn progress() -> Int { self.step_index }
+            let c = spawn Counter {} in { progress }
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+        let handler = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = {
+            let rt = rt.borrow();
+            assert_eq!(rt.actors.len(), 1, "exactly one workflow actor should exist");
+            *rt.actors.keys().next().unwrap()
+        };
+
+        // Advance the workflow so the query has observable state to read.
+        rt.borrow_mut().send_message(actor_id, "bump", &[]);
+        rt.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("step_index")
+                .and_then(|v| v.as_int()),
+            Some(1),
+            "bump step should advance step_index to 1"
+        );
+
+        let events_before = store.read_workflow_events(actor_id).len();
+
+        rt.borrow_mut().register_workflow_query(actor_id, "progress", handler);
+        let result = rt.borrow_mut().query_workflow(actor_id, "progress");
+        assert_eq!(
+            result.and_then(|v| v.as_int()),
+            Some(1),
+            "query handler should read the workflow's current step_index"
+        );
+
+        // Queries are read-only: no workflow events were appended.
+        assert_eq!(
+            store.read_workflow_events(actor_id).len(),
+            events_before,
+            "querying must not append workflow events"
+        );
+
+        // Unknown query names resolve to None.
+        assert_eq!(
+            rt.borrow_mut().query_workflow(actor_id, "missing"),
+            None,
+            "unregistered query name should return None"
+        );
+    }
+
+    #[test]
+    fn test_workflow_query_rejects_non_workflow_actor() {
+        // Queries are a workflow-only concept: registering on a plain actor
+        // is a no-op and querying it yields None.
+        let source = r#"
+            actor Echo { behavior ping() { 1 } }
+            let e = spawn Echo {} in { e }
+        "#;
+        let (module, _ty) = compile_source(source).unwrap();
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt.borrow_mut()
+            .register_workflow_query(actor_id, "ping", Value::int(0));
+        assert_eq!(
+            rt.borrow_mut().query_workflow(actor_id, "ping"),
+            None,
+            "plain actors have no query handlers"
+        );
+        assert_eq!(
+            rt.borrow_mut().query_workflow(actor_id + 1000, "ping"),
+            None,
+            "querying a missing actor should return None"
+        );
+    }
+
+    #[test]
+    fn test_workflow_query_effect_from_step() {
+        // `perform Workflow.query(self, name)` inside a workflow step routes
+        // through the runtime's builtin-effect path and invokes the
+        // registered handler on the workflow actor.  The step runs on the
+        // runtime's shared VM while the handler runs on a private VM, so
+        // the query cannot disturb the step's own execution state.
+        let source = r#"
+            workflow Counter {
+                step bump { self.step_index = self.step_index + 1 }
+                step inspect { self.observed = perform Workflow.query(self, "progress") }
+            }
+            fn progress() -> Int { self.step_index }
+            let c = spawn Counter {} in { progress }
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+        let handler = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = {
+            let rt = rt.borrow();
+            assert_eq!(rt.actors.len(), 1, "exactly one workflow actor should exist");
+            *rt.actors.keys().next().unwrap()
+        };
+
+        rt.borrow_mut().register_workflow_query(actor_id, "progress", handler);
+        rt.borrow_mut().send_message(actor_id, "bump", &[]);
+        rt.borrow_mut().run_scheduler();
+        rt.borrow_mut().send_message(actor_id, "inspect", &[]);
+        rt.borrow_mut().run_scheduler();
+
+        assert_eq!(
+            rt.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("observed")
+                .and_then(|v| v.as_int()),
+            Some(1),
+            "Workflow.query effect should deliver the handler result into the step"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // v0.2 HIR/MIR pipeline smoke tests
     // -----------------------------------------------------------------------

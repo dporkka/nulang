@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod bytecode;
+pub mod docgen;
 pub mod effect_checker;
 pub mod hir;
 pub mod hir_lower;
@@ -10,8 +11,10 @@ pub mod lsp;
 pub mod mir;
 pub mod mir_codegen;
 pub mod mir_lower;
+pub mod package;
 pub mod parser;
 pub mod repl;
+pub mod stdlib;
 pub mod typechecker;
 pub mod types;
 pub mod value_layout;

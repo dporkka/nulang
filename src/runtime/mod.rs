@@ -1054,6 +1054,58 @@ impl Runtime {
         }
     }
 
+    /// Register a read-only query handler on a workflow actor.
+    ///
+    /// The handler is a function/closure value invoked by `query_workflow`
+    /// with the workflow actor bound as `self`, so it can read the actor's
+    /// current state.  Registration is a no-op for missing or non-workflow
+    /// actors: queries are a workflow-only concept.  Handlers are not
+    /// journaled, so they must be re-registered after a node restart.
+    pub fn register_workflow_query(&mut self, actor_id: u64, name: &str, handler: Value) {
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            if actor.is_workflow {
+                actor.query_handlers.insert(name.to_string(), handler);
+            }
+        }
+    }
+
+    /// Invoke a registered query handler on a workflow actor and return its
+    /// result.  Returns `None` when the actor is missing, is not a workflow,
+    /// has no handler registered under `name`, or the handler value does not
+    /// resolve to a function in the actor's bytecode module.
+    ///
+    /// Queries are read-only: unlike `signal_workflow` they append nothing
+    /// to the durable workflow journal, force no checkpoint, and never
+    /// resume a suspended step.  The handler runs on a private VM with the
+    /// workflow actor bound as `self`, so a query performed from inside a
+    /// running behavior cannot disturb that behavior's frames; handlers
+    /// must therefore be immediate (non-capturing) functions, since closure
+    /// environments live on the VM that created them.
+    pub fn query_workflow(&mut self, actor_id: u64, name: &str) -> Option<Value> {
+        let (handler, module) = {
+            let actor = self.actors.get(&actor_id)?;
+            if !actor.is_workflow {
+                return None;
+            }
+            let handler = *actor.query_handlers.get(name)?;
+            (handler, actor.bytecode_module.clone()?)
+        };
+
+        let self_ptr: *mut Runtime = self;
+        let mut vm = crate::vm::VM::new();
+        vm.load_module(module);
+        let offset = vm.function_offset_for_value(0, handler).ok()?;
+        // SAFETY: `self` outlives the scratch VM; the callbacks only touch
+        // the runtime while the VM runs inside this call.  The scratch VM
+        // is separate from `self.vm`, so no runtime field is aliased by a
+        // live borrow while the raw pointer is in use.
+        vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
+        let mut frame = crate::vm::Frame::new(None, 0);
+        frame.pc = offset;
+        vm.set_current_frame(frame);
+        vm.run_from(0, offset).ok()
+    }
+
     /// Drain completed background LLM calls and resume the suspended actors
     /// waiting for them.
     fn poll_llm_completions(&mut self) {
@@ -3800,6 +3852,26 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         Some(crate::vm::Value::unit())
     }
 
+    fn perform_builtin_effect(
+        &mut self,
+        effect_name: &str,
+        op_name: Option<&str>,
+        constants: &[crate::bytecode::Constant],
+        regs: &[crate::vm::Value],
+    ) -> Option<crate::vm::Value> {
+        if effect_name == "Workflow" && op_name == Some("query") {
+            let workflow_id = regs.get(0)?.as_actor_id()?;
+            let string_id = regs.get(1)?.as_string_id()?;
+            let query_name = match constants.get(string_id as usize) {
+                Some(crate::bytecode::Constant::String(s)) => s.clone(),
+                _ => return None,
+            };
+            let mut rt = self.runtime.borrow_mut();
+            return rt.query_workflow(workflow_id, &query_name);
+        }
+        self.perform_effect(effect_name, regs)
+    }
+
     fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
         let mut rt = self.runtime.borrow_mut();
         if let Some(actor_id) = rt.current_actor {
@@ -4027,6 +4099,27 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             let duration_ms = regs.get(1)?.as_int()? as u64;
             (*self.runtime).schedule_workflow_timer(self.actor_id, &name, duration_ms);
             Some(crate::vm::Value::unit())
+        }
+    }
+
+    fn perform_builtin_effect(
+        &mut self,
+        effect_name: &str,
+        op_name: Option<&str>,
+        constants: &[crate::bytecode::Constant],
+        regs: &[crate::vm::Value],
+    ) -> Option<crate::vm::Value> {
+        unsafe {
+            if effect_name == "Workflow" && op_name == Some("query") {
+                let workflow_id = regs.get(0)?.as_actor_id()?;
+                let string_id = regs.get(1)?.as_string_id()?;
+                let query_name = match constants.get(string_id as usize) {
+                    Some(crate::bytecode::Constant::String(s)) => s.clone(),
+                    _ => return None,
+                };
+                return (*self.runtime).query_workflow(workflow_id, &query_name);
+            }
+            self.perform_effect(effect_name, regs)
         }
     }
 
