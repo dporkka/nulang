@@ -114,6 +114,28 @@ mod tests {
         );
     }
 
+    /// Assert that running source produces a float value.
+    fn assert_float(source: &str, expected: f64) {
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(
+            value.as_float(),
+            Some(expected),
+            "Expected float result for: {}",
+            source
+        );
+    }
+
+    /// Assert that running source produces a boolean value.
+    fn assert_bool(source: &str, expected: bool) {
+        let (value, _ty) = run_source(source).unwrap();
+        assert_eq!(
+            value.as_bool(),
+            Some(expected),
+            "Expected boolean result for: {}",
+            source
+        );
+    }
+
     /// Run source through the full compiler pipeline using a real actor runtime.
     fn run_source_with_runtime(
         source: &str,
@@ -1001,6 +1023,151 @@ mod tests {
         );
     }
 
+    /// End-to-end float arithmetic: mir_codegen's binary/unary opcode
+    /// emission is type-directed — float operands must compile to the F*
+    /// opcode variants, since the integer handlers coerce float operands
+    /// to 0 (so `1.5 + 2.5` used to evaluate to 0).
+    #[test]
+    fn test_float_arithmetic_end_to_end() {
+        assert_float("1.5 + 2.5", 4.0);
+        assert_float("5.5 - 2.0", 3.5);
+        assert_float("1.5 * 2.0", 3.0);
+        assert_float("7.0 / 2.0", 3.5);
+        assert_float("-1.5", -1.5);
+        // Float-ness propagates through let bindings even though
+        // hir_lower types binary results as Int.
+        assert_float("let x = 1.5 in let y = x + 2.5 in y * 2.0", 8.0);
+    }
+
+    /// All six comparisons on float operands, with exact expected values.
+    /// Integer comparison opcodes coerce both sides to 0, which made
+    /// `2.0 == 3.0` true and `2.5 <= 1.5` true before the fix.
+    #[test]
+    fn test_float_comparisons_end_to_end() {
+        assert_bool("1.5 < 2.5", true);
+        assert_bool("2.5 < 1.5", false);
+        assert_bool("2.5 > 1.5", true);
+        assert_bool("1.5 > 2.5", false);
+        assert_bool("1.5 <= 2.5", true);
+        assert_bool("2.5 <= 1.5", false);
+        assert_bool("2.5 >= 1.5", true);
+        assert_bool("1.5 >= 2.5", false);
+        assert_bool("2.0 == 3.0", false);
+        assert_bool("2.0 == 2.0", true);
+        assert_bool("2.0 != 3.0", true);
+        assert_bool("2.0 != 2.0", false);
+    }
+
+    /// Float modulo: the FMod opcode has no interpreter or JIT
+    /// implementation, so `7.5 % 2.0` must be an honest compile error
+    /// rather than silently evaluating as integer mod (0).
+    #[test]
+    fn test_float_modulo_is_compile_error() {
+        let result = run_source("7.5 % 2.0");
+        assert!(
+            matches!(result, Err(NuError::NotYetImplemented { .. })),
+            "float modulo should be a compile error, got {:?}",
+            result
+        );
+        assert_int("7 % 2", 1);
+    }
+
+    /// The interpreter's FDiv yields nil on a zero divisor; the JIT must
+    /// match (nulang_fdiv guards the zero divisor, and the typed compiler
+    /// routes FDiv through that helper instead of emitting a raw fdiv
+    /// that would produce inf/NaN). The hot run tiers the function up
+    /// through the type-directed JIT path (>1000 reductions), so both
+    /// runs agreeing proves interpreter == JIT.
+    #[test]
+    fn test_float_div_by_zero_cold_and_hot_parity() {
+        let source = |n: i64| {
+            format!(
+                r#"
+                fn fdivz(n: Int, acc: Float) -> Float {{
+                    if n < 1 then acc else {{
+                        let a = acc + 1.0 in
+                        let b = a * 2.0 in
+                        let c = b - 3.0 in
+                        let d = c / 0.0 in
+                        fdivz(n - 1, d)
+                    }}
+                }}
+                fdivz({}, 7.0)
+                "#,
+                n
+            )
+        };
+
+        // Cold: below the tiering threshold, purely interpreted.
+        let (cold, _ty) = run_source(&source(5)).unwrap();
+        assert_eq!(
+            cold.as_raw(),
+            Value::nil().as_raw(),
+            "interpreted float div by zero must yield nil"
+        );
+
+        // Hot: forces JIT tier-up of the loop body containing the FDiv.
+        let (module, _ty) = compile_source(&source(2000)).unwrap();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let hot = vm.run().unwrap();
+        assert_eq!(
+            hot.as_raw(),
+            cold.as_raw(),
+            "JIT result must match the interpreter for float div by zero"
+        );
+        assert_eq!(hot.as_raw(), Value::nil().as_raw());
+        assert!(
+            vm.jit_typed_compiled_count() >= 1,
+            "hot float function must compile through the type-directed JIT path"
+        );
+    }
+
+    /// Hot float arithmetic with a nonzero divisor: the typed JIT path
+    /// must produce bit-identical results to the interpreter. The
+    /// recurrence acc' = (2*acc + 1)/4 converges to exactly 0.5.
+    #[test]
+    fn test_float_arithmetic_hot_typed_jit_exact() {
+        let source = r#"
+            fn hotf(n: Int, acc: Float) -> Float {
+                if n < 1 then acc else {
+                    let a = acc * 2.0 in
+                    let b = a + 1.0 in
+                    hotf(n - 1, b / 4.0)
+                }
+            }
+            hotf(2000, 0.0)
+        "#;
+        let (module, _ty) = compile_source(source).unwrap();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let value = vm.run().unwrap();
+        assert_eq!(value.as_float(), Some(0.5), "typed-path float math must be exact");
+        assert!(
+            vm.jit_typed_compiled_count() >= 1,
+            "hot float function must compile through the type-directed JIT path"
+        );
+    }
+
+    /// A handler binding with more than MAX_STAGED_ARGS (16) parameters
+    /// must be an honest compile error: the VM stages effect arguments in
+    /// r0..r15, so a longer prologue would alias the enclosing function's
+    /// locals (mirrors the 17-parameter function check).
+    #[test]
+    fn test_over_limit_handler_params_compile_error() {
+        let params = (0..17)
+            .map(|i| format!("p{}", i))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!("handle 0 {{ | E.op({}) => p0 }}", params);
+        let result = run_source(&source);
+        assert!(
+            matches!(result, Err(NuError::VMError(_))),
+            "a 17-parameter handler binding should be a compile error, got {:?}",
+            result
+        );
+    }
+
     #[test]
     fn test_register_overflow_errors() {
         // 20 nested let bindings — the MIR pipeline allocates isolated
@@ -1384,6 +1551,93 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "wait_for_go")),
             "StepCompleted event should be persisted after the signal"
+        );
+    }
+
+    #[test]
+    fn test_workflow_step_waits_on_two_sequential_signals() {
+        // Regression: a workflow step resumed from a signal wait that
+        // suspends AGAIN on a second signal must re-capture its suspended
+        // state. Previously resume_suspended_workflow_step dropped the
+        // suspension on a chained SignalWait:suspend, so the second wait
+        // could never be woken (permanent stall).
+        let source = r#"
+            workflow TwoSignals {
+                step wait_for_both {
+                    (perform Signal.wait("first"), perform Signal.wait("second"))
+                }
+            }
+            let c = spawn TwoSignals {} in { c }
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        // The step is suspended waiting for the first signal.
+        {
+            let rt = rt.borrow();
+            let actor = rt.actors.get(&actor_id).unwrap();
+            assert_eq!(actor.waiting_signal.as_deref(), Some("first"));
+            assert!(actor.suspended_execution.is_some());
+            assert_eq!(
+                actor.get_state_field("step_index").and_then(|v| v.as_int()),
+                Some(0)
+            );
+        }
+
+        // First signal arrives: the step resumes, then suspends again on the
+        // second signal. The chained suspension must be re-captured.
+        rt.borrow_mut().signal_workflow(actor_id, "first", None);
+        {
+            let rt = rt.borrow();
+            let actor = rt.actors.get(&actor_id).unwrap();
+            assert_eq!(
+                actor.waiting_signal.as_deref(),
+                Some("second"),
+                "chained signal wait should re-register the second signal"
+            );
+            assert!(
+                actor.suspended_execution.is_some(),
+                "chained signal wait should re-capture the suspended execution"
+            );
+            assert_eq!(
+                actor.get_state_field("step_index").and_then(|v| v.as_int()),
+                Some(0),
+                "step should not complete before the second signal"
+            );
+        }
+
+        // Second signal arrives: the step completes and the workflow advances.
+        rt.borrow_mut().signal_workflow(actor_id, "second", None);
+        {
+            let rt = rt.borrow();
+            let actor = rt.actors.get(&actor_id).unwrap();
+            assert_eq!(
+                actor.get_state_field("step_index").and_then(|v| v.as_int()),
+                Some(1),
+                "workflow should advance after both signals are received"
+            );
+            assert!(actor.suspended_execution.is_none());
+            assert_eq!(actor.waiting_signal, None);
+        }
+
+        let events = store.read_workflow_events(actor_id);
+        assert!(
+            events.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "wait_for_both")),
+            "StepCompleted event should be persisted after both signals"
         );
     }
 
@@ -3716,5 +3970,262 @@ mod tests {
         let module_idx = vm.modules.len() - 1;
         let result = vm.value_to_string(module_idx, value);
         assert_eq!(result, "consensus reached");
+    }
+
+    #[test]
+    fn test_let_annotation_type_mismatch() {
+        // A let annotation that contradicts the value type must be a type
+        // error, not silently discarded.
+        let source = r#"let x : Int = "not an int" in x"#;
+        let result = run_source(source);
+        assert!(
+            result.is_err(),
+            "let annotation mismatch should be a type error"
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Cannot unify"),
+            "Error should be a unification failure: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_let_annotation_matching_type() {
+        // A matching annotation type checks and runs normally.
+        assert_int("let x : Int = 41 in x + 1", 42);
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: `return` inside `handle` must unwind the handler frame
+    // (previously the frame stayed on the VM handler_stack, so a later
+    // unhandled perform dispatched into the dead function's handler code)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_return_inside_handle_unwinds_handler_frame() {
+        // `leak` returns out of a handled perform; afterwards a top-level
+        // perform of the same effect must be unhandled rather than
+        // dispatching into the dead function's handler.
+        let source = r#"
+            fn leak() -> Int {
+                handle {
+                    perform Math.getAnswer();
+                    return 1
+                } {
+                    | Math.getAnswer() => 40 + 1
+                }
+            }
+            { leak(); perform Math.getAnswer() }
+        "#;
+        let result = run_source(source);
+        assert!(
+            result.is_err(),
+            "perform after return from handle must be unhandled, got {:?}",
+            result
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Unhandled effect"),
+            "expected unhandled-effect error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_return_inside_nested_handles_unwinds_all_frames() {
+        // Two nested handlers for the same effect: the return must pop BOTH
+        // frames, or the outer (stale) one would catch the later perform.
+        let source = r#"
+            fn leak() -> Int {
+                handle {
+                    handle {
+                        perform Math.getAnswer();
+                        return 1
+                    } {
+                        | Math.getAnswer() => 41
+                    }
+                } {
+                    | Math.getAnswer() => 99
+                }
+            }
+            { leak(); perform Math.getAnswer() }
+        "#;
+        let result = run_source(source);
+        assert!(
+            result.is_err(),
+            "both nested handler frames must be unwound, got {:?}",
+            result
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Unhandled effect"),
+            "expected unhandled-effect error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_return_inside_handle_branch_unwinds_handler_frame() {
+        // The FnReturn path through an expression-position `if` inside the
+        // handle body (lower_body_into) must unwind the frame too.
+        let source = r#"
+            fn leak(b: Bool) -> Int {
+                handle {
+                    perform Math.getAnswer();
+                    if b then return 1 else 2
+                } {
+                    | Math.getAnswer() => 41
+                }
+            }
+            { leak(true); perform Math.getAnswer() }
+        "#;
+        let result = run_source(source);
+        assert!(
+            result.is_err(),
+            "return from an if-branch inside handle must unwind, got {:?}",
+            result
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Unhandled effect"),
+            "expected unhandled-effect error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_return_inside_handle_loop_unwinds_handler_frame() {
+        // The FnReturn path through a `for` body inside the handle body
+        // (lower_for) must unwind the frame too.
+        let source = r#"
+            fn leak() -> Int {
+                handle {
+                    perform Math.getAnswer();
+                    for x in [1, 2, 3] { return x };
+                    0
+                } {
+                    | Math.getAnswer() => 41
+                }
+            }
+            { leak(); perform Math.getAnswer() }
+        "#;
+        let result = run_source(source);
+        assert!(
+            result.is_err(),
+            "return from a for body inside handle must unwind, got {:?}",
+            result
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Unhandled effect"),
+            "expected unhandled-effect error, got: {}",
+            err_msg
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: recursive closures must capture enclosing variables
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_recursive_closure_captures_enclosing_var() {
+        let source = r#"
+            let k = 10 in
+            let f = fn(n) { if n < 1 then 0 else f(n - 1) + k } in
+            f(3)
+        "#;
+        assert_int(source, 30);
+    }
+
+    #[test]
+    fn test_recursive_closure_captures_multiple_vars() {
+        let source = r#"
+            let a = 1 in
+            let b = 100 in
+            let f = fn(n) { if n < 1 then 0 else f(n - 1) + a + b } in
+            f(2)
+        "#;
+        // f(2) = f(1) + 101 = (f(0) + 101) + 101 = 202
+        assert_int(source, 202);
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: free_vars must descend into effect/actor expressions so
+    // closures capture variables used only inside them
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_closure_captures_var_used_in_perform() {
+        // `k` is used only as a perform argument (inside a handle so the
+        // program evaluates to a value).
+        let source = r#"
+            let k = 7 in
+            let f = fn(x) { handle perform IO.print(k) { | IO.print(m) => m } } in
+            f(1)
+        "#;
+        assert_int(source, 7);
+    }
+
+    #[test]
+    fn test_closure_captures_var_used_in_bare_perform() {
+        // Exact repro: previously failed at compile time with
+        // "undefined variable 'k'"; now compiles (k is captured) and the
+        // unhandled perform is the expected runtime error.
+        let source = r#"
+            let k = 7 in
+            let f = fn(x) { perform IO.print(k); x } in
+            f(1)
+        "#;
+        let result = run_source(source);
+        let err_msg = match result {
+            Err(e) => format!("{}", e),
+            Ok((v, _)) => panic!("expected unhandled-effect runtime error, got {:?}", v),
+        };
+        assert!(
+            err_msg.contains("Unhandled effect"),
+            "expected unhandled-effect error (k captured), got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_closure_captures_var_used_in_handler_body() {
+        // `secret` is used only inside an effect handler body.
+        let source = r#"
+            let secret = 41 in
+            let f = fn(x) { handle perform Math.getAnswer() { | Math.getAnswer() => secret + 1 } } in
+            f(0)
+        "#;
+        assert_int(source, 42);
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: non-exhaustive match must be a runtime error, not silently
+    // evaluate the last arm
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_match_non_exhaustive_is_runtime_error() {
+        let source = r#"match 99 {
+            case 1 => 10
+            case 2 => 20
+        }"#;
+        let result = run_source(source);
+        assert!(
+            result.is_err(),
+            "non-exhaustive match must be a runtime error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_match_last_literal_arm_still_matches() {
+        // Control: a matching refutable last arm still evaluates normally.
+        let source = r#"match 2 {
+            case 1 => 10
+            case 2 => 20
+        }"#;
+        assert_int(source, 20);
     }
 }
