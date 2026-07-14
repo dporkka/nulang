@@ -815,6 +815,7 @@ impl CycleDetector {
             // The header pointer is validated before any decrement is applied.
             let op = ForeignRefOp {
                 target_actor: to_actor,
+                owner_actor: to_actor,
                 object_header: to_object as *mut crate::runtime::OrcaHeader,
                 delta: -1,
             };

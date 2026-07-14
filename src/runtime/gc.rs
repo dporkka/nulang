@@ -143,11 +143,19 @@ impl GcStats {
 pub struct ForeignRefOp {
     /// The actor that should process this operation.
     pub target_actor: u64,
+    /// The actor that **owns** the object (recorded at send time from the
+    /// object's header).  Consumers must use this instead of dereferencing
+    /// `object_header` to find the owner: the owner's heap may have been
+    /// retired after the actor exited, and reading the header to discover
+    /// the owner would then be a use-after-free.
+    pub owner_actor: u64,
     /// Pointer to the `OrcaHeader` of the object being referenced.
     ///
     /// This is a raw pointer into the **sender's** heap; it remains valid
     /// as long as the object is alive because actors are never moved in
     /// memory and deallocation is deferred until all references are gone.
+    /// An in-flight op keeps `foreign_count > 0`, which in turn keeps the
+    /// owning heap alive (retired, not freed) even if the owner exits.
     pub object_header: *mut OrcaHeader,
     /// Amount to adjust the foreign count by.
     /// `+1` = increment, `-1` = decrement.
@@ -192,6 +200,12 @@ pub struct OrcaGc {
     /// Foreign-ref operations waiting to be handed off to the coordinator.
     /// The runtime drains this vector between scheduling rounds.
     foreign_ref_queue: Vec<ForeignRefOp>,
+    /// Foreign references this actor has **received** and still holds.
+    /// Each entry is `(owning actor id, header of the held object)`.
+    /// Every hold keeps the object's `foreign_count` elevated by one, so
+    /// the object (and, if the owner has exited, its retired heap) stays
+    /// alive until the runtime releases the hold when this actor exits.
+    held_foreign_refs: Vec<(u64, *mut OrcaHeader)>,
     /// Per-actor statistics.
     stats: GcStats,
 }
@@ -205,6 +219,7 @@ impl OrcaGc {
             actor_id,
             deferred_decrements: Vec::new(),
             foreign_ref_queue: Vec::new(),
+            held_foreign_refs: Vec::new(),
             stats: GcStats::default(),
         }
     }
@@ -347,6 +362,7 @@ impl OrcaGc {
 
         ForeignRefOp {
             target_actor,
+            owner_actor: self.actor_id,
             object_header: header_ptr,
             delta: -1, // target will decrement foreign_count on receipt
         }
@@ -377,6 +393,51 @@ impl OrcaGc {
         header.ref_count += 1;
 
         self.stats.foreign_refs_received += 1;
+    }
+
+    /// Take a receiver-side hold on an object owned by **this** actor.
+    ///
+    /// Called by the runtime when another actor receives a message carrying
+    /// a pointer to one of this actor's objects.  The hold increments
+    /// `foreign_count` so the object cannot be freed while the receiver
+    /// still holds it (in a register, state field, or container).  The
+    /// runtime records the hold on the *receiver's* engine via
+    /// [`record_held_ref`](Self::record_held_ref) and releases it (a `-1`
+    /// foreign op) when the receiver exits.
+    ///
+    /// # Safety
+    /// * `payload_ptr` must point to a live object owned by this actor.
+    pub unsafe fn inc_foreign_hold(&mut self, heap: &dyn OrcaHeap, payload_ptr: *mut u8) {
+        // SAFETY: caller guarantees payload_ptr is valid. Single-threaded
+        // runtime: no other thread mutates this header concurrently.
+        let header = &mut *heap.header_ptr(payload_ptr);
+        debug_assert_eq!(
+            header.actor_id, self.actor_id,
+            "inc_foreign_hold called on object not owned by this actor"
+        );
+
+        header.foreign_count += 1;
+        self.stats.foreign_refs_received += 1;
+    }
+
+    /// Record that this actor (the receiver) holds a foreign reference to
+    /// the object with header `object_header` owned by `owner_actor`.
+    ///
+    /// The matching `foreign_count` increment must already have happened
+    /// (via the owner's [`inc_foreign_hold`](Self::inc_foreign_hold) or a
+    /// direct header bump for a retired owner heap).  Holds are released
+    /// by the runtime when this actor exits.
+    pub fn record_held_ref(&mut self, owner_actor: u64, object_header: *mut OrcaHeader) {
+        self.held_foreign_refs.push((owner_actor, object_header));
+    }
+
+    /// Drain the list of foreign references this actor holds.
+    ///
+    /// The runtime calls this when the actor exits and applies a `-1`
+    /// foreign-count decrement for each entry on the owning side.  Draining
+    /// makes a repeated call a no-op, so exit handling can be idempotent.
+    pub fn take_held_refs(&mut self) -> Vec<(u64, *mut OrcaHeader)> {
+        std::mem::take(&mut self.held_foreign_refs)
     }
 
     /// Process a foreign ref operation delivered from another actor.
@@ -1050,6 +1111,7 @@ mod tests {
         // Foreign ref goes away (simulated via a ForeignRefOp).
         let op = ForeignRefOp {
             target_actor: 1,
+            owner_actor: 1,
             object_header: unsafe { heap.header_ptr(ptr) },
             delta: -1,
         };
@@ -1169,6 +1231,7 @@ mod tests {
         let op = unsafe { gc.send_ref_to(&heap, ptr, 99) };
 
         assert_eq!(op.target_actor, 99);
+        assert_eq!(op.owner_actor, 7, "op should record the owning actor");
         assert_eq!(op.delta, -1);
         assert_eq!(op.object_header, header_ptr);
 
@@ -1201,6 +1264,7 @@ mod tests {
         // Process a -1 op.
         let op1 = ForeignRefOp {
             target_actor: 1,
+            owner_actor: 1,
             object_header: unsafe { heap.header_ptr(ptr) },
             delta: -1,
         };
@@ -1217,6 +1281,7 @@ mod tests {
         // Process another -1 op → foreign_count becomes 0, and since local_count is also 0, the object is freed.
         let op2 = ForeignRefOp {
             target_actor: 1,
+            owner_actor: 1,
             object_header: unsafe { heap.header_ptr(ptr) },
             delta: -1,
         };
@@ -1265,6 +1330,7 @@ mod tests {
         let dummy_header = std::ptr::null_mut();
         let op1 = ForeignRefOp {
             target_actor: 10,
+            owner_actor: 1,
             object_header: dummy_header,
             delta: -1,
         };
@@ -1273,6 +1339,7 @@ mod tests {
 
         let op2 = ForeignRefOp {
             target_actor: 20,
+            owner_actor: 1,
             object_header: dummy_header,
             delta: 1,
         };
@@ -1325,11 +1392,13 @@ mod tests {
         let dummy_header = std::ptr::null_mut();
         gc.queue_foreign_op(ForeignRefOp {
             target_actor: 5,
+            owner_actor: 1,
             object_header: dummy_header,
             delta: -1,
         });
         gc.queue_foreign_op(ForeignRefOp {
             target_actor: 6,
+            owner_actor: 1,
             object_header: dummy_header,
             delta: 1,
         });
@@ -1339,5 +1408,55 @@ mod tests {
         let drained = gc.drain_foreign_ops();
         assert_eq!(drained.len(), 2);
         assert!(gc.foreign_ref_queue.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Test 19: receiver-side hold keeps an owned object alive until the
+    // receiver's hold is released (ORCA receiver protocol)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_receiver_hold_lifecycle() {
+        let mut heap = MockHeap::new();
+        let mut owner_gc = OrcaGc::new(1);
+        let mut receiver_gc = OrcaGc::new(2);
+
+        let ptr = owner_gc.alloc_object(&mut heap, 16, TypeTag::Raw).unwrap();
+        let header_ptr = unsafe { heap.header_ptr(ptr) };
+
+        // Receiver takes a hold on the owner's object.
+        unsafe {
+            owner_gc.inc_foreign_hold(&heap, ptr);
+        }
+        receiver_gc.record_held_ref(1, header_ptr);
+
+        let header = unsafe { &*header_ptr };
+        assert_eq!(foreign_count(header), 1);
+        assert_eq!(owner_gc.stats.foreign_refs_received, 1);
+
+        // Owner drops its only local ref: the hold must keep the object
+        // alive (deferred, not freed).
+        let freed = unsafe { owner_gc.drop_local_ref(&mut heap, ptr) };
+        assert!(!freed, "held object must survive the owner's local drop");
+        assert_eq!(heap.live_count(), 1);
+
+        // Receiver exits: the runtime drains its holds and applies the -1
+        // on the owning side, which frees the object.
+        let holds = receiver_gc.take_held_refs();
+        assert_eq!(holds.len(), 1);
+        assert!(receiver_gc.take_held_refs().is_empty(), "drain is idempotent");
+        for (owner_id, header) in holds {
+            assert_eq!(owner_id, 1);
+            owner_gc.process_foreign_op(
+                &mut heap,
+                ForeignRefOp {
+                    target_actor: 2,
+                    owner_actor: owner_id,
+                    object_header: header,
+                    delta: -1,
+                },
+            );
+        }
+        assert_eq!(heap.live_count(), 0, "object freed once the hold is released");
     }
 }

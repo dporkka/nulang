@@ -16,8 +16,13 @@ pub struct CrdtId(pub u64);
 static CRDT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 impl CrdtId {
-    pub fn new() -> Self {
-        CrdtId(CRDT_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
+    /// Mint a node-scoped id: the high 32 bits carry the node id, the low 32
+    /// bits a process-global counter. Folding the node id in guarantees ids
+    /// created independently on different nodes never collide (each node's
+    /// counter starts at the same value, so a bare counter would).
+    pub fn new(node_id: u64) -> Self {
+        let counter = CRDT_ID_COUNTER.fetch_add(1, Ordering::Relaxed) & 0xFFFF_FFFF;
+        CrdtId((node_id << 32) | counter)
     }
 }
 
@@ -316,7 +321,7 @@ impl CrdtManager {
     }
 
     pub fn create_gcounter(&mut self) -> (CrdtId, GCounter) {
-        let id = CrdtId::new();
+        let id = CrdtId::new(self.node_id);
         let counter = GCounter::new(self.node_id);
         self.entries
             .insert(id, CrdtEntry::GCounter(counter.clone()));
@@ -324,7 +329,7 @@ impl CrdtManager {
     }
 
     pub fn create_pncounter(&mut self) -> (CrdtId, PNCounter) {
-        let id = CrdtId::new();
+        let id = CrdtId::new(self.node_id);
         let counter = PNCounter::new(self.node_id);
         self.entries
             .insert(id, CrdtEntry::PNCounter(counter.clone()));
@@ -332,42 +337,42 @@ impl CrdtManager {
     }
 
     pub fn create_gset(&mut self) -> (CrdtId, GSet<String>) {
-        let id = CrdtId::new();
+        let id = CrdtId::new(self.node_id);
         let set = GSet::new();
         self.entries.insert(id, CrdtEntry::GSet(set.clone()));
         (id, set)
     }
 
     pub fn create_orset(&mut self) -> (CrdtId, ORSet<String>) {
-        let id = CrdtId::new();
+        let id = CrdtId::new(self.node_id);
         let set = ORSet::new(self.node_id as u32);
         self.entries.insert(id, CrdtEntry::ORSet(set.clone()));
         (id, set)
     }
 
     pub fn create_aworset(&mut self) -> (CrdtId, AWORSet<String>) {
-        let id = CrdtId::new();
+        let id = CrdtId::new(self.node_id);
         let set = AWORSet::new(self.node_id);
         self.entries.insert(id, CrdtEntry::AWORSet(set.clone()));
         (id, set)
     }
 
     pub fn create_lwwregister(&mut self, initial: String) -> (CrdtId, LWWRegister<String>) {
-        let id = CrdtId::new();
+        let id = CrdtId::new(self.node_id);
         let reg = LWWRegister::new(self.node_id, initial);
         self.entries.insert(id, CrdtEntry::LWWRegister(reg.clone()));
         (id, reg)
     }
 
     pub fn create_mvregister(&mut self) -> (CrdtId, MVRegister<String>) {
-        let id = CrdtId::new();
+        let id = CrdtId::new(self.node_id);
         let reg = MVRegister::new(self.node_id);
         self.entries.insert(id, CrdtEntry::MVRegister(reg.clone()));
         (id, reg)
     }
 
     pub fn create_rga(&mut self) -> (CrdtId, RGA<String>) {
-        let id = CrdtId::new();
+        let id = CrdtId::new(self.node_id);
         let rga = RGA::new(self.node_id);
         self.entries.insert(id, CrdtEntry::RGA(rga.clone()));
         (id, rga)
@@ -1115,5 +1120,41 @@ mod tests {
         // Full-state fallback repairs B.
         sync_all(&mut a, &mut b);
         assert_eq!(b.get_gcounter_mut(id).unwrap().value(), 8);
+    }
+
+    // -----------------------------------------------------------------------
+    // Node-scoped ids
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_crdt_id_disjoint_across_nodes() {
+        // Two managers that each mint several CRDTs must never produce the
+        // same id, even though their local counters start at the same value.
+        let mut a = CrdtManager::new(1);
+        let mut b = CrdtManager::new(2);
+
+        let mut ids_a = Vec::new();
+        let mut ids_b = Vec::new();
+        for _ in 0..4 {
+            ids_a.push(a.create_gcounter().0);
+            ids_b.push(b.create_gcounter().0);
+        }
+
+        for ia in &ids_a {
+            for ib in &ids_b {
+                assert_ne!(ia, ib, "ids from different nodes must not collide");
+            }
+        }
+
+        // The node id is folded into the high 32 bits, so a counter reset on
+        // another node still can't collide with this node's ids.
+        assert!(
+            ids_a.iter().all(|id| id.0 >> 32 == 1),
+            "node 1 ids must carry node id in the high bits"
+        );
+        assert!(
+            ids_b.iter().all(|id| id.0 >> 32 == 2),
+            "node 2 ids must carry node id in the high bits"
+        );
     }
 }

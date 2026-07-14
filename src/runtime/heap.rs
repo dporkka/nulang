@@ -71,7 +71,9 @@ pub enum SizeClass {
 impl SizeClass {}
 
 /// Map a *total* allocation size (header + payload, already aligned) to its
-/// size class and the rounded-up block size for free-list bucketing.
+/// size class and the rounded-up block size for free-list bucketing.  The
+/// bump allocator reserves the full block size for every allocation, so all
+/// blocks in a class are physically uniform and freely interchangeable.
 fn classify_total_size(total_size: usize) -> (SizeClass, usize) {
     // Clamp to at least the header size so that even zero-payload
     // allocations have a well-defined class.
@@ -393,14 +395,24 @@ impl ActorHeap {
     ///    with its original layout on `reset`/`drop`.
     /// 5. Otherwise fall back to bump allocation from the active block —
     ///    chaining a fresh block when the active one is exhausted — or to a
-    ///    fresh LOS allocation when `total_size > LOS_THRESHOLD`.
+    ///    fresh LOS allocation when `total_size > LOS_THRESHOLD`.  The bump
+    ///    pointer advances by the uniform class block size (not the exact
+    ///    total), so all blocks in a class are physically identical and
+    ///    free-list reuse can never overrun a neighbour.
     ///
     /// Returns `None` only if the global allocator fails (OS OOM); an
     /// exhausted bump block triggers growth instead of failure.
     pub fn alloc(&mut self, payload_size: usize, type_tag: TypeTag) -> Option<*mut u8> {
         let aligned_payload = align_up(payload_size);
         let total_size = Self::HEADER_SIZE + aligned_payload;
-        let (size_class, _) = classify_total_size(total_size);
+        // `block_size` is the uniform physical size reserved for the class
+        // (the exact total for Huge/LOS blocks).  The header still records
+        // the exact `total_size`, because the VM derives array / record /
+        // tuple element counts from it.  Every reachable class block is
+        // >= HEADER_SIZE + ALIGN (the smallest is 64 bytes vs a 56-byte
+        // header), so even a zero-byte payload leaves room for `free`'s
+        // intrusive next-pointer.
+        let (size_class, block_size) = classify_total_size(total_size);
         let sc_idx = size_class as usize;
 
         // --- Fast path: try the free list for this size class ---
@@ -447,19 +459,19 @@ impl ActorHeap {
 
         // --- Slow path: bump allocation, chaining a new block on exhaustion ---
         unsafe {
-            if self.current.add(total_size) > self.limit {
+            if self.current.add(block_size) > self.limit {
                 // The active block is full.  Objects never move (raw payload
                 // pointers live in VM registers, foreign refs, and JIT code),
                 // so we chain a fresh block instead of reallocating.
-                self.grow_bump_block(total_size)?;
-                debug_assert!(self.current.add(total_size) <= self.limit);
+                self.grow_bump_block(block_size)?;
+                debug_assert!(self.current.add(block_size) <= self.limit);
             }
 
-            let new_current = self.current.add(total_size);
+            let new_current = self.current.add(block_size);
             let header_ptr = self.current as *mut OrcaHeader;
             let payload_ptr = self.current.add(Self::HEADER_SIZE);
             self.current = new_current;
-            self.used_bytes += total_size;
+            self.used_bytes += block_size;
 
             // Initialise the header in place.
             std::ptr::write(
@@ -517,9 +529,11 @@ impl ActorHeap {
             // Intrusive free list: the first 8 bytes of the (now dead) payload
             // store a pointer to the previous head of the free list.
             //
-            // SAFETY: the payload is at least 8 bytes for every size class
-            // except Tiny, and Tiny is never actually used because the header
-            // alone is 56 bytes. Therefore we always have room for a pointer.
+            // SAFETY: every block physically reserves at least ALIGN bytes of
+            // payload — alloc advances the bump pointer by the uniform class
+            // block size, and the smallest class block is 64 bytes against a
+            // 56-byte header — so there is always room for the next-pointer,
+            // even for zero-byte payloads.
             *(payload_ptr as *mut *mut u8) = self.free_lists[sc_idx];
             self.free_lists[sc_idx] = payload_ptr;
         }
@@ -1545,4 +1559,110 @@ fn test_los_reset_releases_blocks() {
     unsafe {
         assert_eq!((*ActorHeap::header_of(l3)).size_class, SizeClass::Huge);
     }
+}
+
+#[test]
+fn test_bump_advances_by_uniform_class_block_size() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    // payload 16 -> total 72 -> Medium class: the bump pointer must reserve
+    // the whole 128-byte class block, not the exact 72-byte total.
+    heap.alloc(16, TypeTag::Array).unwrap();
+    assert_eq!(
+        heap.used(),
+        128,
+        "bump must reserve the uniform Medium class block"
+    );
+
+    // payload 1 -> total 64 -> Small class block of 64 bytes.
+    heap.alloc(1, TypeTag::Raw).unwrap();
+    assert_eq!(heap.used(), 128 + 64);
+}
+
+#[test]
+fn test_free_then_larger_alloc_same_class_preserves_neighbor() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    // A and B are adjacent: payload 16 -> total 72 (Medium).
+    let a = heap.alloc(16, TypeTag::Array).unwrap();
+    let b = heap.alloc(16, TypeTag::Array).unwrap();
+
+    // Snapshot B's header.
+    let (b_ref, b_foreign, b_size, b_class, b_tag) = unsafe {
+        let h = &*ActorHeap::header_of(b);
+        (h.ref_count, h.foreign_count, h.size, h.size_class, h.type_tag)
+    };
+
+    // Free A, then allocate a larger object in the same class (payload 40 ->
+    // total 96, still Medium).  The freed block is reused, but writing the
+    // full 40-byte payload must not overrun into B's header (before the fix
+    // the reused block was only 72 bytes and the write ran 24 bytes into B).
+    unsafe {
+        heap.free(a);
+    }
+    let a2 = heap.alloc(40, TypeTag::Array).unwrap();
+    assert_eq!(a, a2, "freed Medium block should be reused");
+    unsafe {
+        std::ptr::write_bytes(a2, 0xAB, 40);
+    }
+
+    unsafe {
+        let h = &*ActorHeap::header_of(b);
+        assert_eq!(h.ref_count, b_ref, "neighbour ref_count corrupted");
+        assert_eq!(h.foreign_count, b_foreign);
+        assert_eq!(h.size, b_size);
+        assert_eq!(h.size_class, b_class);
+        assert_eq!(h.type_tag, b_tag);
+    }
+}
+
+#[test]
+fn test_zero_payload_free_preserves_neighbor() {
+    let mut heap = ActorHeap::new(64 * 1024);
+
+    // Zero-byte payloads are reachable via ArrAlloc/RecMk/TupleMk with
+    // count 0 (empty [], {}, () literals).
+    let e1 = heap.alloc(0, TypeTag::Array).unwrap();
+    let e2 = heap.alloc(0, TypeTag::Array).unwrap();
+    let neighbor = heap.alloc(0, TypeTag::Array).unwrap();
+
+    unsafe {
+        let h = &*ActorHeap::header_of(neighbor);
+        assert_eq!(h.ref_count, 1);
+        assert_eq!(h.size_class, SizeClass::Small);
+        // The header records the exact requested total (header only): the
+        // VM derives element counts from it, so an empty array stays len 0.
+        assert_eq!(h.size, ActorHeap::HEADER_SIZE);
+    }
+
+    // Free e1 (stores a null next-pointer), then e2 (stores e1's non-null
+    // pointer).  Both 8-byte writes must stay inside their own blocks.
+    unsafe {
+        heap.free(e1);
+        heap.free(e2);
+    }
+
+    unsafe {
+        let h = &*ActorHeap::header_of(neighbor);
+        assert_eq!(
+            h.ref_count, 1,
+            "neighbour header clobbered by free-list next-pointer write"
+        );
+        assert_eq!(h.foreign_count, 0);
+        assert_eq!(h.size_class, SizeClass::Small);
+        assert_eq!(h.type_tag, TypeTag::Array);
+        assert_eq!(h.size, ActorHeap::HEADER_SIZE);
+    }
+    assert_eq!(heap.live_count(), 1);
+    assert_eq!(heap.free_list_count(), 2);
+
+    // Empty blocks stay reusable across repeated alloc/free cycles.
+    for _ in 0..16 {
+        let p = heap.alloc(0, TypeTag::Array).unwrap();
+        unsafe {
+            heap.free(p);
+        }
+    }
+    assert_eq!(heap.live_count(), 1);
+    assert_eq!(heap.free_list_count(), 2);
 }

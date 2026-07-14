@@ -413,15 +413,38 @@ impl PersistenceStore for JsonFileStore {
         let path = self.snapshot_path(snapshot.actor_id);
         let json = serde_json::to_string_pretty(&snapshot)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let mut file = fs::File::create(path)?;
-        file.write_all(json.as_bytes())?;
+        // Write to a temp file in the same directory, then atomically rename
+        // it into place: a crash mid-write can no longer leave a truncated
+        // snapshot.json that recovery would silently treat as "no state".
+        let tmp_path = dir.join("snapshot.json.tmp");
+        {
+            let mut file = fs::File::create(&tmp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, &path)?;
         Ok(())
     }
 
     fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
         let path = self.snapshot_path(actor_id);
-        let data = fs::read_to_string(path).ok()?;
-        serde_json::from_str(&data).ok()
+        // A missing file is the normal "no snapshot yet" case — stay silent.
+        let data = fs::read_to_string(&path).ok()?;
+        match serde_json::from_str(&data) {
+            Ok(snapshot) => Some(snapshot),
+            Err(e) => {
+                // A present-but-unparseable snapshot means corruption (e.g. an
+                // older non-atomic write); log it instead of silently resetting
+                // the actor's durable state on recovery.
+                eprintln!(
+                    "nulang-persist: failed to parse snapshot for actor {} at {}: {}",
+                    actor_id,
+                    path.display(),
+                    e
+                );
+                None
+            }
+        }
     }
 
     fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> io::Result<()> {
@@ -801,5 +824,200 @@ mod tests {
         let store = SqliteStore::in_memory().unwrap();
         let conn = lock_ignore_poison(&store.conn);
         conn.execute_batch("SELECT 1").unwrap();
+    }
+}
+
+#[cfg(test)]
+mod json_file_store_tests {
+    use super::*;
+
+    /// Unique scratch dir per test (the suite runs tests in parallel, and a
+    /// re-run must not see a previous run's leftover files).
+    fn fresh_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nulang_json_store_test_{}_{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn test_json_file_store_save_load_snapshot() {
+        let dir = fresh_dir("snapshot");
+        let mut store = JsonFileStore::new(&dir).unwrap();
+        let mut state = HashMap::new();
+        state.insert("count".to_string(), PersistedValue::Int(42));
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id: 1,
+                sequence: 3,
+                state,
+                waiting_signal: None,
+            })
+            .unwrap();
+
+        let loaded = store.load_snapshot(1).unwrap();
+        assert_eq!(loaded.actor_id, 1);
+        assert_eq!(loaded.sequence, 3);
+        assert_eq!(loaded.state.get("count"), Some(&PersistedValue::Int(42)));
+
+        // The atomic (temp + rename) write must not leave its temp file behind.
+        assert!(!store
+            .snapshot_path(1)
+            .with_file_name("snapshot.json.tmp")
+            .exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_json_file_store_append_read_journal() {
+        let dir = fresh_dir("journal");
+        let mut store = JsonFileStore::new(&dir).unwrap();
+        store
+            .append_journal(
+                1,
+                JournalEntry {
+                    sequence: 1,
+                    behavior_id: 0,
+                    payload: vec![PersistedValue::Int(10)],
+                },
+            )
+            .unwrap();
+        store
+            .append_journal(
+                1,
+                JournalEntry {
+                    sequence: 2,
+                    behavior_id: 1,
+                    payload: vec![PersistedValue::Int(20)],
+                },
+            )
+            .unwrap();
+
+        let journal = store.read_journal(1);
+        assert_eq!(journal.len(), 2);
+        assert_eq!(journal[0].sequence, 1);
+        assert_eq!(journal[1].behavior_id, 1);
+        assert_eq!(journal[1].payload, vec![PersistedValue::Int(20)]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_json_file_store_latest_sequence() {
+        let dir = fresh_dir("latest_seq");
+        let mut store = JsonFileStore::new(&dir).unwrap();
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id: 1,
+                sequence: 5,
+                state: HashMap::new(),
+                waiting_signal: None,
+            })
+            .unwrap();
+        store
+            .append_journal(
+                1,
+                JournalEntry {
+                    sequence: 7,
+                    behavior_id: 0,
+                    payload: vec![],
+                },
+            )
+            .unwrap();
+        assert_eq!(store.latest_sequence(1), 7);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_json_file_store_clear() {
+        let dir = fresh_dir("clear");
+        let mut store = JsonFileStore::new(&dir).unwrap();
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id: 1,
+                sequence: 1,
+                state: HashMap::new(),
+                waiting_signal: None,
+            })
+            .unwrap();
+        store
+            .append_journal(
+                1,
+                JournalEntry {
+                    sequence: 2,
+                    behavior_id: 0,
+                    payload: vec![],
+                },
+            )
+            .unwrap();
+
+        store.clear(1).unwrap();
+        assert!(store.load_snapshot(1).is_none());
+        assert!(store.read_journal(1).is_empty());
+        assert_eq!(store.latest_sequence(1), 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_json_file_store_persists_across_instances() {
+        let dir = fresh_dir("persist");
+        {
+            let mut store = JsonFileStore::new(&dir).unwrap();
+            let mut state = HashMap::new();
+            state.insert("x".to_string(), PersistedValue::Float(1.5));
+            store
+                .save_snapshot(ActorSnapshot {
+                    actor_id: 1,
+                    sequence: 1,
+                    state,
+                    waiting_signal: None,
+                })
+                .unwrap();
+            store
+                .append_journal(
+                    1,
+                    JournalEntry {
+                        sequence: 2,
+                        behavior_id: 0,
+                        payload: vec![PersistedValue::Bool(true)],
+                    },
+                )
+                .unwrap();
+        }
+
+        {
+            let store = JsonFileStore::new(&dir).unwrap();
+            let snapshot = store.load_snapshot(1).unwrap();
+            assert_eq!(snapshot.sequence, 1);
+            assert_eq!(snapshot.state.get("x"), Some(&PersistedValue::Float(1.5)));
+            let journal = store.read_journal(1);
+            assert_eq!(journal.len(), 1);
+            assert_eq!(journal[0].payload, vec![PersistedValue::Bool(true)]);
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_json_file_store_corrupted_snapshot_loads_none() {
+        let dir = fresh_dir("corrupt");
+        let mut store = JsonFileStore::new(&dir).unwrap();
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id: 1,
+                sequence: 9,
+                state: HashMap::new(),
+                waiting_signal: None,
+            })
+            .unwrap();
+
+        // Simulate a torn write (the pre-fix failure mode): truncate the
+        // snapshot file mid-JSON. Recovery must degrade gracefully to `None`
+        // (and log) rather than panic.
+        let path = store.snapshot_path(1);
+        fs::write(&path, "{\"actor_id\": 1, \"sequ").unwrap();
+        assert!(store.load_snapshot(1).is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

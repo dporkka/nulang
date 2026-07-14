@@ -550,17 +550,16 @@ impl ClusterState {
                         .get("_incarnation")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
-                    // Continued gossip about this node is a liveness hint
-                    // even when the incarnation is not strictly newer:
-                    // without this refresh a node that is only reachable
-                    // via relay (e.g. in a chain topology) would be
-                    // suspected by the heartbeat failure detector.
-                    if entry.incarnation >= stored_incarnation {
-                        existing.last_heartbeat = Instant::now();
-                    }
-                    // Higher incarnation wins.
+                    // Higher incarnation wins. Only a strictly-newer entry
+                    // refreshes `last_heartbeat`: an equal-incarnation entry
+                    // is just a re-broadcast of state we already hold, so
+                    // treating it as a liveness hint would let surviving
+                    // nodes refresh a dead peer's timestamp forever and
+                    // defeat the failure detector. (Direct heartbeats refresh
+                    // the timestamp via `handle_heartbeat`.)
                     if entry.incarnation > stored_incarnation {
                         let old_status = existing.status;
+                        existing.last_heartbeat = Instant::now();
                         existing.status = entry.status;
                         existing.address = entry.address;
                         existing
@@ -1163,5 +1162,63 @@ mod tests {
         }
         a.merge_membership(failed_view);
         assert_eq!(a.get_node(id_c).unwrap().status, NodeStatus::Failed);
+    }
+
+    // -- 22. Dead peer is detected even while a peer gossips about it -------
+
+    #[test]
+    fn test_dead_peer_detected_while_peer_gossips_about_it() {
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+
+        // The peer that will die.
+        let dead_addr = addr(9001);
+        let dead_id = NodeId::new(&dead_addr);
+        cs.handle_heartbeat(dead_id, dead_addr);
+
+        // A surviving peer that keeps gossiping about the dead peer.
+        let surv_addr = addr(9002);
+        let surv_id = NodeId::new(&surv_addr);
+        cs.handle_heartbeat(surv_id, surv_addr);
+
+        // Establish a known incarnation (5) on the dead peer's entry.
+        let gossip_v5 = vec![NodeGossip {
+            node_id: dead_id,
+            address: dead_addr,
+            status: NodeStatus::Healthy,
+            incarnation: 5,
+        }];
+        cs.merge_membership(gossip_v5.clone());
+
+        // The dead peer stops heartbeating: move its timestamp into the past,
+        // beyond the full suspicion window.
+        let stale = Instant::now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&dead_id).unwrap().last_heartbeat = stale;
+
+        // The survivor keeps gossiping about the dead peer at the SAME
+        // incarnation. This must NOT refresh the dead peer's last_heartbeat
+        // (that was the failure-detector-defeating bug).
+        cs.merge_membership(gossip_v5);
+        assert_eq!(
+            cs.get_node(dead_id).unwrap().last_heartbeat,
+            stale,
+            "equal-incarnation gossip must not refresh a dead peer's timestamp"
+        );
+
+        // The failure detector must now declare the peer failed.
+        let actions = cs.tick();
+        assert_eq!(cs.get_node(dead_id).unwrap().status, NodeStatus::Failed);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ClusterAction::NodeFailed { node } if *node == dead_id)),
+            "tick should emit NodeFailed for the dead peer"
+        );
+        // The surviving peer stays healthy throughout.
+        assert_eq!(cs.get_node(surv_id).unwrap().status, NodeStatus::Healthy);
     }
 }

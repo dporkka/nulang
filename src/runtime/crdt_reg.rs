@@ -456,7 +456,10 @@ impl RGA<String> {
         let count = u32::from_be_bytes(bytes[16..20].try_into().ok()?) as usize;
         let mut clock = LamportClock::new(node_id);
         clock.counter = clock_counter;
-        let mut elements = Vec::with_capacity(count);
+        // Cap the pre-allocation: `count` comes straight off the wire, so a
+        // malformed packet could otherwise request billions of elements and
+        // abort the process on allocation failure (same guard as network.rs).
+        let mut elements = Vec::with_capacity(count.min(1024));
         let mut offset = 20;
         for _ in 0..count {
             if bytes.len() < offset + 16 {
@@ -751,6 +754,18 @@ mod tests {
         let restored = RGA::from_bytes(&bytes).unwrap();
         assert_eq!(rga.value(), restored.value());
         assert_eq!(rga.len(), restored.len());
+    }
+
+    #[test]
+    fn test_rga_from_bytes_huge_count_rejected_without_abort() {
+        // A malformed packet declaring ~4.3 billion elements but carrying no
+        // payload must be rejected as `None` — and, crucially, must not
+        // pre-allocate that capacity (which would abort the process).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u64.to_be_bytes()); // node_id
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // clock counter
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes()); // bogus count
+        assert!(RGA::<String>::from_bytes(&bytes).is_none());
     }
 
     // ---- Delta-state replication ----

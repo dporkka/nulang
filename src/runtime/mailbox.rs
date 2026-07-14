@@ -76,23 +76,31 @@ impl Mailbox {
     /// message whose behavior id appears in `behavior_ids`.
     ///
     /// Matching is by mailbox order, not arm order: the first message that
-    /// matches ANY id wins. Skipped (non-matching) messages are requeued in
-    /// their original order, so relative FIFO order is preserved.
+    /// matches ANY id wins. The whole queue is drained into a holding list
+    /// and every non-matched message is re-pushed in its original order, so
+    /// relative FIFO order is preserved both for skipped messages and for
+    /// messages queued behind the match.
     ///
     /// Returns `Some((arm_index, payload))` where `arm_index` is the
     /// position of the matched id within `behavior_ids`, or `None` when no
     /// queued message matches.
     pub fn receive_match(&self, behavior_ids: &[u16]) -> Option<(usize, Vec<Value>)> {
-        let mut skipped: Vec<Message> = Vec::new();
-        let mut found = None;
+        let mut drained: Vec<Message> = Vec::new();
         while let Some(msg) = self.queue.pop() {
-            if let Some(pos) = behavior_ids.iter().position(|&id| id == msg.behavior_id) {
-                found = Some((pos, msg.payload));
-                break;
-            }
-            skipped.push(msg);
+            drained.push(msg);
         }
-        for msg in skipped {
+        let mut found = None;
+        let mut requeue: Vec<Message> = Vec::with_capacity(drained.len());
+        for msg in drained {
+            if found.is_none() {
+                if let Some(pos) = behavior_ids.iter().position(|&id| id == msg.behavior_id) {
+                    found = Some((pos, msg.payload));
+                    continue;
+                }
+            }
+            requeue.push(msg);
+        }
+        for msg in requeue {
             self.queue.push(msg);
         }
         found
@@ -298,5 +306,25 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 400);
+    }
+
+    // Test 7: receive_match preserves the relative FIFO order of ALL
+    // non-matched messages, including those queued behind the match.
+    #[test]
+    fn test_receive_match_preserves_skipped_order() {
+        let mb = Mailbox::new(4);
+        mb.push(make_msg(1, 100)).unwrap(); // A: skipped (no match)
+        mb.push(make_msg(2, 200)).unwrap(); // B: matched
+        mb.push(make_msg(3, 300)).unwrap(); // C: queued behind the match
+
+        let found = mb.receive_match(&[2]);
+        assert_eq!(found, Some((0, vec![Value::int(42)])));
+
+        // The mailbox must still serve A before C: selective receive only
+        // removes the matched message, it must not reorder the rest.
+        assert_eq!(mb.len(), 2);
+        assert_eq!(mb.pop().unwrap().behavior_id, 1);
+        assert_eq!(mb.pop().unwrap().behavior_id, 3);
+        assert!(mb.is_empty());
     }
 }

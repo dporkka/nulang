@@ -326,7 +326,15 @@ impl Crdt for PNCounter {
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         let (node_id, pos) = read_u64(bytes, 0)?;
         let (num_entries, _) = read_u32(bytes, pos)?;
-        let increment_len = 12 + (num_entries as usize) * 16;
+        // `num_entries` comes off the wire: validate the split point before
+        // slicing so a crafted payload cannot panic the scheduler thread.
+        // The decrement half needs no explicit bound — once `increment_len`
+        // is in range the second slice is valid, and `GCounter::from_bytes`
+        // bounds-checks its own contents.
+        let increment_len = (num_entries as usize).checked_mul(16)?.checked_add(12)?;
+        if increment_len > bytes.len() {
+            return None;
+        }
         let inc_bytes = &bytes[0..increment_len];
         let dec_bytes = &bytes[increment_len..];
         let increments = GCounter::from_bytes(inc_bytes)?;
@@ -438,6 +446,9 @@ pub struct Tag {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ORSet<T: Clone + Eq + std::hash::Hash> {
     pub entries: HashMap<T, HashSet<Tag>>,
+    /// Tags removed by `remove`; subtracted on merge so removals replicate
+    /// and removed elements never resurrect (same role as `AWORSet::removed`).
+    pub removed: HashSet<Tag>,
     pub tag_counter: u32,
     pub node_id: u32,
 }
@@ -446,6 +457,7 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
     pub fn new(node_id: u32) -> Self {
         Self {
             entries: HashMap::new(),
+            removed: HashSet::new(),
             tag_counter: 0,
             node_id,
         }
@@ -469,7 +481,11 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
     }
 
     pub fn remove(&mut self, element: &T) {
-        self.entries.remove(element);
+        // Tombstone the observed tags instead of forgetting them: on merge,
+        // replicas that still hold these tags will subtract them.
+        if let Some(tags) = self.entries.remove(element) {
+            self.removed.extend(tags);
+        }
     }
 
     pub fn contains(&self, element: &T) -> bool {
@@ -494,7 +510,8 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
     }
 
     /// Delta relative to `base`: for each element, the tags not present in
-    /// `base`. Elements with no new tags are omitted. `None` when no tag
+    /// `base`, plus the tombstones not present in `base`. Elements with no
+    /// new tags are omitted. `None` when neither tags nor tombstones
     /// changed. The current `tag_counter` rides along so merging the delta
     /// advances the receiver's counter exactly like a full-state merge.
     pub fn delta_since(&self, base: &Self) -> Option<Self> {
@@ -509,11 +526,13 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
                 entries.insert(element.clone(), new_tags);
             }
         }
-        if entries.is_empty() {
+        let removed: HashSet<Tag> = self.removed.difference(&base.removed).copied().collect();
+        if entries.is_empty() && removed.is_empty() {
             None
         } else {
             Some(Self {
                 entries,
+                removed,
                 tag_counter: self.tag_counter,
                 node_id: self.node_id,
             })
@@ -525,12 +544,21 @@ impl Crdt for ORSet<String> {
     type Value = HashSet<String>;
 
     fn merge(&mut self, other: &Self) {
+        // Tombstones first: a tag removed on either side must not survive.
+        for tags in self.entries.values_mut() {
+            tags.retain(|t| !other.removed.contains(t));
+        }
+        self.removed.extend(&other.removed);
         for (element, tags) in &other.entries {
             let entry = self
                 .entries
                 .entry(element.clone())
                 .or_insert_with(HashSet::new);
-            entry.extend(tags);
+            for tag in tags {
+                if !self.removed.contains(tag) {
+                    entry.insert(*tag);
+                }
+            }
         }
         self.tag_counter = self.tag_counter.max(other.tag_counter);
     }
@@ -557,6 +585,13 @@ impl Crdt for ORSet<String> {
                 );
             }
         }
+        push_u32(&mut buf, self.removed.len() as u32);
+        for tag in &self.removed {
+            push_u64(
+                &mut buf,
+                ((tag.node_id as u64) << 32) | (tag.counter as u64),
+            );
+        }
         buf
     }
 
@@ -580,8 +615,19 @@ impl Crdt for ORSet<String> {
             entries.insert(element, tags);
             pos = p;
         }
+        let (num_removed, mut pos) = read_u32(bytes, pos)?;
+        let mut removed = HashSet::new();
+        for _ in 0..num_removed {
+            let (tag_val, p) = read_u64(bytes, pos)?;
+            removed.insert(Tag {
+                node_id: (tag_val >> 32) as u32,
+                counter: tag_val as u32,
+            });
+            pos = p;
+        }
         Some(Self {
             entries,
+            removed,
             tag_counter: tag_counter as u32,
             node_id: node_id as u32,
         })
@@ -940,6 +986,33 @@ mod tests {
         assert_eq!(c.value(), restored.value());
     }
 
+    #[test]
+    fn test_pncounter_from_bytes_rejects_malformed_payloads() {
+        // Regression: `num_entries` comes off the wire. A crafted packet
+        // claiming far more entries than the payload holds must return
+        // None instead of panicking the scheduler thread.
+        let mut crafted = Vec::new();
+        crafted.extend_from_slice(&1u64.to_be_bytes()); // node_id
+        crafted.extend_from_slice(&u32::MAX.to_be_bytes()); // bogus entry count
+        assert_eq!(PNCounter::from_bytes(&crafted), None);
+
+        // Every strict prefix of a valid payload must also fail cleanly
+        // (valid increments with truncated decrements included).
+        let mut c = PNCounter::new(1);
+        c.increment_by(2);
+        c.decrement_by(1);
+        let bytes = c.to_bytes();
+        for len in 0..bytes.len() {
+            assert_eq!(
+                PNCounter::from_bytes(&bytes[..len]),
+                None,
+                "prefix of len {len} must not parse"
+            );
+        }
+        // And the full payload still parses.
+        assert!(PNCounter::from_bytes(&bytes).is_some());
+    }
+
     // ---- GSet ----
 
     #[test]
@@ -1042,9 +1115,55 @@ mod tests {
         let mut s = ORSet::<String>::new(1_u32);
         s.add("hello".to_string());
         s.add("world".to_string());
+        s.remove(&"hello".to_string()); // exercise the tombstone section
         let bytes = s.to_bytes();
         let restored = ORSet::<String>::from_bytes(&bytes).unwrap();
-        assert_eq!(s.value(), restored.value());
+        assert_eq!(s, restored);
+    }
+
+    #[test]
+    fn test_orset_remove_then_merge_stays_removed() {
+        // Regression: a removed element must not resurrect when merging with
+        // a replica that still holds it.
+        let mut a = ORSet::<String>::new(1_u32);
+        a.add("x".to_string());
+        let mut b = a.clone_replica();
+        b.remove(&"x".to_string());
+
+        a.merge(&b);
+        assert!(!a.contains(&"x".to_string()), "removed element resurrected");
+
+        // Merge order must not matter (commutativity).
+        let mut a = ORSet::<String>::new(1_u32);
+        a.add("x".to_string());
+        let mut b = a.clone_replica();
+        b.remove(&"x".to_string());
+        b.merge(&a);
+        assert!(!b.contains(&"x".to_string()), "removed element resurrected");
+    }
+
+    #[test]
+    fn test_orset_remove_replicates_via_delta() {
+        // Regression: removals must ride in `delta_since`, otherwise they
+        // never propagate over delta-state replication.
+        let mut base = ORSet::<String>::new(1_u32);
+        base.add("x".to_string());
+        let mut full = base.clone();
+        full.remove(&"x".to_string());
+
+        let delta = full
+            .delta_since(&base)
+            .expect("removal must produce a delta");
+        assert!(delta.entries.is_empty());
+        assert_eq!(delta.removed.len(), 1);
+
+        let mut via_delta = base.clone();
+        via_delta.merge(&delta);
+        assert!(!via_delta.contains(&"x".to_string()));
+
+        let mut via_full = base.clone();
+        via_full.merge(&full);
+        assert_eq!(via_delta, via_full);
     }
 
     // ---- AWORSet ----

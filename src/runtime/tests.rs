@@ -1561,8 +1561,10 @@ fn test_vm_drop_ref_defers_object_with_foreign_refs() {
 }
 
 /// Regression test: `run_scheduler` must pump the ORCA GC on its own.
-/// A cross-actor reference whose local ref was dropped is reclaimed by the
-/// scheduler without the embedder calling `process_gc_ops` manually.
+/// A cross-actor reference whose local ref was dropped stays alive while
+/// the receiver holds it and is reclaimed — without the embedder calling
+/// `process_gc_ops` manually — once the receiver exits and releases its
+/// hold.
 #[test]
 fn test_run_scheduler_pumps_gc() {
     let mut rt = Runtime::new();
@@ -1594,14 +1596,193 @@ fn test_run_scheduler_pumps_gc() {
         );
     }
 
-    // Draining the scheduler must deliver the pending foreign-ref decrement
-    // and retry deferred frees — no explicit process_gc_ops() call.
+    // Draining the scheduler delivers the pending foreign-ref decrement
+    // and retries deferred frees — no explicit process_gc_ops() call.  The
+    // receiver popped the message, so it now holds the reference: the
+    // object must survive until the receiver releases the hold.
+    rt.run_scheduler();
+
+    assert_eq!(
+        rt.actors.get(&a).unwrap().heap.live_count(),
+        1,
+        "run_scheduler must not free an object the receiver still holds"
+    );
+
+    // The receiver exits: its hold is released and the scheduler's GC pump
+    // reclaims the object.
+    rt.exit_actor(b, ExitReason::Normal);
     rt.run_scheduler();
 
     assert_eq!(
         rt.actors.get(&a).unwrap().heap.live_count(),
         0,
-        "run_scheduler should reclaim the object once the foreign ref op is delivered"
+        "object should be reclaimed once the receiver releases its hold"
+    );
+}
+
+/// Regression test (ORCA memory safety): a sender that exits with a
+/// foreign-ref op still pending must not leave `process_gc_ops` reading
+/// freed heap memory.  The op carries the owner id (no header deref), and
+/// the exiting actor's heap is retired while foreign refs are outstanding,
+/// then reclaimed once they drain.
+#[test]
+fn test_exiting_sender_heap_retired_until_refs_drain() {
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    rt.current_actor = Some(a);
+
+    let ptr = rt
+        .actors
+        .get_mut(&a)
+        .unwrap()
+        .heap
+        .alloc(16, TypeTag::Raw)
+        .unwrap();
+    let v = Value::ptr(ptr);
+    rt.send_message_by_id(b, 0, &[v]);
+
+    // A exits with the in-flight op still pending and B's message unread.
+    rt.exit_actor(a, ExitReason::Normal);
+    assert!(
+        !rt.actors.contains_key(&a),
+        "exited actor should be removed from the map"
+    );
+    assert_eq!(
+        rt.retired_heaps.len(),
+        1,
+        "heap with an outstanding foreign ref must be retired, not freed"
+    );
+
+    // B receives the pointer (taking a hold), then the scheduler drains:
+    // process_gc_ops applies the pending -1 against the retired heap —
+    // before the fix this dereferenced freed heap memory.
+    rt.run_scheduler();
+
+    // B's hold keeps the heap retired: the header is still readable with
+    // foreign_count >= 1.
+    unsafe {
+        let header = &*ActorHeap::header_of(ptr);
+        assert!(
+            header.foreign_count >= 1,
+            "receiver hold must keep the retired heap object alive"
+        );
+    }
+
+    // Once B exits, its hold is released and the retired heap is reclaimed.
+    rt.exit_actor(b, ExitReason::Normal);
+    assert!(
+        rt.retired_heaps.is_empty(),
+        "retired heap should be reclaimed once all foreign refs drain"
+    );
+}
+
+/// Regression test: forwarding a received heap reference must use the
+/// true owner recorded in the object header, not the forwarding actor —
+/// the old code tripped the `send_ref_to` ownership debug_assert and, in
+/// release builds, registered the cycle-detector edge under the wrong
+/// actor.
+#[test]
+fn test_forwarding_received_reference_uses_true_owner() {
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    let c = rt.spawn_actor(Box::new(|| vec![]));
+
+    let ptr = rt
+        .actors
+        .get_mut(&a)
+        .unwrap()
+        .heap
+        .alloc(16, TypeTag::Raw)
+        .unwrap();
+    let v = Value::ptr(ptr);
+
+    // A sends the reference to B; B receives it (taking a hold).
+    rt.current_actor = Some(a);
+    rt.send_message_by_id(b, 0, &[v]);
+    rt.run_scheduler();
+
+    // B forwards the reference to C.  Before the fix this panicked in
+    // debug builds (the object is owned by A, not B).
+    rt.current_actor = Some(b);
+    rt.send_message_by_id(c, 0, &[v]);
+
+    // The foreign count lives on A's object: B's hold plus the in-flight
+    // forward must both be counted there.
+    unsafe {
+        let header = &*ActorHeap::header_of(ptr);
+        assert_eq!(header.actor_id, a, "object is owned by A");
+        assert!(
+            header.foreign_count >= 2,
+            "hold + in-flight forward should both be counted, got {}",
+            header.foreign_count
+        );
+    }
+
+    // The cycle-detector edge must be registered under the true owner A
+    // (target C's sentinel -> A's object), not under B.
+    assert_eq!(
+        rt.cycle_detector.graph_size(),
+        1,
+        "forwarded reference should register exactly one edge"
+    );
+
+    // Draining delivers the forward's -1 to A's heap; B's hold still keeps
+    // the object alive afterwards.
+    rt.run_scheduler();
+    unsafe {
+        let header = &*ActorHeap::header_of(ptr);
+        assert!(
+            header.foreign_count >= 1,
+            "B's hold must keep the object alive after the forward lands"
+        );
+    }
+}
+
+/// Regression test: an object whose pointer was received by another actor
+/// must survive the sender dropping all of its local references, and be
+/// reclaimed only when the receiver releases its hold (here: on exit).
+#[test]
+fn test_receiver_hold_survives_sender_drop_until_release() {
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    rt.current_actor = Some(a);
+
+    let ptr = rt
+        .actors
+        .get_mut(&a)
+        .unwrap()
+        .heap
+        .alloc(16, TypeTag::Raw)
+        .unwrap();
+    let v = Value::ptr(ptr);
+    rt.send_message_by_id(b, 0, &[v]);
+
+    // B receives the message and holds the reference.
+    rt.run_scheduler();
+
+    // A drops its last local reference.  Before the fix the object was
+    // freed here even though B still holds the pointer.
+    {
+        let actor = rt.actors.get_mut(&a).unwrap();
+        unsafe {
+            actor.orca_gc.drop_local_ref(&mut actor.heap, ptr);
+        }
+        assert_eq!(
+            actor.heap.live_count(),
+            1,
+            "object must survive while the receiver holds it"
+        );
+    }
+
+    // B exits: the hold is released and the object is freed on A's heap.
+    rt.exit_actor(b, ExitReason::Normal);
+    assert_eq!(
+        rt.actors.get(&a).unwrap().heap.live_count(),
+        0,
+        "object should be freed once the receiver releases its hold"
     );
 }
 

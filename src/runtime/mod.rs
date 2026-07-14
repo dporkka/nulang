@@ -104,6 +104,13 @@ pub struct Runtime {
     pub coordinator: OrcaCoordinator,
     pub cycle_detector: CycleDetector,
 
+    // Heaps of exited actors that still have outstanding foreign
+    // references.  Dropping a heap while another actor holds a pointer
+    // into it would dangle, so such heaps are retired here instead and
+    // reclaimed by `reclaim_retired_heaps` once every foreign reference
+    // (in-flight op or receiver hold) has drained.
+    retired_heaps: Vec<ActorHeap>,
+
     // Distributed actor system (v0.5)
     pub distributed: DistributedContext,
 
@@ -181,6 +188,7 @@ impl Runtime {
             next_reductions: 1000,
             coordinator: OrcaCoordinator::new(),
             cycle_detector: CycleDetector::new(),
+            retired_heaps: Vec::new(),
 
             distributed: DistributedContext::new(),
 
@@ -1152,8 +1160,28 @@ impl Runtime {
                 }
             }
             Err(crate::types::NuError::VMError(ref msg)) if msg == "SignalWait:suspend" => {
-                // Suspended again for another signal; state has already been
-                // captured by the callback.
+                // Suspended again waiting for another signal: re-capture the
+                // VM state so the next matching signal can resume the step.
+                // BytecodeRuntimeCallbacks::suspend_for_signal is a no-op, so
+                // the capture must happen here — same as in
+                // run_bytecode_at_offset and resume_suspended_llm_step.
+                let recaptured = match self.vm.as_mut() {
+                    Some(vm) => vm.take_suspended_state().map(|vm_state| {
+                        let signal_name = vm.suspended_signal_name.take();
+                        (vm_state, signal_name)
+                    }),
+                    None => None,
+                };
+                if let Some((vm_state, signal_name)) = recaptured {
+                    if let Some(actor) = self.actors.get_mut(&actor_id) {
+                        actor.waiting_signal = signal_name;
+                        actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
+                            vm_state,
+                            behavior_idx,
+                            step_name,
+                        });
+                    }
+                }
             }
             Err(_) => {
                 // Step failed after resumption: run saga compensations.
@@ -1397,33 +1425,62 @@ impl Runtime {
         }
         for arg in args {
             if let Some(ptr) = arg.as_ptr() {
-                if let Some(source_actor_id) = self.current_actor {
-                    if let Some(source_actor) = self.actors.get_mut(&source_actor_id) {
+                if ptr.is_null() {
+                    continue;
+                }
+                if self.current_actor.is_some() {
+                    // The true owner is recorded in the object's header: an
+                    // actor forwarding a reference it received from a third
+                    // actor must not be mistaken for the owner (that tripped
+                    // the ownership assert in `send_ref_to` and registered
+                    // the cycle-detector edge under the wrong actor).
+                    // SAFETY: TAG_PTR values carry ActorHeap payload pointers
+                    // with a uniform OrcaHeader layout; the sender holds a
+                    // counted reference (a local ref or a receiver hold), so
+                    // the heap is live — or retired — and the header valid.
+                    let source_header = unsafe {
+                        crate::runtime::heap::ActorHeap::header_of(ptr)
+                    };
+                    let owner_id = unsafe { (*source_header).actor_id };
+
+                    if let Some(owner) = self.actors.get_mut(&owner_id) {
                         let op = unsafe {
-                            source_actor.orca_gc.send_ref_to(
-                                &source_actor.heap,
+                            owner.orca_gc.send_ref_to(
+                                &owner.heap,
                                 ptr,
                                 target_id,
                             )
                         };
                         self.coordinator.submit_op(op);
+                    } else {
+                        // The owner has exited: its heap is retired (kept
+                        // alive by the sender's hold), so the header is
+                        // still valid.  Bump the in-flight count directly
+                        // and queue the decrement op; `process_gc_ops`
+                        // applies it on the retired heap.
+                        // SAFETY: as above; the single scheduler thread is
+                        // the only mutator of any header.
+                        unsafe { (*source_header).foreign_count += 1 };
+                        self.coordinator.submit_op(ForeignRefOp {
+                            target_actor: target_id,
+                            owner_actor: owner_id,
+                            object_header: source_header,
+                            delta: -1,
+                        });
                     }
                     // Register the cross-actor reference with the cycle detector.
                     // The receiving actor is represented by its pinned sentinel;
                     // the edge target_sentinel -> source_object records that the
                     // target actor holds a reference to the source object.
-                    if self.actors.contains_key(&source_actor_id)
+                    if self.actors.contains_key(&owner_id)
                         && self.actors.contains_key(&target_id)
                     {
-                        let source_header = unsafe {
-                            crate::runtime::heap::ActorHeap::header_of(ptr)
-                        };
                         if let Some(target_actor) = self.actors.get_mut(&target_id) {
                             if let Some(sentinel) = target_actor.cycle_sentinel() {
                                 self.cycle_detector.register_foreign_ref(
                                     target_id,
                                     sentinel,
-                                    source_actor_id,
+                                    owner_id,
                                     source_header,
                                 );
                             }
@@ -1438,9 +1495,12 @@ impl Runtime {
     pub fn process_gc_ops(&mut self) {
         let ops = std::mem::take(&mut self.coordinator.pending_ops);
         for op in ops {
-            // The object_header points to the source actor's heap object.
-            let source_header = op.object_header as *mut crate::runtime::heap::OrcaHeader;
-            let source_actor = unsafe { (*source_header).actor_id };
+            // The owning actor is recorded on the op at send time.  Never
+            // dereference `object_header` to discover the owner: if the
+            // owner has exited its actor entry is gone, and reading the
+            // header first would be a use-after-free once its heap drops.
+            let source_header = op.object_header;
+            let source_actor = op.owner_actor;
 
             // Remove the edge from the cycle detector graph before applying the
             // ORCA decrement so the graph stays consistent with the ref count.
@@ -1462,8 +1522,27 @@ impl Runtime {
                 source_actor_ref
                     .orca_gc
                     .process_foreign_op(&mut source_actor_ref.heap, op);
+            } else {
+                // The owner has exited.  Its heap was retired (not freed)
+                // precisely because this in-flight op kept the object's
+                // foreign_count positive, so the header is still valid and
+                // the decrement can be applied directly.  Individual objects
+                // are not freed here; the whole retired heap is reclaimed by
+                // `reclaim_retired_heaps` once all foreign refs drain.
+                // SAFETY: retired heap memory stays mapped until every
+                // foreign reference drains; the single scheduler thread is
+                // the only mutator of any header.
+                unsafe {
+                    let header = &mut *source_header;
+                    if op.delta >= 0 {
+                        header.foreign_count += op.delta as u32;
+                    } else {
+                        header.foreign_count -= (-op.delta) as u32;
+                    }
+                }
             }
         }
+        self.reclaim_retired_heaps();
         let should_detect = self.cycle_detector.should_detect();
         if should_detect {
             let local_ids: std::collections::HashSet<u64> = self.actors.keys().copied().collect();
@@ -1548,11 +1627,13 @@ impl Runtime {
             }
         }
         // Deliver pending foreign-ref decrements and run cycle detection only
-        // once the run queue has drained. Applying the -1 ops mid-run could
-        // free an object whose pointer is still sitting in a mailbox, because
-        // the runtime never re-increments on message receipt. Note: an actor
-        // that yielded with a non-empty mailbox is re-enqueued, so a drained
-        // queue implies drained mailboxes for terminating programs.
+        // once the run queue has drained. Receiver-side holds now keep
+        // `foreign_count` elevated for as long as a receiving actor holds a
+        // pointer, so the -1 ops only release the *in-flight* count; applying
+        // them mid-run is still deferred to keep mailbox pointers counted by
+        // the in-flight bump until they are received (and held). Note: an
+        // actor that yielded with a non-empty mailbox is re-enqueued, so a
+        // drained queue implies drained mailboxes for terminating programs.
         self.process_gc_ops();
         self.process_deferred_all();
     }
@@ -1563,6 +1644,118 @@ impl Runtime {
         for actor in self.actors.values_mut() {
             actor.orca_gc.process_deferred(&mut actor.heap);
         }
+    }
+
+    // -- ORCA receiver holds & retired heaps --
+
+    /// Take a receiver-side ORCA hold for every heap pointer in a message
+    /// payload that `receiver_id` has just popped from its mailbox.
+    ///
+    /// Each hold increments the owning object's `foreign_count`, so the
+    /// object survives until the receiver exits — even if the sender drops
+    /// its local references or exits first.  Holds are recorded on the
+    /// receiver's `OrcaGc` and released by [`release_held_foreign_refs`].
+    fn hold_payload_refs(&mut self, receiver_id: u64, payload: &[Value]) {
+        for value in payload {
+            let Some(ptr) = value.as_ptr() else { continue };
+            if ptr.is_null() {
+                continue;
+            }
+            // SAFETY: TAG_PTR values carry ActorHeap payload pointers with a
+            // uniform OrcaHeader layout.  The pointer is valid because the
+            // in-flight send bump (or the sender's local ref) keeps the
+            // owning heap live — heaps with outstanding foreign refs are
+            // retired, never freed.
+            let header = unsafe { crate::runtime::heap::ActorHeap::header_of(ptr) };
+            let owner_id = unsafe { (*header).actor_id };
+            if let Some(owner) = self.actors.get_mut(&owner_id) {
+                // SAFETY: `ptr` points to a live object owned by `owner_id`.
+                unsafe { owner.orca_gc.inc_foreign_hold(&owner.heap, ptr) };
+            } else {
+                // The owner has exited: its heap is retired (kept alive by
+                // the in-flight send bump), so bump the header directly.
+                // SAFETY: as above; single scheduler thread.
+                unsafe { (*header).foreign_count += 1 };
+            }
+            if let Some(receiver) = self.actors.get_mut(&receiver_id) {
+                receiver.orca_gc.record_held_ref(owner_id, header);
+            }
+        }
+    }
+
+    /// Release every receiver-side foreign hold taken by `actor_id`.
+    ///
+    /// Called when the actor exits.  For a live owner the release goes
+    /// through the owner's `OrcaGc` (which may free the object); for an
+    /// exited owner the decrement is applied directly against its retired
+    /// heap.  Idempotent: the hold list is drained on the first call.
+    fn release_held_foreign_refs(&mut self, actor_id: u64) {
+        let holds = match self.actors.get_mut(&actor_id) {
+            Some(actor) => actor.orca_gc.take_held_refs(),
+            None => return,
+        };
+        for (owner_id, header) in holds {
+            if let Some(owner) = self.actors.get_mut(&owner_id) {
+                owner.orca_gc.process_foreign_op(
+                    &mut owner.heap,
+                    ForeignRefOp {
+                        target_actor: actor_id,
+                        owner_actor: owner_id,
+                        object_header: header,
+                        delta: -1,
+                    },
+                );
+            } else {
+                // SAFETY: the hold kept foreign_count > 0, so the owner's
+                // heap was retired (not freed) and the header is valid.
+                unsafe { (*header).foreign_count -= 1 };
+            }
+        }
+        self.reclaim_retired_heaps();
+    }
+
+    /// True if any live object on `heap` still has foreign references.
+    fn heap_has_outstanding_foreign_refs(heap: &ActorHeap) -> bool {
+        let mut outstanding = false;
+        heap.iter_live_objects(|header, _, _| {
+            // SAFETY: iter_live_objects yields live headers on the scheduler
+            // thread; no mutation happens during the scan.
+            if unsafe { (*header).foreign_count } > 0 {
+                outstanding = true;
+            }
+        });
+        outstanding
+    }
+
+    /// Remove an actor from the runtime, releasing its receiver holds and
+    /// deferring heap destruction while other actors still reference its
+    /// objects.  A heap with outstanding foreign refs is moved into
+    /// `retired_heaps` instead of being dropped, so in-flight ops and
+    /// receiver holds held elsewhere never dangle.
+    fn remove_actor_reaping(&mut self, actor_id: u64) {
+        self.release_held_foreign_refs(actor_id);
+        if let Some(mut actor) = self.actors.remove(&actor_id) {
+            if Self::heap_has_outstanding_foreign_refs(&actor.heap) {
+                // Swap in a fresh empty heap so `actor` drops cleanly; the
+                // real heap moves to the retired list.
+                let heap = std::mem::replace(&mut actor.heap, ActorHeap::new(64));
+                self.retired_heaps.push(heap);
+            }
+        }
+    }
+
+    /// Drop retired heaps whose foreign references have all drained.
+    ///
+    /// Every foreign-count mutation on a retired heap goes through the
+    /// runtime (direct bumps/decrements in `send_message_by_id`,
+    /// `hold_payload_refs`, `release_held_foreign_refs`, and
+    /// `process_gc_ops`), so scanning at those points is exact.
+    fn reclaim_retired_heaps(&mut self) {
+        if self.retired_heaps.is_empty() {
+            return;
+        }
+        self.retired_heaps
+            .retain(|heap| Self::heap_has_outstanding_foreign_refs(heap));
     }
 
     pub fn step_actor(&mut self, actor_id: u64) {
@@ -1587,6 +1780,11 @@ impl Runtime {
         };
         let should_requeue = if let Some(msg) = msg_opt {
             let behavior_idx = msg.behavior_id as usize;
+
+            // ORCA receiver protocol: hold every heap pointer in the
+            // received payload so the owning objects (and any retired
+            // owner heap) stay alive until this actor exits.
+            self.hold_payload_refs(actor_id, &msg.payload);
 
             // Intercept semantic-memory behaviors generated by compile_agent.
             // They are bytecode behaviors but are implemented directly by the
@@ -2757,6 +2955,12 @@ impl Runtime {
             (actor.monitors.clone(), actor.links.clone(), actor.parent)
         };
 
+        // Release this actor's receiver-side ORCA holds up front: whichever
+        // removal path below runs (direct or supervisor-driven), objects it
+        // received from other actors must be released exactly once.  The
+        // call is idempotent (the hold list drains on first use).
+        self.release_held_foreign_refs(actor_id);
+
         self.registry.unregister_by_actor(actor_id);
         self.process_groups.leave_all(actor_id);
 
@@ -2797,7 +3001,7 @@ impl Runtime {
             let mut supervisor = match self.supervisors.remove(&supervisor_id) {
                 Some(s) => s,
                 None => {
-                    self.actors.remove(&actor_id);
+                    self.remove_actor_reaping(actor_id);
                     return;
                 }
             };
@@ -2826,7 +3030,7 @@ impl Runtime {
                 }
             }
         } else {
-            self.actors.remove(&actor_id);
+            self.remove_actor_reaping(actor_id);
         }
     }
 
@@ -2909,9 +3113,9 @@ impl Runtime {
     fn shutdown_supervisor(&mut self, supervisor_id: u64) {
         let child_ids: Vec<u64> = self.supervisors.get(&supervisor_id).map(|s| s.children.iter().map(|(_, id)| *id).collect()).unwrap_or_default();
         for child_id in child_ids {
-            self.actors.remove(&child_id);
+            self.remove_actor_reaping(child_id);
         }
-        self.actors.remove(&supervisor_id);
+        self.remove_actor_reaping(supervisor_id);
         self.supervisors.remove(&supervisor_id);
     }
 
@@ -3478,20 +3682,22 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     }
 
     fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
-        let rt = self.runtime.borrow();
+        let mut rt = self.runtime.borrow_mut();
         let actor_id = rt.current_actor?;
-        let actor = rt.actors.get(&actor_id)?;
-        actor.mailbox.pop().map(|msg| {
-            let val = msg.payload.into_iter().next().unwrap_or(crate::vm::Value::unit());
-            (msg.behavior_id, val)
-        })
+        let msg = rt.actors.get(&actor_id)?.mailbox.pop()?;
+        // ORCA receiver protocol: hold heap pointers carried by the message.
+        rt.hold_payload_refs(actor_id, &msg.payload);
+        let val = msg.payload.into_iter().next().unwrap_or(crate::vm::Value::unit());
+        Some((msg.behavior_id, val))
     }
 
     fn try_receive_match(&mut self, behavior_ids: &[u16]) -> Option<(usize, Vec<crate::vm::Value>)> {
-        let rt = self.runtime.borrow();
+        let mut rt = self.runtime.borrow_mut();
         let actor_id = rt.current_actor?;
-        let actor = rt.actors.get(&actor_id)?;
-        actor.mailbox.receive_match(behavior_ids)
+        let (pos, payload) = rt.actors.get(&actor_id)?.mailbox.receive_match(behavior_ids)?;
+        // ORCA receiver protocol: hold heap pointers carried by the message.
+        rt.hold_payload_refs(actor_id, &payload);
+        Some((pos, payload))
     }
 }
 
@@ -3822,17 +4028,21 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
     fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
         unsafe {
             let actor = (*self.runtime).actors.get(&self.actor_id)?;
-            actor.mailbox.pop().map(|msg| {
-                let val = msg.payload.into_iter().next().unwrap_or(crate::vm::Value::unit());
-                (msg.behavior_id, val)
-            })
+            let msg = actor.mailbox.pop()?;
+            // ORCA receiver protocol: hold heap pointers carried by the message.
+            (*self.runtime).hold_payload_refs(self.actor_id, &msg.payload);
+            let val = msg.payload.into_iter().next().unwrap_or(crate::vm::Value::unit());
+            Some((msg.behavior_id, val))
         }
     }
 
     fn try_receive_match(&mut self, behavior_ids: &[u16]) -> Option<(usize, Vec<crate::vm::Value>)> {
         unsafe {
             let actor = (*self.runtime).actors.get(&self.actor_id)?;
-            actor.mailbox.receive_match(behavior_ids)
+            let (pos, payload) = actor.mailbox.receive_match(behavior_ids)?;
+            // ORCA receiver protocol: hold heap pointers carried by the message.
+            (*self.runtime).hold_payload_refs(self.actor_id, &payload);
+            Some((pos, payload))
         }
     }
 }
