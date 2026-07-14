@@ -1026,9 +1026,21 @@ impl TypeChecker {
             } => self.infer_ask(ctx, actor, *span),
 
             // Receive
-            Expr::Receive { .. } => {
+            Expr::Receive { after, span, .. } => {
+                // The optional `after ms => body` clause is checked: the
+                // timeout must be an Int (milliseconds); the timeout body is
+                // inferred like any other expression.
+                let mut subst = vec![];
+                if let Some((ms, timeout_body)) = after {
+                    let (s1, ms_ty) = self.infer_expr(ctx, ms)?;
+                    let s2 = mgu(&ms_ty, &Type::int(), *span)?;
+                    subst = compose_subst(&s2, &s1);
+                    let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+                    let (s3, _) = self.infer_expr(&ctx_sub, timeout_body)?;
+                    subst = compose_subst(&s3, &subst);
+                }
                 let ret_ty = Type::Var(TypeVar::fresh());
-                Ok((vec![], ret_ty))
+                Ok((subst, ret_ty))
             }
 
             // Self reference

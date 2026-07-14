@@ -720,6 +720,31 @@ impl MirCodegen {
                     dst,
                 ));
             }
+            mir::RValue::ReceiveWait {
+                behavior_ids,
+                max_params,
+                timeout,
+            } => {
+                // Timed selective receive (receive-after): same spec constant
+                // and dst contract as ReceiveMatch, plus the timeout in
+                // milliseconds staged into r0 (fixed-register staging, like
+                // the pipeline opcodes). See OpCode::ReceiveWait (0xA0) in
+                // bytecode.rs for the full VM-side contract.
+                let ids = behavior_ids
+                    .iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let spec = format!("{}:{}", max_params, ids);
+                let spec_idx = self.module.add_constant(Constant::String(spec));
+                self.emit(Instruction::new2(OpCode::Move, reg_of(*timeout), SCRATCH0));
+                self.emit(Instruction::new3(
+                    OpCode::ReceiveWait,
+                    ((spec_idx >> 8) & 0xFF) as u8,
+                    (spec_idx & 0xFF) as u8,
+                    dst,
+                ));
+            }
             mir::RValue::FFICall { idx, args } => {
                 self.stage_args(args)?;
                 self.emit(Instruction::new3(
@@ -1256,6 +1281,9 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
         | Spawn { .. }
         | SelfRef
         | StateGet { .. } => {}
+        // The timeout value is staged into r0 with a plain Move — an
+        // uncounted copy channel like call/effect argument staging.
+        ReceiveWait { timeout, .. } => cp(&mut out, *timeout),
         Load(x) => cp(&mut out, *x),
         LoadFieldNamed { obj, .. } | LoadFieldPos { obj, .. } => ro(&mut out, *obj),
         ArrayLoad { arr, idx } => {
@@ -2108,6 +2136,85 @@ mod tests {
             value.as_int(),
             Some(36),
             "nested module's function should be reachable unqualified"
+        );
+    }
+
+    #[test]
+    fn test_receive_after_emits_receivewait_with_staged_timeout() {
+        // receive-after codegen: a Move stages the timeout (ms) into r0,
+        // then ReceiveWait (0xA0) carries the candidate-ids spec constant in
+        // op1+op2 and the arm-index/payload base register in op3, exactly
+        // like ReceiveMatch. (Compiling only — the VM handler is wave 2.)
+        let module =
+            compile_mir_source("receive { | Msg(x) => x } after 100 => 0").unwrap();
+        let pos = module
+            .instructions
+            .iter()
+            .position(|i| i.opcode == OpCode::ReceiveWait)
+            .unwrap_or_else(|| {
+                panic!(
+                    "receive-after must emit ReceiveWait: {:?}",
+                    module.instructions
+                )
+            });
+        let instr = module.instructions[pos];
+        // The spec constant is "max_params:id1,id2,..." like ReceiveMatch.
+        let spec_idx = instr.imm16() as usize;
+        match &module.constants[spec_idx] {
+            Constant::String(s) => {
+                assert_eq!(
+                    s.split(':').next(),
+                    Some("1"),
+                    "one arm with one param reserves one payload register: {}",
+                    s
+                );
+            }
+            other => panic!("spec constant must be a string, got {:?}", other),
+        }
+        // Immediately before: Move timeout_reg -> r0.
+        let prev = module.instructions[pos - 1];
+        assert_eq!(prev.opcode, OpCode::Move, "timeout staging move");
+        assert_eq!(prev.op2, 0, "timeout must be staged into r0");
+        // No ReceiveMatch and no legacy pop-any Receive in the timed form.
+        assert!(
+            !module
+                .instructions
+                .iter()
+                .any(|i| i.opcode == OpCode::ReceiveMatch),
+            "timed receive must not emit ReceiveMatch"
+        );
+        assert!(
+            !module
+                .instructions
+                .iter()
+                .any(|i| i.opcode == OpCode::Receive),
+            "receive-after must not emit the legacy pop-any Receive"
+        );
+    }
+
+    #[test]
+    fn test_receive_without_after_emits_receivematch_not_receivewait() {
+        let module = compile_mir_source("receive { | Msg(x) => x }").unwrap();
+        assert!(
+            module
+                .instructions
+                .iter()
+                .any(|i| i.opcode == OpCode::ReceiveMatch),
+            "plain receive must emit ReceiveMatch"
+        );
+        assert!(
+            module
+                .instructions
+                .iter()
+                .any(|i| i.opcode == OpCode::Receive),
+            "plain receive must keep the legacy fallback"
+        );
+        assert!(
+            !module
+                .instructions
+                .iter()
+                .any(|i| i.opcode == OpCode::ReceiveWait),
+            "plain receive must not emit ReceiveWait"
         );
     }
 }

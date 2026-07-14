@@ -1181,11 +1181,14 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
-        Expr::Receive { arms, span } => {
+        Expr::Receive { arms, after, span } => {
             let arms_hir: Vec<_> = arms
                 .iter()
                 .map(|(name, params, e)| (name.clone(), params.clone(), Box::new(lower_body(e))))
                 .collect();
+            let after_hir = after
+                .as_ref()
+                .map(|(ms, body)| (Box::new(lower_body(ms)), Box::new(lower_body(body))));
             let ty = Type::unit();
             let temp = fresh_temp_name();
             body.push(hir::Stmt::Let {
@@ -1193,6 +1196,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                 ty: ty.clone(),
                 value: hir::RValue::Receive {
                     arms: arms_hir,
+                    after: after_hir,
                     ty: ty.clone(),
                 },
                 span: *span,
@@ -1722,11 +1726,22 @@ mod tests {
                     span,
                 },
             )],
+            after: None,
             span,
         };
         let receive_vars = used(&receive);
         assert!(receive_vars.contains("k"), "receive arm var must be free");
         assert!(!receive_vars.contains("p"), "receive arm param is bound");
+
+        // receive { | Msg() => 0 } after k => t: timeout expr and body are free.
+        let receive_after = Expr::Receive {
+            arms: vec![("Msg".to_string(), vec![], Expr::Literal(Literal::Int(0), span))],
+            after: Some((Box::new(var("k")), Box::new(var("t")))),
+            span,
+        };
+        let after_vars = used(&receive_after);
+        assert!(after_vars.contains("k"), "receive-after ms expr must be free");
+        assert!(after_vars.contains("t"), "receive-after body must be free");
     }
 }
 
@@ -1912,13 +1927,17 @@ fn free_vars(
                 free_vars(&h.body, &handler_bound, acc);
             }
         }
-        Expr::Receive { arms, .. } => {
+        Expr::Receive { arms, after, .. } => {
             for (_, params, arm_expr) in arms {
                 let mut arm_bound = bound.clone();
                 for p in params {
                     arm_bound.insert(p.clone());
                 }
                 free_vars(arm_expr, &arm_bound, acc);
+            }
+            if let Some((ms, timeout_body)) = after {
+                free_vars(ms, bound, acc);
+                free_vars(timeout_body, bound, acc);
             }
         }
         Expr::Migrate { actor, node, .. } => {

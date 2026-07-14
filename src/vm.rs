@@ -275,6 +275,22 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// matched id within `behavior_ids` — or `None` when nothing matches
     /// (or there is no current actor). Default returns `None`.
     fn try_receive_match(&mut self, _behavior_ids: &[u16]) -> Option<(usize, Vec<Value>)> { None }
+
+    /// Timed selective receive (`receive { ... } after ms => body`): the
+    /// mailbox scan found no matching message. Return `true` to suspend the
+    /// current actor — the VM re-executes the `ReceiveWait` instruction when
+    /// the runtime resumes it (matching message arrived or timeout fired).
+    /// Return `false` to resolve the wait now with the no-match sentinel:
+    /// a non-positive timeout, no actor context, or an already-fired
+    /// timeout marker (which the implementation must consume so the next
+    /// wait is not poisoned). Default returns `false`, so standalone
+    /// execution is always non-blocking.
+    fn receive_wait_suspend(&mut self, _timeout_ms: i64) -> bool { false }
+
+    /// Timed selective receive resolved with a mailbox match: cancel any
+    /// pending receive-wait timeout state for the current actor so a stale
+    /// timer cannot fire into a later wait. Default is a no-op.
+    fn receive_wait_matched(&mut self) {}
 }
 
 /// Standalone callbacks used when the VM runs without an actor runtime.
@@ -365,7 +381,9 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
     /// Built-in effects for actor-free scripts: `IO.print` writes the
     /// first staged argument to stdout, `IO.read` reads one stdin line
     /// into a heap string. String-id arguments resolve against the
-    /// performing module's constant pool.
+    /// performing module's constant pool. `Actor.*` effects need the actor
+    /// runtime, so they are nil no-ops here (matching the runtime's
+    /// outside-an-actor contract).
     fn perform_builtin_effect(
         &mut self,
         effect_name: &str,
@@ -373,6 +391,9 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
         constants: &[Constant],
         regs: &[Value],
     ) -> Option<Value> {
+        if effect_name == "Actor" {
+            return Some(Value::nil());
+        }
         if effect_name != "IO" {
             return None;
         }
@@ -811,6 +832,11 @@ pub struct VM {
     /// Filled by `SignalWait` and consumed by the runtime after `run`/`run_from`
     /// returns a suspend error.
     pub suspended_signal_name: Option<String>,
+    /// Timeout in milliseconds of the most recent receive-wait suspension.
+    /// Filled by `ReceiveWait` and consumed by the runtime after
+    /// `run`/`run_from`/`resume` returns the `"ReceiveWait:suspend"`
+    /// sentinel (same pattern as `suspended_signal_name`).
+    pub suspended_receive_timeout: Option<i64>,
     /// Optional distributed runtime callbacks for remote operations.
     distributed_callbacks: Option<Box<dyn DistributedVmCallbacks>>,
     /// Actor-runtime callbacks: heap allocation, drop, spawn.
@@ -890,6 +916,7 @@ impl VM {
             pending_migrations: Vec::new(),
             gossip_log: Vec::new(),
             suspended_signal_name: None,
+            suspended_receive_timeout: None,
             distributed_callbacks: None,
             actor_callbacks: Box::new(StandaloneVmCallbacks::new()),
             closure_envs: Vec::new(),
@@ -2645,6 +2672,50 @@ impl VM {
                         }
                     }
                     None => {
+                        self.frames[frame_idx].regs[dst] = Value::int(ids.len() as i64);
+                    }
+                }
+            }
+
+            // -- Timed selective receive (receive-after) --
+            // Same spec constant and dst contract as ReceiveMatch, with the
+            // timeout in milliseconds staged into r0 by the preceding Move.
+            // On no match the runtime callback decides: suspend (positive
+            // timeout inside an actor context) — the PC stays on this
+            // instruction so a wake re-executes the scan — or resolve the
+            // wait with the no-match sentinel (non-positive timeout, no
+            // actor context, or an already-fired timeout). See the
+            // ReceiveWait contract in bytecode.rs.
+            OpCode::ReceiveWait => {
+                let const_idx = instr.imm16() as usize;
+                let dst = instr.op3 as usize;
+                let spec = self.module_const_string(module_idx, const_idx);
+                let (max_params, ids) = parse_receive_spec(&spec);
+                match self.actor_callbacks.try_receive_match(&ids) {
+                    Some((arm_idx, payload)) => {
+                        self.actor_callbacks.receive_wait_matched();
+                        self.frames[frame_idx].regs[dst] = Value::int(arm_idx as i64);
+                        for i in 0..max_params {
+                            let r = dst + 1 + i;
+                            if r >= 256 {
+                                break;
+                            }
+                            self.frames[frame_idx].regs[r] =
+                                payload.get(i).copied().unwrap_or(Value::nil());
+                        }
+                    }
+                    None => {
+                        let timeout_ms =
+                            self.frames[frame_idx].regs[0].as_int().unwrap_or(0);
+                        if self.actor_callbacks.receive_wait_suspend(timeout_ms) {
+                            // Leave the PC pointing at the ReceiveWait
+                            // instruction so resumption re-executes it and
+                            // either finds a matching message or observes
+                            // the fired timeout (same pattern as SignalWait).
+                            self.suspended_receive_timeout = Some(timeout_ms);
+                            self.frames[frame_idx].pc -= 1;
+                            return Err(NuError::VMError("ReceiveWait:suspend".into()));
+                        }
                         self.frames[frame_idx].regs[dst] = Value::int(ids.len() as i64);
                     }
                 }

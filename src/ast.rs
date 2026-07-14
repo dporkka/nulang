@@ -144,9 +144,13 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
-    /// Receive: receive { | Behavior => expr }
+    /// Receive: receive { | Behavior => expr } [after ms => timeout_expr]
     Receive {
         arms: Vec<(String, Vec<String>, Expr)>,
+        /// Optional timeout clause: `(timeout_ms, timeout_body)`. `timeout_ms`
+        /// is an Int expression; on no matching message the actor waits up to
+        /// that many milliseconds, then evaluates `timeout_body`.
+        after: Option<(Box<Expr>, Box<Expr>)>,
         span: Span,
     },
     /// Self reference within actor

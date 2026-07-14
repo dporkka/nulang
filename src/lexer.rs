@@ -1107,6 +1107,24 @@ mod tests {
     }
 
     #[test]
+    fn test_after_is_a_plain_identifier() {
+        // `after` is a CONTEXTUAL keyword: it is only special immediately
+        // after a receive block (`receive { ... } after ms => body`, see
+        // parse_receive) and lexes as an ordinary identifier everywhere
+        // else — e.g. workflow steps may be named `after`. This mirrors the
+        // `to` identifier in `migrate actor to node` (parse_migrate).
+        let kinds = lex("after 100");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Ident("after".to_string()),
+                TokenKind::IntLit(100),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
     fn test_agent_keyword() {
         let kinds = lex("agent MyAgent = { model: \"gpt-4o\" }");
         assert_eq!(

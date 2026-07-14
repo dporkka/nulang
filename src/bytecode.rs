@@ -142,6 +142,43 @@ pub enum OpCode {
     PipelineStage = 0x9E, // Add stage to pipeline (reads r0=id, r1=name, r2=actor, r3=template; dst)
     PipelineRun = 0x9F,   // Run pipeline (reads r0=id, r1=input; dst)
 
+    // == Actor & Concurrency, cont. (0xA0-0xAF) ==
+    // Timed selective receive: `receive { | B(x) => e ... } after ms => body`.
+    //
+    // ReceiveWait contract (operands; the VM/runtime side is wave 2):
+    //   - op1+op2 (imm16): spec constant index. The constant is a string
+    //     "max_params:id1,id2,..." — the same format as ReceiveMatch (0x8F):
+    //     the candidate arm behavior ids and the number of payload registers
+    //     reserved after dst.
+    //   - op3: dst — base of one contiguous register run of 1 + max_params
+    //     registers. On a mailbox match the VM writes the matched arm index
+    //     (0-based) to dst and up to max_params payload values into dst+1..
+    //     (missing -> nil, extras ignored), exactly like ReceiveMatch. On
+    //     timeout expiry — or a non-positive timeout with no match — it
+    //     writes the arm count (the ReceiveMatch no-match sentinel) to dst.
+    //   - r0: timeout in milliseconds (Int), staged by codegen with a Move
+    //     immediately before this instruction (fixed-register staging, same
+    //     convention as PipelineStage reading r0..r3).
+    //
+    // VM semantics (wave 2 implements):
+    //   1. Scan the mailbox via ActorVmCallbacks::try_receive_match(&ids).
+    //      Match -> write arm index + payload, continue at the next instr.
+    //   2. No match, timeout > 0, in an actor context -> suspend the actor:
+    //      decrement the PC so the instruction re-executes on wake (the
+    //      SignalWait pattern) and raise the "ReceiveWait:suspend" sentinel.
+    //      The runtime wakes the actor when a matching message arrives
+    //      (re-execution finds the match) or when the timer fires (resume
+    //      with a timeout marker; the instruction then writes the arm-count
+    //      sentinel to dst and continues).
+    //   3. No match, timeout <= 0 (or outside an actor context) -> write the
+    //      arm-count sentinel to dst and continue; fully non-blocking.
+    //
+    // The MIR compare chain following this instruction dispatches arm
+    // indices 0..n-1 to the receive arm bodies and routes the arm-count
+    // sentinel to the after-clause body (no legacy pop-any Receive
+    // fallthrough in the timed form).
+    ReceiveWait = 0xA0,
+
 
     // == FFI (0xB0-0xBF) ==
     FFICall = 0xB0, // Call foreign function (func_idx high, func_idx low, dst)
@@ -297,6 +334,7 @@ impl OpCode {
             0x9D => Some(PipelineNew),
             0x9E => Some(PipelineStage),
             0x9F => Some(PipelineRun),
+            0xA0 => Some(ReceiveWait),
             0xB0 => Some(FFICall),
             0xC0 => Some(SupervisorNew),
             0xC1 => Some(SupervisorWorker),
@@ -710,6 +748,7 @@ mod tests {
             .chain(0x80..=0x8F)
             .chain(0x90..=0x93)
             .chain(0x94..=0x9F)
+            .chain(0xA0..=0xA0)
             .chain(0xB0..=0xB0)
             .chain(0xC0..=0xC5)
             .chain(0xD0..=0xD5)

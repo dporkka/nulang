@@ -85,10 +85,10 @@ fn timer_fired_handler(actor: &mut Actor, _args: &[Value]) {
 fn bytecode_step_placeholder(_actor: &mut Actor, _args: &[Value]) {}
 
 /// True for the sentinel VM errors that indicate a behavior suspended
-/// (waiting on a workflow signal or a background LLM call) rather than
-/// failed.
+/// (waiting on a workflow signal, a background LLM call, or a timed
+/// selective receive) rather than failed.
 fn is_suspend_error(msg: &str) -> bool {
-    msg == "SignalWait:suspend" || msg == "LlmAsk:suspend"
+    msg == "SignalWait:suspend" || msg == "LlmAsk:suspend" || msg == "ReceiveWait:suspend"
 }
 
 /// Persisted `waiting_signal` marker for a workflow step suspended on a
@@ -111,6 +111,37 @@ fn suspension_marker(actor: &Actor, signal_name: Option<String>) -> Option<Strin
         None if actor.is_workflow => Some(LLM_SUSPEND_MARKER.to_string()),
         None => None,
     }
+}
+
+/// Map the argument of `perform Actor.exit(reason)` onto an `ExitReason`.
+/// Ints and strings select the reason kind (`0`/`"normal"`, `1`/`"error"`,
+/// `2`/`"kill"`); any other value is a custom reason, and a missing or
+/// non-int/non-string argument defaults to a normal exit.
+fn actor_exit_reason(value: Option<&Value>, constants: &[crate::bytecode::Constant]) -> ExitReason {
+    let Some(value) = value else {
+        return ExitReason::Normal;
+    };
+    if let Some(n) = value.as_int() {
+        return match n {
+            0 => ExitReason::Normal,
+            1 => ExitReason::Error("error".to_string()),
+            2 => ExitReason::Kill,
+            other => ExitReason::Custom(other.to_string()),
+        };
+    }
+    if let Some(id) = value.as_string_id() {
+        let name = match constants.get(id as usize) {
+            Some(crate::bytecode::Constant::String(s)) => s.as_str(),
+            _ => "",
+        };
+        return match name {
+            "normal" => ExitReason::Normal,
+            "error" => ExitReason::Error("error".to_string()),
+            "kill" => ExitReason::Kill,
+            other => ExitReason::Custom(other.to_string()),
+        };
+    }
+    ExitReason::Normal
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +205,26 @@ pub struct Runtime {
     // it back to false so they keep blocking behavior.
     llm_suspend_enabled: bool,
 
+    // Depth of in-flight calls on the shared runtime VM
+    // (`run_bytecode_at_offset`, `resume_suspended_*`). While > 0 a
+    // behavior is mid-execution, so receive-wait wakes requested by
+    // `send_message_by_id` must be deferred: resuming the target would
+    // nest a second `vm.resume()`/`run_from` inside the running one and
+    // clobber the shared frames.
+    vm_execution_depth: u32,
+
+    // Actors whose receive-wait wake was deferred while the shared VM was
+    // executing (deduplicated). Drained by `vm_exec_end` once the
+    // outermost VM call returns; a resumed behavior can itself send and
+    // re-queue a wake, so the drain loops until empty.
+    pending_receive_wakes: Vec<u64>,
+
+    // True while `vm_exec_end` is draining `pending_receive_wakes`. Nested
+    // `vm_exec_end` calls (from resumes issued by the drain) then skip
+    // their own drain, so the backlog is processed iteratively instead of
+    // by unbounded recursion.
+    draining_receive_wakes: bool,
+
     // Bytecode modules for actors that may need to be recovered after a
     // runtime restart.  Maps actor_id -> (bytecode_module, behavior_offsets,
     // compensation_offsets).
@@ -227,6 +278,9 @@ impl Runtime {
             llm_rx,
             llm_inflight_count: 0,
             llm_suspend_enabled: false,
+            vm_execution_depth: 0,
+            pending_receive_wakes: Vec::new(),
+            draining_receive_wakes: false,
             recovery_modules: HashMap::new(),
             next_pipeline_id: 1,
             pipelines: HashMap::new(),
@@ -313,8 +367,85 @@ impl Runtime {
             );
             self.checkpoint_actor(id);
         }
-        self.scheduler.enqueue(id);
+        self.enqueue_actor(id);
         id
+    }
+
+    /// Spawn an actor for `module`'s behavior `behavior_idx`, seeded with
+    /// the `init` state fields, and wire up its bytecode handlers. Shared
+    /// body of both VM-callback `spawn_actor` impls: `RuntimeVmCallbacks`
+    /// (spawns from the top-level VM) and `BytecodeRuntimeCallbacks`
+    /// (spawns from inside a scheduler-driven behavior on the shared
+    /// runtime VM).
+    pub fn spawn_from_module(
+        &mut self,
+        module: &crate::bytecode::CodeModule,
+        behavior_idx: usize,
+        init: Vec<(String, Value)>,
+    ) -> Value {
+        let meta = module
+            .actor_metadata
+            .iter()
+            .find(|m| m.behavior_indices.contains(&behavior_idx));
+        let id = if let Some(meta) = meta {
+            let state_models: HashMap<String, crate::runtime::persistence::StateModel> = meta
+                .state_models
+                .iter()
+                .map(|(name, model)| (name.clone(), map_ast_state_model(*model)))
+                .collect();
+            let defaults = meta.state_defaults.clone();
+            self.spawn_actor_with_models(
+                Box::new(move || {
+                    let mut fields: Vec<(String, Value)> = defaults
+                        .iter()
+                        .map(|(name, c)| (name.clone(), crate::vm::constant_to_value(c)))
+                        .collect();
+                    fields.extend(init);
+                    fields
+                }),
+                state_models,
+                meta.persistent,
+                if meta.is_workflow {
+                    Some(meta.name.as_str())
+                } else {
+                    None
+                },
+            )
+        } else {
+            self.spawn_actor(Box::new(move || init))
+        };
+        // Record bytecode behavior offsets so the runtime can execute bytecode
+        // handlers. Populate ALL module-level behavior offsets (not just this
+        // actor's behavior_indices) so that behavior_id_for's module-level
+        // fallback indices work correctly.
+        let offsets: Vec<usize> = module.behaviors.iter().map(|b| b.code_offset).collect();
+        let compensation_offsets: Vec<Option<usize>> = module.behaviors.iter()
+            .map(|b| b.compensate_offset).collect();
+        if let Some(actor) = self.actors.get_mut(&id) {
+            actor.bytecode_module = Some(module.clone());
+            actor.bytecode_offsets = offsets.clone();
+            actor.compensation_offsets = compensation_offsets.clone();
+            if let Some(meta) = meta {
+                if meta.is_agent {
+                    actor.is_agent = true;
+                }
+                // `constant_to_value` turns Constant::String into nil. Rehydrate
+                // string defaults by allocating them on the actor heap so state
+                // fields like `model` and `system_prompt` are readable strings.
+                for (name, c) in &meta.state_defaults {
+                    if let crate::bytecode::Constant::String(s) = c {
+                        let ptr = actor.allocate_string(s);
+                        actor.set_state_field(name, ptr);
+                    }
+                }
+            }
+        }
+        if meta.map(|m| m.is_workflow).unwrap_or(false) {
+            self.layout_workflow_behavior_table(id);
+        }
+        // Keep a copy for recovery after a runtime restart.
+        self.register_recovery_module(id, module.clone(), offsets, compensation_offsets);
+        Value::actor_ref(id)
     }
 
     /// Register bytecode metadata so that a persistent actor can be recovered
@@ -1160,6 +1291,7 @@ impl Runtime {
             vm.restore_suspended_state(suspended.vm_state);
             let saved_suspend = (*self_ptr).llm_suspend_enabled;
             (*self_ptr).llm_suspend_enabled = true;
+            (*self_ptr).vm_exec_begin();
             let result = vm.resume();
             (*self_ptr).llm_suspend_enabled = saved_suspend;
             match result {
@@ -1195,6 +1327,7 @@ impl Runtime {
                     // completion or signal can resume it.
                     if let Some(vm_state) = vm.take_suspended_state() {
                         let signal_name = vm.suspended_signal_name.take();
+                        let receive_timeout = vm.suspended_receive_timeout.take();
                         if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
                             let marker = suspension_marker(actor, signal_name);
                             actor.waiting_signal = marker;
@@ -1204,12 +1337,21 @@ impl Runtime {
                                 step_name: suspended.step_name,
                             });
                         }
+                        // A chained receive-after suspend arms its timeout
+                        // here; a no-op for the other sentinels.
+                        (*self_ptr).maybe_schedule_receive_wait(actor_id, receive_timeout);
                     }
                 }
                 // Other errors: the send-path result is discarded anyway,
                 // matching step_actor semantics.
                 Err(_) => {}
             }
+            // End the VM-execution window only after any suspend-state
+            // re-capture above: draining deferred wakes runs other actors
+            // on the shared VM, which would clobber the frames an
+            // un-captured suspend still needs. Runs on every path, so
+            // wakes of other actors are not lost when THIS one suspends.
+            (*self_ptr).vm_exec_end();
         }
         // The suspension resolved (completed or failed): if messages queued
         // up while the behavior was suspended, schedule the actor to drain
@@ -1228,8 +1370,52 @@ impl Runtime {
             .map(|a| a.suspended_execution.is_none() && !a.mailbox.is_empty())
             .unwrap_or(false);
         if needs_requeue {
-            self.scheduler.enqueue(actor_id);
+            self.enqueue_actor(actor_id);
         }
+    }
+
+    /// Enqueue an actor on the scheduler at its current priority. All
+    /// scheduler enqueue paths go through here so a priority set via
+    /// `perform Actor.set_priority` takes effect on the next (re)queue;
+    /// unknown actors (e.g. already exited) enqueue at the Normal default.
+    fn enqueue_actor(&self, actor_id: u64) {
+        let priority = self
+            .actors
+            .get(&actor_id)
+            .map(|a| a.priority)
+            .unwrap_or_default();
+        self.scheduler.enqueue_with_priority(actor_id, priority);
+    }
+
+    /// Mark the start of a call into the shared runtime VM. While the
+    /// depth is non-zero, receive-wait wakes are deferred onto
+    /// `pending_receive_wakes` (see `send_message_by_id`).
+    fn vm_exec_begin(&mut self) {
+        self.vm_execution_depth += 1;
+    }
+
+    /// Mark the end of a call into the shared runtime VM. When the
+    /// outermost call returns, drain the deferred receive-wait wakes: a
+    /// resumed behavior can itself send and re-queue a wake, so loop until
+    /// the backlog is empty. The drain flag keeps this iterative — a
+    /// nested `vm_exec_end` (from a resume issued by the drain) returns
+    /// without draining again.
+    fn vm_exec_end(&mut self) {
+        self.vm_execution_depth = self.vm_execution_depth.saturating_sub(1);
+        if self.vm_execution_depth > 0 || self.draining_receive_wakes {
+            return;
+        }
+        self.draining_receive_wakes = true;
+        while let Some(target_id) = self.pending_receive_wakes.pop() {
+            // The drain can run inside another actor's step: attribute
+            // sends by the resumed behavior to the resumed actor, not to
+            // the interrupted one.
+            let prev_current_actor = self.current_actor;
+            self.current_actor = Some(target_id);
+            self.resume_suspended_receive_wait(target_id);
+            self.current_actor = prev_current_actor;
+        }
+        self.draining_receive_wakes = false;
     }
 
     /// Resume a workflow actor that is suspended waiting for a signal.
@@ -1265,6 +1451,7 @@ impl Runtime {
             // instead of blocking the caller thread on the HTTP call.
             let saved_suspend = (*self_ptr).llm_suspend_enabled;
             (*self_ptr).llm_suspend_enabled = true;
+            (*self_ptr).vm_exec_begin();
             let result = vm.resume();
             (*self_ptr).llm_suspend_enabled = saved_suspend;
             result
@@ -1309,11 +1496,12 @@ impl Runtime {
                 let recaptured = match self.vm.as_mut() {
                     Some(vm) => vm.take_suspended_state().map(|vm_state| {
                         let signal_name = vm.suspended_signal_name.take();
-                        (vm_state, signal_name)
+                        let receive_timeout = vm.suspended_receive_timeout.take();
+                        (vm_state, signal_name, receive_timeout)
                     }),
                     None => None,
                 };
-                if let Some((vm_state, signal_name)) = recaptured {
+                if let Some((vm_state, signal_name, receive_timeout)) = recaptured {
                     if let Some(actor) = self.actors.get_mut(&actor_id) {
                         let marker = suspension_marker(actor, signal_name);
                         actor.waiting_signal = marker;
@@ -1323,6 +1511,9 @@ impl Runtime {
                             step_name,
                         });
                     }
+                    // A chained receive-after suspend arms its timeout
+                    // here; a no-op for the other sentinels.
+                    self.maybe_schedule_receive_wait(actor_id, receive_timeout);
                 }
             }
             Err(_) => {
@@ -1332,6 +1523,12 @@ impl Runtime {
                 }
             }
         }
+        // End the VM-execution window only after the match above: the
+        // re-capture arm reads the shared VM's frames, which draining
+        // deferred wakes would clobber; the compensation arm runs nested
+        // bytecode whose own begin/end must stay inside this window. Runs
+        // on every path so wakes of other actors are not lost.
+        self.vm_exec_end();
         // The suspension resolved (completed or failed): drain any mail
         // that queued up while the step was suspended.
         self.requeue_if_mail_pending(actor_id);
@@ -1634,7 +1831,33 @@ impl Runtime {
                 }
             }
         }
-        self.scheduler.enqueue(target_id);
+        self.enqueue_actor(target_id);
+        // Wake an actor suspended in a timed selective receive: resume it
+        // so the VM re-executes the ReceiveWait scan. A match resolves the
+        // wait; otherwise the behavior re-suspends on its original deadline.
+        // (An already-fired timeout is resolved by the timer-fire path.)
+        let wake_for_receive = self
+            .actors
+            .get(&target_id)
+            .map(|a| {
+                a.suspended_execution.is_some()
+                    && a.receive_wait.map(|w| !w.timed_out).unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if wake_for_receive {
+            if self.vm_execution_depth > 0 {
+                // A behavior is mid-flight on the shared runtime VM:
+                // resuming the target now would nest a second
+                // `vm.resume()` inside the running one and clobber the
+                // shared frames. Defer the wake; `vm_exec_end` drains it
+                // once the outermost VM call returns.
+                if !self.pending_receive_wakes.contains(&target_id) {
+                    self.pending_receive_wakes.push(target_id);
+                }
+            } else {
+                self.resume_suspended_receive_wait(target_id);
+            }
+        }
     }
 
     pub fn process_gc_ops(&mut self) {
@@ -2262,7 +2485,7 @@ impl Runtime {
             false
         };
         if should_requeue {
-            self.scheduler.enqueue(actor_id);
+            self.enqueue_actor(actor_id);
         }
         self.current_actor = None;
     }
@@ -2557,6 +2780,193 @@ impl Runtime {
         self.tick_timers_at(std::time::Instant::now());
     }
 
+    // -- Timed selective receive (receive-after) --
+
+    /// Arm the timeout for an actor's first receive-wait suspension.
+    ///
+    /// Called at every suspend-capture site with the timeout the VM staged
+    /// in `suspended_receive_timeout`. A re-suspension of the SAME wait
+    /// (a wake found no matching message) must not restart the clock, so
+    /// the timer is scheduled only when the actor has no live receive-wait
+    /// state; the original deadline stands.
+    fn maybe_schedule_receive_wait(&mut self, actor_id: u64, timeout_ms: Option<i64>) {
+        let Some(ms) = timeout_ms else { return };
+        if ms <= 0 {
+            return;
+        }
+        let already_waiting = self
+            .actors
+            .get(&actor_id)
+            .map(|a| a.receive_wait.is_some())
+            .unwrap_or(false);
+        if already_waiting {
+            return;
+        }
+        let timer_id = self
+            .timer_wheel
+            .receive_wait_timeout(std::time::Duration::from_millis(ms as u64), actor_id);
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.receive_wait = Some(crate::runtime::actor::ReceiveWaitState {
+                timer_id,
+                timed_out: false,
+            });
+        }
+    }
+
+    /// Drop an actor's receive-wait state once the wait has resolved,
+    /// cancelling the timeout timer if it is still pending. Called on every
+    /// terminal outcome of a resumed receive-suspended behavior (the match
+    /// path cancels earlier, via `receive_wait_matched`).
+    fn clear_receive_wait(&mut self, actor_id: u64) {
+        let wait = self
+            .actors
+            .get_mut(&actor_id)
+            .and_then(|a| a.receive_wait.take());
+        if let Some(wait) = wait {
+            self.timer_wheel.cancel(wait.timer_id);
+        }
+    }
+
+    /// A receive-wait timeout timer fired: mark the actor's wait as timed
+    /// out and resume its suspended behavior. The re-executed `ReceiveWait`
+    /// consumes the marker, writes the no-match sentinel, and continues
+    /// into the after body.
+    fn fire_receive_wait_timeout(&mut self, actor_id: u64) {
+        let has_suspension = self
+            .actors
+            .get(&actor_id)
+            .map(|a| a.suspended_execution.is_some())
+            .unwrap_or(false);
+        if !has_suspension {
+            // Nothing to wake (actor exited or the wait already resolved):
+            // drop any stale wait state instead of poisoning a later wait.
+            self.clear_receive_wait(actor_id);
+            return;
+        }
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            if let Some(wait) = actor.receive_wait.as_mut() {
+                wait.timed_out = true;
+            }
+        }
+        self.resume_suspended_receive_wait(actor_id);
+    }
+
+    /// Resume an actor whose bytecode behavior suspended on a timed
+    /// selective receive (`receive ... after ms =>`). Called when a message
+    /// was pushed to the actor's mailbox (the re-scan may match) or when
+    /// the wait's timer fired (the wait resolves with the no-match
+    /// sentinel). Mirrors `resume_suspended_llm_step`: the actor's
+    /// callbacks are re-installed on the shared VM before `vm.resume()`.
+    fn resume_suspended_receive_wait(&mut self, actor_id: u64) {
+        let suspended = match self.actors.get_mut(&actor_id) {
+            Some(actor) => actor.suspended_execution.take(),
+            None => return,
+        };
+        let Some(suspended) = suspended else { return };
+
+        if self.vm.is_none() {
+            // No VM available; put the suspension back so a later wake can
+            // re-trigger it.
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.suspended_execution = Some(suspended);
+            }
+            return;
+        }
+
+        let self_ptr: *mut Runtime = self;
+        unsafe {
+            let vm = (*self_ptr).vm.as_mut().unwrap();
+            // Re-install callbacks bound to THIS actor: other actors may have
+            // run on the shared VM while this one was suspended.
+            vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
+            vm.restore_suspended_state(suspended.vm_state);
+            // A resumed behavior is still scheduler-context execution: a
+            // `perform LLM.ask` after the wait must suspend (non-blocking).
+            let saved_suspend = (*self_ptr).llm_suspend_enabled;
+            (*self_ptr).llm_suspend_enabled = true;
+            (*self_ptr).vm_exec_begin();
+            let result = vm.resume();
+            (*self_ptr).llm_suspend_enabled = saved_suspend;
+            match result {
+                Ok(_) => {
+                    // The wait resolved (match or timeout) and the behavior
+                    // ran to completion: drop any leftover wait state and
+                    // record workflow completion like the LLM resume path.
+                    (*self_ptr).clear_receive_wait(actor_id);
+                    if (*self_ptr).actor_is_workflow(actor_id) {
+                        if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                            actor.waiting_signal = None;
+                            if let Some(n) =
+                                actor.get_state_field("step_index").and_then(|v| v.as_int())
+                            {
+                                actor.set_state_field("step_index", Value::int(n + 1));
+                            }
+                        }
+                        let seq = (*self_ptr).next_sequence(actor_id);
+                        let _ = (*self_ptr).persistence.append_workflow_event(
+                            actor_id,
+                            WorkflowEvent::StepCompleted {
+                                sequence: seq,
+                                step_name: suspended.step_name,
+                            },
+                        );
+                        (*self_ptr).checkpoint_actor(actor_id);
+                    }
+                }
+                Err(crate::types::NuError::VMError(ref msg)) if msg == "ReceiveWait:suspend" => {
+                    // Re-suspended on the same wait (the waking message did
+                    // not match): keep the original timer and re-capture the
+                    // VM state so the next message or the timeout can resume
+                    // it. maybe_schedule_receive_wait is a no-op while the
+                    // wait state is live, so the deadline is not restarted.
+                    if let Some(vm_state) = vm.take_suspended_state() {
+                        let timeout = vm.suspended_receive_timeout.take();
+                        if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                            actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
+                                vm_state,
+                                behavior_idx: suspended.behavior_idx,
+                                step_name: suspended.step_name,
+                            });
+                        }
+                        (*self_ptr).maybe_schedule_receive_wait(actor_id, timeout);
+                    }
+                }
+                Err(crate::types::NuError::VMError(ref msg)) if is_suspend_error(msg) => {
+                    // Suspended on something else (a signal wait or a
+                    // background LLM call) past the receive: the wait is
+                    // over. Re-capture so the matching signal or pumped
+                    // completion can resume the behavior.
+                    (*self_ptr).clear_receive_wait(actor_id);
+                    if let Some(vm_state) = vm.take_suspended_state() {
+                        let signal_name = vm.suspended_signal_name.take();
+                        if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                            let marker = suspension_marker(actor, signal_name);
+                            actor.waiting_signal = marker;
+                            actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
+                                vm_state,
+                                behavior_idx: suspended.behavior_idx,
+                                step_name: suspended.step_name,
+                            });
+                        }
+                    }
+                }
+                // Other errors: the wait is over; the send-path result is
+                // discarded anyway, matching step_actor semantics.
+                Err(_) => (*self_ptr).clear_receive_wait(actor_id),
+            }
+            // End the VM-execution window only after any suspend-state
+            // re-capture above: draining deferred wakes runs other actors
+            // on the shared VM, which would clobber the frames an
+            // un-captured suspend still needs. Runs on every path, so
+            // wakes of other actors are not lost when THIS one suspends.
+            (*self_ptr).vm_exec_end();
+        }
+        // The suspension resolved (completed or failed): if messages queued
+        // up while the behavior was suspended, schedule the actor to drain
+        // them — step_actor leaves mail untouched while a suspension is live.
+        self.requeue_if_mail_pending(actor_id);
+    }
+
     fn tick_timers_at(&mut self, now: std::time::Instant) {
         let fired = self.timer_wheel.tick(now);
         for (target_actor, message) in fired {
@@ -2575,6 +2985,9 @@ impl Runtime {
                 }
                 TimerMessage::Kill => {
                     self.kill_actor(target_actor);
+                }
+                TimerMessage::ReceiveWaitTimeout => {
+                    self.fire_receive_wait_timeout(target_actor);
                 }
             }
         }
@@ -2757,14 +3170,17 @@ impl Runtime {
             }
             vm.set_current_frame(frame);
 
+            (*self_ptr).vm_exec_begin();
             let result = vm.run_from(module_idx, code_offset);
-            // Capture VM state for a workflow signal wait or a non-blocking
-            // LLM call. Doing this here avoids aliasing the Runtime through
-            // the callback while the VM borrow is active.
+            // Capture VM state for a workflow signal wait, a non-blocking
+            // LLM call, or a timed selective receive. Doing this here avoids
+            // aliasing the Runtime through the callback while the VM borrow
+            // is active.
             if let Err(crate::types::NuError::VMError(ref msg)) = result {
                 if is_suspend_error(msg) {
                     if let Some(vm_state) = vm.take_suspended_state() {
                         let signal_name = vm.suspended_signal_name.take();
+                        let receive_timeout = vm.suspended_receive_timeout.take();
                         if let Some(actor) = self.actors.get_mut(&actor_id) {
                             let marker = suspension_marker(actor, signal_name);
                             actor.waiting_signal = marker;
@@ -2774,9 +3190,18 @@ impl Runtime {
                                 step_name: String::new(),
                             });
                         }
+                        // Arm the receive-after timeout on the first
+                        // suspension; a no-op for the other sentinels.
+                        self.maybe_schedule_receive_wait(actor_id, receive_timeout);
                     }
                 }
             }
+            // End the VM-execution window only after the suspend-state
+            // capture above: draining deferred wakes runs other actors on
+            // the shared VM, which would clobber the frames an un-captured
+            // suspend still needs. Runs on every path, so wakes of other
+            // actors are not lost when THIS actor suspends.
+            (*self_ptr).vm_exec_end();
             // String-id values index into this runtime VM's constant pool. When
             // the result is returned to a different VM (e.g. the top-level VM
             // that invoked `ask`), the id is meaningless there. Convert string
@@ -3034,7 +3459,7 @@ impl Runtime {
                 }
             }
         }
-        self.scheduler.enqueue(actor_id);
+        self.enqueue_actor(actor_id);
         Some(actor_id)
     }
 
@@ -3240,7 +3665,7 @@ impl Runtime {
                     if let Some(actor) = self.actors.get_mut(&linked_id) {
                         let _ = actor.mailbox.push(exit_msg);
                     }
-                    self.scheduler.enqueue(linked_id);
+                    self.enqueue_actor(linked_id);
                 } else {
                     let linked_reason = ExitReason::Error(format!("linked actor {} exited with {:?}", actor_id, reason));
                     if let Some(actor) = self.actors.get_mut(&linked_id) {
@@ -3280,6 +3705,96 @@ impl Runtime {
         }
     }
 
+    // -- Builtin Actor Effects (Actor.*) --
+
+    /// Dispatch a built-in `Actor.*` effect performed by `actor_id` (the
+    /// current actor, when any). Every op yields nil except `whereis`,
+    /// which yields the actor ref or nil for unknown names. Ops that need
+    /// a current actor are no-ops outside one, matching the standalone
+    /// VM's nil fallback. Returns `None` for unknown op names so the
+    /// caller can fall through to other built-in handlers.
+    fn perform_actor_builtin(
+        &mut self,
+        actor_id: Option<u64>,
+        op_name: Option<&str>,
+        constants: &[crate::bytecode::Constant],
+        regs: &[Value],
+    ) -> Option<Value> {
+        let string_arg = |idx: usize| -> Option<String> {
+            let id = regs.get(idx)?.as_string_id()?;
+            match constants.get(id as usize) {
+                Some(crate::bytecode::Constant::String(s)) => Some(s.clone()),
+                _ => None,
+            }
+        };
+        match op_name {
+            Some("link") | Some("unlink") | Some("monitor") | Some("demonitor") => {
+                let target = regs.get(0)?.as_actor_id()?;
+                let Some(me) = actor_id else {
+                    return Some(Value::nil());
+                };
+                match op_name {
+                    Some("link") => self.link_actors(me, target),
+                    Some("unlink") => self.unlink_actors(me, target),
+                    Some("monitor") => self.monitor(me, target),
+                    _ => self.demonitor(me, target),
+                }
+                Some(Value::nil())
+            }
+            Some("trap_exit") => {
+                let flag = regs.get(0)?.as_bool()?;
+                if let Some(me) = actor_id {
+                    if let Some(actor) = self.actors.get_mut(&me) {
+                        actor.trap_exits = flag;
+                    }
+                }
+                Some(Value::nil())
+            }
+            Some("set_priority") => {
+                // 0 = High, 1 = Normal, 2 = Low; any other value selects
+                // Normal. Takes effect on the actor's next (re)queue.
+                let level = regs.get(0)?.as_int()?;
+                if let Some(me) = actor_id {
+                    if let Some(actor) = self.actors.get_mut(&me) {
+                        actor.priority = match level {
+                            0 => ActorPriority::High,
+                            2 => ActorPriority::Low,
+                            _ => ActorPriority::Normal,
+                        };
+                    }
+                }
+                Some(Value::nil())
+            }
+            Some("exit") => {
+                let reason = actor_exit_reason(regs.get(0), constants);
+                if let Some(me) = actor_id {
+                    self.exit_actor(me, reason);
+                }
+                Some(Value::nil())
+            }
+            Some("register") => {
+                let name = string_arg(0)?;
+                if let Some(me) = actor_id {
+                    let _ = self.registry.register(&name, me);
+                }
+                Some(Value::nil())
+            }
+            Some("unregister") => {
+                let name = string_arg(0)?;
+                let _ = self.registry.unregister(&name);
+                Some(Value::nil())
+            }
+            Some("whereis") => {
+                let name = string_arg(0)?;
+                Some(match self.registry.whereis(&name) {
+                    Some(id) => Value::actor_ref(id),
+                    None => Value::nil(),
+                })
+            }
+            _ => None,
+        }
+    }
+
     // -- Supervisor Management --
 
     pub fn create_supervisor(&mut self, name: &str, strategy: RestartStrategy) -> u64 {
@@ -3289,7 +3804,7 @@ impl Runtime {
         self.actors.insert(id, actor);
         let supervisor = Supervisor::new(id, name, strategy);
         self.supervisors.insert(id, supervisor);
-        self.scheduler.enqueue(id);
+        self.enqueue_actor(id);
         id
     }
 
@@ -3350,7 +3865,7 @@ impl Runtime {
             let _ = watcher.mailbox.push(down_msg);
             let _ = reason_str;
         }
-        self.scheduler.enqueue(watcher_id);
+        self.enqueue_actor(watcher_id);
     }
 
     /// Shut a supervisor down, removing its children and the supervisor
@@ -3722,70 +4237,9 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         behavior_idx: usize,
         init: Vec<(String, crate::vm::Value)>,
     ) -> crate::vm::Value {
-        let mut rt = self.runtime.borrow_mut();
-        let meta = module
-            .actor_metadata
-            .iter()
-            .find(|m| m.behavior_indices.contains(&behavior_idx));
-        let id = if let Some(meta) = meta {
-            let state_models: HashMap<String, crate::runtime::persistence::StateModel> = meta
-                .state_models
-                .iter()
-                .map(|(name, model)| (name.clone(), map_ast_state_model(*model)))
-                .collect();
-            let defaults = meta.state_defaults.clone();
-            rt.spawn_actor_with_models(
-                Box::new(move || {
-                    let mut fields: Vec<(String, crate::vm::Value)> = defaults
-                        .iter()
-                        .map(|(name, c)| (name.clone(), crate::vm::constant_to_value(c)))
-                        .collect();
-                    fields.extend(init);
-                    fields
-                }),
-                state_models,
-                meta.persistent,
-                if meta.is_workflow {
-                    Some(meta.name.as_str())
-                } else {
-                    None
-                },
-            )
-        } else {
-            rt.spawn_actor(Box::new(move || init))
-        };
-        // Record bytecode behavior offsets so the runtime can execute bytecode
-        // handlers. Populate ALL module-level behavior offsets (not just this
-        // actor's behavior_indices) so that behavior_id_for's module-level
-        // fallback indices work correctly.
-        let offsets: Vec<usize> = module.behaviors.iter().map(|b| b.code_offset).collect();
-        let compensation_offsets: Vec<Option<usize>> = module.behaviors.iter()
-            .map(|b| b.compensate_offset).collect();
-        if let Some(actor) = rt.actors.get_mut(&id) {
-            actor.bytecode_module = Some(module.clone());
-            actor.bytecode_offsets = offsets.clone();
-            actor.compensation_offsets = compensation_offsets.clone();
-            if let Some(meta) = meta {
-                if meta.is_agent {
-                    actor.is_agent = true;
-                }
-                // `constant_to_value` turns Constant::String into nil. Rehydrate
-                // string defaults by allocating them on the actor heap so state
-                // fields like `model` and `system_prompt` are readable strings.
-                for (name, c) in &meta.state_defaults {
-                    if let crate::bytecode::Constant::String(s) = c {
-                        let ptr = actor.allocate_string(s);
-                        actor.set_state_field(name, ptr);
-                    }
-                }
-            }
-        }
-        if meta.map(|m| m.is_workflow).unwrap_or(false) {
-            rt.layout_workflow_behavior_table(id);
-        }
-        // Keep a copy for recovery after a runtime restart.
-        rt.register_recovery_module(id, module.clone(), offsets, compensation_offsets);
-        crate::vm::Value::actor_ref(id)
+        self.runtime
+            .borrow_mut()
+            .spawn_from_module(module, behavior_idx, init)
     }
 
     fn send_message(&mut self, target: crate::vm::Value, behavior_id: u16, args: &[crate::vm::Value]) {
@@ -3868,6 +4322,11 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             };
             let mut rt = self.runtime.borrow_mut();
             return rt.query_workflow(workflow_id, &query_name);
+        }
+        if effect_name == "Actor" {
+            let mut rt = self.runtime.borrow_mut();
+            let actor_id = rt.current_actor;
+            return rt.perform_actor_builtin(actor_id, op_name, constants, regs);
         }
         self.perform_effect(effect_name, regs)
     }
@@ -4034,14 +4493,26 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
 
     fn spawn_actor(
         &mut self,
-        _module: &crate::bytecode::CodeModule,
-        _behavior_idx: usize,
-        _init: Vec<(String, crate::vm::Value)>,
+        module: &crate::bytecode::CodeModule,
+        behavior_idx: usize,
+        init: Vec<(String, crate::vm::Value)>,
     ) -> crate::vm::Value {
-        crate::vm::Value::actor_ref(0)
+        // SAFETY: the callback is installed on the shared runtime VM only
+        // while the runtime drives a behavior on the single scheduler
+        // thread, so `runtime` is a live, exclusively-borrowed pointer.
+        // Spawning mutates runtime state but never re-enters the VM.
+        unsafe { (*self.runtime).spawn_from_module(module, behavior_idx, init) }
     }
 
-    fn send_message(&mut self, _target: crate::vm::Value, _behavior_id: u16, _args: &[crate::vm::Value]) {}
+    fn send_message(&mut self, target: crate::vm::Value, behavior_id: u16, args: &[crate::vm::Value]) {
+        if let Some(target_id) = target.as_actor_id() {
+            // SAFETY: as above. `send_message_by_id` is safe mid-behavior:
+            // it pushes mail, bumps ORCA foreign counts, and enqueues the
+            // target; the receive-wait wake is deferred while the shared
+            // VM is executing (see `Runtime::pending_receive_wakes`).
+            unsafe { (*self.runtime).send_message_by_id(target_id, behavior_id, args) }
+        }
+    }
 
     fn get_state_field(&self, field: &str) -> crate::vm::Value {
         unsafe {
@@ -4118,6 +4589,14 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     _ => return None,
                 };
                 return (*self.runtime).query_workflow(workflow_id, &query_name);
+            }
+            if effect_name == "Actor" {
+                return (*self.runtime).perform_actor_builtin(
+                    Some(self.actor_id),
+                    op_name,
+                    constants,
+                    regs,
+                );
             }
             self.perform_effect(effect_name, regs)
         }
@@ -4337,6 +4816,45 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             // ORCA receiver protocol: hold heap pointers carried by the message.
             (*self.runtime).hold_payload_refs(self.actor_id, &payload);
             Some((pos, payload))
+        }
+    }
+
+    fn receive_wait_suspend(&mut self, timeout_ms: i64) -> bool {
+        unsafe {
+            let rt = &mut *self.runtime;
+            let Some(actor) = rt.actors.get_mut(&self.actor_id) else {
+                return false;
+            };
+            // A fired timeout resolves the wait exactly once: consume the
+            // marker so the re-executed ReceiveWait writes the no-match
+            // sentinel and a later wait starts clean.
+            if actor.receive_wait.map(|w| w.timed_out).unwrap_or(false) {
+                actor.receive_wait = None;
+                return false;
+            }
+            // Non-positive timeouts poll once (Erlang-style non-blocking
+            // receive). Synchronous entry points (ask_actor_sync: pipelines,
+            // supervisors, debates, `Ask`) never suspend — same gating as
+            // the non-blocking LLM path.
+            if timeout_ms <= 0 || !rt.llm_suspend_enabled {
+                return false;
+            }
+            true
+        }
+    }
+
+    fn receive_wait_matched(&mut self) {
+        unsafe {
+            let rt = &mut *self.runtime;
+            let wait = rt
+                .actors
+                .get_mut(&self.actor_id)
+                .and_then(|a| a.receive_wait.take());
+            // A match resolves the wait: cancel the pending timeout so it
+            // cannot fire into a later wait on this actor.
+            if let Some(wait) = wait {
+                rt.timer_wheel.cancel(wait.timer_id);
+            }
         }
     }
 }

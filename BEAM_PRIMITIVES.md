@@ -16,8 +16,8 @@ The BEAM (Bogdan/Bjorn's Erlang Abstract Machine) and OTP (Open Telecom Platform
 |----------------|---------------|-------------|-----------|
 | `spawn(Fun)` | **IMPLEMENTED** | `spawn ActorType { field = value }` | Parser + `Spawn` opcode (0x80) → `ActorVmCallbacks::spawn_actor`. Field-init record, not a function. |
 | `spawn(Module, Fun, Args)` | **ADAPT** | `spawn ActorType(args)` | Nulang uses typed actor constructors rather than dynamic module references. Positional-arg spawn is not implemented (only field init). |
-| `spawn_link(Fun)` | **ADOPT — NOT IMPLEMENTED** | `spawn_link ActorType` | Essential for supervision trees. Bidirectional fault propagation. No `spawn_link` syntax or opcode exists; linking is a separate `Runtime::link_actors` call. |
-| `spawn_monitor(Fun)` | **ADOPT — NOT IMPLEMENTED** | `spawn_monitor ActorType` | Returns `{ActorRef, MonitorRef}`. Unilateral observation with down notifications. No `spawn_monitor` exists; monitoring is a separate `Runtime::monitor` call. |
+| `spawn_link(Fun)` | **IMPLEMENTED** | `spawn link ActorType { field = value }` | Parser desugar to `spawn` + `perform Actor.link(child)` on the spawner. Bidirectional fault propagation for supervision trees. |
+| `spawn_monitor(Fun)` | **IMPLEMENTED** | `spawn monitor ActorType { field = value }` | Same desugar with `Actor.monitor(child)`; DOWN notification on exit. (No `MonitorRef` return — `Actor.demonitor(target)` takes the target.) |
 | `spawn_opt(Fun, Options)` | **ADAPT — NOT IMPLEMENTED** | `spawn ActorType with options { ... }` | Nulang should support: `priority`, `scheduler_hint`, `max_heap_size`, `link`, `monitor`. None of these options exist today. |
 
 **Design Note:** Nulang's typed actors eliminate the need for `apply/3` and dynamic function calls. As implemented, `spawn` returns an `ActorRef` directly (a NaN-boxed actor id), not `Result[ActorRef, SpawnError]` — spawn cannot fail in the current runtime.
@@ -212,7 +212,7 @@ Key `gen_server` primitives:
 
 | gen_server Function | Nulang Status | Nulang Form |
 |---------------------|---------------|-------------|
-| `gen_server:start_link/4` | **NOT IMPLEMENTED** | `spawn_link` does not exist; use `Runtime::link_actors` after `spawn` |
+| `gen_server:start_link/4` | **NOT IMPLEMENTED** | `spawn link Store {..}` exists; no `gen_server` behavior mixin yet (Phase 2) |
 | `gen_server:call/2` | **IMPLEMENTED** | `ask store get("key")` — `Ask` opcode (0x82) → `Runtime::ask_actor_sync` (synchronous, single-threaded runtime) |
 | `gen_server:cast/2` | **IMPLEMENTED** | `send store put("key", "value")` (not `<-`) |
 | `gen_server:reply/2` | **OMIT** | Built into `ask`/behavior return |
@@ -685,10 +685,10 @@ let hash = crypto_lib.call("sha256", data)
 
 | Category | Adopt | Adapt | Replace | Omit |
 |----------|-------|-------|---------|------|
-| **Actor Lifecycle** | spawn ✅, self ✅, exit ✅(API), trap_exit ✅(API) | spawn_opt, process_info, priority | — | pid_to_list, list_to_pid, spawn_link ❌, spawn_monitor ❌ |
-| **Message Passing** | send ✅, ask ✅, receive ⚠️ (syntax only) | — | — | — |
-| **Naming** | register, unregister, whereis, registered ✅(API) | — | — | — |
-| **Links/Monitors** | link, unlink, monitor, demonitor ✅(API) | demonitor flush ❌ | — | — |
+| **Actor Lifecycle** | spawn ✅, self ✅, exit ✅, trap_exit ✅, spawn_link ✅ (`spawn link` syntax), spawn_monitor ✅ (`spawn monitor` syntax), priority ✅ (`Actor.set_priority`; scheduling-only) | spawn_opt, process_info | — | pid_to_list, list_to_pid |
+| **Message Passing** | send ✅, ask ✅, receive ✅ (selective + `after` timeout via `ReceiveWait` 0xA0) | — | — | — |
+| **Naming** | register, unregister, whereis ✅ (`Actor.register`/`unregister`/`whereis` builtins), registered ✅(API) | — | — | — |
+| **Links/Monitors** | link, unlink, monitor, demonitor ✅ (`Actor.*` builtins) | demonitor flush ❌ | — | — |
 | **OTP Behaviors** | supervisor strategies ✅ (3 of 4), gen_server call/cast ✅ | gen_statem ❌, gen_event ❌, simple_one_for_one ❌ | — | — |
 | **Storage** | persistent_term ❌ | ETS (actor-local tables) ❌ | Mnesia ✅ (persistent actors + CRDTs implemented) | match_spec |
 | **Distribution** | node(), nodes() ✅(API), monitor_node ❌ | RPC calls ⚠️ (RAsk partial; send stub) | global registry ❌ (no virtual actors) | set_cookie |
@@ -707,12 +707,12 @@ let hash = crypto_lib.call("sha256", data)
 ## 15. Priority Implementation Order
 
 ### Phase 1: Core Actor Model (Foundation)
-1. `receive` / `receive after` — **The single most important missing primitive** — *syntax only; needs MIR lowering, pattern dispatch, and `after`*
-2. `spawn_link` / `spawn_monitor` — *not started (no syntax, no opcodes)*
-3. `link` / `unlink` / `monitor` / `demonitor` — *runtime API done; needs VM opcode handling + language builtins*
-4. `exit` signals and `trap_exit` — *runtime done; needs language surface*
-5. `process_flag` (priority, trap_exit) — *not started (no actor priority)*
-6. `register` / `unregister` / `whereis` — *runtime API done; needs language surface*
+1. `receive` / `receive after` — **DONE** — selective receive via `ReceiveMatch` 0x8F (non-blocking); `receive { arms } after ms => body` via `ReceiveWait` 0xA0 with full suspend/wake/timeout semantics (`"ReceiveWait:suspend"` sentinel, one-shot timer per wait)
+2. `spawn_link` / `spawn_monitor` — **DONE** — `spawn link Actor {..}` / `spawn monitor Actor {..}` syntax, parser-desugared to `spawn` + `perform Actor.link`/`Actor.monitor` on the spawner
+3. `link` / `unlink` / `monitor` / `demonitor` — **DONE** — `perform Actor.link(t)` / `Actor.unlink(t)` / `Actor.monitor(t)` / `Actor.demonitor(t)` builtins, dispatched via `ActorVmCallbacks::perform_builtin_effect` → `Runtime::perform_actor_builtin`
+4. `exit` signals and `trap_exit` — **DONE** — `perform Actor.exit(reason)` (0/"normal", 1/"error", 2/"kill", else custom) and `perform Actor.trap_exit(flag)` builtins
+5. `process_flag` (priority, trap_exit) — **DONE** — trap_exit via `Actor.trap_exit`; priority via `perform Actor.set_priority(0|1|2)` (High/Normal/Low) with strict per-level scheduler preference (scheduling-only; mailbox stays FIFO — `Message.priority` remains unconsulted by `Mailbox::receive_match`)
+6. `register` / `unregister` / `whereis` — **DONE** — `perform Actor.register(name)` / `Actor.unregister(name)` / `Actor.whereis(name)` builtins (nil no-op outside an actor, like all `Actor.*` effects)
 
 ### Phase 2: OTP Integration
 7. `GenServer` behavior mixin — *not started*
@@ -766,17 +766,17 @@ Verified by reading `src/runtime/`, `src/bytecode.rs`, and `src/vm.rs` (post-v0.
 | Area | Implementation | Where |
 |------|----------------|-------|
 | Actor lifecycle | `Runtime::spawn_actor` / `spawn_persistent_actor` / `spawn_workflow_actor`; ids from a global `AtomicU64` (`fresh_actor_id`); state machine `Created → Running → Waiting → Suspended → Terminated` | `runtime/mod.rs:212`, `runtime/actor.rs:10` |
-| Language surface | `spawn Actor { field = v }`, `send a b(args)`, `ask a b(args)`, `self`, `receive { \| B(p) => e }` (selective receive shipped — §17.5 item 4), `emit`, `migrate a to node` | `parser.rs:1749`, `lexer.rs:815` |
-| VM actor opcodes (handled) | `Spawn` 0x80, `Send` 0x81, `Ask` 0x82, `SelfOp` 0x83, `Receive` 0x84 (no-match fallback emitted by MIR lowering), `StateGet` 0x8B, `StateSet` 0x8C, `Emit` 0x8D, `SignalWait` 0x8E, `ReceiveMatch` 0x8F | `bytecode.rs:108`, `vm.rs:1373` |
+| Language surface | `spawn Actor { field = v }`, `spawn link Actor {..}` / `spawn monitor Actor {..}` (parser desugar to spawn + `Actor.link`/`Actor.monitor`), `send a b(args)`, `ask a b(args)`, `self`, `receive { \| B(p) => e }` (selective receive — §17.5 item 4), `receive { arms } after ms => body` (timed, suspending), `perform Actor.link/unlink/monitor/demonitor/trap_exit/exit/register/unregister/whereis/set_priority`, `emit`, `migrate a to node` | `parser.rs:1749`, `lexer.rs:815` |
+| VM actor opcodes (handled) | `Spawn` 0x80, `Send` 0x81, `Ask` 0x82, `SelfOp` 0x83, `Receive` 0x84 (no-match fallback emitted by MIR lowering), `StateGet` 0x8B, `StateSet` 0x8C, `Emit` 0x8D, `SignalWait` 0x8E, `ReceiveMatch` 0x8F, `ReceiveWait` 0xA0 | `bytecode.rs:108`, `vm.rs:1373` |
 | VM actor opcodes (defined, **unhandled** — fall to "unimplemented opcode") | `Monitor` 0x85, `Demon` 0x86, `Link` 0x87, `Unlink` 0x88, `Exit` 0x89, `Yield` 0x8A | `vm.rs:2387` |
 | Mailbox | Unbounded lock-free MPSC via `crossbeam::queue::SegQueue`; push never fails, never drops; epoch-based reclamation; `Message { behavior_id: u16, payload: Vec<Value>, sender: u64, priority }` with `MessagePriority::{System=0, Normal=1, Bulk=2}` (stored, not scheduling-affecting) | `runtime/mailbox.rs` |
-| Scheduler | Work-stealing: Chase-Lev `Worker` deque per worker (LIFO local, FIFO steal) + global `Injector`; `Runtime::new` configures **4 workers**; idle backoff (3 empty polls → 100 µs sleep); profiling counters (`SchedulerStats`) | `runtime/scheduler.rs` |
+| Scheduler | Work-stealing: Chase-Lev `Worker` deque per worker (LIFO local, FIFO steal) + global `Injector` split into three priority queues (`ActorPriority::{High, Normal, Low}`, default Normal; strict per-level preference — High drains before Normal before Low, FIFO within a level; every enqueue path reads the actor's current priority via `Runtime::enqueue_actor`); `Runtime::new` configures **4 workers**; idle backoff (3 empty polls → 100 µs sleep); profiling counters (`SchedulerStats`) | `runtime/scheduler.rs` |
 | Preemption | Reduction counting: +1 per message processed; yield at `max_reductions = 1000`; actor re-enqueued only while mailbox non-empty | `runtime/actor.rs:120`, `runtime/mod.rs:1894` |
 | GC | Per-actor ORCA: 64 KiB bump-allocator heaps (5 size classes, free lists), `local_count`/`foreign_count` per object; cross-actor sends bump `foreign_count` via `OrcaCoordinator`; deferred frees pumped every **256 scheduler ticks** and on run-queue drain | `runtime/heap.rs`, `runtime/gc.rs`, `runtime/mod.rs:1514` |
 | Cycle detection | Incremental `CycleDetector`: per-actor pinned sentinel node, foreign-ref edge graph with ref counts, full scan every **10 epochs**, suspect marking, DFS, trial decrements, reclamation | `runtime/orca_cycle.rs` |
-| Links/monitors/exit | `link_actors`/`unlink_actors`/`monitor`/`demonitor`/`exit_actor`/`kill_actor`; abnormal exit cascades to non-trapping links; trapping actors get a `System` message `[dead_id, linked_id]`; monitors get DOWN `[target_id, watcher_id, reason_code]` (codes: Normal 0, Error 1, Kill 2, Killed 3, Shutdown 4, Custom 5), all with `behavior_id = 0`; monitoring a dead actor → immediate DOWN `Error("noproc")` | `runtime/mod.rs:2461` |
+| Links/monitors/exit | `link_actors`/`unlink_actors`/`monitor`/`demonitor`/`exit_actor`/`kill_actor`; abnormal exit cascades to non-trapping links; trapping actors get a `System` message `[dead_id, linked_id]`; monitors get DOWN `[target_id, watcher_id, reason_code]` (codes: Normal 0, Error 1, Kill 2, Killed 3, Shutdown 4, Custom 5), all with `behavior_id = 0`; monitoring a dead actor → immediate DOWN `Error("noproc")`. Language surface: `perform Actor.link/unlink/monitor/demonitor/trap_exit/exit` | `runtime/mod.rs:2461` |
 | Supervision | 3 strategies (`OneForOne`, `OneForAll`, `RestForOne`), 3 policies (`Permanent`, `Temporary`, `Transient`), per-spec rate limits (default 5 restarts / 60 s), escalation with cascading supervisor shutdown | `runtime/supervisor.rs` |
-| Registry | `ActorRegistry`: register/unregister/whereis/registered + name validation + auto-cleanup on exit | `runtime/registry.rs` |
+| Registry | `ActorRegistry`: register/unregister/whereis/registered + name validation + auto-cleanup on exit. Language surface: `perform Actor.register/unregister/whereis` | `runtime/registry.rs` |
 | Process groups | `ProcessGroups`: join/leave/leave_all/members/is_member/member_count/which_groups; empty-group pruning; auto-leave on exit | `runtime/process_groups.rs` |
 | Timers | `TimerWheel` (min-heap, lazy cancel): `send_after`, `send_after_with_context`, `exit_after`, `kill_after`, `cancel`, `remaining`, `tick`; driven every scheduler iteration; durable workflow timers via `perform Timer.sleep(name, ms)` (journaled, re-armed on recovery) | `runtime/timer.rs`, `runtime/mod.rs:2185` |
 | Persistence | `PersistenceStore` trait + `MemoryStore`, `JsonFileStore`, `SqliteStore` (rusqlite); per-field `StateModel` (`Local`/`Durable`/`EventSourced`/`Crdt`); journal (`JournalEntry`) + snapshot (`ActorSnapshot`, incl. `waiting_signal`); 8-variant `WorkflowEvent` journal; `recover_actor` replays journal + restores bytecode via `register_recovery_module`; pointers/strings normalize to `Nil` across restarts | `runtime/persistence.rs`, `runtime/mod.rs:2498` |
@@ -834,16 +834,16 @@ Location transparency (`src/runtime/distributed.rs`): `ActorAddress::{Local, Rem
 1. ~~**Remote send drops the behavior name.**~~ **FIXED.** `Packet::ActorMessage` now carries `behavior_name: String` on the wire (length-prefixed UTF-8, replacing the `behavior_id: u16` field); `process_network_packets` resolves it via `Runtime::behavior_id_for` against the target actor's behavior table, falling back to behavior 0 for unknown names — mirroring local `send_message`'s `unwrap_or(0)` (`runtime/distributed.rs`, `runtime/network.rs`).
 2. ~~**Remote spawn is send-only.**~~ **FIXED (MVP).** `process_network_packets` now handles `Packet::SpawnRequest`: the receiving node spawns a fresh actor with the request's `initial_state` and registers the requested behavior — but only if that behavior was explicitly offered via `Runtime::register_spawnable_behavior` (MVP scope: remote spawn supports native behaviors the receiver opted into, not arbitrary or bytecode behaviors). Unknown names are answered with `SpawnResponse{success:false}` and no actor is created — the no-crash counterpart of the local unknown-behavior fallback. The reply carries the real actor id; the requester collects it via `Runtime::take_spawn_response(request_id)` (recorded by the `SpawnResponse` arm of `process_network_packets`; the address returned by `spawn_on_node` is still a placeholder whose `actor_id` is the request id). `RSpawn` (0xD4) still returns `actor_ref(0)` (`vm.rs:1468`); `DistributedRuntimeImpl::spawn_on_node` still returns placeholder addresses.
 3. **`RSend` (0xD2) is a no-op** in the VM (`vm.rs:1465`).
-4. ~~**`receive` has no semantics.**~~ **FIXED — selective receive shipped.** MIR lowering (`lower_receive`, `mir_lower.rs:1098`) resolves arm behavior names to behavior-table indices and emits `ReceiveMatch` (0x8F) with a `"max_params:id1,id2,..."` spec constant; the VM calls `ActorVmCallbacks::try_receive_match` (mailbox scan `Mailbox::receive_match`, FIFO order, non-matching messages requeued), writes the matched arm index plus payload values to registers, and a MIR compare chain dispatches to the arm body. No-match falls through to the legacy pop-any `Receive` handler (`vm.rs:2347`, nil when the mailbox is empty or outside an actor context) — non-blocking, no suspension. Still no `after` timeout in the grammar.
-5. **Fault-tolerance opcodes unhandled.** `Monitor`/`Demon`/`Link`/`Unlink`/`Exit`/`Yield` hit the VM's "unimplemented opcode" catch-all (`vm.rs:2387`); the functionality exists only as Rust runtime API.
-6. **`trap_exits` is Rust-only** (public `Actor` field, no setter/builtin); same for registry, process groups, and `TimerWheel`.
-7. **No actor scheduling priority.** `MessagePriority` is stored on messages but never consulted by the scheduler or mailbox (FIFO segmented queue).
+4. ~~**`receive` has no semantics.**~~ **FIXED — selective receive shipped, and `receive after` has since landed.** MIR lowering (`lower_receive`, `mir_lower.rs:1098`) resolves arm behavior names to behavior-table indices and emits `ReceiveMatch` (0x8F) with a `"max_params:id1,id2,..."` spec constant; the VM calls `ActorVmCallbacks::try_receive_match` (mailbox scan `Mailbox::receive_match`, FIFO order, non-matching messages requeued), writes the matched arm index plus payload values to registers, and a MIR compare chain dispatches to the arm body. No-match falls through to the legacy pop-any `Receive` handler (`vm.rs:2347`, nil when the mailbox is empty or outside an actor context) — non-blocking, no suspension. The timed form `receive { arms } after ms => body` emits `ReceiveWait` (0xA0, same spec/register contract, timeout staged in r0): on no match with a positive timeout in an actor the VM re-arms the PC and raises `"ReceiveWait:suspend"`; the runtime arms a one-shot timer per wait (`Actor.receive_wait`), resumes on a matching message or timer fire (timeout → arm-count sentinel to dst → after body; no legacy pop-any fallthrough in the timed form).
+5. **Fault-tolerance opcodes unhandled.** `Monitor`/`Demon`/`Link`/`Unlink`/`Exit`/`Yield` still hit the VM's "unimplemented opcode" catch-all (`vm.rs:2387`) — but the functionality is now reachable from source as built-in effects (`perform Actor.link/unlink/monitor/demonitor/trap_exit/exit` → `Runtime::perform_actor_builtin`), so the opcodes are superseded rather than missing.
+6. ~~**`trap_exits` is Rust-only.**~~ **FIXED for trap_exit and the registry** (`Actor.trap_exit`, `Actor.register`/`unregister`/`whereis` builtins). Process groups and `TimerWheel` remain Rust-only.
+7. ~~**No actor scheduling priority.**~~ **FIXED.** `Actor.priority: ActorPriority {High, Normal (default), Low}` set via `perform Actor.set_priority(0|1|2)`; the scheduler's global injector is split into three per-level queues drained High → Normal → Low (FIFO within a level). Affects scheduling only: `MessagePriority` is still stored on messages but never consulted by the mailbox (`Mailbox::receive_match` stays FIFO).
 8. **Unresolvable remote sends are silently dropped** (`ResolveResult::Unresolvable` → ignored, `runtime/distributed.rs:682`).
 9. **`Ack` packets** serialize/deserialize and are tested, but nothing sends or consumes them.
 10. **Supervisor restarts recreate bare actors**: `Supervisor::restart_child` builds a fresh `Actor` with no behavior table or bytecode; restarted children cannot process messages until behavior restoration is wired up.
 11. **`Kill` is trappable in practice.** `handle_actor_exit` special-cases nothing for `ExitReason::Kill` — linked actors with `trap_exits` receive it as a message instead of dying, contradicting the "cannot be trapped" doc comment (`types.rs:515`, `runtime/mod.rs:2751`). `ExitReason::Killed` is never constructed; link cascades use `Error("linked actor ... exited with ...")` instead.
 12. **Wire `Value` serde lossy.** Only int/float/bool/string-id/unit round-trip; nil, actor refs, and pointers serialize as raw-bit `VAL_FLOAT` and read back as floats (`runtime/network.rs:522`, `:538`).
-13. No: `spawn_link`/`spawn_monitor`, `is_alive`/`process_info`/`processes` builtins, actor hibernation, explicit GC triggers, group broadcast, `monitor_node`, cluster RPC family (`call`/`multicall`/`cast`/`broadcast`), ETS tables, `persistent_term`, `simple_one_for_one`, virtual actors, application lifecycle, tracing, ports, binary/bit syntax, hot code loading.
+13. No: `is_alive`/`process_info`/`processes` builtins, actor hibernation, explicit GC triggers, group broadcast, `monitor_node`, cluster RPC family (`call`/`multicall`/`cast`/`broadcast`), ETS tables, `persistent_term`, `simple_one_for_one`, virtual actors, application lifecycle, tracing, ports, binary/bit syntax, hot code loading.
 
 ### 17.6 Implemented but previously undocumented in this file
 

@@ -1396,6 +1396,22 @@ impl Parser {
     fn parse_spawn(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
         self.advance(); // consume 'spawn'
+        // Optional `link`/`monitor` modifier (BEAM spawn_link/spawn_monitor).
+        // `spawn link A { ... }` desugars right here to
+        // `let __spawn_ref = spawn A { ... } in { perform Actor.link(__spawn_ref); __spawn_ref }`
+        // (likewise `Actor.monitor`), so the form typechecks exactly like a
+        // plain spawn (actor ref) and needs no new IR nodes or opcodes.
+        let link_op = match self.peek_kind() {
+            TokenKind::Link => {
+                self.advance();
+                Some("link")
+            }
+            TokenKind::Monitor => {
+                self.advance();
+                Some("monitor")
+            }
+            _ => None,
+        };
         let actor_type = self.parse_expr()?;
         self.expect(TokenKind::LBrace)?;
         let mut init = Vec::new();
@@ -1412,10 +1428,34 @@ impl Parser {
             self.skip_newlines_semicolons();
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(Expr::Spawn {
+        let spawned = Expr::Spawn {
             actor_type: Box::new(actor_type),
             init,
             span,
+        };
+        Ok(match link_op {
+            None => spawned,
+            Some(op) => {
+                let t = "__spawn_ref".to_string();
+                Expr::Let {
+                    name: t.clone(),
+                    ty: None,
+                    value: Box::new(spawned),
+                    body: Box::new(Expr::Block {
+                        exprs: vec![
+                            Expr::Perform {
+                                effect: "Actor".to_string(),
+                                op: op.to_string(),
+                                args: vec![Expr::Var(t.clone(), span)],
+                                span,
+                            },
+                            Expr::Var(t, span),
+                        ],
+                        span,
+                    }),
+                    span,
+                }
+            }
         })
     }
 
@@ -1462,10 +1502,25 @@ impl Parser {
         self.advance(); // consume 'perform'
         let effect = self.expect_ident("effect name")?;
         self.expect(TokenKind::Dot)?;
+        // `ask`, `link`, `monitor` and `exit` are reserved keywords, so they
+        // lex as keyword tokens rather than identifiers; accept them as
+        // operation names (`perform Actor.link(t)`, `perform LLM.ask(p)`).
         let op = match self.peek_kind() {
             TokenKind::Ask => {
                 self.advance();
                 "ask".to_string()
+            }
+            TokenKind::Link => {
+                self.advance();
+                "link".to_string()
+            }
+            TokenKind::Monitor => {
+                self.advance();
+                "monitor".to_string()
+            }
+            TokenKind::Exit => {
+                self.advance();
+                "exit".to_string()
             }
             _ => self.expect_ident("operation name")?,
         };
@@ -1794,7 +1849,23 @@ impl Parser {
             self.skip_newlines_semicolons();
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(Expr::Receive { arms, span })
+        // Optional timeout clause: `receive { ... } after ms_expr => body`.
+        // `after` is a contextual keyword — an ordinary identifier expected
+        // only in this position (same pattern as `to` in parse_migrate), so
+        // user code may still name bindings and workflow steps `after`.
+        // Without the clause the receive keeps its non-blocking fallthrough;
+        // with it, a no-match suspends up to `ms_expr` milliseconds before
+        // running `body` (see mir::RValue::ReceiveWait / OpCode::ReceiveWait).
+        let after = if matches!(self.peek_kind(), TokenKind::Ident(s) if s == "after") {
+            self.advance(); // consume 'after'
+            let timeout_ms = self.parse_expr()?;
+            self.expect(TokenKind::FatArrow)?;
+            let timeout_body = self.parse_expr()?;
+            Some((Box::new(timeout_ms), Box::new(timeout_body)))
+        } else {
+            None
+        };
+        Ok(Expr::Receive { arms, after, span })
     }
 
     fn parse_for(&mut self) -> NuResult<Expr> {
@@ -2833,6 +2904,152 @@ mod tests {
                 assert!(matches!(right.as_ref(), Expr::Var(name, _) if name == "f"));
             }
             _ => panic!("Expected pipe expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_spawn_link_desugars() {
+        // `spawn link A { ... }` desugars in the parser to
+        // `let __spawn_ref = spawn A { ... } in { perform Actor.link(__spawn_ref); __spawn_ref }`.
+        let expr = parse_expr("spawn link Counter { count = 0 }").unwrap();
+        let Expr::Let {
+            name, value, body, ..
+        } = expr
+        else {
+            panic!("Expected let from spawn link desugar, got {:?}", expr);
+        };
+        assert_eq!(name, "__spawn_ref");
+        match value.as_ref() {
+            Expr::Spawn { actor_type, init, .. } => {
+                assert!(matches!(actor_type.as_ref(), Expr::Var(n, _) if n == "Counter"));
+                assert_eq!(init.len(), 1);
+                assert_eq!(init[0].0, "count");
+            }
+            other => panic!("Expected spawn in let value, got {:?}", other),
+        }
+        match body.as_ref() {
+            Expr::Block { exprs, .. } => {
+                assert_eq!(exprs.len(), 2);
+                match &exprs[0] {
+                    Expr::Perform { effect, op, args, .. } => {
+                        assert_eq!(effect, "Actor");
+                        assert_eq!(op, "link");
+                        assert_eq!(args.len(), 1);
+                        assert!(matches!(&args[0], Expr::Var(n, _) if n == "__spawn_ref"));
+                    }
+                    other => panic!("Expected perform Actor.link, got {:?}", other),
+                }
+                assert!(matches!(&exprs[1], Expr::Var(n, _) if n == "__spawn_ref"));
+            }
+            other => panic!("Expected block body, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_spawn_monitor_desugars() {
+        let expr = parse_expr("spawn monitor Counter { count = 0 }").unwrap();
+        let Expr::Let { body, .. } = expr else {
+            panic!("Expected let from spawn monitor desugar, got {:?}", expr);
+        };
+        match body.as_ref() {
+            Expr::Block { exprs, .. } => match &exprs[0] {
+                Expr::Perform { effect, op, .. } => {
+                    assert_eq!(effect, "Actor");
+                    assert_eq!(op, "monitor");
+                }
+                other => panic!("Expected perform Actor.monitor, got {:?}", other),
+            },
+            other => panic!("Expected block body, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_spawn_plain_not_desugared() {
+        let expr = parse_expr("spawn Counter { count = 0 }").unwrap();
+        assert!(
+            matches!(expr, Expr::Spawn { .. }),
+            "plain spawn must stay a Spawn node, got {:?}",
+            expr
+        );
+    }
+
+    #[test]
+    fn test_parse_spawn_link_missing_body_errors() {
+        assert!(parse_expr("spawn link Counter").is_err());
+        assert!(parse_expr("spawn link").is_err());
+    }
+
+    #[test]
+    fn test_parse_receive_after() {
+        let expr = parse_expr("receive { | Msg(x) => x } after 100 => 0").unwrap();
+        match expr {
+            Expr::Receive { arms, after, .. } => {
+                assert_eq!(arms.len(), 1);
+                assert_eq!(arms[0].0, "Msg");
+                assert_eq!(arms[0].1, vec!["x".to_string()]);
+                let (ms, body) = after.expect("after clause");
+                assert!(matches!(ms.as_ref(), Expr::Literal(Literal::Int(100), _)));
+                assert!(matches!(body.as_ref(), Expr::Literal(Literal::Int(0), _)));
+            }
+            _ => panic!("Expected receive expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_receive_without_after() {
+        let expr = parse_expr("receive { | Msg(x) => x }").unwrap();
+        match expr {
+            Expr::Receive { arms, after, .. } => {
+                assert_eq!(arms.len(), 1);
+                assert!(after.is_none());
+            }
+            _ => panic!("Expected receive expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_receive_after_malformed_errors() {
+        // Missing `=>` between the timeout expression and the body.
+        assert!(parse_expr("receive { | Msg() => 0 } after 100").is_err());
+        // Missing timeout expression.
+        assert!(parse_expr("receive { | Msg() => 0 } after => 0").is_err());
+    }
+
+    #[test]
+    fn test_after_stays_a_plain_identifier() {
+        // `after` is contextual (only special right after a receive block);
+        // elsewhere it remains a usable identifier, e.g. a let binding or a
+        // workflow step name (integration_tests has `step after { ... }`).
+        let expr = parse_expr("let after = 1 in after + 1").unwrap();
+        assert!(
+            matches!(&expr, Expr::Let { name, .. } if name == "after"),
+            "`after` must still bind as an identifier, got {:?}",
+            expr
+        );
+        let module = parse("workflow W { step after { 1 } }").unwrap();
+        assert_eq!(module.decls.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_perform_keyword_ops() {
+        // `link`, `monitor` and `exit` are reserved keywords; they must still
+        // parse as effect operation names (BEAM Actor.* builtin effects).
+        for (source, expected_op) in [
+            ("perform Actor.link(a)", "link"),
+            ("perform Actor.monitor(a)", "monitor"),
+            ("perform Actor.demonitor(a)", "demonitor"),
+            ("perform Actor.unlink(a)", "unlink"),
+            ("perform Actor.exit(1)", "exit"),
+            ("perform Actor.trap_exit(true)", "trap_exit"),
+        ] {
+            let expr = parse_expr(source).unwrap();
+            match expr {
+                Expr::Perform { effect, op, .. } => {
+                    assert_eq!(effect, "Actor", "{}", source);
+                    assert_eq!(op, expected_op, "{}", source);
+                }
+                other => panic!("Expected perform for {}, got {:?}", source, other),
+            }
         }
     }
 

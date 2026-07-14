@@ -26,7 +26,7 @@ It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired t
 | **CRDTs** | 8 conflict-free replicated data types for shared distributed state |
 | **Register-Based VM** | High-performance bytecode VM with NaN-tagged value representation |
 | **Cranelift JIT Backend** | Tiered execution: interpreter for cold code, native compilation for hot loops |
-| **BEAM/OTP Primitives** | `monitor`, `link`, registry, timers, process groups, selective `receive` (Rust runtime API; `spawn_link` planned) |
+| **BEAM/OTP Primitives** | `link`/`monitor`/`exit`/`trap_exit`/registry via `perform Actor.*`, `spawn link`/`spawn monitor`, selective `receive` with `after` timeout, actor priority (`Actor.set_priority`), timers, process groups |
 | **Linear Type Moves** | Zero-cost `iso` actor messaging via compile-time linearity tracking |
 | **SIMD Vectorization** | Auto-vectorization of array loops via Cranelift SIMD (I64x2, F64x2, I32x4, F32x4) |
 | **Python Interop** | Native Actor pattern: Python isolated to dedicated OS threads, marshal-only boundary |
@@ -38,11 +38,11 @@ It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired t
 Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
 
 - ✅ Builds with `cargo build`
-- ✅ All 1181 tests pass with `cargo test`
+- ✅ All 1224 tests pass with `cargo test`
 - ✅ NaN-boxed `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`)
-- ✅ 137-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, FFI, Python, distribution)
+- ✅ 138-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, FFI, Python, distribution)
 - ✅ Hindley-Milner type inference with algebraic effects, user-declared variant types (construction + recursive pattern matching with guards), and row-polymorphic records (`fn(r) r.x + r.y` accepts any record with `x` and `y`; closed record annotations stay exact)
-- ✅ Actor runtime: spawn, send, monitors, links, supervision, timers, registry, process groups, selective `receive`
+- ✅ Actor runtime: spawn, `spawn link`/`spawn monitor`, send, monitors, links, supervision, timers, registry, process groups, selective `receive` with `after`, actor priority
 - ✅ ORCA-style per-actor GC with cycle detection
 - ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams
 - ✅ Durable workflow runtime: `workflow` declarations with steps, timers, signals, saga compensation
@@ -218,7 +218,7 @@ let dbl = fn(x) { x * 2 } in
                               v                       v
                     +-------------------------+  +-------------------+
                     |  Type Checker (H-M)     |  | Bytecode Module   |
-                    |  Effect Checker         |  | (137 opcodes)     |
+                    |  Effect Checker         |  | (138 opcodes)     |
                     +-------------------------+  +-------------------+
                                                            |
                                                            v
@@ -274,7 +274,7 @@ let dbl = fn(x) { x * 2 } in
 | `hir` / `hir_lower` | High-level IR and AST → HIR lowering | ~2,345 |
 | `mir` / `mir_lower` | Mid-level IR and HIR → MIR lowering | ~2,090 |
 | `mir_codegen` | MIR-to-bytecode compilation with register allocation | ~1,875 |
-| `bytecode` | 137 opcodes, 32-bit fixed-width instructions | ~990 |
+| `bytecode` | 138 opcodes, 32-bit fixed-width instructions | ~990 |
 | `value_layout` | Canonical NaN-boxing tag/mask constants (single source of truth) | ~140 |
 | `vm` | Register-based virtual machine, effect handlers, JIT tiering hook | ~3,100 |
 | `jit/mod` | JIT session manager, tiered execution, hot-counter tracking | ~565 |
@@ -368,22 +368,26 @@ rt.sync_crdts();  // broadcast to all connected nodes
 
 ### v0.7 — BEAM/OTP Primitives
 
-35+ Erlang/OTP primitives analyzed and 12 core primitives implemented. Note: the
-`monitor`/`demonitor`/`link`/`unlink`/`exit`/`yield` **VM opcodes are defined but
-unhandled** — they hit the interpreter's unimplemented-opcode catch-all
-(`src/vm.rs:2386`); the corresponding functionality exists today only as Rust
-runtime API (`src/runtime/`), not from Nulang source.
+35+ Erlang/OTP primitives analyzed and the core set implemented. The primitives are
+reachable from Nulang source as built-in effects — `perform Actor.link(t)`,
+`Actor.unlink(t)`, `Actor.monitor(t)`, `Actor.demonitor(t)`, `Actor.trap_exit(flag)`,
+`Actor.exit(reason)`, `Actor.register(name)`, `Actor.unregister(name)`,
+`Actor.whereis(name)`, `Actor.set_priority(0|1|2)` — dispatched via
+`ActorVmCallbacks::perform_builtin_effect` into `Runtime::perform_actor_builtin`
+(nil no-op outside an actor). The legacy `monitor`/`demonitor`/`link`/`unlink`/`exit`/`yield`
+**VM opcodes remain defined but unhandled** — superseded by the effect surface.
 
 | Primitive | File | Description |
 |-----------|------|-------------|
-| `receive` | `parser.rs`, `vm.rs` | Selective receive: scans the mailbox in FIFO order for the first message matching any arm (`OpCode::ReceiveMatch` → `ActorVmCallbacks::try_receive_match`), binds payload values to arm params, non-matching messages stay queued; no-match falls back to pop-any (nil when empty). See `examples/receive.nula`. |
-| `spawn_link` | — | **Planned** — no implementation in the tree yet |
-| `monitor` | `runtime/mod.rs` | Watcher monitors target actor for exit (Rust runtime API only) |
-| `demonitor` | `runtime/mod.rs` | Remove a monitor (Rust runtime API only) |
-| `link`/`unlink` | `runtime/mod.rs` | Bidirectional fault tolerance links (Rust runtime API only) |
-| `exit` | `runtime/mod.rs` | Typed actor exit with `ExitReason` enum (Rust runtime API only) |
-| `trap_exit` | `runtime/actor.rs` | Convert exit signals to messages |
-| `register`/`whereis` | `runtime/registry.rs` | Local actor name registry |
+| `receive` | `parser.rs`, `vm.rs` | Selective receive: scans the mailbox in FIFO order for the first message matching any arm (`OpCode::ReceiveMatch` → `ActorVmCallbacks::try_receive_match`), binds payload values to arm params, non-matching messages stay queued; no-match falls back to pop-any (nil when empty). The timed form `receive { arms } after ms => body` (`OpCode::ReceiveWait` 0xA0) suspends the actor until a match arrives or the timeout fires. See `examples/receive.nula`. |
+| `spawn link` / `spawn monitor` | `parser.rs` | Spawn-and-link/monitor in one step: parser desugars to `spawn` + `perform Actor.link`/`Actor.monitor` on the spawner |
+| `monitor` | `runtime/mod.rs` | Watcher monitors target actor for exit (`Actor.monitor` builtin or Rust API) |
+| `demonitor` | `runtime/mod.rs` | Remove a monitor (`Actor.demonitor` builtin or Rust API) |
+| `link`/`unlink` | `runtime/mod.rs` | Bidirectional fault tolerance links (`Actor.link`/`Actor.unlink` builtins or Rust API) |
+| `exit` | `runtime/mod.rs` | Typed actor exit with `ExitReason` enum (`Actor.exit` builtin or Rust API) |
+| `trap_exit` | `runtime/actor.rs` | Convert exit signals to messages (`Actor.trap_exit` builtin) |
+| `register`/`whereis` | `runtime/registry.rs` | Local actor name registry (`Actor.register`/`unregister`/`whereis` builtins) |
+| `set_priority` | `runtime/actor.rs`, `runtime/scheduler.rs` | `Actor.set_priority(0|1|2)` → High/Normal/Low; scheduler drains High before Normal before Low (scheduling-only, mailbox stays FIFO) |
 | `send_after` | `runtime/timer.rs` | Hierarchical timer wheel |
 | `pg` process groups | `runtime/process_groups.rs` | Decentralized actor groups |
 | `yield` | `runtime/actor.rs` | Cooperative scheduling yield via reduction quotas |
@@ -540,7 +544,7 @@ This is an active implementation with the following components functional:
 - [x] AST (complete node types)
 - [x] Hindley-Milner type checker (Algorithm W with full inference)
 - [x] Algebraic effect checker (effect row compatibility, capability analysis)
-- [x] Bytecode (137 opcodes, constant pool, behavior table)
+- [x] Bytecode (138 opcodes, constant pool, behavior table)
 - [x] Compiler (AST → HIR → MIR → bytecode with register allocation)
 - [x] VM (register-based execution, arithmetic, comparisons, control flow)
 - [x] REPL (parse-typecheck-compile-execute cycle with introspection)
@@ -553,8 +557,8 @@ This is an active implementation with the following components functional:
 - [x] Distributed runtime (TCP transport, cluster membership, location-transparent messaging)
 - [x] CRDT subsystem (8 types: counters, sets, registers, sequences)
 - [x] CRDT manager (factory, sync, inter-node merge)
-- [x] BEAM/OTP primitives (monitor, link, exit, trap_exit, register, whereis, send_after, pg, yield, selective receive — Rust runtime API; VM opcodes for monitor/link/exit/yield are defined but unhandled)
-- [ ] `spawn_link` (planned — no implementation yet)
+- [x] BEAM/OTP primitives (`perform Actor.*`: monitor, link, exit, trap_exit, register, whereis, set_priority; send_after, pg, yield, selective receive with `after`; legacy VM opcodes for monitor/link/exit/yield are defined but unhandled)
+- [x] `spawn link` / `spawn monitor` (parser desugar to spawn + `Actor.link`/`Actor.monitor`)
 - [x] Unbounded mailboxes (crossbeam::SegQueue — BEAM semantics, no message loss)
 - [x] Hierarchical timer wheel (send_after, exit_after, kill_after)
 - [x] Actor registry (register/whereis/registered)
@@ -583,7 +587,7 @@ This is an active implementation with the following components functional:
 | v0.4 | ORCA garbage collector | Completed |
 | v0.5 | Multi-node distribution | Completed |
 | v0.6 | CRDT integration | Completed |
-| v0.7 | BEAM/OTP primitives (monitor, links, registry, timers, process groups, selective receive; `spawn_link` planned) | Completed |
+| v0.7 | BEAM/OTP primitives (monitor, links, exit, trap_exit, registry, timers, process groups, selective receive with `after`, `spawn link`/`spawn monitor`, actor priority — `perform Actor.*` language surface) | Completed |
 | v0.8 | Performance improvements (mimalloc, lock-free mailboxes, linear type moves) | Completed |
 | v0.9 | Cranelift JIT backend | Completed |
 | v0.10 | Type guard stripping + LSP inlay hints | Completed |
@@ -598,7 +602,7 @@ This is an active implementation with the following components functional:
 
 ## Known Limitations
 
-- **`receive` uses non-blocking selective matching.** `receive { | Behavior(params) => expr }` scans the mailbox in FIFO order for the first message matching any arm (`src/mir_lower.rs` `lower_receive` → `OpCode::ReceiveMatch` → `ActorVmCallbacks::try_receive_match`), binds payload values to the arm's params (missing values bind to nil, extras ignored), and skips non-matching messages, which stay queued. Unlike Erlang's `receive`, it never blocks: when nothing matches, a legacy fallback pops the next message and yields its first payload value (nil when the mailbox is empty or outside an actor context). Payload matching is by behavior name and arity-free — no guard expressions or payload patterns yet.
+- **`receive` uses selective matching without payload patterns.** `receive { | Behavior(params) => expr }` scans the mailbox in FIFO order for the first message matching any arm (`src/mir_lower.rs` `lower_receive` → `OpCode::ReceiveMatch` → `ActorVmCallbacks::try_receive_match`), binds payload values to the arm's params (missing values bind to nil, extras ignored), and skips non-matching messages, which stay queued. In the plain form it never blocks: when nothing matches, a legacy fallback pops the next message and yields its first payload value (nil when the mailbox is empty or outside an actor context). The timed form `receive { arms } after ms => body` (`OpCode::ReceiveWait` 0xA0) does block — the actor suspends until a matching message arrives or the timeout fires, then runs the after body. Payload matching is by behavior name and arity-free — no guard expressions or payload patterns yet.
 - Actor messaging that *is* fully wired goes through named behavior dispatch (`send actor behavior(args)`) — see `examples/counter_actor.nula`.
 
 ---

@@ -16,6 +16,10 @@
 //!   served by the host `wait_signal` callback.
 //! - `LLM.ask`: lowered to the `LlmAsk` opcode in `mir_lower.rs`, served
 //!   by the host `llm_ask` / `complete_llm` callbacks.
+//! - `Actor.*` (link/unlink/monitor/demonitor/trap_exit/exit/register/
+//!   unregister/whereis/set_priority): `Runtime::perform_actor_builtin` in
+//!   `runtime/mod.rs`, reached through both runtime host callback impls;
+//!   the standalone VM answers them with a nil no-op.
 
 use crate::types::{NuError, NuResult};
 
@@ -117,6 +121,86 @@ impl StdLib {
                     implemented_in: ImplSite::RuntimeHost,
                     description: "Send the prompt to the configured LLM client and return the reply; suspends non-blockingly when the runtime supports it.",
                 },
+                BuiltinOp {
+                    name: "Actor.link",
+                    effect: "Actor",
+                    op: "link",
+                    signature: "link(target: Actor) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Link the current actor to `target`; abnormal exits propagate to linked peers. Nil no-op outside an actor.",
+                },
+                BuiltinOp {
+                    name: "Actor.unlink",
+                    effect: "Actor",
+                    op: "unlink",
+                    signature: "unlink(target: Actor) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Remove the link between the current actor and `target`. Nil no-op outside an actor.",
+                },
+                BuiltinOp {
+                    name: "Actor.monitor",
+                    effect: "Actor",
+                    op: "monitor",
+                    signature: "monitor(target: Actor) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Monitor `target` from the current actor; a DOWN system message is delivered when it exits. Nil no-op outside an actor.",
+                },
+                BuiltinOp {
+                    name: "Actor.demonitor",
+                    effect: "Actor",
+                    op: "demonitor",
+                    signature: "demonitor(target: Actor) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Stop the current actor's monitor on `target`, so no DOWN message is delivered. Nil no-op outside an actor.",
+                },
+                BuiltinOp {
+                    name: "Actor.trap_exit",
+                    effect: "Actor",
+                    op: "trap_exit",
+                    signature: "trap_exit(flag: Bool) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Set the current actor's trap_exits flag; when true, linked-peer exit signals arrive as system messages instead of killing it. Nil no-op outside an actor.",
+                },
+                BuiltinOp {
+                    name: "Actor.exit",
+                    effect: "Actor",
+                    op: "exit",
+                    signature: "exit(reason: Int | String) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Self-exit the current actor; 0/\"normal\", 1/\"error\", 2/\"kill\" select the reason, anything else is custom. Nil no-op outside an actor.",
+                },
+                BuiltinOp {
+                    name: "Actor.register",
+                    effect: "Actor",
+                    op: "register",
+                    signature: "register(name: String) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Register the current actor under `name` in the local actor registry. Nil no-op outside an actor.",
+                },
+                BuiltinOp {
+                    name: "Actor.unregister",
+                    effect: "Actor",
+                    op: "unregister",
+                    signature: "unregister(name: String) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Remove `name` from the local actor registry.",
+                },
+                BuiltinOp {
+                    name: "Actor.whereis",
+                    effect: "Actor",
+                    op: "whereis",
+                    signature: "whereis(name: String) -> Actor | Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Look up `name` in the local actor registry; returns the actor ref, or nil when the name is not registered.",
+                },
+                BuiltinOp {
+                    name: "Actor.set_priority",
+                    effect: "Actor",
+                    op: "set_priority",
+                    signature: "set_priority(level: Int) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Set the current actor's scheduling priority: 0=High, 1=Normal, 2=Low (any other value selects Normal). Ready High-priority actors are scheduled before Normal, Normal before Low; affects scheduling only, not message order. Nil no-op outside an actor.",
+                },
             ],
         }
     }
@@ -202,6 +286,16 @@ mod tests {
             "Timer.sleep",
             "Signal.wait",
             "LLM.ask",
+            "Actor.link",
+            "Actor.unlink",
+            "Actor.monitor",
+            "Actor.demonitor",
+            "Actor.trap_exit",
+            "Actor.exit",
+            "Actor.register",
+            "Actor.unregister",
+            "Actor.whereis",
+            "Actor.set_priority",
         ] {
             assert!(
                 lib.lookup(name).is_some(),
@@ -254,12 +348,20 @@ mod tests {
             lib.lookup("LLM.ask").unwrap().implemented_in,
             ImplSite::RuntimeHost
         );
+        assert_eq!(
+            lib.lookup("Actor.link").unwrap().implemented_in,
+            ImplSite::RuntimeHost
+        );
+        assert_eq!(
+            lib.lookup("Actor.whereis").unwrap().implemented_in,
+            ImplSite::RuntimeHost
+        );
     }
 
     #[test]
     fn effects_lists_distinct_effects_in_order() {
         let lib = StdLib::new();
-        assert_eq!(lib.effects(), vec!["IO", "Timer", "Signal", "LLM"]);
+        assert_eq!(lib.effects(), vec!["IO", "Timer", "Signal", "LLM", "Actor"]);
     }
 
     #[test]

@@ -8,12 +8,14 @@
 //! This design provides:
 //! - Lock-free local operations (push/pop on own deque)
 //! - Lock-free work stealing from other workers
-//! - Global overflow queue for newly spawned / requeued actors
+//! - Global overflow queues for newly spawned / requeued actors, split
+//!   by actor priority (High drains before Normal before Low)
 //! - Backoff and sleep for idle workers (avoids busy-waiting)
 //!
 //! Based on the Chase-Lev algorithm (PPoPP 2005) as implemented by
 //! crossbeam::deque.
 
+use super::actor::ActorPriority;
 use crossbeam::deque::{Injector, Steal, Stealer, Worker};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
@@ -81,10 +83,23 @@ impl SchedulerStatsInternal {
 /// Created with a fixed number of worker slots. Each worker thread
 /// claims one slot and uses its local deque for LIFO operations.
 /// Staling uses FIFO order to promote breadth-first execution.
+///
+/// Actor priority: the global injector is split into three priority
+/// queues (High/Normal/Low). Dequeue drains every High entry before any
+/// Normal, and every Normal before any Low — strict per-level preference
+/// (Erlang-like), FIFO within a level. A sustained stream of High work
+/// can therefore starve lower levels; priority is a scheduling hint for
+/// latency-sensitive actors, not a fairness mechanism (fairness comes
+/// from the per-turn reduction budget, which is unchanged).
 pub struct Scheduler {
-    /// Global overflow queue for actors that don't belong to any
-    /// specific worker (newly spawned, woken from sleep, etc.)
+    /// Global overflow queue for High-priority actors.
+    global_high: Injector<u64>,
+
+    /// Global overflow queue for Normal-priority actors (the default).
     global: Injector<u64>,
+
+    /// Global overflow queue for Low-priority actors.
+    global_low: Injector<u64>,
 
     /// Per-worker deques. Each worker has one Worker handle;
     /// all other workers hold Stealer handles to it.
@@ -120,7 +135,9 @@ impl Scheduler {
         }
 
         Scheduler {
+            global_high: Injector::new(),
             global: Injector::new(),
+            global_low: Injector::new(),
             workers,
             stealers,
             worker_count,
@@ -137,7 +154,7 @@ impl Scheduler {
         }
     }
 
-    /// Push an actor ID onto the global injector queue.
+    /// Push an actor ID onto the global injector queue at Normal priority.
     ///
     /// Used when:
     /// - A new actor is spawned (no affinity yet)
@@ -147,7 +164,22 @@ impl Scheduler {
     /// The next worker to need work will pick this actor up from the
     /// global queue or steal it via FIFO from another worker.
     pub fn enqueue(&self, actor_id: u64) {
-        self.global.push(actor_id);
+        self.enqueue_with_priority(actor_id, ActorPriority::Normal);
+    }
+
+    /// Push an actor ID onto the global queue for its priority level.
+    ///
+    /// Dequeue preference is strict per level — all High entries drain
+    /// before any Normal, all Normal before any Low — and FIFO within a
+    /// level. The runtime reads the priority off the actor at enqueue
+    /// time, so a priority change takes effect on the actor's next
+    /// (re)queue.
+    pub fn enqueue_with_priority(&self, actor_id: u64, priority: ActorPriority) {
+        match priority {
+            ActorPriority::High => self.global_high.push(actor_id),
+            ActorPriority::Normal => self.global.push(actor_id),
+            ActorPriority::Low => self.global_low.push(actor_id),
+        }
     }
 
     /// Push an actor ID onto a specific worker's local deque.
@@ -163,11 +195,29 @@ impl Scheduler {
         }
     }
 
+    /// Steal one task from the priority-ordered global queues: every High
+    /// entry drains before any Normal, every Normal before any Low (FIFO
+    /// within a level). All three count toward `tasks_from_global_queue`.
+    fn steal_global(&self) -> Option<u64> {
+        for queue in [&self.global_high, &self.global, &self.global_low] {
+            if let Steal::Success(task) = queue.steal() {
+                self.stats
+                    .total_tasks_processed
+                    .fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .tasks_from_global_queue
+                    .fetch_add(1, Ordering::Relaxed);
+                return Some(task);
+            }
+        }
+        None
+    }
+
     /// Pop the next actor ID for the given worker.
     ///
     /// Tries in order:
-    /// 1. Worker's own local deque (LIFO — hot cache)
-    /// 2. Global injector queue
+    /// 1. Worker's own local deque (LIFO — hot cache; not priority-aware)
+    /// 2. Global injector queues (High, then Normal, then Low)
     /// 3. Steal from other workers' deques (FIFO — load balancing)
     ///
     /// Returns `None` if no work is available across all sources.
@@ -185,14 +235,8 @@ impl Scheduler {
             }
         }
 
-        // 2. Try the global injector
-        if let Steal::Success(task) = self.global.steal() {
-            self.stats
-                .total_tasks_processed
-                .fetch_add(1, Ordering::Relaxed);
-            self.stats
-                .tasks_from_global_queue
-                .fetch_add(1, Ordering::Relaxed);
+        // 2. Try the global injectors in priority order
+        if let Some(task) = self.steal_global() {
             return Some(task);
         }
 
@@ -239,14 +283,8 @@ impl Scheduler {
     /// Used by external event loops (I/O, timers) that need to
     /// grab work but don't have a dedicated worker thread.
     pub fn steal_one(&self) -> Option<u64> {
-        // Try global first
-        if let Steal::Success(task) = self.global.steal() {
-            self.stats
-                .total_tasks_processed
-                .fetch_add(1, Ordering::Relaxed);
-            self.stats
-                .tasks_from_global_queue
-                .fetch_add(1, Ordering::Relaxed);
+        // Try the global injectors first, in priority order
+        if let Some(task) = self.steal_global() {
             return Some(task);
         }
         // Try any worker

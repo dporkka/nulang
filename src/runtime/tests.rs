@@ -80,6 +80,90 @@ fn test_run_scheduler_processes_all_actors() {
 }
 
 // ========================================================================
+// Actor Priority Tests
+// ========================================================================
+
+#[test]
+fn test_actor_priority_default_is_normal() {
+    let actor = Actor::new(1, "test_actor", 16);
+    assert_eq!(actor.priority, ActorPriority::Normal);
+    assert_eq!(ActorPriority::default(), ActorPriority::Normal);
+}
+
+#[test]
+fn test_scheduler_priority_dequeue_order() {
+    // Strict per-level preference: every High entry drains before any
+    // Normal, every Normal before any Low; FIFO within a level.
+    let sched = Scheduler::new(4);
+    sched.enqueue_with_priority(1, ActorPriority::Normal);
+    sched.enqueue_with_priority(2, ActorPriority::Low);
+    sched.enqueue_with_priority(3, ActorPriority::High);
+    sched.enqueue_with_priority(4, ActorPriority::Normal);
+    sched.enqueue_with_priority(5, ActorPriority::High);
+    sched.enqueue_with_priority(6, ActorPriority::Low);
+    assert_eq!(sched.steal_one(), Some(3));
+    assert_eq!(sched.steal_one(), Some(5));
+    assert_eq!(sched.steal_one(), Some(1));
+    assert_eq!(sched.steal_one(), Some(4));
+    assert_eq!(sched.steal_one(), Some(2));
+    assert_eq!(sched.steal_one(), Some(6));
+    assert!(sched.steal_one().is_none());
+}
+
+#[test]
+fn test_scheduler_enqueue_defaults_to_normal() {
+    // The plain `enqueue` entry point lands in the Normal level.
+    let sched = Scheduler::new(2);
+    sched.enqueue(1); // Normal
+    sched.enqueue_with_priority(2, ActorPriority::High);
+    sched.enqueue_with_priority(3, ActorPriority::Low);
+    assert_eq!(sched.steal_one(), Some(2));
+    assert_eq!(sched.steal_one(), Some(1));
+    assert_eq!(sched.steal_one(), Some(3));
+}
+
+#[test]
+fn test_actor_set_priority_effect_maps_levels() {
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let set = |rt: &mut Runtime, who: Option<u64>, level: i64| {
+        rt.perform_actor_builtin(who, Some("set_priority"), &[], &[Value::int(level)])
+    };
+    assert_eq!(set(&mut rt, Some(a), 0), Some(Value::nil()));
+    assert_eq!(rt.actors.get(&a).unwrap().priority, ActorPriority::High);
+    assert_eq!(set(&mut rt, Some(a), 2), Some(Value::nil()));
+    assert_eq!(rt.actors.get(&a).unwrap().priority, ActorPriority::Low);
+    assert_eq!(set(&mut rt, Some(a), 1), Some(Value::nil()));
+    assert_eq!(rt.actors.get(&a).unwrap().priority, ActorPriority::Normal);
+    // Out-of-range levels fall back to Normal.
+    assert_eq!(set(&mut rt, Some(a), 7), Some(Value::nil()));
+    assert_eq!(rt.actors.get(&a).unwrap().priority, ActorPriority::Normal);
+    // Outside an actor context the effect is a nil no-op.
+    assert_eq!(set(&mut rt, None, 0), Some(Value::nil()));
+}
+
+#[test]
+fn test_actor_set_priority_changes_scheduling() {
+    // A High-priority actor is dequeued before a Normal one even when the
+    // Normal actor's message was sent first.
+    let mut rt = Runtime::new();
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    // Drain the spawn-time queue entries (both enqueued at Normal).
+    assert_eq!(rt.scheduler.dequeue(), Some(a));
+    assert_eq!(rt.scheduler.dequeue(), Some(b));
+    // Boost b via the builtin-effect path, then send to a before b.
+    assert_eq!(
+        rt.perform_actor_builtin(Some(b), Some("set_priority"), &[], &[Value::int(0)]),
+        Some(Value::nil())
+    );
+    rt.send_message(a, "noop", &[]);
+    rt.send_message(b, "noop", &[]);
+    assert_eq!(rt.scheduler.dequeue(), Some(b));
+    assert_eq!(rt.scheduler.dequeue(), Some(a));
+}
+
+// ========================================================================
 // Supervisor Tests
 // ========================================================================
 
@@ -598,6 +682,79 @@ fn test_run_scheduler_waits_for_pending_timer() {
         "pending timer must fire before run_scheduler exits"
     );
 }
+
+// -- Timed selective receive (receive-after) wait-state tests --
+
+/// The receive-wait timeout is armed exactly once per wait: a re-suspension
+/// of the same wait must not restart the clock.
+#[test]
+fn test_receive_wait_timer_armed_once() {
+    let mut rt = Runtime::new();
+    let actor_id = rt.spawn_actor(Box::new(|| vec![]));
+
+    rt.maybe_schedule_receive_wait(actor_id, Some(50));
+    let first = rt.actors.get(&actor_id).unwrap().receive_wait;
+    assert!(first.is_some(), "first suspend must arm the timeout");
+    assert_eq!(rt.timer_wheel.len(), 1);
+
+    // Re-suspending the same wait (e.g. a non-matching wake) keeps the
+    // original timer instead of scheduling a fresh one.
+    rt.maybe_schedule_receive_wait(actor_id, Some(5000));
+    let second = rt.actors.get(&actor_id).unwrap().receive_wait;
+    assert_eq!(first, second, "re-suspend must keep the original deadline");
+    assert_eq!(rt.timer_wheel.len(), 1, "no second timer may be armed");
+}
+
+/// Non-positive (or absent) timeouts never arm a receive-wait timer: the
+/// VM resolves those waits non-blockingly without suspending.
+#[test]
+fn test_receive_wait_timer_skips_nonpositive() {
+    let mut rt = Runtime::new();
+    let actor_id = rt.spawn_actor(Box::new(|| vec![]));
+
+    rt.maybe_schedule_receive_wait(actor_id, Some(0));
+    rt.maybe_schedule_receive_wait(actor_id, Some(-10));
+    rt.maybe_schedule_receive_wait(actor_id, None);
+
+    assert!(rt.actors.get(&actor_id).unwrap().receive_wait.is_none());
+    assert!(rt.timer_wheel.is_empty());
+}
+
+/// Clearing a resolved wait cancels its pending timeout timer.
+#[test]
+fn test_clear_receive_wait_cancels_timer() {
+    let mut rt = Runtime::new();
+    let actor_id = rt.spawn_actor(Box::new(|| vec![]));
+
+    rt.maybe_schedule_receive_wait(actor_id, Some(50));
+    assert_eq!(rt.timer_wheel.len(), 1);
+
+    rt.clear_receive_wait(actor_id);
+    assert!(rt.actors.get(&actor_id).unwrap().receive_wait.is_none());
+    assert!(
+        rt.timer_wheel.is_empty(),
+        "a resolved wait must not leave a timer behind"
+    );
+}
+
+/// A timeout firing with no live suspension (e.g. the actor exited or the
+/// wait already resolved) must drop the stale state instead of leaving a
+/// poisoned timed-out marker for a later wait.
+#[test]
+fn test_fire_receive_wait_timeout_without_suspension_clears_state() {
+    let mut rt = Runtime::new();
+    let actor_id = rt.spawn_actor(Box::new(|| vec![]));
+
+    rt.maybe_schedule_receive_wait(actor_id, Some(50));
+    assert!(rt.actors.get(&actor_id).unwrap().receive_wait.is_some());
+
+    rt.fire_receive_wait_timeout(actor_id);
+    assert!(
+        rt.actors.get(&actor_id).unwrap().receive_wait.is_none(),
+        "stale receive-wait state must be cleared, not marked timed out"
+    );
+}
+
 
 // -- Process Groups (5 tests) --
 

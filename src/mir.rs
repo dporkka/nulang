@@ -218,6 +218,21 @@ pub enum RValue {
         behavior_ids: Vec<u16>,
         max_params: usize,
     },
+    /// Timed selective receive: `receive { | Behavior(params) => expr ... }
+    /// after ms => timeout_expr` (bytecode `ReceiveWait`). Like
+    /// `ReceiveMatch`, but the codegen additionally stages the `timeout`
+    /// local (milliseconds) into r0; on no match the VM suspends the actor
+    /// via the `"ReceiveWait:suspend"` sentinel until a matching message
+    /// arrives or the timer fires. Writes the matched arm index to dst (or
+    /// `behavior_ids.len()` on timeout / non-positive timeout) and up to
+    /// `max_params` payload values into the registers following dst — dst and
+    /// the payload temps must form one contiguous run of locals, exactly as
+    /// for `ReceiveMatch`.
+    ReceiveWait {
+        behavior_ids: Vec<u16>,
+        max_params: usize,
+        timeout: LocalId,
+    },
     FFICall {
         idx: usize,
         args: Vec<LocalId>,
@@ -540,6 +555,16 @@ mod tests {
         };
         let _ = RValue::LlmAsk { prompt: LocalId(0) };
         let _ = RValue::SignalWait { name: "sig".into() };
+        let _ = RValue::Receive;
+        let _ = RValue::ReceiveMatch {
+            behavior_ids: vec![1, 2],
+            max_params: 1,
+        };
+        let _ = RValue::ReceiveWait {
+            behavior_ids: vec![1, 2],
+            max_params: 1,
+            timeout: LocalId(0),
+        };
         let _ = RValue::FFICall {
             idx: 0,
             args: vec![LocalId(0)],

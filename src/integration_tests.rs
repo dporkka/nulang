@@ -2945,6 +2945,410 @@ match { a: 2, b: 9 } with {
     }
 
     // -----------------------------------------------------------------------
+    // Test: Actor.* builtin effects (link/monitor/registry/exit/trap_exit)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_actor_builtin_effects_standalone_nil_noop() {
+        // Outside an actor runtime every Actor.* effect is a nil no-op.
+        let source = r#"
+            {
+                perform Actor.link(nil)
+                perform Actor.unlink(nil)
+                perform Actor.monitor(nil)
+                perform Actor.demonitor(nil)
+                perform Actor.trap_exit(true)
+                perform Actor.set_priority(0)
+                perform Actor.exit(0)
+                perform Actor.register("name")
+                perform Actor.unregister("name")
+                perform Actor.whereis("name")
+            }
+        "#;
+        let (value, _ty) = run_source(source).unwrap();
+        assert!(value.is_nil(), "Actor.* effects should yield nil outside a runtime");
+    }
+
+    #[test]
+    fn test_actor_link_killed_peer_exits_linked_actor() {
+        // The peer links to the victim from inside its behavior; the victim
+        // then self-exits with a Kill-style reason, which must propagate
+        // through the link and take the non-trapping peer down.
+        let source = r#"
+            actor Peer {
+                state exits: Int = 0
+                behavior notified(dead, me) { self.exits = self.exits + 1 }
+                behavior watch(t) { perform Actor.link(t) }
+            }
+            actor Victim {
+                behavior die() { perform Actor.exit(2) }
+            }
+            let p = spawn Peer {} in
+            let v = spawn Victim {} in {
+                send p watch(v)
+                send v die()
+                p
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let peer_id = value.as_actor_id().expect("spawn should return an actor ref");
+
+        rt.borrow_mut().run_scheduler();
+
+        assert!(
+            rt.borrow().actors.get(&peer_id).is_none(),
+            "linked peer should exit when the victim is killed"
+        );
+    }
+
+    #[test]
+    fn test_actor_trap_exit_survives_as_system_message() {
+        // With trap_exit(true) the linked peer's abnormal exit arrives as a
+        // System message instead of killing the trapping actor.
+        let source = r#"
+            actor Peer {
+                state exits: Int = 0
+                behavior notified(dead, me) { self.exits = self.exits + 1 }
+                behavior watch(t) {
+                    perform Actor.trap_exit(true)
+                    perform Actor.link(t)
+                }
+            }
+            actor Victim {
+                behavior die() { perform Actor.exit(2) }
+            }
+            let p = spawn Peer {} in
+            let v = spawn Victim {} in {
+                send p watch(v)
+                send v die()
+                p
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let peer_id = value.as_actor_id().expect("spawn should return an actor ref");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let peer = rt_ref
+            .actors
+            .get(&peer_id)
+            .expect("trapping peer should survive the victim's exit");
+        assert_eq!(
+            peer.get_state_field("exits").and_then(|v| v.as_int()),
+            Some(1),
+            "trapping peer should have consumed the exit System message"
+        );
+    }
+
+    #[test]
+    fn test_actor_link_normal_exit_does_not_propagate() {
+        // A Normal self-exit must not take down linked peers (BEAM semantics).
+        let source = r#"
+            actor Peer {
+                behavior watch(t) { perform Actor.link(t) }
+            }
+            actor Victim {
+                behavior die() { perform Actor.exit(0) }
+            }
+            let p = spawn Peer {} in
+            let v = spawn Victim {} in {
+                send p watch(v)
+                send v die()
+                p
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let peer_id = value.as_actor_id().expect("spawn should return an actor ref");
+
+        rt.borrow_mut().run_scheduler();
+
+        assert!(
+            rt.borrow().actors.get(&peer_id).is_some(),
+            "linked peer should survive a Normal exit"
+        );
+    }
+
+    #[test]
+    fn test_actor_link_external_kill_propagates() {
+        // Same propagation, but the kill comes from the runtime API rather
+        // than Actor.exit. The peer registers itself so the test can find
+        // its id afterwards.
+        let source = r#"
+            actor Peer {
+                state exits: Int = 0
+                behavior notified(dead, me) { self.exits = self.exits + 1 }
+                behavior watch(t) {
+                    perform Actor.register("peer")
+                    perform Actor.link(t)
+                }
+            }
+            actor Victim {
+                behavior noop() { 0 }
+            }
+            let p = spawn Peer {} in
+            let v = spawn Victim {} in {
+                send p watch(v)
+                v
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let victim_id = value.as_actor_id().expect("spawn should return an actor ref");
+
+        rt.borrow_mut().run_scheduler();
+        let peer_id = rt
+            .borrow()
+            .registry
+            .whereis("peer")
+            .expect("peer should have registered itself");
+
+        rt.borrow_mut().kill_actor(victim_id);
+
+        assert!(
+            rt.borrow().actors.get(&peer_id).is_none(),
+            "linked peer should exit when the victim is killed externally"
+        );
+    }
+
+    #[test]
+    fn test_actor_monitor_delivers_down_message() {
+        // The watcher monitors the victim; the victim's exit delivers a DOWN
+        // System message (payload: target, watcher, reason code) which the
+        // watcher's first behavior consumes.
+        let source = r#"
+            actor Watcher {
+                state got: Int = 0
+                behavior down(t, w, r) { self.got = r }
+                behavior watch(t) { perform Actor.monitor(t) }
+            }
+            actor Victim {
+                behavior die() { perform Actor.exit(2) }
+            }
+            let w = spawn Watcher {} in
+            let v = spawn Victim {} in {
+                send w watch(v)
+                send v die()
+                w
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let watcher_id = value.as_actor_id().expect("spawn should return an actor ref");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let watcher = rt_ref
+            .actors
+            .get(&watcher_id)
+            .expect("watcher should survive the monitored actor's exit");
+        assert_eq!(
+            watcher.get_state_field("got").and_then(|v| v.as_int()),
+            Some(2),
+            "watcher should receive DOWN with the Kill reason code (2)"
+        );
+    }
+
+    #[test]
+    fn test_actor_demonitor_stops_down_message() {
+        // After demonitor the victim's exit must not deliver a DOWN.
+        let source = r#"
+            actor Watcher {
+                state got: Int = 0
+                behavior down(t, w, r) { self.got = r }
+                behavior watch(t) {
+                    perform Actor.monitor(t)
+                    perform Actor.demonitor(t)
+                }
+            }
+            actor Victim {
+                behavior die() { perform Actor.exit(2) }
+            }
+            let w = spawn Watcher {} in
+            let v = spawn Victim {} in {
+                send w watch(v)
+                send v die()
+                w
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let watcher_id = value.as_actor_id().expect("spawn should return an actor ref");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let watcher = rt_ref
+            .actors
+            .get(&watcher_id)
+            .expect("watcher should survive");
+        assert_eq!(
+            watcher.get_state_field("got").and_then(|v| v.as_int()),
+            Some(0),
+            "demonitored watcher should not receive a DOWN message"
+        );
+    }
+
+    #[test]
+    fn test_actor_register_whereis_unregister_roundtrip() {
+        let source = r#"
+            actor Hero {
+                state found: Int = 0
+                state gone: Int = 0
+                behavior reg() { perform Actor.register("hero") }
+                behavior lookup() { self.found = perform Actor.whereis("hero") }
+                behavior unreg() { perform Actor.unregister("hero") }
+                behavior lookup2() { self.gone = perform Actor.whereis("hero") }
+            }
+            let h = spawn Hero {} in {
+                send h reg()
+                send h lookup()
+                send h unreg()
+                send h lookup2()
+                h
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let hero_id = value.as_actor_id().expect("spawn should return an actor ref");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        assert_eq!(
+            rt_ref.registry.whereis("hero"),
+            None,
+            "name should be unregistered by the end"
+        );
+        let hero = rt_ref.actors.get(&hero_id).unwrap();
+        assert_eq!(
+            hero.get_state_field("found").and_then(|v| v.as_actor_id()),
+            Some(hero_id),
+            "whereis should resolve the registered name to the actor ref"
+        );
+        assert!(
+            hero.get_state_field("gone").map(|v| v.is_nil()).unwrap_or(false),
+            "whereis should return nil for an unregistered name"
+        );
+    }
+
+    #[test]
+    fn test_actor_exit_terminates_self() {
+        let source = r#"
+            actor Leaver {
+                behavior die() { perform Actor.exit("error") }
+            }
+            let h = spawn Leaver {} in {
+                send h die()
+                h
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let leaver_id = value.as_actor_id().expect("spawn should return an actor ref");
+
+        rt.borrow_mut().run_scheduler();
+
+        assert!(
+            rt.borrow().actors.get(&leaver_id).is_none(),
+            "Actor.exit should terminate the performing actor"
+        );
+    }
+
+    #[test]
+    fn test_example_link_monitor_runs() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = include_str!("../examples/link_monitor.nula");
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        assert_eq!(value.as_int(), Some(0), "main should return 0");
+
+        rt.borrow_mut().run_scheduler();
+
+        // The trapping watcher received both the link exit signal and the
+        // monitor DOWN when the victim exited, and resolved its own
+        // registered name through whereis.
+        let rt_ref = rt.borrow();
+        let watcher_id = rt_ref
+            .registry
+            .whereis("watcher")
+            .expect("watcher should have registered itself");
+        let watcher = rt_ref.actors.get(&watcher_id).unwrap();
+        assert_eq!(
+            watcher.get_state_field("notices").and_then(|v| v.as_int()),
+            Some(2),
+            "watcher should see the link exit signal and the monitor DOWN"
+        );
+        assert_eq!(
+            watcher.get_state_field("seen").and_then(|v| v.as_actor_id()),
+            Some(watcher_id),
+            "whereis should resolve the registered name to the actor ref"
+        );
+    }
+
+    #[test]
+    fn test_actor_set_priority_runs_high_first() {
+        // A High-priority actor is dequeued before a Normal one even when
+        // the Normal actor's message was sent first. Phase 1 runs a real
+        // compiled behavior that boosts itself via `perform
+        // Actor.set_priority(0)`; phase 2 enqueues both actors through the
+        // normal send path and observes the scheduler's dequeue order.
+        // Deterministic: each run_scheduler drains fully, so the phase-2
+        // queue order is exactly [Hi(High), Lo(Normal)].
+        let source = r#"
+            actor Hi {
+                behavior boost_hi() {
+                    perform Actor.set_priority(0)
+                    perform Actor.register("hi")
+                }
+                behavior work() { 0 }
+            }
+            actor Lo {
+                behavior boost_lo() { perform Actor.register("lo") }
+                behavior work() { 0 }
+            }
+            let h = spawn Hi {} in
+            let n = spawn Lo {} in {
+                send h boost_hi()
+                send n boost_lo()
+                0
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        assert_eq!(value.as_int(), Some(0), "main should return 0");
+
+        // Phase 1: the boost behaviors run; Hi sets its own priority.
+        rt.borrow_mut().run_scheduler();
+        let (hi_id, lo_id) = {
+            let rt_ref = rt.borrow();
+            let hi_id = rt_ref.registry.whereis("hi").expect("Hi registered itself");
+            let lo_id = rt_ref.registry.whereis("lo").expect("Lo registered itself");
+            assert_eq!(
+                rt_ref.actors.get(&hi_id).unwrap().priority,
+                crate::runtime::ActorPriority::High,
+                "Actor.set_priority(0) from a behavior should make the actor High"
+            );
+            assert_eq!(
+                rt_ref.actors.get(&lo_id).unwrap().priority,
+                crate::runtime::ActorPriority::Normal,
+                "untouched actors stay Normal"
+            );
+            (hi_id, lo_id)
+        };
+
+        // Phase 2: send to Lo first, then Hi; the High entry dequeues first.
+        rt.borrow_mut().send_message(lo_id, "work", &[]);
+        rt.borrow_mut().send_message(hi_id, "work", &[]);
+        let rt_ref = rt.borrow_mut();
+        assert_eq!(rt_ref.scheduler.dequeue(), Some(hi_id));
+        assert_eq!(rt_ref.scheduler.dequeue(), Some(lo_id));
+    }
+
+    // -----------------------------------------------------------------------
     // v0.2 HIR/MIR pipeline smoke tests
     // -----------------------------------------------------------------------
 
@@ -3829,6 +4233,426 @@ match { a: 2, b: 9 } with {
                 .unwrap_or(false),
             "params beyond the payload length should bind to nil"
         );
+    }
+
+    /// Timed selective receive: with no matching message in the mailbox the
+    /// actor suspends, the timeout fires, and the after body runs.
+    #[test]
+    fn test_receive_after_times_out_runs_after_body() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | add(x, y) => x + y
+                    } after 30 => 4242
+                }
+                behavior add(x: Int, y: Int) { x }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(4242),
+            "no message before the deadline: the after body must run"
+        );
+        assert!(
+            actor.suspended_execution.is_none(),
+            "the wait must be fully resolved after the timeout fired"
+        );
+    }
+
+    /// Timed selective receive: a message arriving before the deadline wakes
+    /// the suspended actor and dispatches to the matching arm; the timeout
+    /// never fires observably.
+    #[test]
+    fn test_receive_after_wakes_on_matching_message() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | add(x, y) => x + y
+                    } after 5000 => 4242
+                }
+                behavior add(x: Int, y: Int) { x }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        // Deliver add(4, 5) ~30ms into the 5s wait, while the actor is
+        // suspended: the send must wake it so the scan matches arm 0.
+        let add_id = rt.borrow().behavior_id_for(actor_id, "add").unwrap();
+        rt.borrow().timer_wheel.send_after(
+            std::time::Duration::from_millis(30),
+            actor_id,
+            add_id,
+            vec![Value::int(4), Value::int(5)],
+        );
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(9),
+            "the matching message must resolve the wait, not the timeout"
+        );
+        assert!(
+            rt_ref.timer_wheel.is_empty(),
+            "the receive timeout must be cancelled once the wait matches"
+        );
+    }
+
+    /// Timed selective receive with `after 0`: non-blocking poll — no match
+    /// runs the after body immediately, without suspending or arming a timer.
+    #[test]
+    fn test_receive_after_zero_is_non_blocking() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | add(x, y) => x + y
+                    } after 0 => 77
+                }
+                behavior add(x: Int, y: Int) { x }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(77),
+            "after 0 with no queued match must run the after body immediately"
+        );
+        assert!(
+            actor.suspended_execution.is_none(),
+            "after 0 must never suspend the actor"
+        );
+        assert!(
+            rt_ref.timer_wheel.is_empty(),
+            "after 0 must not arm a timeout timer"
+        );
+    }
+
+    /// Timed selective receive with multiple arms: a message waking the
+    /// suspended actor dispatches to the right arm with its payload bound.
+    #[test]
+    fn test_receive_after_multiple_arms_bind_payload() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | get() => 100
+                        | add(x, y) => x * 10 + y
+                    } after 5000 => 0
+                }
+                behavior add(x: Int, y: Int) { x }
+                behavior get() { 0 }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        // Wake the suspended wait with add(7, 8): the second arm must win
+        // with x, y bound from the payload.
+        let add_id = rt.borrow().behavior_id_for(actor_id, "add").unwrap();
+        rt.borrow().timer_wheel.send_after(
+            std::time::Duration::from_millis(30),
+            actor_id,
+            add_id,
+            vec![Value::int(7), Value::int(8)],
+        );
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(78),
+            "the waking message must dispatch to the add arm with its payload bound"
+        );
+    }
+
+    /// Timed selective receive: a NON-matching message wakes the actor, the
+    /// re-scan finds no arm, and the behavior re-suspends on the ORIGINAL
+    /// deadline — the skipped message stays queued and dispatches normally
+    /// after the timeout runs the after body.
+    #[test]
+    fn test_receive_after_nonmatching_wake_keeps_deadline() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                state heard = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | add(x, y) => x + y
+                    } after 60 => 4242
+                }
+                behavior add(x: Int, y: Int) { x }
+                behavior noise(n: Int) { self.heard = n }
+            }
+            let c = spawn Listener { seen = 0 heard = 0 } in {
+                send c drain()
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        // Wake the wait ~20ms in with a message no arm matches: the actor
+        // re-suspends and the 60ms timeout (armed at the first suspend)
+        // still resolves the wait.
+        let noise_id = rt.borrow().behavior_id_for(actor_id, "noise").unwrap();
+        rt.borrow().timer_wheel.send_after(
+            std::time::Duration::from_millis(20),
+            actor_id,
+            noise_id,
+            vec![Value::int(9)],
+        );
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(4242),
+            "a non-matching wake must re-suspend; the original timeout fires"
+        );
+        assert_eq!(
+            actor.get_state_field("heard").and_then(|v| v.as_int()),
+            Some(9),
+            "the skipped message must stay queued and dispatch normally"
+        );
+    }
+
+    /// A behavior that `send`s to another actor: the message must be
+    /// delivered (BytecodeRuntimeCallbacks::send_message used to be a
+    /// silent no-op, dropping every behavior-internal send).
+    #[test]
+    fn test_behavior_send_relay_reaches_target() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Relay {
+                behavior forward(target, n: Int) { send target arrived(n + 1) }
+            }
+            actor Sink {
+                state seen = 0
+                behavior arrived(n: Int) { self.seen = n }
+            }
+            let s = spawn Sink {} in
+            let r = spawn Relay {} in {
+                send r forward(s, 41)
+                s
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let sink_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let sink = rt_ref.actors.get(&sink_id).unwrap();
+        assert_eq!(
+            sink.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(42),
+            "the relay's behavior-internal send must reach the sink"
+        );
+    }
+
+    /// A behavior that `spawn`s a child and sends to it: the child must be
+    /// created with its bytecode handlers wired up and must run (the
+    /// behavior-internal spawn used to return a bogus actor_ref(0)).
+    #[test]
+    fn test_behavior_spawn_child_runs_and_reports() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Worker {
+                state got = 0
+                behavior built(v: Int, sink) {
+                    self.got = v
+                    send sink report(v)
+                }
+            }
+            actor Collector {
+                state seen = 0
+                behavior report(n: Int) { self.seen = n }
+            }
+            actor Factory {
+                behavior make(n: Int, sink) {
+                    let child = spawn Worker {} in
+                        send child built(n * 2, sink)
+                }
+            }
+            let c = spawn Collector {} in
+            let f = spawn Factory {} in {
+                send f make(21, c)
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let collector_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        assert_eq!(
+            rt_ref.actors.len(),
+            3,
+            "the behavior-internal spawn must create a real third actor"
+        );
+        let collector = rt_ref.actors.get(&collector_id).unwrap();
+        assert_eq!(
+            collector.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(42),
+            "the spawned child must run and report back to the collector"
+        );
+    }
+
+    /// Regression for the deferred receive-wait wake: a behavior that sends
+    /// to an actor suspended in `receive ... after` must wake it via the
+    /// match — but the resume cannot run inside the sender's VM execution
+    /// (it would nest `vm.resume()` on the shared runtime VM), so the wake
+    /// is deferred until the sender's behavior returns.
+    #[test]
+    fn test_behavior_send_wakes_suspended_receive_wait() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Waiter {
+                state result = 0
+                behavior waitwork() {
+                    self.result = receive {
+                        | token(n) => n
+                    } after 5000 => 999
+                }
+                behavior token(n: Int) { n }
+            }
+            actor Poker {
+                behavior poke(r) { send r token(77) }
+            }
+            let w = spawn Waiter {} in
+            let p = spawn Poker {} in {
+                send w waitwork()
+                send p poke(w)
+                w
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let waiter_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let waiter = rt_ref.actors.get(&waiter_id).unwrap();
+        assert_eq!(
+            waiter.get_state_field("result").and_then(|v| v.as_int()),
+            Some(77),
+            "the behavior-internal send must wake the suspended wait via the match, not the 5s timeout"
+        );
+        assert!(
+            waiter.suspended_execution.is_none(),
+            "the wait must be fully resolved"
+        );
+        assert!(
+            rt_ref.timer_wheel.is_empty(),
+            "the receive timeout must be cancelled once the wait matches"
+        );
+    }
+
+    /// A behavior that sends to its own actor (self-send): the message is
+    /// delivered normally and processed in a later turn.
+    #[test]
+    fn test_behavior_send_to_self_delivers() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Loop {
+                state count = 0
+                behavior spin(me, n: Int) {
+                    self.count = self.count + 1
+                    if n > 0 then send me spin(me, n - 1) else send me halt()
+                }
+                behavior halt() { 0 }
+            }
+            let l = spawn Loop {} in {
+                send l spin(l, 3)
+                l
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let loop_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&loop_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("count").and_then(|v| v.as_int()),
+            Some(4),
+            "spin(3) plus three self-sends (2, 1, 0) must all run"
+        );
+    }
+
+    /// Sending to an unknown actor id is a no-op: the message is dropped
+    /// and the bogus queue entry is skipped without crashing.
+    #[test]
+    fn test_send_to_unknown_actor_is_noop() {
+        let mut rt = Runtime::new();
+        rt.send_message_by_id(999_999, 0, &[Value::int(1)]);
+        rt.run_scheduler();
+        assert!(rt.actors.is_empty());
     }
 
     /// Differential test: the legacy compiler and the HIR/MIR pipeline must

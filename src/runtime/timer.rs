@@ -37,6 +37,11 @@ pub enum TimerMessage {
     Exit { reason: String },
     /// Unconditionally kill the target actor.
     Kill,
+    /// Wake an actor suspended in a timed selective receive
+    /// (`receive { ... } after ms => body`): the runtime marks the wait as
+    /// timed out and resumes the suspended behavior, which then runs the
+    /// after body.
+    ReceiveWaitTimeout,
 }
 
 /// A single timer entry in the wheel.
@@ -175,6 +180,29 @@ impl TimerWheel {
             id,
             target_actor,
             message: TimerMessage::Kill,
+            fire_at,
+            cancelled: AtomicBool::new(false),
+        };
+
+        if let Ok(mut timers) = self.timers.write() {
+            timers.push(entry);
+        }
+
+        id
+    }
+
+    /// Schedule a receive-wait timeout for an actor suspended in a timed
+    /// selective receive. On fire the runtime marks the actor's wait as
+    /// timed out and resumes it; the re-executed `ReceiveWait` then resolves
+    /// with the no-match sentinel.
+    pub fn receive_wait_timeout(&self, delay: Duration, target_actor: u64) -> TimerId {
+        let id = TimerId(self.next_id.fetch_add(1, Ordering::SeqCst));
+        let fire_at = Instant::now() + delay;
+
+        let entry = TimerEntry {
+            id,
+            target_actor,
+            message: TimerMessage::ReceiveWaitTimeout,
             fire_at,
             cancelled: AtomicBool::new(false),
         };
@@ -355,5 +383,19 @@ mod tests {
         let _id = wheel.kill_after(Duration::from_secs(1), 42);
 
         assert_eq!(wheel.len(), 1);
+    }
+
+    #[test]
+    fn test_receive_wait_timeout() {
+        let wheel = TimerWheel::new();
+        let id = wheel.receive_wait_timeout(Duration::from_millis(50), 42);
+
+        assert_eq!(wheel.len(), 1);
+        let fired = wheel.tick(Instant::now() + Duration::from_secs(1));
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].0, 42);
+        assert_eq!(fired[0].1, TimerMessage::ReceiveWaitTimeout);
+        assert!(wheel.is_empty());
+        assert!(wheel.remaining(id).is_none());
     }
 }

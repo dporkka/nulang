@@ -1287,7 +1287,7 @@ impl<'c> FnLowerer<'c> {
                 self.b.assign(dst, mir::RValue::DebateRun { id: i });
                 Ok(())
             }
-            hir::RValue::Receive { arms, .. } => self.lower_receive(dst, arms),
+            hir::RValue::Receive { arms, after, .. } => self.lower_receive(dst, arms, after),
         }
     }
 
@@ -1299,13 +1299,23 @@ impl<'c> FnLowerer<'c> {
     /// over the matched arm index selects the arm body, binding the arm's
     /// params to the payload registers. When nothing matches, control falls
     /// through to a fallback block that runs the legacy pop-any `Receive`.
+    ///
+    /// With an `after ms => timeout_body` clause the scan instead uses the
+    /// timed-wait `ReceiveWait` rvalue: the timeout expression is evaluated
+    /// first (codegen stages its value into r0), and on no match the VM
+    /// suspends the actor until a matching message arrives or the timer
+    /// fires. The no-match block then lowers `timeout_body` instead of the
+    /// legacy pop-any `Receive` — a non-positive timeout therefore runs the
+    /// timeout body immediately (Erlang-style non-blocking poll), never the
+    /// legacy fallthrough.
     fn lower_receive(
         &mut self,
         dst: mir::LocalId,
         arms: &[(String, Vec<String>, Box<hir::Body>)],
+        after: &Option<(Box<hir::Body>, Box<hir::Body>)>,
     ) -> NuResult<()> {
         use crate::bytecode::Constant;
-        if arms.is_empty() {
+        if arms.is_empty() && after.is_none() {
             self.b.assign(dst, mir::RValue::Receive);
             return Ok(());
         }
@@ -1317,22 +1327,45 @@ impl<'c> FnLowerer<'c> {
             .map(|(name, _, _)| self.ctx.send_behavior_idx("", name) as u16)
             .collect();
         let max_params = arms.iter().map(|(_, p, _)| p.len()).max().unwrap_or(0);
-        // dst of ReceiveMatch and the payload temps must form one contiguous
-        // register run: the VM writes payload[i] into reg dst+1+i.
+        // For the timed form, evaluate the timeout expression first. The temp
+        // must be allocated BEFORE the arm-index/payload run below so that run
+        // stays contiguous.
+        let timeout = match after {
+            Some((ms_body, _)) => {
+                let timeout = self.b.add_temp(Type::int());
+                let cont = self.b.create_block();
+                self.lower_body_into(ms_body, timeout, cont)?;
+                self.b.switch_to(cont);
+                Some(timeout)
+            }
+            None => None,
+        };
+        // dst of ReceiveMatch/ReceiveWait and the payload temps must form one
+        // contiguous register run: the VM writes payload[i] into reg dst+1+i.
         let arm_idx = self.b.add_temp(Type::int());
         let payload_temps: Vec<mir::LocalId> = (0..max_params)
             .map(|_| self.b.add_temp(Type::unit()))
             .collect();
-        self.b.assign(
-            arm_idx,
-            mir::RValue::ReceiveMatch {
-                behavior_ids,
-                max_params,
-            },
-        );
+        match timeout {
+            Some(timeout) => self.b.assign(
+                arm_idx,
+                mir::RValue::ReceiveWait {
+                    behavior_ids,
+                    max_params,
+                    timeout,
+                },
+            ),
+            None => self.b.assign(
+                arm_idx,
+                mir::RValue::ReceiveMatch {
+                    behavior_ids,
+                    max_params,
+                },
+            ),
+        }
 
         let join = self.b.create_block();
-        let fallback = self.b.create_block();
+        let no_match = self.b.create_block();
         for (i, (_name, params, arm_body)) in arms.iter().enumerate() {
             let test = self.b.add_temp(Type::bool());
             let idx_const = self.b.add_temp(Type::int());
@@ -1344,7 +1377,7 @@ impl<'c> FnLowerer<'c> {
             );
             let arm_bb = self.b.create_block();
             let next_bb = if i == arms.len() - 1 {
-                fallback
+                no_match
             } else {
                 self.b.create_block()
             };
@@ -1362,12 +1395,27 @@ impl<'c> FnLowerer<'c> {
             self.pop_scope();
             self.b.switch_to(next_bb);
         }
+        if arms.is_empty() {
+            // No arms to dispatch: nothing can match, so control reaches the
+            // no-match block unconditionally.
+            self.b.terminate(mir::Terminator::Jump(no_match));
+            self.b.switch_to(no_match);
+        }
 
-        // Fallback: no queued message matched any arm. Preserve the legacy
-        // non-blocking behavior — pop the next message regardless of
-        // behavior and yield its first payload value (nil when empty).
-        self.b.assign(dst, mir::RValue::Receive);
-        self.b.terminate(mir::Terminator::Jump(join));
+        // No-match block. Without `after`, preserve the legacy non-blocking
+        // behavior — pop the next message regardless of behavior and yield
+        // its first payload value (nil when empty). With `after`, run the
+        // timeout body (the VM writes the arm-count sentinel once the timer
+        // fires, or immediately for a non-positive timeout).
+        match after {
+            Some((_, timeout_body)) => {
+                self.lower_body_into(timeout_body, dst, join)?;
+            }
+            None => {
+                self.b.assign(dst, mir::RValue::Receive);
+                self.b.terminate(mir::Terminator::Jump(join));
+            }
+        }
         self.b.switch_to(join);
         Ok(())
     }
@@ -2032,6 +2080,7 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         | Spawn { .. }
         | SelfRef
         | StateGet { .. } => {}
+        ReceiveWait { timeout, .. } => out.push(*timeout),
         Load(x) | ArrayLen(x) | Unary(_, x) | LlmAsk { prompt: x }
         | CapabilityCheck { val: x }
         | DebateRun { id: x } => out.push(*x),
@@ -2265,9 +2314,13 @@ fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
                 walk_hir_body(&h.body, acc);
             }
         }
-        hir::RValue::Receive { arms, .. } => {
+        hir::RValue::Receive { arms, after, .. } => {
             for (_, _, arm_body) in arms {
                 walk_hir_body(arm_body, acc);
+            }
+            if let Some((ms_body, timeout_body)) = after {
+                walk_hir_body(ms_body, acc);
+                walk_hir_body(timeout_body, acc);
             }
         }
         hir::RValue::Migrate { actor, node, .. } => {
@@ -2641,6 +2694,114 @@ mod tests {
             indices.contains(&0) && indices.contains(&1),
             "tuple pattern must load element positions 0 and 1, got {:?}: {:?}",
             indices,
+            main.blocks
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BEAM Phase 1: spawn link/monitor desugar and receive-after lowering
+    // -----------------------------------------------------------------------
+
+    fn fn_uses_rvalue(func: &mir::Function, pred: impl Fn(&mir::RValue) -> bool) -> bool {
+        func.blocks
+            .iter()
+            .flat_map(|b| b.stmts.iter())
+            .any(|s| matches!(s, mir::Stmt::Assign { op, .. } if pred(op)))
+    }
+
+    #[test]
+    fn test_spawn_link_lowers_to_spawn_plus_actor_link_perform() {
+        // The parser desugars `spawn link A { ... }` to
+        // `let t = spawn A { ... } in { perform Actor.link(t); t }`, so MIR
+        // must contain a Spawn and a generic Perform "Actor"."link" — no new
+        // IR nodes or opcodes.
+        let module = lower_source("spawn link Counter { count = 0 }").unwrap();
+        let main = find_fn(&module, "__main");
+        assert!(
+            fn_uses_rvalue(main, |op| matches!(op, mir::RValue::Spawn { .. })),
+            "desugar must keep a plain Spawn rvalue: {:?}",
+            main.blocks
+        );
+        assert!(
+            fn_uses_rvalue(main, |op| matches!(
+                op,
+                mir::RValue::Perform { effect, op, .. } if effect == "Actor" && op == "link"
+            )),
+            "desugar must perform Actor.link: {:?}",
+            main.blocks
+        );
+    }
+
+    #[test]
+    fn test_spawn_monitor_lowers_to_actor_monitor_perform() {
+        let module = lower_source("spawn monitor Counter { count = 0 }").unwrap();
+        let main = find_fn(&module, "__main");
+        assert!(
+            fn_uses_rvalue(main, |op| matches!(
+                op,
+                mir::RValue::Perform { effect, op, .. } if effect == "Actor" && op == "monitor"
+            )),
+            "desugar must perform Actor.monitor: {:?}",
+            main.blocks
+        );
+    }
+
+    #[test]
+    fn test_receive_after_lowers_to_receivewait() {
+        // receive { | Msg(x) => x } after 100 => 0 lowers to a ReceiveWait
+        // (timed wait) whose no-match branch runs the timeout body — the
+        // legacy pop-any Receive must NOT appear.
+        let module = lower_source("receive { | Msg(x) => x } after 100 => 0").unwrap();
+        let main = find_fn(&module, "__main");
+        let wait = main.blocks.iter().flat_map(|b| b.stmts.iter()).find_map(|s| {
+            match s {
+                mir::Stmt::Assign {
+                    op: mir::RValue::ReceiveWait {
+                        behavior_ids,
+                        max_params,
+                        ..
+                    },
+                    ..
+                } => Some((behavior_ids.len(), *max_params)),
+                _ => None,
+            }
+        });
+        let (n_ids, max_params) = wait.unwrap_or_else(|| {
+            panic!("receive-after must lower to ReceiveWait: {:?}", main.blocks)
+        });
+        assert_eq!(n_ids, 1, "one arm -> one candidate behavior id");
+        assert_eq!(max_params, 1, "arm has one param");
+        assert!(
+            !fn_uses_rvalue(main, |op| matches!(op, mir::RValue::ReceiveMatch { .. })),
+            "timed receive must not emit a ReceiveMatch scan: {:?}",
+            main.blocks
+        );
+        assert!(
+            !fn_uses_rvalue(main, |op| matches!(op, mir::RValue::Receive)),
+            "receive-after replaces the legacy pop-any fallback: {:?}",
+            main.blocks
+        );
+    }
+
+    #[test]
+    fn test_receive_without_after_keeps_receivematch_and_fallback() {
+        // Without `after`, lowering is unchanged: ReceiveMatch scan plus the
+        // legacy pop-any Receive fallback on no match.
+        let module = lower_source("receive { | Msg(x) => x }").unwrap();
+        let main = find_fn(&module, "__main");
+        assert!(
+            fn_uses_rvalue(main, |op| matches!(op, mir::RValue::ReceiveMatch { .. })),
+            "plain receive must keep the ReceiveMatch scan: {:?}",
+            main.blocks
+        );
+        assert!(
+            fn_uses_rvalue(main, |op| matches!(op, mir::RValue::Receive)),
+            "plain receive must keep the legacy fallback: {:?}",
+            main.blocks
+        );
+        assert!(
+            !fn_uses_rvalue(main, |op| matches!(op, mir::RValue::ReceiveWait { .. })),
+            "plain receive must not use the timed wait: {:?}",
             main.blocks
         );
     }

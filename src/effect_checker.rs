@@ -242,7 +242,7 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
                 free_vars(arg, bound, acc);
             }
         }
-        Expr::Receive { arms, .. } => {
+        Expr::Receive { arms, after, .. } => {
             for (_, params, body_expr) in arms {
                 let mut arm_bound = bound.clone();
                 for p in params {
@@ -251,6 +251,10 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
                     }
                 }
                 free_vars(body_expr, &mut arm_bound, acc);
+            }
+            if let Some((ms, timeout_body)) = after {
+                free_vars(ms, bound, acc);
+                free_vars(timeout_body, bound, acc);
             }
         }
         Expr::SelfRef(_) => {}
@@ -644,12 +648,18 @@ impl EffectChecker {
             }
 
             // Receive: adds the Receive effect. Arm parameters shadow
-            // same-named module functions inside their arm body.
-            Expr::Receive { arms, .. } => {
+            // same-named module functions inside their arm body. The optional
+            // `after` clause contributes the effects of its timeout
+            // expression and body.
+            Expr::Receive { arms, after, .. } => {
                 let mut row = EffectRow::singleton(Effect::Receive);
                 for (_, params, body_expr) in arms {
                     let arm_row = self.infer_with_bound(ctx, params, body_expr)?;
                     row = effect_row_union(&row, &arm_row);
+                }
+                if let Some((ms, timeout_body)) = after {
+                    row = effect_row_union(&row, &self.infer_effects(ctx, ms)?);
+                    row = effect_row_union(&row, &self.infer_effects(ctx, timeout_body)?);
                 }
                 Ok(row)
             }
@@ -1385,17 +1395,33 @@ impl CapabilityAnalyzer {
             }
 
             // Receive: the capability of a receive block is the join of all
-            // arm capabilities.
-            Expr::Receive { arms, .. } => {
-                if arms.is_empty() {
+            // arm capabilities. An `after ms => body` clause evaluates `ms`
+            // eagerly (outside the branch merge) and merges `body` like an
+            // additional arm.
+            Expr::Receive { arms, after, .. } => {
+                if arms.is_empty() && after.is_none() {
                     return Ok(Capability::Tag);
+                }
+                // The timeout expression runs before the wait, so its
+                // consumption is unconditional and part of the base state.
+                if let Some((ms, _)) = after {
+                    let _ = self.infer_cap_tracked(ctx, ms, consumed)?;
                 }
                 // Branch merge (same rule as `match`): consumed-after only if
                 // every arm consumes the binding.
                 let base = consumed.clone();
                 let mut cap = Capability::Tag;
                 let mut merged: Option<HashSet<String>> = None;
-                for (_, params, body_expr) in arms {
+                let no_params: &[String] = &[];
+                let timeout_arm: Vec<(&[String], &Expr)> = match after {
+                    Some((_, body)) => vec![(no_params, &**body)],
+                    None => Vec::new(),
+                };
+                for (params, body_expr) in arms
+                    .iter()
+                    .map(|(_, p, b)| (p.as_slice(), b))
+                    .chain(timeout_arm)
+                {
                     *consumed = base.clone();
                     let mut arm_ctx = ctx.clone();
                     // Arm parameters shadow outer bindings; hide (and restore)
@@ -2234,10 +2260,39 @@ mod tests {
                 vec!["x".to_string()],
                 Expr::Var("x".to_string(), s()),
             )],
+            after: None,
             span: s(),
         };
         let row = checker.infer_effects(&ctx, &receive).unwrap();
         assert!(row.contains(&Effect::Receive));
+    }
+
+    #[test]
+    fn test_infer_receive_after_effect() {
+        // receive { | Msg() => 0 } after 100 => perform Logger.log("t"):
+        // the after clause contributes its body's effects to the row.
+        let mut checker = EffectChecker::new();
+        let ctx = EffectContext::empty();
+        let receive = Expr::Receive {
+            arms: vec![(
+                "Msg".to_string(),
+                vec![],
+                Expr::Literal(Literal::Int(0), s()),
+            )],
+            after: Some((
+                Box::new(Expr::Literal(Literal::Int(100), s())),
+                Box::new(Expr::Perform {
+                    effect: "Logger".to_string(),
+                    op: "log".to_string(),
+                    args: vec![Expr::Literal(Literal::String("t".to_string()), s())],
+                    span: s(),
+                }),
+            )),
+            span: s(),
+        };
+        let row = checker.infer_effects(&ctx, &receive).unwrap();
+        assert!(row.contains(&Effect::Receive));
+        assert!(row.contains(&Effect::UserDefined("Logger".to_string())));
     }
 
     #[test]

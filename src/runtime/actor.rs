@@ -15,6 +15,22 @@ pub enum ActorState {
     Terminated, // Actor has exited
 }
 
+/// Scheduling priority of an actor (Erlang-style process priority).
+///
+/// The scheduler dequeues ready High-priority actors before Normal, and
+/// Normal before Low (strict per-level preference, FIFO within a level —
+/// see `Scheduler::enqueue_with_priority`). Priority affects scheduling
+/// order only; it does not touch message delivery order
+/// (`Mailbox::receive_match` stays FIFO and ignores `Message::priority`).
+/// Set from Nulang via `perform Actor.set_priority(0|1|2)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActorPriority {
+    High,
+    #[default]
+    Normal,
+    Low,
+}
+
 /// An actor: independent unit of computation with isolated state and mailbox.
 pub struct Actor {
     pub id: u64,
@@ -46,6 +62,8 @@ pub struct Actor {
     pub monitors: Vec<u64>,   // Actors monitoring this one
     pub links: Vec<u64>,      // Bidirectional links
     pub trap_exits: bool,     // If true, exit signals become messages instead of killing this actor
+    /// Scheduling priority, consulted by the scheduler on every enqueue.
+    pub priority: ActorPriority,
     pub reduction_count: u32, // Lifetime messages handled (monotonic progress metric)
     turn_reductions: u32,     // Messages handled in the current scheduling turn
     pub max_reductions: u32,  // Max reductions per turn before yield (preemption)
@@ -76,6 +94,25 @@ pub struct Actor {
     /// Completed background LLM result waiting to be consumed when the
     /// suspended behavior re-executes its `LlmAsk` instruction.
     pub llm_completed: Option<Result<crate::ai::LlmResponse, String>>,
+    /// State of an in-flight timed selective receive (`receive ... after
+    /// ms =>`), from the first suspension until the wait resolves (match,
+    /// timeout, or the behavior ends). `None` when no receive-wait is live.
+    pub receive_wait: Option<ReceiveWaitState>,
+}
+
+/// State of an actor's in-flight timed selective receive.
+///
+/// The timeout timer is armed exactly once per wait (at the first
+/// suspension), so a wake-then-re-suspend cycle (a non-matching message
+/// arrived) keeps the original deadline instead of restarting the clock.
+/// `timed_out` is set by the timer-fire path; the re-executed `ReceiveWait`
+/// consumes it and resolves the wait with the no-match sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReceiveWaitState {
+    /// The armed timeout timer (cancelled when the wait resolves by match).
+    pub timer_id: TimerId,
+    /// True once the timeout timer has fired.
+    pub timed_out: bool,
 }
 
 /// Captured VM state plus metadata for resuming a workflow step.
@@ -121,6 +158,7 @@ impl Actor {
             monitors: Vec::new(),
             links: Vec::new(),
             trap_exits: false,
+            priority: ActorPriority::Normal,
             reduction_count: 0,
             turn_reductions: 0,
             max_reductions: 1000,
@@ -134,6 +172,7 @@ impl Actor {
             llm_inflight: false,
             llm_pending_prompt: None,
             llm_completed: None,
+            receive_wait: None,
         }
     }
 

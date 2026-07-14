@@ -297,6 +297,8 @@ pub enum RValue {
     },
     Receive {
         arms: Vec<(String, Vec<String>, Box<Body>)>,
+        /// Optional `after ms => body` clause: `(timeout_ms, timeout_body)`.
+        after: Option<(Box<Body>, Box<Body>)>,
         ty: Type,
     },
     Migrate {
