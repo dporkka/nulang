@@ -1102,6 +1102,42 @@ impl VM {
         }
     }
 
+    /// Resolve a value to its string content for `SCmpEq`.
+    ///
+    /// Pool strings are module-scoped constant-pool indices; heap strings
+    /// are null-terminated UTF-8 allocations tagged `HeapTypeTag::String`.
+    /// Equality must be by content: the same text may live at different
+    /// pool indices in different modules, and pool/heap representations
+    /// must compare equal. Any non-string value (ints, nil, records,
+    /// arrays, ...) yields `None` so the comparison evaluates to `false`
+    /// instead of erroring — mirroring the coerce-don't-fail style of
+    /// `ICmpEq`/`FCmpEq`.
+    fn string_operand(&self, module_idx: usize, value: Value) -> Option<String> {
+        if let Some(id) = value.as_string_id() {
+            self.constant_string(module_idx, id)
+        } else if let Some(ptr) = value.as_ptr() {
+            if ptr.is_null() {
+                return None;
+            }
+            // SAFETY: `ptr` was produced by `actor_callbacks.alloc`, so
+            // `ActorHeap::header_of` is valid (same pattern as RecL). The
+            // type-tag check ensures only string payloads are read as C
+            // strings — a record or array pointer must not be scanned for
+            // a NUL terminator.
+            unsafe {
+                let header = &*ActorHeap::header_of(ptr);
+                if header.type_tag != HeapTypeTag::String {
+                    return None;
+                }
+                Some(CStr::from_ptr(ptr as *const c_char)
+                    .to_string_lossy()
+                    .into_owned())
+            }
+        } else {
+            None
+        }
+    }
+
     /// Allocate a fresh heap string and return it as a pointer value.
     pub fn allocate_string(&mut self, s: &str) -> Value {
         let bytes = s.as_bytes();
@@ -1845,6 +1881,18 @@ impl VM {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
                 let b = self.frames[frame_idx].regs[instr.op2 as usize].as_float().unwrap_or(0.0);
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a > b);
+            }
+            OpCode::SCmpEq => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                let eq = match (
+                    self.string_operand(module_idx, a),
+                    self.string_operand(module_idx, b),
+                ) {
+                    (Some(sa), Some(sb)) => sa == sb,
+                    _ => false,
+                };
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(eq);
             }
 
             // -- Arrays (actor-heap backed; no longer leaked) --
@@ -4030,5 +4078,167 @@ mod vm_tests {
         assert_eq!(result.as_int(), Some(0), "(2^47 * 2^47) mod 2^48 = 0");
         let compiled = vm.jit_session.as_ref().map(|j| j.compiled_count()).unwrap_or(0);
         assert!(compiled > 0, "loop body must have been JIT-compiled");
+    }
+
+    // -- SCmpEq (string equality; emitted by variant-match lowering) --
+
+    /// A module whose first instruction is `SCmpEq r0, r1 -> r2`, carrying
+    /// the given constant pool.
+    fn scmpeq_module(name: &str, constants: Vec<Constant>) -> CodeModule {
+        let mut module = CodeModule::new(name);
+        for c in constants {
+            module.add_constant(c);
+        }
+        module.emit(Instruction::new3(OpCode::SCmpEq, 0, 1, 2));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.entry_point = Some(0);
+        module
+    }
+
+    /// Drive the single leading `SCmpEq` instruction of the last-loaded
+    /// module with `a`/`b` preloaded into r0/r1 and return r2.
+    fn run_scmpeq(vm: &mut VM, a: Value, b: Value) -> Value {
+        let module_idx = vm.modules.len() - 1;
+        let mut frame = Frame::new(None, module_idx);
+        frame.regs[0] = a;
+        frame.regs[1] = b;
+        vm.frames.clear();
+        vm.frames.push(frame);
+        vm.current_frame_idx = Some(0);
+        vm.step().expect("SCmpEq must not error");
+        vm.frames[0].regs[2]
+    }
+
+    /// Two pool strings with the same text but different constant-pool
+    /// indices must compare equal — equality is by content, not by bits.
+    #[test]
+    fn test_scmpeq_same_content_different_pool_indices() {
+        let module = scmpeq_module(
+            "test_scmpeq_pool_idx",
+            vec![
+                Constant::String("Some".to_string()),
+                Constant::Int(999), // separator so the duplicate lands at idx 2
+                Constant::String("Some".to_string()),
+            ],
+        );
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = run_scmpeq(&mut vm, Value::string(0), Value::string(2));
+        assert_eq!(
+            result.as_bool(),
+            Some(true),
+            "same text at different pool indices must be equal"
+        );
+    }
+
+    /// Pool indices are module-scoped: "Some" at index 0 of module A and
+    /// index 1 of module B must resolve to equal content. (Resolution is
+    /// frame-module-scoped, so this exercises `string_operand` — the exact
+    /// path the SCmpEq arm uses — against both modules.)
+    #[test]
+    fn test_scmpeq_same_content_across_modules() {
+        let mod_a = scmpeq_module(
+            "test_scmpeq_mod_a",
+            vec![Constant::String("Some".to_string())],
+        );
+        let mod_b = scmpeq_module(
+            "test_scmpeq_mod_b",
+            vec![
+                Constant::Int(7),
+                Constant::String("Some".to_string()),
+            ],
+        );
+        let mut vm = VM::new();
+        vm.load_module(mod_a);
+        vm.load_module(mod_b);
+        let from_a = vm.string_operand(0, Value::string(0));
+        let from_b = vm.string_operand(1, Value::string(1));
+        assert_eq!(from_a.as_deref(), Some("Some"));
+        assert_eq!(from_a, from_b, "cross-module same-text strings must match");
+    }
+
+    /// A pool string and a heap string with the same bytes compare equal,
+    /// in either operand order.
+    #[test]
+    fn test_scmpeq_pool_vs_heap_string() {
+        let module = scmpeq_module(
+            "test_scmpeq_pool_heap",
+            vec![Constant::String("hello".to_string())],
+        );
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let heap = vm.allocate_string("hello");
+        let pool_first = run_scmpeq(&mut vm, Value::string(0), heap);
+        assert_eq!(pool_first.as_bool(), Some(true), "pool vs heap must match");
+        let heap_first = run_scmpeq(&mut vm, heap, Value::string(0));
+        assert_eq!(heap_first.as_bool(), Some(true), "heap vs pool must match");
+    }
+
+    /// Two distinct heap allocations with the same bytes compare equal.
+    #[test]
+    fn test_scmpeq_heap_vs_heap_string() {
+        let module = scmpeq_module("test_scmpeq_heap_heap", vec![]);
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let a = vm.allocate_string("hello");
+        let b = vm.allocate_string("hello");
+        assert_ne!(a.to_bits(), b.to_bits(), "distinct allocations expected");
+        let result = run_scmpeq(&mut vm, a, b);
+        assert_eq!(result.as_bool(), Some(true), "heap vs heap must match");
+    }
+
+    /// Different string contents are unequal (pool/pool and heap/heap).
+    #[test]
+    fn test_scmpeq_different_strings_false() {
+        let module = scmpeq_module(
+            "test_scmpeq_different",
+            vec![
+                Constant::String("Some".to_string()),
+                Constant::String("None".to_string()),
+            ],
+        );
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = run_scmpeq(&mut vm, Value::string(0), Value::string(1));
+        assert_eq!(result.as_bool(), Some(false), "Some != None");
+        let other = vm.allocate_string("world");
+        let result = run_scmpeq(&mut vm, Value::string(0), other);
+        assert_eq!(result.as_bool(), Some(false), "Some != world");
+    }
+
+    /// Non-string operands (int, nil, a non-string heap object, a string-id
+    /// pointing at a non-string constant) yield `false`, never an error —
+    /// mirroring ICmpEq/FCmpEq coerce-don't-fail style.
+    #[test]
+    fn test_scmpeq_non_string_operands_false() {
+        let module = scmpeq_module(
+            "test_scmpeq_non_string",
+            vec![
+                Constant::String("hello".to_string()),
+                Constant::Int(42),
+            ],
+        );
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let hello = Value::string(0);
+
+        let result = run_scmpeq(&mut vm, Value::int(0), hello);
+        assert_eq!(result.as_bool(), Some(false), "int vs string must be false");
+        let result = run_scmpeq(&mut vm, hello, Value::int(0));
+        assert_eq!(result.as_bool(), Some(false), "string vs int must be false");
+        let result = run_scmpeq(&mut vm, Value::nil(), hello);
+        assert_eq!(result.as_bool(), Some(false), "nil vs string must be false");
+
+        // A string-id whose pool slot is not a string constant.
+        let result = run_scmpeq(&mut vm, Value::string(1), hello);
+        assert_eq!(result.as_bool(), Some(false), "non-string pool slot must be false");
+
+        // A heap pointer to a record must not be read as a C string.
+        let rec_ptr = vm
+            .actor_callbacks
+            .alloc(std::mem::size_of::<Value>(), HeapTypeTag::Record)
+            .expect("record allocation");
+        let result = run_scmpeq(&mut vm, Value::ptr(rec_ptr), hello);
+        assert_eq!(result.as_bool(), Some(false), "record ptr vs string must be false");
     }
 }

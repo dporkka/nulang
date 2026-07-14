@@ -134,10 +134,21 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
                 reserve_decl(ctx, d)?;
             }
         }
+        hir::Decl::VariantType { variants, .. } => {
+            // Variant declarations produce no code, but construction sites
+            // need the constructor table: a payload constructor call
+            // `Some(x)` builds a `{ ctor, payload }` record and a nullary
+            // constructor reference `None` is the bare tag string (see
+            // pattern_test for the matching destructuring side). On a name
+            // collision between two variant declarations the later one
+            // wins, mirroring the typechecker's ctx.bind.
+            for (ctor_name, payload) in variants {
+                ctx.ctor_map.insert(ctor_name.clone(), payload.is_some());
+            }
+        }
         // Type-level declarations produce no code.
         hir::Decl::TypeAlias { .. }
         | hir::Decl::RecordType { .. }
-        | hir::Decl::VariantType { .. }
         | hir::Decl::EffectDecl { .. }
         | hir::Decl::Import { .. } => {}
     }
@@ -218,6 +229,10 @@ struct ModuleCtx {
     compensation_of: Vec<(usize, usize)>,
     /// `(behavior_idx, branch_names)` pairs; see `mir::Module`.
     parallel_branches_of: Vec<(usize, Vec<String>)>,
+    /// Declared variant constructors: ctor name -> has_payload. Populated in
+    /// pass 1 from `Decl::VariantType` so construction sites (`Some(41)`,
+    /// `None`) resolve regardless of source order; see `reserve_decl`.
+    ctor_map: HashMap<String, bool>,
     next_lambda: u32,
 }
 
@@ -234,6 +249,7 @@ impl ModuleCtx {
             actor_metas: Vec::new(),
             compensation_of: Vec::new(),
             parallel_branches_of: Vec::new(),
+            ctor_map: HashMap::new(),
             next_lambda: 0,
         }
     }
@@ -667,6 +683,13 @@ impl<'c> FnLowerer<'c> {
                     self.b.assign(id, mir::RValue::SelfRef);
                     return Ok(id);
                 }
+                if let Some(&has_payload) = self.ctx.ctor_map.get(name) {
+                    // Declared variant constructor used as a value. Locals
+                    // and top-level functions shadow constructors (resolved
+                    // above), so a user `let Some = ...` or `fn Some(...)`
+                    // always wins over the ctor.
+                    return self.lower_ctor_value(name, has_payload);
+                }
                 Err(compile_err(format!(
                     "undefined variable '{}' in MIR lowering",
                     name
@@ -687,6 +710,106 @@ impl<'c> FnLowerer<'c> {
         self.b
             .assign(id, mir::RValue::Const(crate::bytecode::Constant::Unit));
         id
+    }
+
+    /// Lower a declared variant constructor *call* `Some(x)` to the record
+    /// `{ ctor: "Some", payload: x }` — the representation pattern_test and
+    /// bind_pattern destructure (`ctor` rather than `tag` because `tag` is a
+    /// lexer keyword). Field names resolve to module-wide field ids in
+    /// codegen, so both sides agree on the layout automatically.
+    fn lower_ctor_call(
+        &mut self,
+        dst: mir::LocalId,
+        name: &str,
+        has_payload: bool,
+        args: Vec<mir::LocalId>,
+    ) -> NuResult<()> {
+        if !has_payload {
+            return Err(compile_err(format!(
+                "constructor '{}' takes no payload; use it as a plain value, not a call",
+                name
+            )));
+        }
+        if args.len() != 1 {
+            return Err(compile_err(format!(
+                "constructor '{}' expects exactly one payload argument, got {}",
+                name,
+                args.len()
+            )));
+        }
+        let tag = self.b.add_temp(Type::string());
+        self.b.assign(
+            tag,
+            mir::RValue::Const(crate::bytecode::Constant::String(name.to_string())),
+        );
+        self.b.assign(
+            dst,
+            mir::RValue::Record(vec![
+                ("ctor".to_string(), tag),
+                ("payload".to_string(), args[0]),
+            ]),
+        );
+        Ok(())
+    }
+
+    /// Lower a declared variant constructor used as a *value* (not a call).
+    /// A nullary constructor is the bare tag string — the payload-less
+    /// variant pattern test string-compares the whole scrutinee against the
+    /// tag, so the value must be exactly that representation. A payload
+    /// constructor eta-expands to a lifted `fn(x) { { ctor, payload: x } }`
+    /// so `let f = Some in f(1)` works like any other function value.
+    fn lower_ctor_value(&mut self, name: &str, has_payload: bool) -> NuResult<mir::LocalId> {
+        if !has_payload {
+            let id = self.b.add_temp(Type::string());
+            self.b.assign(
+                id,
+                mir::RValue::Const(crate::bytecode::Constant::String(name.to_string())),
+            );
+            return Ok(id);
+        }
+        let lname = self.ctx.fresh_lambda_name();
+        let idx = self.ctx.reserve_function(&lname);
+        let mut body = hir::Body::new();
+        body.stmts.push(hir::Stmt::Let {
+            name: "__ctor".to_string(),
+            ty: Type::unit(),
+            value: hir::RValue::Record(
+                vec![
+                    (
+                        "ctor".to_string(),
+                        hir::Operand::Literal(
+                            crate::ast::Literal::String(name.to_string()),
+                            Type::string(),
+                        ),
+                    ),
+                    (
+                        "payload".to_string(),
+                        hir::Operand::Var("__payload".to_string(), Type::unit()),
+                    ),
+                ],
+                Type::unit(),
+            ),
+            span: Span::default(),
+        });
+        body.terminator =
+            hir::Terminator::Yield(hir::Operand::Var("__ctor".to_string(), Type::unit()));
+        let lifted = lower_lifted(
+            self.ctx,
+            &lname,
+            &[("__payload".to_string(), Type::unit())],
+            &[],
+            None,
+            &body,
+        )?;
+        self.ctx.fill_function(idx, lifted);
+        // No captures: the function-table index is the value (callable like
+        // any top-level function reference — see lower_lifted).
+        let id = self.b.add_temp(Type::unit());
+        self.b.assign(
+            id,
+            mir::RValue::Const(crate::bytecode::Constant::Int(idx as i64)),
+        );
+        Ok(id)
     }
 
     // -- RValues (dst-directed) -----------------------------------------------
@@ -735,6 +858,12 @@ impl<'c> FnLowerer<'c> {
                                 },
                             );
                             return Ok(());
+                        } else if let Some(&has_payload) = self.ctx.ctor_map.get(name) {
+                            // Declared variant constructor call. Locals,
+                            // top-level functions and externs shadow
+                            // constructors (resolved above), so a user
+                            // `fn Some(...)` wins over the ctor.
+                            return self.lower_ctor_call(dst, name, has_payload, aids);
                         } else {
                             return Err(compile_err(format!(
                                 "call to undefined function '{}'",
