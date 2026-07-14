@@ -95,7 +95,16 @@ pub struct HandlerBindingDef {
     /// Handler parameters; the VM delivers arguments in r0..rN, and codegen
     /// moves them into these locals at the handler block's start.
     pub params: Vec<LocalId>,
-    /// Block containing the handler body; must end in `Terminator::Resume`.
+    /// Whether the handler resumes the captured continuation
+    /// (`| E.op() resume => body`). A resuming handler's body block ends in
+    /// `Terminator::Resume`; a non-resuming (abortive) handler's block
+    /// instead assigns the body value to the handle expression's dst, pops
+    /// the handler frame (discarding the captured continuation), and jumps
+    /// to the handle's join block.
+    pub resume: bool,
+    /// Block containing the handler body; ends in `Terminator::Resume` for
+    /// resuming handlers, in a `PopHandler` + `Terminator::Jump` to the
+    /// handle's join block for non-resuming ones.
     pub body: BlockId,
 }
 

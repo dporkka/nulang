@@ -169,6 +169,25 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// VM errors.
     fn perform_effect(&mut self, _effect_name: &str, _regs: &[Value]) -> Option<Value> { None }
 
+    /// Handle a built-in effect performed without an explicit handler,
+    /// given the operation name (e.g. `print` in `perform IO.print`) and
+    /// the performing module's constant pool for resolving string-id
+    /// arguments.
+    ///
+    /// The default ignores the extra context and delegates to
+    /// `perform_effect`, preserving the historic callback contract for
+    /// runtime-backed implementations (e.g. workflow `Timer.sleep`).
+    fn perform_builtin_effect(
+        &mut self,
+        effect_name: &str,
+        op_name: Option<&str>,
+        constants: &[Constant],
+        regs: &[Value],
+    ) -> Option<Value> {
+        let _ = (op_name, constants);
+        self.perform_effect(effect_name, regs)
+    }
+
     /// Check whether a workflow signal has been received.
     /// Default returns `Ready(unit)` so un-wired signal waits do not block.
     fn wait_signal(&mut self, _name: &str) -> SignalWaitResult {
@@ -266,13 +285,40 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
 struct StandaloneVmCallbacks {
     heap: ActorHeap,
     gc: crate::runtime::OrcaGc,
+    /// Test hook: when set, `IO.print` output is recorded here instead of
+    /// written to stdout.
+    io_output: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
 }
 
 impl StandaloneVmCallbacks {
     fn new() -> Self {
         let mut heap = ActorHeap::new(1024 * 1024);
         heap.set_actor_id(0);
-        Self { heap, gc: crate::runtime::OrcaGc::new(0) }
+        Self { heap, gc: crate::runtime::OrcaGc::new(0), io_output: None }
+    }
+}
+
+/// Resolve a value to display text using a module constant pool.
+///
+/// String-id values index the constant pool; pointer values are read as
+/// null-terminated UTF-8; everything else falls back to `to_string_repr`.
+fn resolve_value_string(constants: &[Constant], value: Value) -> String {
+    if let Some(id) = value.as_string_id() {
+        match constants.get(id as usize) {
+            Some(Constant::String(s)) => s.clone(),
+            _ => String::new(),
+        }
+    } else if let Some(ptr) = value.as_ptr() {
+        if ptr.is_null() {
+            String::new()
+        } else {
+            // SAFETY: heap string payloads are null-terminated
+            // (allocate_string and the standalone IO.read path both write
+            // a trailing zero byte).
+            unsafe { CStr::from_ptr(ptr as *const c_char).to_string_lossy().into_owned() }
+        }
+    } else {
+        value.to_string_repr()
     }
 }
 
@@ -315,6 +361,59 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
     }
 
     fn send_message(&mut self, _target: Value, _behavior_id: u16, _args: &[Value]) {}
+
+    /// Built-in effects for actor-free scripts: `IO.print` writes the
+    /// first staged argument to stdout, `IO.read` reads one stdin line
+    /// into a heap string. String-id arguments resolve against the
+    /// performing module's constant pool.
+    fn perform_builtin_effect(
+        &mut self,
+        effect_name: &str,
+        op_name: Option<&str>,
+        constants: &[Constant],
+        regs: &[Value],
+    ) -> Option<Value> {
+        if effect_name != "IO" {
+            return None;
+        }
+        match op_name {
+            Some("print") | Some("println") => {
+                let message = regs
+                    .first()
+                    .map(|v| resolve_value_string(constants, *v))
+                    .unwrap_or_default();
+                if let Some(sink) = &self.io_output {
+                    sink.borrow_mut().push(message);
+                } else {
+                    println!("{}", message);
+                }
+                Some(Value::unit())
+            }
+            Some("read") => {
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).is_err() {
+                    return Some(Value::nil());
+                }
+                while input.ends_with(|c| c == '\n' || c == '\r') {
+                    input.pop();
+                }
+                let bytes = input.into_bytes();
+                match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                    Some(ptr) => {
+                        // SAFETY: `ptr` points to bytes.len()+1 freshly
+                        // allocated bytes on the standalone heap.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                            *ptr.add(bytes.len()) = 0;
+                        }
+                        Some(Value::ptr(ptr))
+                    }
+                    None => Some(Value::nil()),
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1696,6 +1795,11 @@ impl VM {
                 let b = self.frames[frame_idx].regs[instr.op2 as usize].as_float().unwrap_or(1.0);
                 self.frames[frame_idx].regs[instr.op3 as usize] = if b != 0.0 { Value::float(a / b) } else { Value::nil() };
             }
+            OpCode::FMod => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_float().unwrap_or(1.0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = if b != 0.0 { Value::float(a % b) } else { Value::nil() };
+            }
             OpCode::FNeg => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(-a);
@@ -2039,12 +2143,27 @@ impl VM {
             OpCode::Perform => {
                 let eff_name_idx = instr.imm16();
                 let dst_reg = instr.op3;
-                let effect_name = self.module_const_string(module_idx, eff_name_idx as usize);
+                let qualified_name = self.module_const_string(module_idx, eff_name_idx as usize);
+                // The MIR pipeline encodes the performed operation as
+                // "Effect.op" (e.g. "IO.print"); hand-built modules may
+                // carry a bare name with no operation.
+                let (effect_name, op_name) = match qualified_name.split_once('.') {
+                    Some((effect, op)) => (effect.to_string(), Some(op.to_string())),
+                    None => (qualified_name.clone(), None),
+                };
+                // A binding matches when it names the exact "Effect.op"
+                // pair. Bindings that carry a bare effect name (no '.')
+                // predate op-qualified dispatch and match any op of that
+                // effect, preserving legacy modules.
+                let matches_binding = |b: &crate::bytecode::HandlerBinding| {
+                    b.effect_name == qualified_name
+                        || (!b.effect_name.contains('.') && b.effect_name == effect_name)
+                };
 
                 let handler_idx = self.handler_stack.iter().rposition(|hf| {
                     if let Some(module) = self.modules.get(hf.module_idx) {
                         if let Some(ht) = module.handler_tables.get(hf.handler_table_idx) {
-                            ht.bindings.iter().any(|b| b.effect_name == effect_name)
+                            ht.bindings.iter().any(|b| matches_binding(b))
                         } else {
                             false
                         }
@@ -2059,7 +2178,7 @@ impl VM {
                         let module = self.modules.get(hf.module_idx).unwrap();
                         let ht = module.handler_tables.get(hf.handler_table_idx).unwrap();
                         let binding = ht.bindings.iter()
-                            .find(|b| b.effect_name == effect_name)
+                            .find(|b| matches_binding(*b))
                             .unwrap();
                         (binding.handler_offset, binding.result_reg)
                     };
@@ -2089,12 +2208,24 @@ impl VM {
                 } else {
                     // No handler and no fallback: give the runtime callback a
                     // chance to handle built-in effects (e.g. Timer.sleep in
-                    // workflow steps). Args are in r0..rn.
-                    if let Some(result) = self.actor_callbacks.perform_effect(&effect_name, &self.frames[frame_idx].regs) {
+                    // workflow steps, IO.print in standalone scripts). Args
+                    // are in r0..rn; string-id args resolve against the
+                    // performing module's constant pool.
+                    let constants: &[Constant] = self
+                        .modules
+                        .get(module_idx)
+                        .map(|m| m.constants.as_slice())
+                        .unwrap_or(&[]);
+                    if let Some(result) = self.actor_callbacks.perform_builtin_effect(
+                        &effect_name,
+                        op_name.as_deref(),
+                        constants,
+                        &self.frames[frame_idx].regs,
+                    ) {
                         self.frames[frame_idx].regs[dst_reg as usize] = result;
                     } else {
                         return Err(NuError::EffectError {
-                            msg: format!("Unhandled effect: '{}'", effect_name),
+                            msg: format!("Unhandled effect: '{}'", qualified_name),
                             span: Span::default(),
                         });
                     }
@@ -3715,6 +3846,151 @@ mod vm_tests {
         assert!(result.is_ok(),
             "resume from a non-top handler frame must work: {:?}", result.err());
         assert_eq!(result.unwrap().as_int(), Some(42), "outer handler resumes with 42");
+    }
+
+    /// Regression: `perform IO.print` in a standalone script (no handler on
+    /// the stack) must print via the standalone built-in instead of failing
+    /// with "Unhandled effect: IO".
+    #[test]
+    fn test_standalone_io_print_builtin() {
+        let mut module = CodeModule::new("test_io_print");
+        let hello_idx = module.add_constant(Constant::String("hello".to_string()));
+        let eff_idx = module.add_constant(Constant::String("IO.print".to_string()));
+
+        // r0 = "hello" (staged arg); Perform IO.print -> r1; result is unit.
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((hello_idx >> 8) & 0xFF) as u8, (hello_idx & 0xFF) as u8, 0)); // 0
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((eff_idx >> 8) & 0xFF) as u8, (eff_idx & 0xFF) as u8, 1));     // 1
+        module.emit(Instruction::new2(OpCode::Move, 1, 0));                 // 2
+        module.emit(Instruction::new0(OpCode::Halt));                       // 3
+        module.entry_point = Some(0);
+
+        let sink = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut callbacks = StandaloneVmCallbacks::new();
+        callbacks.io_output = Some(sink.clone());
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(callbacks));
+        let result = vm.run();
+        assert!(result.is_ok(), "standalone IO.print must not error: {:?}", result.err());
+        assert!(result.unwrap().is_unit(), "IO.print resumes with unit");
+        assert_eq!(sink.borrow().as_slice(), &["hello".to_string()]);
+    }
+
+    /// Regression: effect dispatch must match on the (effect, op) pair —
+    /// a handler for `IO.bar` must NOT catch a perform of `IO.foo`.
+    #[test]
+    fn test_perform_dispatches_on_op_name() {
+        let mut module = CodeModule::new("test_op_dispatch");
+        module.add_handler_table(HandlerTable {
+            bindings: vec![HandlerBinding {
+                effect_name: "IO.bar".to_string(),
+                handler_offset: 8,
+                arg_count: 0,
+                result_reg: 0,
+            }],
+            fallback_offset: None,
+        });
+        let eff_idx = module.add_constant(Constant::String("IO.foo".to_string()));
+
+        module.emit(Instruction::new1(OpCode::Handle, 0));                  // 0
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((eff_idx >> 8) & 0xFF) as u8, (eff_idx & 0xFF) as u8, 0));     // 1
+        module.emit(Instruction::new0(OpCode::Unwind));                     // 2
+        module.emit(Instruction::new0(OpCode::Halt));                       // 3
+        for _ in 4..8 { module.emit(Instruction::new0(OpCode::Nop)); }      // 4-7
+        // IO.bar handler body (must NOT run): resume with 42.
+        let c42_idx = module.add_constant(Constant::Int(42));
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c42_idx >> 8) & 0xFF) as u8, (c42_idx & 0xFF) as u8, 0));     // 8
+        module.emit(Instruction::new1(OpCode::Resume, 0));                  // 9
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_err(),
+            "IO.foo must not be caught by an IO.bar handler");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("Unhandled effect"),
+            "wrong-op perform should be unhandled, got: {}", msg);
+        assert!(msg.contains("IO.foo"),
+            "error should name the qualified effect, got: {}", msg);
+    }
+
+    /// Positive control for op-name dispatch: a handler naming the exact
+    /// "Effect.op" pair DOES catch the perform.
+    #[test]
+    fn test_perform_op_name_matches_qualified_handler() {
+        let mut module = CodeModule::new("test_op_match");
+        module.add_handler_table(HandlerTable {
+            bindings: vec![HandlerBinding {
+                effect_name: "IO.foo".to_string(),
+                handler_offset: 8,
+                arg_count: 0,
+                result_reg: 0,
+            }],
+            fallback_offset: None,
+        });
+        let eff_idx = module.add_constant(Constant::String("IO.foo".to_string()));
+        let c7_idx = module.add_constant(Constant::Int(7));
+
+        module.emit(Instruction::new1(OpCode::Handle, 0));                  // 0
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((eff_idx >> 8) & 0xFF) as u8, (eff_idx & 0xFF) as u8, 1));     // 1
+        module.emit(Instruction::new2(OpCode::Move, 1, 0));                 // 2
+        module.emit(Instruction::new0(OpCode::Unwind));                     // 3
+        module.emit(Instruction::new0(OpCode::Halt));                       // 4
+        for _ in 5..8 { module.emit(Instruction::new0(OpCode::Nop)); }      // 5-7
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c7_idx >> 8) & 0xFF) as u8, (c7_idx & 0xFF) as u8, 0));       // 8
+        module.emit(Instruction::new1(OpCode::Resume, 0));                  // 9
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "qualified handler must catch: {:?}", result.err());
+        assert_eq!(result.unwrap().as_int(), Some(7));
+    }
+
+    /// Compatibility: a binding carrying a bare effect name (no op, as the
+    /// MIR pipeline emitted before op-qualified dispatch) still catches any
+    /// op of that effect.
+    #[test]
+    fn test_perform_bare_effect_binding_matches_legacy() {
+        let mut module = CodeModule::new("test_bare_binding");
+        module.add_handler_table(HandlerTable {
+            bindings: vec![HandlerBinding {
+                effect_name: "IO".to_string(),
+                handler_offset: 8,
+                arg_count: 0,
+                result_reg: 0,
+            }],
+            fallback_offset: None,
+        });
+        let eff_idx = module.add_constant(Constant::String("IO.foo".to_string()));
+        let c9_idx = module.add_constant(Constant::Int(9));
+
+        module.emit(Instruction::new1(OpCode::Handle, 0));                  // 0
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((eff_idx >> 8) & 0xFF) as u8, (eff_idx & 0xFF) as u8, 1));     // 1
+        module.emit(Instruction::new2(OpCode::Move, 1, 0));                 // 2
+        module.emit(Instruction::new0(OpCode::Unwind));                     // 3
+        module.emit(Instruction::new0(OpCode::Halt));                       // 4
+        for _ in 5..8 { module.emit(Instruction::new0(OpCode::Nop)); }      // 5-7
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c9_idx >> 8) & 0xFF) as u8, (c9_idx & 0xFF) as u8, 0));       // 8
+        module.emit(Instruction::new1(OpCode::Resume, 0));                  // 9
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(), "bare binding must stay compatible: {:?}", result.err());
+        assert_eq!(result.unwrap().as_int(), Some(9));
     }
 
     /// Regression: `IMul` on 48-bit boundary values must not overflow i64

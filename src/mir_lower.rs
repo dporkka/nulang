@@ -295,14 +295,18 @@ impl ModuleCtx {
     fn finish(self) -> NuResult<mir::Module> {
         let mut module = mir::Module::new(&self.name);
         for (i, f) in self.functions.into_iter().enumerate() {
-            module.functions.push(f.ok_or_else(|| {
+            let mut f = f.ok_or_else(|| {
                 compile_err(format!("internal: MIR function slot {} left unfilled", i))
-            })?);
+            })?;
+            fuse_single_use_temps(&mut f);
+            module.functions.push(f);
         }
         for (i, f) in self.behaviors.into_iter().enumerate() {
-            module.behaviors.push(f.ok_or_else(|| {
+            let mut f = f.ok_or_else(|| {
                 compile_err(format!("internal: MIR behavior slot {} left unfilled", i))
-            })?);
+            })?;
+            fuse_single_use_temps(&mut f);
+            module.behaviors.push(f);
         }
         module.actor_metadata = self.actor_metas;
         module.compensation_of = self.compensation_of;
@@ -450,10 +454,12 @@ impl<'c> FnLowerer<'c> {
     // -- Body lowering ------------------------------------------------------
 
     /// Terminate the current block with a function return, first unwinding
-    /// any handler frames installed by enclosing `handle` bodies. Without
-    /// this the frame would outlive the function on the VM's
-    /// `handler_stack`, and a later unhandled perform of the same effect
-    /// would dispatch into the dead function's handler code.
+    /// any handler frames installed by enclosing `handle` bodies (and by the
+    /// handler body itself, when the return sits inside one — the VM keeps
+    /// the frame on `handler_stack` while the handler runs). Without this
+    /// the frame would outlive the function on the VM's `handler_stack`,
+    /// and a later unhandled perform of the same effect would dispatch
+    /// into the dead function's handler code.
     fn emit_return(&mut self, id: mir::LocalId) {
         for _ in 0..self.handle_depth {
             self.b.emit(mir::Stmt::PopHandler);
@@ -1314,11 +1320,32 @@ impl<'c> FnLowerer<'c> {
                 self.b
                     .assign(dst, mir::RValue::Binary(crate::ast::BinOp::Eq, sid, lit_id));
             }
-            Pattern::Variant(tag, _) => {
+            Pattern::Variant(tag, payload) => {
+                // Runtime representation: a payload-less constructor is the
+                // bare tag string; a payload-carrying constructor is a
+                // record `{ ctor: <name>, payload: <value> }` (records are
+                // the only heap values MIR can both construct and
+                // destructure field-wise — see bind_pattern; the field is
+                // `ctor` rather than `tag` because `tag` is a keyword and
+                // could never appear in a source record literal). Match the
+                // tag accordingly.
+                let scrut_tag = if payload.is_some() {
+                    let t = self.b.add_temp(Type::unit());
+                    self.b.assign(
+                        t,
+                        mir::RValue::LoadFieldNamed {
+                            obj: sid,
+                            field: "ctor".to_string(),
+                        },
+                    );
+                    t
+                } else {
+                    sid
+                };
                 let tag_id = self.b.add_temp(Type::unit());
                 self.b
                     .assign(tag_id, mir::RValue::Const(Constant::String(tag.clone())));
-                self.b.assign(dst, mir::RValue::StringEq(sid, tag_id));
+                self.b.assign(dst, mir::RValue::StringEq(scrut_tag, tag_id));
             }
             Pattern::Tuple(pats) => {
                 // Structural tuple matching is not implemented; mirror the
@@ -1344,7 +1371,23 @@ impl<'c> FnLowerer<'c> {
                 self.bind(name, sid);
                 self.bind_pattern(inner, sid);
             }
-            Pattern::Variant(_, Some(inner)) => self.bind_pattern(inner, sid),
+            Pattern::Variant(_, Some(inner)) => {
+                // Payload-carrying variants are `{ ctor, payload }` records
+                // (see pattern_test): bind the inner pattern to the payload
+                // field's value, not to the whole scrutinee record. RecL on
+                // a non-record scrutinee yields nil, so a value that matched
+                // only because the tag field compared equal still binds
+                // safely.
+                let payload = self.b.add_temp(Type::unit());
+                self.b.assign(
+                    payload,
+                    mir::RValue::LoadFieldNamed {
+                        obj: sid,
+                        field: "payload".to_string(),
+                    },
+                );
+                self.bind_pattern(inner, payload);
+            }
             _ => {}
         }
     }
@@ -1463,12 +1506,20 @@ impl<'c> FnLowerer<'c> {
         }
         self.handle_depth -= 1;
 
-        // Handler bodies: entered only by the VM's effect dispatch; each ends
-        // with Resume.
+        // Handler bodies: entered only by the VM's effect dispatch. The
+        // handle's frame is still on `handler_stack` while a handler runs,
+        // so the depth is bumped here too — a `return` inside a handler
+        // body must unwind it (and every enclosing frame) like any other
+        // return inside the handled scope. Resuming handlers end with
+        // `Resume`; non-resuming (abortive) handlers assign the body value
+        // to the handle's dst, pop the frame (discarding the captured
+        // continuation), and jump to the handle's join block, so the body
+        // value becomes the handle expression's value.
         let mut bindings = Vec::with_capacity(handlers.len());
         for h in handlers {
             let hb = self.b.create_block();
             self.b.switch_to(hb);
+            self.handle_depth += 1;
             self.push_scope();
             let mut params = Vec::with_capacity(h.params.len());
             for (pname, pty) in &h.params {
@@ -1483,24 +1534,36 @@ impl<'c> FnLowerer<'c> {
                 match &h.body.terminator {
                     hir::Terminator::Yield(op) => {
                         let id = self.lower_operand(op)?;
-                        self.b.terminate(mir::Terminator::Resume(id));
+                        if h.resume {
+                            self.b.terminate(mir::Terminator::Resume(id));
+                        } else {
+                            self.b.assign(dst, mir::RValue::Load(id));
+                            self.b.emit(mir::Stmt::PopHandler);
+                            self.b.terminate(mir::Terminator::Jump(join));
+                        }
                     }
                     hir::Terminator::FnReturn(op) => {
                         let id = match op {
                             Some(op) => self.lower_operand(op)?,
                             None => self.unit_temp(),
                         };
-                        self.b.terminate(mir::Terminator::Return(Some(id)));
+                        self.emit_return(id);
                     }
                     hir::Terminator::Break => {
                         return Err(compile_err("break out of an effect handler"));
                     }
                 }
             }
+            self.handle_depth -= 1;
             self.pop_scope();
             bindings.push(mir::HandlerBindingDef {
-                effect_name: h.effect_name.clone(),
+                // Op-qualified ("Effect.op") so the VM dispatches on the exact
+                // (effect, op) pair; a perform of `IO.foo` must not match a
+                // handler for `IO.bar`. Hand-built modules may still use bare
+                // effect names, which the VM matches against any op.
+                effect_name: format!("{}.{}", h.effect_name, h.op_name),
                 params,
+                resume: h.resume,
                 body: hb,
             });
         }
@@ -1544,6 +1607,228 @@ fn literal_to_constant(lit: &crate::ast::Literal) -> crate::bytecode::Constant {
         Literal::Bool(b) => Constant::Bool(*b),
         Literal::Nil => Constant::Nil,
         Literal::Unit => Constant::Unit,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Peephole: fuse temp materialization copies
+// ---------------------------------------------------------------------------
+
+/// Fuse `tmp = <rvalue>; x = Load(tmp)` pairs into a single `x = <rvalue>`.
+///
+/// The HIR pipeline materializes every expression value into a `__tmpN`
+/// temporary and binds every `let` through `RValue::Use`, so without this
+/// pass named locals are always defined by a non-owning `Load` of a temp
+/// whose only use is that same copy. Codegen's drop planning
+/// (`plan_drops`) can never prove such a local solely owns its heap value,
+/// so no `Drop` is ever emitted and arrays/records accumulate until actor
+/// exit. Fusing the pair lets the owning rvalue bind the named local
+/// directly, which is exactly the shape the drop analysis needs.
+///
+/// A pair fuses only when all of these hold:
+///   - the two assignments are adjacent in the same block (no intervening
+///     side effects could be reordered by moving the rvalue);
+///   - the source is a fusable temp (an anonymous MIR temp or a `__tmpN`
+///     HIR materialization temp — see `is_fusable_temp`); params, captures,
+///     handler params and ordinary named locals keep their copies, since
+///     those arrive through uncounted channels and must stay non-owning;
+///   - the temp has exactly one use in the whole function — this Load (a
+///     second reader would observe the temp's register, which the fusion
+///     leaves undefined);
+///   - the rvalue does not read the temp itself.
+fn fuse_single_use_temps(func: &mut mir::Function) {
+    let use_counts = count_local_uses(func);
+    let fusable: Vec<bool> = (0..func.locals.len())
+        .map(|i| {
+            let id = mir::LocalId(i as u32);
+            is_fusable_temp(func, id) && use_counts[i] == 1
+        })
+        .collect();
+    for block in &mut func.blocks {
+        let mut fused: Vec<mir::Stmt> = Vec::with_capacity(block.stmts.len());
+        for stmt in block.stmts.drain(..) {
+            let mir::Stmt::Assign {
+                dst,
+                op: mir::RValue::Load(src),
+            } = stmt
+            else {
+                fused.push(stmt);
+                continue;
+            };
+            let can_fuse = match fused.last() {
+                Some(mir::Stmt::Assign { dst: def_dst, op: def_op }) => {
+                    *def_dst == src
+                        && fusable[src.0 as usize]
+                        && !rvalue_mentions(def_op, src)
+                }
+                _ => false,
+            };
+            if can_fuse {
+                let Some(mir::Stmt::Assign { op: def_op, .. }) = fused.pop() else {
+                    unreachable!("can_fuse requires an Assign on top");
+                };
+                fused.push(mir::Stmt::Assign { dst, op: def_op });
+            } else {
+                fused.push(mir::Stmt::Assign {
+                    dst,
+                    op: mir::RValue::Load(src),
+                });
+            }
+        }
+        block.stmts = fused;
+    }
+}
+
+/// A local whose only purpose is to materialize an expression value for a
+/// single later copy: an anonymous MIR temp (`add_temp`) or one of the
+/// `__tmpN` temporaries `hir_lower` materializes every expression into
+/// (see `hir_lower::fresh_temp_name`). Params, captures, handler params and
+/// ordinary named locals are never fusable — their values arrive through
+/// uncounted channels and must stay non-owning.
+fn is_fusable_temp(func: &mir::Function, id: mir::LocalId) -> bool {
+    match &func.locals[id.0 as usize].name {
+        None => true,
+        Some(n) => n.starts_with("__tmp"),
+    }
+}
+
+/// Whole-function use counts per local id (an assignment's destination is a
+/// definition, not a use).
+fn count_local_uses(func: &mir::Function) -> Vec<usize> {
+    let mut counts = vec![0usize; func.locals.len()];
+    let mut used: Vec<mir::LocalId> = Vec::new();
+    for block in &func.blocks {
+        for stmt in &block.stmts {
+            match stmt {
+                mir::Stmt::Assign { op, .. } => rvalue_use_locals(op, &mut used),
+                mir::Stmt::StoreFieldNamed { obj, src, .. } => {
+                    used.push(*obj);
+                    used.push(*src);
+                }
+                mir::Stmt::ArrayStore { arr, idx, src } => {
+                    used.push(*arr);
+                    used.push(*idx);
+                    used.push(*src);
+                }
+                mir::Stmt::EnterHandle { .. } | mir::Stmt::PopHandler => {}
+                mir::Stmt::Emit { args, .. } => used.extend(args.iter().copied()),
+                mir::Stmt::StateSet { src, .. } => used.push(*src),
+            }
+            for id in used.drain(..) {
+                counts[id.0 as usize] += 1;
+            }
+        }
+        match &block.terminator {
+            mir::Terminator::Return(Some(v)) | mir::Terminator::Resume(v) => {
+                counts[v.0 as usize] += 1
+            }
+            mir::Terminator::Branch { cond, .. } => counts[cond.0 as usize] += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+fn rvalue_mentions(op: &mir::RValue, id: mir::LocalId) -> bool {
+    let mut used = Vec::new();
+    rvalue_use_locals(op, &mut used);
+    used.contains(&id)
+}
+
+/// Every local referenced by an rvalue.
+fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
+    use mir::RValue::*;
+    match op {
+        Const(_)
+        | SignalWait { .. }
+        | Receive
+        | ReceiveMatch { .. }
+        | PipelineNew
+        | SupervisorNew
+        | Spawn { .. }
+        | SelfRef
+        | StateGet { .. } => {}
+        Load(x) | ArrayLen(x) | Unary(_, x) | LlmAsk { prompt: x }
+        | CapabilityCheck { val: x }
+        | DebateRun { id: x } => out.push(*x),
+        LoadFieldNamed { obj, .. } => out.push(*obj),
+        ArrayLoad { arr, idx } => {
+            out.push(*arr);
+            out.push(*idx);
+        }
+        ArrayLit(elems) | Tuple(elems) => out.extend(elems.iter().copied()),
+        Binary(_, l, r) | StringEq(l, r) => {
+            out.push(*l);
+            out.push(*r);
+        }
+        PipelineRun { id, input } => {
+            out.push(*id);
+            out.push(*input);
+        }
+        SupervisorRun { id, task } => {
+            out.push(*id);
+            out.push(*task);
+        }
+        Call { func, args } => {
+            if let mir::FuncRef::Local(f) = func {
+                out.push(*f);
+            }
+            out.extend(args.iter().copied());
+        }
+        Closure { captures, .. } => out.extend(captures.iter().copied()),
+        Record(fields) => {
+            for (_, v) in fields {
+                out.push(*v);
+            }
+        }
+        Perform { args, .. } | FFICall { args, .. } => out.extend(args.iter().copied()),
+        Migrate { actor, node } => {
+            out.push(*actor);
+            out.push(*node);
+        }
+        Send { actor, args, .. } | Ask { actor, args, .. } => {
+            out.push(*actor);
+            out.extend(args.iter().copied());
+        }
+        PipelineStage {
+            id,
+            name,
+            actor,
+            template,
+        } => {
+            for x in [id, name, actor, template] {
+                out.push(*x);
+            }
+        }
+        SupervisorWorker {
+            id,
+            name,
+            actor,
+            description,
+        } => {
+            for x in [id, name, actor, description] {
+                out.push(*x);
+            }
+        }
+        DebateNew {
+            topic,
+            rounds,
+            threshold,
+        } => {
+            for x in [topic, rounds, threshold] {
+                out.push(*x);
+            }
+        }
+        DebateParticipant {
+            id,
+            name,
+            stance,
+            actor,
+        } => {
+            for x in [id, name, stance, actor] {
+                out.push(*x);
+            }
+        }
     }
 }
 
@@ -1797,5 +2082,205 @@ mod tests {
         let hir_module = hir::Module::new("test");
         let mir_module = lower_module(&hir_module).unwrap();
         assert_eq!(mir_module.name, "test");
+    }
+
+    // -----------------------------------------------------------------------
+    // Peephole: temp/Load fusion (keeps codegen's drop planning effective)
+    // -----------------------------------------------------------------------
+
+    fn lower_source(source: &str) -> NuResult<mir::Module> {
+        let mut lexer = crate::lexer::Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_module()?;
+        let hir = crate::hir_lower::lower_module(&ast);
+        lower_module(&hir)
+    }
+
+    fn find_fn<'m>(module: &'m mir::Module, name: &str) -> &'m mir::Function {
+        module
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| panic!("function '{}' not lowered", name))
+    }
+
+    #[test]
+    fn test_fuse_binds_owning_rvalue_to_named_local() {
+        // `let a = [1,2,3]` must lower to `a = ArrayLit(...)` directly — not
+        // `__tmp = ArrayLit(...); a = Load(__tmp)` — so codegen can prove
+        // `a` solely owns the array and emit a real Drop.
+        let module = lower_source("let a = [1, 2, 3] in a[0]").unwrap();
+        let main = find_fn(&module, "__main");
+        let a_id = main
+            .locals
+            .iter()
+            .find(|l| l.name.as_deref() == Some("a"))
+            .expect("named local 'a'")
+            .id;
+        let owns_array = main.blocks.iter().any(|b| {
+            b.stmts.iter().any(|s| {
+                matches!(s, mir::Stmt::Assign { dst, op: mir::RValue::ArrayLit(_) } if *dst == a_id)
+            })
+        });
+        assert!(
+            owns_array,
+            "named local 'a' must be defined directly by the ArrayLit, got blocks: {:?}",
+            main.blocks
+        );
+        // And no leftover Load copy into `a`.
+        let load_into_a = main.blocks.iter().any(|b| {
+            b.stmts.iter().any(|s| {
+                matches!(s, mir::Stmt::Assign { dst, op: mir::RValue::Load(_) } if *dst == a_id)
+            })
+        });
+        assert!(!load_into_a, "the Load copy into 'a' should be fused away");
+    }
+
+    #[test]
+    fn test_fuse_keeps_multi_use_temp() {
+        // A temp read by two Loads must keep its definition; fusing either
+        // copy would leave the other reading an undefined register.
+        let mut b = mir::FunctionBuilder::new("f", None);
+        let t = b.add_temp(Type::unit());
+        let x = b.add_local("x", Type::unit());
+        let y = b.add_local("y", Type::unit());
+        b.assign(t, mir::RValue::ArrayLit(Vec::new()));
+        b.assign(x, mir::RValue::Load(t));
+        b.assign(y, mir::RValue::Load(t));
+        b.terminate(mir::Terminator::Return(Some(y)));
+        let mut func = b.build();
+        fuse_single_use_temps(&mut func);
+        let stmts = &func.blocks[0].stmts;
+        assert_eq!(stmts.len(), 3, "multi-use temp must not fuse: {:?}", stmts);
+        assert!(matches!(stmts[1], mir::Stmt::Assign { op: mir::RValue::Load(_), .. }));
+        assert!(matches!(stmts[2], mir::Stmt::Assign { op: mir::RValue::Load(_), .. }));
+    }
+
+    #[test]
+    fn test_fuse_requires_adjacent_load() {
+        // A non-adjacent Load does not fuse: moving the rvalue across an
+        // intervening statement could reorder side effects.
+        let mut b = mir::FunctionBuilder::new("f", None);
+        let t = b.add_temp(Type::unit());
+        let z = b.add_local("z", Type::unit());
+        let x = b.add_local("x", Type::unit());
+        b.assign(t, mir::RValue::ArrayLit(Vec::new()));
+        b.assign(z, mir::RValue::Const(crate::bytecode::Constant::Int(1)));
+        b.assign(x, mir::RValue::Load(t));
+        b.terminate(mir::Terminator::Return(Some(x)));
+        let mut func = b.build();
+        fuse_single_use_temps(&mut func);
+        let stmts = &func.blocks[0].stmts;
+        assert_eq!(stmts.len(), 3, "non-adjacent Load must not fuse: {:?}", stmts);
+        assert!(matches!(stmts[2], mir::Stmt::Assign { op: mir::RValue::Load(_), .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Effect handlers: resume flag and return unwinding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_non_resuming_handler_lowers_to_pop_and_jump() {
+        // `| E.op() => 42` (no `resume`): the body value becomes the handle
+        // expression's value — pop the handler frame and jump to the join
+        // block instead of resuming the captured continuation.
+        let module = lower_source("handle { perform E.op(); 100 } { | E.op() => 42 }").unwrap();
+        let main = find_fn(&module, "__main");
+        assert_eq!(main.handler_tables.len(), 1);
+        let binding = &main.handler_tables[0].bindings[0];
+        assert!(!binding.resume, "resume flag must reach MIR");
+        let body = &main.blocks[binding.body.0 as usize];
+        assert!(
+            body.stmts.iter().any(|s| matches!(s, mir::Stmt::PopHandler)),
+            "abortive handler must pop the handler frame: {:?}",
+            body
+        );
+        assert!(
+            matches!(body.terminator, mir::Terminator::Jump(_)),
+            "abortive handler must jump to the handle join, got {:?}",
+            body.terminator
+        );
+    }
+
+    #[test]
+    fn test_resuming_handler_lowers_to_resume() {
+        // `| E.op() resume => 42`: the continuation is resumed with the
+        // body value, exactly like before.
+        let module =
+            lower_source("handle { perform E.op(); 100 } { | E.op() resume => 42 }").unwrap();
+        let main = find_fn(&module, "__main");
+        let binding = &main.handler_tables[0].bindings[0];
+        assert!(binding.resume, "resume flag must reach MIR");
+        let body = &main.blocks[binding.body.0 as usize];
+        assert!(
+            matches!(body.terminator, mir::Terminator::Resume(_)),
+            "resuming handler must end in Resume, got {:?}",
+            body.terminator
+        );
+        assert!(
+            !body.stmts.iter().any(|s| matches!(s, mir::Stmt::PopHandler)),
+            "resuming handler must not pop the frame (the body does)"
+        );
+    }
+
+    #[test]
+    fn test_return_inside_handler_body_unwinds_frame() {
+        // A `return` inside a handler body runs with the handle's frame on
+        // the VM handler_stack, so it must unwind that frame (PopHandler)
+        // before returning — otherwise the frame leaks and a later
+        // unhandled perform dispatches into the dead function.
+        let module =
+            lower_source("fn f() -> Int { handle { perform E.op() } { | E.op() => return 7 } } f()")
+                .unwrap();
+        let f = find_fn(&module, "f");
+        let binding = &f.handler_tables[0].bindings[0];
+        let body = &f.blocks[binding.body.0 as usize];
+        assert!(
+            body.stmts.iter().any(|s| matches!(s, mir::Stmt::PopHandler)),
+            "return inside a handler body must pop the handler frame: {:?}",
+            body
+        );
+        assert!(
+            matches!(body.terminator, mir::Terminator::Return(_)),
+            "handler-body return returns from the function, got {:?}",
+            body.terminator
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Variant patterns: payload-carrying constructors are { ctor, payload }
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_variant_pattern_tests_ctor_field_and_binds_payload() {
+        // `| Some(x) => ...` on a payload-carrying constructor must compare
+        // the scrutinee's `ctor` field against "Some" and bind `x` to the
+        // `payload` field — not to the whole scrutinee record.
+        let module = lower_source(
+            "let o = { ctor: \"Some\", payload: 41 } in match o { | Some(x) => x + 1 | None => 0 }",
+        )
+        .unwrap();
+        let main = find_fn(&module, "__main");
+        let loads_ctor = main.blocks.iter().any(|b| {
+            b.stmts.iter().any(|s| {
+                matches!(s, mir::Stmt::Assign { op: mir::RValue::LoadFieldNamed { field, .. }, .. } if field == "ctor")
+            })
+        });
+        let loads_payload = main.blocks.iter().any(|b| {
+            b.stmts.iter().any(|s| {
+                matches!(s, mir::Stmt::Assign { op: mir::RValue::LoadFieldNamed { field, .. }, .. } if field == "payload")
+            })
+        });
+        assert!(
+            loads_ctor,
+            "variant tag test must read the scrutinee's ctor field: {:?}",
+            main.blocks
+        );
+        assert!(
+            loads_payload,
+            "variant pattern must bind the payload field, not the scrutinee: {:?}",
+            main.blocks
+        );
     }
 }

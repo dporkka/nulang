@@ -653,10 +653,12 @@ impl MirCodegen {
             }
             mir::RValue::Perform { effect, op, args } => {
                 self.stage_args(args)?;
-                let eff_idx = self.module.add_constant(Constant::String(effect.clone()));
-                // The op name is recorded as a constant for symmetry with the
-                // stable compiler; the VM currently dispatches on effect name.
-                let _op_idx = self.module.add_constant(Constant::String(op.clone()));
+                // The dispatch name carries the operation as "Effect.op"
+                // (e.g. "IO.print") so the VM matches handlers on the
+                // (effect, op) pair instead of the effect name alone.
+                let eff_idx = self
+                    .module
+                    .add_constant(Constant::String(format!("{}.{}", effect, op)));
                 self.emit(Instruction::new3(
                     OpCode::Perform,
                     ((eff_idx >> 8) & 0xFF) as u8,
@@ -1057,9 +1059,7 @@ fn binary_opcode(op: &crate::ast::BinOp, is_float: bool) -> NuResult<OpCode> {
         (BinOp::Div, false) => Ok(OpCode::IDiv),
         (BinOp::Div, true) => Ok(OpCode::FDiv),
         (BinOp::Mod, false) => Ok(OpCode::IMod),
-        (BinOp::Mod, true) => Err(not_yet_implemented(
-            "float modulo: the FMod opcode has no interpreter or JIT implementation",
-        )),
+        (BinOp::Mod, true) => Ok(OpCode::FMod),
         (BinOp::Eq, false) => Ok(OpCode::ICmpEq),
         (BinOp::Eq, true) => Ok(OpCode::FCmpEq),
         (BinOp::Lt, false) => Ok(OpCode::ICmpLt),
@@ -1827,16 +1827,14 @@ mod tests {
     }
 
     #[test]
-    fn test_mir_codegen_float_modulo_is_honest_error() {
-        // The FMod opcode has no interpreter or JIT implementation, so
-        // float `%` must fail at compile time rather than silently
-        // evaluating as integer mod (which coerced operands to 0).
-        let result = compile_mir_source("7.5 % 2.0");
-        assert!(
-            matches!(result, Err(NuError::NotYetImplemented { .. })),
-            "float modulo should be an honest compile error, got {:?}",
-            result
-        );
+    fn test_mir_codegen_float_modulo() {
+        // Float `%` compiles to the FMod opcode (0x35), which the
+        // interpreter implements with f64 % f64 semantics and a nil
+        // result on a zero divisor, mirroring FDiv.
+        let value = run_mir_source("7.5 % 2.0").unwrap();
+        assert_eq!(value.as_float(), Some(1.5));
+        let value = run_mir_source("7.0 % 0.0").unwrap();
+        assert_eq!(value.as_raw(), crate::vm::Value::nil().as_raw());
         // Integer modulo is unaffected.
         let value = run_mir_source("7 % 2").unwrap();
         assert_eq!(value.as_int(), Some(1));
