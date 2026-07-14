@@ -40,7 +40,6 @@ mod tests;
 pub use compiler::*;
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
@@ -54,28 +53,6 @@ use cranelift_module::Module;
 /// before it becomes eligible for JIT compilation.
 pub const HOT_THRESHOLD: u64 = 1000;
 
-/// Hot counters keyed by `(module_idx, offset)` so identical offsets in
-/// different modules do not share (or pollute) each other's counts.
-static HOT_COUNTERS: OnceLock<Mutex<HashMap<(usize, usize), u64>>> = OnceLock::new();
-
-fn get_hot_counters() -> &'static Mutex<HashMap<(usize, usize), u64>> {
-    HOT_COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Record execution at `(module_idx, offset)`. Returns true if region is hot.
-pub fn record_and_check_hot(module_idx: usize, offset: usize) -> bool {
-    let mut map = get_hot_counters().lock().unwrap_or_else(|e| e.into_inner());
-    let count = map.entry((module_idx, offset)).or_insert(0);
-    *count += 1;
-    *count >= HOT_THRESHOLD
-}
-
-/// Reset hot counters.
-pub fn reset_hot_counters() {
-    let mut map = get_hot_counters().lock().unwrap_or_else(|e| e.into_inner());
-    map.clear();
-}
-
 // ---------------------------------------------------------------------------
 // JIT Session
 // ---------------------------------------------------------------------------
@@ -88,8 +65,17 @@ pub fn reset_hot_counters() {
 pub struct JitSession {
     /// The Cranelift JIT module that owns compiled code memory.
     module: JITModule,
-    /// Map from `(module_idx, bytecode offset)` → compiled function pointer.
-    compiled: HashMap<(usize, usize), *const u8>,
+    /// Map from `(module_idx, bytecode offset)` → (compiled function
+    /// pointer, region length in instructions). The length is recorded at
+    /// compile time so the VM can advance pc after a JIT run without
+    /// re-scanning the instruction stream.
+    compiled: HashMap<(usize, usize), (*const u8, usize)>,
+    /// Hot counters keyed by `(module_idx, offset)` so identical offsets in
+    /// different modules do not share (or pollute) each other's counts.
+    /// Per-session rather than process-global: VMs never share counters,
+    /// and the single-scheduler-thread invariant means no synchronization
+    /// is needed — same as `compiled` and `typed_regions`.
+    hot_counters: HashMap<(usize, usize), u64>,
     /// Regions compiled through the type-directed (guard-stripped) path in
     /// `typed_compiler`, i.e. where inferred register types were available.
     typed_regions: std::collections::HashSet<(usize, usize)>,
@@ -189,10 +175,27 @@ impl JitSession {
         JitSession {
             module,
             compiled: HashMap::new(),
+            hot_counters: HashMap::new(),
             typed_regions: std::collections::HashSet::new(),
             builder_context: FunctionBuilderContext::new(),
             ctx,
         }
+    }
+
+    /// Record one interpreted execution of the region at
+    /// `(module_idx, offset)`. Returns true once the region has been
+    /// interpreted at least `HOT_THRESHOLD` times, making it eligible for
+    /// JIT compilation.
+    pub fn record_and_check_hot(&mut self, module_idx: usize, offset: usize) -> bool {
+        let count = self.hot_counters.entry((module_idx, offset)).or_insert(0);
+        *count += 1;
+        *count >= HOT_THRESHOLD
+    }
+
+    /// Reset all hot counters (used by tests that re-heat a region on an
+    /// existing session).
+    pub fn reset_hot_counters(&mut self) {
+        self.hot_counters.clear();
     }
 
     /// Compile a bytecode region starting at `start_offset` with `num_instrs`
@@ -211,7 +214,7 @@ impl JitSession {
         instructions: &[crate::bytecode::Instruction],
     ) -> Option<JitFunctionPtr> {
         // Check if already compiled
-        if let Some(&ptr) = self.compiled.get(&(module_idx, start_offset)) {
+        if let Some(&(ptr, _)) = self.compiled.get(&(module_idx, start_offset)) {
             return Some(std::mem::transmute(ptr));
         }
 
@@ -228,7 +231,8 @@ impl JitSession {
             instructions,
         ) {
             Ok(ptr) => {
-                self.compiled.insert((module_idx, start_offset), ptr);
+                self.compiled
+                    .insert((module_idx, start_offset), (ptr, num_instrs));
                 Some(std::mem::transmute(ptr))
             }
             Err(_) => None,
@@ -256,7 +260,7 @@ impl JitSession {
         type_metadata: Option<&crate::jit::typed_compiler::TypeMetadata>,
     ) -> Option<JitFunctionPtr> {
         // Check if already compiled
-        if let Some(&ptr) = self.compiled.get(&(module_idx, start_offset)) {
+        if let Some(&(ptr, _)) = self.compiled.get(&(module_idx, start_offset)) {
             return Some(std::mem::transmute(ptr));
         }
 
@@ -280,7 +284,8 @@ impl JitSession {
                 instructions,
                 type_metadata,
             ) {
-                self.compiled.insert((module_idx, start_offset), ptr);
+                self.compiled
+                    .insert((module_idx, start_offset), (ptr, num_instrs));
                 self.typed_regions.insert((module_idx, start_offset));
                 return Some(std::mem::transmute(ptr));
             }
@@ -310,7 +315,17 @@ impl JitSession {
     pub fn get_compiled(&self, module_idx: usize, offset: usize) -> Option<JitFunctionPtr> {
         self.compiled
             .get(&(module_idx, offset))
-            .map(|&ptr| unsafe { std::mem::transmute(ptr) })
+            .map(|&(ptr, _)| unsafe { std::mem::transmute(ptr) })
+    }
+
+    /// Number of bytecode instructions covered by the compiled region at
+    /// `(module_idx, offset)`, recorded at compile time. The VM uses this
+    /// to advance pc after a JIT run instead of re-scanning the
+    /// instruction stream.
+    pub fn compiled_region_len(&self, module_idx: usize, offset: usize) -> Option<usize> {
+        self.compiled
+            .get(&(module_idx, offset))
+            .map(|&(_, len)| len)
     }
 
     /// Return the number of compiled regions.
@@ -323,9 +338,12 @@ impl JitSession {
     /// First analyzes the region for vectorizable array loop patterns. If found,
     /// emits SIMD CLIF (I64x2/F64x2/I32x4/F32x4), falling back to the
     /// type-directed scalar compiler if SIMD emission fails. Returns `None`
-    /// when the region has no vectorizable pattern at all — callers (e.g.
-    /// `tiered_execute_step`) must then fall back to `compile_region_typed`
-    /// for scalar compilation.
+    /// when the region has no vectorizable pattern at all.
+    ///
+    /// Currently **not wired into tiering**: `simd_analyzer` finds no
+    /// trip-count hints in production and the emitter is unsound as-is (no
+    /// register write-back, baked trip count), so `tiered_execute_step*`
+    /// compile through the scalar/typed paths until SIMD is reworked.
     ///
     /// # Safety
     /// Same safety requirements as `compile_region`.
@@ -341,7 +359,7 @@ impl JitSession {
         use crate::jit::simd_compiler::{compile_simd_region, is_simd_supported};
 
         // Check if already compiled
-        if let Some(&ptr) = self.compiled.get(&(module_idx, start_offset)) {
+        if let Some(&(ptr, _)) = self.compiled.get(&(module_idx, start_offset)) {
             return Some(std::mem::transmute(ptr));
         }
 
@@ -370,7 +388,8 @@ impl JitSession {
             &simd_region,
         ) {
             Ok(ptr) => {
-                self.compiled.insert((module_idx, start_offset), ptr);
+                self.compiled
+                    .insert((module_idx, start_offset), (ptr, num_instrs));
                 Some(std::mem::transmute(ptr))
             }
             Err(_) => self.compile_region_typed(
@@ -419,7 +438,7 @@ pub fn tiered_execute_step(
     instructions: &[crate::bytecode::Instruction],
     regs: &mut [u64; 256],
     constants: &[u64],
-    type_metadata: Option<&crate::jit::typed_compiler::TypeMetadata>,
+    _type_metadata: Option<&crate::jit::typed_compiler::TypeMetadata>,
 ) -> TieredAction {
     // Check if already compiled
     if let Some(func) = jit.get_compiled(module_idx, pc) {
@@ -429,20 +448,15 @@ pub fn tiered_execute_step(
     }
 
     // Record execution for hotness
-    if record_and_check_hot(module_idx, pc) {
+    if jit.record_and_check_hot(module_idx, pc) {
         // Try to compile from PC to the end of the function or a unsupported opcode
         let region_len = find_compilable_region(pc, instructions);
         if region_len >= 3 {
-            // Try SIMD-vectorized compilation first, fall back to scalar
-            if let Some(func) = unsafe {
-                jit.compile_region_simd(module_idx, pc, region_len, instructions, type_metadata)
-            } {
-                func(regs.as_mut_ptr(), constants.as_ptr());
-                return TieredAction::CompiledSimdAndRan;
-            }
-            // The region has no vectorizable pattern (or SIMD emission
-            // failed): compile it with the scalar compiler so hot
-            // non-array code still tiers up instead of interpreting forever.
+            // NOTE: the SIMD path (`compile_region_simd`) is intentionally
+            // not wired into tiering: `simd_analyzer` finds no trip-count
+            // hints in production, and the SIMD emitter is unsound as-is
+            // (no register write-back, baked trip count). Hot regions
+            // compile with the scalar compiler until SIMD is reworked.
             if let Some(func) =
                 unsafe { jit.compile_region(module_idx, pc, region_len, instructions) }
             {
@@ -459,10 +473,10 @@ pub fn tiered_execute_step(
 ///
 /// Identical to [`tiered_execute_step`], except that when a region becomes
 /// hot the register types at `pc` are inferred from the module's bytecode
-/// (`typed_compiler::infer_reg_types`) and handed to both the SIMD analyzer
-/// and the scalar compiler, so hot numeric regions are compiled with NaN-tag
-/// guards stripped. Regions whose types cannot be proven compile exactly as
-/// before. This is the entry point used by the VM's interpreter loop.
+/// (`typed_compiler::infer_reg_types`) and handed to the scalar compiler, so
+/// hot numeric regions are compiled with NaN-tag guards stripped. Regions
+/// whose types cannot be proven compile exactly as before. This is the entry
+/// point used by the VM's interpreter loop.
 pub fn tiered_execute_step_typed(
     jit: &mut JitSession,
     module_idx: usize,
@@ -481,29 +495,21 @@ pub fn tiered_execute_step_typed(
     }
 
     // Record execution for hotness
-    if record_and_check_hot(module_idx, pc) {
+    if jit.record_and_check_hot(module_idx, pc) {
         // Try to compile from PC to the end of the function or a unsupported opcode
         let region_len = find_compilable_region(pc, instructions);
         if region_len >= 3 {
             // Infer register types at pc; empty metadata keeps the
-            // untyped scalar behavior for both compile paths.
+            // untyped scalar behavior for the compile path.
             let meta = typed_compiler::infer_reg_types(module, pc);
             let meta_ref = if meta.reg_types.is_empty() {
                 None
             } else {
                 Some(&meta)
             };
-            // Try SIMD-vectorized compilation first, fall back to scalar
-            if let Some(func) = unsafe {
-                jit.compile_region_simd(module_idx, pc, region_len, instructions, meta_ref)
-            } {
-                func(regs.as_mut_ptr(), constants.as_ptr());
-                return TieredAction::CompiledSimdAndRan;
-            }
-            // The region has no vectorizable pattern (or SIMD emission
-            // failed): compile it with the type-directed scalar compiler so
-            // hot non-array code still tiers up instead of interpreting
-            // forever.
+            // The SIMD path is intentionally gated off (see
+            // `tiered_execute_step`): compile with the type-directed scalar
+            // compiler so hot regions always tier up.
             if let Some(func) = unsafe {
                 jit.compile_region_typed(module_idx, pc, region_len, instructions, meta_ref)
             } {
@@ -560,5 +566,6 @@ pub enum TieredAction {
     /// JIT-compiled code was executed.
     RanJit,
     /// The region was SIMD-vectorized, compiled, and executed.
+    /// (Unused while the SIMD path is gated off; kept for API stability.)
     CompiledSimdAndRan,
 }

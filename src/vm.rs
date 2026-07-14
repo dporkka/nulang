@@ -482,16 +482,21 @@ pub(crate) fn constant_to_value(c: &Constant) -> Value {
 }
 
 /// Convert a bytecode constant pool to raw NaN-boxed bits for the JIT.
+///
+/// String constants must encode their constant-pool index exactly like the
+/// interpreter's `ConstU` (`Value::string(idx)`); encoding them as nil makes
+/// every tiered-up string load silently produce nil.
 fn constants_to_jit_bits(constants: &[Constant]) -> Vec<u64> {
     constants
         .iter()
-        .map(|c| match c {
+        .enumerate()
+        .map(|(idx, c)| match c {
             Constant::Int(i) => Value::int(*i).to_bits(),
             Constant::Float(f) => Value::float(*f).to_bits(),
+            Constant::String(_) => Value::string(idx as u32).to_bits(),
             Constant::Bool(b) => Value::bool(*b).to_bits(),
             Constant::Nil => Value::nil().to_bits(),
             Constant::Unit => Value::unit().to_bits(),
-            Constant::String(_) |
             Constant::FunctionRef(_) |
             Constant::BehaviorRef(_) |
             Constant::TypeDescriptor(_) => Value::nil().to_bits(),
@@ -941,6 +946,11 @@ impl VM {
 
     /// Copy a C string return value into the actor heap and free the temporary.
     fn copy_cstr_return(&mut self, value: Value) -> NuResult<Value> {
+        // cstr_to_value maps a NULL C string to nil; pass it through instead
+        // of failing on the missing pointer.
+        if value.is_nil() {
+            return Ok(value);
+        }
         let ptr = value.as_ptr().ok_or_else(|| NuError::VMError("FFI C string return was not a pointer".to_string()))?;
         // SAFETY: ptr is a valid null-terminated C string from cstr_to_value.
         let bytes = unsafe { CStr::from_ptr(ptr as *const c_char).to_bytes() };
@@ -1016,7 +1026,7 @@ impl VM {
             module.constants.push(Constant::String(s));
         }
         if let Some(bits) = self.jit_constants.get_mut(module_idx) {
-            bits.push(Value::nil().to_bits());
+            bits.push(Value::string(idx as u32).to_bits());
         }
         Value::string(idx as u32)
     }
@@ -1150,13 +1160,25 @@ impl VM {
         }
     }
 
+    /// Step limit, read once from the `NULANG_STEP_LIMIT` env var and
+    /// cached: re-reading the environment on every instruction costs an
+    /// env-mutex lock plus a String allocation per VM step.
+    pub(crate) fn step_limit() -> usize {
+        static STEP_LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *STEP_LIMIT.get_or_init(|| {
+            std::env::var("NULANG_STEP_LIMIT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10_000_000)
+        })
+    }
+
     /// Execute a single bytecode instruction.
     pub fn step(&mut self) -> NuResult<()> {
         // Step limit: configurable via env var NULANG_STEP_LIMIT.
         // Default 10M steps — long-running actors (servers, processors) may need more.
         self.step_count += 1;
-        let limit = std::env::var("NULANG_STEP_LIMIT")
-            .ok().and_then(|s| s.parse().ok()).unwrap_or(10_000_000);
+        let limit = Self::step_limit();
         if self.step_count > limit {
             return Err(NuError::VMError(
                 format!("Step limit exceeded ({} steps). Set NULANG_STEP_LIMIT env var to increase.", self.step_count)
@@ -1170,7 +1192,6 @@ impl VM {
         // Try JIT execution for hot bytecode regions before interpreting.
         if let Some(module) = self.modules.get(self.frames[frame_idx].module_idx) {
             let pc = self.frames[frame_idx].pc;
-            let instructions = &module.instructions;
             let module_idx = self.frames[frame_idx].module_idx;
             let constants = self.jit_constants.get(module_idx)
                 .map(|v| v.as_slice())
@@ -1190,11 +1211,12 @@ impl VM {
                         for (i, bits) in regs.iter().enumerate() {
                             self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
                         }
-                        let region_len = jit::find_compilable_region(pc, instructions);
+                        let region_len = jit.compiled_region_len(module_idx, pc)
+                            .expect("JIT-ran region must be recorded as compiled");
                         self.frames[frame_idx].pc += region_len;
                         return Ok(());
                     }
-                } else if jit::record_and_check_hot(module_idx, pc) {
+                } else if jit.record_and_check_hot(module_idx, pc) {
                     let mut regs: [u64; 256] = [0; 256];
                     for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
                         regs[i] = r.to_bits();
@@ -1206,7 +1228,8 @@ impl VM {
                         for (i, bits) in regs.iter().enumerate() {
                             self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
                         }
-                        let region_len = jit::find_compilable_region(pc, instructions);
+                        let region_len = jit.compiled_region_len(module_idx, pc)
+                            .expect("JIT-ran region must be recorded as compiled");
                         self.frames[frame_idx].pc += region_len;
                         return Ok(());
                     }
@@ -1592,7 +1615,9 @@ impl VM {
             OpCode::IMul => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
                 let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a * b);
+                // wrapping_mul: 48-bit operands can overflow i64 when
+                // multiplied; the result is masked to 48 bits by Value::int.
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a.wrapping_mul(b));
             }
             OpCode::IDiv => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
@@ -2081,7 +2106,12 @@ impl VM {
             }
             OpCode::Resume => {
                 let val = self.frames[frame_idx].regs[instr.op1 as usize];
-                if let Some(hf) = self.handler_stack.last_mut() {
+                // The continuation lives on the innermost *matching* handler
+                // frame (Perform uses rposition), which is not necessarily the
+                // top of the stack when nested handlers bind different effects.
+                if let Some(hf) = self.handler_stack.iter_mut().rev()
+                    .find(|hf| hf.captured_continuation.is_some())
+                {
                     if let Some(cont) = hf.captured_continuation.take() {
                         cont.restore(self, val);
                         return Ok(());
@@ -2451,6 +2481,31 @@ fn module_with_handler_table(bindings: Vec<crate::bytecode::HandlerBinding>) -> 
 mod vm_tests {
     use super::*;
     use crate::bytecode::{HandlerBinding, HandlerTable, Instruction};
+
+    /// A NULL C string return (nil from cstr_to_value) must pass through
+    /// instead of erroring on the missing pointer.
+    #[test]
+    fn test_copy_cstr_return_nil_passthrough() {
+        let mut vm = VM::new();
+        let result = vm.copy_cstr_return(Value::nil());
+        assert!(result.is_ok(), "NULL C string should map to nil: {:?}", result.err());
+        assert!(result.unwrap().is_nil());
+    }
+
+    /// A non-NULL C string return is still copied into the actor heap.
+    #[test]
+    fn test_copy_cstr_return_copies_string() {
+        let mut vm = VM::new();
+        // SAFETY: the literal is a valid null-terminated C string.
+        let value = unsafe { crate::ffi::marshal::cstr_to_value(c"hello ffi".as_ptr()) };
+        let result = vm
+            .copy_cstr_return(value)
+            .expect("C string return should copy into the heap");
+        let ptr = result.as_ptr().expect("copied string must be a pointer");
+        // SAFETY: ptr points to a null-terminated string in the VM heap.
+        let s = unsafe { CStr::from_ptr(ptr as *const c_char) }.to_str().unwrap();
+        assert_eq!(s, "hello ffi");
+    }
 
     /// Test 1: Basic integer arithmetic.
     #[test]
@@ -2995,13 +3050,14 @@ mod vm_tests {
         module.entry_point = Some(0);
 
         // Cold interpreter run.
-        crate::jit::reset_hot_counters();
         let mut vm = VM::new();
         vm.load_module(module.clone());
         let cold_result = vm.run_from(0, 0).unwrap();
 
         // Heat the entry region until it is JIT-compiled.
-        crate::jit::reset_hot_counters();
+        if let Some(jit) = vm.jit_session.as_mut() {
+            jit.reset_hot_counters();
+        }
         for _ in 0..2000 {
             let _ = vm.run_from(0, 0);
         }
@@ -3058,7 +3114,6 @@ mod vm_tests {
         module.emit(Instruction::new0(OpCode::Halt));                    // 15
         module.entry_point = Some(0);
 
-        crate::jit::reset_hot_counters();
         let mut vm = VM::new();
         vm.load_module(module);
         let cold_result = vm.run_from(0, 0).unwrap();
@@ -3494,5 +3549,210 @@ mod vm_tests {
             "after the tuple is dropped the child's block must be freed and recycled"
         );
         assert_ne!(regs[4].as_raw(), regs[5].as_raw(), "sanity: tuple block and child block differ");
+    }
+
+    /// Regression: string constants must survive JIT tier-up.
+    /// `constants_to_jit_bits` used to encode `Constant::String` as nil bits,
+    /// so a hot loop loading a string constant produced nil once the region
+    /// compiled, while the cold interpreter produced the string.
+    #[test]
+    fn test_jit_hot_loop_string_constant_survives_tierup() {
+        fn build_string_loop_module(limit: i64) -> CodeModule {
+            let mut module = CodeModule::new("test_jit_str_const");
+            let c_limit = module.add_constant(Constant::Int(limit));
+            let c_hi = module.add_constant(Constant::String("hi".to_string()));
+
+            // r0 = counter, r1 = limit, r2 = string load, r3 = cond,
+            // r5 = carried string value.
+            module.emit(Instruction::new3(OpCode::ConstU,
+                ((c_limit >> 8) & 0xFF) as u8, (c_limit & 0xFF) as u8, 1)); // 0: r1 = limit
+            module.emit(Instruction::new1(OpCode::Const0, 0));              // 1: r0 = 0
+            // Loop body (pc 2..=5): loads the string constant every iteration.
+            module.emit(Instruction::new3(OpCode::ConstU,
+                ((c_hi >> 8) & 0xFF) as u8, (c_hi & 0xFF) as u8, 2));       // 2: r2 = "hi"
+            module.emit(Instruction::new2(OpCode::Move, 2, 5));             // 3: r5 = r2
+            module.emit(Instruction::new1(OpCode::IInc, 0));                // 4: i++
+            module.emit(Instruction::new3(OpCode::ICmpLt, 0, 1, 3));        // 5: r3 = i < limit
+            let back: i16 = -4; // JmpT at pc 6 -> pc 2
+            module.emit(Instruction::new3(OpCode::JmpT, 3,
+                ((back as u16) >> 8) as u8, (back as u16 & 0xFF) as u8));   // 6
+            module.emit(Instruction::new2(OpCode::Move, 5, 0));             // 7: r0 = r5
+            module.emit(Instruction::new0(OpCode::Halt));                   // 8
+            module.entry_point = Some(0);
+            module
+        }
+
+        // Cold run (below HOT_THRESHOLD): interpreted throughout.
+        let mut cold_vm = VM::new();
+        cold_vm.load_module(build_string_loop_module(900));
+        let cold = cold_vm.run().expect("cold string loop should run");
+        assert_eq!(cold.raw & TAG_MASK, TAG_STRING, "cold run should yield a string");
+
+        // Hot run: the loop body tiers up past HOT_THRESHOLD=1000 and must
+        // still produce the string constant, not nil.
+        let mut hot_vm = VM::new();
+        hot_vm.load_module(build_string_loop_module(3000));
+        let hot = hot_vm.run().expect("hot string loop should run");
+        assert_eq!(hot.raw & TAG_MASK, TAG_STRING,
+            "string constant must survive JIT tier-up (was silently nil)");
+        assert_eq!(hot.raw, cold.raw, "hot and cold runs must agree");
+        let compiled = hot_vm.jit_session.as_ref().map(|j| j.compiled_count()).unwrap_or(0);
+        assert!(compiled > 0, "loop body must have been JIT-compiled");
+    }
+
+    /// Regression: a JIT-compiled `ArrLoad` must apply the interpreter's
+    /// null/type/bounds checks and yield nil for out-of-bounds reads instead
+    /// of dereferencing unchecked memory (a large offset used to read
+    /// garbage or segfault after tier-up).
+    #[test]
+    fn test_jit_hot_oob_arrload_returns_nil() {
+        fn build_oob_module(limit: i64) -> CodeModule {
+            let mut module = CodeModule::new("test_jit_oob_arrload");
+            let c_len = module.add_constant(Constant::Int(3));
+            let c_big = module.add_constant(Constant::Int(1_000_000));
+            let c_limit = module.add_constant(Constant::Int(limit));
+
+            // r0 = counter/result, r1 = limit, r3 = cond, r4 = array,
+            // r5 = loaded value, r6 = out-of-bounds index.
+            module.emit(Instruction::new3(OpCode::ConstU,
+                ((c_len >> 8) & 0xFF) as u8, (c_len & 0xFF) as u8, 0));     // 0: r0 = 3
+            module.emit(Instruction::new2(OpCode::ArrAlloc, 0, 4));         // 1: r4 = array[3]
+            module.emit(Instruction::new3(OpCode::ConstU,
+                ((c_big >> 8) & 0xFF) as u8, (c_big & 0xFF) as u8, 6));     // 2: r6 = 1_000_000
+            module.emit(Instruction::new3(OpCode::ConstU,
+                ((c_limit >> 8) & 0xFF) as u8, (c_limit & 0xFF) as u8, 1)); // 3: r1 = limit
+            module.emit(Instruction::new1(OpCode::Const0, 0));              // 4: r0 = 0
+            // Loop body (pc 5..=7): reads far out of bounds every iteration.
+            module.emit(Instruction::new3(OpCode::ArrLoad, 4, 6, 5));       // 5: r5 = a[1_000_000]
+            module.emit(Instruction::new1(OpCode::IInc, 0));                // 6: i++
+            module.emit(Instruction::new3(OpCode::ICmpLt, 0, 1, 3));        // 7: r3 = i < limit
+            let back: i16 = -3; // JmpT at pc 8 -> pc 5
+            module.emit(Instruction::new3(OpCode::JmpT, 3,
+                ((back as u16) >> 8) as u8, (back as u16 & 0xFF) as u8));   // 8
+            module.emit(Instruction::new2(OpCode::Move, 5, 0));             // 9: r0 = r5
+            module.emit(Instruction::new0(OpCode::Halt));                   // 10
+            module.entry_point = Some(0);
+            module
+        }
+
+        // Cold run: the interpreter yields nil out of bounds.
+        let mut cold_vm = VM::new();
+        cold_vm.load_module(build_oob_module(3));
+        let cold = cold_vm.run().expect("cold OOB loop should run");
+        assert!(cold.is_nil(), "cold out-of-bounds ArrLoad must be nil");
+
+        // Hot run: the compiled region must apply the same checks.
+        let mut hot_vm = VM::new();
+        hot_vm.load_module(build_oob_module(3000));
+        let hot = hot_vm.run().expect("hot OOB loop must not crash");
+        assert!(hot.is_nil(),
+            "JIT-compiled out-of-bounds ArrLoad must yield nil like the interpreter");
+        let compiled = hot_vm.jit_session.as_ref().map(|j| j.compiled_count()).unwrap_or(0);
+        assert!(compiled > 0, "loop body must have been JIT-compiled");
+    }
+
+    /// Regression: resuming from a handler that is NOT the top of the
+    /// handler stack must work. `Perform` captures the continuation into
+    /// the innermost *matching* handler frame (rposition), but `Resume`
+    /// used to look only at the top frame, so nested handlers binding
+    /// different effects — e.g. `handle handle perform A.x() { | B.y() => 0 }
+    /// { | A.x() => 42 }` — errored with "resume called without a captured
+    /// continuation".
+    #[test]
+    fn test_nested_handlers_resume_outer_continuation() {
+        let mut module = CodeModule::new("test_nested_resume");
+
+        // Outer table binds "A.x", inner table binds "B.y": a perform of
+        // "A.x" matches the outer frame, which is not the stack top.
+        module.add_handler_table(HandlerTable {
+            bindings: vec![HandlerBinding {
+                effect_name: "A.x".to_string(),
+                handler_offset: 10,
+                arg_count: 0,
+                result_reg: 0,
+            }],
+            fallback_offset: None,
+        });
+        module.add_handler_table(HandlerTable {
+            bindings: vec![HandlerBinding {
+                effect_name: "B.y".to_string(),
+                handler_offset: 12,
+                arg_count: 0,
+                result_reg: 0,
+            }],
+            fallback_offset: None,
+        });
+
+        let ax_idx = module.add_constant(Constant::String("A.x".to_string()));
+        let c42_idx = module.add_constant(Constant::Int(42));
+
+        // PC 0: Handle(0) — outer
+        // PC 1: Handle(1) — inner
+        // PC 2: Perform "A.x" -> r0 — continuation lands on the OUTER frame
+        // PC 3: Unwind (inner)
+        // PC 4: Unwind (outer)
+        // PC 5: Halt
+        // PC 10: outer handler body: ConstU 42 -> r0; Resume r0
+        // PC 12: inner handler body: Const0 -> r0; Resume r0 (unused)
+        module.emit(Instruction::new1(OpCode::Handle, 0));                // 0
+        module.emit(Instruction::new1(OpCode::Handle, 1));                // 1
+        module.emit(Instruction::new3(OpCode::Perform,
+            ((ax_idx >> 8) & 0xFF) as u8, (ax_idx & 0xFF) as u8, 0));     // 2
+        module.emit(Instruction::new0(OpCode::Unwind));                   // 3
+        module.emit(Instruction::new0(OpCode::Unwind));                   // 4
+        module.emit(Instruction::new0(OpCode::Halt));                     // 5
+        for _ in 6..10 { module.emit(Instruction::new0(OpCode::Nop)); }   // 6-9
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c42_idx >> 8) & 0xFF) as u8, (c42_idx & 0xFF) as u8, 0));   // 10
+        module.emit(Instruction::new1(OpCode::Resume, 0));                // 11
+        module.emit(Instruction::new1(OpCode::Const0, 0));                // 12
+        module.emit(Instruction::new1(OpCode::Resume, 0));                // 13
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run();
+        assert!(result.is_ok(),
+            "resume from a non-top handler frame must work: {:?}", result.err());
+        assert_eq!(result.unwrap().as_int(), Some(42), "outer handler resumes with 42");
+    }
+
+    /// Regression: `IMul` on 48-bit boundary values must not overflow i64
+    /// and panic in debug builds — 2^47 * 2^47 wraps to 0 once masked to
+    /// 48 bits. The hot loop also exercises the `nulang_imul` JIT helper
+    /// after tier-up.
+    #[test]
+    fn test_imul_boundary_value_wraps() {
+        const BOUNDARY: i64 = 140737488355328; // 2^47
+        let mut module = CodeModule::new("test_imul_boundary");
+        let c_val = module.add_constant(Constant::Int(BOUNDARY));
+        let c_limit = module.add_constant(Constant::Int(3000));
+
+        // r0/r1 = operands, r2 = limit, r3 = counter, r4 = product,
+        // r5 = cond.
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c_val >> 8) & 0xFF) as u8, (c_val & 0xFF) as u8, 0));         // 0
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c_val >> 8) & 0xFF) as u8, (c_val & 0xFF) as u8, 1));         // 1
+        module.emit(Instruction::new3(OpCode::ConstU,
+            ((c_limit >> 8) & 0xFF) as u8, (c_limit & 0xFF) as u8, 2));     // 2
+        module.emit(Instruction::new1(OpCode::Const0, 3));                  // 3
+        // Loop body (pc 4..=6): r4 = (2^47 * 2^47) wraps to 0.
+        module.emit(Instruction::new3(OpCode::IMul, 0, 1, 4));              // 4
+        module.emit(Instruction::new1(OpCode::IInc, 3));                    // 5
+        module.emit(Instruction::new3(OpCode::ICmpLt, 3, 2, 5));            // 6
+        let back: i16 = -3; // JmpT at pc 7 -> pc 4
+        module.emit(Instruction::new3(OpCode::JmpT, 5,
+            ((back as u16) >> 8) as u8, (back as u16 & 0xFF) as u8));       // 7
+        module.emit(Instruction::new2(OpCode::Move, 4, 0));                 // 8
+        module.emit(Instruction::new0(OpCode::Halt));                       // 9
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run().expect("boundary IMul must not panic");
+        assert_eq!(result.as_int(), Some(0), "(2^47 * 2^47) mod 2^48 = 0");
+        let compiled = vm.jit_session.as_ref().map(|j| j.compiled_count()).unwrap_or(0);
+        assert!(compiled > 0, "loop body must have been JIT-compiled");
     }
 }

@@ -15,7 +15,9 @@ pub extern "C" fn nulang_isub(a: u64, b: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn nulang_imul(a: u64, b: u64) -> u64 {
-    tag_int(sext48(a & PAYLOAD_MASK) * sext48(b & PAYLOAD_MASK))
+    // wrapping_mul: 48-bit operands can overflow i64 when multiplied; the
+    // result is masked to 48 bits by tag_int (matches interpreter IMul).
+    tag_int(sext48(a & PAYLOAD_MASK).wrapping_mul(sext48(b & PAYLOAD_MASK)))
 }
 
 #[no_mangle]
@@ -130,7 +132,13 @@ pub extern "C" fn nulang_fmul(a: u64, b: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn nulang_fdiv(a: u64, b: u64) -> u64 {
-    Value::float(f64::from_bits(a) / f64::from_bits(b)).as_raw()
+    // Guard the zero divisor like `nulang_idiv`: the interpreter's FDiv
+    // yields nil instead of inf/NaN (src/vm.rs OpCode::FDiv).
+    let bv = f64::from_bits(b);
+    if bv == 0.0 {
+        return Value::nil().as_raw();
+    }
+    Value::float(f64::from_bits(a) / bv).as_raw()
 }
 
 #[no_mangle]

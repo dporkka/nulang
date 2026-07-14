@@ -19,7 +19,6 @@ pub mod vm;
 
 pub mod jit;
 pub mod runtime;
-pub use crate::jit::reset_hot_counters;
 pub mod ai;
 pub mod ffi;
 #[cfg(feature = "python")]

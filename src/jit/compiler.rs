@@ -29,7 +29,8 @@ use cranelift_jit::JITModule;
 use cranelift_module::{Linkage, Module};
 
 use crate::bytecode::{Instruction, OpCode};
-use crate::value_layout::{PAYLOAD_MASK, TAG_INT};
+use crate::runtime::heap::{ActorHeap, OrcaHeader, TypeTag};
+use crate::value_layout::{PAYLOAD_MASK, TAG_INT, TAG_MASK, TAG_NIL, TAG_PTR};
 
 // ---------------------------------------------------------------------------
 // Opcode Support Matrix
@@ -736,23 +737,86 @@ pub(crate) fn emit_arr_load(builder: &mut FunctionBuilder, regs_ptr: Value, arr_
     let arr_val = load_reg(builder, regs_ptr, arr_reg);
     let idx_val = load_reg(builder, regs_ptr, idx_reg);
 
+    // Interpreter parity (vm.rs `OpCode::ArrLoad`): the load yields nil
+    // unless the array register holds a non-null heap pointer to an
+    // Array-typed object AND the index is in bounds — never a raw
+    // dereference. The `#[repr(C)]` `OrcaHeader` sits immediately before
+    // the payload pointer; field offsets come from `offset_of!` so they
+    // track the struct layout.
+    let header_size = builder.ins().iconst(types::I64, ActorHeap::HEADER_SIZE as i64);
+    let nil_bits = builder.ins().iconst(types::I64, TAG_NIL as i64);
+
+    let arr_tag = builder.ins().band_imm(arr_val, TAG_MASK as i64);
+    let is_ptr = builder.ins().icmp_imm(IntCC::Equal, arr_tag, TAG_PTR as i64);
     // Extract raw pointer (mask off tag bits from NaN-boxed pointer).
-    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK as i64);
-    let arr_ptr = builder.ins().band(arr_val, mask);
+    let arr_ptr = builder.ins().band_imm(arr_val, PAYLOAD_MASK as i64);
+    let non_null = builder.ins().icmp_imm(IntCC::NotEqual, arr_ptr, 0);
+    let can_read_header = builder.ins().band(is_ptr, non_null);
 
-    // Extract int payload from NaN-boxed int (sext48 via shift-left-16 then sshr-16).
+    let header_blk = builder.create_block();
+    let bounds_blk = builder.create_block();
+    let load_blk = builder.create_block();
+    let nil_blk = builder.create_block();
+    let merge_blk = builder.create_block();
+
+    builder.ins().brif(can_read_header, header_blk, &[], nil_blk, &[]);
+
+    // Header check: the object must carry the Array type tag.
+    builder.switch_to_block(header_blk);
+    let header = builder.ins().isub(arr_ptr, header_size);
+    let type_tag = builder.ins().load(
+        types::I8,
+        MemFlags::new(),
+        header,
+        std::mem::offset_of!(OrcaHeader, type_tag) as i32,
+    );
+    let is_array = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, type_tag, TypeTag::Array as i64);
+    builder.ins().brif(is_array, bounds_blk, &[], nil_blk, &[]);
+
+    // Bounds check: len = (header.size - header_size) / 8. The unsigned
+    // compare also rejects negative indices (huge when viewed unsigned),
+    // and the int-tag select mirrors `as_int().unwrap_or(0)`.
+    builder.switch_to_block(bounds_blk);
+    let size = builder.ins().load(
+        types::I64,
+        MemFlags::new(),
+        header,
+        std::mem::offset_of!(OrcaHeader, size) as i32,
+    );
+    let payload = builder.ins().isub(size, header_size);
+    let len = builder.ins().ushr_imm(payload, 3);
     let shifted = builder.ins().ishl_imm(idx_val, 16);
-    let idx_raw = builder.ins().sshr_imm(shifted, 16);
+    let idx_sext = builder.ins().sshr_imm(shifted, 16);
+    let idx_tag = builder.ins().band_imm(idx_val, TAG_MASK as i64);
+    let is_int = builder.ins().icmp_imm(IntCC::Equal, idx_tag, TAG_INT as i64);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let idx_raw = builder.ins().select(is_int, idx_sext, zero);
+    let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, idx_raw, len);
+    builder.ins().brif(in_bounds, load_blk, &[], nil_blk, &[]);
 
-    // Scale: idx * sizeof(Value) = idx * 8.
-    let eight = builder.ins().iconst(types::I64, 8);
-    let offset = builder.ins().imul(idx_raw, eight);
-
-    // Compute effective address and load the tagged Value.
+    // In bounds: load the tagged Value at arr_ptr + idx * 8.
+    builder.switch_to_block(load_blk);
+    let offset = builder.ins().ishl_imm(idx_raw, 3);
     let addr = builder.ins().iadd(arr_ptr, offset);
     let result = builder.ins().load(types::I64, MemFlags::new(), addr, 0);
-
     store_reg(builder, regs_ptr, dst, result);
+    builder.ins().jump(merge_blk, &[]);
+
+    // Any failed check produces nil, exactly like the interpreter.
+    builder.switch_to_block(nil_blk);
+    store_reg(builder, regs_ptr, dst, nil_bits);
+    builder.ins().jump(merge_blk, &[]);
+
+    // Every predecessor edge is emitted now; the caller adds the
+    // fallthrough jump out of merge_blk.
+    builder.seal_block(header_blk);
+    builder.seal_block(bounds_blk);
+    builder.seal_block(load_blk);
+    builder.seal_block(nil_blk);
+    builder.seal_block(merge_blk);
+    builder.switch_to_block(merge_blk);
 }
 
 

@@ -15,15 +15,35 @@ fn test_jit_session_creation() {
 
 #[test]
 fn test_hot_counter() {
-    reset_hot_counters();
-    assert!(!record_and_check_hot(0, 0));
+    let mut jit = make_jit();
+    assert!(!jit.record_and_check_hot(0, 0));
     for _ in 0..HOT_THRESHOLD {
-        record_and_check_hot(0, 42);
+        jit.record_and_check_hot(0, 42);
     }
-    assert!(record_and_check_hot(0, 42));
+    assert!(jit.record_and_check_hot(0, 42));
     // The same offset in a different module has its own independent counter.
-    assert!(!record_and_check_hot(1, 42));
-    reset_hot_counters();
+    assert!(!jit.record_and_check_hot(1, 42));
+    jit.reset_hot_counters();
+    assert!(!jit.record_and_check_hot(0, 42));
+}
+
+/// Hot counters must be per-session, not process-global: heating a region
+/// on one session must not make the same `(module_idx, offset)` hot on
+/// another session (the old global counter map made parallel tests that
+/// share module_idx 0 flaky).
+#[test]
+fn test_hot_counters_are_per_session() {
+    let mut jit_a = make_jit();
+    let mut jit_b = make_jit();
+    for _ in 0..HOT_THRESHOLD {
+        jit_a.record_and_check_hot(0, 42);
+    }
+    assert!(jit_a.record_and_check_hot(0, 42));
+    // A different session has an independent counter for the same key.
+    assert!(!jit_b.record_and_check_hot(0, 42));
+    // Reset only affects the session it is called on.
+    jit_a.reset_hot_counters();
+    assert!(!jit_a.record_and_check_hot(0, 42));
 }
 
 #[test]
@@ -71,6 +91,48 @@ fn test_find_region_stops_before_branches_and_halt() {
             instructions[2].opcode
         );
     }
+}
+
+/// The compiled-region map must record each region's instruction length at
+/// compile time, so the VM can advance pc after a JIT run without
+/// re-scanning the instruction stream via `find_compilable_region`.
+#[test]
+fn test_compiled_region_len_recorded() {
+    let mut jit = make_jit();
+    let instructions = vec![
+        Instruction::new3(OpCode::IAdd, 0, 1, 2),
+        Instruction::new3(OpCode::ISub, 0, 1, 2),
+        Instruction::new0(OpCode::Ret),
+    ];
+    let len = find_compilable_region(0, &instructions);
+    assert_eq!(len, 2);
+    assert_eq!(jit.compiled_region_len(0, 0), None, "not compiled yet");
+    let ptr = unsafe { jit.compile_region(0, 0, len, &instructions) };
+    assert!(ptr.is_some());
+    assert_eq!(jit.compiled_region_len(0, 0), Some(len));
+    assert_eq!(
+        jit.compiled_region_len(0, 1),
+        None,
+        "only the region's start offset carries a recorded length"
+    );
+}
+
+/// The step limit must be read from the environment once and cached: after
+/// the first read, changing `NULANG_STEP_LIMIT` must not change the value
+/// the VM uses (the old per-step env read took an env-mutex lock plus a
+/// String allocation on every bytecode instruction).
+#[test]
+fn test_step_limit_env_cached_once() {
+    let first = crate::vm::VM::step_limit();
+    // A higher-than-default value is harmless if another test thread reads
+    // the environment in the tiny window before it is removed again.
+    std::env::set_var("NULANG_STEP_LIMIT", "20000000");
+    let second = crate::vm::VM::step_limit();
+    std::env::remove_var("NULANG_STEP_LIMIT");
+    assert_eq!(
+        first, second,
+        "step limit must be cached after the first read, not re-read per step"
+    );
 }
 
 #[test]

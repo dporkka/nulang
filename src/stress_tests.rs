@@ -1004,7 +1004,6 @@ fn stress_jit_hot_loop_then_cold_fallback() {
     module.emit(Instruction::new0(OpCode::Halt));
     module.entry_point = Some(0);
 
-    crate::jit::reset_hot_counters();
     let mut vm = VM::new();
     vm.load_module(module.clone());
     let cold_result = vm.run_from(0, 0).unwrap();
@@ -1015,7 +1014,6 @@ fn stress_jit_hot_loop_then_cold_fallback() {
     );
 
     // Heat the entry region until it is JIT-compiled.
-    crate::jit::reset_hot_counters();
     for _ in 0..2_000 {
         let _ = vm.run_from(0, 0);
     }
@@ -1028,8 +1026,8 @@ fn stress_jit_hot_loop_then_cold_fallback() {
     );
     assert_eq!(hot_result.as_int(), Some(4950));
 
-    // A fresh VM with reset counters should still compute the same value.
-    crate::jit::reset_hot_counters();
+    // A fresh VM (its own session counters start cold) should still
+    // compute the same value.
     let mut fresh_vm = VM::new();
     fresh_vm.load_module(module);
     let fallback = fresh_vm.run_from(0, 0).unwrap();
