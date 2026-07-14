@@ -326,6 +326,56 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             Ok(compose_subst(&s2, &s1))
         }
 
+        // Variants: same constructor set, payloads unify pairwise. Required
+        // for declared variant types (SPEC2 §3.4.1), e.g. unifying the two
+        // branches of `if b then Some(1) else None`.
+        (Type::Variant(vs1), Type::Variant(vs2)) => {
+            if vs1.len() != vs2.len() {
+                return Err(NuError::TypeError {
+                    msg: format!(
+                        "Cannot unify variants with different constructor counts: {} vs {}",
+                        vs1.len(),
+                        vs2.len()
+                    ),
+                    span,
+                });
+            }
+            // Sort by constructor name so declaration order does not matter.
+            let mut sorted1 = vs1.clone();
+            let mut sorted2 = vs2.clone();
+            sorted1.sort_by(|(a, _), (b, _)| a.cmp(b));
+            sorted2.sort_by(|(a, _), (b, _)| a.cmp(b));
+            let mut subst = vec![];
+            for ((n1, p1), (n2, p2)) in sorted1.iter().zip(sorted2.iter()) {
+                if n1 != n2 {
+                    return Err(NuError::TypeError {
+                        msg: format!(
+                            "Cannot unify variants with different constructors: '{}' vs '{}'",
+                            n1, n2
+                        ),
+                        span,
+                    });
+                }
+                let s = match (p1, p2) {
+                    (None, None) => continue,
+                    (Some(a), Some(b)) => {
+                        mgu(&apply_subst(a, &subst), &apply_subst(b, &subst), span)?
+                    }
+                    _ => {
+                        return Err(NuError::TypeError {
+                            msg: format!(
+                                "Cannot unify variant constructor '{}' with mismatched payloads",
+                                n1
+                            ),
+                            span,
+                        });
+                    }
+                };
+                subst = compose_subst(&s, &subst);
+            }
+            Ok(subst)
+        }
+
         // Anything else is a unification error
         _ => Err(NuError::TypeError {
             msg: format!("Cannot unify {:?} with {:?}", t1, t2),
@@ -509,6 +559,29 @@ impl TypeChecker {
                 }
                 Decl::Agent { name, .. } => {
                     ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                }
+                Decl::VariantType { variants, .. } => {
+                    // Bind each constructor (SPEC2 §3.4.1): a constructor with
+                    // a payload is a function from the payload type to the
+                    // variant type; a nullary constructor is a plain value of
+                    // the variant type. Declared type parameters (e.g. `T` in
+                    // `Option[T]`) stay free in the payload types parsed from
+                    // the declaration and are generalized per constructor, so
+                    // each use instantiates them fresh.
+                    let variant_ty = Type::Variant(variants.clone());
+                    for (ctor_name, payload) in variants {
+                        let ctor_ty = match payload {
+                            Some(payload_ty) => Type::Function {
+                                param: Box::new(payload_ty.clone()),
+                                ret: Box::new(variant_ty.clone()),
+                                effect: EffectRow::empty(),
+                                cap: Capability::Ref,
+                            },
+                            None => variant_ty.clone(),
+                        };
+                        let gen_ty = self.do_generalize(&ctx, &ctor_ty);
+                        ctx.bind(ctor_name.clone(), gen_ty, Capability::Ref);
+                    }
                 }
 
                 _ => {}
@@ -3387,5 +3460,105 @@ mod tests {
             Type::Scheme { vars, .. } => assert!(vars.contains(&v)),
             other => panic!("expected a scheme quantifying v, got {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: declared types — variants, aliases, records, Nil (SPEC2 §3.4.1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_variant_constructors_are_bound() {
+        // Declaring `Option` binds `Some` (payload -> variant function) and
+        // `None` (variant value), so constructing with them checks.
+        let result = check_src("type Option[T] = Some(T) | None\nSome(1)");
+        assert!(result.is_ok(), "expected success, got {:?}", result.err());
+    }
+
+    #[test]
+    fn test_unbound_variant_constructor_errors() {
+        // Without a declaring variant type, `Some` stays an unbound variable.
+        let result = check_src("Some(1)");
+        assert!(
+            result.is_err(),
+            "expected unbound variable error, got {:?}",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn test_nullary_constructor_binds_as_value() {
+        let result = check_src("type Color = Red | Green | Blue\nRed");
+        assert!(result.is_ok(), "expected success, got {:?}", result.err());
+    }
+
+    #[test]
+    fn test_variant_branches_unify() {
+        // The canonical Option pattern: `Some(1)` and `None` must unify
+        // (constructor instantiation + variant unification), and the result
+        // must unify with the expanded `Option[Int]` return annotation.
+        let result = check_src(
+            "type Option[T] = Some(T) | None\nfn pick(b: Bool) -> Option[Int] { if b then Some(1) else None }\npick",
+        );
+        assert!(result.is_ok(), "expected success, got {:?}", result.err());
+    }
+
+    #[test]
+    fn test_variant_match_binds_payload() {
+        let result = check_src(
+            "type Option[T] = Some(T) | None\nfn get(o: Option[Int]) -> Int { match o with { | Some(v) => v | None => 0 } }\nget",
+        );
+        assert!(result.is_ok(), "expected success, got {:?}", result.err());
+    }
+
+    #[test]
+    fn test_type_alias_expands_in_annotations() {
+        // `MyInt` expands to `Int`: an Int argument checks...
+        let ok = check_src("type alias MyInt = Int\nfn f(x: MyInt) -> MyInt { x }\nf(1)");
+        assert!(ok.is_ok(), "expected success, got {:?}", ok.err());
+        // ...and a String argument does not — the alias really constrains.
+        let bad = check_src("type alias MyInt = Int\nfn f(x: MyInt) -> MyInt { x }\nf(\"s\")");
+        assert!(
+            bad.is_err(),
+            "alias must constrain to the aliased type, got {:?}",
+            bad.ok()
+        );
+    }
+
+    #[test]
+    fn test_record_type_name_usable_in_annotation() {
+        let result =
+            check_src("type Point = { x: Int, y: Int }\nfn get_x(p: Point) -> Int { p.x }\nget_x");
+        assert!(result.is_ok(), "expected success, got {:?}", result.err());
+    }
+
+    #[test]
+    fn test_unknown_type_name_in_annotation_errors() {
+        let result = check_src("fn f(x: Bogus) x\nf(1)");
+        match result {
+            Err(NuError::ParseError { msg, .. }) => {
+                assert!(
+                    msg.contains("Unknown type name") && msg.contains("Bogus"),
+                    "unexpected message: {}",
+                    msg
+                );
+            }
+            other => panic!("expected unknown type name parse error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_nil_annotation_rejects_int() {
+        let result = check_src("fn f(x: Nil) x\nf(1)");
+        assert!(
+            result.is_err(),
+            "Int must not unify with Nil, got {:?}",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn test_nil_annotation_accepts_nil() {
+        let result = check_src("fn f(x: Nil) x\nf(nil)");
+        assert!(result.is_ok(), "expected success, got {:?}", result.err());
     }
 }

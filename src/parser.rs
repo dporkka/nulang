@@ -1858,29 +1858,13 @@ impl Parser {
         match current_kind {
             TokenKind::Ident(s) | TokenKind::UpperIdent(s) => {
                 let name = s.clone();
+                let name_span = self.current_span();
                 self.advance();
-                let ty = match name.as_str() {
-                    "Int" => Type::Primitive(PrimitiveType::Int),
-                    "Float" => Type::Primitive(PrimitiveType::Float),
-                    "Bool" => Type::Primitive(PrimitiveType::Bool),
-                    "String" => Type::Primitive(PrimitiveType::String),
-                    "Unit" => Type::Primitive(PrimitiveType::Unit),
-                    "Never" => Type::Primitive(PrimitiveType::Never),
-                    "Address" => Type::Primitive(PrimitiveType::Address),
-                    _ => {
-                        if let Some(&tv) = self.local_type_params.get(&name) {
-                            Type::Var(tv)
-                        } else {
-                            let tv = *self
-                                .global_type_constructors
-                                .entry(name)
-                                .or_insert_with(TypeVar::fresh);
-                            Type::Var(tv)
-                        }
-                    }
-                };
 
-                if self.peek_kind() == &TokenKind::LBracket {
+                // Optional type arguments (`Option[Int]`). Parsed up front so
+                // a declared generic type can have them substituted into its
+                // expansion below.
+                let args = if self.peek_kind() == &TokenKind::LBracket {
                     self.advance(); // consume '['
                     let mut args = Vec::new();
                     self.skip_newlines();
@@ -1893,12 +1877,40 @@ impl Parser {
                         self.skip_newlines();
                     }
                     self.expect(TokenKind::RBracket)?;
+                    args
+                } else {
+                    Vec::new()
+                };
+
+                let ty = match name.as_str() {
+                    "Int" => Type::Primitive(PrimitiveType::Int),
+                    "Float" => Type::Primitive(PrimitiveType::Float),
+                    "Bool" => Type::Primitive(PrimitiveType::Bool),
+                    "String" => Type::Primitive(PrimitiveType::String),
+                    "Nil" => Type::Primitive(PrimitiveType::Nil),
+                    "Unit" => Type::Primitive(PrimitiveType::Unit),
+                    "Never" => Type::Primitive(PrimitiveType::Never),
+                    "Address" => Type::Primitive(PrimitiveType::Address),
+                    _ => {
+                        if let Some(&tv) = self.local_type_params.get(&name) {
+                            Type::Var(tv)
+                        } else {
+                            // Declared type names (`type` / `type alias`)
+                            // expand to their declaration; truly unknown names
+                            // are a hard error instead of a silently
+                            // unconstrained fresh variable (SPEC2 §3.4.1).
+                            return self.resolve_named_type(&name, args, name_span);
+                        }
+                    }
+                };
+
+                if args.is_empty() {
+                    Ok(ty)
+                } else {
                     Ok(Type::App {
                         constructor: Box::new(ty),
                         args,
                     })
-                } else {
-                    Ok(ty)
                 }
             }
             TokenKind::LParen => {
@@ -1951,6 +1963,194 @@ impl Parser {
                 msg: format!("Expected type, found {:?}", current_kind),
                 span: self.current_span(),
             }),
+        }
+    }
+
+    /// Resolve a non-primitive type name against the module's `type` and
+    /// `type alias` declarations. The declaration is re-parsed from the token
+    /// stream — the parser is a cursor over a fully lexed token vec, so
+    /// forward references work — with the use-site arguments substituted for
+    /// the declared type parameters. Unknown names are a hard parse error
+    /// instead of a silently unconstrained fresh type variable.
+    fn resolve_named_type(&mut self, name: &str, args: Vec<Type>, span: Span) -> NuResult<Type> {
+        let decl_pos = match self.find_type_decl(name) {
+            Some(pos) => pos,
+            None => {
+                return Err(NuError::ParseError {
+                    msg: format!("Unknown type name: '{}'", name),
+                    span,
+                });
+            }
+        };
+
+        let saved_pos = self.pos;
+        let saved_locals = self.local_type_params.clone();
+        // Guard against (mutually) recursive references: while the body is
+        // being expanded, the type's own name resolves to a stable abstract
+        // variable instead of expanding again (e.g. `Tree[T]` inside the
+        // body of `type Tree[T] = ...`).
+        let self_tv = *self
+            .global_type_constructors
+            .entry(name.to_string())
+            .or_insert_with(TypeVar::fresh);
+        self.local_type_params.insert(name.to_string(), self_tv);
+
+        // Position the cursor at the declaration and re-parse it.
+        self.pos = decl_pos + 1; // skip the 'type' keyword
+        self.skip_newlines();
+        let decl_result = if self.peek_kind() == &TokenKind::Alias {
+            self.parse_type_alias(false)
+        } else {
+            self.parse_type_decl_variant_or_record(false)
+        };
+        let result = decl_result.and_then(|decl| {
+            let (type_params, body) = match decl {
+                Decl::TypeAlias {
+                    type_params, body, ..
+                } => (type_params, body),
+                Decl::RecordType {
+                    type_params,
+                    fields,
+                    ..
+                } => (type_params, Type::Record(fields)),
+                Decl::VariantType {
+                    type_params,
+                    variants,
+                    ..
+                } => (type_params, Type::Variant(variants)),
+                _ => unreachable!("find_type_decl only matches type declarations"),
+            };
+            if !args.is_empty() && args.len() != type_params.len() {
+                return Err(NuError::ParseError {
+                    msg: format!(
+                        "Type '{}' expects {} type argument(s), got {}",
+                        name,
+                        type_params.len(),
+                        args.len()
+                    ),
+                    span,
+                });
+            }
+            // Snapshot the declared parameters' variables before the local
+            // map is restored, then splice the use-site arguments in.
+            let param_vars: Vec<Option<TypeVar>> = type_params
+                .iter()
+                .map(|p| self.local_type_params.get(p).copied())
+                .collect();
+            let mut body = body;
+            for (tv, arg) in param_vars.iter().zip(args.iter()) {
+                if let Some(tv) = tv {
+                    body = Self::subst_type_var(&body, *tv, arg);
+                }
+            }
+            Ok(body)
+        });
+        self.pos = saved_pos;
+        self.local_type_params = saved_locals;
+        result
+    }
+
+    /// Find the token index of the `type` keyword of the declaration named
+    /// `name` (`type Name = ...` or `type alias Name = ...`), if any.
+    fn find_type_decl(&self, name: &str) -> Option<usize> {
+        for i in 0..self.tokens.len() {
+            if self.tokens[i].kind != TokenKind::Type {
+                continue;
+            }
+            let mut j = i + 1;
+            while matches!(
+                self.tokens.get(j).map(|t| &t.kind),
+                Some(TokenKind::Newline) | Some(TokenKind::DocComment(_))
+            ) {
+                j += 1;
+            }
+            // Optional 'alias' keyword between 'type' and the name.
+            if matches!(
+                self.tokens.get(j).map(|t| &t.kind),
+                Some(TokenKind::Alias)
+            ) {
+                j += 1;
+            }
+            match self.tokens.get(j).map(|t| &t.kind) {
+                Some(TokenKind::Ident(n)) | Some(TokenKind::UpperIdent(n)) if n == name => {
+                    return Some(i);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Substitute a single type variable with a concrete type throughout
+    /// `ty`. Used to splice use-site arguments into an expanded declared
+    /// type; mirrors the type checker's `apply_subst` for one mapping.
+    fn subst_type_var(ty: &Type, var: TypeVar, arg: &Type) -> Type {
+        match ty {
+            Type::Var(v) => {
+                if *v == var {
+                    arg.clone()
+                } else {
+                    ty.clone()
+                }
+            }
+            Type::Primitive(_) => ty.clone(),
+            Type::Tuple(ts) => Type::Tuple(
+                ts.iter()
+                    .map(|t| Self::subst_type_var(t, var, arg))
+                    .collect(),
+            ),
+            Type::Record(fs) => Type::Record(
+                fs.iter()
+                    .map(|(n, t)| (n.clone(), Self::subst_type_var(t, var, arg)))
+                    .collect(),
+            ),
+            Type::Variant(vs) => Type::Variant(
+                vs.iter()
+                    .map(|(n, t)| {
+                        (
+                            n.clone(),
+                            t.as_ref().map(|t| Self::subst_type_var(t, var, arg)),
+                        )
+                    })
+                    .collect(),
+            ),
+            Type::Array(t) => Type::Array(Box::new(Self::subst_type_var(t, var, arg))),
+            Type::Function {
+                param,
+                ret,
+                effect,
+                cap,
+            } => Type::Function {
+                param: Box::new(Self::subst_type_var(param, var, arg)),
+                ret: Box::new(Self::subst_type_var(ret, var, arg)),
+                effect: effect.clone(),
+                cap: *cap,
+            },
+            Type::Actor { state, behavior } => Type::Actor {
+                state: Box::new(Self::subst_type_var(state, var, arg)),
+                behavior: Box::new(Self::subst_type_var(behavior, var, arg)),
+            },
+            Type::App { constructor, args } => Type::App {
+                constructor: Box::new(Self::subst_type_var(constructor, var, arg)),
+                args: args
+                    .iter()
+                    .map(|a| Self::subst_type_var(a, var, arg))
+                    .collect(),
+            },
+            Type::Reference { cap, inner } => Type::Reference {
+                cap: *cap,
+                inner: Box::new(Self::subst_type_var(inner, var, arg)),
+            },
+            Type::Scheme { vars, body } => {
+                if vars.contains(&var) {
+                    ty.clone()
+                } else {
+                    Type::Scheme {
+                        vars: vars.clone(),
+                        body: Box::new(Self::subst_type_var(body, var, arg)),
+                    }
+                }
+            }
         }
     }
 
@@ -2029,22 +2229,10 @@ impl Parser {
     }
 
     fn string_to_effect(&self, name: &str) -> Effect {
-        match name {
-            "IO" => Effect::IO,
-            "Net" => Effect::Net,
-            "FS" => Effect::FS,
-            "Rand" => Effect::Rand,
-            "Time" => Effect::Time,
-            "Spawn" => Effect::Spawn,
-            "Send" => Effect::Send,
-            "Receive" => Effect::Receive,
-            "Migrate" => Effect::Migrate,
-            "STM" => Effect::STM,
-            "Async" => Effect::Async,
-            "LLM" => Effect::LLM,
-            "Cost" => Effect::Cost,
-            _ => Effect::UserDefined(name.to_string()),
-        }
+        // Single name table shared with the effect checker so annotation
+        // parsing and `perform` resolution can never disagree on the
+        // built-in effect names (SPEC2 §4.6).
+        crate::effect_checker::parse_effect_name(name)
     }
 
     fn parse_pattern(&mut self) -> NuResult<Pattern> {
@@ -2371,6 +2559,26 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_effect_row_builtin_event_and_ffi() {
+        // SPEC2 §4.6 lists Event and FFI as built-in effects; annotation
+        // parsing must map them to the built-in variants (not UserDefined),
+        // exactly like `perform` resolution in the effect checker does.
+        let ast = parse("fn f() -> Unit ! {Event, FFI} 1").unwrap();
+        match &ast.decls[0] {
+            Decl::Function {
+                effect: Some(row), ..
+            } => {
+                assert_eq!(
+                    row,
+                    &EffectRow::Closed(vec![Effect::Event, Effect::FFI]),
+                    "Event and FFI must parse as built-in effects"
+                );
+            }
+            _ => panic!("Expected annotated function declaration"),
+        }
+    }
+
+    #[test]
     fn test_parse_type_alias() {
         let ast = parse("type alias MyInt = Int").unwrap();
         match &ast.decls[0] {
@@ -2379,6 +2587,75 @@ mod tests {
                 assert_eq!(body, &Type::Primitive(PrimitiveType::Int));
             }
             _ => panic!("Expected type alias declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nil_primitive_type() {
+        // `Nil` (uppercase) must parse as the primitive Nil type, not a
+        // silently unconstrained fresh type variable.
+        let ast = parse("fn f(x: Nil) x").unwrap();
+        match &ast.decls[0] {
+            Decl::Function { params, .. } => {
+                assert_eq!(params[0].1, Some(Type::Primitive(PrimitiveType::Nil)));
+            }
+            _ => panic!("Expected function declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unknown_type_name_errors() {
+        let result = parse("fn f(x: Bogus) x");
+        match result {
+            Err(NuError::ParseError { msg, .. }) => {
+                assert!(
+                    msg.contains("Unknown type name") && msg.contains("Bogus"),
+                    "unexpected message: {}",
+                    msg
+                );
+            }
+            other => panic!("expected unknown type name error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_declared_alias_expands_in_annotation() {
+        let ast = parse("type alias MyInt = Int\nfn f(x: MyInt) x").unwrap();
+        match &ast.decls[1] {
+            Decl::Function { params, .. } => {
+                assert_eq!(params[0].1, Some(Type::Primitive(PrimitiveType::Int)));
+            }
+            _ => panic!("Expected function declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_declared_variant_expands_with_args() {
+        // `Option[Int]` expands to the variant structure with `T := Int`.
+        let ast = parse("type Option[T] = Some(T) | None\nfn f(x: Option[Int]) x").unwrap();
+        match &ast.decls[1] {
+            Decl::Function { params, .. } => match &params[0].1 {
+                Some(Type::Variant(variants)) => {
+                    assert_eq!(variants.len(), 2);
+                    assert_eq!(variants[0].0, "Some");
+                    assert_eq!(variants[0].1, Some(Type::Primitive(PrimitiveType::Int)));
+                    assert_eq!(variants[1].0, "None");
+                    assert_eq!(variants[1].1, None);
+                }
+                other => panic!("expected expanded variant annotation, got {:?}", other),
+            },
+            _ => panic!("Expected function declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_type_argument_arity_error() {
+        let result = parse("type Option[T] = Some(T) | None\nfn f(x: Option[Int, String]) x");
+        match result {
+            Err(NuError::ParseError { msg, .. }) => {
+                assert!(msg.contains("type argument"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected arity error, got {:?}", other),
         }
     }
 
