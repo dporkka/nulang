@@ -9,7 +9,7 @@
 use crate::ast::*;
 use crate::types::*;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 // ---------------------------------------------------------------------------
 // Effect Row Operations
@@ -84,6 +84,23 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "FFI" => Effect::FFI,
         other => Effect::UserDefined(other.to_string()),
     }
+}
+
+/// Flatten nested `module {}` blocks into a single declaration list.
+///
+/// Mirrors `typechecker::flatten_decls`: modules are purely a namespacing
+/// construct whose contents live in the same flat, unqualified namespace,
+/// so effect and capability checking must recurse into them just like
+/// type checking does.
+pub fn flatten_decls(decls: &[Decl]) -> Vec<&Decl> {
+    let mut out = Vec::with_capacity(decls.len());
+    for decl in decls {
+        match decl {
+            Decl::Module { decls: inner, .. } => out.extend(flatten_decls(inner)),
+            _ => out.push(decl),
+        }
+    }
+    out
 }
 
 /// Collect the free (unbound) variable names in an expression.
@@ -371,6 +388,16 @@ impl EffectContext {
 pub struct EffectChecker {
     /// Accumulated diagnostics (errors + warnings).
     pub diagnostics: Vec<String>,
+    /// Effect rows of module-level functions, keyed by name. Populated by
+    /// [`EffectChecker::register_function_rows`] before bodies are checked,
+    /// so that a direct call site (`Expr::App` on a `Var`) propagates the
+    /// callee's declared or inferred row (SPEC2 §4.9).
+    fn_rows: HashMap<String, EffectRow>,
+    /// Names currently bound by local constructs (let bindings, lambda
+    /// parameters, pattern variables, ...). A locally-bound name shadows a
+    /// same-named module function, so calls through it are not charged the
+    /// module function's effect row.
+    shadowed: Vec<String>,
 }
 
 impl EffectChecker {
@@ -378,7 +405,25 @@ impl EffectChecker {
     pub fn new() -> Self {
         EffectChecker {
             diagnostics: Vec::new(),
+            fn_rows: HashMap::new(),
+            shadowed: Vec::new(),
         }
+    }
+
+    /// Infer `expr` while treating `names` as locally bound, so direct calls
+    /// to same-named module functions are not charged the module function's
+    /// effect row while the binding is in scope.
+    fn infer_with_bound(
+        &mut self,
+        ctx: &EffectContext,
+        names: &[String],
+        expr: &Expr,
+    ) -> NuResult<EffectRow> {
+        let base = self.shadowed.len();
+        self.shadowed.extend(names.iter().cloned());
+        let result = self.infer_effects(ctx, expr);
+        self.shadowed.truncate(base);
+        result
     }
 
     /// Infer the effect row of an expression.
@@ -393,38 +438,64 @@ impl EffectChecker {
 
             // Lambda: effects are given by its annotation, or inferred from the
             // body if unannotated. If annotated, the body must not perform effects
-            // beyond the annotation.
-            Expr::Lambda { body, effect, .. } => {
-                if let Some(ann) = effect {
+            // beyond the annotation. Parameters shadow same-named module
+            // functions inside the body.
+            Expr::Lambda {
+                params,
+                body,
+                effect,
+                ..
+            } => {
+                let base = self.shadowed.len();
+                self.shadowed.extend(params.iter().map(|(n, _)| n.clone()));
+                let result = if let Some(ann) = effect {
                     let lambda_ctx = EffectContext::with_allowed(ann.clone());
-                    self.check_effects(&lambda_ctx, body, ann)?;
-                    Ok(ann.clone())
+                    self.check_effects(&lambda_ctx, body, ann)
+                        .map(|_| ann.clone())
                 } else {
                     self.infer_effects(ctx, body)
-                }
+                };
+                self.shadowed.truncate(base);
+                result
             }
 
-            // Application: effects of function + arguments + the implicit Call
-            // effect (modelled as the function's own effect row).
+            // Application: effects of function + arguments, plus the callee's
+            // own row when this is a direct call to a known module-level
+            // function (SPEC2 §4.9). Locally-bound names shadow module
+            // functions and are not charged.
             Expr::App { func, args, .. } => {
                 let mut row = self.infer_effects(ctx, func)?;
                 for arg in args {
                     row = effect_row_union(&row, &self.infer_effects(ctx, arg)?);
                 }
+                if let Expr::Var(name, _) = func.as_ref() {
+                    if !self.shadowed.contains(name) {
+                        if let Some(callee_row) = self.fn_rows.get(name) {
+                            row = effect_row_union(&row, callee_row);
+                        }
+                    }
+                }
                 Ok(row)
             }
 
-            // Let: effects of value + effects of body.
-            Expr::Let { value, body, .. } => {
+            // Let: effects of value + effects of body. The binding shadows a
+            // same-named module function inside the body.
+            Expr::Let {
+                name, value, body, ..
+            } => {
                 let val_row = self.infer_effects(ctx, value)?;
-                let body_row = self.infer_effects(ctx, body)?;
+                let body_row = self.infer_with_bound(ctx, std::slice::from_ref(name), body)?;
                 Ok(effect_row_union(&val_row, &body_row))
             }
 
-            // Let-rec: similar to let, but the binding is recursive.
-            Expr::LetRec { value, body, .. } => {
-                let val_row = self.infer_effects(ctx, value)?;
-                let body_row = self.infer_effects(ctx, body)?;
+            // Let-rec: similar to let, but the binding is recursive (in scope
+            // in the value as well as the body).
+            Expr::LetRec {
+                name, value, body, ..
+            } => {
+                let names = std::slice::from_ref(name);
+                let val_row = self.infer_with_bound(ctx, names, value)?;
+                let body_row = self.infer_with_bound(ctx, names, body)?;
                 Ok(effect_row_union(&val_row, &body_row))
             }
 
@@ -443,13 +514,17 @@ impl EffectChecker {
                 Ok(row)
             }
 
-            // Match: union of scrutinee and all arm effects.
+            // Match: union of scrutinee and all arm effects. Pattern-bound
+            // variables shadow same-named module functions inside their arm.
             Expr::Match {
                 scrutinee, arms, ..
             } => {
                 let mut row = self.infer_effects(ctx, scrutinee)?;
-                for (_, arm_expr) in arms {
-                    row = effect_row_union(&row, &self.infer_effects(ctx, arm_expr)?);
+                for (pat, arm_expr) in arms {
+                    let mut names = Vec::new();
+                    pat_bound_vars(pat, &mut names);
+                    let arm_row = self.infer_with_bound(ctx, &names, arm_expr)?;
+                    row = effect_row_union(&row, &arm_row);
                 }
                 Ok(row)
             }
@@ -561,11 +636,13 @@ impl EffectChecker {
                 Ok(row)
             }
 
-            // Receive: adds the Receive effect.
+            // Receive: adds the Receive effect. Arm parameters shadow
+            // same-named module functions inside their arm body.
             Expr::Receive { arms, .. } => {
                 let mut row = EffectRow::singleton(Effect::Receive);
-                for (_, _, body_expr) in arms {
-                    row = effect_row_union(&row, &self.infer_effects(ctx, body_expr)?);
+                for (_, params, body_expr) in arms {
+                    let arm_row = self.infer_with_bound(ctx, params, body_expr)?;
+                    row = effect_row_union(&row, &arm_row);
                 }
                 Ok(row)
             }
@@ -644,9 +721,11 @@ impl EffectChecker {
                     row = effect_row_diff(&row, eff);
                 }
 
-                // Add effects of each handler body.
+                // Add effects of each handler body. Handler parameters shadow
+                // same-named module functions inside the handler body.
                 for h in handlers {
-                    row = effect_row_union(&row, &self.infer_effects(ctx, &h.body)?);
+                    let h_row = self.infer_with_bound(ctx, &h.params, &h.body)?;
+                    row = effect_row_union(&row, &h_row);
                 }
 
                 let _ = span;
@@ -674,7 +753,8 @@ impl EffectChecker {
                 Ok(effect_row_union(&r1, &r2))
             }
 
-            // For comprehension: effects of iterable + body.
+            // For comprehension: effects of iterable + body. The loop
+            // variable shadows a same-named module function inside the body.
             Expr::For {
                 var,
                 iterable,
@@ -682,8 +762,8 @@ impl EffectChecker {
                 span,
             } => {
                 let r1 = self.infer_effects(ctx, iterable)?;
-                let r2 = self.infer_effects(ctx, body)?;
-                let _ = (var, span);
+                let r2 = self.infer_with_bound(ctx, std::slice::from_ref(var), body)?;
+                let _ = span;
                 Ok(effect_row_union(&r1, &r2))
             }
 
@@ -735,6 +815,126 @@ impl EffectChecker {
         } else {
             Ok(())
         }
+    }
+
+    /// Pass 1 of module effect checking: record each function's effect row.
+    ///
+    /// Annotated functions contribute their declared row; unannotated
+    /// functions start at the empty row and are then iterated to a fixpoint
+    /// so that call chains propagate callee effects (SPEC2 §4.7/§4.9). Rows
+    /// are finite sets that only grow via union, so the iteration reaches
+    /// the fixpoint within `n` rounds for `n` functions — an effect `k`
+    /// calls away is picked up after `k` rounds, and recursive or
+    /// mutually-recursive functions simply saturate.
+    ///
+    /// Takes the flattened declaration list (see [`flatten_decls`]). After
+    /// this call, [`EffectChecker::infer_effects`] unions the callee row at
+    /// direct call sites (`Expr::App` on a `Var`).
+    pub fn register_function_rows(&mut self, decls: &[&Decl]) -> NuResult<()> {
+        let ctx = EffectContext::empty();
+        for decl in decls {
+            if let Decl::Function { name, effect, .. } = decl {
+                let row = effect.clone().unwrap_or_else(EffectRow::empty);
+                self.fn_rows.insert(name.clone(), row);
+            }
+        }
+        for _ in 0..self.fn_rows.len() {
+            let mut changed = false;
+            for decl in decls {
+                if let Decl::Function {
+                    name,
+                    effect: None,
+                    body,
+                    ..
+                } = decl
+                {
+                    let inferred = self.infer_effects(&ctx, body)?;
+                    let entry = self.fn_rows.entry(name.clone()).or_insert_with(EffectRow::empty);
+                    // Grow only when the inferred row contributes an effect
+                    // not already recorded (a plain `!=` on the union would
+                    // never stabilize, since union appends duplicates).
+                    if !effect_row_subset(&inferred, entry) {
+                        *entry = effect_row_union(entry, &inferred);
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Pass 2 of module effect checking: enforce a single (flattened)
+    /// declaration's bodies.
+    ///
+    /// Bodies with a declared effect row (`! E`) are checked against it;
+    /// un-annotated bodies are inference-only (their row is already recorded
+    /// for callers by [`EffectChecker::register_function_rows`]).
+    pub fn check_decl(&mut self, decl: &Decl) -> NuResult<()> {
+        let ctx = EffectContext::empty();
+        match decl {
+            Decl::Function { body, effect, .. } => match effect {
+                Some(allowed) => self.check_effects(&ctx, body, allowed),
+                None => self.infer_effects(&ctx, body).map(|_| ()),
+            },
+            Decl::Actor {
+                behaviors,
+                state_fields,
+                init,
+                ..
+            } => {
+                for b in behaviors {
+                    match &b.effect {
+                        Some(allowed) => self.check_effects(&ctx, &b.body, allowed)?,
+                        None => self.infer_effects(&ctx, &b.body).map(|_| ())?,
+                    }
+                }
+                for (_, _, _, default) in state_fields {
+                    self.infer_effects(&ctx, default)?;
+                }
+                for (_, expr) in init {
+                    self.infer_effects(&ctx, expr)?;
+                }
+                Ok(())
+            }
+            Decl::Workflow {
+                items, compensate, ..
+            } => {
+                for item in items {
+                    let steps: &[WorkflowStep] = match item {
+                        WorkflowItem::Step(s) => std::slice::from_ref(s),
+                        WorkflowItem::Parallel(steps) => steps,
+                    };
+                    for step in steps {
+                        self.infer_effects(&ctx, &step.body)?;
+                        if let Some(comp) = &step.compensate {
+                            self.infer_effects(&ctx, comp)?;
+                        }
+                    }
+                }
+                if let Some(comp) = compensate {
+                    self.infer_effects(&ctx, comp)?;
+                }
+                Ok(())
+            }
+            // Agent declarations carry only configuration, no expression bodies.
+            _ => Ok(()),
+        }
+    }
+
+    /// Full module effect check: flatten nested `module {}` blocks (so their
+    /// declarations are checked just like top-level ones), register function
+    /// rows so callee effects propagate (pass 1), then enforce declared rows
+    /// on every body (pass 2).
+    pub fn check_module(&mut self, decls: &[Decl]) -> NuResult<()> {
+        let flat = flatten_decls(decls);
+        self.register_function_rows(&flat)?;
+        for decl in &flat {
+            self.check_decl(decl)?;
+        }
+        Ok(())
     }
 }
 
@@ -2313,5 +2513,174 @@ mod tests {
             span: s(),
         };
         assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Interprocedural effect rows (module function row map + module flattening)
+    // -----------------------------------------------------------------------
+
+    fn parse_module(source: &str) -> AstModule {
+        let mut lexer = crate::lexer::Lexer::new(source);
+        let tokens = lexer.lex().unwrap();
+        let mut parser = crate::parser::Parser::new(tokens);
+        parser.parse_module().unwrap()
+    }
+
+    #[test]
+    fn test_flatten_decls_recurses_into_modules() {
+        let ast = parse_module("module M { module N { fn f() 1 } }");
+        let flat = flatten_decls(&ast.decls);
+        assert_eq!(flat.len(), 1);
+        assert!(
+            matches!(flat[0], Decl::Function { name, .. } if name == "f"),
+            "nested module function should be flattened to top level"
+        );
+    }
+
+    #[test]
+    fn test_register_function_rows_infers_unannotated_callee() {
+        // `pure` is unannotated and calls the annotated `do_io`: its inferred
+        // row must pick up IO (SPEC2 §4.9).
+        let ast = parse_module(
+            "fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }\n\
+             fn pure() -> Unit { do_io() }",
+        );
+        let flat = flatten_decls(&ast.decls);
+        let mut checker = EffectChecker::new();
+        checker.register_function_rows(&flat).unwrap();
+        assert!(checker.fn_rows["pure"].contains(&Effect::IO));
+        assert!(checker.fn_rows["do_io"].contains(&Effect::IO));
+    }
+
+    #[test]
+    fn test_register_function_rows_fixpoint_multi_hop() {
+        // Call chain declared callee-last: `top` -> `middle` -> `do_io`.
+        // One pass is not enough; the fixpoint must iterate until IO
+        // propagates all the way to `top`.
+        let ast = parse_module(
+            "fn top() -> Unit { middle() }\n\
+             fn middle() -> Unit { do_io() }\n\
+             fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }",
+        );
+        let flat = flatten_decls(&ast.decls);
+        let mut checker = EffectChecker::new();
+        checker.register_function_rows(&flat).unwrap();
+        assert!(checker.fn_rows["middle"].contains(&Effect::IO));
+        assert!(checker.fn_rows["top"].contains(&Effect::IO));
+    }
+
+    #[test]
+    fn test_register_function_rows_recursive_cycle_saturates() {
+        // `a` and the annotated `b` call each other: the cycle saturates at
+        // the fixpoint instead of looping forever.
+        let ast = parse_module(
+            "fn a() -> Unit { b() }\n\
+             fn b() -> Unit ! {IO} { a() }",
+        );
+        let flat = flatten_decls(&ast.decls);
+        let mut checker = EffectChecker::new();
+        checker.register_function_rows(&flat).unwrap();
+        assert!(checker.fn_rows["a"].contains(&Effect::IO));
+    }
+
+    #[test]
+    fn test_check_module_rejects_pure_fn_calling_io_fn() {
+        // Finding: `pure` declared `! {}` but (transitively) performing IO
+        // through `do_io` must be rejected statically, not at runtime.
+        let ast = parse_module(
+            "fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }\n\
+             fn pure() -> Unit ! {} { do_io() }",
+        );
+        let mut checker = EffectChecker::new();
+        let result = checker.check_module(&ast.decls);
+        assert!(
+            result.is_err(),
+            "pure function calling an IO function must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_check_module_rejects_module_nested_effect_violation() {
+        // Finding: declarations nested in `module {}` must be effect-checked
+        // just like top-level ones.
+        let ast = parse_module(
+            "module M {\n  fn pure() -> Unit ! {} { perform IO.print(\"x\") }\n}",
+        );
+        let mut checker = EffectChecker::new();
+        let result = checker.check_module(&ast.decls);
+        assert!(
+            result.is_err(),
+            "module-nested pure function performing IO must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_check_module_accepts_pure_functions() {
+        // Positive: legitimately pure functions (including pure calls between
+        // them) must keep passing.
+        let ast = parse_module(
+            "fn pure() -> Unit ! {} { unit }\n\
+             fn also_pure() -> Unit ! {} { pure() }\n\
+             module M { fn nested_pure() -> Unit ! {} { also_pure() } }",
+        );
+        let mut checker = EffectChecker::new();
+        let result = checker.check_module(&ast.decls);
+        assert!(result.is_ok(), "pure functions must pass: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_check_module_accepts_matching_declared_effects() {
+        // Positive: a function performing exactly its declared effects, plus
+        // a caller whose row covers the callee's.
+        let ast = parse_module(
+            "fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }\n\
+             fn caller() -> Unit ! {IO} { do_io() }",
+        );
+        let mut checker = EffectChecker::new();
+        let result = checker.check_module(&ast.decls);
+        assert!(
+            result.is_ok(),
+            "functions staying within declared rows must pass: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_shadowed_function_name_not_charged_callee_row() {
+        // A local binding shadows the same-named module function: calling the
+        // local (pure) closure must not be charged the module function's row.
+        let mut checker = EffectChecker::new();
+        checker
+            .fn_rows
+            .insert("do_io".to_string(), EffectRow::singleton(Effect::IO));
+        let ctx = EffectContext::empty();
+        let pure_lambda = Expr::Lambda {
+            params: vec![],
+            body: Box::new(Expr::Literal(Literal::Unit, s())),
+            effect: None,
+            span: s(),
+        };
+        let call = |name: &str| Expr::App {
+            func: Box::new(Expr::Var(name.to_string(), s())),
+            args: vec![],
+            span: s(),
+        };
+        // let do_io = (|| unit) in do_io()  — shadowed: pure.
+        let shadowed = Expr::Let {
+            name: "do_io".to_string(),
+            ty: None,
+            value: Box::new(pure_lambda),
+            body: Box::new(call("do_io")),
+            span: s(),
+        };
+        assert!(
+            checker.check_effects(&ctx, &shadowed, &EffectRow::empty()).is_ok(),
+            "call through a shadowing local binding must be pure"
+        );
+        // Control: the unshadowed direct call must be charged IO.
+        assert!(
+            checker.check_effects(&ctx, &call("do_io"), &EffectRow::empty()).is_err(),
+            "unshadowed direct call must propagate the callee row"
+        );
     }
 }

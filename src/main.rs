@@ -19,7 +19,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-use nulang::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
+use nulang::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
 use nulang::lexer::Lexer;
 use nulang::parser::Parser;
 use nulang::repl::Repl;
@@ -214,67 +214,25 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
         println!("{}\n", type_to_string(&module_type));
     }
 
-    // 4. Effect check. Bodies with a declared effect row (`! E`) are enforced
-    // against it; un-annotated bodies are inference-only so existing programs
-    // keep working until interprocedural effect propagation lands.
+    // 4. Effect check. Two passes over module functions: first register a
+    // name -> EffectRow map (declared rows where present, fixpoint-inferred
+    // otherwise) so call sites propagate callee effects, then enforce
+    // declared rows. Bodies without a declared row are inference-only.
+    // Nested `module {}` decls are flattened first (mirroring the
+    // typechecker's flatten_decls).
+    let flat_decls = nulang::effect_checker::flatten_decls(&ast.decls);
     let mut effect_checker = EffectChecker::new();
-    let effect_ctx = EffectContext::empty();
-    let check_body = |checker: &mut EffectChecker,
-                      body: &nulang::ast::Expr,
-                      declared: Option<&nulang::types::EffectRow>|
-     -> NuResult<()> {
-        match declared {
-            Some(allowed) => checker.check_effects(&effect_ctx, body, allowed),
-            None => checker.infer_effects(&effect_ctx, body).map(|_| ()),
-        }
+    effect_checker
+        .register_function_rows(&flat_decls)
         .map_err(|e| {
             eprintln!("Effect error: {}", e);
             e
-        })
-    };
-    for decl in &ast.decls {
-        match decl {
-            nulang::ast::Decl::Function { body, effect, .. } => {
-                check_body(&mut effect_checker, body, effect.as_ref())?;
-            }
-            nulang::ast::Decl::Actor {
-                behaviors,
-                state_fields,
-                init,
-                ..
-            } => {
-                for b in behaviors {
-                    check_body(&mut effect_checker, &b.body, b.effect.as_ref())?;
-                }
-                for (_, _, _, default) in state_fields {
-                    check_body(&mut effect_checker, default, None)?;
-                }
-                for (_, expr) in init {
-                    check_body(&mut effect_checker, expr, None)?;
-                }
-            }
-            nulang::ast::Decl::Workflow {
-                items, compensate, ..
-            } => {
-                for item in items {
-                    let steps: &[nulang::ast::WorkflowStep] = match item {
-                        nulang::ast::WorkflowItem::Step(s) => std::slice::from_ref(s),
-                        nulang::ast::WorkflowItem::Parallel(steps) => steps,
-                    };
-                    for step in steps {
-                        check_body(&mut effect_checker, &step.body, None)?;
-                        if let Some(comp) = &step.compensate {
-                            check_body(&mut effect_checker, comp, None)?;
-                        }
-                    }
-                }
-                if let Some(comp) = compensate {
-                    check_body(&mut effect_checker, comp, None)?;
-                }
-            }
-            // Agent declarations carry only configuration, no expression bodies.
-            _ => {}
-        }
+        })?;
+    for decl in &flat_decls {
+        effect_checker.check_decl(decl).map_err(|e| {
+            eprintln!("Effect error: {}", e);
+            e
+        })?;
     }
 
     // 5. Capability analysis over the same body set.
@@ -286,7 +244,7 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
             e
         })
     };
-    for decl in &ast.decls {
+    for decl in flat_decls.iter().copied() {
         match decl {
             nulang::ast::Decl::Function { body, .. } => {
                 cap_body(&mut cap_analyzer, body)?;
@@ -344,13 +302,25 @@ fn run_source(source: &str, verbose: bool) -> NuResult<()> {
         println!("{}", disassemble(&m));
     }
 
+    // Modules declaring actors need the real runtime: the standalone VM's
+    // spawn/send callbacks are stubs that would silently drop messages.
+    let has_actors = ast
+        .decls
+        .iter()
+        .any(|d| matches!(d, nulang::ast::Decl::Actor { .. }));
+
     // Execute
-    let mut vm = VM::new();
-    vm.load_module(m);
-    let value = vm.run().map_err(|e| {
-        eprintln!("Runtime error: {}", e);
-        e
-    })?;
+    let value = if has_actors {
+        let (value, _runtime) = run_with_runtime(m)?;
+        value
+    } else {
+        let mut vm = VM::new();
+        vm.load_module(m);
+        vm.run().map_err(|e| {
+            eprintln!("Runtime error: {}", e);
+            e
+        })?
+    };
 
     let result_str = value.to_string_repr();
     if result_str != "unit" {
@@ -358,6 +328,34 @@ fn run_source(source: &str, verbose: bool) -> NuResult<()> {
     }
 
     Ok(())
+}
+
+/// Execute a module that declares actors against a real `Runtime`.
+///
+/// The top-level code runs on a VM with runtime-backed callbacks (so
+/// `spawn` creates real actors and `send` enqueues real messages — the
+/// same wiring the integration tests use), then the scheduler runs until
+/// the run queue drains. Returns the top-level value and the runtime so
+/// tests can inspect post-scheduling state.
+fn run_with_runtime(
+    m: nulang::bytecode::CodeModule,
+) -> NuResult<(
+    nulang::vm::Value,
+    std::rc::Rc<std::cell::RefCell<nulang::runtime::Runtime>>,
+)> {
+    let runtime =
+        std::rc::Rc::new(std::cell::RefCell::new(nulang::runtime::Runtime::new()));
+    let mut vm = VM::new();
+    vm.load_module(m);
+    vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
+        runtime.clone(),
+    )));
+    let value = vm.run().map_err(|e| {
+        eprintln!("Runtime error: {}", e);
+        e
+    })?;
+    runtime.borrow_mut().run_scheduler();
+    Ok((value, runtime))
 }
 
 fn check_source(source: &str, verbose: bool) -> NuResult<()> {
@@ -494,4 +492,37 @@ fn disassemble(module: &nulang::bytecode::CodeModule) -> String {
         }
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An actor program run through the CLI path must create real actors
+    /// and deliver sent messages: with the bare standalone VM the stub
+    /// spawn/send callbacks would leave the counter at 0.
+    #[test]
+    fn test_run_source_actor_program_schedules_and_delivers() {
+        let source = r#"
+            actor Counter {
+                state count: Int = 0
+                behavior inc() { self.count = self.count + 1 }
+            }
+            let c = spawn Counter {} in {
+                send c inc()
+                send c inc()
+                c
+            }
+        "#;
+        let ast = run_frontend(source, false).expect("frontend should accept the actor program");
+        let module = compile_with_new_pipeline(&ast, "test").expect("actor program should compile");
+        let (_value, runtime) = run_with_runtime(module).expect("actor program should run");
+        let rt = runtime.borrow();
+        let actor = rt.actors.values().next().expect("one actor should exist");
+        assert_eq!(
+            actor.get_state_field("count").and_then(|v| v.as_int()),
+            Some(2),
+            "both inc messages must be delivered by run_scheduler"
+        );
+    }
 }
