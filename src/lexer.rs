@@ -510,8 +510,29 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 Some(ch) => {
-                    result.push(ch as char);
-                    self.advance();
+                    if ch < 0x80 {
+                        result.push(ch as char);
+                        self.advance();
+                    } else {
+                        // Multi-byte UTF-8 sequence: decode the whole char and
+                        // advance over all of its bytes. `self.pos` is on a
+                        // char boundary here because the source is valid UTF-8
+                        // and every prior step consumed whole chars.
+                        match self.source[self.pos..].chars().next() {
+                            Some(c) => {
+                                result.push(c);
+                                for _ in 0..c.len_utf8() {
+                                    self.advance();
+                                }
+                            }
+                            None => {
+                                return Err(NuError::LexError {
+                                    msg: "Unterminated string literal".to_string(),
+                                    span: Span::new(start, self.pos, start_line, start_col),
+                                })
+                            }
+                        }
+                    }
                 }
                 None => {
                     return Err(NuError::LexError {
@@ -883,6 +904,20 @@ mod tests {
             kinds,
             vec![
                 TokenKind::StringLit("a\nb\tc\"d".to_string()),
+                TokenKind::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_string_utf8_multibyte() {
+        // Multi-byte UTF-8 chars (2-byte é, 3-byte 你, 4-byte 🎉) must be
+        // decoded as chars, not pushed as raw bytes (`é` must not become `Ã©`).
+        let kinds = lex("\"héllo 你好 🎉\"");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::StringLit("héllo 你好 🎉".to_string()),
                 TokenKind::Eof
             ]
         );

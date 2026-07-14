@@ -96,27 +96,51 @@ fn apply_subst(ty: &Type, subst: &Substitution) -> Type {
 }
 
 /// Apply a substitution to a type context, returning the updated context.
-/// Since TypeContext stores types at binding time and we always create fresh
-/// contexts via `extend` / `clone`, substitutions are effectively applied by
-/// binding already-substituted types. This function is a placeholder for
-/// contexts where we need to pass through a substitution.
-#[allow(unused_variables)]
-fn apply_subst_to_ctx(ctx: &TypeContext, _subst: &Substitution) -> TypeContext {
-    ctx.clone()
+/// Every binding's type is substituted so constraints inferred from earlier
+/// subexpressions are visible at later uses of the same variable.
+fn apply_subst_to_ctx(ctx: &TypeContext, subst: &Substitution) -> TypeContext {
+    if subst.is_empty() {
+        return ctx.clone();
+    }
+    let mut result = TypeContext::new();
+    for (name, (ty, cap)) in ctx.iter() {
+        result.bind(name.clone(), apply_subst(ty, subst), *cap);
+    }
+    result
 }
 
 /// Compose two substitutions: s2 after s1.
 /// Result: first apply s1, then apply s2 to the result.
 /// Formally: (s2 ∘ s1)(t) = s2(s1(t))
+///
+/// If a variable is bound by both substitutions, the two mappings are unified
+/// and the unifier is composed through the result, so constraints from both
+/// sides propagate (e.g. `a := (b, c)` from s1 and `a := (Int, Bool)` from s2
+/// yields `b := Int, c := Bool`). Previously s2's mapping was silently
+/// discarded, losing those constraints.
 fn compose_subst(s2: &Substitution, s1: &Substitution) -> Substitution {
     // Apply s2 to all types in s1
     let mut s1_substituted: Substitution =
         s1.iter().map(|(v, t)| (*v, apply_subst(t, s2))).collect();
-    // Add s2 entries that don't conflict with s1
-    let s1_vars: HashSet<TypeVar> = s1.iter().map(|(v, _)| *v).collect();
     for (v, t) in s2 {
-        if !s1_vars.contains(v) {
-            s1_substituted.push((*v, t.clone()));
+        match s1_substituted.iter().position(|(rv, _)| rv == v) {
+            // New binding from s2: keep it.
+            None => s1_substituted.push((*v, t.clone())),
+            // v is bound by both: unify the two mappings so neither
+            // constraint is lost.
+            Some(pos) => {
+                let existing = s1_substituted[pos].1.clone();
+                if let Ok(s) = mgu(&existing, t, Span::default()) {
+                    let unified = apply_subst(&existing, &s);
+                    s1_substituted.remove(pos);
+                    s1_substituted.push((*v, unified));
+                    s1_substituted = compose_subst(&s, &s1_substituted);
+                }
+                // Irreconcilable mappings cannot occur when contexts are
+                // substituted eagerly (`apply_subst_to_ctx`): the conflicting
+                // unification fails earlier, at the use site. Keep s1's
+                // mapping rather than inventing a type.
+            }
         }
     }
     s1_substituted
@@ -413,13 +437,7 @@ fn instantiate(ty: &Type) -> Type {
 // ---------------------------------------------------------------------------
 
 /// Hindley-Milner type checker implementing Algorithm W.
-///
-/// Maintains a counter for fresh type variables and tracks context free variables
-/// for proper generalization.
-pub struct TypeChecker {
-    /// Free type variables present in the initial context (to avoid over-generalization)
-    ctx_free_vars: HashSet<TypeVar>,
-}
+pub struct TypeChecker {}
 
 /// Recursively splice any `Decl::Module { decls, .. }` in place with its own
 /// contents, in source order, leaving every other declaration untouched.
@@ -442,9 +460,7 @@ fn flatten_decls(decls: &[Decl]) -> Vec<&Decl> {
 impl TypeChecker {
     /// Create a new type checker with an empty context.
     pub fn new() -> Self {
-        TypeChecker {
-            ctx_free_vars: HashSet::new(),
-        }
+        TypeChecker {}
     }
 
     /// Type-check an entire module, returning the type of the last declaration.
@@ -693,10 +709,11 @@ impl TypeChecker {
             // Let binding: infer value, generalize, extend context, infer body
             Expr::Let {
                 name,
+                ty,
                 value,
                 body,
                 span,
-            } => self.infer_let(ctx, name, value, body, *span),
+            } => self.infer_let(ctx, name, ty.as_ref(), value, body, *span),
 
             // Let-rec: recursive binding
             Expr::LetRec {
@@ -1072,9 +1089,10 @@ impl TypeChecker {
         &mut self,
         ctx: &TypeContext,
         name: &str,
+        ann: Option<&Type>,
         value: &Expr,
         body: &Expr,
-        _span: Span,
+        span: Span,
     ) -> NuResult<(Substitution, Type)> {
         // For let-bound lambdas that reference themselves (e.g.
         // `let fac = fn(n) ... fac(n-1) ... in ...`), make the binding name
@@ -1088,7 +1106,12 @@ impl TypeChecker {
                 &apply_subst(&val_ty, &s1),
                 Span::default(),
             )?;
-            let s_combined = compose_subst(&s2, &s1);
+            let mut s_combined = compose_subst(&s2, &s1);
+            // An explicit annotation must unify with the inferred value type.
+            if let Some(ann_ty) = ann {
+                let s_ann = mgu(&apply_subst(&val_ty, &s_combined), ann_ty, span)?;
+                s_combined = compose_subst(&s_ann, &s_combined);
+            }
             let gen_ty = self.do_generalize(ctx, &apply_subst(&val_ty, &s_combined));
             let new_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref);
             let (s3, body_ty) = self.infer_expr(&new_ctx, body)?;
@@ -1098,6 +1121,14 @@ impl TypeChecker {
 
         // Infer the binding value
         let (s1, val_ty) = self.infer_expr(ctx, value)?;
+
+        // An explicit annotation must unify with the inferred value type.
+        let s1 = if let Some(ann_ty) = ann {
+            let s_ann = mgu(&apply_subst(&val_ty, &s1), ann_ty, span)?;
+            compose_subst(&s_ann, &s1)
+        } else {
+            s1
+        };
 
         // Generalize the value type
         let gen_ty = self.do_generalize(ctx, &apply_subst(&val_ty, &s1));
@@ -2006,10 +2037,21 @@ impl TypeChecker {
     }
 
     /// Generalize a type by abstracting over free variables not in the context.
+    ///
+    /// Value restriction: variables occurring under a `Reference` constructor
+    /// are never quantified. The cell is created once at binding time and
+    /// shared by every use of the binding, so generalizing it would let the
+    /// same cell be used at incompatible types (e.g.
+    /// `let r = &[] in { r = [1]; (*r)[0] == "s" }`).
     fn do_generalize(&self, ctx: &TypeContext, ty: &Type) -> Type {
         let ty_fv: HashSet<TypeVar> = ty.free_vars().into_iter().collect();
         let ctx_fv = self.get_ctx_free_vars(ctx);
-        let gen_vars: Vec<TypeVar> = ty_fv.difference(&ctx_fv).copied().collect();
+        let ref_fv: HashSet<TypeVar> = ty.ref_free_vars().into_iter().collect();
+        let gen_vars: Vec<TypeVar> = ty_fv
+            .difference(&ctx_fv)
+            .copied()
+            .filter(|v| !ref_fv.contains(v))
+            .collect();
 
         if gen_vars.is_empty() {
             ty.clone()
@@ -2022,12 +2064,8 @@ impl TypeChecker {
     }
 
     /// Get free type variables from the context.
-    fn get_ctx_free_vars(&self, _ctx: &TypeContext) -> HashSet<TypeVar> {
-        // Combine tracked context vars with any vars we can discover
-        let vars = self.ctx_free_vars.clone();
-        // We can't iterate TypeContext directly, so we rely on the tracked set
-        // The tracked set is updated when we add bindings
-        vars
+    fn get_ctx_free_vars(&self, ctx: &TypeContext) -> HashSet<TypeVar> {
+        ctx.free_vars().into_iter().collect()
     }
 }
 
@@ -2093,6 +2131,7 @@ mod tests {
     fn let_(name: &str, value: Expr, body: Expr) -> Expr {
         Expr::Let {
             name: name.to_string(),
+            ty: None,
             value: Box::new(value),
             body: Box::new(body),
             span: sp(),
@@ -3200,6 +3239,153 @@ mod tests {
                 assert!(msg.contains("Unsupported FFI type"));
             }
             other => panic!("Expected TypeError, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: substitution soundness regressions
+    // -----------------------------------------------------------------------
+
+    // Helper to lex, parse, and type-check a source string, mirroring the
+    // `--check` pipeline in main.rs (frontend only, no effects/capabilities).
+    fn check_src(src: &str) -> NuResult<Type> {
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.lex()?;
+        let mut parser = crate::parser::Parser::new(tokens);
+        let module = parser.parse_module()?;
+        let mut tc = TypeChecker::new();
+        tc.check_module(&module)
+    }
+
+    #[test]
+    fn test_apply_subst_to_ctx_updates_bindings() {
+        let v = TypeVar(9001);
+        let ctx = ctx_with("x", Type::Var(v));
+        let subst = vec![(v, Type::int())];
+        let updated = apply_subst_to_ctx(&ctx, &subst);
+        match updated.lookup("x") {
+            Some((ty, _)) => assert_eq!(*ty, Type::int()),
+            None => panic!("binding for x lost"),
+        }
+    }
+
+    #[test]
+    fn test_compose_subst_merges_conflicting_bindings() {
+        // s1: a := (b, c); s2: a := (Int, Bool). Composition must propagate
+        // b := Int and c := Bool instead of discarding s2's mapping for a.
+        let a = TypeVar(9101);
+        let b = TypeVar(9102);
+        let c = TypeVar(9103);
+        let s1 = vec![(
+            a,
+            Type::Tuple(vec![Type::Var(b), Type::Var(c)]),
+        )];
+        let s2 = vec![(a, Type::Tuple(vec![Type::int(), Type::bool()]))];
+        let composed = compose_subst(&s2, &s1);
+        assert_eq!(apply_subst(&Type::Var(a), &composed), s2[0].1);
+        assert_eq!(apply_subst(&Type::Var(b), &composed), Type::int());
+        assert_eq!(apply_subst(&Type::Var(c), &composed), Type::bool());
+    }
+
+    #[test]
+    fn test_if_condition_constraint_reaches_else_branch() {
+        // Regression: `apply_subst_to_ctx` was a no-op, so the Bool constraint
+        // on `x` from the condition never reached `x + 1` in the else branch,
+        // and `compose_subst` then silently dropped the Int constraint.
+        // `let f = fn(x) if x then 1 else x + 1 in f(false)` must NOT check.
+        let result = check_src("let f = fn(x) if x then 1 else x + 1 in f(false)");
+        assert!(
+            result.is_err(),
+            "expected a type error, got {:?}",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn test_ref_binding_is_not_generalized() {
+        // Regression (value restriction): `&[]` was generalized to
+        // `forall a. &[a]`, letting the same cell be used as both [Int] and
+        // [String]. This must now fail to check.
+        let result = check_src("let r = &[] in { r = [1]; (*r)[0] == \"s\" }");
+        assert!(
+            result.is_err(),
+            "expected a type error, got {:?}",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn test_polymorphic_let_still_generalizes() {
+        // A let-bound lambda with no ambient free variables is still
+        // polymorphic: each use instantiates fresh variables.
+        let result = check_src("let id = fn(x) x in (id(1), id(true))");
+        assert!(result.is_ok(), "expected success, got {:?}", result.err());
+    }
+
+    #[test]
+    fn test_ctx_free_vars_prevent_overgeneralization() {
+        // A let binding whose type shares a variable with the enclosing
+        // context must not quantify that variable: two uses of `y` below
+        // force it to be both Int and String, which is unsound if the
+        // identity `id` were generalized over `y`'s variable.
+        let result = check_src("fn f(y) { let id = fn(x) x in { id(y) + 1; id(y) == \"s\" } }");
+        assert!(
+            result.is_err(),
+            "expected a type error, got {:?}",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn test_do_generalize_skips_ctx_free_vars() {
+        let tc = TypeChecker::new();
+        let v = TypeVar(9201);
+        let w = TypeVar(9202);
+        let ctx = ctx_with("y", Type::Var(v));
+        let ty = Type::Function {
+            param: Box::new(Type::Var(v)),
+            ret: Box::new(Type::Var(w)),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        match tc.do_generalize(&ctx, &ty) {
+            // v is free in the context, so only w is quantified.
+            Type::Scheme { vars, .. } => {
+                assert!(!vars.contains(&v));
+                assert!(vars.contains(&w));
+            }
+            other => panic!("expected a scheme quantifying w, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_do_generalize_skips_ref_vars() {
+        let tc = TypeChecker::new();
+        let v = TypeVar(9301);
+        let ctx = TypeContext::new();
+        // A bare reference type: v must not be quantified.
+        let ref_ty = Type::Reference {
+            cap: Capability::Ref,
+            inner: Box::new(Type::Array(Box::new(Type::Var(v)))),
+        };
+        match tc.do_generalize(&ctx, &ref_ty) {
+            Type::Scheme { .. } => panic!("ref-typed binding must not be generalized"),
+            other => assert_eq!(other, ref_ty),
+        }
+        // A function returning a reference creates the cell per call, so v
+        // is still safe to quantify.
+        let mk_ty = Type::Function {
+            param: Box::new(Type::unit()),
+            ret: Box::new(Type::Reference {
+                cap: Capability::Ref,
+                inner: Box::new(Type::Var(v)),
+            }),
+            effect: EffectRow::empty(),
+            cap: Capability::Ref,
+        };
+        match tc.do_generalize(&ctx, &mk_ty) {
+            Type::Scheme { vars, .. } => assert!(vars.contains(&v)),
+            other => panic!("expected a scheme quantifying v, got {:?}", other),
         }
     }
 }

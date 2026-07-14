@@ -1662,6 +1662,7 @@ mod tests {
         let ctx = EffectContext::empty();
         let let_expr = Expr::Let {
             name: "x".to_string(),
+            ty: None,
             value: Box::new(Expr::Perform {
                 effect: "FS".to_string(),
                 op: "read".to_string(),
@@ -2291,6 +2292,7 @@ mod tests {
         // not consumed.
         let expr = Expr::Let {
             name: "x".to_string(),
+            ty: None,
             value: Box::new(Expr::Literal(Literal::Int(1), s())),
             body: Box::new(Expr::Block {
                 exprs: vec![call1("f", lvar("x")), call1("g", lvar("x"))],

@@ -321,6 +321,51 @@ impl Type {
         vars
     }
 
+    /// Free type variables that occur underneath a `Reference` constructor.
+    ///
+    /// Used for the value restriction at generalization: a reference cell is
+    /// created once at binding time and shared by every use of the binding, so
+    /// quantifying a variable under a `Reference` would let one cell be used at
+    /// incompatible types. Function types are not descended into — a reference
+    /// in a function's parameter or return type is created per call, so
+    /// quantifying it is sound.
+    pub fn ref_free_vars(&self) -> Vec<TypeVar> {
+        let mut vars = vec![];
+        self.collect_ref_free_vars(&mut vars);
+        vars.sort_by_key(|v| v.0);
+        vars.dedup_by_key(|v| v.0);
+        vars
+    }
+
+    fn collect_ref_free_vars(&self, acc: &mut Vec<TypeVar>) {
+        match self {
+            // The shared cell: every free variable inside must stay monomorphic.
+            Type::Reference { inner, .. } => inner.collect_free_vars(acc),
+            // Function values are created per call — refs in their types are safe.
+            Type::Function { .. } => {}
+            Type::Tuple(ts) => ts.iter().for_each(|t| t.collect_ref_free_vars(acc)),
+            Type::Record(fs) => fs
+                .iter()
+                .for_each(|(_, t)| t.collect_ref_free_vars(acc)),
+            Type::Variant(vs) => vs.iter().for_each(|(_, t)| {
+                if let Some(t) = t {
+                    t.collect_ref_free_vars(acc)
+                }
+            }),
+            Type::Array(t) => t.collect_ref_free_vars(acc),
+            Type::Actor { state, behavior } => {
+                state.collect_ref_free_vars(acc);
+                behavior.collect_ref_free_vars(acc);
+            }
+            Type::App { constructor, args } => {
+                constructor.collect_ref_free_vars(acc);
+                args.iter().for_each(|a| a.collect_ref_free_vars(acc));
+            }
+            Type::Scheme { body, .. } => body.collect_ref_free_vars(acc),
+            Type::Var(_) | Type::Primitive(_) => {}
+        }
+    }
+
     fn collect_free_vars(&self, acc: &mut Vec<TypeVar>) {
         match self {
             Type::Var(v) => acc.push(*v),
@@ -391,6 +436,21 @@ impl TypeContext {
         ctx
     }
 
+    /// Iterate over all bindings as `(name, (type, capability))` pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &(Type, Capability))> {
+        self.bindings.iter()
+    }
+
+    /// Free type variables occurring in any binding in the context.
+    pub fn free_vars(&self) -> Vec<TypeVar> {
+        let mut vars = vec![];
+        for (ty, _) in self.bindings.values() {
+            vars.extend(ty.free_vars());
+        }
+        vars.sort_by_key(|v| v.0);
+        vars.dedup_by_key(|v| v.0);
+        vars
+    }
 }
 
 // ---------------------------------------------------------------------------

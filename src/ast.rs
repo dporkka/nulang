@@ -54,9 +54,10 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
-    /// Let binding: let x = e1 in e2
+    /// Let binding: let x [: T] = e1 in e2
     Let {
         name: String,
+        ty: Option<Type>,
         value: Box<Expr>,
         body: Box<Expr>,
         span: Span,

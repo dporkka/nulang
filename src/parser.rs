@@ -92,9 +92,19 @@ impl Parser {
             }
 
             // Try declaration first, then expression
+            let decl_start = self.pos;
             match self.parse_decl() {
                 Ok(decl) => decls.push(decl),
-                Err(_) => {
+                Err(e) => {
+                    let consumed = self.pos - decl_start;
+                    // Rewind any tokens a failed declaration parse consumed.
+                    self.pos = decl_start;
+                    if consumed > 0 {
+                        // A declaration started but failed mid-way: surface the
+                        // real declaration error instead of retrying the
+                        // remaining tokens as an expression.
+                        return Err(e);
+                    }
                     // Not a declaration — try expression
                     let expr = self.parse_expr()?;
                     // Wrap expression as synthetic function __main
@@ -1216,7 +1226,7 @@ impl Parser {
         let name = self.expect_ident("variable name")?;
 
         // Optional type annotation
-        let _ty = if self.consume_if(&TokenKind::Colon) {
+        let ty = if self.consume_if(&TokenKind::Colon) {
             Some(self.parse_type()?)
         } else {
             None
@@ -1228,6 +1238,7 @@ impl Parser {
         let body = self.parse_expr()?;
         Ok(Expr::Let {
             name,
+            ty,
             value: Box::new(value),
             body: Box::new(body),
             span,
@@ -1593,7 +1604,10 @@ impl Parser {
     }
 
     fn skip_newlines(&mut self) {
-        while self.peek_kind() == &TokenKind::Newline {
+        while matches!(
+            self.peek_kind(),
+            &TokenKind::Newline | &TokenKind::DocComment(_)
+        ) {
             self.advance();
         }
     }
@@ -1601,7 +1615,7 @@ impl Parser {
     fn skip_newlines_semicolons(&mut self) {
         while matches!(
             self.peek_kind(),
-            &TokenKind::Newline | &TokenKind::Semicolon
+            &TokenKind::Newline | &TokenKind::Semicolon | &TokenKind::DocComment(_)
         ) {
             self.advance();
         }
@@ -2581,6 +2595,89 @@ mod tests {
     fn test_parse_error_unexpected_token() {
         let result = parse("fn");
         assert!(result.is_err(), "Expected parse error for bare 'fn'");
+    }
+
+    #[test]
+    fn test_parse_error_broken_fn_propagates() {
+        // A declaration that fails mid-parse must surface its real error
+        // instead of retrying the remaining tokens as an expression — `fn 5`
+        // must not parse as the expression `5`.
+        let result = parse("fn 5");
+        assert!(result.is_err(), "Expected parse error for 'fn 5'");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("function name"),
+            "Error should be the real declaration error, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_parse_error_broken_pub_propagates() {
+        // `pub` consumed a token before the decl parse failed, so the
+        // original error must propagate rather than falling back to `42`.
+        let result = parse("pub 42");
+        assert!(result.is_err(), "Expected parse error for 'pub 42'");
+    }
+
+    #[test]
+    fn test_parse_error_broken_module_propagates() {
+        // `module Foo` consumed `module`/`Foo` before failing on the missing
+        // brace; the error must come from the declaration parse.
+        let result = parse("module Foo");
+        assert!(result.is_err(), "Expected parse error for 'module Foo'");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("LBrace"),
+            "Error should mention the missing brace, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_parse_top_level_expression_still_works() {
+        // Zero tokens consumed by the decl parse → expression fallback.
+        let ast = parse("42").unwrap();
+        assert_eq!(ast.decls.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_doc_comment_before_decl() {
+        let ast = parse("/// doc for foo\nfn foo() { 1 }").unwrap();
+        assert_eq!(ast.decls.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_doc_comment_before_expression() {
+        let ast = parse("/// doc\n42").unwrap();
+        assert_eq!(ast.decls.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_doc_comment_only_file() {
+        let ast = parse("/// nothing but docs").unwrap();
+        assert!(ast.decls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_let_type_annotation() {
+        let expr = parse_expr("let x : Int = 1 in x").unwrap();
+        match expr {
+            Expr::Let { name, ty, .. } => {
+                assert_eq!(name, "x");
+                assert_eq!(ty, Some(Type::Primitive(PrimitiveType::Int)));
+            }
+            _ => panic!("Expected let expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_let_without_annotation() {
+        let expr = parse_expr("let x = 1 in x").unwrap();
+        match expr {
+            Expr::Let { ty, .. } => assert!(ty.is_none()),
+            _ => panic!("Expected let expression"),
+        }
     }
 
     #[test]
