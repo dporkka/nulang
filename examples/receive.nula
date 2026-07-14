@@ -7,7 +7,7 @@
 // fallback runs: pop the next message and yield its first payload value
 // (nil when the mailbox is empty).
 //
-// Run with: nulang examples/receive.nu
+// Run with: nulang examples/receive.nula
 
 actor Echo {
     behavior respond() {

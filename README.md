@@ -115,10 +115,10 @@ cargo run -- --eval 'perform IO.print("Hello")'
 Runnable programs live in [`examples/`](examples/):
 
 ```bash
-cargo run -- examples/fibonacci.nu       # closures + recursion
-cargo run -- examples/effects.nu         # algebraic effect handlers
-cargo run -- examples/counter_actor.nu   # actor declaration + spawn
-cargo run -- examples/variant_option.nu  # user-declared variant types (Option)
+cargo run -- examples/fibonacci.nula       # closures + recursion
+cargo run -- examples/effects.nula         # algebraic effect handlers
+cargo run -- examples/counter_actor.nula   # actor declaration + spawn
+cargo run -- examples/variant_option.nula  # user-declared variant types (Option)
 ```
 
 ---
@@ -136,7 +136,7 @@ perform IO.print("Hello, World!")
 
 ### Functions and Closures
 
-From [`examples/fibonacci.nu`](examples/fibonacci.nu):
+From [`examples/fibonacci.nula`](examples/fibonacci.nula):
 
 ```nulang
 let fib = fn(n) {
@@ -146,7 +146,7 @@ let fib = fn(n) {
 
 ### Actors
 
-From [`examples/counter_actor.nu`](examples/counter_actor.nu):
+From [`examples/counter_actor.nula`](examples/counter_actor.nula):
 
 ```nulang
 actor Counter {
@@ -159,7 +159,7 @@ spawn Counter { count = 0 }
 
 ### Effects
 
-From [`examples/effects.nu`](examples/effects.nu):
+From [`examples/effects.nula`](examples/effects.nula):
 
 ```nulang
 handle perform Math.getAnswer() {
@@ -376,7 +376,7 @@ runtime API (`src/runtime/`), not from Nulang source.
 
 | Primitive | File | Description |
 |-----------|------|-------------|
-| `receive` | `parser.rs`, `vm.rs` | Selective receive: scans the mailbox in FIFO order for the first message matching any arm (`OpCode::ReceiveMatch` → `ActorVmCallbacks::try_receive_match`), binds payload values to arm params, non-matching messages stay queued; no-match falls back to pop-any (nil when empty). See `examples/receive.nu`. |
+| `receive` | `parser.rs`, `vm.rs` | Selective receive: scans the mailbox in FIFO order for the first message matching any arm (`OpCode::ReceiveMatch` → `ActorVmCallbacks::try_receive_match`), binds payload values to arm params, non-matching messages stay queued; no-match falls back to pop-any (nil when empty). See `examples/receive.nula`. |
 | `spawn_link` | — | **Planned** — no implementation in the tree yet |
 | `monitor` | `runtime/mod.rs` | Watcher monitors target actor for exit (Rust runtime API only) |
 | `demonitor` | `runtime/mod.rs` | Remove a monitor (Rust runtime API only) |
@@ -599,7 +599,7 @@ This is an active implementation with the following components functional:
 ## Known Limitations
 
 - **`receive` uses non-blocking selective matching.** `receive { | Behavior(params) => expr }` scans the mailbox in FIFO order for the first message matching any arm (`src/mir_lower.rs` `lower_receive` → `OpCode::ReceiveMatch` → `ActorVmCallbacks::try_receive_match`), binds payload values to the arm's params (missing values bind to nil, extras ignored), and skips non-matching messages, which stay queued. Unlike Erlang's `receive`, it never blocks: when nothing matches, a legacy fallback pops the next message and yields its first payload value (nil when the mailbox is empty or outside an actor context). Payload matching is by behavior name and arity-free — no guard expressions or payload patterns yet.
-- Actor messaging that *is* fully wired goes through named behavior dispatch (`send actor behavior(args)`) — see `examples/counter_actor.nu`.
+- Actor messaging that *is* fully wired goes through named behavior dispatch (`send actor behavior(args)`) — see `examples/counter_actor.nula`.
 
 ---
 

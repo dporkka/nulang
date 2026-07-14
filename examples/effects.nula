@@ -1,7 +1,7 @@
 // Algebraic effects — a handler intercepts a performed effect and
 // resumes the computation with a value.
 //
-// Run with: nulang examples/effects.nu
+// Run with: nulang examples/effects.nula
 
 handle perform Math.getAnswer() {
     | Math.getAnswer() => 42

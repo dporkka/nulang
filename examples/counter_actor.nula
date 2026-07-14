@@ -1,7 +1,7 @@
 // Actors — declare an actor with state and behaviors, then spawn it.
 // `spawn` returns an actor reference that can receive messages.
 //
-// Run with: nulang examples/counter_actor.nu
+// Run with: nulang examples/counter_actor.nula
 
 actor Counter {
     state count = 0

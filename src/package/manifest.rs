@@ -6,7 +6,7 @@
 //! [package]
 //! name = "my-app"
 //! version = "0.1.0"
-//! entry = "src/main.nu"   # optional; this is the default
+//! entry = "src/main.nula"   # optional; this is the default
 //!
 //! [dependencies]
 //! util = { path = "../util" }
@@ -24,7 +24,7 @@ use crate::types::{NuError, NuResult};
 pub const MANIFEST_FILE: &str = "Nulang.toml";
 
 /// Default entry point, relative to the package root.
-pub const DEFAULT_ENTRY: &str = "src/main.nu";
+pub const DEFAULT_ENTRY: &str = "src/main.nula";
 
 /// A parsed `Nulang.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -39,7 +39,7 @@ pub struct Manifest {
 pub struct PackageSection {
     pub name: String,
     pub version: String,
-    /// Entry point relative to the package root; `src/main.nu` when omitted.
+    /// Entry point relative to the package root; `src/main.nula` when omitted.
     #[serde(default = "default_entry")]
     pub entry: String,
 }
@@ -112,7 +112,7 @@ mod tests {
             [package]
             name = "my-app"
             version = "0.2.0"
-            entry = "src/app.nu"
+            entry = "src/app.nula"
 
             [dependencies]
             util = { path = "../util" }
@@ -121,7 +121,7 @@ mod tests {
             registry_dep = "0.3.0"
         "#;
         let manifest = Manifest::parse(source).expect("manifest with deps should parse");
-        assert_eq!(manifest.package.entry, "src/app.nu");
+        assert_eq!(manifest.package.entry, "src/app.nula");
         assert_eq!(manifest.dependencies.len(), 4);
 
         let util = &manifest.dependencies["util"];

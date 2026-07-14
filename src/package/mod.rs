@@ -1,7 +1,7 @@
 //! `nula` — the Nulang package manager (MVP).
 //!
 //! A package is a directory with a `Nulang.toml` manifest ([`manifest`]) and
-//! an entry point (`src/main.nu` by default). Resolving a package's
+//! an entry point (`src/main.nula` by default). Resolving a package's
 //! dependencies ([`resolver`]) produces a `Nulang.lock` lockfile
 //! ([`lockfile`]). Only local-path and git dependencies are supported; there
 //! is no network registry yet.

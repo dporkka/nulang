@@ -516,7 +516,7 @@ impl NulangLanguageServer {
     fn find_decl(&self, decl: &crate::ast::Decl, word: &str) -> Option<Location> {
         use crate::ast::Decl;
         let loc = |s: &crate::types::Span| Location {
-            uri: Url::parse("file:///current.nu").unwrap(),
+            uri: Url::parse("file:///current.nula").unwrap(),
             range: Range {
                 start: Position::new(
                     s.line.saturating_sub(1) as u32,
@@ -583,7 +583,7 @@ impl NulangLanguageServer {
     fn collect_refs(&self, decl: &crate::ast::Decl, word: &str, locs: &mut Vec<Location>) {
         use crate::ast::Decl;
         let loc = |s: &crate::types::Span| Location {
-            uri: Url::parse("file:///current.nu").unwrap(),
+            uri: Url::parse("file:///current.nula").unwrap(),
             range: Range {
                 start: Position::new(
                     s.line.saturating_sub(1) as u32,
@@ -640,7 +640,7 @@ impl NulangLanguageServer {
     fn refs_expr(&self, expr: &crate::ast::Expr, word: &str, locs: &mut Vec<Location>) {
         use crate::ast::Expr;
         let loc = |s: &crate::types::Span| Location {
-            uri: Url::parse("file:///current.nu").unwrap(),
+            uri: Url::parse("file:///current.nula").unwrap(),
             range: Range {
                 start: Position::new(
                     s.line.saturating_sub(1) as u32,
@@ -726,7 +726,7 @@ impl NulangLanguageServer {
             tags: None,
             deprecated: None,
             location: Location {
-                uri: Url::parse("file:///current.nu").unwrap(),
+                uri: Url::parse("file:///current.nula").unwrap(),
                 range: Range {
                     start: Position::new(
                         span.line.saturating_sub(1) as u32,
@@ -1032,7 +1032,7 @@ impl NulangLanguageServer {
                             new_text: format!(" : {}", ty),
                         };
                         let mut changes = std::collections::HashMap::new();
-                        changes.insert(Url::parse("file:///current.nu").unwrap(), vec![edit]);
+                        changes.insert(Url::parse("file:///current.nula").unwrap(), vec![edit]);
                         actions.push(CodeActionOrCommand::CodeAction(CodeAction {
                             title: format!("Add type annotation ': {}' for '{}'", ty, vname),
                             kind: Some(CodeActionKind::QUICKFIX),

@@ -371,26 +371,26 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test: examples/*.nu run end-to-end through the full pipeline
+    // Test: examples/*.nula run end-to-end through the full pipeline
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_example_fibonacci_runs() {
-        let source = include_str!("../examples/fibonacci.nu");
+        let source = include_str!("../examples/fibonacci.nula");
         let (value, _ty) = run_source(source).unwrap();
         assert_eq!(value.as_int(), Some(55), "fib(10) = 55");
     }
 
     #[test]
     fn test_example_effects_runs() {
-        let source = include_str!("../examples/effects.nu");
+        let source = include_str!("../examples/effects.nula");
         let (value, _ty) = run_source(source).unwrap();
         assert_eq!(value.as_int(), Some(42), "handler should resume with 42");
     }
 
     #[test]
     fn test_example_counter_actor_runs() {
-        let source = include_str!("../examples/counter_actor.nu");
+        let source = include_str!("../examples/counter_actor.nula");
         let (value, _ty) = run_source(source).unwrap();
         assert!(
             value.as_actor_id().is_some(),

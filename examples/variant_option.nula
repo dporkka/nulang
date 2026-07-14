@@ -2,7 +2,7 @@
 // and pattern matching (SPEC2 §3.4.1). Nulang has no prelude: programs
 // declare the variants they need.
 //
-// Run with: nulang examples/variant_option.nu
+// Run with: nulang examples/variant_option.nula
 
 type Option[T] = Some(T) | None
 

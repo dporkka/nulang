@@ -280,7 +280,7 @@ Nulang's design synthesizes ideas from several language families:
 
 ## 2.1 Source Files and Encoding
 
-Nulang source files use the `.nula` extension (the examples in this repository currently use the older `.nu` extension; the CLI accepts any path). A source file is a sequence of Unicode code points encoded in UTF-8. A leading UTF-8 Byte Order Mark is **not** currently stripped; source files should be saved without one.
+Nulang source files conventionally use the `.nula` extension; the CLI accepts any path. A source file is a sequence of Unicode code points encoded in UTF-8. A leading UTF-8 Byte Order Mark is **not** currently stripped; source files should be saved without one.
 
 A source file consists of a sequence of declarations: functions, type definitions, actor and agent definitions, effect definitions, workflow definitions, imports, and module-level expressions. There is no statement terminator; declarations and expressions are separated by newlines or semicolons. Blocks are delimited by braces, and newlines are tokens the parser uses to find expression boundaries — indentation itself is not significant (see Section 2.8).
 
@@ -1646,7 +1646,7 @@ Selective imports (`import List exposing [map]`) and aliased imports (`import Ma
 
 ## 7.7 Module Structure
 
-A Nulang source file (conventionally `.nu` or `.nula`) is compiled as a single module named `main`. Named modules can be nested inside a file with `module Name { ... }`, which prefixes its declarations into the flat namespace:
+A Nulang source file (conventionally `.nula`) is compiled as a single module named `main`. Named modules can be nested inside a file with `module Name { ... }`, which prefixes its declarations into the flat namespace:
 
 ```nulang
 module Math {
@@ -2635,11 +2635,11 @@ let compatible = Binary.deserialize_with_schema(bytes, UserSchema.v2)
 
 > **Status: mostly not implemented.** The deployment manifest, configuration system, observability exporters, and operational tooling described in this chapter are planned. What exists today is the `nulang` command-line tool:
 >
-> - `nulang file.nu` — compile and run a source file
+> - `nulang file.nula` — compile and run a source file
 > - `nulang --eval 'expr'` / `-e` — evaluate a source string
-> - `nulang --check file.nu` / `-c` — type, effect, and capability checking only (no execution)
+> - `nulang --check file.nula` / `-c` — type, effect, and capability checking only (no execution)
 > - `nulang --repl` / `-r` — interactive read-eval-print loop (also the default when no arguments are given)
-> - `nulang --verbose file.nu` / `-v` — print AST, bytecode, and inferred types while running
+> - `nulang --verbose file.nula` / `-v` — print AST, bytecode, and inferred types while running
 > - `nulang --version` / `-V`, `nulang --help` / `-h`
 >
 > (`--help` also advertises `nulang --lsp` for the stdio language server; in the current build that flag is not wired into the argument parser and is rejected as an unknown option — a known issue to be fixed.)

@@ -42,7 +42,7 @@ fn print_usage() {
     println!("Commands:");
     println!("  new <name>   Create a new package in ./<name>");
     println!("  build        Resolve dependencies and type-check the package");
-    println!("  test         Run every .nu file in the package's tests/ directory");
+    println!("  test         Run every .nula file in the package's tests/ directory");
     println!("  run          Build and run the package entry point");
 }
 
@@ -73,7 +73,7 @@ fn cmd_new(name: Option<&str>) -> NuResult<()> {
     Ok(())
 }
 
-/// Write the `Nulang.toml` + `src/main.nu` scaffold for a new package.
+/// Write the `Nulang.toml` + `src/main.nula` scaffold for a new package.
 fn scaffold_package(dir: &Path, name: &str) -> NuResult<()> {
     let src_dir = dir.join("src");
     std::fs::create_dir_all(&src_dir).map_err(|e| {
@@ -85,10 +85,10 @@ fn scaffold_package(dir: &Path, name: &str) -> NuResult<()> {
     )
     .map_err(|e| NuError::PackageError(format!("cannot write {}: {}", MANIFEST_FILE, e)))?;
     std::fs::write(
-        src_dir.join("main.nu"),
+        src_dir.join("main.nula"),
         "// Run with: nulang nula run\n\nperform IO.print(\"Hello from Nulang!\")\n",
     )
-    .map_err(|e| NuError::PackageError(format!("cannot write main.nu: {}", e)))?;
+    .map_err(|e| NuError::PackageError(format!("cannot write main.nula: {}", e)))?;
     Ok(())
 }
 
@@ -144,7 +144,7 @@ fn cmd_run() -> NuResult<()> {
     nulang_exe(&[&entry_str])
 }
 
-/// `nula test`: run every `.nu` file under the package's `tests/` directory.
+/// `nula test`: run every `.nula` file under the package's `tests/` directory.
 fn cmd_test() -> NuResult<()> {
     let _entry = prepare_package()?;
     let tests_dir = std::env::current_dir()
@@ -153,13 +153,13 @@ fn cmd_test() -> NuResult<()> {
     let mut test_files: Vec<PathBuf> = match std::fs::read_dir(&tests_dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "nu"))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "nula"))
             .collect(),
         Err(_) => Vec::new(),
     };
     test_files.sort();
     if test_files.is_empty() {
-        println!("No tests found ({} does not exist or has no .nu files).", tests_dir.display());
+        println!("No tests found ({} does not exist or has no .nula files).", tests_dir.display());
         return Ok(());
     }
     let mut failed = 0;

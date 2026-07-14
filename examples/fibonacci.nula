@@ -1,6 +1,6 @@
 // Recursive Fibonacci — demonstrates closures and recursion.
 //
-// Run with: nulang examples/fibonacci.nu
+// Run with: nulang examples/fibonacci.nula
 
 let fib = fn(n) {
     if n <= 1 then n else fib(n - 1) + fib(n - 2)

@@ -120,7 +120,7 @@ are `//`. The examples in this section are taken from `examples/` and run as
 written.
 
 ```nulang
-// Recursive Fibonacci — closures and recursion (examples/fibonacci.nu)
+// Recursive Fibonacci — closures and recursion (examples/fibonacci.nula)
 let fib = fn(n) {
     if n <= 1 then n else fib(n - 1) + fib(n - 2)
 } in fib(10)
@@ -137,13 +137,13 @@ Core surface forms (`src/ast.rs`, `src/parser.rs`):
   `{ e1; e2 }`; tuples, records `{ field: value }`, arrays.
 - Actors: `actor Counter { state count = 0 behavior inc() { self.count + 1 } }`,
   spawned explicitly with `spawn Counter { count = 0 }`
-  (`examples/counter_actor.nu`). Messages are sent with
+  (`examples/counter_actor.nula`). Messages are sent with
   `send target behavior(args)`; inside a behavior,
   `receive { | Msg(x) => x }` reads the next mailbox message
-  (`examples/receive.nu`).
+  (`examples/receive.nula`).
 - Effects: `perform Effect.op(args)`, intercepted by handlers written as
   `handle perform Math.getAnswer() { | Math.getAnswer() => 42 }`
-  (`examples/effects.nu`).
+  (`examples/effects.nula`).
 - Module-level declarations: `fn` (optionally `@tool`-annotated, §6.5),
   `actor`, `type` aliases, record and variant types, `effect` declarations,
   `module`/`import`, `extern` blocks, `workflow` (v0.8), and `agent` (v0.9,
@@ -1291,7 +1291,7 @@ Azure, and vLLM backends from the target design are unimplemented.
 opaque synthetic `Actor` type) → HIR desugaring → MIR → bytecode metadata →
 runtime support. It is not library-only sugar assembled in Rust code.
 
-Syntax (`examples/pipeline.nu`):
+Syntax (`examples/pipeline.nula`):
 
 ```nulang
 agent Researcher = {
@@ -1414,7 +1414,7 @@ in
 pipeline.run("CRDTs")
 ```
 
-(`examples/pipeline.nu`) is recognized in HIR lowering
+(`examples/pipeline.nula`) is recognized in HIR lowering
 (`is_ai_builtin_call` / `try_lower_run_call`, `src/hir_lower.rs`) and
 compiled to dedicated opcodes — `PipelineNew/Stage/Run`,
 `SupervisorNew/Worker/Run`, `DebateNew/Participant/Run` (§2.6). The VM
