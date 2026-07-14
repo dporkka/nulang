@@ -503,6 +503,9 @@ impl MirCodegen {
                 let fid = self.field_id(field)?;
                 self.emit(Instruction::new3(OpCode::RecL, reg_of(*obj), fid, dst));
             }
+            mir::RValue::LoadFieldPos { obj, index } => {
+                self.emit(Instruction::new3(OpCode::FieldL, reg_of(*obj), *index, dst));
+            }
             mir::RValue::ArrayLoad { arr, idx } => {
                 self.emit(Instruction::new3(
                     OpCode::ArrLoad,
@@ -1176,10 +1179,10 @@ pub fn compile_mir(mir: &mir::Module, module_name: impl Into<String>) -> NuResul
 // not disqualify: after a retaining store the slot owns its own reference,
 // so releasing the register's duplicate is sound.
 //
-// Escapees: a local defined by a field/element load (`RecL`/`ArrLoad`) from
-// a candidate aliases that container's slots *without* a counted reference,
-// so a candidate is never dropped at a point where one of its (transitive)
-// escapees is still live.
+// Escapees: a local defined by a field/element load (`RecL`/`FieldL`/
+// `ArrLoad`) from a candidate aliases that container's slots *without* a
+// counted reference, so a candidate is never dropped at a point where one
+// of its (transitive) escapees is still live.
 //
 // Drop points per candidate: before every redefinition (release the old
 // value; always sound — the register is nil after any earlier drop), after
@@ -1254,7 +1257,7 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
         | SelfRef
         | StateGet { .. } => {}
         Load(x) => cp(&mut out, *x),
-        LoadFieldNamed { obj, .. } => ro(&mut out, *obj),
+        LoadFieldNamed { obj, .. } | LoadFieldPos { obj, .. } => ro(&mut out, *obj),
         ArrayLoad { arr, idx } => {
             ro(&mut out, *arr);
             ro(&mut out, *idx);
@@ -1456,7 +1459,9 @@ fn plan_drops(func: &mir::Function) -> DropPlan {
                     defs_owning[d] = false;
                 }
                 match op {
-                    mir::RValue::LoadFieldNamed { obj, .. } => loads.push((d, obj.0 as usize)),
+                    mir::RValue::LoadFieldNamed { obj, .. } | mir::RValue::LoadFieldPos { obj, .. } => {
+                        loads.push((d, obj.0 as usize))
+                    }
                     mir::RValue::ArrayLoad { arr, .. } => loads.push((d, arr.0 as usize)),
                     _ => {}
                 }

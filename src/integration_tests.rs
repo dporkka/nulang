@@ -1257,6 +1257,128 @@ code(Ok(3)) + code(Error("boom"))
         assert_int(source, 3);
     }
 
+    #[test]
+    fn test_variant_nested_pattern_binds_inner() {
+        // A nested constructor pattern must test both tags and bind the
+        // innermost payload.
+        let source = r#"
+type Option[T] = Some(T) | None
+match Some(Some(9)) with {
+  | Some(Some(x)) => x + 1
+  | _ => 0
+}
+"#;
+        assert_int(source, 10);
+    }
+
+    #[test]
+    fn test_variant_nested_pattern_rejects_inner_none() {
+        // `Some(None)` must NOT match `Some(Some(x))`: the inner tag test
+        // runs against the payload, so the arm falls through to the
+        // `Some(None)` arm. (With outer-tag-only matching this returned 1.)
+        let source = r#"
+type Option[T] = Some(T) | None
+match Some(None) with {
+  | Some(Some(x)) => 1
+  | Some(None) => 2
+  | None => 3
+}
+"#;
+        assert_int(source, 2);
+    }
+
+    #[test]
+    fn test_variant_nested_pattern_rejects_nullary() {
+        // The bare `None` tag must not match a nested `Some(Some(x))` arm.
+        let source = r#"
+type Option[T] = Some(T) | None
+match None with {
+  | Some(Some(x)) => 1
+  | None => 0
+}
+"#;
+        assert_int(source, 0);
+    }
+
+    #[test]
+    fn test_variant_payload_tuple_pattern() {
+        // A tuple pattern nested inside a variant pattern: both the outer
+        // tag and both element sub-patterns are tested, and the elements
+        // bind into the arm body.
+        let source = r#"
+type Option[T] = Some(T) | None
+match Some((1, 2)) with {
+  | Some((a, b)) => a + b
+  | None => 0
+}
+"#;
+        assert_int(source, 3);
+    }
+
+    #[test]
+    fn test_tuple_pattern_binds_elements() {
+        // Structural tuple matching: each element position is loaded from
+        // the scrutinee and bound into the arm body.
+        let source = r#"
+match (1, 2) with {
+  | (a, b) => a + b
+}
+"#;
+        assert_int(source, 3);
+    }
+
+    #[test]
+    fn test_tuple_pattern_literal_element_matches() {
+        // A literal element participates in the test: (1, 5) matches
+        // (1, x) and binds x.
+        let source = r#"
+match (1, 5) with {
+  | (1, x) => x
+  | _ => 0
+}
+"#;
+        assert_int(source, 5);
+    }
+
+    #[test]
+    fn test_tuple_pattern_literal_element_rejects() {
+        // (2, 5) must not match the (1, x) arm; it falls through to the
+        // wildcard.
+        let source = r#"
+match (2, 5) with {
+  | (1, x) => x
+  | _ => 0
+}
+"#;
+        assert_int(source, 0);
+    }
+
+    #[test]
+    fn test_record_pattern_binds_fields() {
+        // Structural record matching: named fields are loaded from the
+        // scrutinee and bound into the arm body.
+        let source = r#"
+match { a: 3, b: 4 } with {
+  | { a: x, b: y } => x + y
+}
+"#;
+        assert_int(source, 7);
+    }
+
+    #[test]
+    fn test_record_pattern_literal_field_rejects() {
+        // A literal field pattern rejects a mismatching record: the first
+        // arm's `a: 1` test fails for `{ a: 2, ... }`, so the second arm
+        // binds both fields.
+        let source = r#"
+match { a: 2, b: 9 } with {
+  | { a: 1, b: y } => y
+  | { a: x, b: y } => x + y
+}
+"#;
+        assert_int(source, 11);
+    }
+
     // -----------------------------------------------------------------------
     // Test: Complex programs
     // -----------------------------------------------------------------------
@@ -1611,6 +1733,35 @@ code(Ok(3)) + code(Error("boom"))
         assert_bool("2.0 == 2.0", true);
         assert_bool("2.0 != 3.0", true);
         assert_bool("2.0 != 2.0", false);
+    }
+
+    /// Float arithmetic threaded through the integer opcode fallback:
+    /// unannotated parameters default to the numeric type variable, but when
+    /// the function is applied to float literals the VM may still execute the
+    /// integer opcodes (IAdd/ISub/IMul/IDiv/IMod/INeg). The interpreter and
+    /// JIT runtime helpers now dispatch to float behavior when both operands
+    /// are real floats, so these must produce correct float results.
+    #[test]
+    fn test_float_threading_through_integer_opcodes() {
+        assert_float("let f = fn(x, y) x + y in f(1.5, 2.5)", 4.0);
+        assert_float("let f = fn(x, y) x - y in f(5.5, 2.0)", 3.5);
+        assert_float("let f = fn(x, y) x * y in f(1.5, 2.0)", 3.0);
+        assert_float("let f = fn(x, y) x / y in f(7.0, 2.0)", 3.5);
+        assert_float("let f = fn(x, y) x % y in f(7.5, 2.0)", 1.5);
+        assert_float("let f = fn(x) -x in f(1.5)", -1.5);
+    }
+
+    /// Float comparisons threaded through the integer comparison fallback:
+    /// unannotated parameters and the standard comparison operators must work
+    /// on float operands even if the compiler emitted ICmp* opcodes.
+    #[test]
+    fn test_float_comparisons_threading_through_integer_opcodes() {
+        assert_bool("let f = fn(x, y) x < y in f(1.5, 2.5)", true);
+        assert_bool("let f = fn(x, y) x > y in f(1.5, 2.5)", false);
+        assert_bool("let f = fn(x, y) x <= y in f(1.5, 2.5)", true);
+        assert_bool("let f = fn(x, y) x >= y in f(1.5, 2.5)", false);
+        assert_bool("let f = fn(x, y) x == y in f(2.0, 2.0)", true);
+        assert_bool("let f = fn(x, y) x == y in f(2.0, 3.0)", false);
     }
 
     /// Float modulo: `7.5 % 2.0` compiles to the FMod opcode and the
@@ -4088,6 +4239,214 @@ code(Ok(3)) + code(Error("boom"))
         assert_eq!(calls[0].messages[0].content, "hello");
     }
 
+    /// A workflow step that waits on a signal AND THEN performs `LLM.ask`
+    /// must, once the signal arrives and the step resumes, suspend on the
+    /// background LLM call instead of running saga compensation.
+    /// Previously resume_suspended_workflow_step only matched
+    /// "SignalWait:suspend": the resumed step's "LlmAsk:suspend" fell into
+    /// the generic error arm and compensated the saga, and with suspension
+    /// not enabled for the resume at all, the LLM call blocked the caller
+    /// thread instead of suspending.
+    #[test]
+    fn test_workflow_step_signal_wait_then_llm_ask() {
+        let source = r#"
+            workflow SignalThenLlm {
+                step wait_then_ask {
+                    (perform Signal.wait("go"), self.answer = perform LLM.ask("hello"))
+                }
+            }
+            let w = spawn SignalThenLlm {} in { w }
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+        rt.borrow_mut()
+            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        // The step is suspended waiting for the signal.
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(actor.waiting_signal.as_deref(), Some("go"));
+            assert!(actor.suspended_execution.is_some());
+            assert_eq!(
+                actor.get_state_field("step_index").and_then(|v| v.as_int()),
+                Some(0)
+            );
+        }
+
+        // The signal arrives: the step resumes, consumes it, and suspends
+        // again on the background LLM call.  The suspension must be
+        // re-captured with the LLM marker — NOT treated as a step failure.
+        rt.borrow_mut().signal_workflow(actor_id, "go", None);
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(
+                actor.waiting_signal.as_deref(),
+                Some("__llm_ask_pending__"),
+                "signal-resumed step should re-suspend with the LLM marker"
+            );
+            assert!(
+                actor.suspended_execution.is_some(),
+                "LLM suspension should be re-captured"
+            );
+            assert!(actor.llm_inflight, "background call should be in flight");
+            assert_eq!(
+                actor.get_state_field("step_index").and_then(|v| v.as_int()),
+                Some(0),
+                "step should not complete before the LLM response"
+            );
+        }
+        let events = store.read_workflow_events(actor_id);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::SagaCompensated { .. })),
+            "an LLM suspend is not a step failure: no saga compensation"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "wait_then_ask")),
+            "step should not be journaled complete before the LLM response"
+        );
+
+        // Pump the mock completion: the step resumes through
+        // resume_suspended_llm_step, which performs the workflow completion
+        // bookkeeping.
+        rt.borrow_mut().run_scheduler();
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(
+                actor.get_state_field("step_index").and_then(|v| v.as_int()),
+                Some(1),
+                "resumed LLM step should advance step_index"
+            );
+            assert!(actor.suspended_execution.is_none());
+            assert_eq!(actor.waiting_signal, None);
+            assert!(!actor.llm_inflight);
+            assert_eq!(
+                rt_ref.actor_state_string(actor_id, "answer").as_deref(),
+                Some("world")
+            );
+        }
+        let events = store.read_workflow_events(actor_id);
+        let completions = events
+            .iter()
+            .filter(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "wait_then_ask"))
+            .count();
+        assert_eq!(
+            completions, 1,
+            "step should complete in the journal exactly once"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::SagaCompensated { .. })),
+            "no saga compensation should ever run for a suspending step"
+        );
+    }
+
+    /// Reverse order: a workflow step that performs `LLM.ask` AND THEN waits
+    /// on a signal.  The LLM completion resumes the step through
+    /// resume_suspended_llm_step, whose chained-suspend arm re-captures the
+    /// signal wait with the signal name as marker; the signal then completes
+    /// the step through resume_suspended_workflow_step.
+    #[test]
+    fn test_workflow_step_llm_ask_then_signal_wait() {
+        let source = r#"
+            workflow LlmThenSignal {
+                step ask_then_wait {
+                    (self.answer = perform LLM.ask("hello"), perform Signal.wait("go"))
+                }
+            }
+            let w = spawn LlmThenSignal {} in { w }
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+        let client = crate::ai::MockLlmClient::text("world");
+        rt.borrow_mut().set_llm_client(Box::new(client.clone()));
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        // run_scheduler pumps the LLM completion; the resumed step then
+        // suspends on the signal wait.
+        rt.borrow_mut().run_scheduler();
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(
+                actor.waiting_signal.as_deref(),
+                Some("go"),
+                "LLM-resumed step should re-suspend waiting for the signal"
+            );
+            assert!(actor.suspended_execution.is_some());
+            assert!(!actor.llm_inflight);
+            assert_eq!(
+                actor.get_state_field("step_index").and_then(|v| v.as_int()),
+                Some(0),
+                "step should not complete before the signal"
+            );
+        }
+        assert_eq!(client.recorded_calls().len(), 1, "exactly one LLM call");
+
+        // The signal arrives: the step runs to completion.
+        rt.borrow_mut().signal_workflow(actor_id, "go", None);
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(
+                actor.get_state_field("step_index").and_then(|v| v.as_int()),
+                Some(1),
+                "workflow should advance after the signal"
+            );
+            assert!(actor.suspended_execution.is_none());
+            assert_eq!(actor.waiting_signal, None);
+            assert_eq!(
+                rt_ref.actor_state_string(actor_id, "answer").as_deref(),
+                Some("world")
+            );
+        }
+        let events = store.read_workflow_events(actor_id);
+        let completions = events
+            .iter()
+            .filter(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "ask_then_wait"))
+            .count();
+        assert_eq!(
+            completions, 1,
+            "step should complete in the journal exactly once"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, WorkflowEvent::SagaCompensated { .. })),
+            "no saga compensation should run for a suspending step"
+        );
+    }
+
     #[test]
     fn test_agent_ask_uses_memory() {
         let source = r#"
@@ -5124,5 +5483,67 @@ code(Ok(3)) + code(Error("boom"))
             case 2 => 20
         }"#;
         assert_int(source, 20);
+    }
+
+    // -----------------------------------------------------------------------
+    // Pattern guards: `| pat if cond => body`
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_match_guard_accepts() {
+        let source = r#"match 42 { | n if n > 10 => 1 | _ => 0 }"#;
+        assert_int(source, 1);
+    }
+
+    #[test]
+    fn test_match_guard_rejects_falls_through() {
+        let source = r#"match 5 { | n if n > 10 => 1 | _ => 0 }"#;
+        assert_int(source, 0);
+    }
+
+    #[test]
+    fn test_match_guard_over_variant_payload() {
+        // The guard sees the payload binding: a failing guard falls through
+        // to the next arm even when the constructor matches.
+        let source = r#"
+            type Option[T] = Some(T) | None
+
+            fn classify(o: Option[Int]) -> Int {
+                match o with {
+                    | Some(n) if n > 0 => 1
+                    | Some(n) => 2
+                    | None => 0
+                }
+            }
+
+            classify(Some(5)) * 100 + classify(Some(0 - 3)) * 10 + classify(None)
+        "#;
+        assert_int(source, 120);
+    }
+
+    #[test]
+    fn test_match_guarded_final_wildcard_non_exhaustive() {
+        // A guarded last arm is not a catch-all: when its guard fails the
+        // match is non-exhaustive and must raise the runtime error.
+        let source = r#"match 5 { | _ if false => 1 }"#;
+        let result = run_source(source);
+        match &result {
+            Err(e) => assert!(
+                format!("{e}").contains("non-exhaustive"),
+                "expected non-exhaustive match error, got {e}"
+            ),
+            Ok(v) => panic!("guarded final wildcard with failing guard must error, got {v:?}"),
+        }
+    }
+
+    #[test]
+    fn test_match_guard_must_be_bool() {
+        let source = r#"match 1 { | n if n => 1 | _ => 0 }"#;
+        let result = run_source(source);
+        assert!(
+            result.is_err(),
+            "non-Bool guard must be a type error, got {:?}",
+            result
+        );
     }
 }

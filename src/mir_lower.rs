@@ -1376,7 +1376,7 @@ impl<'c> FnLowerer<'c> {
         &mut self,
         dst: mir::LocalId,
         scrutinee: &hir::Operand,
-        arms: &[(Pattern, Box<hir::Body>)],
+        arms: &[(Pattern, Option<Box<hir::Body>>, Box<hir::Body>)],
     ) -> NuResult<()> {
         use crate::bytecode::Constant;
         let sid = self.lower_operand(scrutinee)?;
@@ -1386,12 +1386,15 @@ impl<'c> FnLowerer<'c> {
         }
         let join = self.b.create_block();
 
-        for (i, (pat, arm_body)) in arms.iter().enumerate() {
+        for (i, (pat, guard, arm_body)) in arms.iter().enumerate() {
             let is_last = i == arms.len() - 1;
-            if is_last && matches!(pat, Pattern::Wild | Pattern::Var(_)) {
-                // An irrefutable last pattern (wildcard or variable binding)
-                // is a catch-all: enter it unconditionally (mirrors the
-                // stable compiler's fallback semantics).
+            if is_last && guard.is_none() && matches!(pat, Pattern::Wild | Pattern::Var(_)) {
+                // An irrefutable, unguarded last pattern (wildcard or
+                // variable binding) is a catch-all: enter it
+                // unconditionally (mirrors the stable compiler's fallback
+                // semantics). A guarded last arm is NOT a catch-all — when
+                // its guard fails the match is non-exhaustive and takes the
+                // error path below.
                 self.push_scope();
                 self.bind_pattern(pat, sid);
                 self.lower_body_into(arm_body, dst, join)?;
@@ -1408,6 +1411,22 @@ impl<'c> FnLowerer<'c> {
                 self.b.switch_to(arm_bb);
                 self.push_scope();
                 self.bind_pattern(pat, sid);
+                if let Some(guard_body) = guard {
+                    // The pattern matched: evaluate the guard with the
+                    // pattern's bindings in scope, then branch to the arm
+                    // body on true or fall through to the next arm on false.
+                    let guard_val = self.b.add_temp(Type::bool());
+                    let guard_join = self.b.create_block();
+                    self.lower_body_into(guard_body, guard_val, guard_join)?;
+                    self.b.switch_to(guard_join);
+                    let body_bb = self.b.create_block();
+                    self.b.terminate(mir::Terminator::Branch {
+                        cond: guard_val,
+                        then_: body_bb,
+                        else_: next_bb,
+                    });
+                    self.b.switch_to(body_bb);
+                }
                 self.lower_body_into(arm_body, dst, join)?;
                 self.pop_scope();
                 self.b.switch_to(next_bb);
@@ -1474,17 +1493,122 @@ impl<'c> FnLowerer<'c> {
                 let tag_id = self.b.add_temp(Type::unit());
                 self.b
                     .assign(tag_id, mir::RValue::Const(Constant::String(tag.clone())));
-                self.b.assign(dst, mir::RValue::StringEq(scrut_tag, tag_id));
+                match payload {
+                    Some(inner) => {
+                        // Nested pattern: the outer tag must match AND the
+                        // inner pattern must match the payload value, so
+                        // `Some(Some(x))` rejects both `Some(None)` (inner
+                        // tag test fails on the bare-string payload) and
+                        // `None` (outer tag test fails on the nil `ctor`
+                        // field load).
+                        let tag_ok = self.b.add_temp(Type::bool());
+                        self.b
+                            .assign(tag_ok, mir::RValue::StringEq(scrut_tag, tag_id));
+                        let payload_val = self.b.add_temp(Type::unit());
+                        self.b.assign(
+                            payload_val,
+                            mir::RValue::LoadFieldNamed {
+                                obj: sid,
+                                field: "payload".to_string(),
+                            },
+                        );
+                        let inner_ok = self.pattern_test(inner, payload_val)?;
+                        self.b.assign(
+                            dst,
+                            mir::RValue::Binary(crate::ast::BinOp::And, tag_ok, inner_ok),
+                        );
+                    }
+                    None => {
+                        self.b.assign(dst, mir::RValue::StringEq(scrut_tag, tag_id));
+                    }
+                }
             }
             Pattern::Tuple(pats) => {
-                // Structural tuple matching is not implemented; mirror the
-                // stable compiler (non-empty tuple pattern always matches).
-                self.b
-                    .assign(dst, mir::RValue::Const(Constant::Bool(!pats.is_empty())));
+                // Structural tuple matching: each position loads its field
+                // from the scrutinee (FieldL via LoadFieldPos — tuples are
+                // fixed-size heap arrays indexed by position, see the
+                // RValue::Tuple codegen) and the sub-pattern is tested
+                // recursively; all position tests are AND-ed. An empty
+                // tuple pattern matches vacuously.
+                //
+                // Arity is deliberately NOT checked: a 2-element pattern
+                // also matches a 3-element tuple (extra elements are
+                // ignored), and a position beyond the scrutinee's length
+                // loads nil (FieldL clamps out-of-range reads), which
+                // literal sub-patterns reject and variable sub-patterns
+                // bind. There is no cheap arity probe — ArrLen reports 0
+                // for tuples (its callback only measures
+                // HeapTypeTag::Array) and no tuple-length opcode exists —
+                // so an arity test would require a new VM opcode.
+                if pats.is_empty() {
+                    self.b
+                        .assign(dst, mir::RValue::Const(Constant::Bool(true)));
+                } else {
+                    let mut acc: Option<mir::LocalId> = None;
+                    for (i, sub) in pats.iter().enumerate() {
+                        let elem = self.b.add_temp(Type::unit());
+                        self.b.assign(
+                            elem,
+                            mir::RValue::LoadFieldPos {
+                                obj: sid,
+                                index: i as u8,
+                            },
+                        );
+                        let t = self.pattern_test(sub, elem)?;
+                        acc = Some(match acc {
+                            None => t,
+                            Some(prev) => {
+                                let and_t = self.b.add_temp(Type::bool());
+                                self.b.assign(
+                                    and_t,
+                                    mir::RValue::Binary(crate::ast::BinOp::And, prev, t),
+                                );
+                                and_t
+                            }
+                        });
+                    }
+                    self.b.assign(dst, mir::RValue::Load(acc.unwrap()));
+                }
             }
             Pattern::Record(fields) => {
-                self.b
-                    .assign(dst, mir::RValue::Const(Constant::Bool(!fields.is_empty())));
+                // Structural record matching: load each named field
+                // (LoadFieldNamed/RecL — records are flat arrays indexed by
+                // module-wide field ids) and recursively test the
+                // sub-pattern; all field tests are AND-ed. Fields the
+                // pattern does not name are ignored, so a pattern matches
+                // any record that carries at least its named fields; a
+                // missing field loads nil (RecL clamps), which literal
+                // sub-patterns reject and variable sub-patterns bind. An
+                // empty record pattern matches vacuously.
+                if fields.is_empty() {
+                    self.b
+                        .assign(dst, mir::RValue::Const(Constant::Bool(true)));
+                } else {
+                    let mut acc: Option<mir::LocalId> = None;
+                    for (field, sub) in fields {
+                        let v = self.b.add_temp(Type::unit());
+                        self.b.assign(
+                            v,
+                            mir::RValue::LoadFieldNamed {
+                                obj: sid,
+                                field: field.clone(),
+                            },
+                        );
+                        let t = self.pattern_test(sub, v)?;
+                        acc = Some(match acc {
+                            None => t,
+                            Some(prev) => {
+                                let and_t = self.b.add_temp(Type::bool());
+                                self.b.assign(
+                                    and_t,
+                                    mir::RValue::Binary(crate::ast::BinOp::And, prev, t),
+                                );
+                                and_t
+                            }
+                        });
+                    }
+                    self.b.assign(dst, mir::RValue::Load(acc.unwrap()));
+                }
             }
             Pattern::Alias(_, inner) => {
                 return self.pattern_test(inner, sid);
@@ -1516,6 +1640,37 @@ impl<'c> FnLowerer<'c> {
                     },
                 );
                 self.bind_pattern(inner, payload);
+            }
+            Pattern::Tuple(pats) => {
+                // Bind each element sub-pattern to its positional field
+                // load (FieldL — see pattern_test for the arity caveat: an
+                // out-of-range position binds nil).
+                for (i, sub) in pats.iter().enumerate() {
+                    let elem = self.b.add_temp(Type::unit());
+                    self.b.assign(
+                        elem,
+                        mir::RValue::LoadFieldPos {
+                            obj: sid,
+                            index: i as u8,
+                        },
+                    );
+                    self.bind_pattern(sub, elem);
+                }
+            }
+            Pattern::Record(fields) => {
+                // Bind each field sub-pattern to its named field load
+                // (LoadFieldNamed/RecL; a missing field binds nil).
+                for (field, sub) in fields {
+                    let v = self.b.add_temp(Type::unit());
+                    self.b.assign(
+                        v,
+                        mir::RValue::LoadFieldNamed {
+                            obj: sid,
+                            field: field.clone(),
+                        },
+                    );
+                    self.bind_pattern(sub, v);
+                }
             }
             _ => {}
         }
@@ -1880,7 +2035,7 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         Load(x) | ArrayLen(x) | Unary(_, x) | LlmAsk { prompt: x }
         | CapabilityCheck { val: x }
         | DebateRun { id: x } => out.push(*x),
-        LoadFieldNamed { obj, .. } => out.push(*obj),
+        LoadFieldNamed { obj, .. } | LoadFieldPos { obj, .. } => out.push(*obj),
         ArrayLoad { arr, idx } => {
             out.push(*arr);
             out.push(*idx);
@@ -2073,7 +2228,10 @@ fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
             scrutinee, arms, ..
         } => {
             walk_hir_operand(scrutinee, acc);
-            for (_, arm_body) in arms {
+            for (_, guard, arm_body) in arms {
+                if let Some(guard_body) = guard {
+                    walk_hir_body(guard_body, acc);
+                }
                 walk_hir_body(arm_body, acc);
             }
         }
@@ -2409,6 +2567,80 @@ mod tests {
         assert!(
             loads_payload,
             "variant pattern must bind the payload field, not the scrutinee: {:?}",
+            main.blocks
+        );
+    }
+
+    #[test]
+    fn test_nested_variant_pattern_recurses_into_payload_test() {
+        // `| Some(Some(x)) => ...` must test the OUTER ctor, load the
+        // payload, and recursively test the INNER ctor against it — two
+        // `ctor` field loads combined by a logical And — so that
+        // `Some(None)` is rejected. (Outer-tag-only lowering emits a single
+        // ctor load and no And.)
+        let module = lower_source(
+            "let o = { ctor: \"Some\", payload: { ctor: \"Some\", payload: 41 } } in match o { | Some(Some(x)) => x | _ => 0 }",
+        )
+        .unwrap();
+        let main = find_fn(&module, "__main");
+        let ctor_loads = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.stmts.iter())
+            .filter(|s| {
+                matches!(s, mir::Stmt::Assign { op: mir::RValue::LoadFieldNamed { field, .. }, .. } if field == "ctor")
+            })
+            .count();
+        assert!(
+            ctor_loads >= 2,
+            "nested variant pattern must test the ctor field at both levels: {:?}",
+            main.blocks
+        );
+        let joins_with_and = main.blocks.iter().any(|b| {
+            b.stmts.iter().any(|s| {
+                matches!(
+                    s,
+                    mir::Stmt::Assign {
+                        op: mir::RValue::Binary(crate::ast::BinOp::And, _, _),
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(
+            joins_with_and,
+            "outer and inner tag tests must be combined with And: {:?}",
+            main.blocks
+        );
+    }
+
+    #[test]
+    fn test_tuple_pattern_loads_elements_positionally() {
+        // `| (a, b) => ...` must load both element positions (bytecode
+        // FieldL via LoadFieldPos) so the sub-patterns are tested and the
+        // bindings are wired — previously the arm matched unconditionally
+        // and the element bindings were never emitted.
+        let module =
+            lower_source("let t = (1, 2) in match t { | (a, b) => a + b }").unwrap();
+        let main = find_fn(&module, "__main");
+        let mut indices: Vec<u8> = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.stmts.iter())
+            .filter_map(|s| match s {
+                mir::Stmt::Assign {
+                    op: mir::RValue::LoadFieldPos { index, .. },
+                    ..
+                } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        indices.sort_unstable();
+        indices.dedup();
+        assert!(
+            indices.contains(&0) && indices.contains(&1),
+            "tuple pattern must load element positions 0 and 1, got {:?}: {:?}",
+            indices,
             main.blocks
         );
     }

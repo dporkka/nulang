@@ -162,6 +162,12 @@ pub enum RValue {
         obj: LocalId,
         field: String,
     },
+    /// Read a positional tuple field (bytecode `FieldL`; yields nil when
+    /// the object is not a tuple or the index is out of range).
+    LoadFieldPos {
+        obj: LocalId,
+        index: u8,
+    },
     ArrayLoad {
         arr: LocalId,
         idx: LocalId,

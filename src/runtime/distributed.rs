@@ -416,6 +416,9 @@ impl AddressResolver {
     /// The packet carries the behavior **name** (not a behavior id, which is
     /// a per-actor-table index and meaningless across nodes) plus the
     /// sender's node ID so the remote node can route replies back.
+    /// `string_table` holds the UTF-8 content for every string-id value in
+    /// `payload` (see [`Packet::ActorMessage::string_table`]); pass an empty
+    /// vec when the payload carries no strings.
     pub fn build_packet(
         &self,
         target_actor: u64,
@@ -423,11 +426,13 @@ impl AddressResolver {
         payload: Vec<Value>,
         sender_actor: u64,
         priority: MessagePriority,
+        string_table: Vec<String>,
     ) -> Packet {
         Packet::ActorMessage {
             target_actor,
             behavior_name: behavior_name.to_string(),
             payload,
+            string_table,
             sender_actor,
             sender_node: NodeId(self.local_node.0),
             priority,
@@ -436,20 +441,24 @@ impl AddressResolver {
 
     /// Parse a received network packet into a message for local delivery.
     ///
-    /// Returns `Some((target_actor_id, behavior_name, message))` if the
-    /// packet is an actor message that should be delivered locally. The
-    /// message's `behavior_id` is left as `0` — the caller must resolve
+    /// Returns `Some((target_actor_id, behavior_name, message, string_table))`
+    /// if the packet is an actor message that should be delivered locally.
+    /// The message's `behavior_id` is left as `0` — the caller must resolve
     /// `behavior_name` against the target actor's behavior table before
-    /// enqueueing (see [`process_network_packets`]). Returns `None` for
-    /// other packet types (e.g., heartbeats, spawn requests).
+    /// enqueueing (see [`process_network_packets`]). `string_table` carries
+    /// the content for any string-id values in the payload, which the caller
+    /// must intern into the target actor's module pool before delivery.
+    /// Returns `None` for other packet types (e.g., heartbeats, spawn
+    /// requests).
     ///
     /// Also updates the remote cache with the sender information.
-    pub fn parse_packet(&mut self, packet: Packet) -> Option<(u64, String, Message)> {
+    pub fn parse_packet(&mut self, packet: Packet) -> Option<(u64, String, Message, Vec<String>)> {
         match packet {
             Packet::ActorMessage {
                 target_actor,
                 behavior_name,
                 payload,
+                string_table,
                 sender_actor,
                 sender_node,
                 priority,
@@ -464,7 +473,7 @@ impl AddressResolver {
                     sender: sender_actor,
                     priority,
                 };
-                Some((target_actor, behavior_name, msg))
+                Some((target_actor, behavior_name, msg, string_table))
             }
             // Non-actor-message packets are not parsed here.
             _ => None,
@@ -662,15 +671,31 @@ pub fn send_distributed(
             runtime.send_message(actor_id, behavior, args);
         }
         ResolveResult::Remote { node_id, actor_id } => {
+            // String payloads must cross the wire by CONTENT: a bare string
+            // id indexes the sender's module constant pool and means nothing
+            // (or the wrong thing) on the receiving node. Resolve each
+            // string arg against the sender's pool and carry the contents
+            // in the packet's string table.
+            let (payload, string_table) = match resolve_wire_strings(runtime, args) {
+                Some(resolved) => resolved,
+                None => {
+                    eprintln!(
+                        "nulang-net: dropping message to actor {} on node {:?}: string payload cannot be resolved to content (no sender module context)",
+                        actor_id, node_id
+                    );
+                    return;
+                }
+            };
             // Remote sends carry the behavior name; the receiving node
             // resolves it against the target actor's behavior table on
             // delivery (see process_network_packets).
             let packet = resolver.build_packet(
                 actor_id,
                 behavior,
-                args.to_vec(),
+                payload,
                 runtime.current_actor.unwrap_or(0),
                 MessagePriority::Normal,
+                string_table,
             );
 
             if let Some(node_info) = cluster.get_node(node_id) {
@@ -801,7 +826,7 @@ pub fn process_network_packets(
                 }
             }
             _ => {
-                if let Some((target_actor, behavior_name, mut msg)) =
+                if let Some((target_actor, behavior_name, mut msg, string_table)) =
                     resolver.parse_packet(incoming.packet)
                 {
                     // Resolve the behavior name against the target actor's
@@ -812,6 +837,20 @@ pub fn process_network_packets(
                     msg.behavior_id = runtime
                         .behavior_id_for(target_actor, &behavior_name)
                         .unwrap_or(0);
+                    // Intern string payloads into the TARGET actor's module
+                    // pool — on this (scheduler) thread, never in a network
+                    // reader thread. The ids on the wire index the packet's
+                    // string table; a message whose strings cannot be
+                    // interned is dropped rather than delivered with
+                    // dangling pool ids.
+                    if !intern_wire_strings(runtime, target_actor, &mut msg.payload, &string_table)
+                    {
+                        eprintln!(
+                            "nulang-net: dropping message to actor {}: string payload cannot be interned (target actor missing or has no module pool)",
+                            target_actor
+                        );
+                        continue;
+                    }
                     if let Some(actor) = runtime.actors.get_mut(&target_actor) {
                         let _ = actor.mailbox.push(msg);
                         runtime.scheduler.enqueue(target_actor);
@@ -904,6 +943,123 @@ fn fast_random_u64() -> u64 {
     x ^= x >> 7;
     x ^= x << 17;
     x
+}
+
+// ---------------------------------------------------------------------------
+// Cross-node string payloads
+// ---------------------------------------------------------------------------
+
+/// Resolve string-id values in `args` to their UTF-8 content for a remote
+/// send, returning the payload rewritten to index a per-packet string table
+/// plus the table itself.
+///
+/// String ids index the SENDER's module constant pool (the runtime VM module
+/// of the actor currently being stepped), so the content — never the id — is
+/// what may cross the wire. Returns `None` when a string value has no
+/// resolvable content (no current actor, no sender module, or an id outside
+/// the pool); the caller must drop the message rather than send a dangling
+/// id.
+fn resolve_wire_strings(runtime: &Runtime, args: &[Value]) -> Option<(Vec<Value>, Vec<String>)> {
+    let mut payload = args.to_vec();
+    let mut table: Vec<String> = Vec::new();
+    for value in payload.iter_mut() {
+        let Some(id) = value.as_string_id() else { continue };
+        let content = resolve_sender_string(runtime, id)?;
+        // Reuse a table entry for repeated content within one packet.
+        let idx = match table.iter().position(|s| s == &content) {
+            Some(i) => i,
+            None => {
+                table.push(content);
+                table.len() - 1
+            }
+        };
+        *value = Value::string(idx as u32);
+    }
+    Some((payload, table))
+}
+
+/// Resolve a sender-pool string id to its content via the current actor's
+/// module in the runtime VM.
+fn resolve_sender_string(runtime: &Runtime, id: u32) -> Option<String> {
+    let sender = runtime.current_actor?;
+    let module_idx = runtime.actors.get(&sender)?.bytecode_module_idx?;
+    runtime.vm.as_ref()?.constant_string(module_idx, id)
+}
+
+/// Intern the string payloads of a received remote message into the target
+/// actor's module constant pool, rewriting each string-id value from a
+/// packet string table index to its new pool index.
+///
+/// Must run on the scheduler thread — [`crate::vm::VM::add_runtime_string`]
+/// is `&mut self` and the VM is strictly single-threaded. Returns `true`
+/// when every string value was interned; `false` when the target actor has
+/// no module pool to intern into or a payload id falls outside the table,
+/// in which case the caller drops the message rather than deliver a
+/// dangling id.
+fn intern_wire_strings(
+    runtime: &mut Runtime,
+    target_actor: u64,
+    payload: &mut [Value],
+    string_table: &[String],
+) -> bool {
+    if !payload.iter().any(|v| v.is_string()) {
+        return true;
+    }
+    let Some(module_idx) = ensure_actor_module_idx(runtime, target_actor) else {
+        return false;
+    };
+    let vm = runtime.vm.as_mut().expect("a module index implies a VM");
+    for value in payload.iter_mut() {
+        let Some(id) = value.as_string_id() else { continue };
+        let Some(content) = string_table.get(id as usize) else { return false };
+        *value = intern_pool_string(vm, module_idx, content);
+    }
+    true
+}
+
+/// The module pool index that string payloads for `actor_id` must be
+/// interned into: the actor's already-loaded module, or — before its first
+/// turn — its bytecode module loaded into the runtime VM, mirroring the
+/// lazy load in `Runtime::run_bytecode_at_offset`. `None` for actors
+/// without a bytecode module (native handlers have no constant pool).
+fn ensure_actor_module_idx(runtime: &mut Runtime, actor_id: u64) -> Option<usize> {
+    if let Some(idx) = runtime
+        .actors
+        .get(&actor_id)
+        .and_then(|a| a.bytecode_module_idx)
+    {
+        return Some(idx);
+    }
+    let module = runtime
+        .actors
+        .get(&actor_id)
+        .and_then(|a| a.bytecode_module.clone())?;
+    if runtime.vm.is_none() {
+        runtime.vm = Some(crate::vm::VM::new());
+    }
+    let vm = runtime.vm.as_mut().expect("VM was just ensured");
+    let idx = vm.modules.len();
+    vm.load_module(module);
+    if let Some(actor) = runtime.actors.get_mut(&actor_id) {
+        actor.bytecode_module_idx = Some(idx);
+    }
+    Some(idx)
+}
+
+/// Intern `content` into module `module_idx`'s constant pool, reusing an
+/// existing entry when the text is already present so repeated messages
+/// cannot grow the pool without bound.
+fn intern_pool_string(vm: &mut crate::vm::VM, module_idx: usize, content: &str) -> Value {
+    if let Some(module) = vm.modules.get(module_idx) {
+        if let Some(pos) = module
+            .constants
+            .iter()
+            .position(|c| matches!(c, crate::bytecode::Constant::String(s) if s == content))
+        {
+            return Value::string(pos as u32);
+        }
+    }
+    vm.add_runtime_string(module_idx, content.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,6 +1258,7 @@ mod tests {
             vec![Value::int(7), Value::string(0)],
             100,  // sender_actor
             MessagePriority::Normal,
+            vec!["hello".to_string()],
         );
 
         match packet {
@@ -1109,6 +1266,7 @@ mod tests {
                 target_actor,
                 behavior_name,
                 payload,
+                string_table,
                 sender_actor,
                 sender_node,
                 priority,
@@ -1119,6 +1277,7 @@ mod tests {
                 assert_eq!(sender_node.0, local_node.0); // Same underlying u64
                 assert_eq!(priority, MessagePriority::Normal);
                 assert_eq!(payload.len(), 2);
+                assert_eq!(string_table, vec!["hello".to_string()]);
             }
             other => panic!("expected ActorMessage packet, got {:?}", other),
         }
@@ -1136,6 +1295,7 @@ mod tests {
             target_actor: 77,
             behavior_name: "inc".to_string(),
             payload: vec![Value::int(123)],
+            string_table: vec![],
             sender_actor: 88,
             sender_node: NodeId(9), // Remote node 9
             priority: MessagePriority::System,
@@ -1144,7 +1304,7 @@ mod tests {
         let result = resolver.parse_packet(packet);
         assert!(result.is_some());
 
-        let (target, behavior_name, msg) = result.unwrap();
+        let (target, behavior_name, msg, string_table) = result.unwrap();
         assert_eq!(target, 77);
         assert_eq!(behavior_name, "inc");
         // behavior_id is resolved at delivery, not parse time.
@@ -1152,6 +1312,7 @@ mod tests {
         assert_eq!(msg.sender, 88);
         assert_eq!(msg.priority, MessagePriority::System);
         assert_eq!(msg.payload.len(), 1);
+        assert!(string_table.is_empty());
 
         // The sender should now be in the cache.
         assert!(resolver.cache_mut().get(NodeId(9), 88).is_some());
@@ -1357,6 +1518,224 @@ mod tests {
             .actors.get(&actor_b).unwrap()
             .get_state_field("count").and_then(|v| v.as_int()).unwrap();
         assert_eq!(count, 4, "unknown behavior name must fall back to behavior 0 (\"dec\")");
+
+        transport_a.shutdown();
+        transport_b.shutdown();
+    }
+
+    // -- 18. Cross-node string payloads --------------------------------------
+
+    #[test]
+    fn test_resolve_wire_strings() {
+        use crate::bytecode::{CodeModule, Constant};
+
+        let mut rt = Runtime::new();
+        let mut module = CodeModule::new("sender");
+        module.add_constant(Constant::String("first".to_string())); // id 0
+        module.add_constant(Constant::String("hello".to_string())); // id 1
+        rt.vm = Some(crate::vm::VM::new());
+        rt.vm.as_mut().unwrap().load_module(module);
+
+        let sender = rt.spawn_actor(Box::new(|| vec![]));
+        {
+            let actor = rt.actors.get_mut(&sender).unwrap();
+            actor.bytecode_module_idx = Some(0);
+        }
+        rt.current_actor = Some(sender);
+
+        // Strings become per-packet table ids; repeated content shares one
+        // entry; scalars pass through unchanged.
+        let (payload, table) = resolve_wire_strings(
+            &rt,
+            &[
+                Value::string(1),
+                Value::int(5),
+                Value::string(1),
+                Value::string(0),
+            ],
+        )
+        .expect("strings resolvable in the sender module");
+        assert_eq!(
+            payload,
+            vec![
+                Value::string(0),
+                Value::int(5),
+                Value::string(0),
+                Value::string(1),
+            ]
+        );
+        assert_eq!(table, vec!["hello".to_string(), "first".to_string()]);
+
+        // No sender module context → unresolvable → None (drop, don't
+        // corrupt).
+        rt.current_actor = None;
+        assert!(resolve_wire_strings(&rt, &[Value::string(0)]).is_none());
+
+        // A string id outside the sender pool → None.
+        rt.current_actor = Some(sender);
+        assert!(resolve_wire_strings(&rt, &[Value::string(99)]).is_none());
+
+        // Payloads without strings pass through with an empty table.
+        let (payload, table) =
+            resolve_wire_strings(&rt, &[Value::int(1), Value::bool(true)]).unwrap();
+        assert_eq!(payload, vec![Value::int(1), Value::bool(true)]);
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn test_intern_wire_strings() {
+        use crate::bytecode::{CodeModule, Constant};
+
+        let mut rt = Runtime::new();
+        // The receiver's pool id 0 deliberately holds a DIFFERENT string
+        // than the content being interned: resolving a raw sender id
+        // against this pool would corrupt the payload.
+        let mut module = CodeModule::new("receiver");
+        module.add_constant(Constant::String("DECOY-RECEIVER-LOCAL".to_string()));
+
+        let actor_id = rt.spawn_actor(Box::new(|| vec![]));
+        {
+            let actor = rt.actors.get_mut(&actor_id).unwrap();
+            actor.bytecode_module = Some(module);
+        }
+
+        // First intern: lazy-loads the actor's module and appends the
+        // content after the decoy.
+        let table = vec!["hello-cross-node".to_string()];
+        let mut payload = vec![Value::string(0), Value::int(9)];
+        assert!(intern_wire_strings(&mut rt, actor_id, &mut payload, &table));
+        assert_eq!(payload[0], Value::string(1));
+        assert_eq!(payload[1], Value::int(9), "scalars must pass through");
+        let module_idx = rt.actors.get(&actor_id).unwrap().bytecode_module_idx.unwrap();
+        let vm = rt.vm.as_ref().unwrap();
+        assert_eq!(
+            vm.constant_string(module_idx, payload[0].as_string_id().unwrap()),
+            Some("hello-cross-node".to_string())
+        );
+        let pool_len = vm.modules[module_idx].constants.len();
+
+        // Repeated content dedups against the existing pool entry — the
+        // pool must not grow per message.
+        let mut payload2 = vec![Value::string(0)];
+        assert!(intern_wire_strings(&mut rt, actor_id, &mut payload2, &table));
+        assert_eq!(payload2[0], Value::string(1));
+        assert_eq!(
+            rt.vm.as_ref().unwrap().modules[module_idx].constants.len(),
+            pool_len
+        );
+
+        // Out-of-bounds table id → false (the caller drops the message).
+        let mut bad = vec![Value::string(5)];
+        assert!(!intern_wire_strings(&mut rt, actor_id, &mut bad, &table));
+
+        // An actor with no module pool at all → false.
+        let bare = rt.spawn_actor(Box::new(|| vec![]));
+        let mut payload3 = vec![Value::string(0)];
+        assert!(!intern_wire_strings(&mut rt, bare, &mut payload3, &table));
+    }
+
+    /// End-to-end regression: a string payload sent from node A must arrive
+    /// on node B with its CONTENT intact — interned into the receiving
+    /// actor's module pool — even though the receiver's pool holds a
+    /// different string at the sender's pool id. Before cross-node string
+    /// interning the send-time guard dropped such packets outright (and
+    /// before that, raw ids silently resolved to the wrong text).
+    #[test]
+    fn test_remote_string_payload_delivered_by_content() {
+        use crate::bytecode::{CodeModule, Constant};
+        use std::time::{Duration, Instant};
+
+        // --- Node A (sender): pool id 0 = "hello-cross-node". ---
+        let mut runtime_a = Runtime::new();
+        let mut module_a = CodeModule::new("sender");
+        module_a.add_constant(Constant::String("hello-cross-node".to_string()));
+        runtime_a.vm = Some(crate::vm::VM::new());
+        runtime_a.vm.as_mut().unwrap().load_module(module_a);
+        let actor_a = runtime_a.spawn_actor(Box::new(|| vec![]));
+        {
+            let actor = runtime_a.actors.get_mut(&actor_a).unwrap();
+            actor.bytecode_module_idx = Some(0);
+        }
+        // The send path resolves string content against the CURRENT
+        // actor's module pool.
+        runtime_a.current_actor = Some(actor_a);
+
+        // --- Node B (receiver): pool id 0 deliberately holds a DIFFERENT
+        // string, so delivering the sender's raw id 0 would corrupt the
+        // payload into "DECOY-RECEIVER-LOCAL". ---
+        let mut runtime_b = Runtime::new();
+        let mut module_b = CodeModule::new("receiver");
+        module_b.add_constant(Constant::String("DECOY-RECEIVER-LOCAL".to_string()));
+        let actor_b = runtime_b.spawn_actor(Box::new(|| {
+            vec![("received".to_string(), Value::nil())]
+        }));
+        {
+            let actor = runtime_b.actors.get_mut(&actor_b).unwrap();
+            actor.bytecode_module = Some(module_b);
+            actor.register_behavior("store", |actor, args| {
+                let v = args.get(0).copied().unwrap_or(Value::nil());
+                actor.set_state_field("received", v);
+            });
+        }
+
+        let mut transport_a = NetworkTransport::bind(addr(0)).unwrap();
+        let mut transport_b = NetworkTransport::bind(addr(0)).unwrap();
+        let node_b = transport_b.node_id();
+        let addr_b = transport_b.listen_addr();
+
+        // Node A's cluster knows B as a healthy peer.
+        let mut cluster_a =
+            ClusterState::new(transport_a.node_id(), transport_a.listen_addr());
+        cluster_a.handle_heartbeat(node_b, addr_b);
+        let mut resolver_a = AddressResolver::new(transport_a.node_id());
+
+        // Node B's delivery side.
+        let mut cluster_b = ClusterState::new(node_b, addr_b);
+        let mut resolver_b = AddressResolver::new(node_b);
+
+        let target = ActorAddress::remote(node_b, actor_b);
+        send_distributed(
+            &mut runtime_a, &mut transport_a, &cluster_a, &mut resolver_a,
+            target, "store", &[Value::string(0)],
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            process_network_packets(&mut runtime_b, &mut transport_b, &mut cluster_b, &mut resolver_b);
+            let pending = runtime_b
+                .actors
+                .get(&actor_b)
+                .map(|a| a.mailbox.len())
+                .unwrap_or(0);
+            if pending > 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            runtime_b.actors.get(&actor_b).map(|a| a.mailbox.len()).unwrap_or(0) > 0,
+            "string message was not delivered to the remote actor's mailbox"
+        );
+
+        runtime_b.step_actor(actor_b);
+
+        let stored = runtime_b
+            .actors.get(&actor_b).unwrap()
+            .get_state_field("received").unwrap();
+        let stored_id = stored
+            .as_string_id()
+            .expect("payload must arrive as a string value");
+        let module_idx = runtime_b
+            .actors.get(&actor_b).unwrap()
+            .bytecode_module_idx.unwrap();
+        let content = runtime_b
+            .vm.as_ref().unwrap()
+            .constant_string(module_idx, stored_id);
+        assert_eq!(
+            content,
+            Some("hello-cross-node".to_string()),
+            "string payload must arrive by CONTENT, not by the sender's pool id"
+        );
 
         transport_a.shutdown();
         transport_b.shutdown();

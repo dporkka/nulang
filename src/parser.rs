@@ -1320,9 +1320,16 @@ impl Parser {
             self.skip_newlines();
 
             let pat = self.parse_pattern()?;
+            // Optional guard: `| pat if cond => body`. The guard is a full
+            // expression; it may reference variables bound by the pattern.
+            let guard = if self.consume_if(&TokenKind::If) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
             self.expect(TokenKind::FatArrow)?;
             let expr = self.parse_expr()?;
-            arms.push((pat, expr));
+            arms.push((pat, guard, expr));
             self.skip_newlines_semicolons();
         }
         self.expect(TokenKind::RBrace)?;

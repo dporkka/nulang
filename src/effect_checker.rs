@@ -174,9 +174,12 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             scrutinee, arms, ..
         } => {
             free_vars(scrutinee, bound, acc);
-            for (pat, arm_expr) in arms {
+            for (pat, guard, arm_expr) in arms {
                 let mut arm_bound = bound.clone();
                 pat_bound_vars(pat, &mut arm_bound);
+                if let Some(guard_expr) = guard {
+                    free_vars(guard_expr, &mut arm_bound, acc);
+                }
                 free_vars(arm_expr, &mut arm_bound, acc);
             }
         }
@@ -520,9 +523,13 @@ impl EffectChecker {
                 scrutinee, arms, ..
             } => {
                 let mut row = self.infer_effects(ctx, scrutinee)?;
-                for (pat, arm_expr) in arms {
+                for (pat, guard, arm_expr) in arms {
                     let mut names = Vec::new();
                     pat_bound_vars(pat, &mut names);
+                    if let Some(guard_expr) = guard {
+                        let guard_row = self.infer_with_bound(ctx, &names, guard_expr)?;
+                        row = effect_row_union(&row, &guard_row);
+                    }
                     let arm_row = self.infer_with_bound(ctx, &names, arm_expr)?;
                     row = effect_row_union(&row, &arm_row);
                 }
@@ -1213,7 +1220,7 @@ impl CapabilityAnalyzer {
                 let base = consumed.clone();
                 let mut cap = Capability::Tag;
                 let mut merged: Option<HashSet<String>> = None;
-                for (pat, arm_expr) in arms {
+                for (pat, guard, arm_expr) in arms {
                     *consumed = base.clone();
                     let mut arm_ctx = ctx.clone();
                     add_pat_bindings(pat, &mut arm_ctx, Capability::Val);
@@ -1225,6 +1232,12 @@ impl CapabilityAnalyzer {
                         .iter()
                         .map(|n| (n.clone(), consumed.remove(n)))
                         .collect();
+                    // A guard runs under the same condition as the arm body,
+                    // so its capability and consumption fold into the arm.
+                    let guard_result = match guard {
+                        Some(guard_expr) => self.infer_cap_tracked(&arm_ctx, guard_expr, consumed),
+                        None => Ok(Capability::Tag),
+                    };
                     let arm_result = self.infer_cap_tracked(&arm_ctx, arm_expr, consumed);
                     for (n, was_consumed) in saved {
                         consumed.remove(&n);
@@ -1232,7 +1245,7 @@ impl CapabilityAnalyzer {
                             consumed.insert(n);
                         }
                     }
-                    cap = cap.join(arm_result?);
+                    cap = cap.join(guard_result?.join(arm_result?));
                     merged = Some(match merged {
                         None => consumed.clone(),
                         Some(m) => m.intersection(consumed).cloned().collect(),

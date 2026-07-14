@@ -913,7 +913,10 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             let temp = fresh_temp_name();
             let arms_hir: Vec<_> = arms
                 .iter()
-                .map(|(pat, e)| (pat.clone(), Box::new(lower_body(e))))
+                .map(|(pat, guard, e)| {
+                    let guard_hir = guard.as_ref().map(|g| Box::new(lower_body(g)));
+                    (pat.clone(), guard_hir, Box::new(lower_body(e)))
+                })
                 .collect();
             body.push(hir::Stmt::Let {
                 name: temp.clone(),
@@ -1822,9 +1825,12 @@ fn free_vars(
             scrutinee, arms, ..
         } => {
             free_vars(scrutinee, bound, acc);
-            for (pat, arm_expr) in arms {
+            for (pat, guard, arm_expr) in arms {
                 let mut arm_bound = bound.clone();
                 pattern_bindings(pat, &mut arm_bound);
+                if let Some(guard_expr) = guard {
+                    free_vars(guard_expr, &arm_bound, acc);
+                }
                 free_vars(arm_expr, &arm_bound, acc);
             }
         }

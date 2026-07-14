@@ -252,9 +252,12 @@ pub enum RValue {
         ty: Type,
     },
     /// Expression-position match. Arm bodies yield their value via `Yield`.
+    /// Each arm is `(pattern, optional guard body, arm body)`; the guard
+    /// body yields a boolean and is evaluated with the pattern's bindings
+    /// in scope after the pattern test passes.
     Match {
         scrutinee: Operand,
-        arms: Vec<(Pattern, Box<Body>)>,
+        arms: Vec<(Pattern, Option<Box<Body>>, Box<Body>)>,
         ty: Type,
     },
     /// Array iteration loop; evaluates to unit.

@@ -263,6 +263,11 @@ pub enum Type {
     /// Tuple (A, B, ...)
     Tuple(Vec<Type>),
     /// Record { field: Type, ... }
+    ///
+    /// A record whose field list ends with the reserved pseudo-field
+    /// [`RECORD_ROW_TAIL_FIELD`] is an *open* record: the pseudo-field's type
+    /// is a row variable standing for "possibly more fields". Records from
+    /// literals and annotations are always closed (no tail).
     Record(Vec<(String, Type)>),
     /// Variant Type1 | Type2 | ...
     Variant(Vec<(String, Option<Type>)>),
@@ -291,10 +296,43 @@ pub enum Type {
     Scheme { vars: Vec<TypeVar>, body: Box<Type> },
 }
 
+/// Reserved pseudo-field name carrying the *row tail* of an open record type.
+///
+/// Record row polymorphism is encoded without changing the shape of
+/// `Type::Record(Vec<(String, Type)>)` — exhaustive matches on `Type` exist
+/// across the crate (`main.rs`, `repl.rs`, `mir_codegen.rs`, `ai/schema.rs`),
+/// so the representation stays additive. An open record `{ x: a | rho }` is
+/// represented as `Record([("x", a), ("..", Var(rho))])`. The name `".."`
+/// can never collide with a user field: record field names are parsed with
+/// `expect_ident`, and `".."` is not a valid identifier.
+///
+/// The tail's type is a fresh `Type::Var` when produced; record unification
+/// may substitute it with an open record (row extension) or a closed record
+/// (row closing). Because the row variable is an ordinary type variable in an
+/// ordinary field, `free_vars`, `ref_free_vars`, substitution, the occurs
+/// check, and generalization all handle it with no special casing.
+pub const RECORD_ROW_TAIL_FIELD: &str = "..";
+
 impl Type {
     pub fn int() -> Type {
         Type::Primitive(PrimitiveType::Int)
     }
+
+    /// A closed record type: exactly the given fields. Record literals and
+    /// annotations are always closed.
+    pub fn record(fields: Vec<(String, Type)>) -> Type {
+        Type::Record(fields)
+    }
+
+    /// An open record type: the given fields plus a fresh row variable
+    /// standing for "possibly more fields". Produced by field access on a
+    /// record of not-yet-known shape; see [`RECORD_ROW_TAIL_FIELD`].
+    pub fn record_open(fields: Vec<(String, Type)>, row: TypeVar) -> Type {
+        let mut fields = fields;
+        fields.push((RECORD_ROW_TAIL_FIELD.to_string(), Type::Var(row)));
+        Type::Record(fields)
+    }
+
     pub fn float() -> Type {
         Type::Primitive(PrimitiveType::Float)
     }

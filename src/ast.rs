@@ -77,10 +77,12 @@ pub enum Expr {
         else_branch: Option<Box<Expr>>,
         span: Span,
     },
-    /// Pattern match
+    /// Pattern match. Each arm is `(pattern, optional guard, body)`; the
+    /// guard is a boolean expression evaluated with the pattern's bindings
+    /// in scope after the pattern matches (`| pat if cond => body`).
     Match {
         scrutinee: Box<Expr>,
-        arms: Vec<(Pattern, Expr)>,
+        arms: Vec<(Pattern, Option<Expr>, Expr)>,
         span: Span,
     },
     /// Block expression: { e1; e2 }

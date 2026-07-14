@@ -1188,22 +1188,35 @@ impl Runtime {
         };
         let Some(suspended) = suspended else { return };
 
-        let vm = match self.vm.as_mut() {
-            Some(vm) => vm,
-            None => {
-                // No VM available; put the suspension back so a later message
-                // can re-trigger the step.
-                if let Some(actor) = self.actors.get_mut(&actor_id) {
-                    actor.suspended_execution = Some(suspended);
-                }
-                return;
+        if self.vm.is_none() {
+            // No VM available; put the suspension back so a later message
+            // can re-trigger the step.
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.suspended_execution = Some(suspended);
             }
-        };
+            return;
+        }
 
-        vm.restore_suspended_state(suspended.vm_state);
         let behavior_idx = suspended.behavior_idx;
         let step_name = suspended.step_name;
-        let result = vm.resume();
+        let self_ptr: *mut Runtime = self;
+        let result = unsafe {
+            let vm = (*self_ptr).vm.as_mut().unwrap();
+            // Re-install callbacks bound to THIS actor: other actors may have
+            // run on the shared VM while this one was suspended, and a resumed
+            // `LLM.ask` must record its in-flight call (and later completion)
+            // on this actor — same as resume_suspended_llm_step.
+            vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
+            vm.restore_suspended_state(suspended.vm_state);
+            // A signal-resumed step is still scheduler-context execution: a
+            // `perform LLM.ask` after the wait must suspend (non-blocking)
+            // instead of blocking the caller thread on the HTTP call.
+            let saved_suspend = (*self_ptr).llm_suspend_enabled;
+            (*self_ptr).llm_suspend_enabled = true;
+            let result = vm.resume();
+            (*self_ptr).llm_suspend_enabled = saved_suspend;
+            result
+        };
 
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.waiting_signal = None;
@@ -1228,12 +1241,19 @@ impl Runtime {
                     self.checkpoint_actor(actor_id);
                 }
             }
-            Err(crate::types::NuError::VMError(ref msg)) if msg == "SignalWait:suspend" => {
-                // Suspended again waiting for another signal: re-capture the
-                // VM state so the next matching signal can resume the step.
-                // BytecodeRuntimeCallbacks::suspend_for_signal is a no-op, so
-                // the capture must happen here — same as in
-                // run_bytecode_at_offset and resume_suspended_llm_step.
+            Err(crate::types::NuError::VMError(ref msg)) if is_suspend_error(msg) => {
+                // Suspended again — waiting for another signal OR on a
+                // background LLM call (`perform LLM.ask` after the wait).
+                // Re-capture the VM state so the next matching signal or the
+                // pumped LLM completion can resume the step.  The marker is
+                // the awaited signal's name for a signal wait, or the
+                // reserved LLM marker (via suspension_marker) for an LLM
+                // suspend, whose completion flows through
+                // resume_suspended_llm_step — that path performs the workflow
+                // completion bookkeeping.  BytecodeRuntimeCallbacks::
+                // suspend_for_signal is a no-op, so the capture must happen
+                // here — same as in run_bytecode_at_offset and
+                // resume_suspended_llm_step.
                 let recaptured = match self.vm.as_mut() {
                     Some(vm) => vm.take_suspended_state().map(|vm_state| {
                         let signal_name = vm.suspended_signal_name.take();
@@ -1243,7 +1263,8 @@ impl Runtime {
                 };
                 if let Some((vm_state, signal_name)) = recaptured {
                     if let Some(actor) = self.actors.get_mut(&actor_id) {
-                        actor.waiting_signal = signal_name;
+                        let marker = suspension_marker(actor, signal_name);
+                        actor.waiting_signal = marker;
                         actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
                             vm_state,
                             behavior_idx,

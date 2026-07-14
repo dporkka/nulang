@@ -241,38 +241,20 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             unify_many(ts1, ts2, span)
         }
 
-        // Records
+        // Records. Closed records (from literals and annotations) unify
+        // exactly: identical field sets, pairwise field unification. Records
+        // with an open row tail (produced by field access on a record of
+        // not-yet-known shape) unify with scoped rows: shared fields unify
+        // pairwise and the row variables absorb each other's extra fields; a
+        // closed record unified with an open one must provide all of the open
+        // record's fields and closes the row.
         (Type::Record(fs1), Type::Record(fs2)) => {
-            if fs1.len() != fs2.len() {
-                return Err(NuError::TypeError {
-                    msg: format!(
-                        "Cannot unify records with different field counts: {} vs {}",
-                        fs1.len(),
-                        fs2.len()
-                    ),
-                    span,
-                });
+            let (fields1, tail1) = split_record(fs1);
+            let (fields2, tail2) = split_record(fs2);
+            match (&tail1, &tail2) {
+                (None, None) => unify_closed_records(&fields1, &fields2, span),
+                _ => unify_open_records(&fields1, &tail1, &fields2, &tail2, span),
             }
-            // Sort by field name and unify corresponding fields
-            let mut sorted1 = fs1.clone();
-            let mut sorted2 = fs2.clone();
-            sorted1.sort_by(|(a, _), (b, _)| a.cmp(b));
-            sorted2.sort_by(|(a, _), (b, _)| a.cmp(b));
-            let mut subst = vec![];
-            for ((n1, t1f), (n2, t2f)) in sorted1.iter().zip(sorted2.iter()) {
-                if n1 != n2 {
-                    return Err(NuError::TypeError {
-                        msg: format!(
-                            "Cannot unify records with different field names: '{}' vs '{}'",
-                            n1, n2
-                        ),
-                        span,
-                    });
-                }
-                let s = mgu(&apply_subst(t1f, &subst), &apply_subst(t2f, &subst), span)?;
-                subst = compose_subst(&s, &subst);
-            }
-            Ok(subst)
         }
 
         // Arrays
@@ -379,6 +361,180 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
         // Anything else is a unification error
         _ => Err(NuError::TypeError {
             msg: format!("Cannot unify {:?} with {:?}", t1, t2),
+            span,
+        }),
+    }
+}
+
+/// Split a record type's field list into its real fields and its optional
+/// row tail, flattening nested record tails (`rho := { y: b | rho2 }`)
+/// produced by row unification. A `None` tail means the record is closed.
+/// See [`RECORD_ROW_TAIL_FIELD`] for the encoding.
+fn split_record(fs: &[(String, Type)]) -> (Vec<(String, Type)>, Option<Type>) {
+    let mut fields: Vec<(String, Type)> = Vec::new();
+    let mut current: Vec<(String, Type)> = fs.to_vec();
+    let tail = loop {
+        let mut next_tail: Option<Type> = None;
+        let mut rest: Vec<(String, Type)> = Vec::new();
+        for (name, ty) in current {
+            if name == RECORD_ROW_TAIL_FIELD {
+                next_tail = Some(ty);
+            } else {
+                rest.push((name, ty));
+            }
+        }
+        fields.extend(rest);
+        match next_tail {
+            Some(Type::Record(inner)) => current = inner,
+            other => break other,
+        }
+    };
+    (fields, tail)
+}
+
+/// Unify two closed records: identical field sets, pairwise field
+/// unification. This is the exact pre-row-polymorphism behavior.
+fn unify_closed_records(
+    fs1: &[(String, Type)],
+    fs2: &[(String, Type)],
+    span: Span,
+) -> NuResult<Substitution> {
+    if fs1.len() != fs2.len() {
+        return Err(NuError::TypeError {
+            msg: format!(
+                "Cannot unify records with different field counts: {} vs {}",
+                fs1.len(),
+                fs2.len()
+            ),
+            span,
+        });
+    }
+    // Sort by field name and unify corresponding fields
+    let mut sorted1 = fs1.to_vec();
+    let mut sorted2 = fs2.to_vec();
+    sorted1.sort_by(|(a, _), (b, _)| a.cmp(b));
+    sorted2.sort_by(|(a, _), (b, _)| a.cmp(b));
+    let mut subst = vec![];
+    for ((n1, t1f), (n2, t2f)) in sorted1.iter().zip(sorted2.iter()) {
+        if n1 != n2 {
+            return Err(NuError::TypeError {
+                msg: format!(
+                    "Cannot unify records with different field names: '{}' vs '{}'",
+                    n1, n2
+                ),
+                span,
+            });
+        }
+        let s = mgu(&apply_subst(t1f, &subst), &apply_subst(t2f, &subst), span)?;
+        subst = compose_subst(&s, &subst);
+    }
+    Ok(subst)
+}
+
+/// Unify two record types where at least one side has an open row tail
+/// (standard scoped-rows unification). `fields*` are the real fields and
+/// `tail*` the optional row tail as returned by [`split_record`].
+///
+/// - open ~ open: shared fields unify; each row variable is bound to the
+///   other side's extra fields extended with a shared fresh row variable.
+/// - open ~ closed: the closed record must provide every field the open
+///   side demands; its remaining fields close the row.
+fn unify_open_records(
+    fields1: &[(String, Type)],
+    tail1: &Option<Type>,
+    fields2: &[(String, Type)],
+    tail2: &Option<Type>,
+    span: Span,
+) -> NuResult<Substitution> {
+    let names1: HashSet<&str> = fields1.iter().map(|(n, _)| n.as_str()).collect();
+    let names2: HashSet<&str> = fields2.iter().map(|(n, _)| n.as_str()).collect();
+
+    // Shared fields unify pairwise (sorted for determinism).
+    let mut shared: Vec<&str> = names1.intersection(&names2).copied().collect();
+    shared.sort_unstable();
+    let lookup = |fs: &[(String, Type)], name: &str| {
+        fs.iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, t)| t.clone())
+            .expect("shared field must exist")
+    };
+    let mut subst: Substitution = vec![];
+    for name in shared {
+        let t1f = apply_subst(&lookup(fields1, name), &subst);
+        let t2f = apply_subst(&lookup(fields2, name), &subst);
+        let s = mgu(&t1f, &t2f, span)?;
+        subst = compose_subst(&s, &subst);
+    }
+
+    // Fields present on only one side must be absorbed by the other side's
+    // row tail.
+    let extras = |fs: &[(String, Type)], other: &HashSet<&str>| -> Vec<(String, Type)> {
+        fs.iter()
+            .filter(|(n, _)| !other.contains(n.as_str()))
+            .map(|(n, t)| (n.clone(), apply_subst(t, &subst)))
+            .collect()
+    };
+    let extras1 = extras(fields1, &names2);
+    let extras2 = extras(fields2, &names1);
+
+    match (tail1, tail2) {
+        (Some(Type::Var(r1)), Some(Type::Var(r2))) => {
+            if r1 == r2 {
+                // Same row variable on both sides: only unifiable when the
+                // field sets already agree (otherwise the row would be
+                // ill-formed, the row analogue of an occurs failure).
+                if extras1.is_empty() && extras2.is_empty() {
+                    return Ok(subst);
+                }
+                return Err(NuError::TypeError {
+                    msg: "Cannot unify records: same row variable with different fields"
+                        .to_string(),
+                    span,
+                });
+            }
+            if extras1.is_empty() && extras2.is_empty() {
+                let s = mgu(&Type::Var(*r1), &Type::Var(*r2), span)?;
+                return Ok(compose_subst(&s, &subst));
+            }
+            let fresh_row = TypeVar::fresh();
+            let s = mgu(
+                &Type::Var(*r1),
+                &Type::record_open(extras2, fresh_row),
+                span,
+            )?;
+            subst = compose_subst(&s, &subst);
+            let s = mgu(
+                &Type::Var(*r2),
+                &Type::record_open(extras1, fresh_row),
+                span,
+            )?;
+            subst = compose_subst(&s, &subst);
+            Ok(subst)
+        }
+        (Some(Type::Var(r)), None) => {
+            if let Some((missing, _)) = extras1.first() {
+                return Err(NuError::TypeError {
+                    msg: format!("Field '{}' not found in record type", missing),
+                    span,
+                });
+            }
+            let s = mgu(&Type::Var(*r), &Type::record(extras2), span)?;
+            Ok(compose_subst(&s, &subst))
+        }
+        (None, Some(Type::Var(r))) => {
+            if let Some((missing, _)) = extras2.first() {
+                return Err(NuError::TypeError {
+                    msg: format!("Field '{}' not found in record type", missing),
+                    span,
+                });
+            }
+            let s = mgu(&Type::Var(*r), &Type::record(extras1), span)?;
+            Ok(compose_subst(&s, &subst))
+        }
+        // Row tails are always fresh type variables by construction; a
+        // residual non-variable tail cannot absorb fields.
+        _ => Err(NuError::TypeError {
+            msg: "Cannot unify records with incompatible row tails".to_string(),
             span,
         }),
     }
@@ -531,7 +687,12 @@ impl TypeChecker {
             let final_ty = apply_subst(&ty, &s);
             match decl {
                 Decl::Function { name, .. } => {
-                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                    // Generalize at the binding site so each use of a
+                    // module-level function instantiates fresh type (and row)
+                    // variables — without this the substitution threads
+                    // through the context and monomorphizes every later use.
+                    let gen_ty = self.do_generalize(&ctx, &final_ty);
+                    ctx.bind(name.clone(), gen_ty, Capability::Ref);
                 }
                 Decl::Actor { name, .. } => {
                     ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
@@ -667,11 +828,9 @@ impl TypeChecker {
                     cap: Capability::Ref,
                 };
 
-                // Generalize and add to context
-                let gen_ty = self.do_generalize(ctx, &apply_subst(&func_ty, &s_combined));
-                let mut final_ctx = ctx.clone();
-                final_ctx.bind(name.clone(), gen_ty, Capability::Ref);
-
+                // The function is generalized when bound into the module
+                // context (see `check_module`); the raw type is returned so
+                // the caller can substitute it into the module's type.
                 Ok((s_combined, func_ty))
             }
             Decl::TypeAlias { .. } => Ok((vec![], Type::unit())),
@@ -1656,9 +1815,23 @@ impl TypeChecker {
         let record_ty_resolved = apply_subst(&record_ty, &s1);
 
         match record_ty_resolved {
-            Type::Record(ref fields) => {
+            Type::Record(ref fs) => {
+                let (fields, tail) = split_record(fs);
                 if let Some((_, field_ty)) = fields.iter().find(|(name, _)| name == field) {
                     return Ok((s1, field_ty.clone()));
+                }
+                // An open record absorbs the access: extend its row variable
+                // with the demanded field, so multiple accesses on the same
+                // record accumulate row-polymorphically.
+                if let Some(Type::Var(row)) = tail {
+                    let field_var = Type::Var(TypeVar::fresh());
+                    let extension = Type::record_open(
+                        vec![(field.to_string(), field_var.clone())],
+                        TypeVar::fresh(),
+                    );
+                    let s2 = mgu(&Type::Var(row), &extension, span)?;
+                    let final_subst = compose_subst(&s2, &s1);
+                    return Ok((final_subst.clone(), apply_subst(&field_var, &final_subst)));
                 }
                 Err(NuError::TypeError {
                     msg: format!("Field '{}' not found in record type", field),
@@ -1666,8 +1839,14 @@ impl TypeChecker {
                 })
             }
             _ => {
+                // Unknown receiver shape: require an open record carrying the
+                // demanded field, leaving the rest of the row to be inferred
+                // from other accesses or the call site.
                 let field_var = Type::Var(TypeVar::fresh());
-                let expected = Type::Record(vec![(field.to_string(), field_var.clone())]);
+                let expected = Type::record_open(
+                    vec![(field.to_string(), field_var.clone())],
+                    TypeVar::fresh(),
+                );
                 let s2 = mgu(&record_ty_resolved, &expected, span)?;
                 let final_subst = compose_subst(&s2, &s1);
                 Ok((final_subst.clone(), apply_subst(&field_var, &final_subst)))
@@ -1741,7 +1920,7 @@ impl TypeChecker {
         &mut self,
         ctx: &TypeContext,
         scrutinee: &Expr,
-        arms: &[(Pattern, Expr)],
+        arms: &[(Pattern, Option<Expr>, Expr)],
         span: Span,
     ) -> NuResult<(Substitution, Type)> {
         // Infer scrutinee type
@@ -1751,11 +1930,20 @@ impl TypeChecker {
         let mut subst = s1;
         let mut arm_types = vec![];
 
-        for (pattern, arm_expr) in arms {
+        for (pattern, guard, arm_expr) in arms {
             let ctx_sub = apply_subst_to_ctx(ctx, &subst);
             // Bind pattern variables to the context
             let pattern_ctx =
                 self.bind_pattern(&ctx_sub, pattern, &apply_subst(&scrut_ty, &subst))?;
+            // A guard runs with the pattern's bindings in scope and must be
+            // a boolean; it does not contribute to the arm result type.
+            if let Some(guard_expr) = guard {
+                let (s_guard, guard_ty) = self.infer_expr(&pattern_ctx, guard_expr)?;
+                let guard_subst = compose_subst(&s_guard, &subst);
+                let s_bool = mgu(&apply_subst(&guard_ty, &guard_subst), &Type::bool(), span)?;
+                subst = compose_subst(&s_bool, &guard_subst);
+            }
+            let pattern_ctx = apply_subst_to_ctx(&pattern_ctx, &subst);
             let (s_arm, arm_ty) = self.infer_expr(&pattern_ctx, arm_expr)?;
             subst = compose_subst(&s_arm, &subst);
             arm_types.push(apply_subst(&arm_ty, &subst));
@@ -2731,7 +2919,7 @@ mod tests {
         // match 42 { | _ => 0 }
         let expr = Expr::Match {
             scrutinee: Box::new(int_lit(42)),
-            arms: vec![(Pattern::Wild, int_lit(0))],
+            arms: vec![(Pattern::Wild, None, int_lit(0))],
             span: sp(),
         };
         let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();
@@ -2745,7 +2933,7 @@ mod tests {
         // match 42 { | x => x }
         let expr = Expr::Match {
             scrutinee: Box::new(int_lit(42)),
-            arms: vec![(Pattern::Var("x".to_string()), var("x"))],
+            arms: vec![(Pattern::Var("x".to_string()), None, var("x"))],
             span: sp(),
         };
         let (s, ty) = tc.infer_expr(&ctx, &expr).unwrap();

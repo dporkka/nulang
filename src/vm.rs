@@ -1153,7 +1153,13 @@ impl VM {
     }
 
     /// Add a runtime string to a module's constant pool and return its string-id value.
-    fn add_runtime_string(&mut self, module_idx: usize, s: String) -> Value {
+    ///
+    /// Also appends the matching NaN-boxed bits to the module's JIT constant
+    /// table so JIT-compiled regions resolve the new constant correctly. This
+    /// is `&mut self` and must run on the single scheduler thread (the only
+    /// thread that touches the VM); the cross-node string interning in
+    /// `runtime::distributed` relies on that invariant.
+    pub fn add_runtime_string(&mut self, module_idx: usize, s: String) -> Value {
         let idx = self.modules.get(module_idx)
             .map(|m| m.constants.len())
             .unwrap_or(0);
@@ -1738,31 +1744,59 @@ impl VM {
 
             // -- Arithmetic --
             OpCode::IAdd => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a + b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                if a.is_float() && b.is_float() {
+                    self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a.as_float().unwrap() + b.as_float().unwrap());
+                } else {
+                    self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a.as_int().unwrap_or(0) + b.as_int().unwrap_or(0));
+                }
             }
             OpCode::ISub => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a - b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                if a.is_float() && b.is_float() {
+                    self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a.as_float().unwrap() - b.as_float().unwrap());
+                } else {
+                    self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a.as_int().unwrap_or(0) - b.as_int().unwrap_or(0));
+                }
             }
             OpCode::IMul => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
-                // wrapping_mul: 48-bit operands can overflow i64 when
-                // multiplied; the result is masked to 48 bits by Value::int.
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a.wrapping_mul(b));
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                if a.is_float() && b.is_float() {
+                    self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a.as_float().unwrap() * b.as_float().unwrap());
+                } else {
+                    // wrapping_mul: 48-bit operands can overflow i64 when
+                    // multiplied; the result is masked to 48 bits by Value::int.
+                    self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a.as_int().unwrap_or(0).wrapping_mul(b.as_int().unwrap_or(0)));
+                }
             }
             OpCode::IDiv => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(1);
-                self.frames[frame_idx].regs[instr.op3 as usize] = if b != 0 { Value::int(a / b) } else { Value::nil() };
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                if a.is_float() && b.is_float() {
+                    let af = a.as_float().unwrap();
+                    let bf = b.as_float().unwrap();
+                    self.frames[frame_idx].regs[instr.op3 as usize] = if bf != 0.0 { Value::float(af / bf) } else { Value::nil() };
+                } else {
+                    let ai = a.as_int().unwrap_or(0);
+                    let bi = b.as_int().unwrap_or(1);
+                    self.frames[frame_idx].regs[instr.op3 as usize] = if bi != 0 { Value::int(ai / bi) } else { Value::nil() };
+                }
             }
             OpCode::IMod => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(1);
-                self.frames[frame_idx].regs[instr.op3 as usize] = if b != 0 { Value::int(a % b) } else { Value::nil() };
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                if a.is_float() && b.is_float() {
+                    let af = a.as_float().unwrap();
+                    let bf = b.as_float().unwrap();
+                    self.frames[frame_idx].regs[instr.op3 as usize] = if bf != 0.0 { Value::float(af % bf) } else { Value::nil() };
+                } else {
+                    let ai = a.as_int().unwrap_or(0);
+                    let bi = b.as_int().unwrap_or(1);
+                    self.frames[frame_idx].regs[instr.op3 as usize] = if bi != 0 { Value::int(ai % bi) } else { Value::nil() };
+                }
             }
             OpCode::Xor => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
@@ -1792,8 +1826,12 @@ impl VM {
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(a | b);
             }
             OpCode::INeg => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(-a);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                if a.is_float() {
+                    self.frames[frame_idx].regs[instr.op2 as usize] = Value::float(-a.as_float().unwrap());
+                } else {
+                    self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(-a.as_int().unwrap_or(0));
+                }
             }
             // IInc/IDec mirror the JIT helpers `nulang_iinc`/`nulang_idec`
             // bit-for-bit: the register's low 48 payload bits are read as a
@@ -1843,29 +1881,49 @@ impl VM {
 
             // -- Comparison --
             OpCode::ICmpEq => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a == b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
+                    Value::bool((a.as_float().unwrap() - b.as_float().unwrap()).abs() < f64::EPSILON)
+                } else {
+                    Value::bool(a.as_int().unwrap_or(0) == b.as_int().unwrap_or(0))
+                };
             }
             OpCode::ICmpLt => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a < b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
+                    Value::bool(a.as_float().unwrap() < b.as_float().unwrap())
+                } else {
+                    Value::bool(a.as_int().unwrap_or(0) < b.as_int().unwrap_or(0))
+                };
             }
             OpCode::ICmpGt => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a > b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
+                    Value::bool(a.as_float().unwrap() > b.as_float().unwrap())
+                } else {
+                    Value::bool(a.as_int().unwrap_or(0) > b.as_int().unwrap_or(0))
+                };
             }
             OpCode::ICmpLe => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a <= b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
+                    Value::bool(a.as_float().unwrap() <= b.as_float().unwrap())
+                } else {
+                    Value::bool(a.as_int().unwrap_or(0) <= b.as_int().unwrap_or(0))
+                };
             }
             OpCode::ICmpGe => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize].as_int().unwrap_or(0);
-                let b = self.frames[frame_idx].regs[instr.op2 as usize].as_int().unwrap_or(0);
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::bool(a >= b);
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let b = self.frames[frame_idx].regs[instr.op2 as usize];
+                self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
+                    Value::bool(a.as_float().unwrap() >= b.as_float().unwrap())
+                } else {
+                    Value::bool(a.as_int().unwrap_or(0) >= b.as_int().unwrap_or(0))
+                };
             }
             OpCode::FCmpEq => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize].as_float().unwrap_or(0.0);

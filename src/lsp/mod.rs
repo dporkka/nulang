@@ -25,7 +25,7 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
+use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
@@ -184,7 +184,7 @@ impl LanguageServer for NulangLanguageServer {
             );
         }
 
-        let diagnostics = self.compute_diagnostics(&source);
+        let diagnostics = Self::compute_diagnostics(&source);
         self.client
             .publish_diagnostics(uri, diagnostics, Some(version))
             .await;
@@ -208,7 +208,7 @@ impl LanguageServer for NulangLanguageServer {
             }
         }
 
-        let diagnostics = self.compute_diagnostics(&source);
+        let diagnostics = Self::compute_diagnostics(&source);
         self.client
             .publish_diagnostics(uri, diagnostics, Some(version))
             .await;
@@ -1057,7 +1057,7 @@ impl NulangLanguageServer {
         }
     }
 
-    fn compute_diagnostics(&self, source: &str) -> Vec<Diagnostic> {
+    fn compute_diagnostics(source: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
 
         // Lex
@@ -1084,15 +1084,14 @@ impl NulangLanguageServer {
             return diagnostics;
         }
 
-        // Effect check
+        // Effect check: same two-pass driver as the CLI frontend
+        // (`run_frontend` in main.rs) — `check_module` flattens nested
+        // `module {}` decls, registers function rows so callee effects
+        // propagate to call sites (pass 1), then enforces declared rows
+        // (pass 2). Stops at the first fatal error.
         let mut effect_checker = EffectChecker::new();
-        let effect_ctx = EffectContext::empty();
-        for decl in &ast.decls {
-            if let crate::ast::Decl::Function { body, .. } = decl {
-                if let Err(e) = effect_checker.infer_effects(&effect_ctx, body) {
-                    diagnostics.push(nu_error_to_diagnostic(e));
-                }
-            }
+        if let Err(e) = effect_checker.check_module(&ast.decls) {
+            diagnostics.push(nu_error_to_diagnostic(e));
         }
         for msg in &effect_checker.diagnostics {
             diagnostics.push(Diagnostic {
@@ -1108,10 +1107,12 @@ impl NulangLanguageServer {
             });
         }
 
-        // Capability analysis
+        // Capability analysis over the flattened declaration list, so
+        // functions nested in `module {}` blocks are checked like top-level
+        // ones (mirroring the CLI frontend).
         let mut cap_analyzer = CapabilityAnalyzer::new();
         let cap_ctx = CapContext::new();
-        for decl in &ast.decls {
+        for decl in crate::effect_checker::flatten_decls(&ast.decls) {
             if let crate::ast::Decl::Function { body, .. } = decl {
                 if let Err(e) = cap_analyzer.infer_cap(&cap_ctx, body) {
                     diagnostics.push(nu_error_to_diagnostic(e));
@@ -1801,5 +1802,54 @@ mod lsp_tests {
         let engine = InlayHintEngine::new("fun foo) bar(");
         let hints = engine.generate_inlay_hints();
         assert!(hints.is_empty());
+    }
+
+    /// Regression: the LSP effect check is interprocedural, matching the CLI
+    /// frontend — a function declared `! {}` that calls an IO function must
+    /// produce an effect diagnostic in the editor, not just in `nulang run`.
+    #[test]
+    fn test_diagnostics_pure_fn_calling_io_fn() {
+        let source = "fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }\n\
+                      fn pure() -> Unit ! {} { do_io() }";
+        let diagnostics = NulangLanguageServer::compute_diagnostics(source);
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.severity == Some(DiagnosticSeverity::ERROR) && d.message.contains("IO")
+            }),
+            "expected an effect error diagnostic mentioning IO, got: {:?}",
+            diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// Regression: declarations nested in `module {}` blocks must be
+    /// effect-checked just like top-level ones (the diagnostics pass
+    /// flattens them, mirroring the CLI frontend).
+    #[test]
+    fn test_diagnostics_module_nested_effect_violation() {
+        let source = "module M { fn pure() -> Unit ! {} { perform IO.print(\"x\") } }";
+        let diagnostics = NulangLanguageServer::compute_diagnostics(source);
+        assert!(
+            diagnostics.iter().any(|d| {
+                d.severity == Some(DiagnosticSeverity::ERROR) && d.message.contains("IO")
+            }),
+            "expected an effect error diagnostic for module-nested IO, got: {:?}",
+            diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// Positive control: functions staying within their declared effect rows
+    /// must produce no diagnostics at all.
+    #[test]
+    fn test_diagnostics_pure_functions_clean() {
+        let source = "fn pure() -> Unit ! {} { unit }\n\
+                      fn also_pure() -> Unit ! {} { pure() }\n\
+                      fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }\n\
+                      fn caller() -> Unit ! {IO} { do_io() }";
+        let diagnostics = NulangLanguageServer::compute_diagnostics(source);
+        assert!(
+            diagnostics.is_empty(),
+            "well-formed effectful/pure functions must be diagnostic-free, got: {:?}",
+            diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
 }

@@ -3,25 +3,50 @@
 use crate::value_layout::{sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK};
 use crate::vm::Value;
 
+/// True when `v` holds a real IEEE-754 float (any bit pattern that is not a NaN).
+#[inline]
+fn is_float_raw(v: u64) -> bool {
+    !f64::from_bits(v).is_nan()
+}
+
 #[no_mangle]
 pub extern "C" fn nulang_iadd(a: u64, b: u64) -> u64 {
-    tag_int(sext48(a & PAYLOAD_MASK) + sext48(b & PAYLOAD_MASK))
+    if is_float_raw(a) && is_float_raw(b) {
+        Value::float(f64::from_bits(a) + f64::from_bits(b)).as_raw()
+    } else {
+        tag_int(sext48(a & PAYLOAD_MASK) + sext48(b & PAYLOAD_MASK))
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_isub(a: u64, b: u64) -> u64 {
-    tag_int(sext48(a & PAYLOAD_MASK) - sext48(b & PAYLOAD_MASK))
+    if is_float_raw(a) && is_float_raw(b) {
+        Value::float(f64::from_bits(a) - f64::from_bits(b)).as_raw()
+    } else {
+        tag_int(sext48(a & PAYLOAD_MASK) - sext48(b & PAYLOAD_MASK))
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_imul(a: u64, b: u64) -> u64 {
-    // wrapping_mul: 48-bit operands can overflow i64 when multiplied; the
-    // result is masked to 48 bits by tag_int (matches interpreter IMul).
-    tag_int(sext48(a & PAYLOAD_MASK).wrapping_mul(sext48(b & PAYLOAD_MASK)))
+    if is_float_raw(a) && is_float_raw(b) {
+        Value::float(f64::from_bits(a) * f64::from_bits(b)).as_raw()
+    } else {
+        // wrapping_mul: 48-bit operands can overflow i64 when multiplied; the
+        // result is masked to 48 bits by tag_int (matches interpreter IMul).
+        tag_int(sext48(a & PAYLOAD_MASK).wrapping_mul(sext48(b & PAYLOAD_MASK)))
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_idiv(a: u64, b: u64) -> u64 {
+    if is_float_raw(a) && is_float_raw(b) {
+        let bv = f64::from_bits(b);
+        if bv == 0.0 {
+            return Value::nil().as_raw();
+        }
+        return Value::float(f64::from_bits(a) / bv).as_raw();
+    }
     let bv = sext48(b & PAYLOAD_MASK);
     if bv == 0 {
         return Value::nil().as_raw();
@@ -31,6 +56,13 @@ pub extern "C" fn nulang_idiv(a: u64, b: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn nulang_imod(a: u64, b: u64) -> u64 {
+    if is_float_raw(a) && is_float_raw(b) {
+        let bv = f64::from_bits(b);
+        if bv == 0.0 {
+            return Value::nil().as_raw();
+        }
+        return Value::float(f64::from_bits(a) % bv).as_raw();
+    }
     let bv = sext48(b & PAYLOAD_MASK);
     if bv == 0 {
         return Value::nil().as_raw();
@@ -77,7 +109,11 @@ pub extern "C" fn nulang_bitor(a: u64, b: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn nulang_ineg(a: u64) -> u64 {
-    tag_int(-sext48(a & PAYLOAD_MASK))
+    if is_float_raw(a) {
+        Value::float(-f64::from_bits(a)).as_raw()
+    } else {
+        tag_int(-sext48(a & PAYLOAD_MASK))
+    }
 }
 
 #[no_mangle]
@@ -92,27 +128,47 @@ pub extern "C" fn nulang_idec(a: u64) -> u64 {
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_eq(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & PAYLOAD_MASK) == sext48(b & PAYLOAD_MASK)).as_raw()
+    if is_float_raw(a) && is_float_raw(b) {
+        Value::bool((f64::from_bits(a) - f64::from_bits(b)).abs() < f64::EPSILON).as_raw()
+    } else {
+        Value::bool(sext48(a & PAYLOAD_MASK) == sext48(b & PAYLOAD_MASK)).as_raw()
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_lt(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & PAYLOAD_MASK) < sext48(b & PAYLOAD_MASK)).as_raw()
+    if is_float_raw(a) && is_float_raw(b) {
+        Value::bool(f64::from_bits(a) < f64::from_bits(b)).as_raw()
+    } else {
+        Value::bool(sext48(a & PAYLOAD_MASK) < sext48(b & PAYLOAD_MASK)).as_raw()
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_gt(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & PAYLOAD_MASK) > sext48(b & PAYLOAD_MASK)).as_raw()
+    if is_float_raw(a) && is_float_raw(b) {
+        Value::bool(f64::from_bits(a) > f64::from_bits(b)).as_raw()
+    } else {
+        Value::bool(sext48(a & PAYLOAD_MASK) > sext48(b & PAYLOAD_MASK)).as_raw()
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_le(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & PAYLOAD_MASK) <= sext48(b & PAYLOAD_MASK)).as_raw()
+    if is_float_raw(a) && is_float_raw(b) {
+        Value::bool(f64::from_bits(a) <= f64::from_bits(b)).as_raw()
+    } else {
+        Value::bool(sext48(a & PAYLOAD_MASK) <= sext48(b & PAYLOAD_MASK)).as_raw()
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn nulang_icmp_ge(a: u64, b: u64) -> u64 {
-    Value::bool(sext48(a & PAYLOAD_MASK) >= sext48(b & PAYLOAD_MASK)).as_raw()
+    if is_float_raw(a) && is_float_raw(b) {
+        Value::bool(f64::from_bits(a) >= f64::from_bits(b)).as_raw()
+    } else {
+        Value::bool(sext48(a & PAYLOAD_MASK) >= sext48(b & PAYLOAD_MASK)).as_raw()
+    }
 }
 
 #[no_mangle]

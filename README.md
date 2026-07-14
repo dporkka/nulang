@@ -38,10 +38,10 @@ It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired t
 Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
 
 - ✅ Builds with `cargo build`
-- ✅ All 1096 tests pass with `cargo test`
+- ✅ All 1143 tests pass with `cargo test`
 - ✅ NaN-boxed `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`)
 - ✅ 137-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, FFI, Python, distribution)
-- ✅ Hindley-Milner type inference with algebraic effects and user-declared variant types (construction + pattern matching)
+- ✅ Hindley-Milner type inference with algebraic effects, user-declared variant types (construction + recursive pattern matching with guards), and row-polymorphic records (`fn(r) r.x + r.y` accepts any record with `x` and `y`; closed record annotations stay exact)
 - ✅ Actor runtime: spawn, send, monitors, links, supervision, timers, registry, process groups, selective `receive`
 - ✅ ORCA-style per-actor GC with cycle detection
 - ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams
@@ -188,6 +188,10 @@ match s {
     | _ => 0
 }
 ```
+
+Arms may carry a guard (`| pat if cond => body` — a failing guard falls
+through to the next arm), and patterns nest recursively: `Some(Some(x))`,
+tuple, and record sub-patterns each test the positions they name.
 
 ### Pipe Operator
 

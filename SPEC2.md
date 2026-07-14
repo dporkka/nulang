@@ -54,7 +54,7 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - The WebAssembly compilation target, WIT interface generation, and WASI worlds (Chapter 13). The current backend emits bytecode for the register VM.
 - The standard-library modules of Chapter 14 (`Core`, `List`, `Map`, `Set`, `String`, `Json`, `Http`, `Concurrent`, …). The only builtin modules today are `Pipeline`, `Supervisor`, and `Debate`.
 - Typeclasses and type-parameter constraints (Section 3.6), higher-kinded types, `Char` and `Decimal` primitives, character literals, multi-line strings, `\u{...}` escapes, string interpolation, and `++` concatenation syntax.
-- `var` bindings, `consume` / `recover` expressions, pattern guards, record-update syntax `{ r .. f = v }`, ranges, the `**` operator, `<-` message syntax, and indentation-based layout (Section 2.8).
+- `var` bindings, `consume` / `recover` expressions, record-update syntax `{ r .. f = v }`, ranges, the `**` operator, `<-` message syntax, and indentation-based layout (Section 2.8).
 - Authority capabilities (`capability` declarations on actors, delegation, revocation, auditing — Sections 1.5 and 5.3–5.6), `config` blocks, the `tool` declaration form inside actors, `virtual` actors, `select`, `await`, `await_human`, `sleep_until`, and `retry` blocks.
 - The deployment manifest (`nulang.toml`), `nulang migrate`, and `nulang shell` (Chapter 15, Appendix D).
 
@@ -753,7 +753,7 @@ fn describe(r: Result[Float, String]) -> String {
 }
 ```
 
-> **Implementation status.** Declared variants work end-to-end: constructors create values, constructor names are first-class values (a payload constructor used as a value, such as `let f = Some in f(1)`, behaves as a one-argument function), and `match` destructures them with payload binding. At runtime a payload-less constructor is the bare tag string and a payload-carrying constructor is a record `{ ctor: <name>, payload: <value> }`; matching string-compares the tag. One limitation remains: a match arm tests only its outermost constructor tag — a nested pattern such as `Some(Some(x))` binds the inner payload but does not reject an inner `None` (Section 6.7).
+> **Implementation status.** Declared variants work end-to-end: constructors create values, constructor names are first-class values (a payload constructor used as a value, such as `let f = Some in f(1)`, behaves as a one-argument function), and `match` destructures them with payload binding. At runtime a payload-less constructor is the bare tag string and a payload-carrying constructor is a record `{ ctor: <name>, payload: <value> }`; matching string-compares the tag. Nested constructor patterns match structurally — `Some(Some(x))` tests both tags and rejects an inner `None`. One limitation remains: tuple patterns do not check arity — a tuple-pattern arm tests only the positions it names, so `(a, b)` also matches a longer tuple (extra elements are ignored) and a position beyond the scrutinee's length binds nil (Section 6.7).
 
 ### 3.4.2 Enums
 
@@ -1443,7 +1443,7 @@ match tree {
 }
 ```
 
-Pattern guards (`| pat if cond => ...`) and list-cons patterns are planned for a future version. Two structural limitations apply today: a variant-pattern arm tests only its outermost constructor tag — a nested pattern like `Some(Some(x))` binds the inner payload but does not reject a non-matching inner constructor — and tuple patterns are not matched structurally: the arm always matches and its element bindings are not wired up, so the `Node((l, v, r))` form above parses but an arm body referencing `l`, `v`, or `r` fails to compile.
+Pattern guards (`| pat if cond => ...`) are implemented — the guard is a boolean expression evaluated with the pattern's bindings in scope after the pattern matches, and an arm whose guard fails falls through to the next arm (a guarded last arm whose guard fails raises the non-exhaustive-match error) — while list-cons patterns are planned for a future version. Nested variant, tuple, and record patterns all match structurally: sub-patterns are tested recursively against the payload, element, or field value, so `Some(Some(x))` rejects both `Some(None)` and `None`, and the `Node((l, v, r))` form above binds `l`, `v`, and `r`. One caveat remains: tuple patterns do not check arity — a pattern tests only the positions it names, so `(a, b)` also matches a longer tuple (extra elements are ignored) and a position beyond the scrutinee's length binds nil.
 
 ## 6.8 Lambda Expressions
 
@@ -3000,7 +3000,7 @@ let_rec       ::= "let" "rec" identifier "(" [ parameters ] ")" "=" expression "
 
 conditional   ::= "if" expression [ "then" ] ( expression | block ) [ "else" ( expression | block ) ]
 
-match_expr    ::= "match" expression [ "with" ] "{" { [ "case" | "|" ] pattern "=>" expression } "}"
+match_expr    ::= "match" expression [ "with" ] "{" { [ "case" | "|" ] pattern [ "if" expression ] "=>" expression } "}"
 
 handle_expr   ::= "handle" expression "{" { handler_clause } "}"
 
@@ -3046,7 +3046,7 @@ alias_pattern ::= identifier "@" pattern
 patterns      ::= pattern { "," pattern }
 ```
 
-(Pattern guards are planned.)
+(Pattern guards are supported: an arm may place `if expression` between the pattern and `=>`; the guard must have type `Bool` and may reference pattern-bound variables.)
 
 ## A.5 Type Grammar
 

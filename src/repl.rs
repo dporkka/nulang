@@ -7,7 +7,7 @@
 //! - Graceful error handling
 
 use crate::ast::{AstModule, Decl, Expr};
-use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker, EffectContext};
+use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
@@ -194,18 +194,15 @@ impl Repl {
         // Type check the combined module
         let module_type = self.type_checker.check_module(&combined_module)?;
 
-        // Effect check
+        // Effect check: same two-pass driver as the CLI frontend
+        // (`run_frontend` in main.rs) over the combined module — accumulated
+        // + new declarations + __main. Registering function rows first lets
+        // callee effects propagate to call sites (so new code calling an
+        // accumulated IO function is charged its row), and pass 2 enforces
+        // declared rows on every body. Errors print through the caller's
+        // `print_error` exactly as before.
         let mut effect_checker = EffectChecker::new();
-        let effect_ctx = EffectContext::empty();
-        if let Some(ref expr) = main_expr {
-            let _effects = effect_checker.infer_effects(&effect_ctx, expr)?;
-        }
-        for decl in &new_decls {
-            // Check effects on each new declaration
-            if let Decl::Function { body, .. } = decl {
-                let _effects = effect_checker.infer_effects(&effect_ctx, body)?;
-            }
-        }
+        effect_checker.check_module(&combined_module.decls)?;
 
         // Capability analysis
         let mut cap_analyzer = CapabilityAnalyzer::new();
@@ -232,13 +229,17 @@ impl Repl {
             let ty_str = type_to_string(&module_type);
             println!("{} : {}", val_str, ty_str);
         } else if !new_decls.is_empty() {
-            // Print declaration info
+            // Print declaration info. Each new declaration is re-checked in
+            // the full session context (accumulated + earlier new decls, in
+            // source order) rather than in isolation, so a function calling
+            // a previously-defined function resolves and its type prints.
+            let mut context_decls = self.accumulated_decls.clone();
             for decl in &new_decls {
+                context_decls.push(decl.clone());
                 if let Decl::Function { name, .. } = decl {
-                    // Get the type from the accumulated context after this eval
                     let decl_ty = self.type_checker.check_module(&AstModule {
                         name: "repl".to_string(),
-                        decls: vec![decl.clone()],
+                        decls: context_decls.clone(),
                     })?;
                     println!("{} : {}", name, type_to_string(&decl_ty));
                 }
@@ -560,5 +561,52 @@ mod tests {
         let mut repl = Repl::new();
         repl.execute("1 + 2").unwrap();
         assert!(repl.last_bytecode().unwrap().contains("Function Table"));
+    }
+
+    /// Regression test: the REPL effect check is interprocedural, matching
+    /// the CLI frontend — a function declared `! {}` that calls an IO
+    /// function must be rejected even when the IO function was defined in
+    /// an earlier evaluation (the callee row comes from the accumulated
+    /// module's function-row map).
+    #[test]
+    fn test_repl_rejects_pure_fn_calling_io_fn_across_evals() {
+        let mut repl = Repl::new();
+        repl.execute("fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }")
+            .unwrap();
+        let result = repl.execute("fn pure() -> Unit ! {} { do_io() }");
+        assert!(
+            matches!(result, Err(NuError::EffectError { .. })),
+            "pure function calling an IO function must be rejected, got {:?}",
+            result
+        );
+    }
+
+    /// Regression test: same enforcement within a single input — and the
+    /// offending declaration must not accumulate into the session state.
+    #[test]
+    fn test_repl_rejects_pure_fn_calling_io_fn_same_input() {
+        let mut repl = Repl::new();
+        let result = repl.execute(
+            "fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }\n\
+             fn pure() -> Unit ! {} { do_io() }",
+        );
+        assert!(
+            matches!(result, Err(NuError::EffectError { .. })),
+            "pure function calling an IO function must be rejected, got {:?}",
+            result
+        );
+    }
+
+    /// Positive control: functions staying within their declared rows still
+    /// evaluate, and top-level IO expressions stay allowed in the REPL
+    /// (`__main` carries no declared row, so it is inference-only).
+    #[test]
+    fn test_repl_accepts_matching_declared_effects() {
+        let mut repl = Repl::new();
+        repl.execute("fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }")
+            .unwrap();
+        repl.execute("fn caller() -> Unit ! {IO} { do_io() }")
+            .unwrap();
+        repl.execute("caller()").unwrap();
     }
 }

@@ -102,6 +102,14 @@ pub enum Packet {
         target_actor: u64,
         behavior_name: String,
         payload: Vec<Value>,
+        /// UTF-8 content for every `Value::string(id)` in `payload`: on the
+        /// wire a string-id value indexes **this table**, never the sender's
+        /// or receiver's constant pool (a pool id is meaningless across
+        /// nodes). The sending runtime populates the table from the sender's
+        /// module pool (`distributed::resolve_wire_strings`); the receiving
+        /// runtime interns each entry into the target actor's module pool
+        /// (`distributed::intern_wire_strings`).
+        string_table: Vec<String>,
         sender_actor: u64,
         sender_node: NodeId,
         priority: MessagePriority,
@@ -235,6 +243,7 @@ impl Packet {
                 target_actor,
                 behavior_name,
                 payload,
+                string_table,
                 sender_actor,
                 sender_node,
                 priority,
@@ -247,6 +256,12 @@ impl Packet {
                 buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
                 for v in payload {
                     write_value(buf, v);
+                }
+                // String contents travel after the payload values; the
+                // string-id values above index this table.
+                buf.extend_from_slice(&(string_table.len() as u32).to_be_bytes());
+                for s in string_table {
+                    write_string(buf, s);
                 }
             }
             Packet::Heartbeat { node_id, timestamp } => {
@@ -333,10 +348,20 @@ impl Packet {
                 return None;
             }
         }
+        // String table: contents for the payload's string-id values.
+        let table_count = read_u32(payload, offset)? as usize;
+        offset = offset.checked_add(4)?;
+        let mut string_table = Vec::with_capacity(table_count.min(1024));
+        for _ in 0..table_count {
+            let (s, consumed) = read_string(payload, offset)?;
+            string_table.push(s);
+            offset = offset.checked_add(consumed)?;
+        }
         Some(Packet::ActorMessage {
             target_actor,
             behavior_name,
             payload: values,
+            string_table,
             sender_actor,
             sender_node,
             priority,
@@ -514,6 +539,8 @@ fn write_value(buf: &mut Vec<u8>, v: &Value) {
         buf.push(VAL_BOOL);
         buf.push(if b { 1 } else { 0 });
     } else if let Some(id) = v.as_string_id() {
+        // The id indexes the enclosing packet's string table, not any
+        // constant pool — see `Packet::ActorMessage::string_table`.
         buf.push(VAL_STRING);
         buf.extend_from_slice(&id.to_be_bytes());
     } else if v.is_unit() {
@@ -525,24 +552,39 @@ fn write_value(buf: &mut Vec<u8>, v: &Value) {
     }
 }
 
-/// A [`Value`] is wire-safe only if it round-trips exactly through the
-/// serializer above: int, float, bool, or unit. A string-id indexes the
-/// *sender's* constant pool and a heap pointer is process-local, so either
-/// would arrive corrupted on the receiving node — such values must be
-/// rejected at send time rather than silently mangled.
-fn value_is_wire_safe(v: &Value) -> bool {
-    !(v.is_string() || v.is_ptr() || v.is_actor_ref() || v.is_closure() || v.is_nil())
+/// A [`Value`] is wire-safe only if it can cross to another node without
+/// silent corruption: int, float, bool, or unit always qualify. A heap
+/// pointer is process-local and nil has no exact wire representation, so
+/// those are always rejected. A string-id is safe only when `strings_ok`
+/// — i.e. the enclosing packet carries a string table with the content
+/// (actor messages do; spawn requests do not).
+fn value_is_wire_safe(v: &Value, strings_ok: bool) -> bool {
+    !(v.is_ptr() || v.is_actor_ref() || v.is_closure() || v.is_nil())
+        && (strings_ok || !v.is_string())
 }
 
 /// True if every payload [`Value`] carried by `packet` is wire-safe.
 ///
 /// Only actor messages and spawn requests carry `Value`s; all other packet
-/// kinds serialize plain scalars and are always safe to send.
+/// kinds serialize plain scalars and are always safe to send. Actor-message
+/// strings must additionally index the packet's string table — a string id
+/// without a table entry is a dangling reference and is rejected. Spawn
+/// requests keep strings rejected entirely: remotely-spawned actors run
+/// native handlers and have no module pool to intern content into.
 fn packet_payload_wire_safe(packet: &Packet) -> bool {
     match packet {
-        Packet::ActorMessage { payload, .. } => payload.iter().all(value_is_wire_safe),
+        Packet::ActorMessage {
+            payload,
+            string_table,
+            ..
+        } => payload.iter().all(|v| {
+            value_is_wire_safe(v, true)
+                && v
+                    .as_string_id()
+                    .map_or(true, |id| (id as usize) < string_table.len())
+        }),
         Packet::SpawnRequest { initial_state, .. } => {
-            initial_state.iter().all(|(_, v)| value_is_wire_safe(v))
+            initial_state.iter().all(|(_, v)| value_is_wire_safe(v, false))
         }
         _ => true,
     }
@@ -922,13 +964,13 @@ impl NetworkTransport {
     /// a silent drop. A packet is dropped only if the sender thread has
     /// already shut down (channel disconnected); that case is logged.
     pub fn send(&mut self, to_node: NodeId, to_addr: SocketAddr, packet: Packet) {
-        // Reject payloads that cannot cross the wire losslessly. A string-id
-        // indexes the sender's constant pool and a heap pointer is
-        // process-local, so either would arrive corrupted on the receiving
-        // node — drop the packet loudly instead of silently mangling it.
+        // Reject payloads that cannot cross the wire losslessly. A heap
+        // pointer is process-local and nil has no exact wire form; a string
+        // id is only meaningful paired with the packet's string table.
+        // Drop the packet loudly instead of silently mangling it.
         if !packet_payload_wire_safe(&packet) {
             eprintln!(
-                "nulang-net: dropping packet to node {:?} (addr {}): non-scalar payload (strings/heap values cannot cross the wire)",
+                "nulang-net: dropping packet to node {:?} (addr {}): payload value cannot cross the wire (heap pointer, nil, or string without content)",
                 to_node, to_addr
             );
             return;
@@ -1392,6 +1434,7 @@ mod tests {
             target_actor: 42,
             behavior_name: "handle_msg".to_string(),
             payload: vec![Value::int(123), Value::string(456)],
+            string_table: vec![],
             sender_actor: 99,
             sender_node: NodeId(0xDEAD_BEEF_CAFE_BABE),
             priority: MessagePriority::Normal,
@@ -1402,6 +1445,55 @@ mod tests {
 
         assert_eq!(seq, 0x1234);
         assert_eq!(decoded, packet);
+    }
+
+    // ------------------------------------------------------------------
+    // 2b. ActorMessage string table roundtrip
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_packet_actor_message_string_table_roundtrip() {
+        // Payload string ids index the packet's string table; the table
+        // carries UTF-8 content (including non-ASCII) and must round-trip
+        // byte-exactly. Repeated content shares one table entry.
+        let packet = Packet::ActorMessage {
+            target_actor: 7,
+            behavior_name: "store".to_string(),
+            payload: vec![Value::string(0), Value::string(1), Value::string(0)],
+            string_table: vec!["hello".to_string(), "wörld ✓".to_string()],
+            sender_actor: 3,
+            sender_node: NodeId(0x1111_2222_3333_4444),
+            priority: MessagePriority::Normal,
+        };
+
+        let bytes = packet.to_bytes(77);
+        let (seq, decoded) =
+            Packet::from_bytes(&bytes).expect("actor message deserialization failed");
+
+        assert_eq!(seq, 77);
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn test_packet_actor_message_rejects_truncated_string_table() {
+        let packet = Packet::ActorMessage {
+            target_actor: 7,
+            behavior_name: "store".to_string(),
+            payload: vec![Value::string(0)],
+            string_table: vec!["hello".to_string()],
+            sender_actor: 3,
+            sender_node: NodeId(1),
+            priority: MessagePriority::Normal,
+        };
+        let bytes = packet.to_bytes(1);
+        // Chop the string table in half: the declared count/content no
+        // longer fits, so deserialization must fail cleanly (no panic).
+        let truncated = &bytes[..bytes.len() - 3];
+        assert!(Packet::from_bytes(truncated).is_none());
+        // A packet cut off right after the payload values (before the
+        // table count: 4 bytes count + 4 bytes len + 5 bytes "hello") is
+        // rejected too.
+        let values_end = bytes.len() - 13;
+        assert!(Packet::from_bytes(&bytes[..values_end]).is_none());
     }
 
     // ------------------------------------------------------------------
@@ -1713,33 +1805,49 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn test_value_wire_safety_classification() {
-        // Scalars round-trip exactly and are safe to send.
-        assert!(value_is_wire_safe(&Value::int(1)));
-        assert!(value_is_wire_safe(&Value::float(2.5)));
-        assert!(value_is_wire_safe(&Value::bool(true)));
-        assert!(value_is_wire_safe(&Value::unit()));
+        // Scalars round-trip exactly and are safe to send. Strings are safe
+        // only where the packet can carry their content (`strings_ok`).
+        assert!(value_is_wire_safe(&Value::int(1), false));
+        assert!(value_is_wire_safe(&Value::float(2.5), false));
+        assert!(value_is_wire_safe(&Value::bool(true), false));
+        assert!(value_is_wire_safe(&Value::unit(), false));
+        assert!(value_is_wire_safe(&Value::string(7), true));
+        assert!(!value_is_wire_safe(&Value::string(7), false));
 
-        // String-ids and heap/tagged values would arrive corrupted on the
-        // receiving node, so they must be rejected. (The canonical NaN bit
-        // pattern is TAG_NIL, so Value::float(f64::NAN) is rejected as nil.)
-        assert!(!value_is_wire_safe(&Value::string(7)));
-        assert!(!value_is_wire_safe(&Value::ptr(std::ptr::null_mut())));
-        assert!(!value_is_wire_safe(&Value::actor_ref(9)));
-        assert!(!value_is_wire_safe(&Value::closure(3)));
-        assert!(!value_is_wire_safe(&Value::nil()));
+        // Heap/tagged values would arrive corrupted on the receiving node,
+        // so they must always be rejected. (The canonical NaN bit pattern
+        // is TAG_NIL, so Value::float(f64::NAN) is rejected as nil.)
+        assert!(!value_is_wire_safe(&Value::ptr(std::ptr::null_mut()), true));
+        assert!(!value_is_wire_safe(&Value::actor_ref(9), true));
+        assert!(!value_is_wire_safe(&Value::closure(3), true));
+        assert!(!value_is_wire_safe(&Value::nil(), true));
 
-        // Packet-level classification.
-        let mk = |payload: Vec<Value>| Packet::ActorMessage {
+        // Packet-level classification: an actor-message string id must
+        // index the packet's string table.
+        let mk = |payload: Vec<Value>, string_table: Vec<String>| Packet::ActorMessage {
             target_actor: 1,
             behavior_name: "h".into(),
             payload,
+            string_table,
             sender_actor: 0,
             sender_node: NodeId(5),
             priority: MessagePriority::Normal,
         };
-        assert!(packet_payload_wire_safe(&mk(vec![Value::int(1)])));
-        assert!(!packet_payload_wire_safe(&mk(vec![Value::string(3)])));
+        assert!(packet_payload_wire_safe(&mk(vec![Value::int(1)], vec![])));
+        assert!(packet_payload_wire_safe(&mk(
+            vec![Value::string(0)],
+            vec!["hello".into()]
+        )));
+        // Dangling id: no table entry at index 3.
+        assert!(!packet_payload_wire_safe(&mk(vec![Value::string(3)], vec![])));
+        // Heap values stay rejected even with a table present.
+        assert!(!packet_payload_wire_safe(&mk(
+            vec![Value::ptr(std::ptr::null_mut())],
+            vec!["x".into()]
+        )));
 
+        // Spawn requests have no receiving-side pool, so strings stay
+        // rejected there.
         let spawn = Packet::SpawnRequest {
             request_id: 1,
             behavior_name: "Counter".into(),
@@ -1754,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transport_send_rejects_string_payload() {
+    fn test_transport_send_rejects_dangling_string_payload() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
         let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
@@ -1766,13 +1874,15 @@ mod tests {
         transport_a.connect(node_b_id, addr_b_actual).unwrap();
         sleep(Duration::from_millis(100));
 
-        // A string-id indexes the sender's constant pool, so it would resolve
-        // to the wrong string (or nil) on the receiving node. The transport
-        // must drop the packet at send time rather than deliver corrupt data.
+        // A string id without a string-table entry is a dangling reference
+        // that would resolve to the wrong string (or nil) on the receiving
+        // node. The transport must drop the packet at send time rather than
+        // deliver corrupt data.
         let bad = Packet::ActorMessage {
             target_actor: 1,
             behavior_name: "handle".into(),
             payload: vec![Value::string(42)],
+            string_table: vec![],
             sender_actor: 7,
             sender_node: transport_a.node_id(),
             priority: MessagePriority::Normal,
@@ -1786,7 +1896,52 @@ mod tests {
             received
                 .iter()
                 .all(|p| !matches!(p.packet, Packet::ActorMessage { .. })),
-            "string payload must be rejected at send time, but B received: {:?}",
+            "dangling string payload must be rejected at send time, but B received: {:?}",
+            received
+        );
+
+        transport_a.shutdown();
+        transport_b.shutdown();
+    }
+
+    #[test]
+    fn test_transport_send_delivers_string_payload_with_table() {
+        let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
+        let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let transport_b = NetworkTransport::bind(addr_b).unwrap();
+
+        let addr_b_actual = transport_b.listen_addr();
+        let node_b_id = transport_b.node_id();
+
+        transport_a.connect(node_b_id, addr_b_actual).unwrap();
+        sleep(Duration::from_millis(100));
+
+        // A string payload whose content travels in the packet's string
+        // table is wire-safe and must be delivered unchanged.
+        let good = Packet::ActorMessage {
+            target_actor: 1,
+            behavior_name: "handle".into(),
+            payload: vec![Value::string(0), Value::int(7), Value::string(1)],
+            string_table: vec!["hello".into(), "world".into()],
+            sender_actor: 7,
+            sender_node: transport_a.node_id(),
+            priority: MessagePriority::Normal,
+        };
+        transport_a.send(node_b_id, addr_b_actual, good.clone());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut received = Vec::new();
+        while Instant::now() < deadline && received.is_empty() {
+            received = transport_b.receive();
+            if received.is_empty() {
+                sleep(Duration::from_millis(50));
+            }
+        }
+
+        assert!(
+            received.iter().any(|p| p.packet == good),
+            "string payload with content table must be delivered, got: {:?}",
             received
         );
 
@@ -1813,6 +1968,7 @@ mod tests {
             target_actor: 1,
             behavior_name: "handle".into(),
             payload: vec![Value::int(123), Value::bool(true), Value::unit()],
+            string_table: vec![],
             sender_actor: 7,
             sender_node: transport_a.node_id(),
             priority: MessagePriority::Normal,
