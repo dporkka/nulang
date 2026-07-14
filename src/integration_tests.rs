@@ -343,8 +343,10 @@ mod tests {
     #[test]
     fn test_perform_unhandled_effect_errors() {
         // Unhandled effects should return an error (v0.15+ effect system).
+        // Note: IO.print is no longer unhandled — the standalone VM handles
+        // it as a built-in — so this uses an effect with no built-in.
         let source = r#"
-            perform IO.print("hello")
+            perform Net.fetch("hello")
         "#;
         let result = run_source(source);
         assert!(result.is_err(), "Unhandled effect should error");
@@ -469,6 +471,111 @@ mod tests {
         );
     }
 
+    /// Run the module effect check the way the CLI frontend does
+    /// (`run_frontend` in main.rs): one `EffectChecker::check_module` over
+    /// the parsed declarations.
+    fn check_module_effects(source: &str) -> Result<(), NuError> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex().unwrap();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module().unwrap();
+        let mut checker = crate::effect_checker::EffectChecker::new();
+        checker.check_module(&ast.decls)
+    }
+
+    #[test]
+    fn test_pure_fn_calling_io_fn_rejected() {
+        // Finding: a function declared pure (`! {}`) that calls a function
+        // performing IO must be rejected statically (SPEC2 §4.7/§4.9); the
+        // callee's row propagates to the call site.
+        let source = r#"
+            fn do_io() -> Unit ! {IO} { perform IO.print("x") }
+            fn pure() -> Unit ! {} { do_io() }
+        "#;
+        let result = check_module_effects(source);
+        assert!(
+            result.is_err(),
+            "pure function calling an IO function must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_pure_fn_calling_io_fn_transitively_rejected() {
+        // The row map iterates to a fixpoint, so IO propagates through an
+        // unannotated intermediate function as well.
+        let source = r#"
+            fn do_io() -> Unit ! {IO} { perform IO.print("x") }
+            fn middle() -> Unit { do_io() }
+            fn pure() -> Unit ! {} { middle() }
+        "#;
+        let result = check_module_effects(source);
+        assert!(
+            result.is_err(),
+            "pure function transitively performing IO must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_module_nested_effect_violation_rejected() {
+        // Finding: declarations nested in `module {}` must be effect-checked
+        // just like top-level ones (the typechecker already flattens them).
+        let source = r#"
+            module M {
+                fn pure() -> Unit ! {} { perform IO.print("x") }
+            }
+        "#;
+        let result = check_module_effects(source);
+        assert!(
+            result.is_err(),
+            "module-nested pure function performing IO must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_event_effect_annotation_accepted() {
+        // Finding: `Event` (like `FFI`) is a built-in effect (SPEC2 §4.6), so
+        // an `{Event}` annotation must satisfy a body that emits an event.
+        let source = r#"
+            fn f() -> Unit ! {Event} { emit MyEvent(1) }
+        "#;
+        let result = check_module_effects(source);
+        assert!(
+            result.is_ok(),
+            "fn annotated ! {{Event}} may emit events: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_ffi_effect_annotation_accepted() {
+        let source = r#"
+            fn f() -> Unit ! {FFI} { 1 }
+        "#;
+        let result = check_module_effects(source);
+        assert!(
+            result.is_ok(),
+            "fn annotated ! {{FFI}} must parse and check: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_pure_functions_still_pass_effect_check() {
+        // Positive: legitimately pure functions — including pure calls
+        // between them and module-nested pure functions — keep passing.
+        let source = r#"
+            fn pure() -> Unit ! {} { unit }
+            fn also_pure() -> Unit ! {} { pure() }
+            module M { fn nested_pure() -> Unit ! {} { also_pure() } }
+        "#;
+        let result = check_module_effects(source);
+        assert!(
+            result.is_ok(),
+            "legitimately pure functions must pass: {:?}",
+            result.err()
+        );
+    }
+
     #[test]
     fn test_perform_effect_with_handler() {
         // perform with a handler that catches the effect.
@@ -509,6 +616,82 @@ mod tests {
         "#;
         let (value, _ty) = run_source(source).unwrap();
         assert_eq!(value.as_int(), Some(42), "Handler should double 21 to 42");
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression: non-resuming handlers (`=> body` without `resume`) must
+    // abort the handled computation with the body value instead of silently
+    // resuming the continuation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_non_resuming_handler_aborts_with_body_value() {
+        // Without `resume`, the handler's value becomes the handle
+        // expression's value; the `; 100` continuation must NOT run.
+        let source = r#"
+            handle { perform E.op(); 100 } { | E.op() => 42 }
+        "#;
+        assert_int(source, 42);
+    }
+
+    #[test]
+    fn test_resuming_handler_continues_body() {
+        // With `resume`, the handler value flows back to the perform site
+        // and the body continues: 42 is bound to x, then discarded for 100.
+        let source = r#"
+            handle { let x = perform E.op() in { x; 100 } } { | E.op() resume => 42 }
+        "#;
+        assert_int(source, 100);
+    }
+
+    #[test]
+    fn test_resuming_handler_value_reaches_perform_site() {
+        // The resumed value must land in the perform's dst: 41 + 1 = 42.
+        let source = r#"
+            handle { let x = perform E.op() in x + 1 } { | E.op() resume => 41 }
+        "#;
+        assert_int(source, 42);
+    }
+
+    #[test]
+    fn test_non_resuming_handler_with_parameter() {
+        // Abortive handlers receive perform arguments like resuming ones.
+        let source = r#"
+            handle { perform Math.double(21); 0 } { | Math.double(x) => x + x }
+        "#;
+        assert_int(source, 42);
+    }
+
+    /// End-to-end: `perform IO.print` with no handler resolves through the
+    /// standalone built-in effect instead of failing with
+    /// "Unhandled effect: IO" (the `nulang --eval` path).
+    #[test]
+    fn test_standalone_io_print_end_to_end() {
+        let (value, _ty) = run_source(r#"perform IO.print("hello")"#)
+            .expect("standalone IO.print must not be an unhandled effect");
+        assert!(value.is_unit(), "IO.print resumes with unit");
+    }
+
+    /// Source-level op-name dispatch: a handler for `IO.bar` must NOT catch
+    /// `perform IO.foo()` — handler bindings are op-qualified ("Effect.op").
+    #[test]
+    fn test_source_handler_does_not_catch_other_op() {
+        let source = r#"handle perform IO.foo() { | IO.bar() => 1 }"#;
+        let err = run_source(source).expect_err("IO.bar handler must not catch IO.foo");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Unhandled effect: 'IO.foo'"),
+            "expected unhandled IO.foo, got: {}",
+            msg
+        );
+    }
+
+    /// Source-level op-name dispatch, positive control: the matching
+    /// `IO.foo` handler catches the perform.
+    #[test]
+    fn test_source_handler_catches_matching_op() {
+        let source = r#"handle perform IO.foo() { | IO.foo() => 1 }"#;
+        assert_int(source, 1);
     }
 
     // -----------------------------------------------------------------------
@@ -645,6 +828,79 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Regression: owning locals must get real Drop instructions (mir_lower's
+    // temp-fusion peephole keeps plan_drops effective; previously every
+    // named local was defined by a non-owning Load, so no heap value was
+    // ever reclaimed before actor exit)
+    // -----------------------------------------------------------------------
+
+    /// Register (LOCAL_BASE + local id) of the named local in __main, plus
+    /// the compiled module.
+    fn compile_and_find_local(source: &str, name: &str) -> (crate::bytecode::CodeModule, u8) {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex().unwrap();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module().unwrap();
+        let mut type_checker = TypeChecker::new();
+        type_checker.check_module(&ast).unwrap();
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir).unwrap();
+        let main = mir
+            .functions
+            .iter()
+            .find(|f| f.name == "__main")
+            .expect("__main lowered");
+        let local = main
+            .locals
+            .iter()
+            .find(|l| l.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("local '{}' not found in {:?}", name, main.locals));
+        let reg = (16 + local.id.0) as u8;
+        let module = crate::mir_codegen::compile_mir(&mir, "test").unwrap();
+        (module, reg)
+    }
+
+    #[test]
+    fn test_array_local_gets_real_drop() {
+        // `a` solely owns its array and is only read (indexing), so codegen
+        // must emit a Drop of `a`'s register after its last use — before
+        // the fusion fix, `a` was defined by a non-owning Load and no Drop
+        // of any array ever appeared.
+        let source = "let a = [1, 2, 3] in a[0] + a[1]";
+        let (module, reg) = compile_and_find_local(source, "a");
+        let drops = module
+            .instructions
+            .iter()
+            .filter(|i| i.opcode == crate::bytecode::OpCode::Drop && i.op1 == reg)
+            .count();
+        assert!(
+            drops >= 1,
+            "owning array local must be dropped at least once (reg {}), instructions: {:?}",
+            reg,
+            module.instructions
+        );
+        // And the program still evaluates correctly (no use-after-free).
+        assert_int(source, 3);
+    }
+
+    #[test]
+    fn test_record_local_gets_real_drop() {
+        let source = "let r = { x: 1, y: 2 } in r.x + r.y";
+        let (module, reg) = compile_and_find_local(source, "r");
+        let drops = module
+            .instructions
+            .iter()
+            .filter(|i| i.opcode == crate::bytecode::OpCode::Drop && i.op1 == reg)
+            .count();
+        assert!(
+            drops >= 1,
+            "owning record local must be dropped at least once (reg {})",
+            reg
+        );
+        assert_int(source, 3);
+    }
+
+    // -----------------------------------------------------------------------
     // Test: Float literal
     // -----------------------------------------------------------------------
 
@@ -700,6 +956,132 @@ mod tests {
                 // Accept either — arity checking varies by implementation
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: declared types — variants, aliases, records, Nil (SPEC2 §3.4.1)
+    // -----------------------------------------------------------------------
+
+    /// Run only the frontend (lex → parse → typecheck), mirroring `--check`.
+    fn check_source(source: &str) -> Result<Type, NuError> {
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module()?;
+        let mut type_checker = TypeChecker::new();
+        type_checker.check_module(&ast)
+    }
+
+    #[test]
+    fn test_declared_variant_construction_typechecks() {
+        let result = check_source("type Option[T] = Some(T) | None\nSome(1)");
+        assert!(
+            result.is_ok(),
+            "declared variant construction should check, got {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_unbound_variant_constructor_is_error() {
+        let result = check_source("Some(1)");
+        assert!(
+            result.is_err(),
+            "Some without a declaring variant type must be an error"
+        );
+    }
+
+    #[test]
+    fn test_variant_spec_example_typechecks() {
+        // The canonical SPEC2 §3.4.1 example: declared Result variant used
+        // for construction, annotation, and pattern matching.
+        let source = r#"
+type Result[T, E] = Ok(T) | Error(E)
+
+fn safe_divide(a: Float, b: Float) -> Result[Float, String] {
+  if b == 0.0 then
+    Error("Division by zero")
+  else
+    Ok(a / b)
+}
+
+fn describe(r: Result[Float, String]) -> String {
+  match r with {
+    | Ok(value) => "ok"
+    | Error(msg) => msg
+  }
+}
+describe
+"#;
+        let result = check_source(source);
+        assert!(
+            result.is_ok(),
+            "spec variant example should check, got {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_unknown_type_name_in_annotation_is_error() {
+        let result = check_source("fn f(x: Bogus) x\nf(1)");
+        assert!(
+            result.is_err(),
+            "annotation with an unknown type name must be an error"
+        );
+    }
+
+    #[test]
+    fn test_type_alias_expansion_end_to_end() {
+        let ok = check_source("type alias MyInt = Int\nfn f(x: MyInt) -> MyInt { x }\nf(1)");
+        assert!(ok.is_ok(), "alias use with Int should check, got {:?}", ok.err());
+        let bad = check_source("type alias MyInt = Int\nfn f(x: MyInt) -> MyInt { x }\nf(\"s\")");
+        assert!(
+            bad.is_err(),
+            "alias must expand to the aliased type and reject String"
+        );
+    }
+
+    #[test]
+    fn test_record_type_annotation_end_to_end() {
+        let result =
+            check_source("type Point = { x: Int, y: Int }\nfn get_x(p: Point) -> Int { p.x }\nget_x");
+        assert!(
+            result.is_ok(),
+            "record type name in annotation should check, got {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_nil_annotation_end_to_end() {
+        assert!(
+            check_source("fn f(x: Nil) x\nf(nil)").is_ok(),
+            "nil must have type Nil"
+        );
+        assert!(
+            check_source("fn f(x: Nil) x\nf(1)").is_err(),
+            "Int must not be accepted where Nil is annotated"
+        );
+    }
+
+    #[test]
+    fn test_variant_declaration_compiles_and_runs() {
+        // A program that declares a variant and destructures it in match
+        // patterns must compile through the whole MIR pipeline and run in
+        // the VM. (Constructing variant *values* is lowered separately.)
+        let source = r#"
+type Color = Red | Green | Blue
+fn code(c: Color) -> Int {
+  match c with {
+    | Red => 1
+    | Green => 2
+    | Blue => 3
+  }
+}
+code
+"#;
+        let (value, _ty) = run_source(source).unwrap();
+        assert!(value.as_int().is_some(), "expected function-index value");
     }
 
     // -----------------------------------------------------------------------
@@ -1058,18 +1440,44 @@ mod tests {
         assert_bool("2.0 != 2.0", false);
     }
 
-    /// Float modulo: the FMod opcode has no interpreter or JIT
-    /// implementation, so `7.5 % 2.0` must be an honest compile error
-    /// rather than silently evaluating as integer mod (0).
+    /// Float modulo: `7.5 % 2.0` compiles to the FMod opcode and the
+    /// interpreter evaluates it with f64 % f64 semantics; a zero float
+    /// divisor yields nil, mirroring FDiv.
     #[test]
-    fn test_float_modulo_is_compile_error() {
-        let result = run_source("7.5 % 2.0");
-        assert!(
-            matches!(result, Err(NuError::NotYetImplemented { .. })),
-            "float modulo should be a compile error, got {:?}",
-            result
+    fn test_float_modulo_end_to_end() {
+        assert_float("7.5 % 2.0", 1.5);
+        assert_float("7.0 % 2.0", 1.0);
+        let (value, _ty) = run_source("7.0 % 0.0").unwrap();
+        assert_eq!(
+            value.as_raw(),
+            crate::vm::Value::nil().as_raw(),
+            "float modulo by zero must yield nil, got {:?}",
+            value
         );
         assert_int("7 % 2", 1);
+    }
+
+    /// A hot loop (>1000 reductions, past the JIT tier-up threshold)
+    /// containing float `%` must produce correct results. FMod is not in
+    /// `is_opcode_compilable`, so `find_compilable_region` stops at it and
+    /// the opcode only ever runs in the interpreter — this pins that
+    /// graceful fallback.
+    #[test]
+    fn test_float_modulo_hot_loop_interpreter_only() {
+        let source = r#"
+            fn loop_mod(n: Int, acc: Float) -> Float {
+                if n < 1 then acc else {
+                    let a = acc + 0.5 in
+                    let b = a % 2.0 in
+                    loop_mod(n - 1, b)
+                }
+            }
+            loop_mod(1501, 0.0)
+        "#;
+        // acc cycles 0.5 -> 1.0 -> 1.5 -> 0.0 -> ... with period 4;
+        // 1501 mod 4 == 1, so the final value is 0.5. All intermediate
+        // values are exactly representable in f64.
+        assert_float(source, 0.5);
     }
 
     /// The interpreter's FDiv yields nil on a zero divisor; the JIT must
@@ -1742,7 +2150,11 @@ mod tests {
             }
         }
 
-        // First runtime: spawn the workflow and run the timer step.
+        // First runtime: spawn the workflow and run the timer step. Step
+        // the actor once directly instead of running the scheduler to
+        // quiescence: run_scheduler now waits for pending timers to fire,
+        // which would complete the step instead of leaving the timer
+        // pending for the simulated crash.
         let rt1 = Rc::new(RefCell::new(Runtime::new()));
         rt1.borrow_mut().persistence = Box::new(store.clone());
         let value = {
@@ -1754,7 +2166,7 @@ mod tests {
         let actor_id = value.as_actor_id().expect("spawn should return actor ref");
 
         rt1.borrow_mut().send_message_by_id(actor_id, 0, &[]);
-        rt1.borrow_mut().run_scheduler();
+        rt1.borrow_mut().step_actor(actor_id);
 
         let events_before = store.read_workflow_events(actor_id);
         assert!(
@@ -3250,6 +3662,259 @@ mod tests {
         assert_eq!(calls[1].messages[0].content, "two");
     }
 
+    /// Two messages sent to one actor whose behavior suspends on
+    /// `LLM.ask`: the second message must wait in the mailbox until the
+    /// first behavior fully resumes.  Previously step_actor ran the second
+    /// message over the live suspension; its `LlmAsk` saw the in-flight
+    /// flag, returned Pending, and overwrote `suspended_execution`, so the
+    /// first completion resumed the SECOND behavior with the FIRST call's
+    /// response and the first behavior was lost forever.
+    #[test]
+    fn test_llm_ask_queued_messages_wait_for_suspended_behavior() {
+        let text_response = |content: &str| crate::ai::LlmResponse {
+            content: Some(content.to_string()),
+            tool_calls: Vec::new(),
+            model: "mock".to_string(),
+            finish_reason: "stop".to_string(),
+            usage: crate::ai::TokenUsage::default(),
+        };
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let client = crate::ai::MockLlmClient::sequence(vec![
+            text_response("reply-one"),
+            text_response("reply-two"),
+        ]);
+        rt.borrow_mut().set_llm_client(Box::new(client.clone()));
+
+        let source = r#"
+            actor LlmPair {
+                state first = ""
+                state second = ""
+                behavior one() {
+                    self.first = perform LLM.ask("one")
+                }
+                behavior two() {
+                    self.second = perform LLM.ask("two")
+                }
+            }
+            let a = spawn LlmPair { first = ""; second = "" } in a
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        // Both messages are queued before the scheduler runs: the second
+        // arrives while the first behavior is suspended on its LLM call.
+        rt.borrow_mut().send_message(actor_id, "one", &[]);
+        rt.borrow_mut().send_message(actor_id, "two", &[]);
+        rt.borrow_mut().run_scheduler();
+
+        {
+            let rt_ref = rt.borrow();
+            assert_eq!(
+                rt_ref.actor_state_string(actor_id, "first").as_deref(),
+                Some("reply-one"),
+                "first behavior must store its own response"
+            );
+            assert_eq!(
+                rt_ref.actor_state_string(actor_id, "second").as_deref(),
+                Some("reply-two"),
+                "second behavior must store its own response"
+            );
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert!(!actor.llm_inflight, "in-flight flag should be cleared");
+            assert!(
+                actor.suspended_execution.is_none(),
+                "no suspension should remain after both behaviors complete"
+            );
+            assert!(
+                actor.mailbox.is_empty(),
+                "both queued messages should have been processed"
+            );
+        }
+        let calls = client.recorded_calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "each behavior should issue its own LLM call"
+        );
+        assert_eq!(calls[0].messages[0].content, "one");
+        assert_eq!(calls[1].messages[0].content, "two");
+    }
+
+    /// A workflow step that performs `LLM.ask` suspends on the background
+    /// call and, once resumed, records the step completion the same way a
+    /// signal-resumed step does: step_index advances, a StepCompleted
+    /// event is appended, and the actor checkpoints.  Previously
+    /// resume_suspended_llm_step did none of the workflow bookkeeping, so
+    /// the step never advanced from the journal's perspective.
+    #[test]
+    fn test_workflow_llm_ask_step_records_completion() {
+        let source = r#"
+            workflow LlmFlow {
+                step ask_step { self.answer = perform LLM.ask("hello") }
+            }
+            let w = spawn LlmFlow {} in { w }
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut().persistence = Box::new(store.clone());
+        rt.borrow_mut()
+            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        rt.borrow_mut().run_scheduler();
+
+        {
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(
+                actor.get_state_field("step_index").and_then(|v| v.as_int()),
+                Some(1),
+                "resumed LLM step should advance step_index"
+            );
+            assert!(actor.suspended_execution.is_none());
+            assert_eq!(
+                actor.waiting_signal, None,
+                "suspension marker should be cleared after resume"
+            );
+            assert_eq!(
+                rt_ref.actor_state_string(actor_id, "answer").as_deref(),
+                Some("world")
+            );
+        }
+        let events = store.read_workflow_events(actor_id);
+        assert!(
+            events.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "ask_step")),
+            "StepCompleted event should be persisted after the LLM call resumes"
+        );
+    }
+
+    /// Crash-and-recover for a workflow step suspended on `LLM.ask`: the
+    /// persisted suspension marker lets recovery re-drive the interrupted
+    /// step, which re-issues the call on the new runtime and completes the
+    /// step in the journal.  Previously the snapshot carried no marker
+    /// (waiting_signal is None for LLM suspends), so recover_actor did not
+    /// re-trigger the step and it was silently lost on restart.
+    #[test]
+    fn test_workflow_llm_ask_step_redriven_after_restart() {
+        let source = r#"
+            workflow LlmFlowRecover {
+                step ask_step { self.answer = perform LLM.ask("hello") }
+            }
+            let w = spawn LlmFlowRecover {} in { w }
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+            }
+        }
+
+        // First runtime: start the step and let it suspend on the LLM call.
+        // The completion is never pumped, simulating a crash mid-call.
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        rt1.borrow_mut()
+            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("stale")));
+        let value = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().unwrap()
+        };
+        let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+
+        rt1.borrow_mut().send_message_by_id(actor_id, 0, &[]);
+        // Drive the queue manually so the behavior suspends; running the
+        // full scheduler would pump the completion and resume the step.
+        loop {
+            let next = rt1.borrow_mut().scheduler.dequeue();
+            match next {
+                Some(id) => rt1.borrow_mut().step_actor(id),
+                None => break,
+            }
+        }
+        {
+            let rt_ref = rt1.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert!(
+                actor.suspended_execution.is_some(),
+                "step should be suspended on the LLM call"
+            );
+            assert!(actor.llm_inflight, "background call should be in flight");
+        }
+        // The snapshot must carry the suspension marker so recovery knows
+        // the in-flight step has to be re-driven.
+        let snapshot = store
+            .load_snapshot(actor_id)
+            .expect("workflow spawn should have persisted a snapshot");
+        assert_eq!(
+            snapshot.waiting_signal.as_deref(),
+            Some("__llm_ask_pending__"),
+            "snapshot should record the LLM suspension marker"
+        );
+
+        // Simulate a node restart: drop the actor and recover into a fresh
+        // runtime sharing the store, with its own LLM client.
+        rt1.borrow_mut().actors.remove(&actor_id);
+
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        let client2 = crate::ai::MockLlmClient::text("world");
+        rt2.borrow_mut().set_llm_client(Box::new(client2.clone()));
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            vec![None; module.behaviors.len()],
+        );
+        rt2.borrow_mut().recover_actor(actor_id);
+        rt2.borrow_mut().run_scheduler();
+
+        {
+            let rt_ref = rt2.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            assert_eq!(
+                actor.get_state_field("step_index").and_then(|v| v.as_int()),
+                Some(1),
+                "re-driven step should advance step_index"
+            );
+            assert!(actor.suspended_execution.is_none());
+            assert_eq!(
+                rt_ref.actor_state_string(actor_id, "answer").as_deref(),
+                Some("world"),
+                "re-driven step should store the new runtime's response"
+            );
+        }
+        let events = store.read_workflow_events(actor_id);
+        assert!(
+            events.iter().any(|e| matches!(e, WorkflowEvent::StepCompleted { step_name, .. } if step_name == "ask_step")),
+            "StepCompleted event should be persisted after recovery re-drives the step"
+        );
+        let calls = client2.recorded_calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the recovered runtime should issue one fresh LLM call"
+        );
+        assert_eq!(calls[0].messages[0].content, "hello");
+    }
+
     #[test]
     fn test_agent_ask_uses_memory() {
         let source = r#"
@@ -4124,6 +4789,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_return_inside_handler_body_unwinds_handler_frame() {
+        // A `return` inside a HANDLER body (not the handled body) runs with
+        // the handle's frame on the VM handler_stack; it must unwind that
+        // frame or a later unhandled perform dispatches into the dead
+        // function's handler code.
+        let source = r#"
+            fn leak() -> Int {
+                handle { perform Math.getAnswer() } { | Math.getAnswer() => return 7 }
+            }
+            { leak(); perform Math.getAnswer() }
+        "#;
+        let result = run_source(source);
+        assert!(
+            result.is_err(),
+            "return from a handler body must unwind its frame, got {:?}",
+            result
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Unhandled effect"),
+            "expected unhandled-effect error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_return_inside_handler_body_value() {
+        // Positive control: the return itself still yields its value.
+        let source = r#"
+            fn f() -> Int {
+                handle { perform Math.getAnswer() } { | Math.getAnswer() => return 7 }
+            }
+            f()
+        "#;
+        assert_int(source, 7);
+    }
+
+    #[test]
+    fn test_return_inside_nested_handler_body_unwinds_all_frames() {
+        // The inner handler body's return runs with BOTH handle frames on
+        // the stack; both must be unwound (depth counts the handler's own
+        // frame plus enclosing handles).
+        let source = r#"
+            fn leak() -> Int {
+                handle {
+                    handle { perform Math.getAnswer() } { | Math.getAnswer() => return 7 }
+                } {
+                    | Math.getAnswer() => 1
+                }
+            }
+            { leak(); perform Math.getAnswer() }
+        "#;
+        let result = run_source(source);
+        assert!(
+            result.is_err(),
+            "return from a nested handler body must unwind both frames, got {:?}",
+            result
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Unhandled effect"),
+            "expected unhandled-effect error, got: {}",
+            err_msg
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Regression: recursive closures must capture enclosing variables
     // -----------------------------------------------------------------------
@@ -4171,22 +4903,14 @@ mod tests {
     fn test_closure_captures_var_used_in_bare_perform() {
         // Exact repro: previously failed at compile time with
         // "undefined variable 'k'"; now compiles (k is captured) and the
-        // unhandled perform is the expected runtime error.
+        // standalone IO.print built-in handles the perform at runtime, so
+        // the closure body evaluates to x.
         let source = r#"
             let k = 7 in
             let f = fn(x) { perform IO.print(k); x } in
             f(1)
         "#;
-        let result = run_source(source);
-        let err_msg = match result {
-            Err(e) => format!("{}", e),
-            Ok((v, _)) => panic!("expected unhandled-effect runtime error, got {:?}", v),
-        };
-        assert!(
-            err_msg.contains("Unhandled effect"),
-            "expected unhandled-effect error (k captured), got: {}",
-            err_msg
-        );
+        assert_int(source, 1);
     }
 
     #[test]

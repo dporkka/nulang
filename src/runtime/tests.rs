@@ -154,6 +154,233 @@ fn test_temporary_child_not_restarted() {
     assert_eq!(rt.supervisors[&sup_id].child_count(), 0);
 }
 
+/// Regression test: a restarted child must be rebuilt with its behavior
+/// table and initial state, not as a bare actor that silently drops every
+/// message it receives.
+#[test]
+fn test_restarted_child_restores_behavior_and_state() {
+    let mut rt = Runtime::new();
+    let sup_id = rt.create_supervisor("test_sup", RestartStrategy::OneForOne);
+    let child_id = rt.spawn_actor(Box::new(|| vec![("count".to_string(), Value::int(0))]));
+    {
+        let actor = rt.actors.get_mut(&child_id).unwrap();
+        actor.register_behavior("inc", |actor, args| {
+            let n = actor.get_state_field("count").and_then(|v| v.as_int()).unwrap_or(0);
+            let by = args.get(0).and_then(|v| v.as_int()).unwrap_or(1);
+            actor.set_state_field("count", Value::int(n + by));
+        });
+    }
+    let spec = ChildSpec::new("child1", RestartPolicy::Permanent);
+    rt.supervise_child(sup_id, spec, child_id);
+
+    rt.exit_actor(child_id, ExitReason::Error("crash".to_string()));
+    let new_id = rt.supervisors[&sup_id].children[0].1;
+    assert_ne!(new_id, child_id, "restart should create a fresh actor");
+
+    // The restarted child must handle messages (before the fix it was a
+    // bare actor that silently dropped them).
+    rt.send_message(new_id, "inc", &[Value::int(5)]);
+    rt.step_actor(new_id);
+    let count = rt.actors.get(&new_id).unwrap().get_state_field("count");
+    assert_eq!(count, Some(Value::int(5)));
+}
+
+/// Regression test: a restarted bytecode child must keep its bytecode
+/// module, behavior offsets, and captured initial state so it still
+/// resolves and runs its bytecode behaviors after a restart.
+#[test]
+fn test_restarted_bytecode_child_handles_messages() {
+    use crate::bytecode::{BehaviorTableEntry, CodeModule, Constant, Instruction, OpCode};
+
+    let mut rt = Runtime::new();
+    let sup_id = rt.create_supervisor("byte_sup", RestartStrategy::OneForOne);
+
+    // Behavior "Counter.inc": count += 1, returning the new count.
+    let mut module = CodeModule::new("test");
+    let field_idx = module.add_constant(Constant::String("count".to_string()));
+    let one_idx = module.add_constant(Constant::Int(1));
+    module.add_behavior(BehaviorTableEntry {
+        name: "Counter.inc".to_string(),
+        param_count: 0,
+        code_offset: 0,
+        local_count: 4,
+        effect_mask: 0,
+        compensate_offset: None,
+        parallel_branches: None,
+    });
+    module.emit(Instruction::new3(
+        OpCode::StateGet,
+        ((field_idx >> 8) & 0xFF) as u8,
+        (field_idx & 0xFF) as u8,
+        1,
+    ));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((one_idx >> 8) & 0xFF) as u8,
+        (one_idx & 0xFF) as u8,
+        2,
+    ));
+    module.emit(Instruction::new3(OpCode::IAdd, 1, 2, 3));
+    module.emit(Instruction::new3(OpCode::StateSet, 0, 0, 3));
+    module.emit(Instruction::new1(OpCode::RetVal, 3));
+
+    let child_id = rt.spawn_actor(Box::new(|| vec![("count".to_string(), Value::int(0))]));
+    {
+        let actor = rt.actors.get_mut(&child_id).unwrap();
+        actor.bytecode_module = Some(module.clone());
+        actor.bytecode_offsets = vec![0];
+        actor.compensation_offsets = vec![None];
+    }
+    rt.register_recovery_module(child_id, module, vec![0], vec![None]);
+    let spec = ChildSpec::new("counter", RestartPolicy::Permanent);
+    rt.supervise_child(sup_id, spec, child_id);
+
+    // Sanity: the behavior works before the crash.
+    let before = rt.ask_actor_sync(child_id, 0, &[]).unwrap();
+    assert_eq!(before, Value::int(1));
+
+    rt.exit_actor(child_id, ExitReason::Error("crash".to_string()));
+    let new_id = rt.supervisors[&sup_id].children[0].1;
+    assert_ne!(new_id, child_id);
+
+    // After restart the child must still resolve and run its bytecode
+    // behavior (before the fix the bare actor answered every ask with nil).
+    assert_eq!(rt.behavior_id_for(new_id, "inc"), Some(0));
+    let after = rt.ask_actor_sync(new_id, 0, &[]).unwrap();
+    assert_eq!(
+        after,
+        Value::int(1),
+        "restarted child must restart from its captured initial state"
+    );
+    // And the module was re-registered for recovery after a runtime restart.
+    assert!(rt.recovery_modules.contains_key(&new_id));
+}
+
+/// Regression test: OneForAll mass restart removes the LIVING sibling
+/// children through the full exit protocol — registry names are
+/// unregistered and monitors receive a DOWN message.
+#[test]
+fn test_restart_all_unregisters_names_and_notifies_monitors() {
+    let mut rt = Runtime::new();
+    let sup_id = rt.create_supervisor("all_sup", RestartStrategy::OneForAll);
+    let trigger = rt.spawn_actor(Box::new(|| vec![]));
+    let sibling = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(sup_id, ChildSpec::new("trigger", RestartPolicy::Permanent), trigger);
+    rt.supervise_child(sup_id, ChildSpec::new("sibling", RestartPolicy::Permanent), sibling);
+    rt.registry.register("sibling_name", sibling).unwrap();
+    let watcher = rt.spawn_actor(Box::new(|| vec![]));
+    rt.monitor(watcher, sibling);
+
+    rt.exit_actor(trigger, ExitReason::Error("crash".to_string()));
+
+    assert!(
+        !rt.actors.contains_key(&sibling),
+        "living sibling must be replaced on a OneForAll restart"
+    );
+    assert_eq!(
+        rt.registry.whereis("sibling_name"),
+        None,
+        "removed child's registered name must not linger"
+    );
+    let down = rt
+        .actors
+        .get_mut(&watcher)
+        .unwrap()
+        .mailbox
+        .pop()
+        .expect("monitor of the removed sibling must receive a DOWN message");
+    assert_eq!(down.payload[0].as_int(), Some(sibling as i64));
+    assert_eq!(rt.supervisors[&sup_id].child_count(), 2);
+}
+
+/// Regression test: when a supervisor shuts down (restart intensity
+/// exceeded), its remaining living children are removed through the exit
+/// protocol too — not via a raw map removal.
+#[test]
+fn test_supervisor_shutdown_cleans_up_children() {
+    let mut rt = Runtime::new();
+    let sup_id = rt.create_supervisor("rate_sup", RestartStrategy::OneForOne);
+    let fragile = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(
+        sup_id,
+        ChildSpec::new("fragile", RestartPolicy::Permanent).with_limits(1, 60),
+        fragile,
+    );
+    let sibling = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(sup_id, ChildSpec::new("sibling", RestartPolicy::Permanent), sibling);
+    rt.registry.register("sibling_name", sibling).unwrap();
+    let watcher = rt.spawn_actor(Box::new(|| vec![]));
+    rt.monitor(watcher, sibling);
+
+    // Crash 1 restarts the fragile child (within limits); crash 2 exceeds
+    // the intensity and shuts the supervisor down, which must remove the
+    // living sibling through the exit protocol.
+    rt.exit_actor(fragile, ExitReason::Error("crash1".to_string()));
+    let fragile2 = rt.supervisors[&sup_id]
+        .children
+        .iter()
+        .find(|(s, _)| s.id == "fragile")
+        .unwrap()
+        .1;
+    rt.exit_actor(fragile2, ExitReason::Error("crash2".to_string()));
+
+    assert!(!rt.supervisors.contains_key(&sup_id));
+    assert!(!rt.actors.contains_key(&sibling));
+    assert_eq!(
+        rt.registry.whereis("sibling_name"),
+        None,
+        "shut-down supervisor must unregister its children's names"
+    );
+    let down = rt.actors.get_mut(&watcher).unwrap().mailbox.pop();
+    assert!(
+        down.is_some(),
+        "monitor of a child removed by supervisor shutdown must receive DOWN"
+    );
+}
+
+/// Regression test: a supervised child that exits with an outstanding
+/// foreign reference must have its heap retired (not dropped wholesale),
+/// exactly like an unsupervised exit via `remove_actor_reaping`.
+#[test]
+fn test_supervised_child_restart_retires_heap_with_foreign_refs() {
+    let mut rt = Runtime::new();
+    let sup_id = rt.create_supervisor("reap_sup", RestartStrategy::OneForOne);
+    let a = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(sup_id, ChildSpec::new("a", RestartPolicy::Permanent), a);
+    let b = rt.spawn_actor(Box::new(|| vec![]));
+    rt.current_actor = Some(a);
+
+    let ptr = rt
+        .actors
+        .get_mut(&a)
+        .unwrap()
+        .heap
+        .alloc(16, TypeTag::Raw)
+        .unwrap();
+    let v = Value::ptr(ptr);
+    rt.send_message_by_id(b, 0, &[v]);
+
+    // A crashes with the in-flight foreign ref still pending.
+    rt.exit_actor(a, ExitReason::Error("crash".to_string()));
+    rt.current_actor = None;
+    assert!(!rt.actors.contains_key(&a));
+    assert_eq!(
+        rt.retired_heaps.len(),
+        1,
+        "supervised child's heap must be retired while foreign refs are outstanding"
+    );
+    let new_id = rt.supervisors[&sup_id].children[0].1;
+    assert_ne!(new_id, a, "replacement child should have been spawned");
+    // SAFETY: the retired heap keeps the object alive while refs drain.
+    unsafe {
+        let header = &*ActorHeap::header_of(ptr);
+        assert!(
+            header.foreign_count >= 1,
+            "retired heap object must remain readable"
+        );
+    }
+}
+
 // ========================================================================
 // ORCA GC Tests
 // ========================================================================
@@ -333,6 +560,43 @@ fn test_timer_kill_after() {
     let tw = TimerWheel::new();
     let timer_id = tw.kill_after(Duration::from_millis(50), 42);
     assert_eq!(timer_id, TimerId(1));
+}
+
+/// Regression: a timer still pending when the run queue drains must still
+/// fire. run_scheduler used to break as soon as the queue emptied, so a
+/// timer armed by an actor's last turn was silently dropped.
+#[test]
+fn test_run_scheduler_waits_for_pending_timer() {
+    let mut rt = Runtime::new();
+    let actor_id = rt.spawn_actor(Box::new(|| vec![("pings".to_string(), Value::int(0))]));
+    {
+        let actor = rt.actors.get_mut(&actor_id).unwrap();
+        actor.register_behavior("ping", |actor, _args| {
+            let n = actor
+                .get_state_field("pings")
+                .and_then(|v| v.as_int())
+                .unwrap_or(0);
+            actor.set_state_field("pings", Value::int(n + 1));
+        });
+    }
+    // One direct message (processed immediately) plus a timer that
+    // matures only after the queue has drained.
+    rt.send_message(actor_id, "ping", &[]);
+    let behavior_id = rt.behavior_id_for(actor_id, "ping").unwrap();
+    rt.timer_wheel
+        .send_after(Duration::from_millis(20), actor_id, behavior_id, vec![]);
+    rt.run_scheduler();
+    let pings = rt
+        .actors
+        .get(&actor_id)
+        .unwrap()
+        .get_state_field("pings")
+        .and_then(|v| v.as_int());
+    assert_eq!(
+        pings,
+        Some(2),
+        "pending timer must fire before run_scheduler exits"
+    );
 }
 
 // -- Process Groups (5 tests) --
