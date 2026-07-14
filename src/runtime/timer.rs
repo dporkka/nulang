@@ -256,6 +256,22 @@ impl TimerWheel {
         fired
     }
 
+    /// Earliest fire time among active (non-cancelled) timers.
+    ///
+    /// Returns `None` when no active timer is scheduled. O(n) over the
+    /// wheel; intended for the scheduler's drain path, not the hot loop.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        let timers = match self.timers.read() {
+            Ok(t) => t,
+            Err(_) => return None,
+        };
+        timers
+            .iter()
+            .filter(|e| !e.cancelled.load(Ordering::SeqCst))
+            .map(|e| e.fire_at)
+            .min()
+    }
+
     /// Count of active (non-cancelled) timers.
     pub fn len(&self) -> usize {
         let timers = match self.timers.read() {

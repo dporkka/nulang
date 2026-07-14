@@ -41,8 +41,6 @@
 //! The caller (the runtime) is responsible for ensuring that payload pointers are
 //! valid and that no data races occur when multiple actors access the same object.
 
-use std::collections::HashMap;
-
 use crate::runtime::heap::{OrcaHeader, TypeTag};
 
 // ---------------------------------------------------------------------------
@@ -446,8 +444,8 @@ impl OrcaGc {
     /// count drops to zero and `local_count` is also zero (and the object is
     /// not sticky), the object is freed.
     ///
-    /// This method is called on the **target** actor's GC engine by the
-    /// [`OrcaCoordinator::deliver_pending_ops`].
+    /// This method is called on the **owning** actor's GC engine by the
+    /// runtime's `process_gc_ops`.
     pub fn process_foreign_op(&mut self, heap: &mut dyn OrcaHeap, op: ForeignRefOp) {
         // SAFETY: the coordinator only delivers ops whose object_header is
         // a live pointer into a sender heap.  The object stays alive because
@@ -659,8 +657,6 @@ pub struct OrcaCoordinator {
     /// Actor GCs drain their local queues into here; the coordinator then
     /// routes each op to the correct target actor.
     pub pending_ops: Vec<ForeignRefOp>,
-    /// Operations bucketed by target actor for efficient delivery.
-    per_actor_ops: HashMap<u64, Vec<ForeignRefOp>>,
     /// How many delivered ops must accumulate before we run cycle detection.
     pub cycle_detect_threshold: usize,
     /// Total number of ops delivered since last cycle check.
@@ -674,7 +670,6 @@ impl OrcaCoordinator {
     pub fn new() -> Self {
         OrcaCoordinator {
             pending_ops: Vec::new(),
-            per_actor_ops: HashMap::new(),
             cycle_detect_threshold: 10_000,
             delivered_count: 0,
             stats: GcStats::default(),
@@ -692,42 +687,6 @@ impl OrcaCoordinator {
     /// Absorb a batch of foreign-ref ops from an actor GC.
     pub fn absorb_ops(&mut self, mut ops: Vec<ForeignRefOp>) {
         self.pending_ops.append(&mut ops);
-    }
-
-    /// Deliver all pending operations to their target actors.
-    ///
-    /// Called by the runtime between scheduling rounds.  For each pending
-    /// op, this looks up the target actor and calls
-    /// [`OrcaGc::process_foreign_op`] on that actor's GC engine.
-    ///
-    /// Ops whose target actor no longer exist are silently dropped (the
-    /// object will be reclaimed when its owning actor drops the last local
-    /// ref).
-    pub fn deliver_pending_ops(&mut self, runtime: &mut super::Runtime) {
-        // Bucket ops by target actor.
-        for op in self.pending_ops.drain(..) {
-            self.per_actor_ops
-                .entry(op.target_actor)
-                .or_default()
-                .push(op);
-        }
-
-        // Deliver to each actor.
-        let actor_ids: Vec<u64> = self.per_actor_ops.keys().copied().collect();
-        for actor_id in actor_ids {
-            let ops = self.per_actor_ops.remove(&actor_id).unwrap_or_default();
-
-            if let Some(actor) = runtime.actors.get_mut(&actor_id) {
-                let delivered = ops.len();
-                for op in ops {
-                    actor.orca_gc.process_foreign_op(&mut actor.heap, op);
-                }
-                self.delivered_count += delivered;
-            } else {
-                // Target actor is gone — drop the ops.  The objects will be
-                // reclaimed via normal refcounting on the owner side.
-            }
-        }
     }
 
     /// Check if cycle detection should be triggered.

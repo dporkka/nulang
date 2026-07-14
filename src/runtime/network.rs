@@ -525,6 +525,29 @@ fn write_value(buf: &mut Vec<u8>, v: &Value) {
     }
 }
 
+/// A [`Value`] is wire-safe only if it round-trips exactly through the
+/// serializer above: int, float, bool, or unit. A string-id indexes the
+/// *sender's* constant pool and a heap pointer is process-local, so either
+/// would arrive corrupted on the receiving node — such values must be
+/// rejected at send time rather than silently mangled.
+fn value_is_wire_safe(v: &Value) -> bool {
+    !(v.is_string() || v.is_ptr() || v.is_actor_ref() || v.is_closure() || v.is_nil())
+}
+
+/// True if every payload [`Value`] carried by `packet` is wire-safe.
+///
+/// Only actor messages and spawn requests carry `Value`s; all other packet
+/// kinds serialize plain scalars and are always safe to send.
+fn packet_payload_wire_safe(packet: &Packet) -> bool {
+    match packet {
+        Packet::ActorMessage { payload, .. } => payload.iter().all(value_is_wire_safe),
+        Packet::SpawnRequest { initial_state, .. } => {
+            initial_state.iter().all(|(_, v)| value_is_wire_safe(v))
+        }
+        _ => true,
+    }
+}
+
 /// Read a [`Value`] from `bytes` starting at `offset`.
 ///
 /// Returns `(Value, bytes_consumed)`.
@@ -834,7 +857,10 @@ impl NetworkTransport {
             }
         }
 
-        let mut stream = TcpStream::connect(addr)?;
+        // Bound the connect so one unreachable peer cannot stall this node:
+        // `TcpStream::connect` would wait out the OS default (~2 min for a
+        // blackholed peer).
+        let mut stream = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
         stream.set_read_timeout(Some(IO_TIMEOUT))?;
         stream.set_write_timeout(Some(IO_TIMEOUT))?;
         stream.set_nodelay(true)?;
@@ -896,6 +922,17 @@ impl NetworkTransport {
     /// a silent drop. A packet is dropped only if the sender thread has
     /// already shut down (channel disconnected); that case is logged.
     pub fn send(&mut self, to_node: NodeId, to_addr: SocketAddr, packet: Packet) {
+        // Reject payloads that cannot cross the wire losslessly. A string-id
+        // indexes the sender's constant pool and a heap pointer is
+        // process-local, so either would arrive corrupted on the receiving
+        // node — drop the packet loudly instead of silently mangling it.
+        if !packet_payload_wire_safe(&packet) {
+            eprintln!(
+                "nulang-net: dropping packet to node {:?} (addr {}): non-scalar payload (strings/heap values cannot cross the wire)",
+                to_node, to_addr
+            );
+            return;
+        }
         let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let outgoing = OutgoingPacket {
             to_node,
@@ -1269,7 +1306,10 @@ fn connect_in_sender(
     node_id: NodeId,
     addr: SocketAddr,
 ) -> io::Result<()> {
-    let mut stream = TcpStream::connect(addr)?;
+    // Bound the connect: the single sender thread serialises every peer's
+    // traffic, so an unreachable peer must not block all sends for the OS
+    // default timeout (~2 min).
+    let mut stream = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     stream.set_nodelay(true)?;
@@ -1663,6 +1703,136 @@ mod tests {
         );
         assert_eq!(received[0].from_node, transport_a.node_id());
         assert_eq!(received[0].packet, packet);
+
+        transport_a.shutdown();
+        transport_b.shutdown();
+    }
+
+    // ------------------------------------------------------------------
+    // 9b. Non-scalar payloads are rejected at send time
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_value_wire_safety_classification() {
+        // Scalars round-trip exactly and are safe to send.
+        assert!(value_is_wire_safe(&Value::int(1)));
+        assert!(value_is_wire_safe(&Value::float(2.5)));
+        assert!(value_is_wire_safe(&Value::bool(true)));
+        assert!(value_is_wire_safe(&Value::unit()));
+
+        // String-ids and heap/tagged values would arrive corrupted on the
+        // receiving node, so they must be rejected. (The canonical NaN bit
+        // pattern is TAG_NIL, so Value::float(f64::NAN) is rejected as nil.)
+        assert!(!value_is_wire_safe(&Value::string(7)));
+        assert!(!value_is_wire_safe(&Value::ptr(std::ptr::null_mut())));
+        assert!(!value_is_wire_safe(&Value::actor_ref(9)));
+        assert!(!value_is_wire_safe(&Value::closure(3)));
+        assert!(!value_is_wire_safe(&Value::nil()));
+
+        // Packet-level classification.
+        let mk = |payload: Vec<Value>| Packet::ActorMessage {
+            target_actor: 1,
+            behavior_name: "h".into(),
+            payload,
+            sender_actor: 0,
+            sender_node: NodeId(5),
+            priority: MessagePriority::Normal,
+        };
+        assert!(packet_payload_wire_safe(&mk(vec![Value::int(1)])));
+        assert!(!packet_payload_wire_safe(&mk(vec![Value::string(3)])));
+
+        let spawn = Packet::SpawnRequest {
+            request_id: 1,
+            behavior_name: "Counter".into(),
+            initial_state: vec![("name".into(), Value::string(1))],
+        };
+        assert!(!packet_payload_wire_safe(&spawn));
+
+        assert!(packet_payload_wire_safe(&Packet::Heartbeat {
+            node_id: NodeId(1),
+            timestamp: 0,
+        }));
+    }
+
+    #[test]
+    fn test_transport_send_rejects_string_payload() {
+        let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
+        let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let transport_b = NetworkTransport::bind(addr_b).unwrap();
+
+        let addr_b_actual = transport_b.listen_addr();
+        let node_b_id = transport_b.node_id();
+
+        transport_a.connect(node_b_id, addr_b_actual).unwrap();
+        sleep(Duration::from_millis(100));
+
+        // A string-id indexes the sender's constant pool, so it would resolve
+        // to the wrong string (or nil) on the receiving node. The transport
+        // must drop the packet at send time rather than deliver corrupt data.
+        let bad = Packet::ActorMessage {
+            target_actor: 1,
+            behavior_name: "handle".into(),
+            payload: vec![Value::string(42)],
+            sender_actor: 7,
+            sender_node: transport_a.node_id(),
+            priority: MessagePriority::Normal,
+        };
+        transport_a.send(node_b_id, addr_b_actual, bad);
+
+        // Give the (non-)delivery plenty of time, then confirm nothing came.
+        sleep(Duration::from_millis(500));
+        let received = transport_b.receive();
+        assert!(
+            received
+                .iter()
+                .all(|p| !matches!(p.packet, Packet::ActorMessage { .. })),
+            "string payload must be rejected at send time, but B received: {:?}",
+            received
+        );
+
+        transport_a.shutdown();
+        transport_b.shutdown();
+    }
+
+    #[test]
+    fn test_transport_send_delivers_scalar_payload() {
+        let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
+        let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+        let transport_b = NetworkTransport::bind(addr_b).unwrap();
+
+        let addr_b_actual = transport_b.listen_addr();
+        let node_b_id = transport_b.node_id();
+
+        transport_a.connect(node_b_id, addr_b_actual).unwrap();
+        sleep(Duration::from_millis(100));
+
+        // Scalar payloads are wire-safe and must be delivered unchanged —
+        // the send-time guard must not over-reject.
+        let good = Packet::ActorMessage {
+            target_actor: 1,
+            behavior_name: "handle".into(),
+            payload: vec![Value::int(123), Value::bool(true), Value::unit()],
+            sender_actor: 7,
+            sender_node: transport_a.node_id(),
+            priority: MessagePriority::Normal,
+        };
+        transport_a.send(node_b_id, addr_b_actual, good.clone());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut received = Vec::new();
+        while Instant::now() < deadline && received.is_empty() {
+            received = transport_b.receive();
+            if received.is_empty() {
+                sleep(Duration::from_millis(50));
+            }
+        }
+
+        assert!(
+            received.iter().any(|p| p.packet == good),
+            "scalar payload must be delivered, got: {:?}",
+            received
+        );
 
         transport_a.shutdown();
         transport_b.shutdown();

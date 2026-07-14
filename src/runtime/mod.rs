@@ -91,6 +91,28 @@ fn is_suspend_error(msg: &str) -> bool {
     msg == "SignalWait:suspend" || msg == "LlmAsk:suspend"
 }
 
+/// Persisted `waiting_signal` marker for a workflow step suspended on a
+/// background LLM call.  A signal wait stores the awaited signal's name so
+/// recovery can re-trigger the in-flight step; an LLM suspend has no
+/// signal, so this reserved marker plays the same role.  The suspended VM
+/// state itself cannot be persisted, so recovery re-runs the step from
+/// its last pre-suspend checkpoint and the re-executed `LLM.ask` starts
+/// a fresh background call.
+const LLM_SUSPEND_MARKER: &str = "__llm_ask_pending__";
+
+/// Choose the `waiting_signal` value for a freshly captured suspension:
+/// the awaited signal's name for a signal wait, or the reserved LLM
+/// marker for a workflow step suspended on a background LLM call (plain
+/// actors store nothing; their suspensions are not re-driven on
+/// recovery).
+fn suspension_marker(actor: &Actor, signal_name: Option<String>) -> Option<String> {
+    match signal_name {
+        Some(name) => Some(name),
+        None if actor.is_workflow => Some(LLM_SUSPEND_MARKER.to_string()),
+        None => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
@@ -1088,15 +1110,42 @@ impl Runtime {
             (*self_ptr).llm_suspend_enabled = true;
             let result = vm.resume();
             (*self_ptr).llm_suspend_enabled = saved_suspend;
-            if let Err(crate::types::NuError::VMError(ref msg)) = result {
-                if is_suspend_error(msg) {
+            match result {
+                Ok(_) => {
+                    // The suspended step ran to completion. For workflow
+                    // actors record the completion the same way
+                    // resume_suspended_workflow_step does: clear the
+                    // suspension marker, advance step_index, append
+                    // StepCompleted, and checkpoint.
+                    if (*self_ptr).actor_is_workflow(actor_id) {
+                        if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                            actor.waiting_signal = None;
+                            if let Some(n) =
+                                actor.get_state_field("step_index").and_then(|v| v.as_int())
+                            {
+                                actor.set_state_field("step_index", Value::int(n + 1));
+                            }
+                        }
+                        let seq = (*self_ptr).next_sequence(actor_id);
+                        let _ = (*self_ptr).persistence.append_workflow_event(
+                            actor_id,
+                            WorkflowEvent::StepCompleted {
+                                sequence: seq,
+                                step_name: suspended.step_name,
+                            },
+                        );
+                        (*self_ptr).checkpoint_actor(actor_id);
+                    }
+                }
+                Err(crate::types::NuError::VMError(ref msg)) if is_suspend_error(msg) => {
                     // Suspended again (e.g. a chained `perform LLM.ask` or a
                     // signal wait): re-capture the VM state so the next
                     // completion or signal can resume it.
                     if let Some(vm_state) = vm.take_suspended_state() {
                         let signal_name = vm.suspended_signal_name.take();
                         if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
-                            actor.waiting_signal = signal_name;
+                            let marker = suspension_marker(actor, signal_name);
+                            actor.waiting_signal = marker;
                             actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
                                 vm_state,
                                 behavior_idx: suspended.behavior_idx,
@@ -1107,7 +1156,27 @@ impl Runtime {
                 }
                 // Other errors: the send-path result is discarded anyway,
                 // matching step_actor semantics.
+                Err(_) => {}
             }
+        }
+        // The suspension resolved (completed or failed): if messages queued
+        // up while the behavior was suspended, schedule the actor to drain
+        // them — step_actor leaves mail untouched while a suspension is live.
+        self.requeue_if_mail_pending(actor_id);
+    }
+
+    /// Re-enqueue an actor whose suspension has resolved if messages queued
+    /// up while it was suspended.  step_actor refuses to run new messages
+    /// while a suspension is live, so without this the queued mail would
+    /// sit until an unrelated send happened to re-enqueue the actor.
+    fn requeue_if_mail_pending(&mut self, actor_id: u64) {
+        let needs_requeue = self
+            .actors
+            .get(&actor_id)
+            .map(|a| a.suspended_execution.is_none() && !a.mailbox.is_empty())
+            .unwrap_or(false);
+        if needs_requeue {
+            self.scheduler.enqueue(actor_id);
         }
     }
 
@@ -1190,6 +1259,9 @@ impl Runtime {
                 }
             }
         }
+        // The suspension resolved (completed or failed): drain any mail
+        // that queued up while the step was suspended.
+        self.requeue_if_mail_pending(actor_id);
     }
 
     pub fn send_message(&mut self, target_id: u64, behavior: &str, args: &[Value]) {
@@ -1596,23 +1668,32 @@ impl Runtime {
             let actor_id = match self.scheduler.dequeue() {
                 Some(actor_id) => actor_id,
                 None => {
-                    if self.llm_inflight_count == 0 {
+                    if self.llm_inflight_count == 0 && self.timer_wheel.is_empty() {
                         break;
                     }
                     // The run queue is drained but background LLM calls are
-                    // still in flight: block briefly for the next completion
-                    // so run_scheduler keeps its "run until quiescent"
-                    // semantics for actors suspended on `perform LLM.ask`.
-                    match self
-                        .llm_rx
-                        .recv_timeout(std::time::Duration::from_millis(10))
-                    {
+                    // still in flight or timers are pending: block briefly
+                    // for the next completion or timer deadline so
+                    // run_scheduler keeps its "run until quiescent"
+                    // semantics — an actor whose last turn armed a timer
+                    // must still receive the fired message.
+                    let wait = match self.timer_wheel.next_deadline() {
+                        Some(deadline) => deadline
+                            .saturating_duration_since(std::time::Instant::now())
+                            .min(std::time::Duration::from_millis(10)),
+                        None => std::time::Duration::from_millis(10),
+                    };
+                    match self.llm_rx.recv_timeout(wait) {
                         Ok((actor_id, result)) => {
                             self.store_llm_completion(actor_id, result);
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
+                    // Deliver any timers that matured while waiting; fired
+                    // messages re-enqueue their target actors, so the next
+                    // dequeue resumes work.
+                    self.tick_timers();
                     continue;
                 }
             };
@@ -1770,7 +1851,19 @@ impl Runtime {
             };
             match actor.state {
                 ActorState::Running | ActorState::Created | ActorState::Waiting => {
-                    actor.receive()
+                    // A behavior suspended on a signal wait or a background
+                    // LLM call owns the actor until it resumes: leave queued
+                    // messages in the mailbox instead of running them over
+                    // the suspension.  A second suspending behavior would
+                    // overwrite `suspended_execution`, hijack the first
+                    // call's completion (a single `llm_completed` slot), and
+                    // lose the first behavior forever.  The resume paths
+                    // re-enqueue the actor once the suspension resolves.
+                    if actor.suspended_execution.is_some() {
+                        None
+                    } else {
+                        actor.receive()
+                    }
                 }
                 _ => {
                     self.current_actor = None;
@@ -2016,16 +2109,23 @@ impl Runtime {
                 self.llm_suspend_enabled = true;
                 let result = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
                 self.llm_suspend_enabled = saved_suspend;
-                self.checkpoint_actor(actor_id);
                 match result {
-                    Ok(_) => processed = true,
+                    Ok(_) => {
+                        self.checkpoint_actor(actor_id);
+                        processed = true;
+                    }
                     Err(crate::types::NuError::VMError(ref msg)) if is_suspend_error(msg) => {
                         // The step yielded waiting for a signal or a
-                        // background LLM call. Do not mark it completed and
-                        // do not run compensations.
+                        // background LLM call. Do not mark it completed, do
+                        // not run compensations, and do not checkpoint the
+                        // partially-mutated durable state: persist only the
+                        // suspension marker so recovery can re-drive the
+                        // step from its last pre-suspend checkpoint.
+                        self.persist_suspension_marker(actor_id);
                         processed = false;
                     }
                     Err(_) => {
+                        self.checkpoint_actor(actor_id);
                         // A workflow step failed: run saga compensations for previously
                         // completed steps in reverse order.
                         if self.actor_is_workflow(actor_id) {
@@ -2445,6 +2545,28 @@ impl Runtime {
         }
     }
 
+    /// Persist only the suspension marker of a persistent actor whose
+    /// bytecode behavior has just suspended (signal wait or background LLM
+    /// call), without snapshotting the step's partially-mutated durable
+    /// state.  Recovery reads the marker (`waiting_signal`, or the
+    /// `LLM_SUSPEND_MARKER` sentinel for LLM suspends) to decide that the
+    /// in-flight step must be re-driven; the state it re-runs from is the
+    /// last pre-step checkpoint.  A no-op when the actor has no snapshot
+    /// yet — without one there is nothing to recover anyway.
+    fn persist_suspension_marker(&mut self, actor_id: u64) {
+        let waiting_signal = match self.actors.get(&actor_id) {
+            Some(actor) if actor.persistent => actor.waiting_signal.clone(),
+            _ => return,
+        };
+        if let Some(mut snapshot) = self.persistence.load_snapshot(actor_id) {
+            if snapshot.waiting_signal == waiting_signal {
+                return;
+            }
+            snapshot.waiting_signal = waiting_signal;
+            let _ = self.persistence.save_snapshot(snapshot);
+        }
+    }
+
     /// Lay out a workflow actor's native behavior table so that bytecode step
     /// ids (0..n-1) do not collide with internal runtime behaviors such as
     /// `__timer_fired`.
@@ -2571,7 +2693,8 @@ impl Runtime {
                     if let Some(vm_state) = vm.take_suspended_state() {
                         let signal_name = vm.suspended_signal_name.take();
                         if let Some(actor) = self.actors.get_mut(&actor_id) {
-                            actor.waiting_signal = signal_name;
+                            let marker = suspension_marker(actor, signal_name);
+                            actor.waiting_signal = marker;
                             actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
                                 vm_state,
                                 behavior_idx: 0,
@@ -2947,18 +3070,76 @@ impl Runtime {
     }
 
     pub fn handle_actor_exit(&mut self, actor_id: u64, reason: ExitReason) {
-        let (monitors, links, parent) = {
+        let parent = match self.actors.get(&actor_id) {
+            Some(a) => a.parent,
+            None => return,
+        };
+
+        // Run the exit protocol (holds, registry, process groups, monitor
+        // DOWN, link propagation) and reap the actor.  If it is supervised,
+        // the restart paths below rebuild a replacement; the removal there
+        // is idempotent.
+        self.reap_living_actor(actor_id, reason.clone());
+
+        if let Some(supervisor_id) = parent {
+            let mut supervisor = match self.supervisors.remove(&supervisor_id) {
+                Some(s) => s,
+                None => return,
+            };
+            let action = supervisor.handle_exit(actor_id, reason.clone(), self);
+            match action {
+                SupervisorAction::Restarted(_new_id) => {
+                    self.supervisors.insert(supervisor_id, supervisor);
+                }
+                SupervisorAction::Shutdown => {
+                    let sup_parent = supervisor.parent;
+                    self.shutdown_supervisor(supervisor_id, &supervisor);
+                    if let Some(parent_id) = sup_parent {
+                        let escalate_reason = ExitReason::Error("child supervisor shutdown".to_string());
+                        self.handle_supervisor_parent_exit(parent_id, supervisor_id, escalate_reason);
+                    }
+                }
+                SupervisorAction::Ignore => {
+                    self.supervisors.insert(supervisor_id, supervisor);
+                }
+                SupervisorAction::Escalate => {
+                    self.supervisors.insert(supervisor_id, supervisor);
+                    if let Some(parent_id) = parent {
+                        let escalate_reason = reason.clone();
+                        self.handle_supervisor_parent_exit(parent_id, actor_id, escalate_reason);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Exit-protocol cleanup for an actor being removed: mark it terminated,
+    /// release its receiver-side ORCA holds, unregister its names, leave its
+    /// process groups, send DOWN to its monitors, propagate abnormal exits
+    /// to linked actors, then reap it (retiring the heap while foreign
+    /// references are outstanding).
+    ///
+    /// Shared by `handle_actor_exit` and by supervisor mass-removal paths
+    /// (`restart_all`/`restart_from`/`shutdown_supervisor`), which remove
+    /// LIVING children and therefore must not bypass the protocol.  Does not
+    /// dispatch to the actor's supervisor — supervision is handled by the
+    /// callers, which is why this is not simply `handle_actor_exit`.
+    fn reap_living_actor(&mut self, actor_id: u64, reason: ExitReason) {
+        let (monitors, links) = {
             let actor = match self.actors.get(&actor_id) {
                 Some(a) => a,
                 None => return,
             };
-            (actor.monitors.clone(), actor.links.clone(), actor.parent)
+            (actor.monitors.clone(), actor.links.clone())
         };
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.state = ActorState::Terminated;
+        }
 
         // Release this actor's receiver-side ORCA holds up front: whichever
-        // removal path below runs (direct or supervisor-driven), objects it
-        // received from other actors must be released exactly once.  The
-        // call is idempotent (the hold list drains on first use).
+        // removal path runs, objects it received from other actors must be
+        // released exactly once.  The call is idempotent (the hold list
+        // drains on first use).
         self.release_held_foreign_refs(actor_id);
 
         self.registry.unregister_by_actor(actor_id);
@@ -2997,41 +3178,7 @@ impl Runtime {
             }
         }
 
-        if let Some(supervisor_id) = parent {
-            let mut supervisor = match self.supervisors.remove(&supervisor_id) {
-                Some(s) => s,
-                None => {
-                    self.remove_actor_reaping(actor_id);
-                    return;
-                }
-            };
-            let action = supervisor.handle_exit(actor_id, reason.clone(), self);
-            match action {
-                SupervisorAction::Restarted(_new_id) => {
-                    self.supervisors.insert(supervisor_id, supervisor);
-                }
-                SupervisorAction::Shutdown => {
-                    let sup_parent = supervisor.parent;
-                    self.shutdown_supervisor(supervisor_id);
-                    if let Some(parent_id) = sup_parent {
-                        let escalate_reason = ExitReason::Error("child supervisor shutdown".to_string());
-                        self.handle_supervisor_parent_exit(parent_id, supervisor_id, escalate_reason);
-                    }
-                }
-                SupervisorAction::Ignore => {
-                    self.supervisors.insert(supervisor_id, supervisor);
-                }
-                SupervisorAction::Escalate => {
-                    self.supervisors.insert(supervisor_id, supervisor);
-                    if let Some(parent_id) = parent {
-                        let escalate_reason = reason.clone();
-                        self.handle_supervisor_parent_exit(parent_id, actor_id, escalate_reason);
-                    }
-                }
-            }
-        } else {
-            self.remove_actor_reaping(actor_id);
-        }
+        self.remove_actor_reaping(actor_id);
     }
 
     fn handle_supervisor_parent_exit(
@@ -3048,7 +3195,7 @@ impl Runtime {
         match parent_action {
             SupervisorAction::Shutdown => {
                 let grandparent = parent_sup.parent;
-                self.shutdown_supervisor(parent_id);
+                self.shutdown_supervisor(parent_id, &parent_sup);
                 if let Some(gp_id) = grandparent {
                     let gp_reason = ExitReason::Error("supervisor shutdown cascaded".to_string());
                     self.handle_supervisor_parent_exit(gp_id, parent_id, gp_reason);
@@ -3074,6 +3221,29 @@ impl Runtime {
     }
 
     pub fn supervise_child(&mut self, supervisor_id: u64, spec: ChildSpec, child_id: u64) {
+        // Snapshot everything a restart needs to rebuild the child, so a
+        // supervised restart restores behaviors/bytecode/state instead of
+        // producing a bare actor that silently drops every message.
+        let restart = self.actors.get(&child_id).map(|actor| RestartTemplate {
+            state_data: actor
+                .state_data
+                .iter()
+                .map(|(name, value)| (name.clone(), *value))
+                .collect(),
+            state_models: actor.state_models.clone(),
+            behaviors: actor
+                .behavior_table
+                .iter()
+                .map(|entry| (entry.name.clone(), entry.handler_fn))
+                .collect(),
+            bytecode_module: actor.bytecode_module.clone(),
+            bytecode_offsets: actor.bytecode_offsets.clone(),
+            compensation_offsets: actor.compensation_offsets.clone(),
+            persistent: actor.persistent,
+            is_workflow: actor.is_workflow,
+            is_agent: actor.is_agent,
+        });
+        let spec = ChildSpec { restart, ..spec };
         if let Some(child) = self.actors.get_mut(&child_id) {
             child.parent = Some(supervisor_id);
         }
@@ -3110,12 +3280,22 @@ impl Runtime {
         self.scheduler.enqueue(watcher_id);
     }
 
-    fn shutdown_supervisor(&mut self, supervisor_id: u64) {
-        let child_ids: Vec<u64> = self.supervisors.get(&supervisor_id).map(|s| s.children.iter().map(|(_, id)| *id).collect()).unwrap_or_default();
+    /// Shut a supervisor down, removing its children and the supervisor
+    /// actor itself through the full exit protocol so registered names and
+    /// process groups are cleaned up and monitors/links are notified.
+    ///
+    /// The `supervisor` value is passed in because callers remove it from
+    /// `self.supervisors` before deciding to shut it down — looking it up in
+    /// the map here would find nothing and leak the children.
+    fn shutdown_supervisor(&mut self, supervisor_id: u64, supervisor: &Supervisor) {
+        let child_ids: Vec<u64> = supervisor.children.iter().map(|(_, id)| *id).collect();
+        let reason = ExitReason::Error("supervisor shutdown".to_string());
         for child_id in child_ids {
-            self.remove_actor_reaping(child_id);
+            // Children are still living: remove them through the full exit
+            // protocol so names/groups are cleaned up and watchers notified.
+            self.reap_living_actor(child_id, reason.clone());
         }
-        self.remove_actor_reaping(supervisor_id);
+        self.reap_living_actor(supervisor_id, reason);
         self.supervisors.remove(&supervisor_id);
     }
 

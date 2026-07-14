@@ -677,10 +677,21 @@ pub fn send_distributed(
                 let net_node_id = NodeId(node_id.0);
                 transport.send(net_node_id, node_info.address, packet);
                 resolver.record_remote_send(node_id, actor_id);
+            } else {
+                // The node resolved as remote but is no longer in the
+                // membership table (it left between resolve and send). Log
+                // the drop rather than losing the message silently.
+                eprintln!(
+                    "nulang-net: dropping message to actor {} on node {:?}: node missing from cluster membership",
+                    actor_id, node_id
+                );
             }
         }
         ResolveResult::Unresolvable { reason } => {
-            let _ = reason;
+            eprintln!(
+                "nulang-net: dropping message to {:?}: {}",
+                target, reason
+            );
         }
     }
 }
