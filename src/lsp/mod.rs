@@ -31,6 +31,24 @@ use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
 use crate::types::NuError;
 
+/// Convert an LSP position column (UTF-16 code units) into a byte offset
+/// within `line`, clamped to a char boundary.
+///
+/// LSP clients report columns as UTF-16 code units, but Rust strings are
+/// sliced by byte offset. Using the raw column as a byte index on non-ASCII
+/// text lands inside multibyte characters and panics; this helper walks the
+/// line and snaps to the boundary covering the requested column.
+fn utf16_col_to_byte(line: &str, col: usize) -> usize {
+    let mut utf16 = 0usize;
+    for (byte_idx, ch) in line.char_indices() {
+        if utf16 >= col {
+            return byte_idx;
+        }
+        utf16 += ch.len_utf16();
+    }
+    line.len()
+}
+
 // ---------------------------------------------------------------------------
 // LSP Server
 // ---------------------------------------------------------------------------
@@ -324,7 +342,7 @@ impl LanguageServer for NulangLanguageServer {
             None => return Ok(None),
         };
         drop(docs);
-        Ok(self.sig_help(&source, params.text_document_position_params.position))
+        Ok(Self::sig_help(&source, params.text_document_position_params.position))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -371,7 +389,7 @@ impl LanguageServer for NulangLanguageServer {
             None => return Ok(None),
         };
         drop(docs);
-        Ok(self.code_actions(&source))
+        Ok(Self::code_actions(&source))
     }
 }
 
@@ -385,7 +403,9 @@ impl NulangLanguageServer {
         let line = position.line as usize;
         let col = position.character as usize;
         let target_line = source.lines().nth(line)?;
-        let word = self.word_at(target_line, col)?;
+        // LSP columns are UTF-16 code units; map to a byte offset on a char
+        // boundary before touching the line's bytes.
+        let word = self.word_at(target_line, utf16_col_to_byte(target_line, col))?;
         let tokens = Lexer::new(source).lex().ok()?;
         let ast = Parser::new(tokens).parse_module().ok()?;
         let mut tc = TypeChecker::new();
@@ -480,7 +500,9 @@ impl NulangLanguageServer {
         let line = position.line as usize;
         let col = position.character as usize;
         let target_line = source.lines().nth(line)?;
-        let word = self.word_at(target_line, col)?;
+        // LSP columns are UTF-16 code units; map to a byte offset on a char
+        // boundary before touching the line's bytes.
+        let word = self.word_at(target_line, utf16_col_to_byte(target_line, col))?;
         let tokens = Lexer::new(source).lex().ok()?;
         let ast = Parser::new(tokens).parse_module().ok()?;
         let _ = TypeChecker::new().check_module(&ast).ok()?;
@@ -539,7 +561,7 @@ impl NulangLanguageServer {
             Some(l) => l,
             None => return vec![],
         };
-        let word = match self.word_at(target_line, col) {
+        let word = match self.word_at(target_line, utf16_col_to_byte(target_line, col)) {
             Some(w) => w.to_string(),
             None => return vec![],
         };
@@ -645,6 +667,7 @@ impl NulangLanguageServer {
                 value,
                 body,
                 span,
+                ..
             } => {
                 if name == word {
                     locs.push(loc(span));
@@ -750,11 +773,13 @@ impl NulangLanguageServer {
         }
     }
 
-    fn sig_help(&self, source: &str, position: Position) -> Option<SignatureHelp> {
+    fn sig_help(source: &str, position: Position) -> Option<SignatureHelp> {
         let line = position.line as usize;
         let col = position.character as usize;
         let target_line = source.lines().nth(line)?;
-        let prefix = &target_line[..col.min(target_line.len())];
+        // LSP columns are UTF-16 code units; slice at a char boundary so
+        // non-ASCII source cannot panic here.
+        let prefix = &target_line[..utf16_col_to_byte(target_line, col)];
         let func_name = prefix
             .trim_end_matches(|c: char| c.is_whitespace() || c == '(' || c == ',')
             .rsplit(|c: char| c.is_whitespace() || c == '(' || c == ',')
@@ -974,7 +999,7 @@ impl NulangLanguageServer {
         tokens
     }
 
-    fn code_actions(&self, source: &str) -> Option<CodeActionResponse> {
+    fn code_actions(source: &str) -> Option<CodeActionResponse> {
         let mut actions = Vec::new();
         for (li, line) in source.lines().enumerate() {
             let t = line.trim();
@@ -985,7 +1010,10 @@ impl NulangLanguageServer {
                     let rest = &t[after..];
                     if let Some(end) = rest.find(|c: char| c == ' ' || c == '=') {
                         let vname = &rest[..end];
-                        let eq = t.find('=').unwrap_or(t.len());
+                        // A half-typed binding with no `=` yet (e.g. `let x y`)
+                        // has no right-hand side to infer from; skip it
+                        // instead of slicing past the end of the line.
+                        let Some(eq) = t.find('=') else { continue };
                         let rhs = t[eq + 1..].trim();
                         let ty = if rhs.parse::<i64>().is_ok() {
                             "Int"
@@ -1224,21 +1252,25 @@ impl<'a> InlayHintEngine<'a> {
             if trimmed.starts_with("fun ") {
                 if let Some(lparen) = line.find('(') {
                     if let Some(rparen) = line.find(')') {
-                        let params = &line[lparen + 1..rparen];
-                        let mut col_offset = (lparen + 1) as u32;
-                        for param in params.split(',') {
-                            let param = param.trim();
-                            if !param.is_empty() && !param.contains(":") {
-                                let param_len = param.len() as u32;
-                                if let Some(inferred) = self.infer_param_type(param, line) {
-                                    annotations.push(TypeAnnotation {
-                                        line: line_num,
-                                        character: col_offset + param_len,
-                                        label: format!(": {}", inferred),
-                                        kind: AnnotationKind::Type,
-                                    });
+                        // A malformed line with `)` before `(` must not panic
+                        // the parameter slice below.
+                        if rparen > lparen {
+                            let params = &line[lparen + 1..rparen];
+                            let mut col_offset = (lparen + 1) as u32;
+                            for param in params.split(',') {
+                                let param = param.trim();
+                                if !param.is_empty() && !param.contains(":") {
+                                    let param_len = param.len() as u32;
+                                    if let Some(inferred) = self.infer_param_type(param, line) {
+                                        annotations.push(TypeAnnotation {
+                                            line: line_num,
+                                            character: col_offset + param_len,
+                                            label: format!(": {}", inferred),
+                                            kind: AnnotationKind::Type,
+                                        });
+                                    }
+                                    col_offset += param_len + 2; // +2 for ", "
                                 }
-                                col_offset += param_len + 2; // +2 for ", "
                             }
                         }
                     }
@@ -1450,7 +1482,9 @@ impl<'a> CompletionEngine<'a> {
         let mut offset = 0usize;
         for (line_idx, line) in self.source.lines().enumerate() {
             if line_idx as u32 == position.line {
-                return offset + (position.character as usize).min(line.len());
+                // LSP columns are UTF-16 code units; map to a byte offset on
+                // a char boundary so non-ASCII lines cannot panic downstream.
+                return offset + utf16_col_to_byte(line, position.character as usize);
             }
             offset += line.len() + 1; // +1 for newline
         }
@@ -1460,10 +1494,19 @@ impl<'a> CompletionEngine<'a> {
     /// Extract the identifier fragment the user has typed so far.
     fn prefix_at(&self, offset: usize) -> String {
         let bytes = self.source.as_bytes();
+        // Snap a mid-character offset back to the nearest char boundary so
+        // the slice below can never panic.
+        let mut offset = offset.min(bytes.len());
+        while offset > 0 && !self.source.is_char_boundary(offset) {
+            offset -= 1;
+        }
         let mut start = offset;
         while start > 0 {
-            let prev = bytes[start - 1] as char;
-            if prev.is_alphanumeric() || prev == '_' {
+            // Byte-wise ASCII test: continuation/lead bytes of multibyte
+            // characters are never alphanumeric, so the walk always stops
+            // on a char boundary.
+            let prev = bytes[start - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
                 start -= 1;
             } else {
                 break;
@@ -1701,5 +1744,62 @@ mod lsp_tests {
             labels.contains(&"Migrate"),
             "should match 'Migrate' for prefix 'mi'"
         );
+    }
+
+    // -- Crash-safety regression tests --
+
+    #[test]
+    fn test_code_action_let_binding_without_rhs() {
+        // A half-typed `let` line with no `=` (e.g. `let x y`) must not
+        // panic the code action provider; no quick fix can be offered
+        // without a right-hand side.
+        assert!(NulangLanguageServer::code_actions("let x y").is_none());
+        // A well-formed binding still produces a quick fix.
+        assert!(NulangLanguageServer::code_actions("let x = 42").is_some());
+    }
+
+    #[test]
+    fn test_sig_help_non_ascii_line() {
+        // UTF-16 columns must map to byte offsets on char boundaries: a
+        // column inside the multibyte é must not panic the prefix slice.
+        let source = "fun add(a, b) = a + b\nlet résumé = add(1, 2)";
+        // UTF-16 column 6 on line 1 sits right after the é; as a raw byte
+        // index it would land mid-character.
+        let result = NulangLanguageServer::sig_help(source, Position::new(1, 6));
+        assert!(result.is_none());
+        // A column past the end of the line clamps to the line end.
+        let result = NulangLanguageServer::sig_help(source, Position::new(1, 999));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_position_to_offset_non_ascii_line() {
+        // "café": é is one UTF-16 code unit but two bytes.
+        let engine = CompletionEngine::new("let café = 1");
+        // UTF-16 column 8 (right after "café") maps to byte offset 9.
+        assert_eq!(engine.position_to_offset(Position::new(0, 8)), 9);
+        // Completion at that offset must not panic: pre-fix the raw column
+        // landed mid-character and prefix_at sliced inside é.
+        let items = engine.complete(Position::new(0, 8));
+        assert!(!items.is_empty(), "empty prefix should offer completions");
+    }
+
+    #[test]
+    fn test_prefix_at_stops_on_char_boundary() {
+        let engine = CompletionEngine::new("let caféx = 1");
+        // Byte offset 10 is right after the x (é occupies bytes 7-8).
+        assert_eq!(engine.prefix_at(10), "x");
+        // A mid-character offset snaps back to a char boundary instead of
+        // panicking: offset 8 (inside é) behaves like the start of é.
+        assert_eq!(engine.prefix_at(8), "caf");
+    }
+
+    #[test]
+    fn test_inlay_hints_rparen_before_lparen() {
+        // A malformed `fun` line with `)` before `(` must not panic the
+        // parameter slicer in collect_annotations.
+        let engine = InlayHintEngine::new("fun foo) bar(");
+        let hints = engine.generate_inlay_hints();
+        assert!(hints.is_empty());
     }
 }

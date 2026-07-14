@@ -114,7 +114,7 @@ impl OpenAiClient {
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: api_key.into(),
             model: model.into(),
-            client: reqwest::Client::new(),
+            client: crate::ai::client::http_client(),
         }
     }
 
@@ -128,7 +128,7 @@ impl OpenAiClient {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
-            client: reqwest::Client::new(),
+            client: crate::ai::client::http_client(),
         }
     }
 

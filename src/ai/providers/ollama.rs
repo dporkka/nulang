@@ -84,7 +84,7 @@ impl OllamaClient {
         Self {
             base_url: base_url.to_string(),
             model: model.to_string(),
-            client: reqwest::Client::new(),
+            client: crate::ai::client::http_client(),
         }
     }
 
