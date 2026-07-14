@@ -38,7 +38,7 @@ It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired t
 Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
 
 - ✅ Builds with `cargo build`
-- ✅ All 938 tests pass with `cargo test`
+- ✅ All 1096 tests pass with `cargo test`
 - ✅ NaN-boxed `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`)
 - ✅ 137-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, FFI, Python, distribution)
 - ✅ Hindley-Milner type inference with algebraic effects
@@ -107,7 +107,7 @@ cargo run -- myprogram.nula
 cargo run -- --check myprogram.nula
 
 # Evaluate a string
-cargo run -- --eval 'handle perform IO.print("Hello") { | IO.print(_) => unit }'
+cargo run -- --eval 'perform IO.print("Hello")'
 ```
 
 ### Examples
@@ -126,13 +126,11 @@ cargo run -- examples/counter_actor.nu   # actor declaration + spawn
 
 ### Hello, World
 
-The standalone VM has no built-in `IO` effect handler, so install one with
-`handle` (every snippet below was verified with `cargo run`):
+`IO.print` is handled by the standalone VM's built-in effect (every snippet
+below was verified with `cargo run`):
 
 ```nulang
-handle perform IO.print("Hello, World!") {
-    | IO.print(_) => unit
-}
+perform IO.print("Hello, World!")
 ```
 
 ### Functions and Closures
@@ -305,7 +303,7 @@ let dbl = fn(x) { x * 2 } in
 | `main` | CLI entry point (run, repl, eval, check, lsp modes) | ~500 |
 | `integration_tests` / `stress_tests` / `runtime/tests` | End-to-end pipeline, chaos, and runtime test suites | ~7,740 |
 
-**Total: ~64,900 lines of Rust across 70 source files with 938 tests.**
+**Total: ~64,900 lines of Rust across 70 source files with 1096 tests.**
 
 ---
 
