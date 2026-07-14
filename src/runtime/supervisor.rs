@@ -6,6 +6,7 @@
 //! - Rate-limited restarts with configurable time windows
 //! - Hierarchical supervision with escalation
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -69,6 +70,12 @@ pub struct ChildSpec {
     pub max_restarts: u32,
     /// Time window (in seconds) for counting restarts.
     pub restart_window_secs: u32,
+    /// Everything needed to rebuild the child on restart, captured from the
+    /// live actor at registration time (`Runtime::supervise_child`).
+    /// `None` means the child cannot be rebuilt faithfully; restart attempts
+    /// then fail loudly (log + escalate) instead of creating a zombie actor
+    /// that silently drops every message it receives.
+    pub restart: Option<RestartTemplate>,
 }
 
 impl ChildSpec {
@@ -81,6 +88,7 @@ impl ChildSpec {
             restart_policy: policy,
             max_restarts: 5,
             restart_window_secs: 60,
+            restart: None,
         }
     }
 
@@ -90,6 +98,37 @@ impl ChildSpec {
         self.restart_window_secs = window_secs;
         self
     }
+}
+
+// ---------------------------------------------------------------------------
+// Restart Template
+// ---------------------------------------------------------------------------
+
+/// Snapshot of a child actor taken at registration time, used to rebuild it
+/// on restart.  Mirrors what `Runtime::spawn_actor` and bytecode behavior
+/// registration wire into a fresh actor: state fields, the native behavior
+/// table, and the bytecode module with its behavior offsets.
+///
+/// State values are captured shallowly: heap-pointer values still refer to
+/// the old incarnation's heap and are only meaningful while that heap is
+/// alive or retired.
+#[derive(Debug, Clone)]
+pub struct RestartTemplate {
+    /// Initial state fields captured at registration.
+    pub state_data: Vec<(String, Value)>,
+    /// Persistence model per state field.
+    pub state_models: HashMap<String, StateModel>,
+    /// Native behavior handlers (name, handler).
+    pub behaviors: Vec<(String, fn(&mut Actor, &[Value]))>,
+    /// Bytecode module backing the child's bytecode behaviors, if any.
+    pub bytecode_module: Option<crate::bytecode::CodeModule>,
+    /// Bytecode behavior offsets by behavior id.
+    pub bytecode_offsets: Vec<usize>,
+    /// Saga compensation offsets by behavior id.
+    pub compensation_offsets: Vec<Option<usize>>,
+    pub persistent: bool,
+    pub is_workflow: bool,
+    pub is_agent: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +252,69 @@ impl Supervisor {
         recent_restarts < spec.max_restarts
     }
 
+    /// Rebuild a child actor from its restart template, mirroring
+    /// `Runtime::spawn_actor` plus bytecode behavior registration.
+    ///
+    /// Returns the new actor id, or `None` if no template was captured — in
+    /// that case the failure is logged so the caller can escalate instead of
+    /// silently creating a zombie actor that drops every message.
+    fn rebuild_child(&self, spec: &ChildSpec, runtime: &mut Runtime) -> Option<u64> {
+        let template = match &spec.restart {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "supervisor '{}': child '{}' has no restart template; \
+                     refusing to restart it as a bare actor",
+                    self.name, spec.id
+                );
+                return None;
+            }
+        };
+        let new_id = fresh_actor_id();
+        let child_name = format!("{}_child_{}", self.name, spec.id);
+        let mut new_actor = Actor::new(new_id, child_name, 256);
+        for (name, value) in &template.state_data {
+            new_actor.set_state_field(name.clone(), *value);
+        }
+        new_actor.state_models = template.state_models.clone();
+        for (name, handler) in &template.behaviors {
+            new_actor.register_behavior(name.clone(), *handler);
+        }
+        new_actor.bytecode_offsets = template.bytecode_offsets.clone();
+        new_actor.compensation_offsets = template.compensation_offsets.clone();
+        new_actor.persistent = template.persistent;
+        new_actor.is_workflow = template.is_workflow;
+        new_actor.is_agent = template.is_agent;
+        new_actor.state = ActorState::Running;
+        new_actor.parent = Some(self.id);
+        if let Some(module) = &template.bytecode_module {
+            new_actor.bytecode_module = Some(module.clone());
+            // Keep a copy for recovery after a runtime restart, exactly as
+            // the spawn path does via `register_recovery_module`.
+            runtime.register_recovery_module(
+                new_id,
+                module.clone(),
+                template.bytecode_offsets.clone(),
+                template.compensation_offsets.clone(),
+            );
+        }
+        let is_workflow = new_actor.is_workflow;
+        runtime.actors.insert(new_id, new_actor);
+        if is_workflow {
+            runtime.layout_workflow_behavior_table(new_id);
+        }
+        runtime.scheduler.enqueue(new_id);
+        Some(new_id)
+    }
+
+    /// Remove a child actor whose exit was already processed by
+    /// `Runtime::handle_actor_exit` (its exit protocol — registry, process
+    /// groups, monitor DOWN, link propagation — has run).  Only the reaping
+    /// remains, retiring the heap while foreign references are outstanding.
+    fn reap_exited_child(&self, actor_id: u64, runtime: &mut Runtime) {
+        runtime.remove_actor_reaping(actor_id);
+    }
+
     /// Restart a single child actor.
     pub fn restart_child(&mut self, actor_id: u64, runtime: &mut Runtime) -> Option<u64> {
         let now = Instant::now();
@@ -226,36 +328,48 @@ impl Supervisor {
         if recent_restarts >= spec.max_restarts {
             return None;
         }
-        runtime.actors.remove(&actor_id);
-        let new_id = fresh_actor_id();
-        let child_name = format!("{}_child_{}", self.name, spec.id);
-        let mut new_actor = Actor::new(new_id, child_name, 256);
-        new_actor.state = ActorState::Running;
-        new_actor.parent = Some(self.id);
-        runtime.actors.insert(new_id, new_actor);
+        self.reap_exited_child(actor_id, runtime);
+        let new_id = match self.rebuild_child(&spec, runtime) {
+            Some(id) => id,
+            None => {
+                // rebuild_child logged the failure; drop the child so the
+                // caller escalates instead of supervising a dead entry.
+                self.remove_child(actor_id);
+                return None;
+            }
+        };
         self.update_child_id(actor_id, new_id);
         self.restart_history.push((spec.id.clone(), now));
         self.prune_restart_history();
-        runtime.scheduler.enqueue(new_id);
         Some(new_id)
     }
 
     /// Restart all children (used by OneForAll strategy).
-    pub fn restart_all(&mut self, runtime: &mut Runtime) {
+    ///
+    /// `exited_id` is the child whose exit triggered the restart: its exit
+    /// protocol already ran in `Runtime::handle_actor_exit`.  Every other
+    /// child is still living, so its removal goes through the full exit
+    /// protocol (registry unregister, process-group leave, monitor DOWN,
+    /// link propagation) before reaping.
+    pub fn restart_all(&mut self, runtime: &mut Runtime, exited_id: u64, reason: &ExitReason) {
         let now = Instant::now();
         let child_ids: Vec<u64> = self.children.iter().map(|(_, id)| *id).collect();
         for old_id in child_ids {
-            if let Some(spec) = self.find_child_spec(old_id).cloned() {
-                runtime.actors.remove(&old_id);
-                let new_id = fresh_actor_id();
-                let child_name = format!("{}_child_{}", self.name, spec.id);
-                let mut new_actor = Actor::new(new_id, child_name, 256);
-                new_actor.state = ActorState::Running;
-                new_actor.parent = Some(self.id);
-                runtime.actors.insert(new_id, new_actor);
-                runtime.scheduler.enqueue(new_id);
-                self.update_child_id(old_id, new_id);
-                self.restart_history.push((spec.id, now));
+            let spec = match self.find_child_spec(old_id).cloned() {
+                Some(s) => s,
+                None => continue,
+            };
+            if old_id == exited_id {
+                self.reap_exited_child(old_id, runtime);
+            } else {
+                runtime.reap_living_actor(old_id, reason.clone());
+            }
+            match self.rebuild_child(&spec, runtime) {
+                Some(new_id) => {
+                    self.update_child_id(old_id, new_id);
+                    self.restart_history.push((spec.id, now));
+                }
+                None => self.remove_child(old_id),
             }
         }
         self.prune_restart_history();
@@ -263,7 +377,10 @@ impl Supervisor {
 
     /// Restart the failed child and all children started after it
     /// (used by RestForOne strategy).
-    pub fn restart_from(&mut self, actor_id: u64, runtime: &mut Runtime) {
+    ///
+    /// Like `restart_all`, living siblings are removed through the full exit
+    /// protocol; the triggering child's protocol already ran.
+    pub fn restart_from(&mut self, actor_id: u64, runtime: &mut Runtime, reason: &ExitReason) {
         let idx = match self.find_child_index(actor_id) {
             Some(i) => i,
             None => return,
@@ -276,16 +393,18 @@ impl Supervisor {
             .map(|(spec, id)| (spec.clone(), *id))
             .collect();
         for (spec, old_id) in to_restart {
-            runtime.actors.remove(&old_id);
-            let new_id = fresh_actor_id();
-            let child_name = format!("{}_child_{}", self.name, spec.id);
-            let mut new_actor = Actor::new(new_id, child_name, 256);
-            new_actor.state = ActorState::Running;
-            new_actor.parent = Some(self.id);
-            runtime.actors.insert(new_id, new_actor);
-            runtime.scheduler.enqueue(new_id);
-            self.update_child_id(old_id, new_id);
-            self.restart_history.push((spec.id, now));
+            if old_id == actor_id {
+                self.reap_exited_child(old_id, runtime);
+            } else {
+                runtime.reap_living_actor(old_id, reason.clone());
+            }
+            match self.rebuild_child(&spec, runtime) {
+                Some(new_id) => {
+                    self.update_child_id(old_id, new_id);
+                    self.restart_history.push((spec.id, now));
+                }
+                None => self.remove_child(old_id),
+            }
         }
         self.prune_restart_history();
     }
@@ -304,12 +423,12 @@ impl Supervisor {
         if !self.should_restart(actor_id, spec.restart_policy, &reason) {
             if spec.restart_policy == RestartPolicy::Temporary {
                 self.remove_child(actor_id);
-                runtime.actors.remove(&actor_id);
+                runtime.remove_actor_reaping(actor_id);
                 return SupervisorAction::Ignore;
             }
             if spec.restart_policy == RestartPolicy::Transient && reason == ExitReason::Normal {
                 self.remove_child(actor_id);
-                runtime.actors.remove(&actor_id);
+                runtime.remove_actor_reaping(actor_id);
                 return SupervisorAction::Ignore;
             }
             let now = Instant::now();
@@ -323,7 +442,7 @@ impl Supervisor {
                 return SupervisorAction::Shutdown;
             }
             self.remove_child(actor_id);
-            runtime.actors.remove(&actor_id);
+            runtime.remove_actor_reaping(actor_id);
             return SupervisorAction::Ignore;
         }
         match self.strategy {
@@ -332,14 +451,14 @@ impl Supervisor {
                 None => SupervisorAction::Shutdown,
             },
             RestartStrategy::OneForAll => {
-                self.restart_all(runtime);
+                self.restart_all(runtime, actor_id, &reason);
                 match self.children.iter().find(|(s, _)| s.id == spec.id) {
                     Some((_, new_id)) => SupervisorAction::Restarted(*new_id),
                     None => SupervisorAction::Escalate,
                 }
             }
             RestartStrategy::RestForOne => {
-                self.restart_from(actor_id, runtime);
+                self.restart_from(actor_id, runtime, &reason);
                 match self.children.iter().find(|(s, _)| s.id == spec.id) {
                     Some((_, new_id)) => SupervisorAction::Restarted(*new_id),
                     None => SupervisorAction::Escalate,
