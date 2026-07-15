@@ -188,6 +188,23 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
         self.perform_effect(effect_name, regs)
     }
 
+    /// Handle a built-in effect performed without an explicit handler,
+    /// given the operation name and the whole performing module — both its
+    /// constant pool (string-id arguments) and its actor metadata (needed
+    /// by effects that resolve actor types by name, e.g. `Otp.set_template`).
+    ///
+    /// The default delegates to `perform_builtin_effect` with the module's
+    /// constant pool, preserving that callback's contract.
+    fn perform_builtin_effect_in_module(
+        &mut self,
+        effect_name: &str,
+        op_name: Option<&str>,
+        module: &CodeModule,
+        regs: &[Value],
+    ) -> Option<Value> {
+        self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
+    }
+
     /// Check whether a workflow signal has been received.
     /// Default returns `Ready(unit)` so un-wired signal waits do not block.
     fn wait_signal(&mut self, _name: &str) -> SignalWaitResult {
@@ -381,9 +398,9 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
     /// Built-in effects for actor-free scripts: `IO.print` writes the
     /// first staged argument to stdout, `IO.read` reads one stdin line
     /// into a heap string. String-id arguments resolve against the
-    /// performing module's constant pool. `Actor.*` effects need the actor
-    /// runtime, so they are nil no-ops here (matching the runtime's
-    /// outside-an-actor contract).
+    /// performing module's constant pool. `Actor.*` and `Otp.*` effects
+    /// need the actor runtime, so they are nil no-ops here (matching the
+    /// runtime's outside-an-actor contract).
     fn perform_builtin_effect(
         &mut self,
         effect_name: &str,
@@ -391,7 +408,7 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
         constants: &[Constant],
         regs: &[Value],
     ) -> Option<Value> {
-        if effect_name == "Actor" {
+        if effect_name == "Actor" || effect_name == "Otp" {
             return Some(Value::nil());
         }
         if effect_name != "IO" {
@@ -2344,17 +2361,21 @@ impl VM {
                     // workflow steps, IO.print in standalone scripts). Args
                     // are in r0..rn; string-id args resolve against the
                     // performing module's constant pool.
-                    let constants: &[Constant] = self
-                        .modules
-                        .get(module_idx)
-                        .map(|m| m.constants.as_slice())
-                        .unwrap_or(&[]);
-                    if let Some(result) = self.actor_callbacks.perform_builtin_effect(
-                        &effect_name,
-                        op_name.as_deref(),
-                        constants,
-                        &self.frames[frame_idx].regs,
-                    ) {
+                    let result = match self.modules.get(module_idx) {
+                        Some(module) => self.actor_callbacks.perform_builtin_effect_in_module(
+                            &effect_name,
+                            op_name.as_deref(),
+                            module,
+                            &self.frames[frame_idx].regs,
+                        ),
+                        None => self.actor_callbacks.perform_builtin_effect(
+                            &effect_name,
+                            op_name.as_deref(),
+                            &[],
+                            &self.frames[frame_idx].regs,
+                        ),
+                    };
+                    if let Some(result) = result {
                         self.frames[frame_idx].regs[dst_reg as usize] = result;
                     } else {
                         return Err(NuError::EffectError {

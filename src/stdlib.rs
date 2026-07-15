@@ -20,6 +20,10 @@
 //!   unregister/whereis/set_priority): `Runtime::perform_actor_builtin` in
 //!   `runtime/mod.rs`, reached through both runtime host callback impls;
 //!   the standalone VM answers them with a nil no-op.
+//! - `Otp.*` (create_supervisor/supervise_child/set_template/start_child/
+//!   terminate_child/child_count): `Runtime::perform_otp_builtin` in
+//!   `runtime/mod.rs`, reached through both runtime host callback impls;
+//!   the standalone VM answers them with a nil no-op.
 
 use crate::types::{NuError, NuResult};
 
@@ -201,6 +205,54 @@ impl StdLib {
                     implemented_in: ImplSite::RuntimeHost,
                     description: "Set the current actor's scheduling priority: 0=High, 1=Normal, 2=Low (any other value selects Normal). Ready High-priority actors are scheduled before Normal, Normal before Low; affects scheduling only, not message order. Nil no-op outside an actor.",
                 },
+                BuiltinOp {
+                    name: "Otp.create_supervisor",
+                    effect: "Otp",
+                    op: "create_supervisor",
+                    signature: "create_supervisor(name: String, strategy: Int) -> Int | Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Create an OTP supervisor actor and return its id; strategy is 0=one_for_one, 1=one_for_all, 2=rest_for_one, 3=simple_one_for_one (any other value yields nil). Nil no-op outside a runtime.",
+                },
+                BuiltinOp {
+                    name: "Otp.supervise_child",
+                    effect: "Otp",
+                    op: "supervise_child",
+                    signature: "supervise_child(sup: Int, child: Actor, policy: Int) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Place an existing actor under a supervisor; policy is 0=permanent, 1=temporary, 2=transient (any other value is a no-op). Unknown supervisor ids are nil no-ops.",
+                },
+                BuiltinOp {
+                    name: "Otp.set_template",
+                    effect: "Otp",
+                    op: "set_template",
+                    signature: "set_template(sup: Int, type_name: String) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Set the child template of a simple_one_for_one supervisor to the named actor type, resolved against the performing module's actor metadata. Unknown types or supervisor ids are nil no-ops.",
+                },
+                BuiltinOp {
+                    name: "Otp.start_child",
+                    effect: "Otp",
+                    op: "start_child",
+                    signature: "start_child(sup: Int) -> Actor | Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Spawn a fresh child from a simple_one_for_one supervisor's template and supervise it; returns the child actor ref, or nil when the supervisor is unknown, has no template, or is not simple_one_for_one.",
+                },
+                BuiltinOp {
+                    name: "Otp.terminate_child",
+                    effect: "Otp",
+                    op: "terminate_child",
+                    signature: "terminate_child(sup: Int, child: Actor) -> Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Remove a child from supervision WITHOUT restarting it and exit it cleanly (Normal). Unknown supervisors or children are nil no-ops.",
+                },
+                BuiltinOp {
+                    name: "Otp.child_count",
+                    effect: "Otp",
+                    op: "child_count",
+                    signature: "child_count(sup: Int) -> Int | Nil",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Return the number of currently supervised children, or nil for an unknown supervisor id.",
+                },
             ],
         }
     }
@@ -296,6 +348,12 @@ mod tests {
             "Actor.unregister",
             "Actor.whereis",
             "Actor.set_priority",
+            "Otp.create_supervisor",
+            "Otp.supervise_child",
+            "Otp.set_template",
+            "Otp.start_child",
+            "Otp.terminate_child",
+            "Otp.child_count",
         ] {
             assert!(
                 lib.lookup(name).is_some(),
@@ -361,7 +419,10 @@ mod tests {
     #[test]
     fn effects_lists_distinct_effects_in_order() {
         let lib = StdLib::new();
-        assert_eq!(lib.effects(), vec!["IO", "Timer", "Signal", "LLM", "Actor"]);
+        assert_eq!(
+            lib.effects(),
+            vec!["IO", "Timer", "Signal", "LLM", "Actor", "Otp"]
+        );
     }
 
     #[test]

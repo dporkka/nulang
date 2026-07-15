@@ -456,6 +456,18 @@ impl NulangLanguageServer {
                     });
                 }
             }
+            if let crate::ast::Decl::StateMachine { name, states, .. } = decl {
+                if name == word {
+                    return Some(Hover {
+                        contents: HoverContents::Scalar(MarkedString::String(format!(
+                            "state_machine {} (states: {})",
+                            name,
+                            states.join(", ")
+                        ))),
+                        range: None,
+                    });
+                }
+            }
         }
         let kw = [
             "let", "fn", "fun", "actor", "agent", "if", "else", "match", "case", "for", "in",
@@ -533,6 +545,7 @@ impl NulangLanguageServer {
             | Decl::Actor { name, span, .. }
             | Decl::Agent { name, span, .. }
             | Decl::Workflow { name, span, .. }
+            | Decl::StateMachine { name, span, .. }
             | Decl::TypeAlias { name, span, .. }
                 if name == word =>
             {
@@ -615,6 +628,20 @@ impl NulangLanguageServer {
                 }
                 for b in behaviors {
                     self.refs_expr(&b.body, word, locs);
+                }
+            }
+            Decl::StateMachine {
+                name,
+                entry_hooks,
+                exit_hooks,
+                span,
+                ..
+            } => {
+                if name == word {
+                    locs.push(loc(span));
+                }
+                for (_, body) in entry_hooks.iter().chain(exit_hooks.iter()) {
+                    self.refs_expr(body, word, locs);
                 }
             }
             Decl::Agent { name, span, .. }
@@ -759,6 +786,18 @@ impl NulangLanguageServer {
             }
             Decl::Agent { name, span, .. } => syms.push(si(name, SymbolKind::CLASS, span)),
             Decl::Workflow { name, span, .. } => syms.push(si(name, SymbolKind::CLASS, span)),
+            Decl::StateMachine {
+                name, events, span, ..
+            } => {
+                syms.push(si(name, SymbolKind::CLASS, span));
+                for e in events {
+                    syms.push(si(
+                        &format!("{}.{}", name, e.name),
+                        SymbolKind::EVENT,
+                        &e.span,
+                    ));
+                }
+            }
             Decl::TypeAlias { name, span, .. } => syms.push(si(name, SymbolKind::STRUCT, span)),
             Decl::Module {
                 name, decls, span, ..
@@ -1418,14 +1457,14 @@ pub struct CompletionEngine<'a> {
 impl<'a> CompletionEngine<'a> {
     /// Nulang language keywords offered by the completion provider.
     const KEYWORDS: &'static [&'static str] = &[
-        "fn", "let", "if", "else", "match", "effect", "actor", "type", "module", "import",
-        "handle", "perform", "resume", "return", "true", "false", "nil", "unit",
+        "fn", "let", "if", "else", "match", "effect", "actor", "state_machine", "type", "module",
+        "import", "handle", "perform", "resume", "return", "true", "false", "nil", "unit",
     ];
 
     /// Built-in effect names offered by the completion provider.
     const EFFECTS: &'static [&'static str] = &[
         "IO", "Net", "FS", "Spawn", "Send", "Receive", "Migrate", "STM", "Async", "LLM", "Cost",
-        "Rand", "Time",
+        "Rand", "Time", "Actor",
     ];
 
     pub fn new(source: &'a str) -> Self {

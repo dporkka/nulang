@@ -466,6 +466,246 @@ fn test_supervised_child_restart_retires_heap_with_foreign_refs() {
 }
 
 // ========================================================================
+// SimpleOneForOne Dynamic Children Tests
+// ========================================================================
+
+/// Build a module declaring actor type `DynWorker` with a `count` state
+/// field (default `default_count`) and one bytecode behavior
+/// `DynWorker.inc` that increments `count` and returns the new value.
+fn dyn_worker_module(default_count: i64) -> crate::bytecode::CodeModule {
+    use crate::bytecode::{
+        ActorMeta, BehaviorTableEntry, CodeModule, Constant, Instruction, OpCode,
+    };
+
+    let mut module = CodeModule::new("dyn_test");
+    let field_idx = module.add_constant(Constant::String("count".to_string()));
+    let one_idx = module.add_constant(Constant::Int(1));
+    module.add_behavior(BehaviorTableEntry {
+        name: "DynWorker.inc".to_string(),
+        param_count: 0,
+        code_offset: 0,
+        local_count: 4,
+        effect_mask: 0,
+        compensate_offset: None,
+        parallel_branches: None,
+    });
+    module.emit(Instruction::new3(
+        OpCode::StateGet,
+        ((field_idx >> 8) & 0xFF) as u8,
+        (field_idx & 0xFF) as u8,
+        1,
+    ));
+    module.emit(Instruction::new3(
+        OpCode::ConstU,
+        ((one_idx >> 8) & 0xFF) as u8,
+        (one_idx & 0xFF) as u8,
+        2,
+    ));
+    module.emit(Instruction::new3(OpCode::IAdd, 1, 2, 3));
+    module.emit(Instruction::new3(OpCode::StateSet, 0, 0, 3));
+    module.emit(Instruction::new1(OpCode::RetVal, 3));
+    module.add_actor_meta(ActorMeta {
+        name: "DynWorker".to_string(),
+        persistent: false,
+        state_models: vec![("count".to_string(), crate::ast::StateModel::Local)],
+        state_defaults: vec![("count".to_string(), Constant::Int(default_count))],
+        behavior_indices: vec![0],
+        is_workflow: false,
+        is_agent: false,
+        tools: vec![],
+        semantic_memory_dimensions: None,
+        procedural_memory_namespace: None,
+    });
+    module
+}
+
+#[test]
+fn test_simple_one_for_one_start_child_spawns_real_children() {
+    let mut rt = Runtime::new();
+    let module = dyn_worker_module(0);
+    let sup_id = rt.create_supervisor("pool", RestartStrategy::SimpleOneForOne);
+    assert!(rt.set_supervisor_template(sup_id, "DynWorker", &module));
+
+    let w1 = rt
+        .start_supervised_child(sup_id, vec![])
+        .expect("start_child should spawn from the template");
+    let w2 = rt
+        .start_supervised_child(sup_id, vec![])
+        .expect("start_child should spawn from the template");
+    assert_ne!(w1, w2);
+    assert_eq!(rt.supervisors[&sup_id].child_count(), 2);
+    assert_eq!(rt.actors[&w1].parent, Some(sup_id));
+    assert_eq!(rt.actors[&w2].parent, Some(sup_id));
+
+    // Children are real bytecode actors running the template behavior.
+    assert_eq!(rt.ask_actor_sync(w1, 0, &[]).unwrap(), Value::int(1));
+    assert_eq!(rt.ask_actor_sync(w2, 0, &[]).unwrap(), Value::int(1));
+
+    // Distinct dynamic spec ids keep restart rate limiting per child.
+    let specs: Vec<&str> = rt.supervisors[&sup_id]
+        .children
+        .iter()
+        .map(|(s, _)| s.id.as_str())
+        .collect();
+    assert_eq!(specs, vec!["DynWorker_0", "DynWorker_1"]);
+}
+
+#[test]
+fn test_simple_one_for_one_restart_from_template_on_crash() {
+    let mut rt = Runtime::new();
+    let module = dyn_worker_module(0);
+    let sup_id = rt.create_supervisor("pool", RestartStrategy::SimpleOneForOne);
+    assert!(rt.set_supervisor_template(sup_id, "DynWorker", &module));
+    let w = rt.start_supervised_child(sup_id, vec![]).unwrap();
+
+    // Mutate state away from the template defaults, then crash.
+    assert_eq!(rt.ask_actor_sync(w, 0, &[]).unwrap(), Value::int(1));
+    assert_eq!(rt.ask_actor_sync(w, 0, &[]).unwrap(), Value::int(2));
+    rt.exit_actor(w, ExitReason::Error("crash".to_string()));
+
+    assert!(!rt.actors.contains_key(&w));
+    assert_eq!(rt.supervisors[&sup_id].child_count(), 1);
+    let restarted = rt.supervisors[&sup_id].children[0].1;
+    assert_ne!(restarted, w, "restart should create a fresh actor");
+    assert_eq!(rt.actors[&restarted].parent, Some(sup_id));
+    // The replacement restarts from the template defaults, not the
+    // pre-crash state: its first inc returns 1, not 3.
+    assert_eq!(rt.ask_actor_sync(restarted, 0, &[]).unwrap(), Value::int(1));
+}
+
+#[test]
+fn test_simple_one_for_one_terminate_child_skips_restart() {
+    let mut rt = Runtime::new();
+    let module = dyn_worker_module(0);
+    let sup_id = rt.create_supervisor("pool", RestartStrategy::SimpleOneForOne);
+    assert!(rt.set_supervisor_template(sup_id, "DynWorker", &module));
+    let w = rt.start_supervised_child(sup_id, vec![]).unwrap();
+    assert_eq!(rt.supervisors[&sup_id].child_count(), 1);
+
+    assert!(rt.terminate_supervised_child(sup_id, w));
+    assert_eq!(
+        rt.supervisors[&sup_id].child_count(),
+        0,
+        "terminated child must leave supervision"
+    );
+    assert!(
+        !rt.actors.contains_key(&w),
+        "terminated child must exit without a restart replacement"
+    );
+    // Unknown child / unknown supervisor are no-ops.
+    assert!(!rt.terminate_supervised_child(sup_id, w));
+    assert!(!rt.terminate_supervised_child(999_999, w));
+}
+
+#[test]
+fn test_simple_one_for_one_normal_exit_not_restarted() {
+    // Dynamic children are Transient: a Normal exit retires the child
+    // without a replacement (unlike terminate_child, this routes through
+    // the restart policy).
+    let mut rt = Runtime::new();
+    let module = dyn_worker_module(0);
+    let sup_id = rt.create_supervisor("pool", RestartStrategy::SimpleOneForOne);
+    assert!(rt.set_supervisor_template(sup_id, "DynWorker", &module));
+    let w = rt.start_supervised_child(sup_id, vec![]).unwrap();
+
+    rt.exit_actor(w, ExitReason::Normal);
+    assert!(!rt.actors.contains_key(&w));
+    assert_eq!(rt.supervisors[&sup_id].child_count(), 0);
+}
+
+#[test]
+fn test_simple_one_for_one_start_child_guards() {
+    let mut rt = Runtime::new();
+    let module = dyn_worker_module(0);
+    // No template set -> None.
+    let sup_id = rt.create_supervisor("pool", RestartStrategy::SimpleOneForOne);
+    assert_eq!(rt.start_supervised_child(sup_id, vec![]), None);
+    // Non-dynamic strategy -> None even with a template set.
+    let plain_id = rt.create_supervisor("plain", RestartStrategy::OneForOne);
+    assert!(rt.set_supervisor_template(plain_id, "DynWorker", &module));
+    assert_eq!(rt.start_supervised_child(plain_id, vec![]), None);
+    // Unknown supervisor / unknown actor type -> None / false.
+    assert_eq!(rt.start_supervised_child(999_999, vec![]), None);
+    assert!(!rt.set_supervisor_template(sup_id, "NoSuchActor", &module));
+    assert!(!rt.set_supervisor_template(999_999, "DynWorker", &module));
+}
+
+#[test]
+fn test_otp_builtin_effect_strategy_mapping_and_noops() {
+    use crate::bytecode::{CodeModule, Constant};
+
+    let mut module = CodeModule::new("otp_test");
+    let name_idx = module.add_constant(Constant::String("s".to_string())) as u32;
+
+    let mut rt = Runtime::new();
+    for (raw, want) in [
+        (0i64, RestartStrategy::OneForOne),
+        (1, RestartStrategy::OneForAll),
+        (2, RestartStrategy::RestForOne),
+        (3, RestartStrategy::SimpleOneForOne),
+    ] {
+        let id = rt
+            .perform_otp_builtin(
+                Some("create_supervisor"),
+                &module,
+                &[Value::string(name_idx), Value::int(raw)],
+            )
+            .and_then(|v| v.as_int())
+            .expect("create_supervisor should return an Int id") as u64;
+        assert_eq!(rt.supervisors[&id].strategy, want);
+    }
+
+    // Out-of-range strategy -> nil no-op (no supervisor created).
+    let before = rt.supervisors.len();
+    let value = rt.perform_otp_builtin(
+        Some("create_supervisor"),
+        &module,
+        &[Value::string(name_idx), Value::int(9)],
+    );
+    assert_eq!(value, Some(Value::nil()));
+    assert_eq!(rt.supervisors.len(), before);
+
+    // Policy mapping via supervise_child (2 = transient).
+    let sup_id = rt
+        .perform_otp_builtin(
+            Some("create_supervisor"),
+            &module,
+            &[Value::string(name_idx), Value::int(0)],
+        )
+        .and_then(|v| v.as_int())
+        .unwrap() as u64;
+    let child = rt.spawn_actor(Box::new(|| vec![]));
+    let value = rt.perform_otp_builtin(
+        Some("supervise_child"),
+        &module,
+        &[
+            Value::int(sup_id as i64),
+            Value::actor_ref(child),
+            Value::int(2),
+        ],
+    );
+    assert_eq!(value, Some(Value::nil()));
+    assert_eq!(
+        rt.supervisors[&sup_id].children[0].0.restart_policy,
+        RestartPolicy::Transient
+    );
+    // supervise_child with an unknown supervisor is a nil no-op.
+    let value = rt.perform_otp_builtin(
+        Some("supervise_child"),
+        &module,
+        &[Value::int(999_999), Value::actor_ref(child), Value::int(0)],
+    );
+    assert_eq!(value, Some(Value::nil()));
+
+    // Unknown op -> None (unhandled); child_count on unknown id -> nil.
+    assert_eq!(rt.perform_otp_builtin(Some("bogus"), &module, &[]), None);
+    assert_eq!(
+        rt.perform_otp_builtin(Some("child_count"), &module, &[Value::int(999_999)]),
+        Some(Value::nil())
+    );
+}
+
+// ========================================================================
 // ORCA GC Tests
 // ========================================================================
 

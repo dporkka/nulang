@@ -916,6 +916,25 @@ impl EffectChecker {
                 }
                 Ok(())
             }
+            Decl::StateMachine {
+                name,
+                states,
+                events,
+                entry_hooks,
+                exit_hooks,
+                span,
+            } => {
+                // Effect-check the desugared form exactly like an actor.
+                let actor = crate::ast::desugar_state_machine(
+                    name,
+                    states,
+                    events,
+                    entry_hooks,
+                    exit_hooks,
+                    *span,
+                );
+                self.check_decl(&actor)
+            }
             Decl::Workflow {
                 items, compensate, ..
             } => {
@@ -2750,5 +2769,27 @@ mod tests {
             checker.check_effects(&ctx, &call("do_io"), &EffectRow::empty()).is_err(),
             "unshadowed direct call must propagate the callee row"
         );
+    }
+
+    #[test]
+    fn test_state_machine_effect_checks_desugared_form() {
+        // Hooks and the generated transition bodies are effect-checked
+        // exactly like actor behaviors: the `perform IO.print` in the entry
+        // hook infers an IO row, and un-annotated behaviors are
+        // inference-only, so the module checks cleanly.
+        let ast = parse_module(
+            r#"
+            state_machine M {
+                state A
+                state B
+                event go: B
+                on_entry B { perform IO.print("enter") }
+                on_exit B { perform IO.print("leave") }
+            }
+            "#,
+        );
+        let mut checker = EffectChecker::new();
+        let result = checker.check_module(&ast.decls);
+        assert!(result.is_ok(), "expected success, got {:?}", result.err());
     }
 }

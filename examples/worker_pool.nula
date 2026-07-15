@@ -1,0 +1,40 @@
+// Dynamic worker pool — a simple_one_for_one OTP supervisor that spawns
+// workers on demand from a single child template, driven from Nulang
+// source via the built-in `Otp` effect.
+//
+// - `perform Otp.create_supervisor("name", strategy)` creates a supervisor
+//   and returns its id; strategy is 0=one_for_one, 1=one_for_all,
+//   2=rest_for_one, 3=simple_one_for_one.
+// - `perform Otp.set_template(sup, "ActorTypeName")` sets the child
+//   template of a simple_one_for_one supervisor.
+// - `perform Otp.start_child(sup)` spawns a fresh worker from the
+//   template and supervises it, returning the worker actor ref.
+// - `perform Otp.terminate_child(sup, w)` retires a worker WITHOUT
+//   restarting it; `perform Otp.child_count(sup)` counts live children.
+//
+// Dynamic children run under the Transient restart policy: an abnormal
+// exit (like the `die` message below) restarts them from the template
+// state defaults with a fresh actor id; a Normal exit or terminate_child
+// retires them without a replacement.
+//
+// Run with: nulang examples/worker_pool.nula
+
+actor PoolWorker {
+    state count: Int = 0
+    behavior work(x) { self.count = self.count + x }
+    behavior die() { perform Actor.exit(1) }
+}
+
+fn main() {
+    let sup = perform Otp.create_supervisor("pool", 3) in
+    let t = perform Otp.set_template(sup, "PoolWorker") in
+    let w1 = perform Otp.start_child(sup) in
+    let w2 = perform Otp.start_child(sup) in {
+        send w1 work(1)
+        send w2 work(2)
+        // Crash w1: the supervisor restarts it from the template, so its
+        // count goes back to 0 with a fresh actor id. w2 keeps its count.
+        send w1 die()
+        0
+    }
+}

@@ -3795,6 +3795,126 @@ impl Runtime {
         }
     }
 
+    // -- Builtin OTP Supervisor Effects (Otp.*) --
+
+    /// Dispatch a built-in `Otp.*` supervisor effect performed from
+    /// bytecode. Unlike `Actor.*`, these ops manage supervisors directly
+    /// and do not need a current actor; unknown supervisor ids are nil
+    /// no-ops (matching the `Actor.*` outside-an-actor contract). Returns
+    /// `None` for unknown op names so the caller can fall through to other
+    /// built-in handlers. `module` is the performing module: string args
+    /// resolve against its constant pool and actor-type templates against
+    /// its actor metadata (`find_actor_template`).
+    fn perform_otp_builtin(
+        &mut self,
+        op_name: Option<&str>,
+        module: &crate::bytecode::CodeModule,
+        regs: &[Value],
+    ) -> Option<Value> {
+        let string_arg = |idx: usize| -> Option<String> {
+            let id = regs.get(idx)?.as_string_id()?;
+            match module.constants.get(id as usize) {
+                Some(crate::bytecode::Constant::String(s)) => Some(s.clone()),
+                _ => None,
+            }
+        };
+        match op_name {
+            // Strategy: 0=one_for_one, 1=one_for_all, 2=rest_for_one,
+            // 3=simple_one_for_one; any other value is a nil no-op.
+            Some("create_supervisor") => {
+                let name = string_arg(0)?;
+                let strategy = match regs.get(1)?.as_int()? {
+                    0 => RestartStrategy::OneForOne,
+                    1 => RestartStrategy::OneForAll,
+                    2 => RestartStrategy::RestForOne,
+                    3 => RestartStrategy::SimpleOneForOne,
+                    _ => return Some(Value::nil()),
+                };
+                let id = self.create_supervisor(&name, strategy);
+                Some(Value::int(id as i64))
+            }
+            // Policy: 0=permanent, 1=temporary, 2=transient; any other
+            // value is a nil no-op.
+            Some("supervise_child") => {
+                let sup = regs.get(0)?.as_int()? as u64;
+                let child = regs.get(1)?.as_actor_id()?;
+                let policy = match regs.get(2)?.as_int()? {
+                    0 => RestartPolicy::Permanent,
+                    1 => RestartPolicy::Temporary,
+                    2 => RestartPolicy::Transient,
+                    _ => return Some(Value::nil()),
+                };
+                if self.supervisors.contains_key(&sup) {
+                    let spec = ChildSpec::new(format!("child_{}", child), policy);
+                    self.supervise_child(sup, spec, child);
+                }
+                Some(Value::nil())
+            }
+            Some("set_template") => {
+                let sup = regs.get(0)?.as_int()? as u64;
+                let type_name = string_arg(1)?;
+                let _ = self.set_supervisor_template(sup, &type_name, module);
+                Some(Value::nil())
+            }
+            Some("start_child") => {
+                let sup = regs.get(0)?.as_int()? as u64;
+                Some(match self.start_supervised_child(sup, Vec::new()) {
+                    Some(id) => Value::actor_ref(id),
+                    None => Value::nil(),
+                })
+            }
+            Some("terminate_child") => {
+                let sup = regs.get(0)?.as_int()? as u64;
+                let child = regs.get(1)?.as_actor_id()?;
+                let _ = self.terminate_supervised_child(sup, child);
+                Some(Value::nil())
+            }
+            Some("child_count") => {
+                let sup = regs.get(0)?.as_int()? as u64;
+                Some(match self.supervisors.get(&sup) {
+                    Some(supervisor) => Value::int(supervisor.child_count() as i64),
+                    None => Value::nil(),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve an actor type by name to the `(module, behavior_idx)` pair
+    /// `spawn_from_module` expects. Searches the performing module first,
+    /// then the runtime VM's loaded modules, then the recovery modules
+    /// registered by previous spawns — so a type declared anywhere in the
+    /// running program resolves even before its first spawn.
+    fn find_actor_template(
+        &self,
+        name: &str,
+        performing: &crate::bytecode::CodeModule,
+    ) -> Option<(crate::bytecode::CodeModule, usize)> {
+        fn find_in(module: &crate::bytecode::CodeModule, name: &str) -> Option<usize> {
+            module
+                .actor_metadata
+                .iter()
+                .find(|meta| meta.name == name)
+                .and_then(|meta| meta.behavior_indices.first().copied())
+        }
+        if let Some(idx) = find_in(performing, name) {
+            return Some((performing.clone(), idx));
+        }
+        if let Some(vm) = &self.vm {
+            for module in &vm.modules {
+                if let Some(idx) = find_in(module, name) {
+                    return Some((module.clone(), idx));
+                }
+            }
+        }
+        for (module, _, _) in self.recovery_modules.values() {
+            if let Some(idx) = find_in(module, name) {
+                return Some((module.clone(), idx));
+            }
+        }
+        None
+    }
+
     // -- Supervisor Management --
 
     pub fn create_supervisor(&mut self, name: &str, strategy: RestartStrategy) -> u64 {
@@ -3838,6 +3958,56 @@ impl Runtime {
         if let Some(supervisor) = self.supervisors.get_mut(&supervisor_id) {
             supervisor.add_child(spec, child_id);
         }
+    }
+
+    /// Set the child template of a `SimpleOneForOne` supervisor by actor
+    /// type name. Returns false when the supervisor does not exist or the
+    /// actor type cannot be resolved (see `find_actor_template`).
+    pub fn set_supervisor_template(
+        &mut self,
+        supervisor_id: u64,
+        type_name: &str,
+        performing: &crate::bytecode::CodeModule,
+    ) -> bool {
+        let Some((module, behavior_idx)) = self.find_actor_template(type_name, performing) else {
+            return false;
+        };
+        match self.supervisors.get_mut(&supervisor_id) {
+            Some(supervisor) => {
+                supervisor.template = Some(ChildTemplate {
+                    type_name: type_name.to_string(),
+                    module,
+                    behavior_idx,
+                });
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Start a dynamic child of a `SimpleOneForOne` supervisor from its
+    /// child template. Returns the new child's actor id, or `None` for an
+    /// unknown supervisor, a missing template, or a non-dynamic strategy.
+    pub fn start_supervised_child(
+        &mut self,
+        supervisor_id: u64,
+        init_args: Vec<(String, Value)>,
+    ) -> Option<u64> {
+        let mut supervisor = self.supervisors.remove(&supervisor_id)?;
+        let result = supervisor.start_child(self, init_args);
+        self.supervisors.insert(supervisor_id, supervisor);
+        result
+    }
+
+    /// Terminate a supervised child WITHOUT restarting it (clean Normal
+    /// exit). Returns false when the supervisor or the child is unknown.
+    pub fn terminate_supervised_child(&mut self, supervisor_id: u64, actor_id: u64) -> bool {
+        let Some(mut supervisor) = self.supervisors.remove(&supervisor_id) else {
+            return false;
+        };
+        let result = supervisor.terminate_child(self, actor_id);
+        self.supervisors.insert(supervisor_id, supervisor);
+        result
     }
 
     // -- Internal Helpers --
@@ -4328,7 +4498,34 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let actor_id = rt.current_actor;
             return rt.perform_actor_builtin(actor_id, op_name, constants, regs);
         }
+        if effect_name == "IO" {
+            if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {
+                let msg = match first.as_string_id() {
+                    Some(id) => match constants.get(id as usize) {
+                        Some(crate::bytecode::Constant::String(s)) => s.clone(),
+                        _ => first.to_string_repr(),
+                    },
+                    None => first.to_string_repr(),
+                };
+                println!("{}", msg);
+                return Some(crate::vm::Value::unit());
+            }
+        }
         self.perform_effect(effect_name, regs)
+    }
+
+    fn perform_builtin_effect_in_module(
+        &mut self,
+        effect_name: &str,
+        op_name: Option<&str>,
+        module: &crate::bytecode::CodeModule,
+        regs: &[crate::vm::Value],
+    ) -> Option<crate::vm::Value> {
+        if effect_name == "Otp" {
+            let mut rt = self.runtime.borrow_mut();
+            return rt.perform_otp_builtin(op_name, module, regs);
+        }
+        self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
     }
 
     fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
@@ -4598,7 +4795,35 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     regs,
                 );
             }
+            if effect_name == "IO" {
+                if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {
+                    let msg = match first.as_string_id() {
+                        Some(id) => match constants.get(id as usize) {
+                            Some(crate::bytecode::Constant::String(s)) => s.clone(),
+                            _ => first.to_string_repr(),
+                        },
+                        None => first.to_string_repr(),
+                    };
+                    println!("{}", msg);
+                    return Some(crate::vm::Value::unit());
+                }
+            }
             self.perform_effect(effect_name, regs)
+        }
+    }
+
+    fn perform_builtin_effect_in_module(
+        &mut self,
+        effect_name: &str,
+        op_name: Option<&str>,
+        module: &crate::bytecode::CodeModule,
+        regs: &[crate::vm::Value],
+    ) -> Option<crate::vm::Value> {
+        unsafe {
+            if effect_name == "Otp" {
+                return (*self.runtime).perform_otp_builtin(op_name, module, regs);
+            }
+            self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
         }
     }
 

@@ -227,6 +227,22 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
         Decl::Workflow {
             name, items, span, ..
         } => desugar_workflow(name, items, *span),
+        Decl::StateMachine {
+            name,
+            states,
+            events,
+            entry_hooks,
+            exit_hooks,
+            span,
+        } => {
+            // Desugar to an ordinary actor declaration, then lower it
+            // through the standard actor path (mirrors desugar_workflow,
+            // which also targets hir::Decl::Actor).
+            lower_decl(
+                &ast::desugar_state_machine(name, states, events, entry_hooks, exit_hooks, *span),
+                tools,
+            )
+        }
         Decl::Agent {
             name,
             model,
@@ -1742,6 +1758,62 @@ mod tests {
         let after_vars = used(&receive_after);
         assert!(after_vars.contains("k"), "receive-after ms expr must be free");
         assert!(after_vars.contains("t"), "receive-after body must be free");
+    }
+
+    #[test]
+    fn test_lower_state_machine_desugars_to_actor() {
+        // A state_machine lowers to an ordinary hir::Decl::Actor (the desugar
+        // targets the existing actor machinery — no new IR shapes).
+        let sp = Span::default();
+        let ast = ast::AstModule {
+            name: "test".to_string(),
+            decls: vec![Decl::StateMachine {
+                name: "TcpConnection".to_string(),
+                states: vec!["Closed".to_string(), "Connected".to_string()],
+                events: vec![
+                    ast::StateMachineEvent {
+                        name: "connect".to_string(),
+                        params: vec![("address".to_string(), None)],
+                        target: "Connected".to_string(),
+                        span: sp,
+                    },
+                    ast::StateMachineEvent {
+                        name: "disconnect".to_string(),
+                        params: vec![],
+                        target: "Closed".to_string(),
+                        span: sp,
+                    },
+                ],
+                entry_hooks: vec![("Connected".to_string(), Expr::Literal(Literal::Unit, sp))],
+                exit_hooks: vec![],
+                span: sp,
+            }],
+        };
+        let hir = lower_module(&ast);
+        assert_eq!(hir.decls.len(), 1);
+        match &hir.decls[0] {
+            hir::Decl::Actor(def) => {
+                assert_eq!(def.name, "TcpConnection");
+                assert!(!def.persistent);
+                assert_eq!(def.state_fields.len(), 1);
+                assert_eq!(def.state_fields[0].0, "_sm_state");
+                assert_eq!(def.behaviors.len(), 2);
+                assert_eq!(def.behaviors[0].name, "connect");
+                assert_eq!(def.behaviors[0].params.len(), 1);
+                assert_eq!(def.behaviors[1].name, "disconnect");
+                // The transition lowers to a `_sm_state` field assign in the
+                // event behavior body.
+                assert!(
+                    def.behaviors[0]
+                        .body
+                        .stmts
+                        .iter()
+                        .any(|s| matches!(s, hir::Stmt::Assign { .. })),
+                    "event behavior should assign _sm_state"
+                );
+            }
+            other => panic!("Expected actor declaration, got {:?}", other),
+        }
     }
 }
 

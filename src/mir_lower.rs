@@ -830,7 +830,24 @@ impl<'c> FnLowerer<'c> {
             hir::RValue::Binary(op, l, r, _) => {
                 let lid = self.lower_operand(l)?;
                 let rid = self.lower_operand(r)?;
-                self.b.assign(dst, mir::RValue::Binary(*op, lid, rid));
+                // String equality/inequality must use SCmpEq (content
+                // comparison), not ICmpEq (raw-bit comparison), because
+                // a string value may be a constant-pool id or a heap
+                // pointer depending on how it was constructed.
+                let is_string = l.ty() == Type::string() || r.ty() == Type::string();
+                match (op, is_string) {
+                    (crate::ast::BinOp::Eq, true) => {
+                        self.b.assign(dst, mir::RValue::StringEq(lid, rid));
+                    }
+                    (crate::ast::BinOp::Ne, true) => {
+                        let eq_dst = self.b.add_temp(Type::bool());
+                        self.b.assign(eq_dst, mir::RValue::StringEq(lid, rid));
+                        self.b.assign(dst, mir::RValue::Unary(crate::ast::UnOp::Not, eq_dst));
+                    }
+                    _ => {
+                        self.b.assign(dst, mir::RValue::Binary(*op, lid, rid));
+                    }
+                }
                 Ok(())
             }
             hir::RValue::Unary(op, e, _) => {

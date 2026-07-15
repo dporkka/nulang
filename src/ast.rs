@@ -285,6 +285,23 @@ impl Default for StateModel {
 }
 
 // ---------------------------------------------------------------------------
+// State machine events (state_machine declaration transitions)
+// ---------------------------------------------------------------------------
+
+/// A single event transition inside a `state_machine` declaration:
+/// `event name(params): Target`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StateMachineEvent {
+    pub name: String,
+    pub params: Vec<(String, Option<Type>)>,
+    /// Target state name. Must be one of the states declared via `state`
+    /// lines (enforced by the parser); handler-function targets like
+    /// gen_statem's are not supported.
+    pub target: String,
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------------------
 // Function annotations
 // ---------------------------------------------------------------------------
 
@@ -349,6 +366,22 @@ pub enum Decl {
         state_fields: Vec<(String, StateModel, Type, Expr)>, // name, model, type, default
         behaviors: Vec<Behavior>,
         init: Vec<(String, Expr)>,
+        span: Span,
+    },
+    /// State machine declaration (BEAM_PRIMITIVES §4.2 gen_statem adaptation):
+    /// `state_machine Name { state S, event e(p): T, on_entry S { .. }, on_exit S { .. } }`.
+    /// Kept as a real declaration so the typechecker, effect checker, and LSP
+    /// see the source-level structure; desugared to an ordinary `Decl::Actor`
+    /// by [`desugar_state_machine`].
+    StateMachine {
+        name: String,
+        /// Declared states in source order; `states[0]` is the initial state.
+        states: Vec<String>,
+        events: Vec<StateMachineEvent>,
+        /// `(state, body)` hooks run on transitions entering `state`.
+        entry_hooks: Vec<(String, Expr)>,
+        /// `(state, body)` hooks run on transitions leaving `state`.
+        exit_hooks: Vec<(String, Expr)>,
         span: Span,
     },
     /// Type alias: type MyInt = Int
@@ -447,6 +480,117 @@ pub struct ExternFunc {
     pub params: Vec<(String, Type)>,
     pub ret: Type,
     pub span: Span,
+}
+
+// ---------------------------------------------------------------------------
+// State machine desugar (state_machine -> actor)
+// ---------------------------------------------------------------------------
+
+/// Desugar a `state_machine` declaration into an ordinary actor. The
+/// typechecker, effect checker, and HIR lowering all run the result through
+/// exactly the same paths as a hand-written `Decl::Actor`, so the feature
+/// needs no IR, bytecode, or runtime support (BEAM_PRIMITIVES §15 Phase 2).
+///
+/// The generated actor has:
+/// - a `Local` string state field `_sm_state` initialized to the first
+///   declared state (`states` must be non-empty; enforced by the parser),
+///   holding the current state tag;
+/// - one behavior per `event name(params): Target`, whose body
+///   1. runs the `on_exit` hook of the *current* state, if one is declared —
+///      an if-chain comparing `_sm_state` against each hooked state tag;
+///   2. assigns `_sm_state = "Target"`;
+///   3. runs the `on_entry Target` hook inline, if one is declared (the
+///      target is statically known, so no dispatch is needed);
+///   4. evaluates to `nil`.
+///
+/// Hooks run on every matching transition, including self-transitions
+/// (e.g. `disconnect: Closed` taken while already `Closed` runs both the
+/// `Closed` exit and entry hooks). Because events do not name source states,
+/// every event is allowed in every state — gen_statem's "event ignored in a
+/// state where it is not allowed" case cannot arise, so no message is ever
+/// dropped for state reasons. `send`/`ask` against the machine behave
+/// exactly as against any actor.
+pub fn desugar_state_machine(
+    name: &str,
+    states: &[String],
+    events: &[StateMachineEvent],
+    entry_hooks: &[(String, Expr)],
+    exit_hooks: &[(String, Expr)],
+    span: Span,
+) -> Decl {
+    let initial = states.first().cloned().unwrap_or_default();
+    let state_field = (
+        "_sm_state".to_string(),
+        StateModel::Local,
+        Type::string(),
+        Expr::Literal(Literal::String(initial), span),
+    );
+
+    let sm_state = || Expr::FieldAccess {
+        expr: Box::new(Expr::SelfRef(span)),
+        field: "_sm_state".to_string(),
+        span,
+    };
+
+    let behaviors = events
+        .iter()
+        .map(|event| {
+            let mut body_exprs: Vec<Expr> = Vec::new();
+            // on_exit: dispatch on the current state tag over the states
+            // that declare an exit hook. The hook value is discarded into a
+            // trailing `unit` because an `if` without `else` unifies its
+            // then-branch with Unit — a non-Unit hook body (e.g. one ending
+            // in `nil`) would otherwise fail type checking.
+            for (state, hook) in exit_hooks {
+                body_exprs.push(Expr::If {
+                    cond: Box::new(Expr::Binary {
+                        op: BinOp::Eq,
+                        left: Box::new(sm_state()),
+                        right: Box::new(Expr::Literal(Literal::String(state.clone()), span)),
+                        span,
+                    }),
+                    then_branch: Box::new(Expr::Block {
+                        exprs: vec![hook.clone(), Expr::Literal(Literal::Unit, span)],
+                        span,
+                    }),
+                    else_branch: None,
+                    span,
+                });
+            }
+            // Transition to the target state.
+            body_exprs.push(Expr::Assign {
+                target: Box::new(sm_state()),
+                value: Box::new(Expr::Literal(Literal::String(event.target.clone()), span)),
+                span,
+            });
+            // on_entry of the (statically known) target state, if declared.
+            if let Some((_, hook)) = entry_hooks.iter().find(|(s, _)| s == &event.target) {
+                body_exprs.push(hook.clone());
+            }
+            body_exprs.push(Expr::Literal(Literal::Nil, span));
+            Behavior {
+                name: event.name.clone(),
+                params: event.params.clone(),
+                body: Expr::Block {
+                    exprs: body_exprs,
+                    span,
+                },
+                effect: None,
+                cap: Capability::Ref,
+                span: event.span,
+            }
+        })
+        .collect();
+
+    Decl::Actor {
+        name: name.to_string(),
+        type_params: vec![],
+        persistent: false,
+        state_fields: vec![state_field],
+        behaviors,
+        init: vec![],
+        span,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -616,5 +760,92 @@ mod tests {
         assert_eq!(f.params[0].0, "x");
         assert_eq!(f.params[0].1, Type::float());
         assert_eq!(f.ret, Type::float());
+    }
+
+    #[test]
+    fn test_desugar_state_machine() {
+        let sp = Span::default();
+        let hook = || Expr::Literal(Literal::Unit, sp);
+        let events = vec![
+            StateMachineEvent {
+                name: "connect".to_string(),
+                params: vec![("address".to_string(), None)],
+                target: "Connecting".to_string(),
+                span: sp,
+            },
+            StateMachineEvent {
+                name: "disconnect".to_string(),
+                params: vec![],
+                target: "Closed".to_string(),
+                span: sp,
+            },
+        ];
+        let decl = desugar_state_machine(
+            "TcpConnection",
+            &["Closed".to_string(), "Connecting".to_string()],
+            &events,
+            &[("Connecting".to_string(), hook())],
+            &[("Closed".to_string(), hook())],
+            sp,
+        );
+        let Decl::Actor {
+            name,
+            persistent,
+            state_fields,
+            behaviors,
+            ..
+        } = decl
+        else {
+            panic!("state machine should desugar to Decl::Actor");
+        };
+        assert_eq!(name, "TcpConnection");
+        assert!(!persistent);
+        // The generated state field holds the initial state tag.
+        assert_eq!(state_fields.len(), 1);
+        assert_eq!(state_fields[0].0, "_sm_state");
+        assert_eq!(state_fields[0].1, StateModel::Local);
+        assert_eq!(state_fields[0].2, Type::string());
+        assert!(matches!(
+            &state_fields[0].3,
+            Expr::Literal(Literal::String(s), _) if s == "Closed"
+        ));
+        // One behavior per event, preserving names and params.
+        assert_eq!(behaviors.len(), 2);
+        assert_eq!(behaviors[0].name, "connect");
+        assert_eq!(behaviors[0].params, vec![("address".to_string(), None)]);
+        assert_eq!(behaviors[1].name, "disconnect");
+        // Behavior body: [exit-hook ifs.., assign target, entry hook?, nil].
+        let Expr::Block { exprs, .. } = &behaviors[0].body else {
+            panic!("event behavior body should be a block");
+        };
+        // connect: one exit-hook if (Closed), the transition assign, the
+        // Connecting entry hook, and the trailing nil.
+        assert_eq!(exprs.len(), 4);
+        assert!(matches!(&exprs[0], Expr::If { else_branch: None, .. }));
+        assert!(
+            matches!(&exprs[1], Expr::Assign { value, .. }
+                if matches!(value.as_ref(), Expr::Literal(Literal::String(s), _) if s == "Connecting"))
+        );
+        assert!(matches!(&exprs[2], Expr::Literal(Literal::Unit, _)));
+        assert!(matches!(&exprs[3], Expr::Literal(Literal::Nil, _)));
+        // disconnect targets Closed, which has no entry hook: no inline hook.
+        let Expr::Block { exprs, .. } = &behaviors[1].body else {
+            panic!("event behavior body should be a block");
+        };
+        assert_eq!(exprs.len(), 3);
+    }
+
+    #[test]
+    fn test_desugar_state_machine_empty_states_is_defensive() {
+        // The parser never produces an empty state list; the desugar must
+        // still not panic if called with one.
+        let decl = desugar_state_machine("M", &[], &[], &[], &[], Span::default());
+        let Decl::Actor { state_fields, .. } = decl else {
+            panic!("state machine should desugar to Decl::Actor");
+        };
+        assert!(matches!(
+            &state_fields[0].3,
+            Expr::Literal(Literal::String(s), _) if s.is_empty()
+        ));
     }
 }

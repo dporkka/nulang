@@ -142,6 +142,7 @@ impl Parser {
         match self.peek_kind().clone() {
             TokenKind::Fn => self.parse_function(public, annotations),
             TokenKind::Actor | TokenKind::Persistent => self.parse_actor(),
+            TokenKind::StateMachine => self.parse_state_machine(),
             TokenKind::Agent => self.parse_agent(),
             TokenKind::Workflow => self.parse_workflow(),
             TokenKind::Type => {
@@ -351,6 +352,175 @@ impl Parser {
             state_fields,
             behaviors,
             init: vec![],
+            span,
+        })
+    }
+
+    /// Parse a `state_machine` declaration (BEAM_PRIMITIVES §4.2 gen_statem
+    /// adaptation, desugared to an actor by [`crate::ast::desugar_state_machine`]):
+    ///
+    /// ```text
+    /// state_machine Name {
+    ///   state StateName                       // one or more; first = initial
+    ///   event event_name(params): StateName   // target must be a declared state
+    ///   on_entry StateName { body }           // hooks; state must be declared
+    ///   on_exit StateName { body }
+    /// }
+    /// ```
+    ///
+    /// `event`/`on_entry`/`on_exit` are contextual identifiers (like `after`
+    /// in `receive ... after`), not reserved keywords. Unlike gen_statem, an
+    /// event target MUST be a declared state name — handler-function targets
+    /// (e.g. `event data_received(bytes): handle_data` in the §4.2 sketch)
+    /// are rejected with a clear error. States must be declared explicitly
+    /// with `state` lines, so the aspirational §4.2 sketch parses only once
+    /// `Connecting`/`Connected` are declared.
+    fn parse_state_machine(&mut self) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance(); // consume 'state_machine'
+        let name = self.expect_ident("state_machine name")?;
+        self.expect(TokenKind::LBrace)?;
+
+        let mut states: Vec<String> = Vec::new();
+        let mut events: Vec<StateMachineEvent> = Vec::new();
+        let mut entry_hooks: Vec<(String, Expr)> = Vec::new();
+        let mut exit_hooks: Vec<(String, Expr)> = Vec::new();
+
+        self.skip_newlines();
+        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.match_token(&TokenKind::RBrace) {
+                break;
+            }
+            match self.peek_kind().clone() {
+                TokenKind::State => {
+                    self.advance(); // 'state'
+                    states.push(self.expect_ident("state name")?);
+                    self.skip_newlines_semicolons();
+                }
+                TokenKind::Ident(item) => {
+                    let tok = self.advance();
+                    match item.as_str() {
+                        "event" => {
+                            let event_name = self.expect_ident("event name")?;
+                            let params = if self.consume_if(&TokenKind::LParen) {
+                                let params = self.parse_params()?;
+                                self.expect(TokenKind::RParen)?;
+                                params
+                            } else {
+                                Vec::new()
+                            };
+                            self.expect(TokenKind::Colon)?;
+                            let target = self.expect_ident("event target state")?;
+                            events.push(StateMachineEvent {
+                                name: event_name,
+                                params,
+                                target,
+                                span: tok.span,
+                            });
+                            self.skip_newlines_semicolons();
+                        }
+                        "on_entry" | "on_exit" => {
+                            let state_name = self.expect_ident("hook state name")?;
+                            let body = self.parse_expr()?;
+                            if item == "on_entry" {
+                                entry_hooks.push((state_name, body));
+                            } else {
+                                exit_hooks.push((state_name, body));
+                            }
+                            self.skip_newlines_semicolons();
+                        }
+                        other => {
+                            return Err(NuError::ParseError {
+                                msg: format!(
+                                    "Expected 'state', 'event', 'on_entry', or 'on_exit' in state_machine body, got '{}'",
+                                    other
+                                ),
+                                span: tok.span,
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    return Err(NuError::ParseError {
+                        msg: format!(
+                            "Expected 'state', 'event', 'on_entry', or 'on_exit' in state_machine body, got {:?}",
+                            self.peek_kind()
+                        ),
+                        span: self.current_span(),
+                    });
+                }
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+
+        // Two-pass validation, run only now so `state` lines are known
+        // regardless of where they appear relative to events and hooks.
+        if states.is_empty() {
+            return Err(NuError::ParseError {
+                msg: format!(
+                    "state_machine '{}' requires at least one 'state <Name>' declaration (the first declared state is the initial state)",
+                    name
+                ),
+                span,
+            });
+        }
+        for (i, state) in states.iter().enumerate() {
+            if states[..i].contains(state) {
+                return Err(NuError::ParseError {
+                    msg: format!("duplicate state '{}' in state_machine '{}'", state, name),
+                    span,
+                });
+            }
+        }
+        let state_list = states.join(", ");
+        let declared = |state: &str| states.iter().any(|s| s == state);
+        for (i, event) in events.iter().enumerate() {
+            if events[..i].iter().any(|e| e.name == event.name) {
+                return Err(NuError::ParseError {
+                    msg: format!("duplicate event '{}' in state_machine '{}'", event.name, name),
+                    span: event.span,
+                });
+            }
+            if !declared(&event.target) {
+                return Err(NuError::ParseError {
+                    msg: format!(
+                        "event '{}' targets unknown state '{}' in state_machine '{}' (declared states: {})",
+                        event.name, event.target, name, state_list
+                    ),
+                    span: event.span,
+                });
+            }
+        }
+        for (kind, hooks) in [("on_entry", &entry_hooks), ("on_exit", &exit_hooks)] {
+            for (i, (state, _)) in hooks.iter().enumerate() {
+                if !declared(state) {
+                    return Err(NuError::ParseError {
+                        msg: format!(
+                            "{} hook references unknown state '{}' in state_machine '{}' (declared states: {})",
+                            kind, state, name, state_list
+                        ),
+                        span,
+                    });
+                }
+                if hooks[..i].iter().any(|(s, _)| s == state) {
+                    return Err(NuError::ParseError {
+                        msg: format!(
+                            "duplicate {} hook for state '{}' in state_machine '{}'",
+                            kind, state, name
+                        ),
+                        span,
+                    });
+                }
+            }
+        }
+
+        Ok(Decl::StateMachine {
+            name,
+            states,
+            events,
+            entry_hooks,
+            exit_hooks,
             span,
         })
     }
@@ -3429,6 +3599,200 @@ mod tests {
                 );
             }
             _ => panic!("Expected agent declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_state_machine_full_sketch() {
+        // The BEAM_PRIMITIVES §4.2 sketch, completed for the implemented
+        // grammar: every state is declared with a `state` line (the first is
+        // the initial state) and every event target is a declared state.
+        let source = r#"
+            state_machine TcpConnection {
+                state Closed
+                state Connecting
+                state Connected
+
+                event connect(address): Connecting
+                event connection_established: Connected
+                event disconnect: Closed
+
+                on_entry Connected {
+                    perform IO.print("up")
+                }
+
+                on_exit Connected {
+                    perform IO.print("down")
+                }
+            }
+        "#;
+        let ast = parse(source).unwrap();
+        assert_eq!(ast.decls.len(), 1);
+        match &ast.decls[0] {
+            Decl::StateMachine {
+                name,
+                states,
+                events,
+                entry_hooks,
+                exit_hooks,
+                ..
+            } => {
+                assert_eq!(name, "TcpConnection");
+                assert_eq!(states, &["Closed", "Connecting", "Connected"]);
+                assert_eq!(events.len(), 3);
+                assert_eq!(events[0].name, "connect");
+                assert_eq!(events[0].params, vec![("address".to_string(), None)]);
+                assert_eq!(events[0].target, "Connecting");
+                assert_eq!(events[1].name, "connection_established");
+                assert!(events[1].params.is_empty());
+                assert_eq!(events[1].target, "Connected");
+                assert_eq!(events[2].name, "disconnect");
+                assert_eq!(events[2].target, "Closed");
+                assert_eq!(entry_hooks.len(), 1);
+                assert_eq!(entry_hooks[0].0, "Connected");
+                assert_eq!(exit_hooks.len(), 1);
+                assert_eq!(exit_hooks[0].0, "Connected");
+            }
+            _ => panic!("Expected state_machine declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_state_machine_typed_event_params() {
+        let source = r#"
+            state_machine M {
+                state A
+                state B
+                event go(x: Int, y: String): B
+            }
+        "#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::StateMachine { events, .. } => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(
+                    events[0].params,
+                    vec![
+                        ("x".to_string(), Some(Type::int())),
+                        ("y".to_string(), Some(Type::string())),
+                    ]
+                );
+            }
+            _ => panic!("Expected state_machine declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_state_machine_unknown_target_errors() {
+        // DECISION (see parse_state_machine docs): unlike gen_statem, an
+        // event target must be a declared state — the §4.2 sketch's
+        // `event data_received(bytes): handle_data` handler-target form is
+        // rejected with a clear error.
+        let source = r#"
+            state_machine TcpConnection {
+                state Closed
+                event data_received(bytes): handle_data
+            }
+        "#;
+        let err = parse(source).unwrap_err();
+        match err {
+            NuError::ParseError { msg, .. } => {
+                assert!(msg.contains("unknown state 'handle_data'"), "{}", msg);
+                assert!(msg.contains("data_received"), "{}", msg);
+                assert!(msg.contains("declared states: Closed"), "{}", msg);
+            }
+            _ => panic!("Expected ParseError"),
+        }
+    }
+
+    #[test]
+    fn test_parse_state_machine_duplicate_state_errors() {
+        let source = "state_machine M { state A state A }";
+        let err = parse(source).unwrap_err();
+        match err {
+            NuError::ParseError { msg, .. } => {
+                assert!(msg.contains("duplicate state 'A'"), "{}", msg)
+            }
+            _ => panic!("Expected ParseError"),
+        }
+    }
+
+    #[test]
+    fn test_parse_state_machine_missing_initial_state_errors() {
+        let source = "state_machine M { event go: A }";
+        let err = parse(source).unwrap_err();
+        match err {
+            NuError::ParseError { msg, .. } => {
+                assert!(msg.contains("requires at least one 'state <Name>'"), "{}", msg)
+            }
+            _ => panic!("Expected ParseError"),
+        }
+    }
+
+    #[test]
+    fn test_parse_state_machine_hook_unknown_state_errors() {
+        let source = r#"
+            state_machine M {
+                state A
+                on_entry B { nil }
+            }
+        "#;
+        let err = parse(source).unwrap_err();
+        match err {
+            NuError::ParseError { msg, .. } => {
+                assert!(msg.contains("on_entry hook references unknown state 'B'"), "{}", msg)
+            }
+            _ => panic!("Expected ParseError"),
+        }
+    }
+
+    #[test]
+    fn test_parse_state_machine_duplicate_event_errors() {
+        let source = r#"
+            state_machine M {
+                state A
+                event go: A
+                event go: A
+            }
+        "#;
+        let err = parse(source).unwrap_err();
+        match err {
+            NuError::ParseError { msg, .. } => {
+                assert!(msg.contains("duplicate event 'go'"), "{}", msg)
+            }
+            _ => panic!("Expected ParseError"),
+        }
+    }
+
+    #[test]
+    fn test_parse_state_machine_duplicate_hook_errors() {
+        let source = r#"
+            state_machine M {
+                state A
+                on_exit A { nil }
+                on_exit A { nil }
+            }
+        "#;
+        let err = parse(source).unwrap_err();
+        match err {
+            NuError::ParseError { msg, .. } => {
+                assert!(msg.contains("duplicate on_exit hook for state 'A'"), "{}", msg)
+            }
+            _ => panic!("Expected ParseError"),
+        }
+    }
+
+    #[test]
+    fn test_parse_state_machine_unexpected_item_errors() {
+        let source = "state_machine M { state A behavior b() { nil } }";
+        let err = parse(source).unwrap_err();
+        match err {
+            NuError::ParseError { msg, .. } => assert!(
+                msg.contains("Expected 'state', 'event', 'on_entry', or 'on_exit'"),
+                "{}",
+                msg
+            ),
+            _ => panic!("Expected ParseError"),
         }
     }
 }

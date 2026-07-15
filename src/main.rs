@@ -342,8 +342,7 @@ fn run_source(source: &str, verbose: bool) -> NuResult<()> {
     let has_actors = ast
         .decls
         .iter()
-        .any(|d| matches!(d, nulang::ast::Decl::Actor { .. }));
-
+        .any(|d| matches!(d, nulang::ast::Decl::Actor { .. } | nulang::ast::Decl::StateMachine { .. }));
     // Execute
     let value = if has_actors {
         let (value, _runtime) = run_with_runtime(m)?;

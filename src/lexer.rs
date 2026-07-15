@@ -32,6 +32,7 @@ pub enum TokenKind {
     Actor,
     Behavior,
     State,
+    StateMachine,
     SelfKw,
     Spawn,
     Send,
@@ -781,6 +782,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "actor" => Some(TokenKind::Actor),
         "behavior" => Some(TokenKind::Behavior),
         "state" => Some(TokenKind::State),
+        "state_machine" => Some(TokenKind::StateMachine),
         "persistent" => Some(TokenKind::Persistent),
         "local" => Some(TokenKind::Local),
         "durable" => Some(TokenKind::Durable),
@@ -1138,6 +1140,25 @@ mod tests {
                 TokenKind::Colon,
                 TokenKind::StringLit("gpt-4o".to_string()),
                 TokenKind::RBrace,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_state_machine_keyword() {
+        // `state_machine` is a reserved keyword; `event`/`on_entry`/`on_exit`
+        // are CONTEXTUAL keywords — only special inside a state_machine body
+        // (see parse_state_machine), plain identifiers everywhere else. This
+        // mirrors `after` in `receive { } after ms => body`.
+        let kinds = lex("state_machine event on_entry on_exit");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::StateMachine,
+                TokenKind::Ident("event".to_string()),
+                TokenKind::Ident("on_entry".to_string()),
+                TokenKind::Ident("on_exit".to_string()),
                 TokenKind::Eof,
             ]
         );

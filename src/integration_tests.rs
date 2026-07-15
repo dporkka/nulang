@@ -3289,6 +3289,291 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Test: Otp.* builtin effects (supervisors with dynamic children)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_otp_builtin_effects_standalone_nil_noop() {
+        // Outside an actor runtime every Otp.* effect is a nil no-op.
+        let source = r#"
+            {
+                perform Otp.create_supervisor("pool", 0)
+                perform Otp.supervise_child(0, nil, 0)
+                perform Otp.set_template(0, "Worker")
+                perform Otp.start_child(0)
+                perform Otp.terminate_child(0, nil)
+                perform Otp.child_count(0)
+            }
+        "#;
+        let (value, _ty) = run_source(source).unwrap();
+        assert!(value.is_nil(), "Otp.* effects should yield nil outside a runtime");
+    }
+
+    #[test]
+    fn test_otp_simple_one_for_one_restarts_crashed_child_from_template() {
+        // From source: create a simple_one_for_one supervisor with a
+        // template actor type, start two children, send them work, kill
+        // one, and assert it restarts from the template — fresh id, state
+        // back to the declared defaults, behavior table intact.
+        let source = r#"
+            actor PoolWorker {
+                state count: Int = 0
+                behavior work(x) { self.count = self.count + x }
+            }
+            let sup = perform Otp.create_supervisor("pool", 3) in
+            let t = perform Otp.set_template(sup, "PoolWorker") in
+            let w1 = perform Otp.start_child(sup) in
+            let w2 = perform Otp.start_child(sup) in {
+                send w1 work(1)
+                send w2 work(2)
+                sup
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let sup_id = value
+            .as_int()
+            .expect("create_supervisor should yield the supervisor id as Int")
+            as u64;
+        assert_eq!(
+            rt.borrow().supervisors[&sup_id].strategy,
+            crate::runtime::RestartStrategy::SimpleOneForOne
+        );
+
+        rt.borrow_mut().run_scheduler();
+
+        let children: Vec<u64> = rt.borrow().supervisors[&sup_id]
+            .children
+            .iter()
+            .map(|(_, id)| *id)
+            .collect();
+        assert_eq!(children.len(), 2, "two dynamic children should be supervised");
+        for (child, want) in children.iter().zip([1, 2]) {
+            assert_eq!(
+                rt.borrow().actors[child]
+                    .get_state_field("count")
+                    .and_then(|v| v.as_int()),
+                Some(want),
+                "child should have handled its work message"
+            );
+        }
+
+        // Kill the first child (abnormal exit): dynamic children are
+        // Transient, so it restarts from the template.
+        rt.borrow_mut().kill_actor(children[0]);
+
+        let after: Vec<u64> = rt.borrow().supervisors[&sup_id]
+            .children
+            .iter()
+            .map(|(_, id)| *id)
+            .collect();
+        assert_eq!(after.len(), 2, "the crashed child must be replaced, not dropped");
+        assert_eq!(after[1], children[1], "the surviving child must be untouched");
+        let restarted = after[0];
+        assert_ne!(restarted, children[0], "restart must create a fresh actor");
+        assert_eq!(
+            rt.borrow().actors[&restarted]
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(0),
+            "restarted child must start from the template state defaults"
+        );
+
+        // The replacement is a real bytecode actor: send it work and let
+        // the scheduler run its template behavior.
+        rt.borrow_mut().send_message(restarted, "work", &[Value::int(5)]);
+        rt.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt.borrow().actors[&restarted]
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(5),
+            "restarted child must run the template behavior table"
+        );
+    }
+
+    #[test]
+    fn test_otp_supervise_and_terminate_child_round_trip() {
+        let source = r#"
+            actor Managed {
+                state n: Int = 0
+                behavior bump() { self.n = self.n + 1 }
+            }
+            let sup = perform Otp.create_supervisor("plain", 0) in
+            let w = spawn Managed {} in
+            let s1 = perform Otp.supervise_child(sup, w, 0) in
+            let before = perform Otp.child_count(sup) in
+            let s2 = perform Otp.terminate_child(sup, w) in
+            let after = perform Otp.child_count(sup) in
+            before * 10 + after
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        assert_eq!(
+            value.as_int(),
+            Some(10),
+            "child_count should be 1 after supervise_child and 0 after terminate_child"
+        );
+
+        // The terminated worker exited cleanly and was NOT restarted.
+        let rt_ref = rt.borrow();
+        let (sup_id, supervisor) = rt_ref
+            .supervisors
+            .iter()
+            .next()
+            .expect("the supervisor should still exist");
+        assert_eq!(supervisor.child_count(), 0);
+        assert_eq!(
+            rt_ref.actors.len(),
+            1,
+            "only the supervisor actor should remain after terminate_child"
+        );
+        assert!(rt_ref.actors.contains_key(sup_id));
+    }
+
+    #[test]
+    fn test_example_worker_pool_runs() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = include_str!("../examples/worker_pool.nula");
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        assert_eq!(value.as_int(), Some(0), "main should return 0");
+
+        rt.borrow_mut().run_scheduler();
+
+        // w1 crashed on `die` and was restarted from the template (fresh
+        // id, count back to the declared default 0); w2 kept its count.
+        let rt_ref = rt.borrow();
+        let supervisor = rt_ref
+            .supervisors
+            .values()
+            .next()
+            .expect("the pool supervisor should exist");
+        assert_eq!(supervisor.child_count(), 2);
+        let counts: Vec<i64> = supervisor
+            .children
+            .iter()
+            .map(|(_, id)| {
+                rt_ref.actors[id]
+                    .get_state_field("count")
+                    .and_then(|v| v.as_int())
+                    .expect("each pool child should have a count state field")
+            })
+            .collect();
+        assert_eq!(
+            counts,
+            vec![0, 2],
+            "crashed child must restart from the template state defaults"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: state_machine end-to-end (desugar → compile → run)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_state_machine_spawn_and_transition() {
+        // Define a state_machine, spawn it, send events. The state_machine
+        // desugars to an ordinary actor; verify the pipeline compiles and
+        // the spawned actor survives all transitions (the desugared
+        // behaviors — exit-hook if-chain, assign, entry-hook, nil —
+        // compiled and ran correctly).
+        let source = r#"
+            state_machine Light {
+                state Off
+                state On
+
+                event turn_on: On
+                event turn_off: Off
+
+                on_entry On {
+                    perform IO.print("light on")
+                }
+
+                on_exit On {
+                    perform IO.print("light off")
+                }
+            }
+            fn main() {
+                let light = spawn Light {} in {
+                    send light turn_on()
+                    send light turn_off()
+                    send light turn_on()
+                    light
+                }
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let light_id = value.as_actor_id().expect("main should return the actor ref");
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        assert!(
+            rt_ref.actors.contains_key(&light_id),
+            "actor should still be alive after state transitions"
+        );
+        let actor = &rt_ref.actors[&light_id];
+        // The _sm_state field should exist; it's heap-allocated (TAG_PTR).
+        let state_val = actor
+            .get_state_field("_sm_state")
+            .expect("_sm_state field should exist");
+        assert!(
+            state_val.is_ptr() || state_val.is_string(),
+            "_sm_state should be a string-ish value"
+        );
+        // Bytecode behaviors are stored in bytecode_offsets, not
+        // behavior_table (which is for native Rust handlers).
+        assert!(
+            !actor.bytecode_offsets.is_empty(),
+            "desugared actor should have bytecode offsets (found {})",
+            actor.bytecode_offsets.len()
+        );
+    }
+
+    #[test]
+    fn test_state_machine_self_transition_runs_hooks() {
+        // A self-transition (event targeting the current state) must run
+        // both exit and entry hooks. Verify the actor survives self-ticks.
+        let source = r#"
+            state_machine IdleLoop {
+                state Idle
+                state Done
+
+                event tick: Idle
+                event finish: Done
+
+                on_entry Idle {
+                    perform IO.print("entering idle")
+                }
+
+                on_exit Idle {
+                    perform IO.print("leaving idle")
+                }
+            }
+            fn main() {
+                let m = spawn IdleLoop {} in {
+                    send m tick()
+                    send m tick()
+                    m
+                }
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let machine_id = value.as_actor_id().expect("main should return the actor ref");
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        assert!(rt_ref.actors.contains_key(&machine_id), "actor should survive self-transitions");
+        let actor = &rt_ref.actors[&machine_id];
+        let state_val = actor
+            .get_state_field("_sm_state")
+            .expect("_sm_state should exist");
+        assert!(state_val.is_ptr() || state_val.is_string(), "_sm_state should be a string-ish value");
+        assert!(!actor.bytecode_offsets.is_empty(), "desugared actor should have bytecode offsets");
+    }
+
     #[test]
     fn test_actor_set_priority_runs_high_first() {
         // A High-priority actor is dequeued before a Normal one even when

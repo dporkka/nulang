@@ -1,7 +1,8 @@
 //! Supervision trees: actor failure recovery.
 //!
 //! Implements Erlang/OTP-style supervision with:
-//! - Three restart strategies: OneForOne, OneForAll, RestForOne
+//! - Four restart strategies: OneForOne, OneForAll, RestForOne,
+//!   SimpleOneForOne (dynamic children spawned on demand from one template)
 //! - Three restart policies: Permanent, Temporary, Transient
 //! - Rate-limited restarts with configurable time windows
 //! - Hierarchical supervision with escalation
@@ -42,6 +43,10 @@ pub enum RestartStrategy {
     OneForAll,
     /// Restart the failed child and all children started after it.
     RestForOne,
+    /// Dynamic children: the supervisor holds a single child template and
+    /// children are spawned on demand via `Supervisor::start_child`. A
+    /// failed child is replaced by a fresh instance of the template.
+    SimpleOneForOne,
 }
 
 /// When to restart a child.
@@ -132,6 +137,31 @@ pub struct RestartTemplate {
 }
 
 // ---------------------------------------------------------------------------
+// Child Template (simple_one_for_one dynamic children)
+// ---------------------------------------------------------------------------
+
+/// Template for the dynamic children of a `SimpleOneForOne` supervisor.
+///
+/// Carries everything `Runtime::spawn_from_module` needs to spawn a real
+/// bytecode actor of the template type: the module that declares the actor
+/// type plus a behavior-table index belonging to it. The actor type's
+/// `ActorMeta` (state defaults, persistence models) is read from the module
+/// on every spawn, so fresh children always start from the declared
+/// defaults. Captured by `Runtime::perform_otp_builtin` on
+/// `perform Otp.set_template(sup, "ActorTypeName")`.
+#[derive(Debug, Clone)]
+pub struct ChildTemplate {
+    /// Actor type name the template was resolved from (for diagnostics and
+    /// child-spec naming).
+    pub type_name: String,
+    /// Bytecode module declaring the actor type.
+    pub module: crate::bytecode::CodeModule,
+    /// A behavior-table index belonging to the actor type, as expected by
+    /// `Runtime::spawn_from_module`.
+    pub behavior_idx: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Supervisor
 // ---------------------------------------------------------------------------
 
@@ -159,6 +189,12 @@ pub struct Supervisor {
     pub restart_history: Vec<(String, Instant)>,
     /// Parent supervisor actor ID (if any).
     pub parent: Option<u64>,
+    /// Child template for `SimpleOneForOne` supervisors: the one actor type
+    /// dynamic children are spawned from. Unused by the other strategies.
+    pub template: Option<ChildTemplate>,
+    /// Monotonic sequence numbering dynamically started children, so each
+    /// gets a distinct child-spec id (restart rate limits are per spec id).
+    next_dynamic_id: u64,
 }
 
 impl Supervisor {
@@ -173,6 +209,8 @@ impl Supervisor {
             children: Vec::new(),
             restart_history: Vec::new(),
             parent: None,
+            template: None,
+            next_dynamic_id: 0,
         }
     }
 
@@ -344,6 +382,54 @@ impl Supervisor {
         Some(new_id)
     }
 
+    /// Restart a failed dynamic child of a `SimpleOneForOne` supervisor by
+    /// spawning a fresh instance of the child template: the new child starts
+    /// from the actor type's declared state defaults (start-time init args
+    /// are not replayed). Applies the same rate limiting as `restart_child`.
+    fn restart_dynamic_child(&mut self, actor_id: u64, runtime: &mut Runtime) -> Option<u64> {
+        let now = Instant::now();
+        let spec = self.find_child_spec(actor_id)?.clone();
+        let window = Duration::from_secs(spec.restart_window_secs as u64);
+        let recent_restarts = self
+            .restart_history
+            .iter()
+            .filter(|(spec_id, time)| *spec_id == spec.id && now.duration_since(*time) < window)
+            .count() as u32;
+        if recent_restarts >= spec.max_restarts {
+            return None;
+        }
+        let template = match &self.template {
+            Some(t) => t.clone(),
+            None => {
+                // No template: drop the child so the caller escalates
+                // instead of supervising a dead entry (same posture as
+                // rebuild_child's missing RestartTemplate).
+                eprintln!(
+                    "supervisor '{}': child '{}' cannot restart without a child template",
+                    self.name, spec.id
+                );
+                self.remove_child(actor_id);
+                return None;
+            }
+        };
+        self.reap_exited_child(actor_id, runtime);
+        let value = runtime.spawn_from_module(&template.module, template.behavior_idx, Vec::new());
+        let new_id = match value.as_actor_id() {
+            Some(id) => id,
+            None => {
+                self.remove_child(actor_id);
+                return None;
+            }
+        };
+        if let Some(actor) = runtime.actors.get_mut(&new_id) {
+            actor.parent = Some(self.id);
+        }
+        self.update_child_id(actor_id, new_id);
+        self.restart_history.push((spec.id.clone(), now));
+        self.prune_restart_history();
+        Some(new_id)
+    }
+
     /// Restart all children (used by OneForAll strategy).
     ///
     /// `exited_id` is the child whose exit triggered the restart: its exit
@@ -409,6 +495,70 @@ impl Supervisor {
         self.prune_restart_history();
     }
 
+    /// Spawn a fresh child from this supervisor's child template and
+    /// supervise it (`SimpleOneForOne` only). Returns the new child's actor
+    /// id, or `None` when the strategy is not `SimpleOneForOne` or no
+    /// template has been set.
+    ///
+    /// The child is spawned through `Runtime::spawn_from_module`, so it is a
+    /// real bytecode actor with the template type's state defaults and
+    /// behavior table. Dynamic children default to the `Transient` restart
+    /// policy: abnormal exits restart them from the template, while normal
+    /// exits (and `terminate_child`) retire them without replacement.
+    pub fn start_child(
+        &mut self,
+        runtime: &mut Runtime,
+        init_args: Vec<(String, Value)>,
+    ) -> Option<u64> {
+        if self.strategy != RestartStrategy::SimpleOneForOne {
+            return None;
+        }
+        let template = match &self.template {
+            Some(t) => t.clone(),
+            None => {
+                eprintln!(
+                    "supervisor '{}': start_child without a child template; \
+                     set one via Otp.set_template first",
+                    self.name
+                );
+                return None;
+            }
+        };
+        let value = runtime.spawn_from_module(&template.module, template.behavior_idx, init_args);
+        let child_id = value.as_actor_id()?;
+        if let Some(actor) = runtime.actors.get_mut(&child_id) {
+            actor.parent = Some(self.id);
+        }
+        let seq = self.next_dynamic_id;
+        self.next_dynamic_id += 1;
+        let spec = ChildSpec::new(
+            format!("{}_{}", template.type_name, seq),
+            RestartPolicy::Transient,
+        );
+        self.add_child(spec, child_id);
+        Some(child_id)
+    }
+
+    /// Remove a child from supervision WITHOUT restarting it and exit it
+    /// cleanly (`ExitReason::Normal`). Returns true when the child was
+    /// supervised here. Contrasts with `Runtime::exit_actor`, which routes
+    /// the exit through the child's restart policy and may replace it.
+    pub fn terminate_child(&mut self, runtime: &mut Runtime, actor_id: u64) -> bool {
+        if self.find_child_index(actor_id).is_none() {
+            return false;
+        }
+        self.remove_child(actor_id);
+        // Detach first so the Normal exit below never consults this
+        // supervisor (no restart, no escalation).
+        if let Some(actor) = runtime.actors.get_mut(&actor_id) {
+            if actor.parent == Some(self.id) {
+                actor.parent = None;
+            }
+        }
+        runtime.exit_actor(actor_id, ExitReason::Normal);
+        true
+    }
+
     /// Handle a child exit according to the supervisor's restart strategy.
     pub fn handle_exit(
         &mut self,
@@ -464,6 +614,12 @@ impl Supervisor {
                     None => SupervisorAction::Escalate,
                 }
             }
+            RestartStrategy::SimpleOneForOne => {
+                match self.restart_dynamic_child(actor_id, runtime) {
+                    Some(new_id) => SupervisorAction::Restarted(new_id),
+                    None => SupervisorAction::Shutdown,
+                }
+            }
         }
     }
 
@@ -510,6 +666,7 @@ mod tests {
             RestartStrategy::OneForOne,
             RestartStrategy::OneForAll,
             RestartStrategy::RestForOne,
+            RestartStrategy::SimpleOneForOne,
         ];
         for v in &variants {
             let _ = format!("{:?}", v);

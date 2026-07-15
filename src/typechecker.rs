@@ -697,6 +697,9 @@ impl TypeChecker {
                 Decl::Actor { name, .. } => {
                     ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
                 }
+                Decl::StateMachine { name, .. } => {
+                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                }
                 Decl::Extern { funcs, .. } => {
                     for func in funcs {
                         let param_types: Vec<Type> =
@@ -843,6 +846,26 @@ impl TypeChecker {
                 span,
                 ..
             } => self.infer_actor_decl(ctx, name, behaviors, *span),
+            Decl::StateMachine {
+                name,
+                states,
+                events,
+                entry_hooks,
+                exit_hooks,
+                span,
+            } => {
+                // Type-check the desugared form exactly like an actor (the
+                // desugar targets the ordinary actor machinery).
+                let actor = crate::ast::desugar_state_machine(
+                    name,
+                    states,
+                    events,
+                    entry_hooks,
+                    exit_hooks,
+                    *span,
+                );
+                self.infer_decl(ctx, &actor)
+            }
             Decl::Agent { .. } => {
                 // An agent declaration is an opaque module-level binding with a
                 // synthetic actor type, just like actors and workflows.
@@ -3759,6 +3782,48 @@ mod tests {
     #[test]
     fn test_nil_annotation_accepts_nil() {
         let result = check_src("fn f(x: Nil) x\nf(nil)");
+        assert!(result.is_ok(), "expected success, got {:?}", result.err());
+    }
+
+    #[test]
+    fn test_state_machine_typechecks_like_actor() {
+        // The desugared form is checked exactly like an actor: a string-tagged
+        // `_sm_state` field, one behavior per event, hook bodies included. A
+        // hook body ending in `nil` must not trip the no-else `if` Unit rule
+        // (the desugar discards hook values into a trailing `unit`).
+        let ty = check_src(
+            r#"
+            state_machine TcpConnection {
+                state Closed
+                state Connected
+                event connect(address): Connected
+                event disconnect: Closed
+                on_entry Connected { nil }
+                on_exit Connected { nil }
+            }
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(ty, Type::Actor { .. }));
+    }
+
+    #[test]
+    fn test_state_machine_binds_actor_type_for_spawn_and_send() {
+        // The machine name binds an actor type, so `spawn`/`send`/`ask`
+        // against it check exactly like against a hand-written actor.
+        let result = check_src(
+            r#"
+            state_machine M {
+                state A
+                state B
+                event go: B
+            }
+            let m = spawn M {} in {
+                send m go()
+                ask m go()
+            }
+            "#,
+        );
         assert!(result.is_ok(), "expected success, got {:?}", result.err());
     }
 }

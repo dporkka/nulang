@@ -223,28 +223,27 @@ The `use GenServer` mixin, `state durable` sugar, and `on_info` catch-all shown 
 
 ### 4.2 gen_statem
 
-**Status: ADAPT as `state_machine` behavior — NOT IMPLEMENTED** (no `state_machine` keyword exists; the example below is aspirational syntax)
+**Status: IMPLEMENTED** — `state_machine` keyword desugars to an ordinary actor; see `src/ast.rs:desugar_state_machine`. The desugared actor carries a `_sm_state` string field, one behavior per event, and inline on_entry/on_exit dispatch. Event targets must be declared state names (the parser rejects handler-function targets like gen_statem's `handle_data`).
 
 State machines are critical for protocol handling, workflow engines, and AI agent state management:
 
 ```nulang
 state_machine TcpConnection {
-  state Closed
+    state Closed
+    state Connecting
+    state Connected
 
-  event connect(address): Connecting
-  event connection_established: Connected
-  event disconnect: Closed
-  event data_received(bytes): handle_data
-  event timeout: handle_timeout
+    event connect(address): Connecting
+    event connection_established: Connected
+    event disconnect: Closed
 
-  -- State entry/exit actions
-  on_entry Connected {
-    perform io.println("Connection established")
-  }
+    on_entry Connected {
+        perform IO.print("up")
+    }
 
-  on_exit Connected {
-    perform io.println("Connection closing")
-  }
+    on_exit Connected {
+        perform IO.print("down")
+    }
 }
 ```
 
@@ -252,11 +251,11 @@ Key `gen_statem` primitives:
 
 | gen_statem Function | Nulang Status | Nulang Form |
 |---------------------|---------------|-------------|
-| `gen_statem:call/2` | **NOT IMPLEMENTED** | `ask fsm event` works for any actor, but no state-machine semantics |
-| `gen_statem:cast/2` | **NOT IMPLEMENTED** | `send fsm event` works for any actor, but no state-machine semantics |
-| Event actions | **ADAPT — NOT IMPLEMENTED** | Declarative event handlers with state transitions |
-| State enter/exit | **ADAPT — NOT IMPLEMENTED** | `on_entry` / `on_exit` hooks |
-
+| `gen_statem:call/2` | **IMPLEMENTED** | `ask fsm event` works on the desugared actor |
+| `gen_statem:cast/2` | **IMPLEMENTED** | `send fsm event` works on the desugared actor |
+| Event actions | **IMPLEMENTED** | Declarative event handlers with state transitions via desugared actor behaviors |
+| State enter/exit | **IMPLEMENTED** | `on_entry` / `on_exit` hooks inlined into transition bodies; self-transitions run both exit and entry hooks |
+| Handler-function targets | **REJECTED** | Event targets must be declared state names; the parser rejects handler-function targets with a clear error |
 ### 4.3 gen_event
 
 **Status: ADAPT as `event_bus` behavior — NOT IMPLEMENTED** (`use EventBus` does not parse)
@@ -279,26 +278,21 @@ actor MetricsBus {
 
 ### 4.4 supervisor
 
-**Status: IMPLEMENTED (runtime API)** — supervision trees exist in `src/runtime/supervisor.rs` and are exercised by unit and stress tests. There is no Nulang-level supervisor DSL yet.
+**Status: IMPLEMENTED (runtime API + language surface)** — supervision trees exist in `src/runtime/supervisor.rs` and are exercised by unit and stress tests. Nulang-level supervisor DSL available via `perform Otp.create_supervisor`/`set_template`/`start_child`/`terminate_child`/`child_count` built-in effects (dispatched through `Runtime::perform_otp_builtin`).
 
 OTP supervisor primitives to ensure are complete:
 
 | Supervisor Primitive | Nulang Status | Nulang Form |
 |----------------------|---------------|-------------|
-| `supervisor:start_link/2` | **IMPLEMENTED (runtime API)** | `Runtime::create_supervisor(name, strategy)` + `Runtime::supervise_child(sup, spec, child)` |
-| `supervisor:start_child/2` | **IMPLEMENTED (runtime API)** | `Supervisor::add_child(spec, actor_id)` (via `supervise_child`) |
-| `supervisor:terminate_child/2` | **NOT IMPLEMENTED** | No dedicated terminate; `exit_actor` on the child routes through the supervisor's restart policy |
+| `supervisor:start_link/2` | **IMPLEMENTED (language surface)** | `perform Otp.create_supervisor(name, strategy)` |
+| `supervisor:start_child/2` | **IMPLEMENTED (language surface)** | `perform Otp.supervise_child(sup, child, policy)` / `perform Otp.start_child(sup)` (dynamic) |
+| `supervisor:terminate_child/2` | **IMPLEMENTED (language surface)** | `perform Otp.terminate_child(sup, child)` (clean Normal exit, bypasses restart policy) |
 | `supervisor:restart_child/2` | **IMPLEMENTED (runtime API)** | `Supervisor::restart_child(actor_id, runtime)` |
 | `supervisor:delete_child/2` | **IMPLEMENTED (internal)** | `Supervisor::remove_child` (private; invoked on `Temporary`/normal-`Transient` exits) |
-| `supervisor:which_children/1` | **IMPLEMENTED (runtime API)** | `Supervisor::child_count()` / `children` field |
-| Restart strategies | **IMPLEMENTED: 3 of 4** | `one_for_one`, `one_for_all`, `rest_for_one`. **`simple_one_for_one` does not exist.** |
+| `supervisor:which_children/1` | **IMPLEMENTED (language surface)** | `perform Otp.child_count(sup)` / `Supervisor::children` field |
+| Restart strategies | **IMPLEMENTED: 4 of 4** | `one_for_one`, `one_for_all`, `rest_for_one`, `simple_one_for_one` (template-based dynamic children spawned on demand) |
 
-Restart semantics: three restart policies (`Permanent`, `Temporary`, `Transient`), per-child rate limiting (`max_restarts = 5` within `restart_window_secs = 60` by default, tracked per child-spec id), and escalation — exceeding the limit returns `SupervisorAction::Shutdown`, which cascades to the parent supervisor. Note that restarts recreate a fresh actor with a new id; bytecode/behavior restoration for restarted children is future work (the recreated child is a bare `Actor` today).
-
-**Design Note:** Nulang should support dynamic supervision (adding children at runtime — partially present via `add_child`) and `simple_one_for_one` (template-based child creation), both critical for connection pools and worker pools.
-
----
-
+Restart semantics: four restart strategies (now including `SimpleOneForOne`), three restart policies (`Permanent`, `Temporary`, `Transient`), per-child rate limiting (`max_restarts = 5` within `restart_window_secs = 60` by default, tracked per child-spec id), and escalation — exceeding the limit returns `SupervisorAction::Shutdown`, which cascades to the parent supervisor. Bytecode/behavior restoration for restarted children works via `RestartTemplate` (state snapshot + behavior table + bytecode module captured at `supervise_child` time); dynamic children (`SimpleOneForOne`) are spawned from the template module via `spawn_from_module`, so they always start from the actor type's declared state defaults.
 ## 5. In-Memory Storage
 
 ### 5.1 ETS (Erlang Term Storage)
@@ -716,9 +710,9 @@ let hash = crypto_lib.call("sha256", data)
 
 ### Phase 2: OTP Integration
 7. `GenServer` behavior mixin — *not started*
-8. `GenStateM` behavior mixin — *not started*
+8. `GenStateM` behavior mixin — **DONE** — `state_machine` keyword with states, events, on_entry/on_exit hooks; desugared to actor
 9. `EventBus` behavior mixin — *not started*
-10. Supervisor dynamic child management — *runtime API done (`add_child`); `simple_one_for_one` missing*
+10. Supervisor dynamic child management — **DONE** — `simple_one_for_one` with child template, `start_child`/`terminate_child`; `Otp.*` language surface
 
 ### Phase 3: Operations
 11. `timer.send_after` / `start_timer` / `cancel_timer` — *runtime API done (`TimerWheel`); needs language surface*
@@ -840,10 +834,10 @@ Location transparency (`src/runtime/distributed.rs`): `ActorAddress::{Local, Rem
 7. ~~**No actor scheduling priority.**~~ **FIXED.** `Actor.priority: ActorPriority {High, Normal (default), Low}` set via `perform Actor.set_priority(0|1|2)`; the scheduler's global injector is split into three per-level queues drained High → Normal → Low (FIFO within a level). Affects scheduling only: `MessagePriority` is still stored on messages but never consulted by the mailbox (`Mailbox::receive_match` stays FIFO).
 8. **Unresolvable remote sends are silently dropped** (`ResolveResult::Unresolvable` → ignored, `runtime/distributed.rs:682`).
 9. **`Ack` packets** serialize/deserialize and are tested, but nothing sends or consumes them.
-10. **Supervisor restarts recreate bare actors**: `Supervisor::restart_child` builds a fresh `Actor` with no behavior table or bytecode; restarted children cannot process messages until behavior restoration is wired up.
+10. ~~**Supervisor restarts recreate bare actors**~~ **FIXED.** `RestartTemplate` (captured at `supervise_child`) carries state data, behavior table, and bytecode module; `rebuild_child` restores them; dynamic children (`SimpleOneForOne`) spawn from the template module via `spawn_from_module`.
 11. **`Kill` is trappable in practice.** `handle_actor_exit` special-cases nothing for `ExitReason::Kill` — linked actors with `trap_exits` receive it as a message instead of dying, contradicting the "cannot be trapped" doc comment (`types.rs:515`, `runtime/mod.rs:2751`). `ExitReason::Killed` is never constructed; link cascades use `Error("linked actor ... exited with ...")` instead.
 12. **Wire `Value` serde lossy.** Only int/float/bool/string-id/unit round-trip; nil, actor refs, and pointers serialize as raw-bit `VAL_FLOAT` and read back as floats (`runtime/network.rs:522`, `:538`).
-13. No: `is_alive`/`process_info`/`processes` builtins, actor hibernation, explicit GC triggers, group broadcast, `monitor_node`, cluster RPC family (`call`/`multicall`/`cast`/`broadcast`), ETS tables, `persistent_term`, `simple_one_for_one`, virtual actors, application lifecycle, tracing, ports, binary/bit syntax, hot code loading.
+13. No: `is_alive`/`process_info`/`processes` builtins, actor hibernation, explicit GC triggers, group broadcast, `monitor_node`, cluster RPC family (`call`/`multicall`/`cast`/`broadcast`), ETS tables, `persistent_term`, virtual actors, application lifecycle, tracing, ports, binary/bit syntax, hot code loading. (Note: `simple_one_for_one` supervisors and `Otp.*` language surface are now implemented — see §4.4 and §15.)
 
 ### 17.6 Implemented but previously undocumented in this file
 
