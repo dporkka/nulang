@@ -758,15 +758,29 @@ pub fn send_distributed(
 
 /// Notify a sender that their message could not be delivered.
 ///
-/// Delivers a system message to the sender actor's behavior 0 with the
-/// failure reason as a string payload. Non-existent senders (id 0) are
-/// silently skipped.
+/// Delivers a system message (behavior 0) to the sender actor with a
+/// failure code in the payload: `[failure_code: Int, _reserved: Nil]`.
+/// Codes: 0=unresolvable, 1=node left cluster, 2=string payload unresolvable,
+/// 3=string intern failed on receiver, 4=target actor not found, 5=unknown.
+/// Non-existent senders (id 0) are silently skipped.
 fn notify_delivery_failed(runtime: &mut Runtime, sender_id: u64, reason: &str) {
     if sender_id == 0 { return; }
-    // Ensure sender actor still exists before queuing the notification.
     if !runtime.actors.contains_key(&sender_id) { return; }
-    let fail_payload = vec![Value::string(0), Value::nil()]; // behavior name = "__delivery_failed" via string id 0
+    let code = delivery_failure_code(reason);
+    let fail_payload = vec![Value::int(code), Value::nil()];
     runtime.send_message_by_id(sender_id, 0, &fail_payload);
+}
+
+/// Map a delivery-failure reason string to an integer code.
+fn delivery_failure_code(reason: &str) -> i64 {
+    match reason {
+        "unresolvable" => 0,
+        "target node left cluster" => 1,
+        "string payload unresolvable" => 2,
+        "string intern failed on receiver" => 3,
+        "target actor not found" => 4,
+        _ => 5,
+    }
 }
 
 /// Process all incoming network packets and deliver actor messages.
@@ -775,6 +789,23 @@ fn notify_delivery_failed(runtime: &mut Runtime, sender_id: u64, reason: &str) {
 /// the membership table, actor messages are parsed and delivered to the
 /// target actor's mailbox, and spawn requests are answered with a
 /// [`Packet::SpawnResponse`] (hence the mutable transport).
+
+/// Send a transport-level acknowledgement for a successfully processed packet.
+fn ack_packet(
+    transport: &mut NetworkTransport,
+    cluster: &ClusterState,
+    from_node: NodeId,
+    seq: u64,
+) {
+    let addr = cluster
+        .get_node(from_node)
+        .map(|n| n.address)
+        .or_else(|| transport.connection_addr(from_node));
+    if let Some(addr) = addr {
+        transport.send(from_node, addr, Packet::Ack { packet_seq: seq });
+    }
+}
+
 pub fn process_network_packets(
     runtime: &mut Runtime,
     transport: &mut NetworkTransport,
@@ -799,6 +830,7 @@ pub fn process_network_packets(
                 if let Some(addr) = known_addr {
                     cluster.handle_heartbeat(cluster_node_id, addr);
                 }
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             Packet::Gossip { members } => {
                 // Merge the sender's membership view into ours; higher
@@ -806,6 +838,7 @@ pub fn process_network_packets(
                 // Each entry carries its own listen address, so no extra
                 // connection bookkeeping is needed for the relayed nodes.
                 cluster.merge_membership(members);
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             Packet::SpawnRequest {
                 request_id,
@@ -842,6 +875,7 @@ pub fn process_network_packets(
                 if let Some(addr) = reply_addr {
                     transport.send(from, addr, reply);
                 }
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             Packet::SpawnResponse {
                 request_id,
@@ -856,6 +890,7 @@ pub fn process_network_packets(
                     request_id,
                     if success { Some(actor_id) } else { None },
                 );
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             Packet::CrdtSync { ops } => {
                 if let Some(manager) = &mut runtime.crdt_manager {
@@ -863,6 +898,7 @@ pub fn process_network_packets(
                         manager.apply_op(op);
                     }
                 }
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             Packet::CrdtDeltaSync { ops } => {
                 // Delta ops merge into entries this node already holds;
@@ -873,6 +909,10 @@ pub fn process_network_packets(
                         manager.apply_delta_op(op);
                     }
                 }
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+            }
+            Packet::Ack { packet_seq } => {
+                runtime.acked_packets.insert(packet_seq);
             }
             _ => {
                 if let Some((target_actor, behavior_name, mut msg, string_table)) =
@@ -908,6 +948,7 @@ pub fn process_network_packets(
                         notify_delivery_failed(runtime, msg.sender, "target actor not found");
                     }
                 }
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
         }
     }
@@ -1795,5 +1836,28 @@ mod tests {
 
         transport_a.shutdown();
         transport_b.shutdown();
+    }
+
+    #[test]
+    fn test_ack_stored_on_receive() {
+        let mut rt = Runtime::new();
+        assert!(!rt.is_acked(42));
+        rt.acked_packets.insert(42);
+        assert!(rt.is_acked(42));
+        let drained = rt.drain_acked();
+        assert!(drained.contains(&42));
+        assert!(!rt.is_acked(42));
+    }
+
+    #[test]
+    fn test_delivery_failure_notification_includes_code() {
+        // Verify that delivery_failure_code maps known reason strings to
+        // the documented integer codes and falls back to 5 for unknowns.
+        assert_eq!(delivery_failure_code("unresolvable"), 0);
+        assert_eq!(delivery_failure_code("target node left cluster"), 1);
+        assert_eq!(delivery_failure_code("string payload unresolvable"), 2);
+        assert_eq!(delivery_failure_code("string intern failed on receiver"), 3);
+        assert_eq!(delivery_failure_code("target actor not found"), 4);
+        assert_eq!(delivery_failure_code("some future reason"), 5);
     }
 }

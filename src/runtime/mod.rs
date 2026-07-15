@@ -3,7 +3,7 @@
 //! Provides: actor lifecycle, scheduler, mailbox, heap, GC, supervision,
 //! distribution.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -168,6 +168,8 @@ pub struct Runtime {
 
     // Distributed actor system (v0.5)
     pub distributed: DistributedContext,
+    // Acknowledged packet sequence numbers (transport-level reliability).
+    pub acked_packets: HashSet<u64>,
 
     // CRDT manager (v0.6)
     pub crdt_manager: Option<CrdtManager>,
@@ -276,6 +278,7 @@ impl Runtime {
             retired_heaps: Vec::new(),
 
             distributed: DistributedContext::new(),
+            acked_packets: HashSet::new(),
 
             crdt_manager: None,
             crdt_sync_rounds: 0,
@@ -1247,6 +1250,7 @@ impl Runtime {
         // is separate from `self.vm`, so no runtime field is aliased by a
         // live borrow while the raw pointer is in use.
         vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
+        vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks { runtime: self_ptr }));
         let mut frame = crate::vm::Frame::new(None, 0);
         frame.pc = offset;
         vm.set_current_frame(frame);
@@ -1304,6 +1308,7 @@ impl Runtime {
             // Re-install callbacks bound to THIS actor: other actors may have
             // run on the shared VM while this one was suspended.
             vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
+            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks { runtime: self_ptr }));
             vm.restore_suspended_state(suspended.vm_state);
             let saved_suspend = (*self_ptr).llm_suspend_enabled;
             (*self_ptr).llm_suspend_enabled = true;
@@ -1460,6 +1465,7 @@ impl Runtime {
             // run on the shared VM while this one was suspended, and a resumed
             // `LLM.ask` must record its in-flight call (and later completion)
             // on this actor — same as resume_suspended_llm_step.
+            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks { runtime: self_ptr }));
             vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
             vm.restore_suspended_state(suspended.vm_state);
             // A signal-resumed step is still scheduler-context execution: a
@@ -2945,6 +2951,7 @@ impl Runtime {
             let vm = (*self_ptr).vm.as_mut().unwrap();
             // Re-install callbacks bound to THIS actor: other actors may have
             // run on the shared VM while this one was suspended.
+            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks { runtime: self_ptr }));
             vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
             vm.restore_suspended_state(suspended.vm_state);
             // A resumed behavior is still scheduler-context execution: a
@@ -3229,6 +3236,7 @@ impl Runtime {
             };
 
             vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
+            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks { runtime: self_ptr }));
 
             let mut frame = crate::vm::Frame::new(None, module_idx);
             frame.pc = code_offset;
@@ -3721,6 +3729,15 @@ impl Runtime {
             if !linked_alive { continue; }
 
             if is_abnormal {
+                // Kill is untrappable per spec — force-terminate even trap_exits actors.
+                if matches!(reason, ExitReason::Kill) {
+                    let kill_reason = ExitReason::Killed;
+                    if let Some(actor) = self.actors.get_mut(&linked_id) {
+                        actor.state = ActorState::Terminated;
+                    }
+                    self.handle_actor_exit(linked_id, kill_reason);
+                    continue;
+                }
                 let traps = self.actors.get(&linked_id).map(|a| a.trap_exits).unwrap_or(false);
                 if traps {
                     let exit_msg = Message {
@@ -4179,6 +4196,20 @@ impl Runtime {
         self.pending_spawn_responses.remove(&request_id)
     }
 
+    /// Check whether a packet with the given sequence number has been
+    /// acknowledged by the receiver.
+    pub fn is_acked(&self, seq: u64) -> bool {
+        self.acked_packets.contains(&seq)
+    }
+
+    /// Drain and return all acknowledged packet sequence numbers.
+    ///
+    /// Callers should drain periodically to avoid unbounded growth of the
+    /// acked-packets set.
+    pub fn drain_acked(&mut self) -> HashSet<u64> {
+        std::mem::take(&mut self.acked_packets)
+    }
+
     pub fn send_distributed(&mut self, target: ActorAddress, behavior: &str, args: &[Value]) {
         if !self.distributed.enabled {
             let actor_id = match target {
@@ -4600,7 +4631,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                     })
                 });
                 if let Some(callback_name) = callback_name {
-                    let mut rt = self.runtime.borrow_mut();
+                    let rt = self.runtime.borrow_mut();
                     let actor_id = rt.current_actor.unwrap_or(0);
                     let behavior_id = rt.behavior_id_for(actor_id, &callback_name).unwrap_or(0);
                     if behavior_id > 0 {
@@ -5252,6 +5283,76 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 rt.timer_wheel.cancel(wait.timer_id);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Distributed callbacks for the bytecode VM — bridges RSend/RAsk/RSpawn
+// opcodes to the runtime's send_distributed infrastructure.
+// ---------------------------------------------------------------------------
+
+/// Raw-pointer callbacks for distributed VM opcodes (`RSend`, `RAsk`,
+/// `Migrate`, `RSpawn`, `Gossip`).  Mirrors [`BytecodeRuntimeCallbacks`]
+/// in using a transient `*mut Runtime` borrow — the VM calls these only
+/// while the runtime holds `&mut self`, so the pointer is valid and unique.
+#[derive(Debug)]
+struct BytecodeDistributedCallbacks {
+    runtime: *mut Runtime,
+}
+
+// SAFETY: the VM only invokes these callbacks while the calling
+// `Runtime` method holds `&mut self`.  The raw pointer is therefore the
+// sole active borrow of the runtime.
+unsafe impl Send for BytecodeDistributedCallbacks {}
+unsafe impl Sync for BytecodeDistributedCallbacks {}
+
+impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
+    fn node_id(&self) -> u64 {
+        unsafe {
+            (*self.runtime)
+                .distributed
+                .node_id
+                .map(|n| n.0)
+                .unwrap_or(0)
+        }
+    }
+
+    fn remote_send(
+        &mut self,
+        target_actor: u64,
+        target_node: u64,
+        behavior: &str,
+        args: &[crate::vm::Value],
+    ) {
+        unsafe {
+            let rt = &mut *self.runtime;
+            // Take distributed fields out so send_distributed can borrow
+            // them independently of rt itself.
+            let mut transport = rt.distributed.transport.take();
+            let mut resolver = rt.distributed.resolver.take();
+            let cluster = rt.distributed.cluster.take();
+            if let (Some(ref mut t), Some(ref c), Some(ref mut r)) = (&mut transport, &cluster, &mut resolver) {
+                let target = ActorAddress::remote(NodeId(target_node), target_actor);
+                send_distributed(rt, t, c, r, target, behavior, args);
+            }
+            rt.distributed.transport = transport;
+            rt.distributed.resolver = resolver;
+            rt.distributed.cluster = cluster;
+        }
+    }
+
+    fn migrate(&mut self, _actor_id: u64, _target_node_id: u64) {}
+    fn remote_ask(
+        &mut self,
+        _target_actor: u64,
+        _behavior: &str,
+        _args: &[crate::vm::Value],
+        _timeout_ms: u64,
+    ) -> crate::vm::Value {
+        crate::vm::Value::nil()
+    }
+    fn gossip(&mut self, _message: &str) -> crate::vm::Value {
+        crate::vm::Value::unit()
     }
 }
 

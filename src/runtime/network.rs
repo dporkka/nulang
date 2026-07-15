@@ -578,6 +578,7 @@ const VAL_FLOAT: u8 = 1;
 const VAL_BOOL: u8 = 2;
 const VAL_STRING: u8 = 3;
 const VAL_UNIT: u8 = 4;
+const VAL_NIL: u8 = 5;
 
 /// Write a [`Value`] into `buf`.
 fn write_value(buf: &mut Vec<u8>, v: &Value) {
@@ -597,6 +598,8 @@ fn write_value(buf: &mut Vec<u8>, v: &Value) {
         buf.extend_from_slice(&id.to_be_bytes());
     } else if v.is_unit() {
         buf.push(VAL_UNIT);
+    } else if v.is_nil() {
+        buf.push(VAL_NIL);
     } else {
         // Fall back to writing raw bits as float (for NaN floats or other tagged NaNs)
         buf.push(VAL_FLOAT);
@@ -605,13 +608,12 @@ fn write_value(buf: &mut Vec<u8>, v: &Value) {
 }
 
 /// A [`Value`] is wire-safe only if it can cross to another node without
-/// silent corruption: int, float, bool, or unit always qualify. A heap
-/// pointer is process-local and nil has no exact wire representation, so
-/// those are always rejected. A string-id is safe only when `strings_ok`
-/// — i.e. the enclosing packet carries a string table with the content
-/// (actor messages do; spawn requests do not).
+/// silent corruption: int, float, bool, nil, or unit always qualify. A heap
+/// pointer is process-local, so those are always rejected. A string-id is
+/// safe only when `strings_ok` — i.e. the enclosing packet carries a string
+/// table with the content (actor messages do; spawn requests do not).
 fn value_is_wire_safe(v: &Value, strings_ok: bool) -> bool {
-    !(v.is_ptr() || v.is_actor_ref() || v.is_closure() || v.is_nil())
+    !(v.is_ptr() || v.is_actor_ref() || v.is_closure())
         && (strings_ok || !v.is_string())
 }
 
@@ -665,6 +667,7 @@ fn read_value(bytes: &[u8], offset: usize) -> Option<(Value, usize)> {
             Some((Value::string(id), 1 + 4))
         }
         VAL_UNIT => Some((Value::unit(), 1)),
+        VAL_NIL => Some((Value::nil(), 1)),
         _ => None,
     }
 }
@@ -826,6 +829,7 @@ impl TcpConnection {
 #[derive(Debug, Clone)]
 pub struct IncomingPacket {
     pub from_node: NodeId,
+    pub seq: u64,
     pub packet: Packet,
 }
 
@@ -1282,10 +1286,10 @@ fn connection_read_loop(
             }
         }
 
-        // Deserialize.
-        if let Some((_seq, packet)) = Packet::from_bytes(&payload) {
+        if let Some((seq, packet)) = Packet::from_bytes(&payload) {
             let incoming = IncomingPacket {
                 from_node: peer_id,
+                seq,
                 packet,
             };
             if incoming_tx.send(incoming).is_err() {
@@ -1866,13 +1870,13 @@ mod tests {
         assert!(value_is_wire_safe(&Value::string(7), true));
         assert!(!value_is_wire_safe(&Value::string(7), false));
 
-        // Heap/tagged values would arrive corrupted on the receiving node,
-        // so they must always be rejected. (The canonical NaN bit pattern
-        // is TAG_NIL, so Value::float(f64::NAN) is rejected as nil.)
+        // Heap/tagged values (except nil) would arrive corrupted on the
+        // receiving node, so they must always be rejected. Nil is now
+        // wire-safe (VAL_NIL tag).
         assert!(!value_is_wire_safe(&Value::ptr(std::ptr::null_mut()), true));
         assert!(!value_is_wire_safe(&Value::actor_ref(9), true));
         assert!(!value_is_wire_safe(&Value::closure(3), true));
-        assert!(!value_is_wire_safe(&Value::nil(), true));
+        assert!(value_is_wire_safe(&Value::nil(), true));
 
         // Packet-level classification: an actor-message string id must
         // index the packet's string table.
@@ -1912,6 +1916,22 @@ mod tests {
             node_id: NodeId(1),
             timestamp: 0,
         }));
+    }
+
+    #[test]
+    fn test_nil_wire_roundtrip() {
+        // Nil must serialize and deserialize as nil (not as a float).
+        let mut buf = Vec::new();
+        write_value(&mut buf, &Value::nil());
+        assert!(!buf.is_empty());
+        let (val, consumed) = read_value(&buf, 0).expect("nil should deserialize");
+        assert!(val.is_nil(), "deserialized value must be nil");
+        assert_eq!(consumed, 1, "nil tag has no payload bytes");
+
+        // Roundtrip: nil written then read should match.
+        let mut buf2 = Vec::new();
+        write_value(&mut buf2, &val);
+        assert_eq!(buf, buf2, "nil roundtrip must be stable");
     }
 
     #[test]

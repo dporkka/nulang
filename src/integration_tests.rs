@@ -3016,7 +3016,7 @@ match { a: 2, b: 9 } with {
                 }
             }
             actor Victim {
-                behavior die() { perform Actor.exit(2) }
+                behavior die() { perform Actor.exit(1) }  // Error exit (trappable), not Kill
             }
             let p = spawn Peer {} in
             let v = spawn Victim {} in {
@@ -3111,6 +3111,40 @@ match { a: 2, b: 9 } with {
         assert!(
             rt.borrow().actors.get(&peer_id).is_none(),
             "linked peer should exit when the victim is killed externally"
+        );
+    }
+
+    #[test]
+    fn test_kill_untrappable_bypasses_trap_exits() {
+        // Kill is untrappable per spec: even a trap_exits actor must be
+        // force-terminated when a linked actor is killed.
+        let source = r#"
+            actor Peer {
+                behavior watch(t) {
+                    perform Actor.trap_exit(true)
+                    perform Actor.link(t)
+                }
+            }
+            actor Victim {
+                behavior die() { perform Actor.exit(2) }  // Kill
+            }
+            let p = spawn Peer {} in
+            let v = spawn Victim {} in {
+                send p watch(v)
+                send v die()
+                p
+            }
+        "#;
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        let peer_id = value.as_actor_id().expect("spawn should return an actor ref");
+
+        rt.borrow_mut().run_scheduler();
+
+        // Kill is untrappable — the trap_exits peer should be terminated.
+        assert!(
+            rt.borrow().actors.get(&peer_id).is_none(),
+            "trap_exits peer must be terminated by cascading Kill"
         );
     }
 
