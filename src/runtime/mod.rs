@@ -12,6 +12,8 @@ mod scheduler;
 mod mailbox;
 pub mod heap;
 mod gc;
+pub(crate) mod heap_serialize;
+pub use heap_serialize::*;
 mod orca_cycle;
 mod supervisor;
 mod cluster;
@@ -328,7 +330,7 @@ impl Runtime {
         workflow: Option<&str>,
     ) -> u64 {
         let id = fresh_actor_id();
-        let mut actor = Actor::new(id, format!("actor_{}", id), 256);
+        let mut actor = Actor::new(id, format!("actor_{}", id), 0);
         let state_fields = init();
         for (name, value) in state_fields {
             actor.set_state_field(name, value);
@@ -3328,7 +3330,7 @@ impl Runtime {
             .map(|(m, _, _)| m.actor_metadata.iter().any(|meta| meta.is_agent))
             .unwrap_or(false);
 
-        let mut actor = Actor::new(actor_id, format!("actor_{}", actor_id), 256);
+        let mut actor = Actor::new(actor_id, format!("actor_{}", actor_id), 0);
         actor.persistent = true;
         actor.is_workflow = is_workflow;
         actor.is_agent = is_agent;
@@ -3919,7 +3921,7 @@ impl Runtime {
 
     pub fn create_supervisor(&mut self, name: &str, strategy: RestartStrategy) -> u64 {
         let id = fresh_actor_id();
-        let mut actor = Actor::new(id, name.to_string(), 256);
+        let mut actor = Actor::new(id, name.to_string(), 0);
         actor.state = ActorState::Running;
         self.actors.insert(id, actor);
         let supervisor = Supervisor::new(id, name, strategy);

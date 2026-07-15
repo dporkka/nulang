@@ -64,6 +64,18 @@ pub trait DistributedVmCallbacks: std::any::Any + std::fmt::Debug {
     ) -> Value {
         Value::nil()
     }
+    /// Perform a fire-and-forget remote send.
+    ///
+    /// The VM calls this for the `RSend` opcode. The implementation should
+    /// serialize the message and deliver it to the target node.
+    fn remote_send(
+        &mut self,
+        _target_actor: u64,
+        _target_node: u64,
+        _behavior: &str,
+        _args: &[Value],
+    ) {
+    }
 
     /// Send a gossip-style message to a subset of known nodes.
     ///
@@ -661,6 +673,7 @@ fn parse_receive_spec(spec: &str) -> (usize, Vec<u16>) {
 // Frame: activation frame
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 /// Activation frame: 256 registers + metadata.
 pub struct Frame {
     /// 256 general-purpose registers.
@@ -716,7 +729,7 @@ impl std::fmt::Debug for Frame {
 /// Created by `Handle` opcode, popped by `Unwind`.
 /// When `Perform` finds this handler, it captures a `Continuation`
 /// and stores it here for `Resume` to use.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HandlerFrame {
     /// Index into the module's handler_tables.
     pub handler_table_idx: usize,
@@ -727,7 +740,7 @@ pub struct HandlerFrame {
     /// Destination register for the handle block's result.
     pub resume_dst: u8,
     /// Captured continuation (set by Perform, consumed by Resume).
-    captured_continuation: Option<Continuation>,
+    pub captured_continuation: Option<Continuation>,
 }
 
 impl HandlerFrame {
@@ -749,23 +762,25 @@ impl HandlerFrame {
 /// A captured continuation — a deep snapshot of the VM's execution state
 /// at the point of a `perform` call. Restored by `resume` to continue
 /// the suspended computation with a value.
-#[derive(Debug)]
-struct Continuation {
-    /// Deep-cloned frames (current frame + all callers).
-    frames: Vec<Frame>,
+#[derive(Debug, Clone)]
+pub struct Continuation {
+    pub frames: Vec<Frame>,
     /// Index of the active frame within `frames`.
-    current_frame_idx: usize,
+    pub current_frame_idx: usize,
     /// Program counter at the point of capture (points past Perform).
-    resume_pc: usize,
+    pub resume_pc: usize,
     /// Destination register for the resume value.
-    resume_dst: u8,
+    pub resume_dst: u8,
     /// Step count at capture time.
-    step_count: usize,
+    pub step_count: usize,
+    /// Snapshot of the handler stack at capture time.
+    /// Only populated during serialization, empty during normal capture.
+    pub handler_stack_snapshot: Vec<HandlerFrame>,
 }
 
 impl Continuation {
     /// Capture a continuation from the current VM state.
-    fn capture(vm: &VM, resume_dst: u8) -> Option<Self> {
+    pub(crate) fn capture(vm: &VM, resume_dst: u8) -> Option<Self> {
         let current_idx = vm.current_frame_idx?;
         Some(Continuation {
             frames: vm.frames.iter().take(current_idx + 1).map(clone_frame).collect(),
@@ -773,12 +788,13 @@ impl Continuation {
             resume_pc: vm.frames[current_idx].pc, // PC already points past the Perform instruction
             resume_dst,
             step_count: vm.step_count,
+            handler_stack_snapshot: Vec::new(),
         })
     }
 
     /// Restore this continuation into the VM, placing `value` in the
     /// resume destination register.
-    fn restore(self, vm: &mut VM, value: Value) {
+    pub(crate) fn restore(self, vm: &mut VM, value: Value) {
         vm.frames = self.frames;
         vm.current_frame_idx = Some(self.current_frame_idx);
         vm.frames[self.current_frame_idx].regs[self.resume_dst as usize] = value;
@@ -845,6 +861,10 @@ pub struct VM {
     /// Gossip messages recorded by the `Gossip` opcode when no runtime
     /// callback is installed.
     gossip_log: Vec<String>,
+    /// When true, FFI calls are restricted to libraries in `ffi_allowlist`.
+    ffi_sandbox: bool,
+    /// Set of library paths allowed when `ffi_sandbox` is true.
+    ffi_allowlist: std::collections::HashSet<String>,
     /// Name of the signal that caused the most recent workflow suspension.
     /// Filled by `SignalWait` and consumed by the runtime after `run`/`run_from`
     /// returns a suspend error.
@@ -898,21 +918,18 @@ pub struct VM {
     /// actually allocating millions of envs to exercise the limit.
     max_closure_envs: usize,
 }
-
 /// Captured environment of a closure: the lifted function it wraps plus the
-/// values captured (by value) from the enclosing scope at creation time.
+/// values captured at creation time.
 #[derive(Debug, Clone)]
-struct ClosureEnv {
-    func_idx: usize,
-    captures: Vec<Value>,
+pub struct ClosureEnv {
+    pub func_idx: usize,
+    pub captures: Vec<Value>,
 }
 
 /// Payload bit distinguishing env-carrying closures (index into
 /// `VM::closure_envs`) from immediate closures (payload = function index).
-const CLOSURE_ENV_FLAG: u64 = 0x0000_4000_0000_0000;
-const CLOSURE_ENV_IDX_MASK: u64 = CLOSURE_ENV_FLAG - 1;
-/// Hard ceiling on retained closure envs (see `VM::closure_envs`'s KNOWN
-/// LIMITATION). ~10M entries is generous — a legitimate program's live
+pub const CLOSURE_ENV_FLAG: u64 = 0x0000_4000_0000_0000;
+pub const CLOSURE_ENV_IDX_MASK: u64 = CLOSURE_ENV_FLAG - 1;
 /// closure count shouldn't come close — while still bounding the leak to a
 /// fixed, predictable amount of memory instead of running unboundedly
 /// toward an uncontrolled OOM.
@@ -932,6 +949,8 @@ impl VM {
             node_id: 0,
             pending_migrations: Vec::new(),
             gossip_log: Vec::new(),
+            ffi_sandbox: false,
+            ffi_allowlist: std::collections::HashSet::new(),
             suspended_signal_name: None,
             suspended_receive_timeout: None,
             distributed_callbacks: None,
@@ -948,6 +967,25 @@ impl VM {
         self.max_closure_envs = n;
     }
 
+    /// Enable FFI sandboxing, restricting calls to the given library paths.
+    /// Pass an empty list to deny all FFI calls while sandboxing is enabled.
+    /// Call with `allowlist: vec![]` and then add libraries via
+    /// `allow_ffi_library`.
+    pub fn set_ffi_sandbox(&mut self, enabled: bool, allowlist: Vec<String>) {
+        self.ffi_sandbox = enabled;
+        self.ffi_allowlist = allowlist.into_iter().collect();
+    }
+
+    /// Add a library path to the FFI allow-list. No-op if sandboxing is
+    /// not enabled (the check only fires when `ffi_sandbox` is true).
+    pub fn allow_ffi_library(&mut self, path: &str) {
+        self.ffi_allowlist.insert(path.to_string());
+    }
+
+    /// Returns true if FFI sandboxing is currently active.
+    pub fn is_ffi_sandboxed(&self) -> bool {
+        self.ffi_sandbox
+    }
     /// Set the local node ID returned by the `NodeId` opcode.
     pub fn set_node_id(&mut self, node_id: u64) {
         self.node_id = node_id;
@@ -964,6 +1002,10 @@ impl VM {
     /// through the supplied runtime.
     pub fn set_actor_callbacks(&mut self, callbacks: Box<dyn ActorVmCallbacks>) {
         self.actor_callbacks = callbacks;
+    }
+    /// Allocate memory on the actor's heap via the callback trait.
+    pub fn alloc_on_heap(&mut self, size: usize, type_tag: HeapTypeTag) -> Option<*mut u8> {
+        self.actor_callbacks.alloc(size, type_tag)
     }
 
     /// Capture the current VM execution state so a workflow step can be
@@ -1059,6 +1101,10 @@ impl VM {
     /// the known unbounded-retention limitation documented on `closure_envs`.
     pub fn closure_env_count(&self) -> usize {
         self.closure_envs.len()
+    }
+    /// Get a closure environment by index.
+    pub fn closure_env(&self, idx: usize) -> Option<&ClosureEnv> {
+        self.closure_envs.get(idx)
     }
 
     /// Copy the payload of a string-like value into a `Vec<u8>`.
@@ -1518,6 +1564,14 @@ impl VM {
                     .and_then(|m| m.foreign_functions.get(func_idx).map(|d| (d.clone(), module_idx)))
                     .ok_or_else(|| NuError::VMError(format!("Foreign function {} not found", func_idx)))?;
 
+                // FFI sandbox: deny calls to libraries not in the allow-list.
+                if self.ffi_sandbox && !self.ffi_allowlist.contains(&def.library) {
+                    return Err(NuError::VMError(format!(
+                        "FFI sandbox blocked call to '{}' from library '{}': library not in allow-list",
+                        def.symbol, def.library
+                    )));
+                }
+
                 let params: Vec<CType> = def.params.iter()
                     .map(|p| crate::ffi::marshal::ffi_type_to_ctype(p))
                     .collect::<Option<_>>()
@@ -1671,7 +1725,27 @@ impl VM {
                 }
             }
             OpCode::RSend => {
-                return Ok(());
+                let target_reg = instr.op1 as usize;
+                let behavior_idx = instr.imm16() as usize;
+                let target_val = self.frames[frame_idx].regs[target_reg];
+                let target_id = target_val.as_actor_id().unwrap_or(0);
+                let node_id = self.node_id; // local node (callbacks can override)
+                let (param_count, _behavior_id) = self.modules.get(module_idx)
+                    .and_then(|m| m.behaviors.get(behavior_idx))
+                    .map(|b| (b.param_count, behavior_idx as u16))
+                    .unwrap_or((0, 0));
+                // Arguments are in r0..r(param_count-1)
+                let args: Vec<Value> = (0..param_count as usize)
+                    .map(|i| self.frames[frame_idx].regs[i])
+                    .collect();
+                if let Some(cb) = &mut self.distributed_callbacks {
+                    // Resolve the behavior name from the module constant pool.
+                    let behavior_name = self.modules.get(module_idx)
+                        .and_then(|m| m.behaviors.get(behavior_idx))
+                        .map(|b| b.name.clone())
+                        .unwrap_or_default();
+                    cb.remote_send(target_id, node_id, &behavior_name, &args);
+                }
             }
             OpCode::RSpawn => {
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::actor_ref(0);
@@ -3750,6 +3824,56 @@ mod vm_tests {
         }
     }
 
+    /// Test 23b: FFI sandbox blocks calls to non-allowlisted libraries.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_ffi_sandbox_blocks_unauthorized_library() {
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+
+        let source = r#"
+            extern "libm.so.6" {
+                fn sqrt(x: Float) -> Float
+            }
+            sqrt(4.0)
+        "#;
+        let tokens = Lexer::new(source).lex().expect("lex");
+        let ast = Parser::new(tokens).parse_module().expect("parse");
+        let _ = TypeChecker::new().check_module(&ast).expect("typecheck");
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir).expect("mir lower");
+        let module = crate::mir_codegen::compile_mir(&mir, "test_sandbox").expect("compile");
+
+        // Test 1: sandbox enabled, empty allow-list → blocked.
+        let mut vm = VM::new();
+        vm.set_ffi_sandbox(true, vec![]);
+        vm.load_module(module.clone());
+        let result = vm.run();
+        assert!(result.is_err(), "FFI call should be blocked by sandbox");
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("FFI sandbox blocked"),
+            "error should mention sandbox: {}",
+            err_msg
+        );
+
+        // Test 2: sandbox enabled, libm.so.6 allowlisted → should work.
+        let mut vm2 = VM::new();
+        vm2.set_ffi_sandbox(true, vec!["libm.so.6".to_string()]);
+        vm2.load_module(module);
+        match vm2.run() {
+            Ok(result) => {
+                let f = result.as_float().expect("float result");
+                assert!((f - 2.0).abs() < 1e-12, "sqrt(4.0) should be 2.0, got {}", f);
+            }
+            Err(crate::types::NuError::VMError(msg)) if msg.contains("open") || msg.contains("load failed") => {
+                eprintln!("warning: could not open libm.so.6, skipping allow-list test: {}", msg);
+            }
+            Err(e) => panic!("unexpected FFI error with allow-list: {}", e),
+        }
+    }
+
     /// Test 24: `Drop` clears the register, so a duplicate `Drop` of the same
     /// register (as `plan_drops` can emit: last-use drop followed by a
     /// redefinition or block-entry drop) is a no-op rather than a second
@@ -4406,5 +4530,98 @@ mod vm_tests {
             .expect("record allocation");
         let result = run_scmpeq(&mut vm, Value::ptr(rec_ptr), hello);
         assert_eq!(result.as_bool(), Some(false), "record ptr vs string must be false");
+    }
+
+    /// Round-trip: allocate heap objects, capture continuation, serialize,
+    /// deserialize into a fresh VM, verify values are intact.
+    #[test]
+    fn test_continuation_roundtrip_serialization() {
+        use crate::runtime::heap_serialize;
+
+        // Build a module so we have a valid module_idx and string pool.
+        let mut module = CodeModule::new("test_roundtrip");
+        module.constants.push(Constant::String("hello".into()));
+        module.constants.push(Constant::String("world".into()));
+        // Dummy instruction so the module has at least one.
+        module.instructions.push(Instruction::new0(OpCode::Halt));
+
+        let mut vm1 = VM::new();
+        vm1.load_module(module.clone());
+
+        // Allocate a heap array with two values.
+        let arr_ptr = vm1.actor_callbacks
+            .alloc(2 * std::mem::size_of::<Value>(), HeapTypeTag::Array)
+            .expect("array allocation");
+        let arr_value = Value::ptr(arr_ptr);
+        // Write [int(42), string("hello")] into the array.
+        unsafe {
+            let slots = std::slice::from_raw_parts_mut(arr_ptr as *mut Value, 2);
+            slots[0] = Value::int(42);
+            slots[1] = Value::string(0); // "hello" at constant index 0
+            // Retain refs to match what ArrStore barrier would do.
+        }
+
+        // Push a frame with the array value in r0.
+        let mut frame = Frame::new(None, 0);
+        frame.regs[0] = arr_value;
+        frame.regs[1] = Value::int(99);
+        frame.pc = 1; // non-zero to verify serialization
+        frame.return_dst = 5;
+        vm1.frames.push(frame);
+        vm1.current_frame_idx = Some(0);
+
+        // Push a handler frame.
+        vm1.handler_stack.push(HandlerFrame::new(0, 0, 10, 3));
+
+        // Capture continuation.
+        let cont = Continuation::capture(&vm1, 0).expect("capture");
+        assert_eq!(cont.frames.len(), 1);
+        assert_eq!(cont.frames[0].regs[0].as_ptr().is_some(), true);
+        assert_eq!(cont.frames[0].regs[1].as_int(), Some(99));
+
+        // Serialize.
+        let module_hash = [0u8; 32];
+        let handler_stack_clone = vm1.handler_stack.clone();
+        let bytes = heap_serialize::serialize_continuation(
+            &cont, &handler_stack_clone, &vm1, &module_hash,
+        ).expect("serialization");
+
+        assert!(!bytes.is_empty(), "serialized payload must not be empty");
+        assert!(bytes.len() > 32, "payload must have header + content");
+
+        // Deserialize into a fresh VM.
+        let mut vm2 = VM::new();
+        vm2.load_module(module);
+
+        let (restored_cont, restored_handlers) =
+            heap_serialize::deserialize_continuation(&bytes, &mut vm2)
+                .expect("deserialization");
+
+        assert_eq!(restored_cont.frames.len(), 1);
+        assert_eq!(restored_handlers.len(), 1);
+        assert_eq!(restored_handlers[0].handler_table_idx, 0);
+        assert_eq!(restored_handlers[0].resume_pc, 10);
+        assert_eq!(restored_handlers[0].resume_dst, 3);
+
+        // Verify register values are intact.
+        let restored_frame = &restored_cont.frames[0];
+        assert_eq!(restored_frame.pc, 1);
+        assert_eq!(restored_frame.return_dst, 5);
+        assert_eq!(restored_frame.regs[1].as_int(), Some(99));
+
+        // r0 should be a TAG_PTR pointing to a heap array with [42, "hello"].
+        let restored_arr_ptr = restored_frame.regs[0].as_ptr()
+            .expect("r0 should be a heap pointer");
+        assert!(!restored_arr_ptr.is_null());
+
+        unsafe {
+            let header = &*ActorHeap::header_of(restored_arr_ptr);
+            assert_eq!(header.type_tag, HeapTypeTag::Array);
+
+            let slots = std::slice::from_raw_parts(restored_arr_ptr as *const Value, 2);
+            assert_eq!(slots[0].as_int(), Some(42), "array[0] should be 42");
+            // slots[1] is a TAG_STRING — verify it's a valid string value
+            assert!(slots[1].is_string(), "array[1] should be a string");
+        }
     }
 }

@@ -1,17 +1,15 @@
-//! Unbounded MPSC mailbox: lock-free queue per actor using crossbeam's
-//! `SegQueue`.
+//! MPSC mailbox with priority bands and optional capacity limit.
 //!
-//! BEAM/OTP semantics assume unbounded actor mailboxes. A bounded queue
-//! forces a destructive trade-off between blocking senders (cascading
-//! scheduler deadlocks) and dropping messages (violating actor reliability
-//! guarantees — supervisor signals must never be lost).
+//! Two priority bands (`System` and `Normal`/`Bulk`) ensure that supervisor
+//! exit signals and monitor DOWN messages are never delayed behind a queue
+//! of regular application messages.  When a capacity limit is configured,
+//! `System` messages always bypass the limit — preserving BEAM/OTP
+//! reliability guarantees — while `Normal` and `Bulk` messages are
+//! rejected with backpressure when the mailbox is full.
 //!
-//! Uses `crossbeam::queue::SegQueue`, a segmented lock-free queue that
-//! grows dynamically. Memory is reclaimed via crossbeam's epoch-based
-//! garbage collection.
-//!
-//! Backpressure is handled at the language level (actor-level flow
-//! control) rather than at the mailbox transport level.
+//! Uses `crossbeam::queue::SegQueue` (lock-free, unbounded segments) for
+//! each band.  Memory is reclaimed via crossbeam's epoch-based garbage
+//! collection.
 
 use crate::vm::Value;
 use crossbeam::queue::SegQueue;
@@ -32,61 +30,82 @@ pub enum MessagePriority {
     Bulk = 2,   // Bulk/non-urgent
 }
 
-/// Unbounded MPSC mailbox backed by `crossbeam::queue::SegQueue`.
+/// MPSC mailbox with priority bands and optional capacity.
 ///
-/// The queue grows dynamically as messages are pushed. There is no
-/// capacity limit, no overflow policy, and no blocking on push.
+/// Two `SegQueue` instances provide priority ordering without starving
+/// normal messages: every `pop` / `receive_match` drains the system band
+/// completely before touching the normal band.
 ///
-/// Memory is reclaimed via crossbeam's epoch-based memory management,
-/// so popped segments are freed only after all concurrent readers have
-/// exited the critical section.
+/// When `capacity > 0`, `push` rejects `Normal` and `Bulk` messages once
+/// the total message count reaches the limit.  `System` messages always
+/// succeed, preserving BEAM/OTP reliability guarantees.
 pub struct Mailbox {
-    queue: SegQueue<Message>,
+    system_queue: SegQueue<Message>,
+    normal_queue: SegQueue<Message>,
+    capacity: usize,
 }
 
 impl Mailbox {
-    /// Create a new unbounded mailbox.
-    pub fn new(_capacity: usize) -> Self {
-        // Capacity argument is ignored — the queue is unbounded.
-        // Kept for API compatibility with existing Actor::new() calls.
+    /// Create a new mailbox.
+    ///
+    /// `capacity`: maximum total messages allowed.  `0` = unbounded
+    /// (BEAM/OTP semantics).  `System` messages always bypass the limit.
+    pub fn new(capacity: usize) -> Self {
         Mailbox {
-            queue: SegQueue::new(),
+            system_queue: SegQueue::new(),
+            normal_queue: SegQueue::new(),
+            capacity,
         }
     }
 
-    /// Lock-free push into the MPSC mailbox.
+    /// Push a message into the mailbox.
     ///
-    /// Always succeeds — the queue is unbounded. Never blocks, never
-    /// drops messages. This preserves BEAM/OTP reliability guarantees:
-    /// supervisor exit signals and monitor DOWN messages are never lost
-    /// in transit.
+    /// `System` messages always succeed.  `Normal` and `Bulk` messages are
+    /// rejected with `Err(msg)` when the mailbox is at capacity (a
+    /// non-zero `capacity` was configured and both queues together hold
+    /// that many messages).
     pub fn push(&self, msg: Message) -> Result<(), Message> {
-        self.queue.push(msg);
+        if msg.priority == MessagePriority::System {
+            self.system_queue.push(msg);
+            return Ok(());
+        }
+        if self.capacity > 0 && self.len() >= self.capacity {
+            return Err(msg);
+        }
+        self.normal_queue.push(msg);
         Ok(())
     }
 
-    /// Lock-free pop from the mailbox.
+    /// Pop the highest-priority message.
     ///
-    /// Delegates to `SegQueue::pop`. Returns `None` if the mailbox is empty.
+    /// Always drains the system queue first; falls back to the normal
+    /// queue only when no system messages are pending.
     pub fn pop(&self) -> Option<Message> {
-        self.queue.pop()
+        self.system_queue.pop().or_else(|| self.normal_queue.pop())
     }
 
-    /// Selective receive: scan the mailbox in FIFO order for the first
+    /// Selective receive: scan both queues in priority order for the first
     /// message whose behavior id appears in `behavior_ids`.
     ///
-    /// Matching is by mailbox order, not arm order: the first message that
-    /// matches ANY id wins. The whole queue is drained into a holding list
-    /// and every non-matched message is re-pushed in its original order, so
-    /// relative FIFO order is preserved both for skipped messages and for
-    /// messages queued behind the match.
-    ///
-    /// Returns `Some((arm_index, payload))` where `arm_index` is the
-    /// position of the matched id within `behavior_ids`, or `None` when no
-    /// queued message matches.
+    /// System messages are scanned first, preserving priority even across
+    /// selective dispatch.  Non-matching messages are re-queued into their
+    /// original band so relative FIFO order is preserved.
     pub fn receive_match(&self, behavior_ids: &[u16]) -> Option<(usize, Vec<Value>)> {
+        // Scan system queue first.
+        if let Some(result) = Self::scan_queue(&self.system_queue, behavior_ids) {
+            return Some(result);
+        }
+        // Then scan normal queue.
+        Self::scan_queue(&self.normal_queue, behavior_ids)
+    }
+
+    /// Drain and scan a single queue for a matching message.
+    fn scan_queue(
+        queue: &SegQueue<Message>,
+        behavior_ids: &[u16],
+    ) -> Option<(usize, Vec<Value>)> {
         let mut drained: Vec<Message> = Vec::new();
-        while let Some(msg) = self.queue.pop() {
+        while let Some(msg) = queue.pop() {
             drained.push(msg);
         }
         let mut found = None;
@@ -101,41 +120,46 @@ impl Mailbox {
             requeue.push(msg);
         }
         for msg in requeue {
-            self.queue.push(msg);
+            queue.push(msg);
         }
         found
     }
 
-    /// Return the current number of messages in the mailbox.
-    ///
-    /// Note: `SegQueue::len` is approximate — concurrent push/pop
-    /// operations may cause the returned value to be slightly stale.
+    /// Total message count across both queues (approximate).
     pub fn len(&self) -> usize {
-        self.queue.len()
+        self.system_queue.len() + self.normal_queue.len()
     }
 
-    /// Return `true` if the mailbox contains no messages.
+    /// True when both queues are empty.
     pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
+        self.system_queue.is_empty() && self.normal_queue.is_empty()
     }
 
-    /// Return a cloned snapshot of all messages currently in the mailbox.
-    ///
-    /// Since the queue is unbounded, there is no risk of the snapshot
-    /// failing due to capacity constraints (unlike the bounded ArrayQueue
-    /// version where concurrent pushes could consume freed slots during
-    /// the restore phase).
+    /// Drain both queues (system first) into a cloned snapshot, then
+    /// restore all messages.
     pub fn drain(&self) -> Vec<Message> {
         let mut snapshot = Vec::with_capacity(self.len());
-        while let Some(msg) = self.queue.pop() {
+        // Drain system first.
+        while let Some(msg) = self.system_queue.pop() {
             snapshot.push(msg);
         }
-        // Restore all popped messages. With an unbounded queue, there
-        // is always room to restore.
+        while let Some(msg) = self.normal_queue.pop() {
+            snapshot.push(msg);
+        }
+        // Restore: system messages go back to system_queue, normal to normal_queue.
         for msg in &snapshot {
-            self.queue.push(msg.clone());
+            if msg.priority == MessagePriority::System {
+                self.system_queue.push(msg.clone());
+            } else {
+                self.normal_queue.push(msg.clone());
+            }
         }
         snapshot
+    }
+
+    /// Return the configured capacity (0 = unbounded).
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 }
 
@@ -182,7 +206,7 @@ mod tests {
     // Test 2: Unbounded — push never fails, even with many messages.
     #[test]
     fn test_unbounded_never_fails() {
-        let mb = Mailbox::new(2); // capacity argument is ignored
+        let mb = Mailbox::new(0); // 0 = unbounded
 
         for i in 0..10000 {
             let result = mb.push(make_msg(i as u16, i as u64));
@@ -280,7 +304,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let mb = Arc::new(Mailbox::new(4));
+        let mb = Arc::new(Mailbox::new(0)); // 0 = unbounded for concurrent test
         let mut handles = Vec::new();
 
         for t in 0..4 {

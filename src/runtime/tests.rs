@@ -63,7 +63,7 @@ fn test_scheduler_enqueue_steal() {
 
 #[test]
 fn test_actor_register_behavior() {
-    let mut actor = Actor::new(1, "test_actor", 16);
+    let mut actor = Actor::new(1, "test_actor", 0);
     actor.register_behavior("hello", |_actor, _args| {});
     assert_eq!(actor.behavior_table.len(), 1);
     assert_eq!(actor.behavior_table[0].name, "hello");
@@ -85,7 +85,7 @@ fn test_run_scheduler_processes_all_actors() {
 
 #[test]
 fn test_actor_priority_default_is_normal() {
-    let actor = Actor::new(1, "test_actor", 16);
+    let actor = Actor::new(1, "test_actor", 0);
     assert_eq!(actor.priority, ActorPriority::Normal);
     assert_eq!(ActorPriority::default(), ActorPriority::Normal);
 }

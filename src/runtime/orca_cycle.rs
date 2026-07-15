@@ -325,6 +325,14 @@ pub struct CycleDetector {
 
     /// Number of objects reclaimed from broken cycles (for statistics).
     objects_reclaimed: u64,
+
+    /// Snapshot of graph keys for the current incremental full scan.
+    /// `None` when no scan is in progress.
+    scan_keys: Option<Vec<(u64, usize)>>,
+    /// How many keys have been processed in the current scan.
+    scan_cursor: usize,
+    /// Maximum number of nodes to scan per `refresh_suspects` call.
+    scan_batch_size: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +347,9 @@ impl CycleDetector {
     /// - `detection_interval`: 10 (full scan every 10 epochs)
     pub fn new() -> Self {
         Self {
+            scan_keys: None,
+            scan_cursor: 0,
+            scan_batch_size: 100, // process at most 100 nodes per call
             graph: HashMap::new(),
             suspects: VecDeque::new(),
             epoch: 0,
@@ -533,26 +544,18 @@ impl CycleDetector {
             }
         }
     }
-
-    /// Refresh the suspect queue by scanning the entire graph.
-    ///
-    /// This is called periodically (every `detection_interval` epochs) to
-    /// ensure the suspect queue reflects the current state of the graph.
-    /// Clears the existing queue and rebuilds it from scratch.
-    ///
-    /// # Safety
-    ///
-    /// This method is `unsafe` because it dereferences header pointers when
-    /// computing weights. All headers are checked for liveness first.
     fn refresh_suspects<R>(&mut self, _runtime: &R) {
-        self.suspects.clear();
+        // Start a new scan if none is in progress.
+        if self.scan_keys.is_none() {
+            self.suspects.clear();
+            self.scan_keys = Some(self.graph.keys().copied().collect());
+            self.scan_cursor = 0;
+        }
 
-        // Collect keys first to avoid borrowing issues.
-        let keys: Vec<(u64, usize)> = self.graph.keys().copied().collect();
+        let keys = self.scan_keys.as_ref().unwrap();
+        let end = (self.scan_cursor + self.scan_batch_size).min(keys.len());
 
-        for key in keys {
-            // Use get_mut because compute_weight needs a mutable borrow for
-            // the node to update its weight field.
+        for &key in &keys[self.scan_cursor..end] {
             let is_local = if let Some(node) = self.graph.get(&key) {
                 self.is_local(node.actor_id)
             } else {
@@ -562,28 +565,15 @@ impl CycleDetector {
                 continue;
             }
             if let Some(node) = self.graph.get_mut(&key) {
-                // SAFETY: We check that the header pointer still points to
-                // a live object before dereferencing. If the object has been
-                // freed, skip this node (it will be cleaned up later).
                 let alive = unsafe {
-                    // Quick check: if the memory has been unmapped, this could
-                    // fault. The runtime guarantees it only frees objects after
-                    // notifying the cycle detector, so this should be safe.
                     (*node.object_header).ref_count + (*node.object_header).foreign_count > 0
                 };
-
                 if !alive {
-                    // Object has been reclaimed. Remove the stale node.
-                    // We can't remove here while iterating, so mark it for
-                    // later cleanup by setting weight to max.
                     node.weight = u32::MAX;
                     continue;
                 }
-
-                // SAFETY: We just verified the object is alive.
                 let weight = unsafe { node.compute_weight() };
                 node.weight = weight;
-
                 if weight <= self.suspect_threshold {
                     self.suspects.push_back(Suspect {
                         actor_id: node.actor_id,
@@ -595,8 +585,14 @@ impl CycleDetector {
             }
         }
 
-        // Clean up stale (dead object) nodes.
-        self.graph.retain(|_, node| node.weight != u32::MAX);
+        self.scan_cursor = end;
+
+        // Scan complete: clean up dead nodes and reset state.
+        if self.scan_cursor >= keys.len() {
+            self.graph.retain(|_, node| node.weight != u32::MAX);
+            self.scan_keys = None;
+            self.scan_cursor = 0;
+        }
     }
 
     /// Run a full cycle detection pass.

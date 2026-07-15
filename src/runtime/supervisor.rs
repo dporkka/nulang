@@ -310,7 +310,7 @@ impl Supervisor {
         };
         let new_id = fresh_actor_id();
         let child_name = format!("{}_child_{}", self.name, spec.id);
-        let mut new_actor = Actor::new(new_id, child_name, 256);
+        let mut new_actor = Actor::new(new_id, child_name, 0);
         for (name, value) in &template.state_data {
             new_actor.set_state_field(name.clone(), *value);
         }
