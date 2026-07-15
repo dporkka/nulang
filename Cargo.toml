@@ -19,6 +19,8 @@ python = ["dep:pyo3"]
 # SQLite-backed actor persistence (SqliteStore). MemoryStore and
 # JsonFileStore remain available without this feature.
 sqlite = ["dep:rusqlite"]
+# Turso libSQL remote database support (TursoStore for edge deployments).
+turso = ["dep:libsql"]
 # Language Server Protocol support (`nulang --lsp`).
 lsp = ["dep:tower-lsp"]
 
@@ -51,9 +53,9 @@ async-trait = "0.1"
 
 # Python interop (optional, see [features])
 pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"], optional = true }
-
-# SQLite persistence backend (optional, see [features])
 rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+# Turso libSQL remote database (optional, see [features])
+libsql = { version = "0.10.0-pre.4", optional = true }
 
 # Native library loading
 libloading = "0.8"

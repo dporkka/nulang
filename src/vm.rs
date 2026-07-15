@@ -423,6 +423,11 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
         if effect_name == "Actor" || effect_name == "Otp" {
             return Some(Value::nil());
         }
+        if effect_name == "DB" {
+            // DB.query requires a runtime with a configured database.
+            // Standalone VM returns nil.
+            return Some(Value::nil());
+        }
         if effect_name != "IO" {
             return None;
         }

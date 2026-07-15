@@ -937,6 +937,7 @@ impl TypeChecker {
                 };
                 Ok((vec![], workflow_ty))
             }
+            Decl::Database { .. } => Ok((vec![], Type::unit())),
         }
     }
 

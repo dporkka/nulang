@@ -45,6 +45,35 @@ use super::MessagePriority;
 use super::NodeId;
 use crate::vm::Value;
 
+
+// ---------------------------------------------------------------------------
+// TransportAddr — network address for TCP or Unix domain sockets
+// ---------------------------------------------------------------------------
+
+/// Address for the NUL0 protocol.  TCP is the default; Unix domain sockets
+/// enable same-host eBPF sockmap redirection in NLC deployments.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TransportAddr {
+    Tcp(SocketAddr),
+    #[cfg(unix)]
+    Unix(std::path::PathBuf),
+}
+
+impl TransportAddr {
+    pub fn tcp(addr: SocketAddr) -> Self { TransportAddr::Tcp(addr) }
+    #[cfg(unix)]
+    pub fn unix(path: impl Into<std::path::PathBuf>) -> Self { TransportAddr::Unix(path.into()) }
+}
+
+impl std::fmt::Display for TransportAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportAddr::Tcp(a) => write!(f, "{}", a),
+            #[cfg(unix)]
+            TransportAddr::Unix(p) => write!(f, "unix:{}", p.display()),
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------

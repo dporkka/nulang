@@ -82,6 +82,7 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "Cost" => Effect::Cost,
         "Event" => Effect::Event,
         "FFI" => Effect::FFI,
+        "DB" => Effect::DB,
         other => Effect::UserDefined(other.to_string()),
     }
 }

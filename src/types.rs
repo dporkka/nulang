@@ -182,6 +182,7 @@ pub enum Effect {
     Cost,
     Event,
     FFI,
+    DB,
     UserDefined(String),
 }
 

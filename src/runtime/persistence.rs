@@ -787,6 +787,83 @@ impl PersistenceStore for SqliteStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// TursoStore — libSQL remote database (Turso edge platform)
+// ---------------------------------------------------------------------------
+
+/// Remote database connection for Turso edge deployments.
+///
+/// Provides `query()` for `perform DB.query(sql, params)` from Nulang code.
+/// Unlike `SqliteStore`, this is NOT a `PersistenceStore` — it's a general-
+/// purpose query interface to a Turso remote database.
+#[cfg(feature = "turso")]
+#[derive(Debug)]
+pub struct TursoStore {
+    db: libsql::Database,
+    rt: tokio::runtime::Runtime,
+}
+
+#[cfg(feature = "turso")]
+impl TursoStore {
+    /// Connect to a Turso remote database.
+    ///
+    /// `url`: e.g. `"libsql://my-db-org.turso.io"`
+    /// `auth_token`: Turso auth token
+    pub fn connect(url: &str, auth_token: &str) -> io::Result<Self> {
+        let db = libsql::Database::open_remote(url.to_string(), auth_token.to_string())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        Ok(TursoStore { db, rt })
+    }
+
+    /// Execute a SQL query and return rows as a Vec of JSON strings.
+    ///
+    /// This is the backend for `perform DB.query(sql, params)` in Nulang.
+    pub fn query(&self, sql: &str, params: &[Value]) -> io::Result<Vec<String>> {
+        let conn = self.db.connect()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        self.rt.block_on(async {
+            let param_values: Vec<String> = params.iter().map(|v| {
+                if let Some(i) = v.as_int() { i.to_string() }
+                else if let Some(f) = v.as_float() { f.to_string() }
+                else if let Some(b) = v.as_bool() { b.to_string() }
+                else { v.to_string_repr() }
+            }).collect();
+            let param_refs: Vec<&str> = param_values.iter().map(|s| s.as_str()).collect();
+            let mut rows = conn.query(sql, libsql::params_from_iter(param_refs))
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            let mut results = Vec::new();
+            loop {
+                match rows.next().await {
+                    Ok(Some(row)) => {
+                        let mut cols: Vec<serde_json::Value> = Vec::new();
+                        for i in 0..row.column_count() {
+                            let val = row.get_value(i)
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                            let json_val = match val {
+                                libsql::Value::Null => serde_json::Value::Null,
+                                libsql::Value::Integer(n) => serde_json::Value::Number(serde_json::Number::from(n)),
+                                libsql::Value::Real(f) => serde_json::value::Number::from_f64(f).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+                                libsql::Value::Text(s) => serde_json::Value::String(s),
+                                libsql::Value::Blob(_) => serde_json::Value::Null,
+                            };
+                            cols.push(json_val);
+                        }
+                        let json = serde_json::to_string(&cols)
+                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+                        results.push(json);
+                    }
+                    Ok(None) => break,
+                    Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+                }
+            }
+            Ok(results)
+        })
+    }
+}
+
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;

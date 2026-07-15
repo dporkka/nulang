@@ -150,7 +150,8 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
         hir::Decl::TypeAlias { .. }
         | hir::Decl::RecordType { .. }
         | hir::Decl::EffectDecl { .. }
-        | hir::Decl::Import { .. } => {}
+        | hir::Decl::Import { .. }
+        | hir::Decl::Database { .. } => {}
     }
     Ok(())
 }

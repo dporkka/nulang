@@ -265,6 +265,11 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             tools,
             *span,
         ),
+        Decl::Database { name, tables, span } => hir::Decl::Database {
+            name: name.clone(),
+            tables: tables.clone(),
+            span: *span,
+        },
     }
 }
 

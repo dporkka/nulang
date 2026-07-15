@@ -61,11 +61,20 @@ const GOSSIP_FANOUT: usize = 2;
 pub struct NodeId(pub u64);
 
 impl NodeId {
-    /// Create a `NodeId` from a socket address.
+    /// Create a `NodeId` from a socket address (TCP).
     ///
-    /// The id is derived with `std::collections::hash_map::DefaultHasher`
-    /// so repeated calls with the same address yield the same id.
+    /// The id is derived with `DefaultHasher` so repeated calls with the
+    /// same address yield the same id.
     pub fn new(addr: &SocketAddr) -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        addr.hash(&mut hasher);
+        NodeId(hasher.finish())
+    }
+
+    /// Create a `NodeId` from a transport address (TCP or Unix).
+    pub fn from_addr(addr: &crate::runtime::network::TransportAddr) -> Self {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();

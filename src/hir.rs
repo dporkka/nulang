@@ -10,6 +10,9 @@
 use crate::ast::{BinOp, Literal, Pattern, StateModel, UnOp};
 use crate::types::{Capability, EffectRow, Span, Type};
 
+// Re-exported AST types used in HIR declarations
+pub use crate::ast::{DatabaseColumn, DatabaseTable};
+
 // ---------------------------------------------------------------------------
 // Module and declarations
 // ---------------------------------------------------------------------------
@@ -59,6 +62,11 @@ pub enum Decl {
     Import {
         path: String,
         items: Vec<String>,
+        span: Span,
+    },
+    Database {
+        name: String,
+        tables: Vec<DatabaseTable>,
         span: Span,
     },
     ExternBlock {

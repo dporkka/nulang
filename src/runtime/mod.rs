@@ -250,6 +250,13 @@ pub struct Runtime {
     // (`Some(actor_id)` = spawned, `None` = rejected).
     pub spawnable_behaviors: HashMap<String, fn(&mut Actor, &[Value])>,
     pub pending_spawn_responses: HashMap<u64, Option<u64>>,
+    /// Turso remote database (optional, gated behind `turso` feature).
+    #[cfg(feature = "turso")]
+    pub turso_store: Option<crate::runtime::persistence::TursoStore>,
+    /// Callback invoked when the scheduler loop reaches true quiescence
+    /// (empty run queue, no inflight LLM calls, no pending timers).
+    /// The embedder (e.g. NLC guest agent) wires this to host signaling.
+    pub idle_callback: Option<Box<dyn FnMut()>>,
 }
 
 impl Runtime {
@@ -283,6 +290,7 @@ impl Runtime {
             vm_execution_depth: 0,
             pending_receive_wakes: Vec::new(),
             draining_receive_wakes: false,
+            idle_callback: None,
             recovery_modules: HashMap::new(),
             next_pipeline_id: 1,
             pipelines: HashMap::new(),
@@ -292,6 +300,8 @@ impl Runtime {
             debates: HashMap::new(),
             spawnable_behaviors: HashMap::new(),
             pending_spawn_responses: HashMap::new(),
+            #[cfg(feature = "turso")]
+            turso_store: None,
         }
     }
 
@@ -1957,6 +1967,13 @@ impl Runtime {
         self.current_actor
     }
 
+    /// Returns `true` when the runtime has LLM calls in flight or timers
+    /// pending.  Callers should loop `run_scheduler` while this returns
+    /// true; the loop naturally breaks on true quiescence.
+    pub fn has_pending_work(&self) -> bool {
+        self.llm_inflight_count > 0 || !self.timer_wheel.is_empty()
+    }
+
     pub fn run_scheduler(&mut self) {
         // How often (in scheduler ticks) deferred local decrements are
         // retried while actors are still running.
@@ -1967,6 +1984,9 @@ impl Runtime {
                 Some(actor_id) => actor_id,
                 None => {
                     if self.llm_inflight_count == 0 && self.timer_wheel.is_empty() {
+                        if let Some(ref mut cb) = self.idle_callback {
+                            cb();
+                        }
                         break;
                     }
                     // The run queue is drained but background LLM calls are
@@ -4495,6 +4515,35 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let mut rt = self.runtime.borrow_mut();
             return rt.query_workflow(workflow_id, &query_name);
         }
+        #[cfg(feature = "turso")]
+        if effect_name == "DB" && op_name == Some("query") {
+            let sql = match regs.first().and_then(|v| v.as_string_id()) {
+                Some(id) => match constants.get(id as usize) {
+                    Some(crate::bytecode::Constant::String(s)) => s.clone(),
+                    _ => return Some(crate::vm::Value::nil()),
+                },
+                None => return Some(crate::vm::Value::nil()),
+            };
+            let params: Vec<crate::vm::Value> = regs.iter().skip(1).copied().collect();
+            let mut rt = self.runtime.borrow_mut();
+            let result = if let Some(ref store) = rt.turso_store {
+                match store.query(&sql, &params) {
+                    Ok(rows) => {
+                        let json = serde_json::to_string(&rows).unwrap_or_default();
+                        let bytes = json.into_bytes();
+                        if let Some(ref mut vm) = rt.vm {
+                            vm.add_runtime_string(0, String::from_utf8_lossy(&bytes).into_owned())
+                        } else {
+                            crate::vm::Value::nil()
+                        }
+                    }
+                    Err(_) => crate::vm::Value::nil(),
+                }
+            } else {
+                crate::vm::Value::nil()
+            };
+            return Some(result);
+        }
         if effect_name == "Actor" {
             let mut rt = self.runtime.borrow_mut();
             let actor_id = rt.current_actor;
@@ -4788,6 +4837,31 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     _ => return None,
                 };
                 return (*self.runtime).query_workflow(workflow_id, &query_name);
+            }
+            #[cfg(feature = "turso")]
+            if effect_name == "DB" && op_name == Some("query") {
+                let sql = match regs.first().and_then(|v| v.as_string_id()) {
+                    Some(id) => match constants.get(id as usize) {
+                        Some(crate::bytecode::Constant::String(s)) => s.clone(),
+                        _ => return Some(crate::vm::Value::nil()),
+                    },
+                    None => return Some(crate::vm::Value::nil()),
+                };
+                let params: Vec<crate::vm::Value> = regs.iter().skip(1).copied().collect();
+                if let Some(ref store) = (*self.runtime).turso_store {
+                    return match store.query(&sql, &params) {
+                        Ok(rows) => {
+                            let json = serde_json::to_string(&rows).unwrap_or_default();
+                            if let Some(ref mut vm) = (*self.runtime).vm {
+                                Some(vm.add_runtime_string(0, json))
+                            } else {
+                                Some(crate::vm::Value::nil())
+                            }
+                        }
+                        Err(_) => Some(crate::vm::Value::nil()),
+                    };
+                }
+                return Some(crate::vm::Value::nil());
             }
             if effect_name == "Actor" {
                 return (*self.runtime).perform_actor_builtin(

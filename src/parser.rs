@@ -145,6 +145,7 @@ impl Parser {
             TokenKind::StateMachine => self.parse_state_machine(),
             TokenKind::Agent => self.parse_agent(),
             TokenKind::Workflow => self.parse_workflow(),
+            TokenKind::Database => self.parse_database(),
             TokenKind::Type => {
                 self.advance(); // consume 'type'
                 self.skip_newlines();
@@ -742,6 +743,61 @@ impl Parser {
             pricing,
             span,
         })
+    }
+
+    /// Parse a database declaration:
+    /// `database Name { TableName { col: Type modifier*, ... } ... }`
+    fn parse_database(&mut self) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance(); // consume 'database'
+        let name = self.expect_ident("database name")?;
+        self.expect(TokenKind::LBrace)?;
+        self.skip_newlines();
+        let mut tables: Vec<DatabaseTable> = Vec::new();
+        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.match_token(&TokenKind::RBrace) { break; }
+            // Each table: Name { col: Type modifier*, ... }
+            let table_name = self.expect_ident("table name")?;
+            self.expect(TokenKind::LBrace)?;
+            self.skip_newlines();
+            let mut columns: Vec<DatabaseColumn> = Vec::new();
+            while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                self.skip_newlines();
+                if self.match_token(&TokenKind::RBrace) { break; }
+                let col_name = self.expect_ident("column name")?;
+                self.expect(TokenKind::Colon)?;
+                let col_type = self.parse_type()?;
+                let mut modifiers: Vec<String> = Vec::new();
+                while matches!(self.peek_kind(),
+                    TokenKind::Ident(_) | TokenKind::UpperIdent(_)
+                ) {
+                    let m = self.expect_ident("column modifier")?;
+                    modifiers.push(m);
+                    self.skip_newlines();
+                    if self.match_token(&TokenKind::Comma) || self.match_token(&TokenKind::RBrace) {
+                        break;
+                    }
+                }
+                columns.push(DatabaseColumn {
+                    name: col_name,
+                    col_type,
+                    modifiers,
+                    span: self.current_span(),
+                });
+                self.skip_newlines();
+                let _ = self.consume_if(&TokenKind::Comma);
+                self.skip_newlines();
+            }
+            self.expect(TokenKind::RBrace)?;
+            tables.push(DatabaseTable {
+                name: table_name,
+                columns,
+                span: self.current_span(),
+            });
+            self.skip_newlines();
+        }
+        Ok(Decl::Database { name, tables, span })
     }
 
     fn parse_state_model(&mut self) -> StateModel {

@@ -453,6 +453,33 @@ pub enum Decl {
         pricing: Option<AgentPricing>,
         span: Span,
     },
+    /// Database declaration: database Name { table Name { col: Type, ... } }
+    Database {
+        name: String,
+        tables: Vec<DatabaseTable>,
+        span: Span,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Database declaration (Turso/libSQL first-class integration)
+// ---------------------------------------------------------------------------
+
+/// A column definition inside a `database` table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatabaseColumn {
+    pub name: String,
+    pub col_type: Type,
+    pub modifiers: Vec<String>, // "primary_key", "unique", "not_null", etc.
+    pub span: Span,
+}
+
+/// A table definition inside a `database` declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatabaseTable {
+    pub name: String,
+    pub columns: Vec<DatabaseColumn>,
+    pub span: Span,
 }
 
 /// A single item inside a `workflow` declaration, preserving the original
