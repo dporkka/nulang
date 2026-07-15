@@ -428,6 +428,9 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
             // Standalone VM returns nil.
             return Some(Value::nil());
         }
+        if effect_name == "Timer" {
+            return Some(Value::unit());
+        }
         if effect_name != "IO" {
             return None;
         }

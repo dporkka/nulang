@@ -1,6 +1,7 @@
 //! Abstract Syntax Tree definitions for Nulang.
 
 use crate::types::{Capability, EffectRow, Span, Type};
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Literals
@@ -270,7 +271,7 @@ pub struct Behavior {
 // State models for actor fields
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StateModel {
     Local,
     Durable,

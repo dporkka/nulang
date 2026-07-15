@@ -4937,7 +4937,9 @@ match { a: 2, b: 9 } with {
         let mut rt = Runtime::new();
         rt.send_message_by_id(999_999, 0, &[Value::int(1)]);
         rt.run_scheduler();
-        assert!(rt.actors.is_empty());
+        // The message is routed to the DLQ, which is created lazily.
+        assert!(rt.dlq_actor_id.is_some());
+        assert_eq!(rt.dlq_depth(), 1);
     }
 
     /// Differential test: the legacy compiler and the HIR/MIR pipeline must

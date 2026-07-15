@@ -1,12 +1,12 @@
 //! Bytecode ISA, instruction encoding, and module format for the Nulang VM.
 
 use crate::ai::request::ToolSchema;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Opcodes (137 total across 17 categories)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum OpCode {
     // == Special (0x00-0x0F) ==
@@ -377,7 +377,7 @@ impl OpCode {
 /// 32-bit fixed-width instruction.
 /// Layout: [opcode: u8] [op1: u8] [op2: u8] [op3: u8]
 /// Extended format for larger immediates uses op1+op2 as u16, or op1+op2+op3 as u24.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instruction {
     pub opcode: OpCode,
     pub op1: u8,
@@ -458,7 +458,7 @@ impl Instruction {
 // Constants
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Constant {
     Int(i64),
     Float(f64),
@@ -477,7 +477,7 @@ pub enum Constant {
 
 /// A single binding from effect name to handler code offset.
 /// Compiled by the compiler when processing `handle eff_name -> { body }` blocks.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandlerBinding {
     pub effect_name: String,
     /// Bytecode offset of the handler body (receives args in r0..rn).
@@ -491,7 +491,7 @@ pub struct HandlerBinding {
 /// A handler table: maps effect names to their handler implementations.
 /// One table per `handle { ... }` block. Pushed onto the handler stack at
 /// runtime by the Handle opcode.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandlerTable {
     pub bindings: Vec<HandlerBinding>,
     /// Optional fallback: code offset to jump to if no binding matches.
@@ -503,7 +503,7 @@ pub struct HandlerTable {
 // Behavior Table Entry
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BehaviorTableEntry {
     pub name: String,
     pub param_count: usize,
@@ -518,7 +518,7 @@ pub struct BehaviorTableEntry {
 }
 
 /// Actor metadata for durable execution.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActorMeta {
     pub name: String,
     pub persistent: bool,
@@ -562,7 +562,7 @@ impl ActorMeta {
 // ---------------------------------------------------------------------------
 
 /// FFI primitive types supported by the bytecode compiler and VM.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FfiType {
     Int,
     Float,
@@ -573,7 +573,7 @@ pub enum FfiType {
 }
 
 /// A foreign function declared in an `extern "lib" { ... }` block.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ForeignFunctionDef {
     pub library: String,
     pub symbol: String,
@@ -585,7 +585,7 @@ pub struct ForeignFunctionDef {
 // Code Module
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeModule {
     pub name: String,
     pub constants: Vec<Constant>,

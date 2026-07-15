@@ -5,6 +5,7 @@
 //! scheduler fairness under load.
 
 use std::collections::HashMap;
+use std::time::Duration;
 use std::sync::{Arc, Mutex};
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
@@ -1040,7 +1041,7 @@ fn stress_jit_hot_loop_then_cold_fallback() {
 
 #[test]
 fn stress_remote_actor_cache_lru_eviction() {
-    let mut cache = RemoteActorCache::new(100);
+    let mut cache = RemoteActorCache::new(100, Duration::from_secs(3600));
     let node = NodeId(7);
 
     for i in 0..500u64 {

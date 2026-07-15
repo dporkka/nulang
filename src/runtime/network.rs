@@ -158,6 +158,7 @@ pub enum Packet {
         request_id: u64,
         behavior_name: String,
         initial_state: Vec<(String, Value)>,
+        bytecode: Option<Vec<u8>>,
     },
 
     /// Response to a spawn request.
@@ -304,6 +305,7 @@ impl Packet {
                 request_id,
                 behavior_name,
                 initial_state,
+                bytecode,
             } => {
                 buf.extend_from_slice(&request_id.to_be_bytes());
                 write_string(buf, behavior_name);
@@ -311,6 +313,16 @@ impl Packet {
                 for (key, value) in initial_state {
                     write_string(buf, key);
                     write_value(buf, value);
+                }
+                // Serialize optional bytecode: 0 length = None.
+                match bytecode {
+                    Some(bytes) => {
+                        buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                        buf.extend_from_slice(bytes);
+                    }
+                    None => {
+                        buf.extend_from_slice(&0u32.to_be_bytes());
+                    }
                 }
             }
             Packet::SpawnResponse {
@@ -428,13 +440,24 @@ impl Packet {
             offset = offset.checked_add(consumed_val)?;
             initial_state.push((key, value));
         }
+        // Deserialize optional bytecode: 0 length = None.
+        let bytecode_len = read_u32(payload, offset)? as usize;
+        offset += 4;
+        let bytecode = if bytecode_len > 0 {
+            if offset + bytecode_len > payload.len() {
+                return None;
+            }
+            Some(payload[offset..offset + bytecode_len].to_vec())
+        } else {
+            None
+        };
         Some(Packet::SpawnRequest {
             request_id,
             behavior_name,
             initial_state,
+            bytecode,
         })
     }
-
     fn read_spawn_response(payload: &[u8]) -> Option<Self> {
         if payload.len() < 17 {
             return None;
@@ -1881,6 +1904,7 @@ mod tests {
             request_id: 1,
             behavior_name: "Counter".into(),
             initial_state: vec![("name".into(), Value::string(1))],
+            bytecode: None,
         };
         assert!(!packet_payload_wire_safe(&spawn));
 
@@ -2071,6 +2095,7 @@ mod tests {
                 ("count".into(), Value::int(0)),
                 ("name".into(), Value::string(42)),
             ],
+            bytecode: None,
         };
         let bytes = req.to_bytes(99);
         let (seq, decoded) = Packet::from_bytes(&bytes).unwrap();

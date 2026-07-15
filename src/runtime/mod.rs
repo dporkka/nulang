@@ -250,6 +250,9 @@ pub struct Runtime {
     // (`Some(actor_id)` = spawned, `None` = rejected).
     pub spawnable_behaviors: HashMap<String, fn(&mut Actor, &[Value])>,
     pub pending_spawn_responses: HashMap<u64, Option<u64>>,
+    /// Actor ID of the dead-letter queue (created lazily).
+    /// Undeliverable messages are routed here.
+    pub dlq_actor_id: Option<u64>,
     /// Turso remote database (optional, gated behind `turso` feature).
     #[cfg(feature = "turso")]
     pub turso_store: Option<crate::runtime::persistence::TursoStore>,
@@ -300,6 +303,7 @@ impl Runtime {
             debates: HashMap::new(),
             spawnable_behaviors: HashMap::new(),
             pending_spawn_responses: HashMap::new(),
+            dlq_actor_id: None,
             #[cfg(feature = "turso")]
             turso_store: None,
         }
@@ -1774,8 +1778,20 @@ impl Runtime {
             sender: self.current_actor.unwrap_or(0),
             priority: MessagePriority::Normal,
         };
-        if let Some(actor) = self.actors.get_mut(&target_id) {
-            if let Err(_dropped) = actor.mailbox.push(msg) {}
+        let target_exists = self.actors.contains_key(&target_id);
+        if target_exists {
+            if let Err(_dropped) = self.actors.get_mut(&target_id).unwrap().mailbox.push(msg) {
+                // Mailbox is full (capacity > 0). Route to DLQ with a simple notification.
+                self.route_to_dlq(
+                    &Message { behavior_id, payload: args.to_vec(), sender: self.current_actor.unwrap_or(0), priority: MessagePriority::System },
+                    "mailbox full",
+                );
+            }
+        } else {
+            self.route_to_dlq(
+                &Message { behavior_id, payload: args.to_vec(), sender: self.current_actor.unwrap_or(0), priority: MessagePriority::System },
+                "target actor not found",
+            );
         }
         for arg in args {
             if let Some(ptr) = arg.as_ptr() {
@@ -1962,16 +1978,45 @@ impl Runtime {
         }
         total
     }
-
-    pub fn current_actor_id(&self) -> Option<u64> {
-        self.current_actor
+    /// Return the DLQ actor id, creating the DLQ actor if needed.
+    /// The DLQ actor is intentionally never scheduled — messages accumulate
+    /// in its mailbox for inspection via `dlq_depth()`.
+    pub fn ensure_dlq_actor(&mut self) -> u64 {
+        if let Some(id) = self.dlq_actor_id {
+            if self.actors.contains_key(&id) {
+                return id;
+            }
+        }
+        let id = fresh_actor_id();
+        let mut actor = Actor::new(id, "__dlq", 0);
+        actor.set_state_field("count", Value::int(0));
+        self.actors.insert(id, actor);
+        self.dlq_actor_id = Some(id);
+        id
     }
 
-    /// Returns `true` when the runtime has LLM calls in flight or timers
-    /// pending.  Callers should loop `run_scheduler` while this returns
-    /// true; the loop naturally breaks on true quiescence.
-    pub fn has_pending_work(&self) -> bool {
-        self.llm_inflight_count > 0 || !self.timer_wheel.is_empty()
+    /// Route an undeliverable message to the DLQ.
+    /// The DLQ actor is never scheduled, so messages accumulate in its mailbox.
+    pub fn route_to_dlq(&mut self, _msg: &Message, _reason: &str) {
+        let dlq_id = self.ensure_dlq_actor();
+        // Push a simple notification to the DLQ's mailbox directly.
+        // We don't use send_message_by_id because it would try to ORCA-track args.
+        if let Some(actor) = self.actors.get_mut(&dlq_id) {
+            let _ = actor.mailbox.push(Message {
+                behavior_id: 0,
+                payload: vec![Value::int(1)],
+                sender: 0,
+                priority: MessagePriority::System,
+            });
+        }
+    }
+
+    /// Number of messages currently queued in the DLQ actor's mailbox.
+    pub fn dlq_depth(&self) -> usize {
+        self.dlq_actor_id
+            .and_then(|id| self.actors.get(&id))
+            .map(|actor| actor.mailbox.len())
+            .unwrap_or(0)
     }
 
     pub fn run_scheduler(&mut self) {
@@ -4544,6 +4589,32 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             };
             return Some(result);
         }
+        if effect_name == "Timer" && op_name == Some("after") {
+            let ms = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+            if ms > 0 {
+                let callback_id = regs.get(1).and_then(|v| v.as_string_id());
+                let callback_name = callback_id.and_then(|id| {
+                    constants.get(id as usize).and_then(|c| match c {
+                        crate::bytecode::Constant::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                });
+                if let Some(callback_name) = callback_name {
+                    let mut rt = self.runtime.borrow_mut();
+                    let actor_id = rt.current_actor.unwrap_or(0);
+                    let behavior_id = rt.behavior_id_for(actor_id, &callback_name).unwrap_or(0);
+                    if behavior_id > 0 {
+                        rt.timer_wheel.send_after(
+                            std::time::Duration::from_millis(ms as u64),
+                            actor_id,
+                            behavior_id,
+                            vec![],
+                        );
+                    }
+                }
+            }
+            return Some(crate::vm::Value::unit());
+        }
         if effect_name == "Actor" {
             let mut rt = self.runtime.borrow_mut();
             let actor_id = rt.current_actor;
@@ -4870,6 +4941,30 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     constants,
                     regs,
                 );
+            }
+            if effect_name == "Timer" && op_name == Some("after") {
+                let ms = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+                if ms > 0 {
+                    let callback_id = regs.get(1).and_then(|v| v.as_string_id());
+                    let callback_name = callback_id.and_then(|id| {
+                        constants.get(id as usize).and_then(|c| match c {
+                            crate::bytecode::Constant::String(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                    });
+                    if let Some(callback_name) = callback_name {
+                        let behavior_id = (*self.runtime).behavior_id_for(self.actor_id, &callback_name).unwrap_or(0);
+                        if behavior_id > 0 {
+                            (*self.runtime).timer_wheel.send_after(
+                                std::time::Duration::from_millis(ms as u64),
+                                self.actor_id,
+                                behavior_id,
+                                vec![],
+                            );
+                        }
+                    }
+                }
+                return Some(crate::vm::Value::unit());
             }
             if effect_name == "IO" {
                 if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {

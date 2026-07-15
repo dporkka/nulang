@@ -36,7 +36,7 @@
 //! - [`DistributedRuntime`] — trait extending [`Runtime`] with distributed ops.
 
 use std::collections::{HashMap, VecDeque};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // Imports from sibling modules in the runtime
@@ -54,6 +54,8 @@ use crate::vm::Value;
 
 /// Default maximum number of entries in the remote actor cache.
 const DEFAULT_CACHE_SIZE: usize = 10_000;
+/// Default TTL for cache entries in seconds. Stale entries are evicted on access.
+const CACHE_TTL_SECS: u64 = 60;
 
 // ---------------------------------------------------------------------------
 // ActorAddress
@@ -152,7 +154,6 @@ pub struct RemoteActorInfo {
 /// reply).
 ///
 /// Uses a simple LRU eviction policy: when the cache exceeds `max_entries`,
-/// the least-recently-accessed entry is removed.
 pub struct RemoteActorCache {
     /// Map: (remote node, actor id) → cached info.
     entries: HashMap<(NodeId, u64), RemoteActorInfo>,
@@ -160,16 +161,24 @@ pub struct RemoteActorCache {
     max_entries: usize,
     /// Access order for LRU eviction — most recent at the back.
     access_order: VecDeque<(NodeId, u64)>,
+    /// How long an entry can live before being evicted as stale.
+    ttl: Duration,
 }
 
 impl RemoteActorCache {
-    /// Create a new cache with the given maximum capacity.
-    pub fn new(max_entries: usize) -> Self {
+    /// Create a new cache with the given maximum capacity and per-entry TTL.
+    pub fn new(max_entries: usize, ttl: Duration) -> Self {
         RemoteActorCache {
             entries: HashMap::with_capacity(max_entries.min(1024)),
             max_entries: max_entries.max(1), // Ensure at least 1
             access_order: VecDeque::new(),
+            ttl,
         }
+    }
+
+    /// Create a new cache with the default size and TTL.
+    pub fn with_defaults() -> Self {
+        Self::new(DEFAULT_CACHE_SIZE, Duration::from_secs(CACHE_TTL_SECS))
     }
 
     /// Look up a remote actor in the cache.
@@ -177,6 +186,15 @@ impl RemoteActorCache {
     /// On a hit, the entry is moved to the most-recently-used position.
     pub fn get(&mut self, node_id: NodeId, actor_id: u64) -> Option<&RemoteActorInfo> {
         let key = (node_id, actor_id);
+        // Check staleness first (immutable borrow) to avoid double mutable borrow.
+        let is_stale = self.entries.get(&key)
+            .map(|info| info.last_accessed.elapsed() > self.ttl)
+            .unwrap_or(false);
+        if is_stale {
+            self.entries.remove(&key);
+            self.access_order.retain(|&k| k != key);
+            return None;
+        }
         if let Some(info) = self.entries.get_mut(&key) {
             // Update LRU position: remove and re-insert at back.
             self.access_order.retain(|&k| k != key);
@@ -188,7 +206,6 @@ impl RemoteActorCache {
             None
         }
     }
-
     /// Add or update a remote actor in the cache.
     ///
     /// If the cache is at capacity, the least-recently-used entry is evicted.
@@ -259,6 +276,14 @@ impl RemoteActorCache {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Evict all entries older than the TTL. Call this periodically to
+    /// prevent the cache from filling with stale entries for dead actors.
+    pub fn evict_stale(&mut self) {
+        let cutoff = Instant::now() - self.ttl;
+        self.entries.retain(|_, info| info.last_accessed >= cutoff);
+        self.access_order.retain(|key| self.entries.contains_key(key));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -318,7 +343,7 @@ impl AddressResolver {
     pub fn new(local_node: NodeId) -> Self {
         AddressResolver {
             local_node,
-            remote_cache: RemoteActorCache::new(DEFAULT_CACHE_SIZE),
+            remote_cache: RemoteActorCache::with_defaults(),
             stats: ResolverStats::default(),
         }
     }
@@ -358,6 +383,11 @@ impl AddressResolver {
         if node_id == self.local_node || node_id == NodeId::LOCAL {
             self.stats.local_resolves += 1;
             return ResolveResult::Local { actor_id };
+        }
+
+        // Periodic eviction sweep — every 100th remote resolve, clean stale entries.
+        if self.stats.remote_resolves % 100 == 0 {
+            self.remote_cache.evict_stale();
         }
 
         // Check the cache first.
@@ -683,6 +713,8 @@ pub fn send_distributed(
                         "nulang-net: dropping message to actor {} on node {:?}: string payload cannot be resolved to content (no sender module context)",
                         actor_id, node_id
                     );
+                    let sender = runtime.current_actor.unwrap_or(0);
+                    notify_delivery_failed(runtime, sender, "string payload unresolvable");
                     return;
                 }
             };
@@ -701,7 +733,6 @@ pub fn send_distributed(
             if let Some(node_info) = cluster.get_node(node_id) {
                 let net_node_id = NodeId(node_id.0);
                 transport.send(net_node_id, node_info.address, packet);
-                resolver.record_remote_send(node_id, actor_id);
             } else {
                 // The node resolved as remote but is no longer in the
                 // membership table (it left between resolve and send). Log
@@ -710,6 +741,8 @@ pub fn send_distributed(
                     "nulang-net: dropping message to actor {} on node {:?}: node missing from cluster membership",
                     actor_id, node_id
                 );
+                let sender = runtime.current_actor.unwrap_or(0);
+                notify_delivery_failed(runtime, sender, "target node left cluster");
             }
         }
         ResolveResult::Unresolvable { reason } => {
@@ -717,8 +750,23 @@ pub fn send_distributed(
                 "nulang-net: dropping message to {:?}: {}",
                 target, reason
             );
+            let sender = runtime.current_actor.unwrap_or(0);
+            notify_delivery_failed(runtime, sender, &reason);
         }
     }
+}
+
+/// Notify a sender that their message could not be delivered.
+///
+/// Delivers a system message to the sender actor's behavior 0 with the
+/// failure reason as a string payload. Non-existent senders (id 0) are
+/// silently skipped.
+fn notify_delivery_failed(runtime: &mut Runtime, sender_id: u64, reason: &str) {
+    if sender_id == 0 { return; }
+    // Ensure sender actor still exists before queuing the notification.
+    if !runtime.actors.contains_key(&sender_id) { return; }
+    let fail_payload = vec![Value::string(0), Value::nil()]; // behavior name = "__delivery_failed" via string id 0
+    runtime.send_message_by_id(sender_id, 0, &fail_payload);
 }
 
 /// Process all incoming network packets and deliver actor messages.
@@ -763,6 +811,7 @@ pub fn process_network_packets(
                 request_id,
                 behavior_name,
                 initial_state,
+                bytecode: _,
             } => {
                 // MVP: remote spawn only supports behaviors the receiving
                 // runtime has explicitly registered via
@@ -849,11 +898,14 @@ pub fn process_network_packets(
                             "nulang-net: dropping message to actor {}: string payload cannot be interned (target actor missing or has no module pool)",
                             target_actor
                         );
+                        notify_delivery_failed(runtime, msg.sender, "string intern failed on receiver");
                         continue;
                     }
                     if let Some(actor) = runtime.actors.get_mut(&target_actor) {
                         let _ = actor.mailbox.push(msg);
                         runtime.scheduler.enqueue(target_actor);
+                    } else {
+                        notify_delivery_failed(runtime, msg.sender, "target actor not found");
                     }
                 }
             }
@@ -916,11 +968,15 @@ pub fn spawn_on_node(
             request_id,
             behavior_name: behavior_name.to_string(),
             initial_state,
+            bytecode: None,
         };
 
         if let Some(node_info) = cluster.get_node(node) {
             let net_node_id = NodeId(node.0);
             transport.send(net_node_id, node_info.address, packet);
+        } else {
+            let sender = runtime.current_actor.unwrap_or(0);
+            notify_delivery_failed(runtime, sender, "spawn target node not in cluster");
         }
 
         ActorAddress::remote(node, request_id)
@@ -1129,7 +1185,7 @@ mod tests {
 
     #[test]
     fn test_remote_cache_put_get() {
-        let mut cache = RemoteActorCache::new(100);
+        let mut cache = RemoteActorCache::with_defaults();
         assert!(cache.is_empty());
 
         cache.put(NodeId(1), 10);
@@ -1146,7 +1202,7 @@ mod tests {
 
     #[test]
     fn test_remote_cache_lru_eviction() {
-        let mut cache = RemoteActorCache::new(3);
+        let mut cache = RemoteActorCache::new(3, Duration::from_secs(3600));
 
         cache.put(NodeId(1), 10);
         cache.put(NodeId(2), 20);
@@ -1358,7 +1414,7 @@ mod tests {
 
     #[test]
     fn test_cache_most_active() {
-        let mut cache = RemoteActorCache::new(10);
+        let mut cache = RemoteActorCache::new(10, Duration::from_secs(3600));
 
         cache.put(NodeId(1), 10);
         cache.put(NodeId(2), 20);
@@ -1380,7 +1436,7 @@ mod tests {
 
     #[test]
     fn test_cache_remove() {
-        let mut cache = RemoteActorCache::new(10);
+        let mut cache = RemoteActorCache::new(10, Duration::from_secs(3600));
 
         cache.put(NodeId(1), 10);
         cache.put(NodeId(2), 20);
