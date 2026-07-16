@@ -204,6 +204,7 @@ fn compile_terminator_with_params(
     block_map: &HashMap<mir::BlockId, cranelift::prelude::Block>,
     block_params: &HashMap<mir::BlockId, Vec<u32>>,
     local_vals: &HashMap<u32, Value>,
+    _mode: CompileMode,
 ) -> AotResult<()> {
     match term {
         mir::Terminator::Return(val) => {
@@ -463,13 +464,13 @@ pub fn compile_mir_function_body(
             for stmt in &block.stmts {
                 compile_stmt(&mut builder, stmt, &type_meta, &h, &call_targets, &mut closure_targets, &mut local_vals, mode)?;
             }
-
             compile_terminator_with_params(
                 &mut builder,
                 &block.terminator,
                 &block_map,
                 &block_params,
                 &local_vals,
+                mode,
             )?;
         }
 
@@ -485,6 +486,71 @@ pub fn compile_mir_function_body(
 
     module
         .define_function(func_id, codegen_ctx)
+        .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+
+    module.clear_context(codegen_ctx);
+
+    Ok(())
+}
+
+/// Generate a thin boxing wrapper for an all-Int function.
+///
+/// The wrapper takes tagged i64 arguments, untags them, calls the unboxed
+/// variant, tags the result, and returns. This replaces the boxed body so
+/// that callers always go through the wrapper — the original boxed body
+/// is never compiled.
+pub fn compile_boxing_wrapper(
+    aot: &mut AotContext,
+    param_count: usize,
+    boxed_fid: cranelift_module::FuncId,
+    unboxed_fid: cranelift_module::FuncId,
+) -> AotResult<()> {
+    // Split module and codegen_ctx for independent borrows.
+    let module: &mut JITModule = aot.module;
+    let codegen_ctx: &mut codegen::Context = &mut aot.codegen_ctx;
+    let builder_ctx: &mut FunctionBuilderContext = aot.builder_context;
+    // Set up function signature: tagged i64 params, tagged i64 return.
+    let mut sig = module.make_signature();
+    for _ in 0..param_count {
+        sig.params.push(AbiParam::new(types::I64));
+    }
+    sig.returns.push(AbiParam::new(types::I64));
+    codegen_ctx.func.signature = sig;
+
+    let mut builder = FunctionBuilder::new(&mut codegen_ctx.func, builder_ctx);
+    let entry_block = builder.create_block();
+    builder.switch_to_block(entry_block);
+    builder.append_block_params_for_function_params(entry_block);
+
+    // Get unboxed function reference.
+    let callee_ref = module.declare_func_in_func(unboxed_fid, builder.func);
+
+    // Untag each parameter.
+    let params: Vec<Value> = builder.block_params(entry_block).to_vec();
+    let unboxed_args: Vec<Value> = params
+        .iter()
+        .map(|&p| emit_sext48(&mut builder, p))
+        .collect();
+
+    // Call unboxed variant.
+    let call = builder.ins().call(callee_ref, &unboxed_args);
+    let raw_result = builder.inst_results(call)[0];
+
+    // Tag result and return.
+    let tagged = emit_tag_int(&mut builder, raw_result);
+    builder.ins().return_(&[tagged]);
+
+    builder.seal_all_blocks();
+    builder.finalize();
+
+    // Debug: dump CLIF when verbose.
+    if std::env::var("NULANG_DUMP_CLIF").is_ok() {
+        eprintln!("=== CLIF for boxing wrapper ({}) ===", param_count);
+        eprintln!("{}", codegen_ctx.func.display());
+    }
+
+    module
+        .define_function(boxed_fid, codegen_ctx)
         .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
 
     module.clear_context(codegen_ctx);
@@ -646,7 +712,7 @@ fn compile_binary(
     type_meta: &TypeMetadata,
     helpers: &HashMap<&str, FuncRef>,
     local_vals: &HashMap<u32, Value>,
-    _mode: CompileMode,
+    mode: CompileMode,
 ) -> AotResult<Value> {
     let lhs_reg = mir::FunctionBuilder::LOCAL_BASE + lhs.0;
     let rhs_reg = mir::FunctionBuilder::LOCAL_BASE + rhs.0;
@@ -664,10 +730,14 @@ fn compile_binary(
     match op {
         BinOp::Add => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
-                let l = emit_sext48(builder, lhs_val);
-                let r = emit_sext48(builder, rhs_val);
-                let sum = builder.ins().iadd(l, r);
-                Ok(emit_tag_int(builder, sum))
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().iadd(lhs_val, rhs_val))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let sum = builder.ins().iadd(l, r);
+                    Ok(emit_tag_int(builder, sum))
+                }
             } else if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Float) {
                 let l = builder.ins().bitcast(types::F64, MemFlags::new(), lhs_val);
                 let r = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
@@ -680,10 +750,14 @@ fn compile_binary(
         }
         BinOp::Sub => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
-                let l = emit_sext48(builder, lhs_val);
-                let r = emit_sext48(builder, rhs_val);
-                let diff = builder.ins().isub(l, r);
-                Ok(emit_tag_int(builder, diff))
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().isub(lhs_val, rhs_val))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let diff = builder.ins().isub(l, r);
+                    Ok(emit_tag_int(builder, diff))
+                }
             } else if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Float) {
                 let l = builder.ins().bitcast(types::F64, MemFlags::new(), lhs_val);
                 let r = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
@@ -695,10 +769,14 @@ fn compile_binary(
         }
         BinOp::Mul => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
-                let l = emit_sext48(builder, lhs_val);
-                let r = emit_sext48(builder, rhs_val);
-                let prod = builder.ins().imul(l, r);
-                Ok(emit_tag_int(builder, prod))
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().imul(lhs_val, rhs_val))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let prod = builder.ins().imul(l, r);
+                    Ok(emit_tag_int(builder, prod))
+                }
             } else if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Float) {
                 let l = builder.ins().bitcast(types::F64, MemFlags::new(), lhs_val);
                 let r = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
@@ -714,50 +792,75 @@ fn compile_binary(
         }
         BinOp::Eq => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
-                let l = emit_sext48(builder, lhs_val);
-                let r = emit_sext48(builder, rhs_val);
-                let cmp = builder.ins().icmp(IntCC::Equal, l, r);
-                Ok(emit_tag_bool(builder, cmp))
+                if mode == CompileMode::Unboxed {
+                    let cmp = builder.ins().icmp(IntCC::Equal, lhs_val, rhs_val);
+                    Ok(emit_tag_bool(builder, cmp))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let cmp = builder.ins().icmp(IntCC::Equal, l, r);
+                    Ok(emit_tag_bool(builder, cmp))
+                }
             } else {
                 call_helper(builder, helpers, "nulang_icmp_eq", &[lhs_val, rhs_val])
             }
         }
         BinOp::Lt => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
-                let l = emit_sext48(builder, lhs_val);
-                let r = emit_sext48(builder, rhs_val);
-                let cmp = builder.ins().icmp(IntCC::SignedLessThan, l, r);
-                Ok(emit_tag_bool(builder, cmp))
+                if mode == CompileMode::Unboxed {
+                    let cmp = builder.ins().icmp(IntCC::SignedLessThan, lhs_val, rhs_val);
+                    Ok(emit_tag_bool(builder, cmp))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let cmp = builder.ins().icmp(IntCC::SignedLessThan, l, r);
+                    Ok(emit_tag_bool(builder, cmp))
+                }
             } else {
                 call_helper(builder, helpers, "nulang_icmp_lt", &[lhs_val, rhs_val])
             }
         }
         BinOp::Gt => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
-                let l = emit_sext48(builder, lhs_val);
-                let r = emit_sext48(builder, rhs_val);
-                let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, l, r);
-                Ok(emit_tag_bool(builder, cmp))
+                if mode == CompileMode::Unboxed {
+                    let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, lhs_val, rhs_val);
+                    Ok(emit_tag_bool(builder, cmp))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, l, r);
+                    Ok(emit_tag_bool(builder, cmp))
+                }
             } else {
                 call_helper(builder, helpers, "nulang_icmp_gt", &[lhs_val, rhs_val])
             }
         }
         BinOp::Le => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
-                let l = emit_sext48(builder, lhs_val);
-                let r = emit_sext48(builder, rhs_val);
-                let cmp = builder.ins().icmp(IntCC::SignedLessThanOrEqual, l, r);
-                Ok(emit_tag_bool(builder, cmp))
+                if mode == CompileMode::Unboxed {
+                    let cmp = builder.ins().icmp(IntCC::SignedLessThanOrEqual, lhs_val, rhs_val);
+                    Ok(emit_tag_bool(builder, cmp))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let cmp = builder.ins().icmp(IntCC::SignedLessThanOrEqual, l, r);
+                    Ok(emit_tag_bool(builder, cmp))
+                }
             } else {
                 call_helper(builder, helpers, "nulang_icmp_le", &[lhs_val, rhs_val])
             }
         }
         BinOp::Ge => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
-                let l = emit_sext48(builder, lhs_val);
-                let r = emit_sext48(builder, rhs_val);
-                let cmp = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r);
-                Ok(emit_tag_bool(builder, cmp))
+                if mode == CompileMode::Unboxed {
+                    let cmp = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, lhs_val, rhs_val);
+                    Ok(emit_tag_bool(builder, cmp))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let cmp = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r);
+                    Ok(emit_tag_bool(builder, cmp))
+                }
             } else {
                 call_helper(builder, helpers, "nulang_icmp_ge", &[lhs_val, rhs_val])
             }

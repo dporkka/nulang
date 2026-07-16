@@ -102,24 +102,37 @@ impl AotModule {
         let mut entry_idx: Option<usize> = None;
 
         for (idx, func) in mir_module.functions.iter().enumerate() {
-            let mut ctx = codegen::AotContext::new(&mut jit_module, &mut builder_context);
-            ctx.func_ids = func_ids.clone();
-
-            // Compile boxed variant.
-            codegen::compile_mir_function_body(&mut ctx, func, idx, func_ids[idx], codegen::CompileMode::Boxed).map_err(|e| {
-                crate::types::NuError::VMError(format!(
-                    "AOT compilation of '{}' failed: {}",
-                    func.name, e
-                ))
-            })?;
-
-            // If eligible, also compile the unboxed variant.
+            // For all-Int functions: compile unboxed body first, then
+            // generate a boxing wrapper as the boxed entry point. The
+            // original boxed body is never compiled.
+            // For non-all-Int functions: compile boxed body as usual.
             if let Some(ub_fid) = unboxed_ids[idx] {
+                // Compile unboxed variant (self-recursive calls resolve to ub_fid).
                 let mut ctx2 = codegen::AotContext::new(&mut jit_module, &mut builder_context);
                 ctx2.func_ids = func_ids.clone();
+                ctx2.func_ids[idx] = ub_fid; // Step 4d: self-calls use unboxed variant
                 codegen::compile_mir_function_body(&mut ctx2, func, idx, ub_fid, codegen::CompileMode::Unboxed).map_err(|e| {
                     crate::types::NuError::VMError(format!(
                         "AOT compilation of unboxed '{}' failed: {}",
+                        func.name, e
+                    ))
+                })?;
+
+                // Compile boxing wrapper as the boxed function table entry.
+                let mut ctx3 = codegen::AotContext::new(&mut jit_module, &mut builder_context);
+                codegen::compile_boxing_wrapper(&mut ctx3, func.params.len(), func_ids[idx], ub_fid).map_err(|e| {
+                    crate::types::NuError::VMError(format!(
+                        "AOT boxing wrapper for '{}' failed: {}",
+                        func.name, e
+                    ))
+                })?;
+            } else {
+                // Normal boxed compilation for non-all-Int functions.
+                let mut ctx = codegen::AotContext::new(&mut jit_module, &mut builder_context);
+                ctx.func_ids = func_ids.clone();
+                codegen::compile_mir_function_body(&mut ctx, func, idx, func_ids[idx], codegen::CompileMode::Boxed).map_err(|e| {
+                    crate::types::NuError::VMError(format!(
+                        "AOT compilation of '{}' failed: {}",
                         func.name, e
                     ))
                 })?;
