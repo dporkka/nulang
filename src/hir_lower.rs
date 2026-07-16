@@ -1084,6 +1084,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             actor_type,
             init,
             span,
+            ..
         } => {
             let name = actor_name_from_expr(actor_type).unwrap_or_default();
             let init_ops: Vec<_> = init
@@ -1705,6 +1706,8 @@ mod tests {
         let spawn = Expr::Spawn {
             actor_type: Box::new(var("Counter")),
             init: vec![("count".to_string(), var("k"))],
+            positional_args: None,
+            register_as: None,
             span,
         };
         assert!(used(&spawn).contains("k"), "spawn init must be free");

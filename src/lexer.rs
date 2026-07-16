@@ -84,6 +84,7 @@ pub enum TokenKind {
     Unit,
     Tool,
     Initial,
+    As,
 
     // Identifiers
     Ident(String),
@@ -781,6 +782,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "match" => Some(TokenKind::Match),
         "with" => Some(TokenKind::With),
         "case" => Some(TokenKind::Case),
+        "as" => Some(TokenKind::As),
         "actor" => Some(TokenKind::Actor),
         "behavior" => Some(TokenKind::Behavior),
         "state" => Some(TokenKind::State),

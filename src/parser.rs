@@ -1680,25 +1680,74 @@ impl Parser {
             }
             _ => None,
         };
-        let actor_type = self.parse_expr()?;
-        self.expect(TokenKind::LBrace)?;
-        let mut init = Vec::new();
-        self.skip_newlines();
-        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
-            self.skip_newlines();
-            if self.match_token(&TokenKind::RBrace) {
-                break;
+        // Parse the actor name.  In a spawn expression the target is always a
+        // simple name (like `Counter` or `DurableCounter`), never an arbitrary
+        // expression.  We parse it as an identifier so `spawn Foo(args)` does
+        // not get misinterpreted as a function call.
+        let actor_name = match self.peek_kind().clone() {
+            TokenKind::Ident(s) | TokenKind::UpperIdent(s) => {
+                self.advance();
+                s
             }
-            let field = self.expect_ident("field name")?;
-            self.expect(TokenKind::Assign)?;
-            let val = self.parse_expr()?;
-            init.push((field, val));
-            self.skip_newlines_semicolons();
-        }
-        self.expect(TokenKind::RBrace)?;
+            _ => return Err(NuError::ParseError {
+                msg: format!("Expected actor name in spawn, got {:?}", self.peek_kind()),
+                span: self.current_span(),
+            }),
+        };
+        let actor_type = Expr::Var(actor_name, span);
+
+        // Optional positional constructor args: `spawn Foo(a, b)`
+        let positional_args = if self.peek_kind() == &TokenKind::LParen {
+            self.advance(); // consume '('
+            let mut args = Vec::new();
+            self.skip_newlines();
+            while !self.match_token(&TokenKind::RParen) && !self.is_at_end() {
+                args.push(self.parse_expr()?);
+                self.skip_newlines();
+                if !self.consume_if(&TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines();
+            }
+            self.expect(TokenKind::RParen)?;
+            Some(args)
+        } else {
+            None
+        };
+
+        // Field init block `{ field = val, ... }` — required if no positional args.
+        let init = if positional_args.is_none() {
+            self.expect(TokenKind::LBrace)?;
+            let mut fields = Vec::new();
+            self.skip_newlines();
+            while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                self.skip_newlines();
+                if self.match_token(&TokenKind::RBrace) {
+                    break;
+                }
+                let field = self.expect_ident("field name")?;
+                self.expect(TokenKind::Assign)?;
+                let val = self.parse_expr()?;
+                fields.push((field, val));
+                self.skip_newlines_semicolons();
+            }
+            self.expect(TokenKind::RBrace)?;
+            fields
+        } else {
+            Vec::new()
+        };
+
+        // Optional named registration: `spawn Foo() as "name"`
+        let register_as = if self.consume_if(&TokenKind::As) {
+            Some(self.expect_string("actor name")?)
+        } else {
+            None
+        };
         let spawned = Expr::Spawn {
             actor_type: Box::new(actor_type),
             init,
+            positional_args,
+            register_as,
             span,
         };
         Ok(match link_op {
@@ -3118,6 +3167,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_parse_spawn_positional_args_and_as() {
+        // spawn Foo(a, b) as "my_foo"
+        let expr = parse_expr(r#"spawn Foo(1, 2) as "my_foo""#).unwrap();
+        match expr {
+            Expr::Spawn {
+                positional_args,
+                register_as,
+                ..
+            } => {
+                let args = positional_args.expect("should have positional args");
+                assert_eq!(args.len(), 2);
+                assert_eq!(register_as.as_deref(), Some("my_foo"));
+            }
+            _ => panic!("Expected Spawn"),
+        }
+
+        // spawn Foo { x = 1 } as "bar"
+        let expr = parse_expr(r#"spawn Foo { x = 1 } as "bar""#).unwrap();
+        match expr {
+            Expr::Spawn {
+                init,
+                positional_args,
+                register_as,
+                ..
+            } => {
+                assert!(positional_args.is_none());
+                assert_eq!(init.len(), 1);
+                assert_eq!(init[0].0, "x");
+                assert_eq!(register_as.as_deref(), Some("bar"));
+            }
+            _ => panic!("Expected Spawn"),
+        }
+
+        // spawn Foo(1) without as
+        let expr = parse_expr("spawn Foo(1)").unwrap();
+        match expr {
+            Expr::Spawn {
+                positional_args,
+                register_as,
+                ..
+            } => {
+                assert!(positional_args.is_some());
+                assert!(register_as.is_none());
+            }
+            _ => panic!("Expected Spawn"),
+        }
+    }
     #[test]
     fn test_parse_record_literal() {
         let ast = parse("{ x: 1, y: 2 }").unwrap();

@@ -1029,8 +1029,8 @@ impl TypeChecker {
             // Spawn actor
             Expr::Spawn {
                 actor_type,
-                init: _,
                 span,
+                ..
             } => self.infer_spawn(ctx, actor_type, *span),
 
             // Send message

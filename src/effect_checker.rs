@@ -1880,6 +1880,8 @@ mod tests {
         let spawn = Expr::Spawn {
             actor_type: Box::new(Expr::Var("MyActor".to_string(), s())),
             init: vec![],
+            positional_args: None,
+            register_as: None,
             span: s(),
         };
         let row = checker.infer_effects(&ctx, &spawn).unwrap();
@@ -2115,6 +2117,8 @@ mod tests {
         let spawn = Expr::Spawn {
             actor_type: Box::new(Expr::Var("A".to_string(), s())),
             init: vec![],
+            positional_args: None,
+            register_as: None,
             span: s(),
         };
         let cap = analyzer.infer_cap(&ctx, &spawn).unwrap();

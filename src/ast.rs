@@ -125,10 +125,14 @@ pub enum Expr {
         value: Box<Expr>,
         span: Span,
     },
-    /// Actor spawn: spawn ActorName { init }
+    /// Actor spawn: spawn ActorName { init } or spawn ActorName(args)
     Spawn {
         actor_type: Box<Expr>,
         init: Vec<(String, Expr)>,
+        /// Positional constructor args: `spawn Foo(a, b)`.
+        positional_args: Option<Vec<Expr>>,
+        /// Named registration: `spawn Foo() as "name"`.
+        register_as: Option<String>,
         span: Span,
     },
     /// Message send: actor ! behavior(args)
