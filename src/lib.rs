@@ -14,6 +14,9 @@ pub mod mir_codegen;
 pub mod mir_wasm;
 #[cfg(feature = "wasm-backend")]
 pub mod wasm_runtime;
+pub mod wasm_types;
+#[cfg(feature = "wasm-backend")]
+pub mod wasm_component_runtime;
 pub mod mir_lower;
 pub mod package;
 pub mod parser;

@@ -141,7 +141,13 @@ impl Parser {
         self.skip_newlines();
         match self.peek_kind().clone() {
             TokenKind::Fn => self.parse_function(public, annotations),
-            TokenKind::Actor | TokenKind::Persistent => self.parse_actor(),
+            TokenKind::Actor | TokenKind::Persistent => {
+                let backend = annotations.iter().find_map(|a| match a {
+                    crate::ast::FunctionAnnotation::Backend { kind } => Some(*kind),
+                    _ => None,
+                });
+                self.parse_actor(backend)
+            }
             TokenKind::StateMachine => self.parse_state_machine(),
             TokenKind::Agent => self.parse_agent(),
             TokenKind::Workflow => self.parse_workflow(),
@@ -220,9 +226,12 @@ impl Parser {
             self.skip_newlines();
             while !self.match_token(&TokenKind::RParen) && !self.is_at_end() {
                 let field_name = self.expect_ident("annotation field name")?;
-                self.expect(TokenKind::Colon)?;
-                let field_value = self.expect_string("annotation field value")?;
-                fields.insert(field_name, field_value);
+                if self.consume_if(&TokenKind::Colon) {
+                    let field_value = self.expect_string("annotation field value")?;
+                    fields.insert(field_name, field_value);
+                } else {
+                    fields.insert(String::new(), field_name);
+                }
                 self.skip_newlines();
                 if !self.consume_if(&TokenKind::Comma) {
                     break;
@@ -234,6 +243,21 @@ impl Parser {
                 "tool" => {
                     let description = fields.remove("description").unwrap_or_default();
                     annotations.push(FunctionAnnotation::Tool { description });
+                }
+                "backend" => {
+                    let kind_str = fields
+                        .remove("kind")
+                        .or_else(|| fields.remove(""))
+                        .unwrap_or_default();
+                    let kind = match kind_str.as_str() {
+                        "native" => crate::ast::ActorBackendKind::Native,
+                        "wasm" => crate::ast::ActorBackendKind::WasmComponent,
+                        other => return Err(NuError::ParseError {
+                            msg: format!("Unknown backend '{}'; expected 'native' or 'wasm'", other),
+                            span: self.current_span(),
+                        }),
+                    };
+                    annotations.push(FunctionAnnotation::Backend { kind });
                 }
                 _ => {
                     return Err(NuError::ParseError {
@@ -298,7 +322,7 @@ impl Parser {
         })
     }
 
-    fn parse_actor(&mut self) -> NuResult<Decl> {
+    fn parse_actor(&mut self, backend: Option<crate::ast::ActorBackendKind>) -> NuResult<Decl> {
         let span = self.current_span();
         let persistent = self.consume_if(&TokenKind::Persistent);
         self.expect(TokenKind::Actor)?;
@@ -353,6 +377,7 @@ impl Parser {
             state_fields,
             behaviors,
             init: vec![],
+            backend,
             span,
         })
     }

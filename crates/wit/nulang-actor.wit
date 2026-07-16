@@ -1,0 +1,32 @@
+/// Nulang Actor WASM Component Interface
+///
+/// Defines the contract between a compiled Nulang actor WASM component
+/// and the host runtime scheduler.
+
+package nulang:actor@0.1.0;
+
+interface types {
+    record pid {
+        node-id: string,
+        actor-id: string,
+    }
+}
+
+interface host {
+    use types.{pid};
+    send: func(recipient: pid, payload: list<u8>);
+    perform-effect: func(effect-name: string, payload: list<u8>) -> result<list<u8>, string>;
+    log: func(level: string, message: string);
+}
+
+interface handler {
+    init: func(id: string, initial-args: list<u8>) -> result<_, string>;
+    handle-message: func(sender: string, payload: list<u8>) -> result<_, string>;
+    checkpoint: func() -> result<list<u8>, string>;
+}
+
+world nulang-actor {
+    import wasi:clocks@0.2.0;
+    import host;
+    export handler;
+}

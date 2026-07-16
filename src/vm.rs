@@ -1443,9 +1443,15 @@ impl VM {
                     for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
                         regs[i] = r.to_bits();
                     }
+                    unsafe {
+                        crate::jit::runtime::set_jit_callbacks(
+                            self.actor_callbacks.as_mut() as *mut dyn ActorVmCallbacks,
+                        );
+                    }
                     let action = jit::tiered_execute_step_typed(
                         jit, module_idx, pc, module, &mut regs, constants,
                     );
+                    crate::jit::runtime::clear_jit_callbacks();
                     if action != TieredAction::Interpret {
                         for (i, bits) in regs.iter().enumerate() {
                             self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
@@ -1460,9 +1466,15 @@ impl VM {
                     for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
                         regs[i] = r.to_bits();
                     }
+                    unsafe {
+                        crate::jit::runtime::set_jit_callbacks(
+                            self.actor_callbacks.as_mut() as *mut dyn ActorVmCallbacks,
+                        );
+                    }
                     let action = jit::tiered_execute_step_typed(
                         jit, module_idx, pc, module, &mut regs, constants,
                     );
+                    crate::jit::runtime::clear_jit_callbacks();
                     if action != TieredAction::Interpret {
                         for (i, bits) in regs.iter().enumerate() {
                             self.frames[frame_idx].regs[i] = Value::from_bits(*bits);

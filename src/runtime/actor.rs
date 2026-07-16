@@ -23,6 +23,18 @@ pub enum ActorState {
 /// order only; it does not touch message delivery order
 /// (`Mailbox::receive_match` stays FIFO and ignores `Message::priority`).
 /// Set from Nulang via `perform Actor.set_priority(0|1|2)`.
+/// Execution backend for an actor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActorBackend {
+    /// Native bytecode with JIT tiering (trusted, default).
+    Native,
+    /// WASM Component with share-nothing isolation (untrusted).
+    WasmComponent { component_path: String },
+}
+
+impl Default for ActorBackend {
+    fn default() -> Self { ActorBackend::Native }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActorPriority {
     High,
@@ -85,6 +97,8 @@ pub struct Actor {
     pub query_handlers: HashMap<String, Value>,
     /// True if this actor was generated from an `agent` declaration.
     pub is_agent: bool,
+    /// Execution backend for this actor.
+    pub backend: ActorBackend,
     /// True while a background worker thread holds an in-flight LLM request
     /// issued by this actor's suspended bytecode behavior.
     pub llm_inflight: bool,
@@ -169,6 +183,7 @@ impl Actor {
             received_signals: Vec::new(),
             query_handlers: HashMap::new(),
             is_agent: false,
+            backend: ActorBackend::default(),
             llm_inflight: false,
             llm_pending_prompt: None,
             llm_completed: None,

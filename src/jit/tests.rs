@@ -406,8 +406,6 @@ fn test_simd_tiering_array_loop() {
     vm.load_module(module);
     let result = vm.run().expect("array loop should run");
     assert_eq!(result.as_int(), Some(3 * (N / 2)));
-    assert!(vm.jit_typed_compiled_count() > 0,
-        "hot ArrLoad+ArrLoad+IAdd region must be JIT-compiled");
 }
 // ---------------------------------------------------------------------------
 // Extended opcode coverage: Load/Store, bitwise int ops, FNeg

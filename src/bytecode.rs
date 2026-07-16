@@ -538,6 +538,9 @@ pub struct ActorMeta {
     pub semantic_memory_dimensions: Option<usize>,
     /// Procedural-memory namespace, if configured for this agent.
     pub procedural_memory_namespace: Option<String>,
+    /// Compile-time backend selection for this actor.
+    #[serde(default)]
+    pub backend: crate::ast::ActorBackendKind,
 }
 
 impl ActorMeta {
@@ -553,6 +556,7 @@ impl ActorMeta {
             tools: Vec::new(),
             semantic_memory_dimensions: None,
             procedural_memory_namespace: None,
+            backend: crate::ast::ActorBackendKind::default(),
         }
     }
 }

@@ -452,6 +452,15 @@ impl Runtime {
                         actor.set_state_field(name, ptr);
                     }
                 }
+                // Set backend from actor metadata.
+                actor.backend = match meta.backend {
+                    crate::ast::ActorBackendKind::Native =>
+                        crate::runtime::actor::ActorBackend::Native,
+                    crate::ast::ActorBackendKind::WasmComponent =>
+                        crate::runtime::actor::ActorBackend::WasmComponent {
+                            component_path: String::new(),
+                        },
+                };
             }
         }
         if meta.map(|m| m.is_workflow).unwrap_or(false) {
@@ -2400,6 +2409,19 @@ impl Runtime {
                 self.checkpoint_actor(actor_id);
                 self.current_actor = None;
                 return;
+            }
+
+            // Backend dispatch: WASM component actors are handled by the
+            // component runtime, not the native VM.
+            {
+                let actor = match self.actors.get(&actor_id) {
+                    Some(a) => a,
+                    None => { self.current_actor = None; return; }
+                };
+                if let crate::runtime::actor::ActorBackend::WasmComponent { .. } = &actor.backend {
+                    self.current_actor = None;
+                    return; // stub: WASM component runtime not yet integrated
+                }
             }
 
             let handler_fn: Option<fn(&mut Actor, &[Value])> = {

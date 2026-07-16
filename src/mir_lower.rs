@@ -121,6 +121,7 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
                 tools: a.tools.clone(),
                 semantic_memory_dimensions: a.semantic_memory_dimensions,
                 procedural_memory_namespace: a.procedural_memory_namespace.clone(),
+                backend: crate::ast::ActorBackendKind::Native,
             });
         }
         hir::Decl::Workflow { name, .. } => {

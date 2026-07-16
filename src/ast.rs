@@ -303,6 +303,18 @@ pub struct StateMachineEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Actor backend kind
+// ---------------------------------------------------------------------------
+
+/// Actor execution backend kind, selected at compile time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ActorBackendKind {
+    #[default]
+    Native,
+    WasmComponent,
+}
+
+// ---------------------------------------------------------------------------
 // Function annotations
 // ---------------------------------------------------------------------------
 
@@ -310,6 +322,8 @@ pub struct StateMachineEvent {
 pub enum FunctionAnnotation {
     /// `@tool(description: "...")` marks a function as an LLM-callable tool.
     Tool { description: String },
+    /// `@backend(native | wasm)` selects the actor execution backend.
+    Backend { kind: ActorBackendKind },
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +381,8 @@ pub enum Decl {
         state_fields: Vec<(String, StateModel, Type, Expr)>, // name, model, type, default
         behaviors: Vec<Behavior>,
         init: Vec<(String, Expr)>,
+        /// Compile-time backend selection. `None` means use the CLI default.
+        backend: Option<ActorBackendKind>,
         span: Span,
     },
     /// State machine declaration (BEAM_PRIMITIVES §4.2 gen_statem adaptation):
@@ -617,6 +633,7 @@ pub fn desugar_state_machine(
         state_fields: vec![state_field],
         behaviors,
         init: vec![],
+        backend: None,
         span,
     }
 }

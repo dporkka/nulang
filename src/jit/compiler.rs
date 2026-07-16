@@ -90,7 +90,10 @@ pub fn is_opcode_compilable(op: OpCode) -> bool {
             | OpCode::Ret
             | OpCode::RetVal
             | OpCode::ArrLoad
-     )
+            | OpCode::ArrStore
+            | OpCode::ArrLen
+            | OpCode::FieldL
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +112,23 @@ fn make_unary_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I64));
+    sig
+}
+
+fn make_void_reg3_sig<M: Module>(module: &M) -> Signature {
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I32));
+    sig.params.push(AbiParam::new(types::I32));
+    sig
+}
+
+fn make_void_reg4_sig<M: Module>(module: &M) -> Signature {
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I32));
+    sig.params.push(AbiParam::new(types::I32));
+    sig.params.push(AbiParam::new(types::I32));
     sig
 }
 
@@ -149,6 +169,9 @@ pub enum RuntimeHelper {
     Not,
     IToF,
     FToI,
+    ArrStore,
+    ArrLen,
+    FieldL,
 }
 
 fn register_runtime_helpers<M: Module>(
@@ -205,6 +228,29 @@ fn register_runtime_helpers<M: Module>(
     for (helper, name) in unary_helpers {
         let func_id = module
             .declare_function(name, Linkage::Import, &make_unary_sig(module))
+            .map_err(|e| CompileError::Internal(format!("declare {}: {}", name, e)))?;
+        let func_ref = module.declare_func_in_func(func_id, builder.func);
+        helpers.insert(*helper, func_ref);
+    }
+
+    let reg4_helpers: &[(RuntimeHelper, &str)] = &[
+        (RuntimeHelper::ArrStore, "nulang_arr_store"),
+        (RuntimeHelper::FieldL, "nulang_field_load"),
+    ];
+    for (helper, name) in reg4_helpers {
+        let func_id = module
+            .declare_function(name, Linkage::Import, &make_void_reg4_sig(module))
+            .map_err(|e| CompileError::Internal(format!("declare {}: {}", name, e)))?;
+        let func_ref = module.declare_func_in_func(func_id, builder.func);
+        helpers.insert(*helper, func_ref);
+    }
+
+    let reg3_helpers: &[(RuntimeHelper, &str)] = &[
+        (RuntimeHelper::ArrLen, "nulang_arr_len"),
+    ];
+    for (helper, name) in reg3_helpers {
+        let func_id = module
+            .declare_function(name, Linkage::Import, &make_void_reg3_sig(module))
             .map_err(|e| CompileError::Internal(format!("declare {}: {}", name, e)))?;
         let func_ref = module.declare_func_in_func(func_id, builder.func);
         helpers.insert(*helper, func_ref);
@@ -655,6 +701,27 @@ pub fn compile_bytecode_region(
                     instr.op1 as usize, instr.op2 as usize, instr.op3 as usize,
                 );
             }
+            OpCode::ArrStore => {
+                emit_reg_call4(
+                    &mut builder, &helpers, regs_ptr,
+                    instr.op1, instr.op2, instr.op3,
+                    RuntimeHelper::ArrStore,
+                );
+            }
+            OpCode::ArrLen => {
+                emit_reg_call3(
+                    &mut builder, &helpers, regs_ptr,
+                    instr.op1, instr.op3,
+                    RuntimeHelper::ArrLen,
+                );
+            }
+            OpCode::FieldL => {
+                emit_reg_call4(
+                    &mut builder, &helpers, regs_ptr,
+                    instr.op1, instr.op2, instr.op3,
+                    RuntimeHelper::FieldL,
+                );
+            }
             _ => {
                 builder.ins().jump(return_block, &[]);
             }
@@ -864,6 +931,36 @@ fn emit_self_unary(
     helper: RuntimeHelper,
 ) {
     emit_unary(builder, helpers, regs_ptr, reg, reg, helper);
+}
+
+fn emit_reg_call3(
+    builder: &mut FunctionBuilder,
+    helpers: &HashMap<RuntimeHelper, FuncRef>,
+    regs_ptr: Value,
+    r1: u8,
+    r2: u8,
+    helper: RuntimeHelper,
+) {
+    let func_ref = *helpers.get(&helper).expect("helper not registered");
+    let a = builder.ins().iconst(types::I32, r1 as i64);
+    let b = builder.ins().iconst(types::I32, r2 as i64);
+    builder.ins().call(func_ref, &[regs_ptr, a, b]);
+}
+
+fn emit_reg_call4(
+    builder: &mut FunctionBuilder,
+    helpers: &HashMap<RuntimeHelper, FuncRef>,
+    regs_ptr: Value,
+    r1: u8,
+    r2: u8,
+    r3: u8,
+    helper: RuntimeHelper,
+) {
+    let func_ref = *helpers.get(&helper).expect("helper not registered");
+    let a = builder.ins().iconst(types::I32, r1 as i64);
+    let b = builder.ins().iconst(types::I32, r2 as i64);
+    let c = builder.ins().iconst(types::I32, r3 as i64);
+    builder.ins().call(func_ref, &[regs_ptr, a, b, c]);
 }
 
 #[cfg(test)]
