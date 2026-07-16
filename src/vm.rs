@@ -431,6 +431,21 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
         if effect_name == "Timer" {
             return Some(Value::unit());
         }
+        if effect_name == "Int" && op_name == Some("to_string") {
+            let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+            let s = format!("{}", n);
+            let bytes = s.into_bytes();
+            match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                Some(ptr) => {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                    }
+                    return Some(Value::ptr(ptr));
+                }
+                None => return Some(Value::nil()),
+            }
+        }
         if effect_name != "IO" {
             return None;
         }

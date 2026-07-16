@@ -4694,6 +4694,15 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             }
             return Some(crate::vm::Value::unit());
         }
+        if effect_name == "Int" && op_name == Some("to_string") {
+            let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+            let s = format!("{}", n);
+            let mut rt = self.runtime.borrow_mut();
+            return Some(match &mut rt.vm {
+                Some(vm) => vm.add_runtime_string(0, s),
+                None => crate::vm::Value::nil(),
+            });
+        }
         if effect_name == "Actor" {
             let mut rt = self.runtime.borrow_mut();
             let actor_id = rt.current_actor;
@@ -5041,6 +5050,14 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     }
                 }
                 return Some(crate::vm::Value::unit());
+            }
+            if effect_name == "Int" && op_name == Some("to_string") {
+                let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+                let s = format!("{}", n);
+                if let Some(ref mut vm) = (*self.runtime).vm {
+                    return Some(vm.add_runtime_string(0, s));
+                }
+                return Some(crate::vm::Value::nil());
             }
             if effect_name == "IO" {
                 if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {

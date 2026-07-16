@@ -102,6 +102,14 @@ impl StdLib {
                     description: "Read one line from stdin; returns the line without the trailing newline.",
                 },
                 BuiltinOp {
+                    name: "Int.to_string",
+                    effect: "Int",
+                    op: "to_string",
+                    signature: "to_string(value: Int) -> String",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Convert an integer to its string representation.",
+                },
+                BuiltinOp {
                     name: "Timer.sleep",
                     effect: "Timer",
                     op: "sleep",
@@ -421,7 +429,7 @@ mod tests {
         let lib = StdLib::new();
         assert_eq!(
             lib.effects(),
-            vec!["IO", "Timer", "Signal", "LLM", "Actor", "Otp"]
+            vec!["IO", "Int", "Timer", "Signal", "LLM", "Actor", "Otp"]
         );
     }
 
