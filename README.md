@@ -27,8 +27,8 @@ It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired t
 | **Register-Based VM** | High-performance bytecode VM with NaN-tagged value representation |
 | **Cranelift JIT Backend** | Tiered execution: interpreter for cold code, native compilation for hot loops |
 | **BEAM/OTP Primitives** | `link`/`monitor`/`exit`/`trap_exit`/registry via `perform Actor.*`, `spawn link`/`spawn monitor`, selective `receive` with `after` timeout, actor priority (`Actor.set_priority`), timers, process groups |
-| **Linear Type Moves** | Zero-cost `iso` actor messaging via compile-time linearity tracking |
-| **SIMD Vectorization** | Auto-vectorization of array loops via Cranelift SIMD (I64x2, F64x2, I32x4, F32x4) |
+| **SIMD Vectorization** | Auto-vectorization of array loops via Cranelift SIMD (I64x2, F64x2, I32x4, F32x4) + WASM SIMD backend |
+| **WASM Backend** | MIR→WASM compiler (`wasm-encoder`) + Wasmtime host runtime with guard pages, inlining, SIMD, and AOT compilation |
 | **Python Interop** | Native Actor pattern: Python isolated to dedicated OS threads, marshal-only boundary |
 | **Unbounded Mailboxes** | Lock-free MPSC queues (crossbeam::SegQueue) — BEAM-semantics, no message loss |
 | **Stress Test Suite** | 30 chaos tests for supervision, scheduler fairness, GC, persistence, CRDTs, and JIT fallback under load |
@@ -36,10 +36,9 @@ It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired t
 ### Current Status
 
 Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
-
+- ✅ All 1273 tests pass with `cargo test` (1279 with `--features wasm-backend`)
 - ✅ Builds with `cargo build`
-- ✅ All 1224 tests pass with `cargo test`
-- ✅ NaN-boxed `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`)
+- ✅ i64-tagged `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`) — immune to WASM NaN canonicalization
 - ✅ 138-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, FFI, Python, distribution)
 - ✅ Hindley-Milner type inference with algebraic effects, user-declared variant types (construction + recursive pattern matching with guards), and row-polymorphic records (`fn(r) r.x + r.y` accepts any record with `x` and `y`; closed record annotations stay exact)
 - ✅ Actor runtime: spawn, `spawn link`/`spawn monitor`, send, monitors, links, supervision, timers, registry, process groups, selective `receive` with `after`, actor priority
@@ -72,11 +71,12 @@ as before this flag set existed. Build without them for a leaner binary and
 fewer system dependencies:
 
 | Feature | Enables | Off by default? |
-|---------|---------|------------------|
-| `python` | Python interop (`perform Python.call(...)`) via PyO3 | No — needs Python 3 dev headers |
-| `sqlite` | `SqliteStore` actor persistence backend | No — `MemoryStore`/`JsonFileStore` always available |
-| `lsp` | Language Server Protocol server (`src/lsp/`) | No |
+| `wasm-backend` | WASM compiler (`mir_wasm.rs`) + Wasmtime runtime (`wasm_runtime.rs`), `--backend wasm\|wasm-run\|wasm-aot` | Yes — requires `wasmtime` CLI for AOT |
 
+```bash
+# Build with WASM backend enabled:
+cargo build --release --features wasm-backend
+```
 ```bash
 # Skip PyO3, SQLite, and the LSP server entirely:
 cargo build --release --no-default-features
@@ -91,16 +91,10 @@ cargo build --release --no-default-features --features sqlite
 cargo test
 ```
 
-### REPL
-
-```bash
-cargo run -- --repl
-```
-
 ### CLI Modes
 
 ```bash
-# Compile and run a file
+# Compile and run a file (bytecode backend)
 cargo run -- myprogram.nula
 
 # Type-check only
@@ -108,6 +102,18 @@ cargo run -- --check myprogram.nula
 
 # Evaluate a string
 cargo run -- --eval 'perform IO.print("Hello")'
+
+# WASM backend: compile to out.wasm
+cargo run --features wasm-backend -- --backend wasm myprogram.nula
+
+# WASM backend: compile and run via Wasmtime
+cargo run --features wasm-backend -- --backend wasm-run myprogram.nula
+
+# WASM backend: compile to .wasm + AOT .cwasm (requires wasmtime CLI)
+cargo run --features wasm-backend -- --backend wasm-aot myprogram.nula
+
+# Package manager (also: nula build-wasm for WASM AOT builds)
+cargo run -- nula new my-app
 ```
 
 ### Examples

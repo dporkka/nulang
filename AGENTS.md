@@ -5,18 +5,19 @@
 
 ## Project Overview
 
-**Nulang** is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system (Hindley-Milner inference + reference capabilities + row-polymorphic algebraic effects), a register-based bytecode VM, a Cranelift JIT, BEAM/OTP primitives, CRDTs, location-transparent distribution, SQLite/JSON persistence, PyO3 Python interop, a C-compatible FFI layer, and a v0.9 AI runtime (`src/ai/` — LLM providers, memory, pipelines, debates, supervisor teams). Status: Alpha; 1255 tests pass (`cargo test`). License: Apache-2.0.
+**Nulang** is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system (Hindley-Milner inference + reference capabilities + row-polymorphic algebraic effects), a register-based bytecode VM, a Cranelift JIT, a WASM backend (MIR→WASM via `wasm-encoder`) with a Wasmtime host runtime, BEAM/OTP primitives, CRDTs, location-transparent distribution, SQLite/JSON persistence, PyO3 Python interop, a C-compatible FFI layer, and a v0.9 AI runtime (`src/ai/` — LLM providers, memory, pipelines, debates, supervisor teams). Status: Alpha; 1273 tests pass (`cargo test`), 1279 with `--features wasm-backend`. License: Apache-2.0.
 
 ## Architecture & Data Flow
 
-The compiler pipeline is a straight line, wired in `src/main.rs` (`run_frontend` at `src/main.rs:184`, `run_source` at `src/main.rs:295`) and reused by the REPL (`src/repl.rs`) and LSP:
+The compiler pipeline has two backends, selectable via `--backend`:
 
+**Bytecode backend (default):**
 ```
 source &str
   -> Lexer::lex()                         -> Vec<Token>            src/lexer.rs
   -> Parser::parse_module()               -> AstModule             src/parser.rs
   -> TypeChecker::check_module()          -> Type                  src/typechecker.rs (HM Algorithm W)
-  -> EffectChecker::check_module()        -> ()                    src/effect_checker.rs (two-pass interprocedural: register_function_rows fixpoint, then per-decl check_decl; CLI, REPL, and LSP all run it)
+  -> EffectChecker::check_module()        -> ()                    src/effect_checker.rs
   -> CapabilityAnalyzer::infer_cap()      -> Capability            src/effect_checker.rs
   -> HIR lowering (hir_lower::lower_module) -> HIR Module          src/hir_lower.rs
   -> MIR lowering (mir_lower::lower_module) -> MIR Module          src/mir_lower.rs
@@ -24,10 +25,17 @@ source &str
   -> VM::load_module() + VM::run()        -> Value                 src/vm.rs (register VM + JIT tiering)
 ```
 
+**WASM backend** (`--backend wasm|wasm-run|wasm-aot`, requires `--features wasm-backend`):
+```
+MIR Module
+  -> WasmBackend::compile()               -> Vec<u8> (.wasm)       src/mir_wasm.rs
+  -> WasmRuntime::new() + run()           -> ()                    src/wasm_runtime.rs (Wasmtime host)
+  -> (optional) aot_compile()             -> .cwasm                src/wasm_runtime.rs (wasmtime compile)
+```
+
 `--check` stops after capability analysis (no compile/run). The runtime (`src/runtime/`) is a **single-threaded synchronous coordinator** (`Runtime`) driving actors via reduction-bounded `step_actor`; it reaches the VM only through two object-safe callback traits (`ActorVmCallbacks`, `DistributedVmCallbacks`) to keep the dependency cycle-free. There is **no async/await in the runtime or VM** — concurrency is `crossbeam` deques/queues + `std::sync` atomics/RwLock + raw `unsafe` pointers for ORCA GC. The only async surfaces are `main.rs` (`#[tokio::main]`), the LSP server (`tower-lsp` over tokio stdin/stdout), and the `src/ai/` LLM client (`async_trait`, exposed to sync callers via `complete_sync`).
 
-### Backend representation
-- **Value** (`src/vm.rs`; tag constants canonical in `src/value_layout.rs`): NaN-boxed `u64` (`raw`), 48-bit payload, 16-bit type tag in the quiet-NaN bits. Tags: `TAG_NIL 0x7FF8`, `TAG_UNIT 0x7FF9`, `TAG_BOOL 0x7FFA`, `TAG_INT 0x7FFB`, `TAG_PTR 0x7FFC`, `TAG_ACTOR 0x7FFD`, `TAG_STRING 0x7FFE`, `TAG_CLOSURE 0x7FF7`.
+- **Value** (`src/vm.rs`; tag constants canonical in `src/value_layout.rs`): i64-tagged `u64` (`raw`), 48-bit payload, 16-bit type tag. Tags: `TAG_NIL 0x7FF8`, `TAG_UNIT 0x7FF9`, `TAG_BOOL 0x7FFA`, `TAG_INT 0x7FFB`, `TAG_PTR 0x7FFC`, `TAG_ACTOR 0x7FFD`, `TAG_STRING 0x7FFE`, `TAG_CLOSURE 0x7FF7`.
 - **Instruction** (`src/bytecode.rs`): 32-bit fixed-width `{opcode:u8, op1:u8, op2:u8, op3:u8}`; helpers `new0/1/2/3`, `imm16()`, `simm16()`, `offset16()`. 138 opcodes across 17 category ranges (Special, Stack & Locals, Int/Float Arithmetic, Comparison & Logic, Control Flow, Closures, Memory & Objects, Actor & Concurrency, Effects, Python Interop, FFI, Supervisor, Debate, Distribution, String & IO, Debug & Meta).
 - **Frames**: 256 registers each; flat `Vec<Frame>` with `caller_idx` links; closures carry `closure_env`.
 
@@ -49,7 +57,9 @@ Custom TCP wire protocol (`src/runtime/network.rs`): length-prefixed frames, mag
 
 ## Key Directories
 
-- `src/` — language frontend + backend: `lexer.rs`, `parser.rs`, `ast.rs`, `typechecker.rs`, `types.rs`, `effect_checker.rs` (effects + capabilities), `bytecode.rs`, `value_layout.rs` (canonical NaN-boxing constants), `hir.rs`/`hir_lower.rs`, `mir.rs`/`mir_lower.rs`/`mir_codegen.rs`, `vm.rs`, `repl.rs`, `main.rs`, `lib.rs`, plus `integration_tests.rs` & `stress_tests.rs` (test-only). The legacy `compiler.rs` was removed — the pipeline is MIR-exclusive.
+- `src/` — language frontend + backend: `lexer.rs`, `parser.rs`, `ast.rs`, `typechecker.rs`, `types.rs`, `effect_checker.rs` (effects + capabilities), `bytecode.rs`, `value_layout.rs` (canonical i64-tagged constants), `hir.rs`/`hir_lower.rs`, `mir.rs`/`mir_lower.rs`/`mir_codegen.rs`, `vm.rs`, `repl.rs`, `main.rs`, `lib.rs`, plus `integration_tests.rs` & `stress_tests.rs` (test-only). The legacy `compiler.rs` was removed — the pipeline is MIR-exclusive.
+- `src/mir_wasm.rs` — WASM backend: MIR→WASM compiler via `wasm-encoder` (behind `wasm-backend` feature). Emits `.wasm` modules with string interning, i64-tagged values, and effect dispatch. Includes SIMD lowering framework for array vectorization.
+- `src/wasm_runtime.rs` — Wasmtime host runtime: loads and executes `.wasm` modules (behind `wasm-backend` feature). Configured with guard pages (4GiB reserv, 128MiB guard), Cranelift speed opts (inlining), and SIMD. Provides AOT compilation via `wasmtime compile`.
 - `src/runtime/` — actor runtime: `mod.rs` (`Runtime` god-object), `actor.rs`, `scheduler.rs`, `mailbox.rs`, `heap.rs` (bump allocator with grow-on-demand chained 64KB blocks — exhaustion chains a fresh block instead of failing, objects never move; size-class free lists + large-object space for allocations over the 256-byte `Huge` threshold, exact-size free-list reuse, all blocks released on `reset()`/`Drop`), `gc.rs`, `orca_cycle.rs`, `supervisor.rs`, `registry.rs`, `process_groups.rs`, `timer.rs`, `cluster.rs`, `network.rs`, `distributed.rs`, `crdt.rs`/`crdt_reg.rs`/`crdt_manager.rs`, `persistence.rs`, `tests.rs`.
 - `src/jit/` — Cranelift JIT: `mod.rs` (`JitSession`, `tiered_execute_step`, hot counters), `compiler.rs` (scalar CLIF), `typed_compiler.rs`, `simd_analyzer.rs`/`simd_compiler.rs`, `runtime.rs` (extern-C helpers), `tests.rs`.
 - `src/lsp/` — `tower-lsp` language server (single `mod.rs`).
@@ -64,18 +74,25 @@ Custom TCP wire protocol (`src/runtime/network.rs`): length-prefixed frames, mag
 - `.agents/` — orchestration scratch/handoff artifacts from a prior multi-agent analysis run; **not language source**.
 
 ## Development Commands
-
 ```bash
 cargo build                      # dev build (opt-level 0, debug)
 cargo build --release            # release (opt-level 3, LTO, codegen-units 1)
-cargo test                       # run all 1255 tests (test profile: no LTO, 16 codegen-units for speed)
+cargo build --features wasm-backend   # dev build with WASM backend + Wasmtime
+cargo test                       # run all 1273 tests (test profile: no LTO, 16 codegen-units for speed)
+cargo test --features wasm-backend    # run all 1279 tests including WASM backend
 cargo test --release             # run tests under the release profile
 cargo run -- --repl              # interactive REPL (prompt `nulang>`)
 cargo run -- --eval 'perform IO.print("Hello")'   # evaluate a string
 cargo run -- --check myprogram.nula                 # type+effect+cap check only (no run)
 cargo run -- myprogram.nula                          # compile and run a file
+cargo run -- --backend wasm myprogram.nula           # compile to out.wasm
+cargo run -- --backend wasm-run myprogram.nula       # compile and run via Wasmtime
+cargo run -- --backend wasm-aot myprogram.nula       # compile to .wasm + .cwasm (AOT)
 cargo run -- --lsp                                 # start the LSP server on stdin/stdout
-cargo run -- nula new my-app                        # package manager: scaffold a package (also: nula build|test|run)
+cargo run -- nula new my-app                        # package manager: scaffold a package
+cargo run -- nula build my-app                      # resolve deps + type-check
+cargo run -- nula build-wasm my-app                 # resolve deps + build .wasm + .cwasm
+cargo run -- nula test|run my-app                   # package manager: test/run
 cargo run -- --doc                                  # generate docs/api.md from .nula doc comments
 cargo run -- -v myprogram.nula                       # verbose: print AST/bytecode/inferred type
 python3 verify_implementation.py                  # gate: cargo test + forbidden-pattern scans + integration checks
@@ -102,11 +119,11 @@ python3 verify_report.py                          # gate: validates codebase_ana
 - `src/lib.rs` — crate root; declares all public modules.
 - `src/hir.rs`, `src/mir.rs` — High-level and Mid-level IR type definitions.
 - `src/hir_lower.rs`, `src/mir_lower.rs`, `src/mir_codegen.rs` — AST → HIR → MIR → bytecode pipeline.
-- `src/vm.rs` — NaN-boxed `Value`, `Frame`, `VM`, `step`/`run`, effect handlers, JIT hook, callback traits.
+- `src/vm.rs` — i64-tagged `Value`, `Frame`, `VM`, `step`/`run`, effect handlers, JIT hook, callback traits.
+- `src/mir_wasm.rs` — WASM backend: MIR→`.wasm` compiler (behind `wasm-backend` feature). SIMD lowering framework.
+- `src/wasm_runtime.rs` — Wasmtime host runtime with guard pages, inlining, SIMD, AOT compilation.
 - `src/runtime/mod.rs` — `Runtime` god-object; actors, scheduler, GC, supervision, distribution, persistence.
 - `src/lsp/mod.rs` — Full-featured LSP server (12 features: hover, goto def, references, rename, signature help, inlay hints, completion, diagnostics, etc.).
-- `src/types.rs` — `NuError`/`NuResult`, `Type`, `Capability`, `EffectRow`, `Span`.
-- `src/bytecode.rs` — `OpCode` (138), `Instruction` (32-bit), `Constant`, `CodeModule`.
 
 ## Runtime/Tooling Preferences
 
@@ -114,7 +131,7 @@ python3 verify_report.py                          # gate: validates codebase_ana
 - **Linker**: GNU `bfd` forced on x86_64 Linux via `.cargo/config.toml` (not `lld`) for Cranelift/PyO3 compatibility.
 - **Python**: PyO3 0.29 abi3 limited-API; `build.rs` symlinks `libpythonX.Y.so` for Fedora.
 - **Allocator**: mimalloc (`#[global_allocator]` in `main.rs`).
-- **Cargo features**: `default = ["python", "sqlite", "lsp"]` (PyO3 interop, rusqlite persistence, tower-lsp server) — all optional and on by default; `--no-default-features --features <subset>` builds a leaner binary.
+- **Cargo features**: `default = ["python", "sqlite", "lsp"]` (PyO3 interop, rusqlite persistence, tower-lsp server). `wasm-backend` is optional (off by default) — enables `wasm-encoder` WASM compiler, `wasmtime` host runtime, and `--backend wasm|wasm-run|wasm-aot` CLI modes. All features are optional; `--no-default-features --features <subset>` builds a leaner binary.
 - **No external test/criterion/proptest crates** — standard `#[test]` only.
 
 ## Testing & QA
@@ -122,7 +139,7 @@ python3 verify_report.py                          # gate: validates codebase_ana
 - **Framework**: standard Rust `#[test]` + `#[cfg(test)]`. No proptest/quickcheck/criterion. No `#[ignore]`/`#[should_panic]`/async tests.
 - **Organization**: two styles — (a) inline `mod tests` at file foot (`lexer.rs`, `parser.rs`, `typechecker.rs`, `effect_checker.rs`, `value_layout.rs`, `vm.rs`, most `runtime/*.rs`, `jit/*`, `python/*`, `ffi/*`, `ai/*`, `lsp/mod.rs`); (b) dedicated test files (`src/integration_tests.rs`, `src/stress_tests.rs`, `src/runtime/tests.rs`, `src/jit/tests.rs`).
 - **Naming**: `test_<subject>` (unit/integration), `stress_<scenario>` (chaos).
-- **Counts** (1255 total, lib suite): `integration_tests.rs` 227 (end-to-end pipeline via `run_source`/`assert_int`/`run_source_with_runtime`, plus MIR-pipeline variants via `run_source_new`/`assert_int_new`/`run_source_new_with_runtime`, plus selective-receive and receive-after, `Actor.*` builtin-effect and actor-priority, non-blocking LLM suspend/resume, typed-JIT tiering tests, float-threading regression tests, behavior-internal send/spawn tests, workflow query tests, and Otp supervisor effects), `stress_tests.rs` 30 (`stress_*` chaos: mailbox floods, crash/exit cascades, scheduler fairness, CRDT/persistence, GC/cycle-detector churn), `runtime/tests.rs` 108, `jit/tests.rs` 38, `src/package/` 17, `src/docgen.rs` 11, `src/stdlib.rs` 7; the remaining 817 are inline unit tests (`src/ai/` alone has 47).
+- **Counts** (1279 total with `wasm-backend`, 1273 without): `integration_tests.rs` 227 (end-to-end pipeline via `run_source`/`assert_int`/`run_source_with_runtime`, plus MIR-pipeline variants via `run_source_new`/`assert_int_new`/`run_source_new_with_runtime`, plus selective-receive and receive-after, `Actor.*` builtin-effect and actor-priority, non-blocking LLM suspend/resume, typed-JIT tiering tests, float-threading regression tests, behavior-internal send/spawn tests, workflow query tests, and Otp supervisor effects), `stress_tests.rs` 30 (`stress_*` chaos: mailbox floods, crash/exit cascades, scheduler fairness, CRDT/persistence, GC/cycle-detector churn), `runtime/tests.rs` 108, `jit/tests.rs` 38, `src/package/` 17, `src/docgen.rs` 11, `src/stdlib.rs` 7, `src/mir_wasm.rs` 4, `src/wasm_runtime.rs` 2; the remaining 835 are inline unit tests (`src/ai/` alone has 47). Doc-tests: 3 run, 8 ignored.
 - **Helpers/fixtures**: `run_source`/`compile_source`/`assert_int` + `SharedMemoryStore` (`Arc<Mutex<MemoryStore>>` impl `PersistenceStore`) for restart simulation (`integration_tests.rs`); `TestContext {counters, log}` (`stress_tests.rs`); `make_jit()` (`jit/tests.rs`).
 - **Run**: `cargo test` (test profile: LTO off, 16 codegen-units for fast parallel builds). `cargo test --release` for optimized runs.
 - **Gate scripts**: `verify_implementation.py` (forbidden-pattern scans for known anti-patterns — Box'd frames, string leaks, `crdt_reg` temp Vec, timer BinaryHeap rebuild, check-then-unwrap — + asserts JIT integration, escape-analysis deadness, scheduler-stats and cycle-detector wiring, then runs `cargo test` and `cargo check --tests` against a zero-warning baseline) and `verify_report.py` (validates `codebase_analysis_report.md`: required sections, ≥5 code snippets, referenced `src/*.rs` paths exist). Each exits 0 only on full pass.
@@ -141,3 +158,5 @@ python3 verify_report.py                          # gate: validates codebase_ana
 - BEAM fault-tolerance language surface: `perform Actor.link/unlink/monitor/demonitor/trap_exit/exit/register/unregister/whereis/set_priority` dispatch through `ActorVmCallbacks::perform_builtin_effect` (no user handler installed) into `Runtime::perform_actor_builtin` — both runtime callback impls (`RuntimeVmCallbacks`, `BytecodeRuntimeCallbacks`) reach it; the standalone VM nil-no-ops every `Actor.*` effect (matching the outside-an-actor contract). `spawn link Actor {..}` / `spawn monitor Actor {..}` are parser desugars to `spawn` + `Actor.link`/`Actor.monitor` on the spawner. Actor scheduling priority: `Actor.priority: ActorPriority {High, Normal=default, Low}` (set via `Actor.set_priority(0|1|2)`); the scheduler's global injector is split into three per-level queues and every enqueue path (`Runtime::enqueue_actor`) reads the actor's current priority — strict per-level preference (all High before any Normal before any Low, FIFO within a level, Erlang-like; lower levels can starve under sustained High load), reduction-budget yield fairness unchanged. Priority affects scheduling only — `Mailbox::receive_match` stays FIFO and ignores `Message::priority`.
 - The compiler pipeline is MIR-exclusive (AST → HIR → MIR → bytecode). The legacy AST compiler (`src/compiler.rs`) has been removed.
 - **Reclamation protocol (do not break)**: intra-actor memory is reclaimed by three cooperating pieces. (1) VM write barriers — `ArrStore`/`RecS`/`FieldS` retain a stored heap pointer and release the overwritten slot's old value (`src/vm.rs`); (2) `OrcaGc::free_object` releases slot references when a container is freed (`src/runtime/gc.rs`) — so every container slot MUST hold a counted reference, which is why the `FieldS` barrier is mandatory; (3) `plan_drops` in `src/mir_codegen.rs` emits `OpCode::Drop` at conservative liveness points, and the `Drop` handler clears the register to nil so duplicate drops are no-ops — removing the nil-clearing reintroduces double-decrement. `OrcaHeader` counts (`ref_count`/`foreign_count`/`sticky`) and `GcStats` are plain integers by the single-scheduler-thread invariant (all heap/GC access runs on the scheduler thread; network/LLM/Python threads never touch heaps) — do not reintroduce cross-thread heap access without restoring atomics.
+- **WASM backend (`src/mir_wasm.rs`)**: the `wasm-backend` feature enables `wasm-encoder` (WASM binary encoding) and `wasmtime` (host runtime). The WASM module uses i64-tagged values (not NaN-boxed) to avoid WASM NaN canonicalization. Function indices in the import section are offset by one — the memory import (index 0) is NOT a function import, so `FUNC_IMPORT_COUNT` (5) differs from the total import count (6). When adding new imports, remember to update both the import-order-preserving `rebuild_imports()` and the function-index constants (`IMPORT_*`). SIMD lowering in `mir_wasm.rs` uses raw byte emission via `Function::raw()` because `wasm-encoder` 0.220 lacks SIMD instruction variants in its `Instruction` enum. The `unreachable` after each block `end` is required for WASM validation: every MIR block terminates with a divergent instruction (`return`/`br`), but the validator needs the block fallthrough path marked unreachable to match the function's return type.
+- **Wasmtime runtime (`src/wasm_runtime.rs`)**: `wasmtime = "46"` uses `default-features = false` with `cranelift`, `runtime`, `std`, `anyhow` features. The `Error` type is `wasmtime::Error` (NOT `anyhow::Error` — they are distinct in wasmtime 46, though `wasmtime::Error::msg()` provides string construction). Host import callbacks use `Caller<'_, HostState>` via `Linker::func_wrap`. The `nulang_init` export has type `() -> i64` (returns the tagged program result), NOT `() -> ()`. AOT compilation (`wasmtime compile`) requires the `wasmtime` CLI tool installed on the build host.
