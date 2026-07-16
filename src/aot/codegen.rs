@@ -14,13 +14,13 @@
 //! unknown, raw bits when unboxed). The AOT runtime trampoline handles
 //! boxing/unboxing at function boundaries.
 
-use cranelift::codegen::ir::FuncRef;
+use cranelift::codegen::ir::{BlockArg, FuncRef};
 use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::JITModule;
 use cranelift_module::{Linkage, Module};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::mir;
 use crate::type_metadata::{KnownType, TypeMetadata};
@@ -121,6 +121,147 @@ impl<'a> AotContext<'a> {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// SSA construction helpers
+// ---------------------------------------------------------------------------
+
+/// Compute block predecessors from terminators.
+fn compute_predecessors(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::BlockId>> {
+    let mut preds: HashMap<mir::BlockId, Vec<mir::BlockId>> = HashMap::new();
+    for block in &func.blocks {
+        match &block.terminator {
+            mir::Terminator::Jump(target) => {
+                preds.entry(*target).or_default().push(block.id);
+            }
+            mir::Terminator::Branch { then_, else_, .. } => {
+                preds.entry(*then_).or_default().push(block.id);
+                preds.entry(*else_).or_default().push(block.id);
+            }
+            _ => {}
+        }
+    }
+    preds
+}
+
+/// For each block, collect the set of register indices that are:
+/// - Last assigned in at least one predecessor, AND
+/// - The block has >1 predecessor.
+///
+/// These locals need CLIF block parameters for proper SSA merging.
+fn compute_liveins(
+    func: &mir::Function,
+    preds: &HashMap<mir::BlockId, Vec<mir::BlockId>>,
+    local_base: u32,
+) -> HashMap<mir::BlockId, Vec<u32>> {
+    // First, for each block, find which locals are last-assigned in that block.
+    let mut block_defs: HashMap<mir::BlockId, HashSet<u32>> = HashMap::new();
+    for block in &func.blocks {
+        let mut defs = HashSet::new();
+        for stmt in &block.stmts {
+            if let mir::Stmt::Assign { dst, .. } = stmt {
+                defs.insert(local_base + dst.0);
+            }
+        }
+        block_defs.insert(block.id, defs);
+    }
+
+    // For each block, compute: which locals are defined in ANY predecessor?
+    let mut liveins: HashMap<mir::BlockId, Vec<u32>> = HashMap::new();
+    for block in &func.blocks {
+        let pids = preds.get(&block.id);
+        if pids.map_or(0, |v| v.len()) <= 1 {
+            continue;
+        }
+        let mut merged: HashSet<u32> = HashSet::new();
+        for pid in pids.unwrap() {
+            if let Some(defs) = block_defs.get(pid) {
+                merged.extend(defs);
+            }
+        }
+        if !merged.is_empty() {
+            let mut sorted: Vec<u32> = merged.into_iter().collect();
+            sorted.sort();
+            liveins.insert(block.id, sorted);
+        }
+    }
+    liveins
+}
+
+/// Like `compile_terminator` but passes block-param values for merged locals.
+fn compile_terminator_with_params(
+    builder: &mut FunctionBuilder,
+    term: &mir::Terminator,
+    block_map: &HashMap<mir::BlockId, cranelift::prelude::Block>,
+    block_params: &HashMap<mir::BlockId, Vec<u32>>,
+    local_vals: &HashMap<u32, Value>,
+) -> AotResult<()> {
+    match term {
+        mir::Terminator::Return(val) => {
+            if let Some(id) = val {
+                let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                let v = *local_vals
+                    .get(&reg)
+                    .ok_or_else(|| AotCompileError::Internal("return value uninitialized".into()))?;
+                builder.ins().return_(&[v]);
+            } else {
+                let nil = builder
+                    .ins()
+                    .iconst(types::I64, 0x7FF8_0000_0000_0000u64 as i64);
+                builder.ins().return_(&[nil]);
+            }
+            Ok(())
+        }
+        mir::Terminator::Jump(target) => {
+            let clif_block = *block_map
+                .get(target)
+                .ok_or_else(|| AotCompileError::Internal("jump to unknown block".into()))?;
+            let args = block_param_args(block_params, target, local_vals);
+            builder.ins().jump(clif_block, &args);
+            Ok(())
+        }
+        mir::Terminator::Branch { cond, then_, else_ } => {
+            let cond_reg = mir::FunctionBuilder::LOCAL_BASE + cond.0;
+            let cond_val = *local_vals
+                .get(&cond_reg)
+                .ok_or_else(|| AotCompileError::Internal("branch cond uninitialized".into()))?;
+            let then_block = *block_map
+                .get(then_)
+                .ok_or_else(|| AotCompileError::Internal("branch then unknown".into()))?;
+            let else_block = *block_map
+                .get(else_)
+                .ok_or_else(|| AotCompileError::Internal("branch else unknown".into()))?;
+
+            let false_val = builder.ins().iconst(types::I64, TAG_BOOL_I64);
+            let is_true = builder.ins().icmp(IntCC::NotEqual, cond_val, false_val);
+            let then_args = block_param_args(block_params, then_, local_vals);
+            let else_args = block_param_args(block_params, else_, local_vals);
+            builder.ins().brif(is_true, then_block, &then_args, else_block, &else_args);
+            Ok(())
+        }
+        _ => Err(AotCompileError::Unsupported(format!("terminator {:?}", term))),
+    }
+}
+
+/// Build the argument list for a jump/branch to `target`: one Value per
+/// block parameter, taken from the current `local_vals`.
+fn block_param_args(
+    block_params: &HashMap<mir::BlockId, Vec<u32>>,
+    target: &mir::BlockId,
+    local_vals: &HashMap<u32, Value>,
+) -> Vec<BlockArg> {
+    if let Some(params) = block_params.get(target) {
+        params
+            .iter()
+            .map(|reg| {
+                let val = *local_vals.get(reg).expect("block param local missing");
+                BlockArg::from(val)
+            })
+            .collect()
+    } else {
+        vec![]
+    }
+}
 // ---------------------------------------------------------------------------
 // Main entry point: compile a MIR function to a native function pointer
 // ---------------------------------------------------------------------------
@@ -158,6 +299,13 @@ pub fn compile_mir_function(
     let local_base = mir::FunctionBuilder::LOCAL_BASE;
     let type_meta = mir_func.type_metadata.clone();
 
+    // Analyze block predecessors.
+    let preds = compute_predecessors(mir_func);
+
+    // For each block, collect locals assigned in any predecessor that are
+    // used in this block — these need block params when multiple preds exist.
+    let block_liveins = compute_liveins(mir_func, &preds, local_base);
+
     // Single-pass: register helpers and build body.
     let _helpers = {
         let mut builder = FunctionBuilder::new(&mut codegen_ctx.func, builder_ctx);
@@ -165,23 +313,41 @@ pub fn compile_mir_function(
         builder.switch_to_block(entry_block);
         builder.append_block_params_for_function_params(entry_block);
 
-        // Register runtime helpers.
+        // Register runtime helpers with proper signatures.
         let mut h: HashMap<&str, FuncRef> = HashMap::new();
-        let helper_names: &[&str] = &[
+
+        // Binary helpers: (i64, i64) -> i64
+        let bin_helpers: &[&str] = &[
             "nulang_iadd", "nulang_isub", "nulang_imul", "nulang_idiv", "nulang_imod",
             "nulang_icmp_eq", "nulang_icmp_lt", "nulang_icmp_gt", "nulang_icmp_le",
             "nulang_icmp_ge",
             "nulang_fadd", "nulang_fsub", "nulang_fmul", "nulang_fdiv",
             "nulang_fcmp_eq", "nulang_fcmp_lt", "nulang_fcmp_gt",
-            "nulang_ineg", "nulang_iinc", "nulang_idec", "nulang_not",
             "nulang_and", "nulang_or",
-            "nulang_itof", "nulang_ftoi",
             "nulang_xor", "nulang_shl", "nulang_shr",
             "nulang_bitand", "nulang_bitor",
-            "nulang_fneg",
         ];
-        for name in helper_names {
-            let h_sig = module.make_signature();
+        for name in bin_helpers {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function(name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(*name, func_ref);
+        }
+
+        // Unary helpers: (i64) -> i64
+        let unary_helpers: &[&str] = &[
+            "nulang_ineg", "nulang_iinc", "nulang_idec", "nulang_not",
+            "nulang_itof", "nulang_ftoi", "nulang_fneg",
+        ];
+        for name in unary_helpers {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.returns.push(AbiParam::new(types::I64));
             let h_id = module
                 .declare_function(name, Linkage::Import, &h_sig)
                 .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
@@ -197,33 +363,66 @@ pub fn compile_mir_function(
             local_vals.insert(reg, val);
         }
 
+        // Create CLIF blocks — allocate block params for merge blocks.
         let mut block_map: HashMap<mir::BlockId, cranelift::prelude::Block> = HashMap::new();
+        // Track which locals have block params in each block.
+        let mut block_params: HashMap<mir::BlockId, Vec<u32>> = HashMap::new();
         for block in &mir_func.blocks {
             let clif_block = if block.id == mir_func.entry {
                 entry_block
             } else {
-                builder.create_block()
+                let blk = builder.create_block();
+                // Add block params for locals that need merging.
+                if let Some(liveins) = block_liveins.get(&block.id) {
+                    let mut params = Vec::new();
+                    for &reg in liveins {
+                        builder.append_block_param(blk, types::I64);
+                        params.push(reg);
+                    }
+                    block_params.insert(block.id, params);
+                }
+                blk
             };
             block_map.insert(block.id, clif_block);
         }
 
+        // Compile blocks in order.
         for block in &mir_func.blocks {
             let clif_block = block_map[&block.id];
+            builder.switch_to_block(clif_block);
+
+            // Read block parameters into local_vals for non-entry blocks.
             if block.id != mir_func.entry {
-                builder.switch_to_block(clif_block);
+                if let Some(params) = block_params.get(&block.id) {
+                    for (i, &reg) in params.iter().enumerate() {
+                        let val = builder.block_params(clif_block)[i];
+                        local_vals.insert(reg, val);
+                    }
+                }
             }
 
             for stmt in &block.stmts {
                 compile_stmt(&mut builder, stmt, &type_meta, &h, &mut local_vals)?;
             }
 
-            compile_terminator(&mut builder, &block.terminator, &block_map, &local_vals)?;
+            compile_terminator_with_params(
+                &mut builder,
+                &block.terminator,
+                &block_map,
+                &block_params,
+                &local_vals,
+            )?;
         }
 
         builder.seal_all_blocks();
         builder.finalize();
         h
     };
+    // Debug: dump CLIF when verbose.
+    if std::env::var("NULANG_DUMP_CLIF").is_ok() {
+        eprintln!("=== CLIF for {} ===", func_name);
+        eprintln!("{}", codegen_ctx.func.display());
+    }
 
     module
         .define_function(func_id, codegen_ctx)
@@ -482,71 +681,6 @@ fn compile_unary(
         }
         UnOp::Not => call_helper(builder, helpers, "nulang_not", &[val]),
         _ => Err(AotCompileError::Unsupported(format!("unary op {:?}", op))),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Terminator compilation
-// ---------------------------------------------------------------------------
-
-fn compile_terminator(
-    builder: &mut FunctionBuilder,
-    term: &mir::Terminator,
-    block_map: &HashMap<mir::BlockId, cranelift::prelude::Block>,
-    _local_vals: &HashMap<u32, Value>,
-) -> AotResult<()> {
-    match term {
-        mir::Terminator::Return(val) => {
-            if let Some(id) = val {
-                let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
-                let v = _local_vals
-                    .get(&reg)
-                    .copied()
-                    .ok_or_else(|| AotCompileError::Internal("return value uninitialized".into()))?;
-                builder.ins().return_(&[v]);
-            } else {
-                // Return unit/nil.
-                let nil = builder
-                    .ins()
-                    .iconst(types::I64, 0x7FF8_0000_0000_0000u64 as i64);
-                builder.ins().return_(&[nil]);
-            }
-            Ok(())
-        }
-        mir::Terminator::Jump(target) => {
-            let clif_block = block_map
-                .get(target)
-                .ok_or_else(|| AotCompileError::Internal("jump to unknown block".into()))?;
-            builder.ins().jump(*clif_block, &[]);
-            Ok(())
-        }
-        mir::Terminator::Branch {
-            cond,
-            then_,
-            else_,
-        } => {
-            let cond_reg = mir::FunctionBuilder::LOCAL_BASE + cond.0;
-            let cond_val = *_local_vals
-                .get(&cond_reg)
-                .ok_or_else(|| AotCompileError::Internal("branch cond uninitialized".into()))?;
-            let then_block = block_map
-                .get(then_)
-                .ok_or_else(|| AotCompileError::Internal("branch then uninitialized".into()))?;
-            let else_block = block_map
-                .get(else_)
-                .ok_or_else(|| AotCompileError::Internal("branch else uninitialized".into()))?;
-            // Compare against tagged false value (bool false).
-            let false_val = builder.ins().iconst(types::I64, TAG_BOOL_I64);
-            let is_true = builder
-                .ins()
-                .icmp(IntCC::NotEqual, cond_val, false_val);
-            builder.ins().brif(is_true, *then_block, &[], *else_block, &[]);
-            Ok(())
-        }
-        _ => Err(AotCompileError::Unsupported(format!(
-            "terminator {:?}",
-            term
-        ))),
     }
 }
 
