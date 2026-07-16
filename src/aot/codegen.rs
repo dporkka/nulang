@@ -104,9 +104,9 @@ pub struct AotContext<'a> {
     /// Runtime helpers registered with the JIT module.
     pub helpers: HashMap<&'static str, FuncRef>,
     /// FuncIds of already-compiled functions, indexed by MIR function index.
-    /// Populated by the caller before compiling each function so that
-    /// cross-function calls can look up the callee's FuncId.
     pub func_ids: Vec<cranelift_module::FuncId>,
+    /// Compilation mode: boxed (NaN-tagged) or unboxed (raw i64 for Int).
+    pub mode: CompileMode,
 }
 
 impl<'a> AotContext<'a> {
@@ -121,6 +121,7 @@ impl<'a> AotContext<'a> {
             codegen_ctx,
             helpers: HashMap::new(),
             func_ids: Vec::new(),
+            mode: CompileMode::Boxed,
         }
     }
 }
@@ -170,17 +171,21 @@ fn compute_liveins(
         block_defs.insert(block.id, defs);
     }
 
-    // For each block, compute: which locals are defined in ANY predecessor?
+    // For each block with >1 predecessor, compute locals defined in ALL predecessors.
     let mut liveins: HashMap<mir::BlockId, Vec<u32>> = HashMap::new();
     for block in &func.blocks {
-        let pids = preds.get(&block.id);
-        if pids.map_or(0, |v| v.len()) <= 1 {
-            continue;
-        }
-        let mut merged: HashSet<u32> = HashSet::new();
-        for pid in pids.unwrap() {
+        let pids = match preds.get(&block.id) {
+            Some(p) if p.len() > 1 => p,
+            _ => continue,
+        };
+        // Start with definitions from first predecessor.
+        let mut merged: HashSet<u32> = block_defs.get(&pids[0]).cloned().unwrap_or_default();
+        for pid in &pids[1..] {
             if let Some(defs) = block_defs.get(pid) {
-                merged.extend(defs);
+                merged = merged.intersection(defs).copied().collect();
+            } else {
+                merged.clear();
+                break;
             }
         }
         if !merged.is_empty() {
@@ -270,15 +275,45 @@ fn block_param_args(
 // Main entry point: compile a MIR function to a native function pointer
 // ---------------------------------------------------------------------------
 
+/// Whether to emit NaN-tagged (boxed) or raw (unboxed) integer values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CompileMode {
+    /// NaN-tagged i64 — the default, interoperable representation.
+    Boxed,
+    /// Raw i64 for Int types — faster, but requires type knowledge at call sites.
+    Unboxed,
+}
+
+/// Check whether a function is eligible for unboxed compilation:
+/// all params are `KnownType::Int` and the return type is Int or void.
+pub fn is_all_int(func: &mir::Function) -> bool {
+    let local_base = mir::FunctionBuilder::LOCAL_BASE as usize;
+    for param in &func.params {
+        let reg = local_base + param.0 as usize;
+        if func.type_metadata.get_type(reg) != KnownType::Int {
+            return false;
+        }
+    }
+    // Return type: None (unit) is fine, Some(Int) is fine, anything else disqualifies.
+    if let Some(ref ret_ty) = func.ret {
+        match ret_ty {
+            crate::types::Type::Primitive(crate::types::PrimitiveType::Int) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// Compile the body of a MIR function that was already declared.
 ///
-/// `func_id` is the pre-declared function ID from a prior `declare_function` call.
 pub fn compile_mir_function_body(
     aot: &mut AotContext,
     mir_func: &mir::Function,
     _func_index: usize,
     func_id: cranelift_module::FuncId,
+    mode: CompileMode,
 ) -> AotResult<()> {
+    aot.mode = mode;
     // Reconstruct the signature for the codegen context.
     let mut sig = aot.module.make_signature();
     for _ in &mir_func.params {
@@ -706,10 +741,32 @@ fn compile_binary(
                 call_helper(builder, helpers, "nulang_icmp_gt", &[lhs_val, rhs_val])
             }
         }
-        _ => Err(AotCompileError::Unsupported(format!(
-            "binary op {:?}",
-            op
-        ))),
+        BinOp::Le => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                let l = emit_sext48(builder, lhs_val);
+                let r = emit_sext48(builder, rhs_val);
+                let cmp = builder.ins().icmp(IntCC::SignedLessThanOrEqual, l, r);
+                Ok(emit_tag_bool(builder, cmp))
+            } else {
+                call_helper(builder, helpers, "nulang_icmp_le", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::Ge => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                let l = emit_sext48(builder, lhs_val);
+                let r = emit_sext48(builder, rhs_val);
+                let cmp = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, l, r);
+                Ok(emit_tag_bool(builder, cmp))
+            } else {
+                call_helper(builder, helpers, "nulang_icmp_ge", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::Ne => {
+            // Not-equal: compare with eq helper, then negate.
+            let eq_result = call_helper(builder, helpers, "nulang_icmp_eq", &[lhs_val, rhs_val])?;
+            call_helper(builder, helpers, "nulang_not", &[eq_result])
+        }
+        _ => Err(AotCompileError::Unsupported(format!("binary op {:?}", op))),
     }
 }
 

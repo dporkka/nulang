@@ -84,7 +84,7 @@ impl AotModule {
         for (idx, func) in mir_module.functions.iter().enumerate() {
             let mut ctx = codegen::AotContext::new(&mut jit_module, &mut builder_context);
             ctx.func_ids = func_ids.clone();
-            codegen::compile_mir_function_body(&mut ctx, func, idx, func_ids[idx]).map_err(|e| {
+            codegen::compile_mir_function_body(&mut ctx, func, idx, func_ids[idx], codegen::CompileMode::Boxed).map_err(|e| {
                 crate::types::NuError::VMError(format!(
                     "AOT compilation of '{}' failed: {}",
                     func.name, e
