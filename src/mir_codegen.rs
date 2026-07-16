@@ -597,6 +597,14 @@ impl MirCodegen {
                     dst,
                 ));
             }
+            mir::RValue::StrConcat(l, r) => {
+                self.emit(Instruction::new3(
+                    OpCode::SConcat,
+                    reg_of(*l),
+                    reg_of(*r),
+                    dst,
+                ));
+            }
             mir::RValue::Call { func, args } => {
                 // Load the callee value first (it lives above the staging
                 // zone, so staging cannot clobber it).
@@ -1302,6 +1310,10 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
             ro(&mut out, *r);
         }
         StringEq(l, r) => {
+            ro(&mut out, *l);
+            ro(&mut out, *r);
+        }
+        StrConcat(l, r) => {
             ro(&mut out, *l);
             ro(&mut out, *r);
         }

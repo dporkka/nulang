@@ -1528,8 +1528,35 @@ impl TypeChecker {
         use BinOp::*;
 
         match op {
-            // Arithmetic: numeric -> numeric
-            Add | Sub | Mul | Div | Mod => {
+            // Arithmetic: numeric -> numeric, except Add which also works on strings.
+            Add => {
+                let (s1, left_ty) = self.infer_expr(ctx, left)?;
+                let ctx1 = apply_subst_to_ctx(ctx, &s1);
+                let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
+                let combined = compose_subst(&s2, &s1);
+
+                // If both sides unify with String, this is string concatenation.
+                let lty = apply_subst(&left_ty, &combined);
+                let rty = apply_subst(&right_ty, &combined);
+                if lty == Type::string() && rty == Type::string() {
+                    return Ok((combined, Type::string()));
+                }
+
+                // Otherwise: numeric addition.
+                let num_var = Type::Var(TypeVar::fresh());
+                let s3 = mgu(&lty, &num_var, span)?;
+                let s_combined = compose_subst(&s3, &combined);
+                let s4 = mgu(
+                    &rty,
+                    &apply_subst(&num_var, &s_combined),
+                    span,
+                )?;
+                let final_subst = compose_subst(&s4, &s_combined);
+                Ok((final_subst.clone(), apply_subst(&num_var, &final_subst)))
+            }
+
+            // Other arithmetic: numeric -> numeric
+            Sub | Mul | Div | Mod => {
                 let (s1, left_ty) = self.infer_expr(ctx, left)?;
                 let ctx1 = apply_subst_to_ctx(ctx, &s1);
                 let (s2, right_ty) = self.infer_expr(&ctx1, right)?;

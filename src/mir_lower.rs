@@ -846,8 +846,10 @@ impl<'c> FnLowerer<'c> {
                         self.b.assign(eq_dst, mir::RValue::StringEq(lid, rid));
                         self.b.assign(dst, mir::RValue::Unary(crate::ast::UnOp::Not, eq_dst));
                     }
+                    (crate::ast::BinOp::Add, true) => {
+                        self.b.assign(dst, mir::RValue::StrConcat(lid, rid));
+                    }
                     _ => {
-                        self.b.assign(dst, mir::RValue::Binary(*op, lid, rid));
                     }
                 }
                 Ok(())
@@ -2109,7 +2111,7 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
             out.push(*idx);
         }
         ArrayLit(elems) | Tuple(elems) => out.extend(elems.iter().copied()),
-        Binary(_, l, r) | StringEq(l, r) => {
+        Binary(_, l, r) | StringEq(l, r) | StrConcat(l, r) => {
             out.push(*l);
             out.push(*r);
         }

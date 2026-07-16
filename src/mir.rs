@@ -179,6 +179,8 @@ pub enum RValue {
     Binary(BinOp, LocalId, LocalId),
     /// String equality (variant tag tests).
     StringEq(LocalId, LocalId),
+    /// String concatenation: `s1 + s2`.
+    StrConcat(LocalId, LocalId),
     Call {
         func: FuncRef,
         args: Vec<LocalId>,
