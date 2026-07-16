@@ -91,7 +91,7 @@ design of Layers 2–4, to keep in mind while reading §3–§5:
   `src/runtime/mod.rs`), enforced by a synchronous single-threaded
   `step_actor` loop — not 2000 WASM-asyncify reductions.
 - **Persistence** ships three `PersistenceStore` backends — `MemoryStore`,
-  `JsonFileStore`, `SqliteStore` (`src/runtime/persistence.rs`) — not
+  `JsonFileStore`, `LibsqlStore` (`src/runtime/persistence.rs`) — not
   PostgreSQL or S3.
 - **The NUL0 transport** is a hand-rolled, length-prefixed TCP protocol whose
   fixed header is 13 bytes (4-byte `NUL0` magic, 1-byte packet type, 8-byte

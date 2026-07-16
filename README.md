@@ -36,7 +36,7 @@ It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired t
 ### Current Status
 
 Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
-- ✅ All 1273 tests pass with `cargo test` (1279 with `--features wasm-backend`)
+- ✅ All 1271 tests pass with `cargo test` (1277 with `--features wasm-backend`)
 - ✅ Builds with `cargo build`
 - ✅ i64-tagged `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`) — immune to WASM NaN canonicalization
 - ✅ 138-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, FFI, Python, distribution)
@@ -78,7 +78,7 @@ fewer system dependencies:
 cargo build --release --features wasm-backend
 ```
 ```bash
-# Skip PyO3, SQLite, and the LSP server entirely:
+# Skip PyO3, libSQL, and the LSP server entirely:
 cargo build --release --no-default-features
 
 # Pick just what you need:
@@ -305,7 +305,7 @@ let dbl = fn(x) { x * 2 } in
 | `runtime/crdt` | CRDT trait + GCounter, PNCounter, GSet, ORSet, AWORSet | ~1,335 |
 | `runtime/crdt_reg` | LWWRegister, MVRegister, RGA sequence CRDT | ~875 |
 | `runtime/crdt_manager` | CRDT factory, sync ops, inter-node merge | ~1,120 |
-| `runtime/persistence` | Snapshot/journal stores (MemoryStore, JsonFileStore, SqliteStore) | ~785 |
+| `runtime/persistence` | Snapshot/journal stores (MemoryStore, JsonFileStore, LibsqlStore) | ~1,060 |
 | `python/bridge` + `python/marshal` | PyO3 interpreter bridge + Value↔Python marshalling | ~1,290 |
 | `ffi` | C-compatible FFI layer, native-library registry, embedder C API | ~1,380 |
 | `ai` | LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams | ~2,590 |
