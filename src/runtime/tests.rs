@@ -269,6 +269,67 @@ fn test_restarted_child_restores_behavior_and_state() {
     assert_eq!(count, Some(Value::int(5)));
 }
 
+/// Supervisor restart of a persistent child must hydrate state from the
+/// persistence store, not from the captured RestartTemplate (which holds
+/// the *original* state from registration time).
+#[test]
+fn test_supervisor_restart_hydrates_from_persistence() {
+    let mut rt = Runtime::new();
+    rt.persistence = Box::new(MemoryStore::new());
+    let sup_id = rt.create_supervisor("sup", RestartStrategy::OneForOne);
+    let mut models = HashMap::new();
+    models.insert("count".to_string(), StateModel::Durable);
+    let child_id = rt.spawn_persistent_actor(
+        Box::new(|| vec![("count".to_string(), Value::int(0))]),
+        models,
+    );
+    {
+        let actor = rt.actors.get_mut(&child_id).unwrap();
+        actor.register_behavior("inc", |actor, args| {
+            let n = actor.get_state_field("count").and_then(|v| v.as_int()).unwrap_or(0);
+            let by = args.get(0).and_then(|v| v.as_int()).unwrap_or(1);
+            actor.set_state_field("count", Value::int(n + by));
+        });
+    }
+
+    for _ in 0..3 {
+        rt.send_message(child_id, "inc", &[Value::int(1)]);
+        rt.step_actor(child_id);
+    }
+    assert_eq!(
+        rt.actors.get(&child_id).unwrap().get_state_field("count"),
+        Some(Value::int(3)),
+        "count should be 3 before crash"
+    );
+    assert!(
+        rt.persistence.load_snapshot(child_id).is_some(),
+        "snapshot should exist before crash"
+    );
+
+    let spec = ChildSpec::new("counter", RestartPolicy::Permanent);
+    rt.supervise_child(sup_id, spec, child_id);
+    rt.exit_actor(child_id, ExitReason::Error("simulated crash".to_string()));
+
+    let new_id = rt.supervisors[&sup_id].children[0].1;
+    assert_ne!(new_id, child_id, "restart should create a fresh actor");
+
+    let count = rt.actors.get(&new_id).unwrap().get_state_field("count");
+    assert_eq!(
+        count,
+        Some(Value::int(3)),
+        "restarted actor must hydrate count=3 from persistence, not template count=0"
+    );
+
+    assert!(
+        rt.persistence.load_snapshot(new_id).is_some(),
+        "snapshot must be re-keyed under new actor id"
+    );
+    assert!(
+        rt.persistence.load_snapshot(child_id).is_none(),
+        "old snapshot must be cleared after re-keying"
+    );
+}
+
 /// Regression test: a restarted bytecode child must keep its bytecode
 /// module, behavior offsets, and captured initial state so it still
 /// resolves and runs its bytecode behaviors after a restart.

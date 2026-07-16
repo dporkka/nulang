@@ -296,7 +296,7 @@ impl Supervisor {
     /// Returns the new actor id, or `None` if no template was captured — in
     /// that case the failure is logged so the caller can escalate instead of
     /// silently creating a zombie actor that drops every message.
-    fn rebuild_child(&self, spec: &ChildSpec, runtime: &mut Runtime) -> Option<u64> {
+    fn rebuild_child(&self, spec: &ChildSpec, runtime: &mut Runtime, old_actor_id: u64) -> Option<u64> {
         let template = match &spec.restart {
             Some(t) => t,
             None => {
@@ -311,9 +311,33 @@ impl Supervisor {
         let new_id = fresh_actor_id();
         let child_name = format!("{}_child_{}", self.name, spec.id);
         let mut new_actor = Actor::new(new_id, child_name, 0);
-        for (name, value) in &template.state_data {
-            new_actor.set_state_field(name.clone(), *value);
+
+        // Hydrate durable state from the persistence store if a snapshot
+        // exists for the old actor.  On first spawn there is no snapshot,
+        // so we fall back to the template state captured at registration.
+        let snapshot = if template.persistent {
+            runtime.persistence.load_snapshot(old_actor_id)
+        } else {
+            None
+        };
+
+        if let Some(ref snap) = snapshot {
+            for (name, value) in &snap.state {
+                new_actor.set_state_field(name.clone(), value.to_value());
+            }
+            for (name, value) in &template.state_data {
+                if !snap.state.contains_key(name) {
+                    new_actor.set_state_field(name.clone(), *value);
+                }
+            }
+            new_actor.sequence = snap.sequence;
+            new_actor.waiting_signal = snap.waiting_signal.clone();
+        } else {
+            for (name, value) in &template.state_data {
+                new_actor.set_state_field(name.clone(), *value);
+            }
         }
+
         new_actor.state_models = template.state_models.clone();
         for (name, handler) in &template.behaviors {
             new_actor.register_behavior(name.clone(), *handler);
@@ -327,8 +351,6 @@ impl Supervisor {
         new_actor.parent = Some(self.id);
         if let Some(module) = &template.bytecode_module {
             new_actor.bytecode_module = Some(module.clone());
-            // Keep a copy for recovery after a runtime restart, exactly as
-            // the spawn path does via `register_recovery_module`.
             runtime.register_recovery_module(
                 new_id,
                 module.clone(),
@@ -341,6 +363,14 @@ impl Supervisor {
         if is_workflow {
             runtime.layout_workflow_behavior_table(new_id);
         }
+
+        // Re-key the snapshot under the new actor id so future restarts find it.
+        if let Some(mut snap) = snapshot {
+            snap.actor_id = new_id;
+            let _ = runtime.persistence.save_snapshot(snap);
+            let _ = runtime.persistence.clear(old_actor_id);
+        }
+
         runtime.scheduler.enqueue(new_id);
         Some(new_id)
     }
@@ -367,7 +397,7 @@ impl Supervisor {
             return None;
         }
         self.reap_exited_child(actor_id, runtime);
-        let new_id = match self.rebuild_child(&spec, runtime) {
+        let new_id = match self.rebuild_child(&spec, runtime, actor_id) {
             Some(id) => id,
             None => {
                 // rebuild_child logged the failure; drop the child so the
@@ -450,7 +480,7 @@ impl Supervisor {
             } else {
                 runtime.reap_living_actor(old_id, reason.clone());
             }
-            match self.rebuild_child(&spec, runtime) {
+            match self.rebuild_child(&spec, runtime, old_id) {
                 Some(new_id) => {
                     self.update_child_id(old_id, new_id);
                     self.restart_history.push((spec.id, now));
@@ -484,7 +514,7 @@ impl Supervisor {
             } else {
                 runtime.reap_living_actor(old_id, reason.clone());
             }
-            match self.rebuild_child(&spec, runtime) {
+            match self.rebuild_child(&spec, runtime, old_id) {
                 Some(new_id) => {
                     self.update_child_id(old_id, new_id);
                     self.restart_history.push((spec.id, now));
