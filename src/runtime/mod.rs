@@ -1080,23 +1080,42 @@ impl Runtime {
             .get(&actor_id)
             .map(|a| a.is_workflow)
             .unwrap_or(false);
+        let seq = self.next_sequence(actor_id);
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.event_log.push((event.to_string(), args.to_vec()));
-            // MVP: increment all event_sourced Int state fields.
             let event_sourced_names: Vec<String> = actor
                 .state_models
                 .iter()
                 .filter(|(_, model)| **model == StateModel::EventSourced)
                 .map(|(name, _)| name.clone())
                 .collect();
-            for name in event_sourced_names {
-                if let Some(n) = actor.get_state_field(&name).and_then(|v| v.as_int()) {
+            for name in &event_sourced_names {
+                if let Some(n) = actor.get_state_field(name).and_then(|v| v.as_int()) {
                     actor.set_state_field(name, crate::vm::Value::int(n + 1));
+                }
+            }
+            // Persist events for EventSourced fields (non-workflow actors).
+            if !is_workflow && !event_sourced_names.is_empty() {
+                let persisted_args: Vec<PersistedValue> =
+                    args.iter().map(PersistedValue::from_value).collect();
+                for name in &event_sourced_names {
+                    let entry = EventEntry {
+                        sequence: seq,
+                        field_name: name.clone(),
+                        event_name: event.to_string(),
+                        args: persisted_args.clone(),
+                    };
+                    let _ = self.persistence.append_event(actor_id, entry);
+                }
+                if let Some(actor) = self.actors.get_mut(&actor_id) {
+                    for name in &event_sourced_names {
+                        actor.event_sourced_sequences.insert(name.clone(), seq);
+                    }
+                    actor.sequence = seq;
                 }
             }
         }
         if is_workflow {
-            let seq = self.next_sequence(actor_id);
             if event == "ParallelBranchCompleted" && args.len() == 2 {
                 let parallel_step_name =
                     self.resolve_string_constant(actor_id, &args[0]).unwrap_or_default();
@@ -3097,7 +3116,8 @@ impl Runtime {
         let mut state = HashMap::new();
         for (name, value) in &actor.state_data {
             let model = actor.state_models.get(name).copied().unwrap_or(StateModel::Local);
-            if model.is_persistent() {
+            // EventSourced fields are reconstructed from the event log, not snapshots.
+            if model == StateModel::Durable || model == StateModel::Crdt {
                 // Serialize the semantic_memory and procedural_memory JSON
                 // pointers to strings so they survive node restarts.
                 let persisted = if name == "semantic_memory" || name == "procedural_memory" {
@@ -3438,6 +3458,21 @@ impl Runtime {
                 }
             }
             actor.set_state_field(name, value.to_value());
+        }
+        // Replay event-sourced events to reconstruct EventSourced fields.
+        let events = self.persistence.read_events(actor_id);
+        if !events.is_empty() {
+            for entry in &events {
+                if let Some(current) = actor.get_state_field(&entry.field_name).and_then(|v| v.as_int()) {
+                    actor.set_state_field(&entry.field_name, Value::int(current + 1));
+                } else {
+                    actor.set_state_field(&entry.field_name, Value::int(1));
+                }
+                let current_seq = actor.event_sourced_sequences.get(&entry.field_name).copied().unwrap_or(0);
+                if entry.sequence > current_seq {
+                    actor.event_sourced_sequences.insert(entry.field_name.clone(), entry.sequence);
+                }
+            }
         }
         // Restore bytecode metadata registered for recovery.
         if let Some((module, offsets, comp_offsets)) = self.recovery_modules.get(&actor_id) {

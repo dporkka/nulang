@@ -54,6 +54,10 @@ pub struct Actor {
     pub state_data: HashMap<String, Value>, // Named actor state fields
     pub state_models: HashMap<String, StateModel>, // Persistence model per field
     pub event_log: Vec<(String, Vec<Value>)>, // Emitted events for event_sourced actors
+    /// Last persisted event sequence per EventSourced field, for compaction tracking.
+    pub event_sourced_sequences: HashMap<String, u64>,
+    /// How many events between compaction snapshots for EventSourced fields (default 100).
+    pub event_sourced_compaction_interval: u64,
     pub persistent: bool,                 // Whether this actor survives restarts
     pub is_workflow: bool,                // True if generated from a workflow declaration
     pub behavior_table: Vec<BehaviorEntry>,
@@ -159,6 +163,8 @@ impl Actor {
             state_data: HashMap::new(),
             state_models: HashMap::new(),
             event_log: Vec::new(),
+            event_sourced_sequences: HashMap::new(),
+            event_sourced_compaction_interval: 100,
             persistent: false,
             is_workflow: false,
             behavior_table: Vec::new(),

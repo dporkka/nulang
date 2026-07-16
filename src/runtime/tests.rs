@@ -1331,6 +1331,50 @@ fn test_local_state_is_not_persisted() {
 }
 
 #[test]
+fn test_event_sourced_counter_replays_from_event_log() {
+    let mut rt = Runtime::new();
+    rt.persistence = Box::new(MemoryStore::new());
+
+    let mut models = HashMap::new();
+    models.insert("counter".to_string(), StateModel::EventSourced);
+    let actor_id = rt.spawn_persistent_actor(
+        Box::new(|| vec![("counter".to_string(), Value::int(0))]),
+        models,
+    );
+
+    for i in 0..5 {
+        rt.emit_event(actor_id, "Incremented", &[Value::int(i)]);
+    }
+
+    let count = rt.actors.get(&actor_id).unwrap().get_state_field("counter");
+    assert_eq!(count, Some(Value::int(5)), "counter should be 5 after 5 events");
+
+    rt.checkpoint_actor(actor_id);
+    let snapshot = rt.persistence.load_snapshot(actor_id).unwrap();
+    assert_eq!(
+        snapshot.state.contains_key("counter"),
+        false,
+        "EventSourced field must not appear in snapshot"
+    );
+
+    let events = rt.persistence.read_events(actor_id);
+    assert_eq!(events.len(), 5, "5 events must be persisted");
+    assert_eq!(events[0].field_name, "counter");
+    assert_eq!(events[0].event_name, "Incremented");
+
+    rt.actors.remove(&actor_id);
+    let recovered_id = rt.recover_actor(actor_id).unwrap();
+    assert_eq!(recovered_id, actor_id);
+
+    let recovered_count = rt.actors.get(&actor_id).unwrap().get_state_field("counter");
+    assert_eq!(
+        recovered_count,
+        Some(Value::int(5)),
+        "recovered actor must have counter=5 from event replay"
+    );
+}
+
+#[test]
 fn test_memory_store_latest_sequence() {
     let mut store = MemoryStore::new();
     let snapshot = ActorSnapshot {

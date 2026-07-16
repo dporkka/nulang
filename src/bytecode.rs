@@ -542,7 +542,6 @@ pub struct ActorMeta {
     #[serde(default)]
     pub backend: crate::ast::ActorBackendKind,
 }
-
 impl ActorMeta {
     pub fn new(name: impl Into<String>) -> Self {
         ActorMeta {

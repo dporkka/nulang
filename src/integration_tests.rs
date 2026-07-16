@@ -7,8 +7,8 @@ mod tests {
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use crate::runtime::{
-        ActorSnapshot, JournalEntry, MemoryStore, PersistenceStore, Runtime, RuntimeVmCallbacks,
-        WorkflowEvent,
+        ActorSnapshot, EventEntry, JournalEntry, MemoryStore, PersistenceStore, Runtime,
+        RuntimeVmCallbacks, WorkflowEvent,
     };
     use crate::typechecker::TypeChecker;
     use crate::types::NuError;
@@ -60,6 +60,12 @@ mod tests {
         }
         fn clear(&mut self, actor_id: u64) -> std::io::Result<()> {
             self.0.lock().unwrap().clear(actor_id)
+        }
+        fn append_event(&mut self, actor_id: u64, entry: EventEntry) -> std::io::Result<()> {
+            self.0.lock().unwrap().append_event(actor_id, entry)
+        }
+        fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
+            self.0.lock().unwrap().read_events(actor_id)
         }
     }
 

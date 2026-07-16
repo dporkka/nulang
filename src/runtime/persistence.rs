@@ -102,6 +102,20 @@ pub struct JournalEntry {
     pub payload: Vec<PersistedValue>,
 }
 
+/// An event-sourced state change. Appended to the event log for each
+/// mutation of an EventSourced field. On recovery, events are replayed
+/// to reconstruct the field's current value without a full snapshot.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EventEntry {
+    pub sequence: u64,
+    /// Name of the EventSourced field being mutated.
+    pub field_name: String,
+    /// Event name (e.g. "Incremented", "Custom").
+    pub event_name: String,
+    /// Event arguments.
+    pub args: Vec<PersistedValue>,
+}
+
 /// A workflow event records a durable, replayable step in a workflow actor.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "tag", content = "value")]
@@ -292,6 +306,12 @@ pub trait PersistenceStore: Send + Sync {
             .collect()
     }
 
+    /// Append an event to the actor's event-sourcing log.
+    fn append_event(&mut self, actor_id: u64, entry: EventEntry) -> io::Result<()>;
+
+    /// Read all event-sourcing entries for an actor in order.
+    fn read_events(&self, actor_id: u64) -> Vec<EventEntry>;
+
     /// Highest sequence number known for the actor.
     fn latest_sequence(&self, actor_id: u64) -> u64;
 
@@ -314,6 +334,7 @@ pub struct MemoryStore {
     snapshots: HashMap<u64, ActorSnapshot>,
     journals: HashMap<u64, Vec<JournalEntry>>,
     workflow_events: HashMap<u64, Vec<WorkflowEvent>>,
+    events: HashMap<u64, Vec<EventEntry>>,
 }
 
 impl MemoryStore {
@@ -356,6 +377,15 @@ impl PersistenceStore for MemoryStore {
             .unwrap_or_default()
     }
 
+    fn append_event(&mut self, actor_id: u64, entry: EventEntry) -> io::Result<()> {
+        self.events.entry(actor_id).or_default().push(entry);
+        Ok(())
+    }
+
+    fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
+        self.events.get(&actor_id).cloned().unwrap_or_default()
+    }
+
     fn latest_sequence(&self, actor_id: u64) -> u64 {
         let snapshot_seq = self
             .snapshots
@@ -367,18 +397,24 @@ impl PersistenceStore for MemoryStore {
             .get(&actor_id)
             .and_then(|j| j.last().map(|e| e.sequence))
             .unwrap_or(0);
-        let event_seq = self
+        let wf_event_seq = self
             .workflow_events
             .get(&actor_id)
             .and_then(|e| e.last().map(|ev| ev.sequence()))
             .unwrap_or(0);
-        snapshot_seq.max(journal_seq).max(event_seq)
+        let event_seq = self
+            .events
+            .get(&actor_id)
+            .and_then(|e| e.last().map(|ev| ev.sequence))
+            .unwrap_or(0);
+        snapshot_seq.max(journal_seq).max(wf_event_seq).max(event_seq)
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
         self.snapshots.remove(&actor_id);
         self.journals.remove(&actor_id);
         self.workflow_events.remove(&actor_id);
+        self.events.remove(&actor_id);
         Ok(())
     }
 }
@@ -412,6 +448,10 @@ impl JsonFileStore {
 
     fn workflow_events_path(&self, actor_id: u64) -> PathBuf {
         self.actor_dir(actor_id).join("workflow_events.jsonl")
+    }
+
+    fn events_path(&self, actor_id: u64) -> PathBuf {
+        self.actor_dir(actor_id).join("events.jsonl")
     }
 }
 
@@ -506,6 +546,31 @@ impl PersistenceStore for JsonFileStore {
             .collect()
     }
 
+    fn append_event(&mut self, actor_id: u64, entry: EventEntry) -> io::Result<()> {
+        let dir = self.actor_dir(actor_id);
+        fs::create_dir_all(&dir)?;
+        let path = self.events_path(actor_id);
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        let json = serde_json::to_string(&entry)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        writeln!(file, "{}", json)?;
+        Ok(())
+    }
+
+    fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
+        let path = self.events_path(actor_id);
+        let data = match fs::read_to_string(path) {
+            Ok(d) => d,
+            Err(_) => return Vec::new(),
+        };
+        data.lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
     fn latest_sequence(&self, actor_id: u64) -> u64 {
         let snapshot_seq = self
             .load_snapshot(actor_id)
@@ -516,12 +581,17 @@ impl PersistenceStore for JsonFileStore {
             .last()
             .map(|e| e.sequence)
             .unwrap_or(0);
-        let event_seq = self
+        let wf_event_seq = self
             .read_workflow_events(actor_id)
             .last()
             .map(|e| e.sequence())
             .unwrap_or(0);
-        snapshot_seq.max(journal_seq).max(event_seq)
+        let event_seq = self
+            .read_events(actor_id)
+            .last()
+            .map(|e| e.sequence)
+            .unwrap_or(0);
+        snapshot_seq.max(journal_seq).max(wf_event_seq).max(event_seq)
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
@@ -627,6 +697,17 @@ impl LibsqlStore {
                     actor_id INTEGER NOT NULL,
                     sequence INTEGER NOT NULL,
                     event TEXT NOT NULL,
+                    PRIMARY KEY (actor_id, sequence)
+                )",
+                (),
+            ).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS events (
+                    actor_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    field_name TEXT NOT NULL,
+                    event_name TEXT NOT NULL,
+                    args TEXT NOT NULL,
                     PRIMARY KEY (actor_id, sequence)
                 )",
                 (),
@@ -803,6 +884,56 @@ impl PersistenceStore for LibsqlStore {
         })
     }
 
+    fn append_event(&mut self, actor_id: u64, entry: EventEntry) -> io::Result<()> {
+        let args_json = serde_json::to_string(&entry.args)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            conn.execute(
+                "INSERT INTO events (actor_id, sequence, field_name, event_name, args) VALUES (?1, ?2, ?3, ?4, ?5)",
+                libsql::params![actor_id as i64, entry.sequence as i64, entry.field_name, entry.event_name, args_json],
+            ).await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        })
+    }
+
+    fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            let mut rows = match conn.query(
+                "SELECT sequence, field_name, event_name, args FROM events
+                 WHERE actor_id = ?1 ORDER BY sequence ASC",
+                libsql::params![actor_id as i64],
+            ).await {
+                Ok(r) => r,
+                Err(_) => return Vec::new(),
+            };
+            let mut entries = Vec::new();
+            loop {
+                match rows.next().await {
+                    Ok(Some(row)) => {
+                        let seq: i64 = match row.get(0) { Ok(v) => v, Err(_) => continue };
+                        let field_name: String = match row.get(1) { Ok(v) => v, Err(_) => continue };
+                        let event_name: String = match row.get(2) { Ok(v) => v, Err(_) => continue };
+                        let args_json: String = match row.get(3) { Ok(v) => v, Err(_) => continue };
+                        let args: Vec<PersistedValue> = match serde_json::from_str(&args_json) {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        entries.push(EventEntry {
+                            sequence: seq as u64,
+                            field_name,
+                            event_name,
+                            args,
+                        });
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+            entries
+        })
+    }
+
     fn latest_sequence(&self, actor_id: u64) -> u64 {
         let conn = self.conn.lock().unwrap();
         self.rt.block_on(async {
@@ -822,7 +953,7 @@ impl PersistenceStore for LibsqlStore {
                 let row = rows.next().await.ok()??;
                 row.get(0).ok()
             }.await;
-            let event_seq: Option<i64> = async {
+            let wf_event_seq: Option<i64> = async {
                 let mut rows = conn.query(
                     "SELECT sequence FROM workflow_events WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
                     libsql::params![actor_id as i64],
@@ -830,8 +961,17 @@ impl PersistenceStore for LibsqlStore {
                 let row = rows.next().await.ok()??;
                 row.get(0).ok()
             }.await;
+            let event_seq: Option<i64> = async {
+                let mut rows = conn.query(
+                    "SELECT sequence FROM events WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                    libsql::params![actor_id as i64],
+                ).await.ok()?;
+                let row = rows.next().await.ok()??;
+                row.get(0).ok()
+            }.await;
             snapshot_seq.unwrap_or(0)
                 .max(journal_seq.unwrap_or(0))
+                .max(wf_event_seq.unwrap_or(0))
                 .max(event_seq.unwrap_or(0)) as u64
         })
     }
@@ -844,6 +984,8 @@ impl PersistenceStore for LibsqlStore {
             conn.execute("DELETE FROM journal WHERE actor_id = ?1", libsql::params![actor_id as i64])
                 .await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             conn.execute("DELETE FROM workflow_events WHERE actor_id = ?1", libsql::params![actor_id as i64])
+                .await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute("DELETE FROM events WHERE actor_id = ?1", libsql::params![actor_id as i64])
                 .await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             Ok(())
         })
