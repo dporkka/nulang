@@ -10,6 +10,10 @@ pub mod lexer;
 pub mod lsp;
 pub mod mir;
 pub mod mir_codegen;
+#[cfg(feature = "wasm-backend")]
+pub mod mir_wasm;
+#[cfg(feature = "wasm-backend")]
+pub mod wasm_runtime;
 pub mod mir_lower;
 pub mod package;
 pub mod parser;

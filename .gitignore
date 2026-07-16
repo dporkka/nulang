@@ -2,3 +2,4 @@
 check_lib
 cargo_check.log
 .claude/
+out.wasm

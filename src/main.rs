@@ -81,6 +81,15 @@ async fn main() {
             }
             "--lsp" => opts.lsp = true,
             "--doc" => opts.doc = true,
+            "--backend" => {
+                if i + 1 < args.len() {
+                    opts.backend = args[i + 1].clone();
+                    i += 1;
+                } else {
+                    eprintln!("Error: --backend requires an argument (bytecode | wasm | wasm-run | wasm-aot)");
+                    std::process::exit(1);
+                }
+            }
             "-v" | "--verbose" => opts.verbose = true,
             "-h" | "--help" => {
                 print_help();
@@ -134,7 +143,7 @@ async fn main() {
     }
 
     if let Some(code) = opts.eval_code {
-        if let Err(e) = run_source(&code, opts.verbose) {
+        if let Err(e) = run_source(&code, opts.verbose, &opts.backend) {
             print_error(&e);
             std::process::exit(1);
         }
@@ -167,7 +176,7 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) = run_source(&source, opts.verbose) {
+        if let Err(e) = run_source(&source, opts.verbose, &opts.backend) {
             print_error(&e);
             std::process::exit(1);
         }
@@ -179,7 +188,6 @@ async fn main() {
     repl.run();
 }
 
-#[derive(Default)]
 struct Options {
     repl: bool,
     eval_code: Option<String>,
@@ -187,6 +195,21 @@ struct Options {
     lsp: bool,
     doc: bool,
     verbose: bool,
+    backend: String,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            repl: false,
+            eval_code: None,
+            check_file: None,
+            lsp: false,
+            doc: false,
+            verbose: false,
+            backend: "bytecode".to_string(),
+        }
+    }
 }
 
 fn print_help() {
@@ -204,6 +227,7 @@ fn print_help() {
     println!("  -c, --check      Type-check a file (don't run)");
     println!("  --doc            Generate Markdown API docs (docs/api.md)");
     println!("  --lsp            Start Language Server (stdio)");
+    println!("  --backend <b>    Backend: bytecode (default) | wasm | wasm-run | wasm-aot");
     println!("  nula <cmd>       Package manager (new, build, test, run)");
     println!("  --version, -V    Print version and exit");
     println!("  -v, --verbose    Show bytecode and AST");
@@ -326,42 +350,98 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
     Ok(ast)
 }
 
-/// Full pipeline: parse -> typecheck -> effect check -> compile -> vm.run()
-fn run_source(source: &str, verbose: bool) -> NuResult<()> {
+/// Full pipeline: parse -> typecheck -> effect check -> compile -> execute.
+fn run_source(source: &str, verbose: bool, backend: &str) -> NuResult<()> {
     let ast = run_frontend(source, verbose)?;
 
-    // Compile via HIR/MIR pipeline.
-    let m = compile_with_new_pipeline(&ast, "main")?;
-    if verbose {
-        println!("=== Bytecode (HIR/MIR pipeline) ===");
-        println!("{}", disassemble(&m));
+    match backend {
+        #[cfg(feature = "wasm-backend")]
+        "wasm" => {
+            let hir = nulang::hir_lower::lower_module(&ast);
+            let mir = nulang::mir_lower::lower_module(&hir)?;
+            let mut wasm_backend = nulang::mir_wasm::WasmBackend::new();
+            let wasm_bytes = wasm_backend.compile(&mir, "main")?;
+            if verbose {
+                println!("=== WASM ({}) bytes ===", wasm_bytes.len());
+            }
+            // Write .wasm file.
+            std::fs::write("out.wasm", &wasm_bytes).map_err(|e| {
+                nulang::types::NuError::VMError(format!("failed to write out.wasm: {}", e))
+            })?;
+            println!("Wrote out.wasm ({} bytes)", wasm_bytes.len());
+            return Ok(());
+        }
+        #[cfg(feature = "wasm-backend")]
+        "wasm-run" => {
+            let hir = nulang::hir_lower::lower_module(&ast);
+            let mir = nulang::mir_lower::lower_module(&hir)?;
+            let mut wasm_backend = nulang::mir_wasm::WasmBackend::new();
+            let wasm_bytes = wasm_backend.compile(&mir, "main")?;
+            if verbose {
+                println!("=== WASM ({}) bytes ===", wasm_bytes.len());
+            }
+            // Write .wasm file for debugging, then run via Wasmtime.
+            std::fs::write("out.wasm", &wasm_bytes).map_err(|e| {
+                nulang::types::NuError::VMError(format!("failed to write out.wasm: {}", e))
+            })?;
+            let mut runtime = nulang::wasm_runtime::WasmRuntime::new(&wasm_bytes, None)?;
+            runtime.run()?;
+            return Ok(());
+        }
+        #[cfg(feature = "wasm-backend")]
+        "wasm-aot" => {
+            let hir = nulang::hir_lower::lower_module(&ast);
+            let mir = nulang::mir_lower::lower_module(&hir)?;
+            let mut wasm_backend = nulang::mir_wasm::WasmBackend::new();
+            let wasm_bytes = wasm_backend.compile(&mir, "main")?;
+            if verbose {
+                println!("=== WASM ({}) bytes ===", wasm_bytes.len());
+            }
+            std::fs::write("out.wasm", &wasm_bytes).map_err(|e| {
+                nulang::types::NuError::VMError(format!("failed to write out.wasm: {}", e))
+            })?;
+            println!("Wrote out.wasm ({} bytes)", wasm_bytes.len());
+            nulang::wasm_runtime::aot_compile("out.wasm", "out.cwasm")?;
+            println!("Wrote out.cwasm (precompiled)");
+            return Ok(());
+        }
+        #[cfg(not(feature = "wasm-backend"))]
+        "wasm" | "wasm-run" | "wasm-aot" => {
+            return Err(nulang::types::NuError::VMError(
+                "wasm backend not compiled in (enable 'wasm-backend' feature)".into(),
+            ));
+        }
+        _ => {
+            // Bytecode backend (default).
+            let m = compile_with_new_pipeline(&ast, "main")?;
+            if verbose {
+                println!("=== Bytecode (HIR/MIR pipeline) ===");
+                println!("{}", disassemble(&m));
+            }
+            let has_actors = ast.decls.iter().any(|d| {
+                matches!(
+                    d,
+                    nulang::ast::Decl::Actor { .. } | nulang::ast::Decl::StateMachine { .. }
+                )
+            });
+            let value = if has_actors {
+                let (value, _runtime) = run_with_runtime(m)?;
+                value
+            } else {
+                let mut vm = VM::new();
+                vm.load_module(m);
+                vm.run().map_err(|e| {
+                    eprintln!("Runtime error: {}", e);
+                    e
+                })?
+            };
+            let result_str = value.to_string_repr();
+            if result_str != "unit" {
+                println!("{}", result_str);
+            }
+            Ok(())
+        }
     }
-
-    // Modules declaring actors need the real runtime: the standalone VM's
-    // spawn/send callbacks are stubs that would silently drop messages.
-    let has_actors = ast
-        .decls
-        .iter()
-        .any(|d| matches!(d, nulang::ast::Decl::Actor { .. } | nulang::ast::Decl::StateMachine { .. }));
-    // Execute
-    let value = if has_actors {
-        let (value, _runtime) = run_with_runtime(m)?;
-        value
-    } else {
-        let mut vm = VM::new();
-        vm.load_module(m);
-        vm.run().map_err(|e| {
-            eprintln!("Runtime error: {}", e);
-            e
-        })?
-    };
-
-    let result_str = value.to_string_repr();
-    if result_str != "unit" {
-        println!("{}", result_str);
-    }
-
-    Ok(())
 }
 
 /// Execute a module that declares actors against a real `Runtime`.

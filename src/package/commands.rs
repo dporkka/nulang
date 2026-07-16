@@ -17,6 +17,7 @@ pub fn run(args: &[String]) -> NuResult<()> {
     match args.first().map(String::as_str) {
         Some("new") => cmd_new(args.get(1).map(String::as_str)),
         Some("build") => cmd_build(),
+        Some("build-wasm") => cmd_build_wasm(),
         Some("test") => cmd_test(),
         Some("run") => cmd_run(),
         Some("--help") | Some("-h") => {
@@ -24,7 +25,7 @@ pub fn run(args: &[String]) -> NuResult<()> {
             Ok(())
         }
         Some(other) => Err(NuError::PackageError(format!(
-            "unknown nula subcommand '{}' (expected new, build, test, or run)",
+            "unknown nula subcommand '{}' (expected new, build, build-wasm, test, or run)",
             other
         ))),
         None => {
@@ -40,8 +41,8 @@ fn print_usage() {
     println!("Usage: nulang nula <COMMAND>");
     println!();
     println!("Commands:");
-    println!("  new <name>   Create a new package in ./<name>");
     println!("  build        Resolve dependencies and type-check the package");
+    println!("  build-wasm   Build package to .wasm + .cwasm (AOT, requires wasmtime)");
     println!("  test         Run every .nula file in the package's tests/ directory");
     println!("  run          Build and run the package entry point");
 }
@@ -137,6 +138,14 @@ fn cmd_build() -> NuResult<()> {
     Ok(())
 }
 
+/// `nula build-wasm`: compile package to .wasm + AOT .cwasm.
+fn cmd_build_wasm() -> NuResult<()> {
+    let entry = prepare_package()?;
+    let entry_str = entry.to_string_lossy().into_owned();
+    nulang_exe(&["--backend", "wasm-aot", &entry_str])?;
+    println!("WASM AOT build finished.");
+    Ok(())
+}
 /// `nula run`: build, then execute the entry point.
 fn cmd_run() -> NuResult<()> {
     let entry = prepare_package()?;

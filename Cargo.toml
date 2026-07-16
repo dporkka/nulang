@@ -21,8 +21,8 @@ python = ["dep:pyo3"]
 sqlite = ["dep:rusqlite"]
 # Turso libSQL remote database support (TursoStore for edge deployments).
 turso = ["dep:libsql"]
-# Language Server Protocol support (`nulang --lsp`).
 lsp = ["dep:tower-lsp"]
+wasm-backend = ["dep:wasm-encoder", "dep:wasmtime"]
 
 [dependencies]
 # Memory & concurrency
@@ -59,6 +59,10 @@ libsql = { version = "0.10.0-pre.4", optional = true }
 
 # Native library loading
 libloading = "0.8"
+# WASM binary encoding (optional, see [features])
+wasm-encoder = { version = "0.220", optional = true }
+# WASM runtime using Wasmtime (optional, see [features])
+wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
 
 [lib]
 name = "nulang"
