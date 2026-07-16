@@ -2571,10 +2571,9 @@ impl VM {
                 self.frames[frame_idx].regs[instr.op3 as usize] = result;
             }
 
-            // -- String & IO --
             OpCode::SConcat => {
-                let s1 = self.frames[frame_idx].regs[instr.op1 as usize].to_string_repr();
-                let s2 = self.frames[frame_idx].regs[instr.op2 as usize].to_string_repr();
+                let s1 = resolve_value_string(&self.modules[module_idx].constants, self.frames[frame_idx].regs[instr.op1 as usize]);
+                let s2 = resolve_value_string(&self.modules[module_idx].constants, self.frames[frame_idx].regs[instr.op2 as usize]);
                 let result = format!("{}{}", s1, s2);
                 let bytes = result.into_bytes();
                 self.frames[frame_idx].regs[instr.op3 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(bytes.len(), HeapTypeTag::String) {

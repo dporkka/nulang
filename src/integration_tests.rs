@@ -148,12 +148,28 @@ mod tests {
         let mut vm = VM::new();
         vm.load_module(module);
         let value = vm.run().unwrap();
-        let string_id = value.as_string_id().expect("expected string result");
-        let module_idx = vm.modules.len() - 1;
-        let content = vm.constant_string(module_idx, string_id).unwrap();
-        assert_eq!(content, expected, "unexpected string for: {}", source);
+        // Handle both constant-pool strings (TAG_STRING) and heap-allocated
+        // strings (TAG_PTR from SConcat).
+        if let Some(id) = value.as_string_id() {
+            let module_idx = vm.modules.len() - 1;
+            let content = vm.constant_string(module_idx, id).unwrap();
+            assert_eq!(content, expected, "unexpected string for: {}", source);
+        } else if value.is_ptr() {
+            // Heap-allocated string: read C string from the heap.
+            let ptr = value.as_ptr().expect("expected ptr value");
+            let mut len = 0usize;
+            unsafe {
+                while *ptr.add(len) != 0 {
+                    len += 1;
+                }
+                let slice = std::slice::from_raw_parts(ptr, len);
+                let content = String::from_utf8_lossy(slice);
+                assert_eq!(content, expected, "unexpected heap string for: {}", source);
+            }
+        } else {
+            panic!("expected string result, got {:?}", value);
+        }
     }
-
     /// Run source through the full compiler pipeline using a real actor runtime.
     fn run_source_with_runtime(
         source: &str,
@@ -2045,6 +2061,16 @@ match { a: 2, b: 9 } with {
         );
         assert_eq!(actor.event_log.len(), 3, "three events should be logged");
         assert_eq!(actor.event_log[0].0, "Incremented");
+    }
+
+    /// String concatenation and Int.to_string via the full MIR pipeline.
+    #[test]
+    fn test_string_concat_and_int_to_string() {
+        assert_string(r#""hello " + "world""#, "hello world");
+        assert_string(
+            r#""count: " + perform Int.to_string(42)"#,
+            "count: 42",
+        );
     }
 
     #[test]
