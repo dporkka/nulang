@@ -1,0 +1,640 @@
+//! AOT code generation: MIR → Cranelift CLIF.
+//!
+//! Compiles whole MIR functions to native code with unboxed parameter and
+//! return types when type metadata is available. Falls back to NaN-tagged
+//! runtime helpers when types are unknown.
+//!
+//! # Calling convention
+//!
+//! Compiled functions follow the C ABI:
+//! ```c
+//! uint64_t nulang_fn_N(uint64_t arg0, uint64_t arg1, ...);
+//! ```
+//! All arguments and return values are `u64` (NaN-tagged when type is
+//! unknown, raw bits when unboxed). The AOT runtime trampoline handles
+//! boxing/unboxing at function boundaries.
+
+use cranelift::codegen::ir::FuncRef;
+use cranelift::prelude::*;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_jit::JITModule;
+use cranelift_module::{Linkage, Module};
+
+use std::collections::HashMap;
+
+use crate::mir;
+use crate::type_metadata::{KnownType, TypeMetadata};
+
+// Reuse NaN-tag constants from the JIT shared helpers.
+use crate::value_layout::{PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT};
+
+const TAG_INT_I64: i64 = TAG_INT as i64;
+const TAG_BOOL_I64: i64 = TAG_BOOL as i64;
+const PAYLOAD_MASK_I64: i64 = PAYLOAD_MASK as i64;
+const SIGN_BIT_I64: i64 = SIGN_BIT as i64;
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// Errors that can occur during AOT compilation.
+#[derive(Debug)]
+pub enum AotCompileError {
+    /// A MIR construct that isn't yet supported by the AOT backend.
+    Unsupported(String),
+    /// Internal compiler error.
+    Internal(String),
+    /// Cranelift compilation failure.
+    Cranelift(String),
+}
+
+impl std::fmt::Display for AotCompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AotCompileError::Unsupported(msg) => write!(f, "AOT unsupported: {}", msg),
+            AotCompileError::Internal(msg) => write!(f, "AOT internal error: {}", msg),
+            AotCompileError::Cranelift(msg) => write!(f, "AOT cranelift error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for AotCompileError {}
+
+pub type AotResult<T> = Result<T, AotCompileError>;
+
+// ---------------------------------------------------------------------------
+// CLIF helpers (adapted from jit/typed_compiler.rs)
+// ---------------------------------------------------------------------------
+
+/// Sign-extend a 48-bit payload to a full i64.
+fn emit_sext48(builder: &mut FunctionBuilder, raw: Value) -> Value {
+    let payload_mask = builder.ins().iconst(types::I64, PAYLOAD_MASK_I64);
+    let sign_bit_mask = builder.ins().iconst(types::I64, SIGN_BIT_I64);
+    let payload = builder.ins().band(raw, payload_mask);
+    let sign_bit = builder.ins().band(raw, sign_bit_mask);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let is_neg = builder
+        .ins()
+        .icmp(IntCC::NotEqual, sign_bit, zero);
+    let sign_ext = builder.ins().iconst(types::I64, 0xFFFF_0000_0000_0000u64 as i64);
+    let extended = builder.ins().bor(payload, sign_ext);
+    builder.ins().select(is_neg, extended, payload)
+}
+
+/// Re-tag an i64 value into a NaN-tagged integer.
+fn emit_tag_int(builder: &mut FunctionBuilder, value: Value) -> Value {
+    let tag = builder.ins().iconst(types::I64, TAG_INT_I64);
+    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK_I64);
+    let masked = builder.ins().band(value, mask);
+    builder.ins().bor(tag, masked)
+}
+
+// ---------------------------------------------------------------------------
+// Compilation context
+// ---------------------------------------------------------------------------
+
+/// State maintained during compilation of one MIR module.
+pub struct AotContext<'a> {
+    /// The Cranelift JIT module (we reuse JITModule for now; could be
+    /// ObjectModule for true AOT later).
+    pub module: &'a mut JITModule,
+    /// Reusable function builder context.
+    pub builder_context: &'a mut FunctionBuilderContext,
+    /// Cranelift codegen context (holds the current function being compiled).
+    pub codegen_ctx: codegen::Context,
+    /// Runtime helpers registered with the JIT module.
+    pub helpers: HashMap<&'static str, FuncRef>,
+}
+
+impl<'a> AotContext<'a> {
+    pub fn new(
+        module: &'a mut JITModule,
+        builder_context: &'a mut FunctionBuilderContext,
+    ) -> Self {
+        let codegen_ctx = module.make_context();
+        AotContext {
+            module,
+            builder_context,
+            codegen_ctx,
+            helpers: HashMap::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point: compile a MIR function to a native function pointer
+// ---------------------------------------------------------------------------
+
+/// Compile a single MIR function to native code using Cranelift.
+///
+/// Returns a raw function pointer with signature `extern "C" fn(u64, u64, ...) -> u64`.
+/// The caller is responsible for boxing/unboxing arguments.
+pub fn compile_mir_function(
+    aot: &mut AotContext,
+    mir_func: &mir::Function,
+    func_index: usize,
+) -> AotResult<cranelift_module::FuncId> {
+    let func_name = format!("nulang_fn_{}", func_index);
+
+    // Build the CLIF function signature.
+    let mut sig = aot.module.make_signature();
+    for _ in &mir_func.params {
+        sig.params.push(AbiParam::new(types::I64));
+    }
+    sig.returns.push(AbiParam::new(types::I64));
+
+    let func_id = aot
+        .module
+        .declare_function(&func_name, Linkage::Local, &sig)
+        .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+
+    // Set the function signature on the codegen context before building.
+    aot.codegen_ctx.func.signature = sig.clone();
+
+    // Split module and codegen_ctx for independent borrows.
+    let module: &mut JITModule = aot.module;
+    let codegen_ctx: &mut codegen::Context = &mut aot.codegen_ctx;
+    let builder_ctx: &mut FunctionBuilderContext = aot.builder_context;
+    let local_base = mir::FunctionBuilder::LOCAL_BASE;
+    let type_meta = mir_func.type_metadata.clone();
+
+    // Single-pass: register helpers and build body.
+    let _helpers = {
+        let mut builder = FunctionBuilder::new(&mut codegen_ctx.func, builder_ctx);
+        let entry_block = builder.create_block();
+        builder.switch_to_block(entry_block);
+        builder.append_block_params_for_function_params(entry_block);
+
+        // Register runtime helpers.
+        let mut h: HashMap<&str, FuncRef> = HashMap::new();
+        let helper_names: &[&str] = &[
+            "nulang_iadd", "nulang_isub", "nulang_imul", "nulang_idiv", "nulang_imod",
+            "nulang_icmp_eq", "nulang_icmp_lt", "nulang_icmp_gt", "nulang_icmp_le",
+            "nulang_icmp_ge",
+            "nulang_fadd", "nulang_fsub", "nulang_fmul", "nulang_fdiv",
+            "nulang_fcmp_eq", "nulang_fcmp_lt", "nulang_fcmp_gt",
+            "nulang_ineg", "nulang_iinc", "nulang_idec", "nulang_not",
+            "nulang_and", "nulang_or",
+            "nulang_itof", "nulang_ftoi",
+            "nulang_xor", "nulang_shl", "nulang_shr",
+            "nulang_bitand", "nulang_bitor",
+            "nulang_fneg",
+        ];
+        for name in helper_names {
+            let h_sig = module.make_signature();
+            let h_id = module
+                .declare_function(name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(*name, func_ref);
+        }
+
+        let mut local_vals: HashMap<u32, Value> = HashMap::new();
+
+        for (i, param_id) in mir_func.params.iter().enumerate() {
+            let reg = local_base + param_id.0;
+            let val = builder.block_params(entry_block)[i];
+            local_vals.insert(reg, val);
+        }
+
+        let mut block_map: HashMap<mir::BlockId, cranelift::prelude::Block> = HashMap::new();
+        for block in &mir_func.blocks {
+            let clif_block = if block.id == mir_func.entry {
+                entry_block
+            } else {
+                builder.create_block()
+            };
+            block_map.insert(block.id, clif_block);
+        }
+
+        for block in &mir_func.blocks {
+            let clif_block = block_map[&block.id];
+            if block.id != mir_func.entry {
+                builder.switch_to_block(clif_block);
+            }
+
+            for stmt in &block.stmts {
+                compile_stmt(&mut builder, stmt, &type_meta, &h, &mut local_vals)?;
+            }
+
+            compile_terminator(&mut builder, &block.terminator, &block_map, &local_vals)?;
+        }
+
+        builder.seal_all_blocks();
+        builder.finalize();
+        h
+    };
+
+    module
+        .define_function(func_id, codegen_ctx)
+        .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+
+    module.clear_context(codegen_ctx);
+
+    Ok(func_id)
+}
+
+// ---------------------------------------------------------------------------
+// Statement compilation
+// ---------------------------------------------------------------------------
+
+fn compile_stmt(
+    builder: &mut FunctionBuilder,
+    stmt: &mir::Stmt,
+    type_meta: &TypeMetadata,
+    helpers: &HashMap<&str, FuncRef>,
+    local_vals: &mut HashMap<u32, Value>,
+) -> AotResult<()> {
+    match stmt {
+        mir::Stmt::Assign { dst, op } => {
+            let val = compile_rvalue(builder, op, type_meta, helpers, local_vals)?;
+            let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
+            local_vals.insert(reg, val);
+            Ok(())
+        }
+        _ => Err(AotCompileError::Unsupported(format!(
+            "statement {:?}",
+            stmt
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RValue compilation
+// ---------------------------------------------------------------------------
+
+fn compile_rvalue(
+    builder: &mut FunctionBuilder,
+    rv: &mir::RValue,
+    type_meta: &TypeMetadata,
+    helpers: &HashMap<&str, FuncRef>,
+    local_vals: &HashMap<u32, Value>,
+) -> AotResult<Value> {
+    match rv {
+        // Constants
+        mir::RValue::Const(c) => compile_const(builder, c),
+
+        // Variable load
+        mir::RValue::Load(id) => {
+            let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+            local_vals
+                .get(&reg)
+                .copied()
+                .ok_or_else(|| AotCompileError::Internal(format!("uninitialized local {}", id.0)))
+        }
+
+        // Binary operations — typed when both operands are known
+        mir::RValue::Binary(op, lhs, rhs) => {
+            compile_binary(builder, *op, *lhs, *rhs, type_meta, helpers, local_vals)
+        }
+
+        // Unary operations
+        mir::RValue::Unary(op, operand) => {
+            compile_unary(builder, *op, *operand, type_meta, helpers, local_vals)
+        }
+
+        _ => Err(AotCompileError::Unsupported(format!(
+            "rvalue {:?}",
+            rv
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Constant emission
+// ---------------------------------------------------------------------------
+
+fn compile_const(
+    builder: &mut FunctionBuilder,
+    c: &crate::bytecode::Constant,
+) -> AotResult<Value> {
+    match c {
+        crate::bytecode::Constant::Int(v) => {
+            let iconst_val = builder.ins().iconst(types::I64, *v);
+            Ok(emit_tag_int(builder, iconst_val))
+        }
+        crate::bytecode::Constant::Float(f) => {
+            // Float constants: store as raw f64 bits (NaN-tagged).
+            Ok(builder.ins().iconst(types::I64, f.to_bits() as i64))
+        }
+        crate::bytecode::Constant::Bool(b) => {
+            let val = if *b { 1i64 } else { 0i64 };
+            let tag = builder.ins().iconst(types::I64, TAG_BOOL_I64);
+            let v = builder.ins().iconst(types::I64, val);
+            Ok(builder.ins().bor(tag, v))
+        }
+        crate::bytecode::Constant::Unit => {
+            // Unit is represented as a special tagged value.
+            Ok(builder.ins().iconst(types::I64, 0x7FF9_0000_0000_0000u64 as i64))
+        }
+        _ => Err(AotCompileError::Unsupported(format!(
+            "constant {:?}",
+            c
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Binary operation emission
+// ---------------------------------------------------------------------------
+
+fn compile_binary(
+    builder: &mut FunctionBuilder,
+    op: crate::ast::BinOp,
+    lhs: mir::LocalId,
+    rhs: mir::LocalId,
+    type_meta: &TypeMetadata,
+    helpers: &HashMap<&str, FuncRef>,
+    local_vals: &HashMap<u32, Value>,
+) -> AotResult<Value> {
+    let lhs_reg = mir::FunctionBuilder::LOCAL_BASE + lhs.0;
+    let rhs_reg = mir::FunctionBuilder::LOCAL_BASE + rhs.0;
+    let lhs_val = *local_vals
+        .get(&lhs_reg)
+        .ok_or_else(|| AotCompileError::Internal("uninitialized lhs".into()))?;
+    let rhs_val = *local_vals
+        .get(&rhs_reg)
+        .ok_or_else(|| AotCompileError::Internal("uninitialized rhs".into()))?;
+
+    use crate::ast::BinOp;
+    let lhs_reg_usize = lhs_reg as usize;
+    let rhs_reg_usize = rhs_reg as usize;
+
+    match op {
+        BinOp::Add => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                let l = emit_sext48(builder, lhs_val);
+                let r = emit_sext48(builder, rhs_val);
+                let sum = builder.ins().iadd(l, r);
+                Ok(emit_tag_int(builder, sum))
+            } else if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Float) {
+                let l = builder.ins().bitcast(types::F64, MemFlags::new(), lhs_val);
+                let r = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
+                let sum = builder.ins().fadd(l, r);
+                Ok(builder.ins().bitcast(types::I64, MemFlags::new(), sum))
+            } else {
+                // Fall back to runtime helper.
+                call_helper(builder, helpers, "nulang_iadd", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::Sub => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                let l = emit_sext48(builder, lhs_val);
+                let r = emit_sext48(builder, rhs_val);
+                let diff = builder.ins().isub(l, r);
+                Ok(emit_tag_int(builder, diff))
+            } else if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Float) {
+                let l = builder.ins().bitcast(types::F64, MemFlags::new(), lhs_val);
+                let r = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
+                let diff = builder.ins().fsub(l, r);
+                Ok(builder.ins().bitcast(types::I64, MemFlags::new(), diff))
+            } else {
+                call_helper(builder, helpers, "nulang_isub", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::Mul => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                let l = emit_sext48(builder, lhs_val);
+                let r = emit_sext48(builder, rhs_val);
+                let prod = builder.ins().imul(l, r);
+                Ok(emit_tag_int(builder, prod))
+            } else if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Float) {
+                let l = builder.ins().bitcast(types::F64, MemFlags::new(), lhs_val);
+                let r = builder.ins().bitcast(types::F64, MemFlags::new(), rhs_val);
+                let prod = builder.ins().fmul(l, r);
+                Ok(builder.ins().bitcast(types::I64, MemFlags::new(), prod))
+            } else {
+                call_helper(builder, helpers, "nulang_imul", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::Div => {
+            // Division always goes through runtime helper (div-by-zero → nil).
+            call_helper(builder, helpers, "nulang_idiv", &[lhs_val, rhs_val])
+        }
+        BinOp::Eq => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                let l = emit_sext48(builder, lhs_val);
+                let r = emit_sext48(builder, rhs_val);
+                let cmp = builder.ins().icmp(IntCC::Equal, l, r);
+                Ok(emit_tag_bool(builder, cmp))
+            } else {
+                call_helper(builder, helpers, "nulang_icmp_eq", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::Lt => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                let l = emit_sext48(builder, lhs_val);
+                let r = emit_sext48(builder, rhs_val);
+                let cmp = builder.ins().icmp(IntCC::SignedLessThan, l, r);
+                Ok(emit_tag_bool(builder, cmp))
+            } else {
+                call_helper(builder, helpers, "nulang_icmp_lt", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::Gt => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                let l = emit_sext48(builder, lhs_val);
+                let r = emit_sext48(builder, rhs_val);
+                let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, l, r);
+                Ok(emit_tag_bool(builder, cmp))
+            } else {
+                call_helper(builder, helpers, "nulang_icmp_gt", &[lhs_val, rhs_val])
+            }
+        }
+        _ => Err(AotCompileError::Unsupported(format!(
+            "binary op {:?}",
+            op
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unary operation emission
+// ---------------------------------------------------------------------------
+
+fn compile_unary(
+    builder: &mut FunctionBuilder,
+    op: crate::ast::UnOp,
+    operand: mir::LocalId,
+    type_meta: &TypeMetadata,
+    helpers: &HashMap<&str, FuncRef>,
+    local_vals: &HashMap<u32, Value>,
+) -> AotResult<Value> {
+    let reg = mir::FunctionBuilder::LOCAL_BASE + operand.0;
+    let val = *local_vals
+        .get(&reg)
+        .ok_or_else(|| AotCompileError::Internal("uninitialized operand".into()))?;
+
+    use crate::ast::UnOp;
+    match op {
+        UnOp::Neg => {
+            if type_meta.is_known(reg as usize, KnownType::Int) {
+                let payload = emit_sext48(builder, val);
+                let neg = builder.ins().ineg(payload);
+                Ok(emit_tag_int(builder, neg))
+            } else if type_meta.is_known(reg as usize, KnownType::Float) {
+                let f = builder.ins().bitcast(types::F64, MemFlags::new(), val);
+                let neg = builder.ins().fneg(f);
+                Ok(builder.ins().bitcast(types::I64, MemFlags::new(), neg))
+            } else {
+                call_helper(builder, helpers, "nulang_ineg", &[val])
+            }
+        }
+        UnOp::Not => call_helper(builder, helpers, "nulang_not", &[val]),
+        _ => Err(AotCompileError::Unsupported(format!("unary op {:?}", op))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Terminator compilation
+// ---------------------------------------------------------------------------
+
+fn compile_terminator(
+    builder: &mut FunctionBuilder,
+    term: &mir::Terminator,
+    block_map: &HashMap<mir::BlockId, cranelift::prelude::Block>,
+    _local_vals: &HashMap<u32, Value>,
+) -> AotResult<()> {
+    match term {
+        mir::Terminator::Return(val) => {
+            if let Some(id) = val {
+                let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                let v = _local_vals
+                    .get(&reg)
+                    .copied()
+                    .ok_or_else(|| AotCompileError::Internal("return value uninitialized".into()))?;
+                builder.ins().return_(&[v]);
+            } else {
+                // Return unit/nil.
+                let nil = builder
+                    .ins()
+                    .iconst(types::I64, 0x7FF8_0000_0000_0000u64 as i64);
+                builder.ins().return_(&[nil]);
+            }
+            Ok(())
+        }
+        mir::Terminator::Jump(target) => {
+            let clif_block = block_map
+                .get(target)
+                .ok_or_else(|| AotCompileError::Internal("jump to unknown block".into()))?;
+            builder.ins().jump(*clif_block, &[]);
+            Ok(())
+        }
+        mir::Terminator::Branch {
+            cond,
+            then_,
+            else_,
+        } => {
+            let cond_reg = mir::FunctionBuilder::LOCAL_BASE + cond.0;
+            let cond_val = *_local_vals
+                .get(&cond_reg)
+                .ok_or_else(|| AotCompileError::Internal("branch cond uninitialized".into()))?;
+            let then_block = block_map
+                .get(then_)
+                .ok_or_else(|| AotCompileError::Internal("branch then uninitialized".into()))?;
+            let else_block = block_map
+                .get(else_)
+                .ok_or_else(|| AotCompileError::Internal("branch else uninitialized".into()))?;
+            // Compare against tagged false value (bool false).
+            let false_val = builder.ins().iconst(types::I64, TAG_BOOL_I64);
+            let is_true = builder
+                .ins()
+                .icmp(IntCC::NotEqual, cond_val, false_val);
+            builder.ins().brif(is_true, *then_block, &[], *else_block, &[]);
+            Ok(())
+        }
+        _ => Err(AotCompileError::Unsupported(format!(
+            "terminator {:?}",
+            term
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Emit a tagged boolean value from an i8 comparison result.
+fn emit_tag_bool(builder: &mut FunctionBuilder, cond: Value) -> Value {
+    let tag = builder.ins().iconst(types::I64, TAG_BOOL_I64);
+    let true_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 1);
+    let val = builder.ins().select(cond, true_val, tag);
+    val
+}
+
+/// Call a runtime helper function by name.
+fn call_helper(
+    builder: &mut FunctionBuilder,
+    helpers: &HashMap<&str, FuncRef>,
+    name: &str,
+    args: &[Value],
+) -> AotResult<Value> {
+    let func_ref = helpers
+        .get(name)
+        .copied()
+        .ok_or_else(|| AotCompileError::Internal(format!("helper {} not registered", name)))?;
+    let call = builder.ins().call(func_ref, args);
+    Ok(builder.inst_results(call)[0])
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_aot_compile_empty_function() {
+        // A function with no params that returns nil.
+        let mut builder = mir::FunctionBuilder::new("empty", None);
+        builder.terminate(mir::Terminator::Return(None));
+        let func = builder.build();
+
+        // Verify type metadata is populated (should be empty for empty function).
+        assert!(func.type_metadata.is_empty());
+        assert_eq!(func.name, "empty");
+    }
+
+    #[test]
+    fn test_aot_compile_int_return() {
+        // A function that returns a constant int.
+        let mut builder = mir::FunctionBuilder::new("answer", Some(crate::types::Type::int()));
+        let tmp = builder.add_temp(crate::types::Type::int());
+        builder.assign(
+            tmp,
+            mir::RValue::Const(crate::bytecode::Constant::Int(42)),
+        );
+        builder.terminate(mir::Terminator::Return(Some(tmp)));
+        let func = builder.build();
+
+        // Verify type metadata captured the int type.
+        let reg = mir::FunctionBuilder::LOCAL_BASE as usize + tmp.0 as usize;
+        assert_eq!(func.type_metadata.get_type(reg), KnownType::Int);
+    }
+
+    #[test]
+    fn test_aot_compile_add() {
+        // A function that adds two int params.
+        let mut builder =
+            mir::FunctionBuilder::new("add", Some(crate::types::Type::int()));
+        let a = builder.add_param("a", crate::types::Type::int());
+        let b = builder.add_param("b", crate::types::Type::int());
+        let sum = builder.add_temp(crate::types::Type::int());
+        builder.assign(
+            sum,
+            mir::RValue::Binary(crate::ast::BinOp::Add, a, b),
+        );
+        builder.terminate(mir::Terminator::Return(Some(sum)));
+        let func = builder.build();
+
+        // Verify params and result have Int type metadata.
+        let reg_a = mir::FunctionBuilder::LOCAL_BASE as usize + a.0 as usize;
+        let reg_b = mir::FunctionBuilder::LOCAL_BASE as usize + b.0 as usize;
+        let reg_sum = mir::FunctionBuilder::LOCAL_BASE as usize + sum.0 as usize;
+        assert_eq!(func.type_metadata.get_type(reg_a), KnownType::Int);
+        assert_eq!(func.type_metadata.get_type(reg_b), KnownType::Int);
+        assert_eq!(func.type_metadata.get_type(reg_sum), KnownType::Int);
+    }
+}

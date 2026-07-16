@@ -63,16 +63,14 @@ pub struct Module {
 pub struct Function {
     pub name: String,
     pub params: Vec<LocalId>,
-    /// Locals populated from the enclosing closure's capture slots, in slot
-    /// order. Codegen emits a `CapLoad` prologue for these.
     pub captures: Vec<LocalId>,
     pub ret: Option<Type>,
     pub locals: Vec<Local>,
     pub blocks: Vec<Block>,
     pub entry: BlockId,
-    /// Effect-handler tables installed by `Stmt::EnterHandle` in this
-    /// function. Offsets are resolved by codegen.
     pub handler_tables: Vec<HandlerTableDef>,
+    /// Compile-time type metadata for each local (by register index).
+    pub type_metadata: crate::type_metadata::TypeMetadata,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -447,7 +445,15 @@ impl FunctionBuilder {
         )
     }
 
+    /// Register offset: MIR locals start at register 16 (r0-r15 are scratch).
+    pub const LOCAL_BASE: u32 = 16;
+
     pub fn build(self) -> Function {
+        let type_metadata = crate::type_metadata::TypeMetadata::from_mir_locals(
+            self.locals.iter().map(|loc| {
+                (Self::LOCAL_BASE as usize + loc.id.0 as usize, &loc.ty)
+            }),
+        );
         Function {
             name: self.name,
             params: self.params,
@@ -457,6 +463,7 @@ impl FunctionBuilder {
             blocks: self.blocks,
             entry: BlockId(0),
             handler_tables: self.handler_tables,
+            type_metadata,
         }
     }
 }

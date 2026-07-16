@@ -1,6 +1,8 @@
 pub mod ast;
 pub mod bytecode;
 pub mod docgen;
+pub mod aot;
+pub mod type_metadata;
 pub mod effect_checker;
 pub mod hir;
 pub mod hir_lower;

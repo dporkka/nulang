@@ -227,7 +227,7 @@ fn print_help() {
     println!("  -c, --check      Type-check a file (don't run)");
     println!("  --doc            Generate Markdown API docs (docs/api.md)");
     println!("  --lsp            Start Language Server (stdio)");
-    println!("  --backend <b>    Backend: bytecode (default) | wasm | wasm-run | wasm-aot");
+    println!("  --backend <b>    Backend: bytecode (default) | native | wasm | wasm-run | wasm-aot");
     println!("  nula <cmd>       Package manager (new, build, test, run)");
     println!("  --version, -V    Print version and exit");
     println!("  -v, --verbose    Show bytecode and AST");
@@ -410,6 +410,25 @@ fn run_source(source: &str, verbose: bool, backend: &str) -> NuResult<()> {
             return Err(nulang::types::NuError::VMError(
                 "wasm backend not compiled in (enable 'wasm-backend' feature)".into(),
             ));
+        }
+        "native" => {
+            let hir = nulang::hir_lower::lower_module(&ast);
+            let mir = nulang::mir_lower::lower_module(&hir)?;
+            if verbose {
+                println!("=== AOT native compilation ===");
+                for func in &mir.functions {
+                    println!("  fn {} ({} locals, {} blocks)",
+                        func.name, func.locals.len(), func.blocks.len());
+                }
+            }
+            let aot_module = nulang::aot::AotModule::compile(&mir)?;
+            let result_raw = aot_module.run()?;
+            let result = nulang::vm::Value::from_raw(result_raw);
+            let result_str = result.to_string_repr();
+            if result_str != "unit" {
+                println!("{}", result_str);
+            }
+            return Ok(());
         }
         _ => {
             // Bytecode backend (default).

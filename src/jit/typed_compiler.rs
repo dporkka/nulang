@@ -49,87 +49,10 @@ const SIGN_BIT_I64: i64 = SIGN_BIT as i64;
 const SIGN_EXTEND: i64 = 0xFFFF_0000_0000_0000u64 as i64;
 
 // ---------------------------------------------------------------------------
-// TypeMetadata & KnownType
+// TypeMetadata & KnownType — re-exported from the shared `type_metadata` module
 // ---------------------------------------------------------------------------
 
-/// Static type information for registers in a compiled region.
-///
-/// When a type is known, the JIT can emit optimized CLIF instead of calling
-/// NaN-tag-aware runtime helpers. Construct this from typechecker output and
-/// pass it to [`compile_bytecode_region_typed`].
-///
-/// # Example
-/// ```
-/// use nulang::jit::typed_compiler::{TypeMetadata, KnownType};
-///
-/// let mut meta = TypeMetadata::new();
-/// meta.set_type(0, KnownType::Int);   // R0 is known Int
-/// meta.set_type(1, KnownType::Float); // R1 is known Float
-/// ```
-#[derive(Debug, Clone, Default)]
-pub struct TypeMetadata {
-    /// Maps register index → known type (if any).
-    pub reg_types: HashMap<usize, KnownType>,
-}
-
-/// The static type of a value known at compile time.
-///
-/// - `Int`: NaN-tagged integer → strip tag, use direct i64 ops.
-/// - `Float`: Raw f64 bits → use direct f64 ops.
-/// - `Bool`: NaN-tagged boolean → compare directly against tagged constants.
-/// - `Unknown`: Fall back to runtime helpers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KnownType {
-    Int,
-    Float,
-    Bool,
-    Unknown,
-}
-
-impl TypeMetadata {
-    /// Create an empty type metadata map (all registers are Unknown).
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the known type for a register index.
-    pub fn set_type(&mut self, reg: usize, ty: KnownType) {
-        self.reg_types.insert(reg, ty);
-    }
-
-    /// Get the known type for a register, defaulting to `Unknown`.
-    pub fn get_type(&self, reg: usize) -> KnownType {
-        self.reg_types
-            .get(&reg)
-            .copied()
-            .unwrap_or(KnownType::Unknown)
-    }
-
-    /// Check whether both operands have the same known type.
-    pub fn both_known(&self, r1: usize, r2: usize, expected: KnownType) -> bool {
-        self.get_type(r1) == expected && self.get_type(r2) == expected
-    }
-
-    /// Check whether a single register has the expected known type.
-    pub fn is_known(&self, reg: usize, expected: KnownType) -> bool {
-        self.get_type(reg) == expected
-    }
-
-    /// Mark the destination register as having a known type after an operation.
-    ///
-    /// For arithmetic: the result type is usually the same as the operand type.
-    /// For comparisons: the result is always Bool.
-    pub fn propagate_result(&mut self, dst: usize, operand_reg: usize) {
-        if let Some(&ty) = self.reg_types.get(&operand_reg) {
-            self.reg_types.insert(dst, ty);
-        }
-    }
-
-    /// Mark the destination register as Bool (used after comparisons).
-    pub fn set_bool_result(&mut self, dst: usize) {
-        self.reg_types.insert(dst, KnownType::Bool);
-    }
-}
+pub use crate::type_metadata::{KnownType, TypeMetadata};
 
 // ---------------------------------------------------------------------------
 // Bytecode-level type inference
