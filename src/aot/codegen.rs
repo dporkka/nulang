@@ -461,7 +461,7 @@ pub fn compile_mir_function_body(
             }
 
             for stmt in &block.stmts {
-                compile_stmt(&mut builder, stmt, &type_meta, &h, &call_targets, &mut closure_targets, &mut local_vals)?;
+                compile_stmt(&mut builder, stmt, &type_meta, &h, &call_targets, &mut closure_targets, &mut local_vals, mode)?;
             }
 
             compile_terminator_with_params(
@@ -504,17 +504,17 @@ fn compile_stmt(
     call_targets: &HashMap<usize, FuncRef>,
     closure_targets: &mut HashMap<u32, usize>,
     local_vals: &mut HashMap<u32, Value>,
+    mode: CompileMode,
 ) -> AotResult<()> {
     match stmt {
         mir::Stmt::Assign { dst, op } => {
-            // Track zero-capture closures for later call resolution.
             if let mir::RValue::Closure { func, captures } = op {
                 if captures.is_empty() {
                     let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
                     closure_targets.insert(reg, *func);
                 }
             }
-            let val = compile_rvalue(builder, op, type_meta, helpers, call_targets, closure_targets, local_vals)?;
+            let val = compile_rvalue(builder, op, type_meta, helpers, call_targets, closure_targets, local_vals, mode)?;
             let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
             local_vals.insert(reg, val);
             Ok(())
@@ -535,9 +535,10 @@ fn compile_rvalue(
     call_targets: &HashMap<usize, FuncRef>,
     closure_targets: &mut HashMap<u32, usize>,
     local_vals: &HashMap<u32, Value>,
+    mode: CompileMode,
 ) -> AotResult<Value> {
     match rv {
-        mir::RValue::Const(c) => compile_const(builder, c),
+        mir::RValue::Const(c) => compile_const(builder, c, mode),
 
         mir::RValue::Load(id) => {
             let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
@@ -546,13 +547,12 @@ fn compile_rvalue(
                 .copied()
                 .ok_or_else(|| AotCompileError::Internal(format!("uninitialized local {}", id.0)))
         }
-
         mir::RValue::Binary(op, lhs, rhs) => {
-            compile_binary(builder, *op, *lhs, *rhs, type_meta, helpers, local_vals)
+            compile_binary(builder, *op, *lhs, *rhs, type_meta, helpers, local_vals, mode)
         }
 
         mir::RValue::Unary(op, operand) => {
-            compile_unary(builder, *op, *operand, type_meta, helpers, local_vals)
+            compile_unary(builder, *op, *operand, type_meta, helpers, local_vals, mode)
         }
 
         mir::RValue::Call { func, args } => {
@@ -607,14 +607,18 @@ fn compile_rvalue(
 fn compile_const(
     builder: &mut FunctionBuilder,
     c: &crate::bytecode::Constant,
+    mode: CompileMode,
 ) -> AotResult<Value> {
     match c {
         crate::bytecode::Constant::Int(v) => {
-            let iconst_val = builder.ins().iconst(types::I64, *v);
-            Ok(emit_tag_int(builder, iconst_val))
+            if mode == CompileMode::Unboxed {
+                Ok(builder.ins().iconst(types::I64, *v))
+            } else {
+                let iconst_val = builder.ins().iconst(types::I64, *v);
+                Ok(emit_tag_int(builder, iconst_val))
+            }
         }
         crate::bytecode::Constant::Float(f) => {
-            // Float constants: store as raw f64 bits (NaN-tagged).
             Ok(builder.ins().iconst(types::I64, f.to_bits() as i64))
         }
         crate::bytecode::Constant::Bool(b) => {
@@ -624,13 +628,9 @@ fn compile_const(
             Ok(builder.ins().bor(tag, v))
         }
         crate::bytecode::Constant::Unit => {
-            // Unit is represented as a special tagged value.
             Ok(builder.ins().iconst(types::I64, 0x7FF9_0000_0000_0000u64 as i64))
         }
-        _ => Err(AotCompileError::Unsupported(format!(
-            "constant {:?}",
-            c
-        ))),
+        _ => Err(AotCompileError::Unsupported(format!("constant {:?}", c))),
     }
 }
 
@@ -646,6 +646,7 @@ fn compile_binary(
     type_meta: &TypeMetadata,
     helpers: &HashMap<&str, FuncRef>,
     local_vals: &HashMap<u32, Value>,
+    _mode: CompileMode,
 ) -> AotResult<Value> {
     let lhs_reg = mir::FunctionBuilder::LOCAL_BASE + lhs.0;
     let rhs_reg = mir::FunctionBuilder::LOCAL_BASE + rhs.0;
@@ -781,6 +782,7 @@ fn compile_unary(
     type_meta: &TypeMetadata,
     helpers: &HashMap<&str, FuncRef>,
     local_vals: &HashMap<u32, Value>,
+    mode: CompileMode,
 ) -> AotResult<Value> {
     let reg = mir::FunctionBuilder::LOCAL_BASE + operand.0;
     let val = *local_vals
@@ -791,9 +793,13 @@ fn compile_unary(
     match op {
         UnOp::Neg => {
             if type_meta.is_known(reg as usize, KnownType::Int) {
-                let payload = emit_sext48(builder, val);
-                let neg = builder.ins().ineg(payload);
-                Ok(emit_tag_int(builder, neg))
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().ineg(val))
+                } else {
+                    let payload = emit_sext48(builder, val);
+                    let neg = builder.ins().ineg(payload);
+                    Ok(emit_tag_int(builder, neg))
+                }
             } else if type_meta.is_known(reg as usize, KnownType::Float) {
                 let f = builder.ins().bitcast(types::F64, MemFlags::new(), val);
                 let neg = builder.ins().fneg(f);

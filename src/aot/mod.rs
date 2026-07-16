@@ -63,6 +63,10 @@ impl AotModule {
         // Pass 1: declare all functions so forward references resolve.
         let mut func_ids: Vec<cranelift_module::FuncId> =
             Vec::with_capacity(mir_module.functions.len());
+        // Unboxed variants for all-Int functions (same indices, empty for non-Int).
+        let mut unboxed_ids: Vec<Option<cranelift_module::FuncId>> =
+            vec![None; mir_module.functions.len()];
+
         for (idx, func) in mir_module.functions.iter().enumerate() {
             let func_name = format!("nulang_fn_{}", idx);
             let mut sig = jit_module.make_signature();
@@ -76,14 +80,32 @@ impl AotModule {
                     crate::types::NuError::VMError(format!("failed to declare '{}': {}", func.name, e))
                 })?;
             func_ids.push(fid);
+
+            // If the function is all-Int, also declare an unboxed variant.
+            if codegen::is_all_int(func) {
+                let ub_name = format!("nulang_fn_{}_unboxed", idx);
+                let mut ub_sig = jit_module.make_signature();
+                for _ in &func.params {
+                    ub_sig.params.push(AbiParam::new(types::I64));
+                }
+                ub_sig.returns.push(AbiParam::new(types::I64));
+                let ub_fid = jit_module
+                    .declare_function(&ub_name, cranelift_module::Linkage::Local, &ub_sig)
+                    .map_err(|e| {
+                        crate::types::NuError::VMError(format!("failed to declare unboxed '{}': {}", func.name, e))
+                    })?;
+                unboxed_ids[idx] = Some(ub_fid);
+            }
         }
 
-        // Pass 2: compile each function body with all FuncIds available.
+        // Pass 2: compile each function body (boxed + optionally unboxed).
         let mut entry_idx: Option<usize> = None;
 
         for (idx, func) in mir_module.functions.iter().enumerate() {
             let mut ctx = codegen::AotContext::new(&mut jit_module, &mut builder_context);
             ctx.func_ids = func_ids.clone();
+
+            // Compile boxed variant.
             codegen::compile_mir_function_body(&mut ctx, func, idx, func_ids[idx], codegen::CompileMode::Boxed).map_err(|e| {
                 crate::types::NuError::VMError(format!(
                     "AOT compilation of '{}' failed: {}",
@@ -91,13 +113,24 @@ impl AotModule {
                 ))
             })?;
 
+            // If eligible, also compile the unboxed variant.
+            if let Some(ub_fid) = unboxed_ids[idx] {
+                let mut ctx2 = codegen::AotContext::new(&mut jit_module, &mut builder_context);
+                ctx2.func_ids = func_ids.clone();
+                codegen::compile_mir_function_body(&mut ctx2, func, idx, ub_fid, codegen::CompileMode::Unboxed).map_err(|e| {
+                    crate::types::NuError::VMError(format!(
+                        "AOT compilation of unboxed '{}' failed: {}",
+                        func.name, e
+                    ))
+                })?;
+            }
+
             if func.name == "__main" || func.name == "main" {
                 if entry_idx.is_none() || func.name == "__main" {
                     entry_idx = Some(idx);
                 }
             }
         }
-        // Finalize all definitions so function pointers become available.
         jit_module.finalize_definitions().map_err(|e| {
             crate::types::NuError::VMError(format!("failed to finalize JIT definitions: {}", e))
         })?;
