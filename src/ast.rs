@@ -383,6 +383,8 @@ pub enum Decl {
         init: Vec<(String, Expr)>,
         /// Compile-time backend selection. `None` means use the CLI default.
         backend: Option<ActorBackendKind>,
+        /// Optional initializer block: `initial name(params) { body }`.
+        initializer: Option<(String, Vec<(String, Option<Type>)>, Expr)>,
         span: Span,
     },
     /// State machine declaration (BEAM_PRIMITIVES §4.2 gen_statem adaptation):
@@ -634,6 +636,7 @@ pub fn desugar_state_machine(
         behaviors,
         init: vec![],
         backend: None,
+        initializer: None,
         span,
     }
 }

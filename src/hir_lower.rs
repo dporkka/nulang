@@ -115,7 +115,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             behaviors,
             init,
             span,
-            backend: _,
+            ..
         } => hir::Decl::Actor(hir::ActorDef {
             name: name.clone(),
             type_params: type_params.clone(),

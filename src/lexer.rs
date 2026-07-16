@@ -83,6 +83,7 @@ pub enum TokenKind {
     False,
     Unit,
     Tool,
+    Initial,
 
     // Identifiers
     Ident(String),
@@ -792,6 +793,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "emit" => Some(TokenKind::Emit),
         "workflow" => Some(TokenKind::Workflow),
         "step" => Some(TokenKind::Step),
+        "initial" => Some(TokenKind::Initial),
         "parallel" => Some(TokenKind::Parallel),
         "compensate" => Some(TokenKind::Compensate),
         "await" => Some(TokenKind::Await),

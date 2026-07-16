@@ -332,7 +332,7 @@ impl Parser {
 
         let mut state_fields = Vec::new();
         let mut behaviors = Vec::new();
-
+        let mut initializer: Option<(String, Vec<(String, Option<Type>)>, Expr)> = None;
         self.skip_newlines();
         while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
             self.skip_newlines();
@@ -357,10 +357,25 @@ impl Parser {
                 TokenKind::Behavior => {
                     behaviors.push(self.parse_behavior()?);
                 }
+                TokenKind::Initial => {
+                    if initializer.is_some() {
+                        return Err(NuError::ParseError {
+                            msg: "Duplicate 'initial' block in actor".to_string(),
+                            span: self.current_span(),
+                        });
+                    }
+                    self.advance(); // consume 'initial'
+                    let init_name = self.expect_ident("initializer name")?;
+                    self.expect(TokenKind::LParen)?;
+                    let params = self.parse_params()?;
+                    self.expect(TokenKind::RParen)?;
+                    let body = self.parse_expr()?;
+                    initializer = Some((init_name, params, body));
+                }
                 _ => {
                     return Err(NuError::ParseError {
                         msg: format!(
-                            "Expected 'state' or 'behavior' in actor body, got {:?}",
+                            "Expected 'state', 'behavior', or 'initial' in actor body, got {:?}",
                             self.peek_kind()
                         ),
                         span: self.current_span(),
@@ -368,6 +383,7 @@ impl Parser {
                 }
             }
         }
+        // Post-loop: parse the closing brace.
         self.expect(TokenKind::RBrace)?;
 
         Ok(Decl::Actor {
@@ -378,6 +394,7 @@ impl Parser {
             behaviors,
             init: vec![],
             backend,
+            initializer,
             span,
         })
     }
@@ -3070,6 +3087,32 @@ mod tests {
                 assert_eq!(state_fields[3].1, StateModel::Crdt);
                 assert_eq!(behaviors.len(), 1);
                 assert_eq!(behaviors[0].name, "get");
+            }
+            _ => panic!("Expected actor declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_actor_with_initializer() {
+        let source = r#"
+            persistent actor Counter {
+                state durable count: Int = 0
+                initial init(start_val: Int) { self.count = start_val }
+                behavior inc() { self.count = self.count + 1 }
+            }
+        "#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Actor {
+                name,
+                initializer,
+                ..
+            } => {
+                assert_eq!(name, "Counter");
+                let (init_name, params, _body) = initializer.as_ref().expect("should have initializer");
+                assert_eq!(init_name, "init");
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].0, "start_val");
             }
             _ => panic!("Expected actor declaration"),
         }
