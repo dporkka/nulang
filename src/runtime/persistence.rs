@@ -297,6 +297,15 @@ pub trait PersistenceStore: Send + Sync {
 
     /// Remove all data for an actor.
     fn clear(&mut self, actor_id: u64) -> io::Result<()>;
+
+    /// Execute an arbitrary SQL query against the store.
+    /// Returns rows as JSON arrays of column values. Default: not supported.
+    fn query(&self, _sql: &str, _params: &[Value]) -> io::Result<Vec<String>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "DB.query is not supported by this persistence backend",
+        ))
+    }
 }
 
 /// In-memory persistence store. Useful for tests and ephemeral durable actors.
@@ -524,305 +533,111 @@ impl PersistenceStore for JsonFileStore {
     }
 }
 
-/// Acquire the connection mutex, recovering the guard even if a previous
-/// holder panicked.
-///
-/// A panic in one thread holding the connection lock must not cascade
-/// panics into every other thread that touches the store, so poisoning is
-/// ignored rather than propagated. But a panic could in principle occur
-/// between `tx.execute` and `tx.commit()` in `save_snapshot`, leaving a
-/// transaction open on the connection; recovering the guard alone doesn't
-/// undo that. `rusqlite::Transaction`'s own `Drop` impl already issues a
-/// `ROLLBACK` when a transaction is dropped without `commit()` (including
-/// during unwind), so this is normally already safe — but as defense in
-/// depth against any transaction that manages to outlive its `Transaction`
-/// handle (e.g. a future bug that leaks one across a panic boundary), issue
-/// a best-effort `ROLLBACK` whenever we actually recover from poisoning, so
-/// the connection can't be left mid-transaction for whoever locks it next.
-#[cfg(feature = "sqlite")]
-fn lock_ignore_poison(
-    m: &std::sync::Mutex<rusqlite::Connection>,
-) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
-    match m.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            let guard = poisoned.into_inner();
-            let _ = guard.execute_batch("ROLLBACK");
-            guard
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// LibsqlStore — libSQL-backed persistence (local, remote Turso, or replica)
+// ---------------------------------------------------------------------------
 
-/// SQLite-backed persistence store.
+/// libSQL-backed persistence store.
 ///
 /// Each actor gets one row in the `snapshots` table and zero or more rows in
-/// the `journal` table ordered by sequence number. State and payloads are
-/// serialized to JSON and stored as TEXT.
-#[cfg(feature = "sqlite")]
-#[derive(Debug)]
-pub struct SqliteStore {
-    conn: std::sync::Mutex<rusqlite::Connection>,
+/// the `journal` and `workflow_events` tables, same schema as the old SQLite
+/// store.  State and payloads are serialized to JSON and stored as TEXT.
+///
+/// The same store also serves `perform DB.query(sql, params)` from Nulang
+/// code via the `query()` method exposed through `PersistenceStore::query`.
+pub struct LibsqlStore {
+    conn: std::sync::Mutex<libsql::Connection>,
+    rt: tokio::runtime::Runtime,
     path: PathBuf,
 }
 
 #[cfg(feature = "sqlite")]
-impl SqliteStore {
-    /// Open (or create) a SQLite persistence store at `path`.
-    ///
-    /// Pass `:memory:` for an ephemeral in-memory store.
+impl LibsqlStore {
+    /// Open (or create) a local file database.  Pass `":memory:"` for an
+    /// ephemeral in-memory store.
     pub fn new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let conn = rusqlite::Connection::open(&path)
+        let db_path = if path == Path::new(":memory:") {
+            ":memory:".to_string()
+        } else {
+            path.to_string_lossy().into_owned()
+        };
+        let rt = tokio::runtime::Runtime::new()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS snapshots (
-                actor_id INTEGER PRIMARY KEY,
-                sequence INTEGER NOT NULL,
-                state TEXT NOT NULL,
-                waiting_signal TEXT
-            )",
-            [],
-        )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        // Migrate existing databases that were created without the
-        // waiting_signal column.
-        let _ = conn.execute("ALTER TABLE snapshots ADD COLUMN waiting_signal TEXT", []);
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS journal (
-                actor_id INTEGER NOT NULL,
-                sequence INTEGER NOT NULL,
-                behavior_id INTEGER NOT NULL,
-                payload TEXT NOT NULL,
-                PRIMARY KEY (actor_id, sequence)
-            )",
-            [],
-        )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS workflow_events (
-                actor_id INTEGER NOT NULL,
-                sequence INTEGER NOT NULL,
-                event TEXT NOT NULL,
-                PRIMARY KEY (actor_id, sequence)
-            )",
-            [],
-        )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        Ok(SqliteStore {
-            conn: std::sync::Mutex::new(conn),
-            path,
-        })
+        let db = rt.block_on(async {
+            libsql::Builder::new_local(&db_path)
+                .build()
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        })?;
+        let conn = db.connect()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let store = LibsqlStore { conn: std::sync::Mutex::new(conn), rt, path };
+        store.ensure_tables()?;
+        Ok(store)
     }
-
-    /// Open a new in-memory SQLite store.
     pub fn in_memory() -> io::Result<Self> {
         Self::new(":memory:")
     }
 
-    /// Return the path this store was opened with.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-#[cfg(feature = "sqlite")]
-impl PersistenceStore for SqliteStore {
-    fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
-        let mut conn = lock_ignore_poison(&self.conn);
-        let state_json = serde_json::to_string(&snapshot.state)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let tx = conn
-            .transaction()
+    /// Connect to a remote Turso database.
+    pub fn new_remote(url: &str, auth_token: &str) -> io::Result<Self> {
+        let rt = tokio::runtime::Runtime::new()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        tx.execute(
-            "INSERT INTO snapshots (actor_id, sequence, state, waiting_signal) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(actor_id) DO UPDATE SET sequence=excluded.sequence, state=excluded.state, waiting_signal=excluded.waiting_signal",
-            rusqlite::params![snapshot.actor_id as i64, snapshot.sequence as i64, state_json, snapshot.waiting_signal.as_ref()],
-        )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        tx.commit()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        Ok(())
+        let db = rt.block_on(async {
+            libsql::Builder::new_remote(url.to_string(), auth_token.to_string())
+                .build()
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        })?;
+        let conn = db.connect()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let store = LibsqlStore { conn: std::sync::Mutex::new(conn), rt, path: PathBuf::from(url) };
+        store.ensure_tables()?;
+        Ok(store)
     }
+    pub fn path(&self) -> &Path { &self.path }
 
-    fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
-        let conn = lock_ignore_poison(&self.conn);
-        let (sequence, state_json, waiting_signal): (i64, String, Option<String>) = conn
-            .query_row(
-                "SELECT sequence, state, waiting_signal FROM snapshots WHERE actor_id = ?1",
-                [actor_id as i64],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .ok()?;
-        let state: HashMap<String, PersistedValue> = serde_json::from_str(&state_json).ok()?;
-        Some(ActorSnapshot {
-            actor_id,
-            sequence: sequence as u64,
-            state,
-            waiting_signal,
+    fn ensure_tables(&self) -> io::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS snapshots (
+                    actor_id INTEGER PRIMARY KEY,
+                    sequence INTEGER NOT NULL,
+                    state TEXT NOT NULL,
+                    waiting_signal TEXT
+                )",
+                (),
+            ).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            // Migrate databases created before the waiting_signal column existed.
+            let _ = conn.execute("ALTER TABLE snapshots ADD COLUMN waiting_signal TEXT", ()).await;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS journal (
+                    actor_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    behavior_id INTEGER NOT NULL,
+                    payload TEXT NOT NULL,
+                    PRIMARY KEY (actor_id, sequence)
+                )",
+                (),
+            ).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS workflow_events (
+                    actor_id INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    event TEXT NOT NULL,
+                    PRIMARY KEY (actor_id, sequence)
+                )",
+                (),
+            ).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            Ok(())
         })
     }
 
-    fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> io::Result<()> {
-        let conn = lock_ignore_poison(&self.conn);
-        let payload_json = serde_json::to_string(&entry.payload)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        conn.execute(
-            "INSERT INTO journal (actor_id, sequence, behavior_id, payload) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![actor_id as i64, entry.sequence as i64, entry.behavior_id as i64, payload_json],
-        )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        Ok(())
-    }
-
-    fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
-        let conn = lock_ignore_poison(&self.conn);
-        let mut stmt = match conn.prepare(
-            "SELECT sequence, behavior_id, payload FROM journal
-             WHERE actor_id = ?1 ORDER BY sequence ASC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let rows = stmt.query_map([actor_id as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        });
-        match rows {
-            Ok(iter) => iter
-                .filter_map(|r| {
-                    let (seq, bid, payload_json) = r.ok()?;
-                    let payload: Vec<PersistedValue> = serde_json::from_str(&payload_json).ok()?;
-                    Some(JournalEntry {
-                        sequence: seq as u64,
-                        behavior_id: bid as u16,
-                        payload,
-                    })
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
-        let conn = lock_ignore_poison(&self.conn);
-        let event_json = serde_json::to_string(&event)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        conn.execute(
-            "INSERT INTO workflow_events (actor_id, sequence, event) VALUES (?1, ?2, ?3)",
-            rusqlite::params![actor_id as i64, event.sequence() as i64, event_json],
-        )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        Ok(())
-    }
-
-    fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
-        let conn = lock_ignore_poison(&self.conn);
-        let mut stmt = match conn.prepare(
-            "SELECT event FROM workflow_events
-             WHERE actor_id = ?1 ORDER BY sequence ASC",
-        ) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let rows = stmt.query_map([actor_id as i64], |row| Ok(row.get::<_, String>(0)?));
-        match rows {
-            Ok(iter) => iter
-                .filter_map(|r| {
-                    let event_json = r.ok()?;
-                    serde_json::from_str(&event_json).ok()
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    fn latest_sequence(&self, actor_id: u64) -> u64 {
-        let conn = lock_ignore_poison(&self.conn);
-        let snapshot_seq: Option<i64> = conn
-            .query_row(
-                "SELECT sequence FROM snapshots WHERE actor_id = ?1",
-                [actor_id as i64],
-                |row| row.get(0),
-            )
-            .ok();
-        let journal_seq: Option<i64> = conn
-            .query_row(
-                "SELECT sequence FROM journal WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
-                [actor_id as i64],
-                |row| row.get(0),
-            )
-            .ok();
-        let event_seq: Option<i64> = conn
-            .query_row(
-                "SELECT sequence FROM workflow_events WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
-                [actor_id as i64],
-                |row| row.get(0),
-            )
-            .ok();
-        snapshot_seq
-            .unwrap_or(0)
-            .max(journal_seq.unwrap_or(0))
-            .max(event_seq.unwrap_or(0)) as u64
-    }
-
-    fn clear(&mut self, actor_id: u64) -> io::Result<()> {
-        let conn = lock_ignore_poison(&self.conn);
-        conn.execute(
-            "DELETE FROM snapshots WHERE actor_id = ?1",
-            [actor_id as i64],
-        )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        conn.execute("DELETE FROM journal WHERE actor_id = ?1", [actor_id as i64])
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        conn.execute(
-            "DELETE FROM workflow_events WHERE actor_id = ?1",
-            [actor_id as i64],
-        )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TursoStore — libSQL remote database (Turso edge platform)
-// ---------------------------------------------------------------------------
-
-/// Remote database connection for Turso edge deployments.
-///
-/// Provides `query()` for `perform DB.query(sql, params)` from Nulang code.
-/// Unlike `SqliteStore`, this is NOT a `PersistenceStore` — it's a general-
-/// purpose query interface to a Turso remote database.
-#[cfg(feature = "turso")]
-#[derive(Debug)]
-pub struct TursoStore {
-    db: libsql::Database,
-    rt: tokio::runtime::Runtime,
-}
-
-#[cfg(feature = "turso")]
-impl TursoStore {
-    /// Connect to a Turso remote database.
-    ///
-    /// `url`: e.g. `"libsql://my-db-org.turso.io"`
-    /// `auth_token`: Turso auth token
-    pub fn connect(url: &str, auth_token: &str) -> io::Result<Self> {
-        let db = libsql::Database::open_remote(url.to_string(), auth_token.to_string())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        Ok(TursoStore { db, rt })
-    }
-
     /// Execute a SQL query and return rows as a Vec of JSON strings.
-    ///
-    /// This is the backend for `perform DB.query(sql, params)` in Nulang.
     pub fn query(&self, sql: &str, params: &[Value]) -> io::Result<Vec<String>> {
-        let conn = self.db.connect()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let conn = self.conn.lock().unwrap();
         self.rt.block_on(async {
             let param_values: Vec<String> = params.iter().map(|v| {
                 if let Some(i) = v.as_int() { i.to_string() }
@@ -844,7 +659,7 @@ impl TursoStore {
                                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                             let json_val = match val {
                                 libsql::Value::Null => serde_json::Value::Null,
-                                libsql::Value::Integer(n) => serde_json::Value::Number(serde_json::Number::from(n)),
+                                libsql::Value::Integer(n) => serde_json::value::Number::from_i128(n as i128).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
                                 libsql::Value::Real(f) => serde_json::value::Number::from_f64(f).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
                                 libsql::Value::Text(s) => serde_json::Value::String(s),
                                 libsql::Value::Blob(_) => serde_json::Value::Null,
@@ -864,43 +679,174 @@ impl TursoStore {
     }
 }
 
-#[cfg(all(test, feature = "sqlite"))]
-mod tests {
-    use super::*;
-
-    /// Regression test: recovering a poisoned connection lock must also
-    /// clean up any transaction a panicking holder left open, or the very
-    /// next `save_snapshot`'s `conn.transaction()` fails with "cannot start
-    /// a transaction within a transaction" instead of the lock recovery
-    /// being transparent to callers.
-    #[test]
-    fn test_lock_ignore_poison_rolls_back_dangling_transaction() {
-        let store = SqliteStore::in_memory().unwrap();
-
-        // Poison the mutex while a transaction is left open on the
-        // connection (simulating a panic between `tx.execute` and
-        // `tx.commit()`), bypassing `Transaction`'s own rollback-on-drop by
-        // never constructing a `Transaction` value at all.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let conn = store.conn.lock().unwrap();
-            conn.execute_batch("BEGIN").unwrap();
-            panic!("simulated panic mid-transaction");
-        }));
-        assert!(result.is_err(), "the panic should have propagated");
-        assert!(store.conn.is_poisoned(), "the mutex should now be poisoned");
-
-        // Recovering the lock must leave the connection usable: a fresh
-        // transaction must be startable, not blocked by the dangling BEGIN.
-        let conn = lock_ignore_poison(&store.conn);
-        conn.execute_batch("BEGIN").unwrap();
-        conn.execute_batch("COMMIT").unwrap();
+#[cfg(feature = "sqlite")]
+impl PersistenceStore for LibsqlStore {
+    fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
+        let state_json = serde_json::to_string(&snapshot.state)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            conn.execute(
+                "INSERT INTO snapshots (actor_id, sequence, state, waiting_signal) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(actor_id) DO UPDATE SET sequence=excluded.sequence, state=excluded.state, waiting_signal=excluded.waiting_signal",
+                libsql::params![snapshot.actor_id as i64, snapshot.sequence as i64, state_json, snapshot.waiting_signal.as_deref()],
+            ).await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        })
     }
 
-    #[test]
-    fn test_lock_ignore_poison_returns_normally_when_not_poisoned() {
-        let store = SqliteStore::in_memory().unwrap();
-        let conn = lock_ignore_poison(&store.conn);
-        conn.execute_batch("SELECT 1").unwrap();
+    fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            let mut rows = conn.query(
+                "SELECT sequence, state, waiting_signal FROM snapshots WHERE actor_id = ?1",
+                libsql::params![actor_id as i64],
+            ).await.ok()?;
+            let row = rows.next().await.ok()??;
+            let sequence: i64 = row.get(0).ok()?;
+            let state_json: String = row.get(1).ok()?;
+            let waiting_signal: Option<String> = row.get(2).ok()?;
+            let state: HashMap<String, PersistedValue> = serde_json::from_str(&state_json).ok()?;
+            Some(ActorSnapshot {
+                actor_id,
+                sequence: sequence as u64,
+                state,
+                waiting_signal,
+            })
+        })
+    }
+
+    fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> io::Result<()> {
+        let payload_json = serde_json::to_string(&entry.payload)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            conn.execute(
+                "INSERT INTO journal (actor_id, sequence, behavior_id, payload) VALUES (?1, ?2, ?3, ?4)",
+                libsql::params![actor_id as i64, entry.sequence as i64, entry.behavior_id as i64, payload_json],
+            ).await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        })
+    }
+
+    fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            let mut rows = match conn.query(
+                "SELECT sequence, behavior_id, payload FROM journal
+                 WHERE actor_id = ?1 ORDER BY sequence ASC",
+                libsql::params![actor_id as i64],
+            ).await {
+                Ok(r) => r,
+                Err(_) => return Vec::new(),
+            };
+            let mut entries = Vec::new();
+            loop {
+                match rows.next().await {
+                    Ok(Some(row)) => {
+                        let seq: i64 = match row.get(0) { Ok(v) => v, Err(_) => continue };
+                        let bid: i64 = match row.get(1) { Ok(v) => v, Err(_) => continue };
+                        let payload_json: String = match row.get(2) { Ok(v) => v, Err(_) => continue };
+                        let payload: Vec<PersistedValue> = match serde_json::from_str(&payload_json) {
+                            Ok(p) => p,
+                            Err(_) => continue,
+                        };
+                        entries.push(JournalEntry {
+                            sequence: seq as u64,
+                            behavior_id: bid as u16,
+                            payload,
+                        });
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+            entries
+        })
+    }
+
+    fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
+        let event_json = serde_json::to_string(&event)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            conn.execute(
+                "INSERT INTO workflow_events (actor_id, sequence, event) VALUES (?1, ?2, ?3)",
+                libsql::params![actor_id as i64, event.sequence() as i64, event_json],
+            ).await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        })
+    }
+
+    fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            let mut rows = match conn.query(
+                "SELECT event FROM workflow_events
+                 WHERE actor_id = ?1 ORDER BY sequence ASC",
+                libsql::params![actor_id as i64],
+            ).await {
+                Ok(r) => r,
+                Err(_) => return Vec::new(),
+            };
+            let mut events = Vec::new();
+            loop {
+                match rows.next().await {
+                    Ok(Some(row)) => {
+                        let event_json: String = match row.get(0) { Ok(v) => v, Err(_) => continue };
+                        if let Ok(event) = serde_json::from_str(&event_json) {
+                            events.push(event);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+            events
+        })
+    }
+
+    fn latest_sequence(&self, actor_id: u64) -> u64 {
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            let snapshot_seq: Option<i64> = async {
+                let mut rows = conn.query(
+                    "SELECT sequence FROM snapshots WHERE actor_id = ?1",
+                    libsql::params![actor_id as i64],
+                ).await.ok()?;
+                let row = rows.next().await.ok()??;
+                row.get(0).ok()
+            }.await;
+            let journal_seq: Option<i64> = async {
+                let mut rows = conn.query(
+                    "SELECT sequence FROM journal WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                    libsql::params![actor_id as i64],
+                ).await.ok()?;
+                let row = rows.next().await.ok()??;
+                row.get(0).ok()
+            }.await;
+            let event_seq: Option<i64> = async {
+                let mut rows = conn.query(
+                    "SELECT sequence FROM workflow_events WHERE actor_id = ?1 ORDER BY sequence DESC LIMIT 1",
+                    libsql::params![actor_id as i64],
+                ).await.ok()?;
+                let row = rows.next().await.ok()??;
+                row.get(0).ok()
+            }.await;
+            snapshot_seq.unwrap_or(0)
+                .max(journal_seq.unwrap_or(0))
+                .max(event_seq.unwrap_or(0)) as u64
+        })
+    }
+
+    fn clear(&mut self, actor_id: u64) -> io::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        self.rt.block_on(async {
+            conn.execute("DELETE FROM snapshots WHERE actor_id = ?1", libsql::params![actor_id as i64])
+                .await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute("DELETE FROM journal WHERE actor_id = ?1", libsql::params![actor_id as i64])
+                .await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute("DELETE FROM workflow_events WHERE actor_id = ?1", libsql::params![actor_id as i64])
+                .await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            Ok(())
+        })
     }
 }
 

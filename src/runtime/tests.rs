@@ -1293,8 +1293,8 @@ fn test_memory_store_latest_sequence() {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_sqlite_store_save_load_snapshot() {
-    let mut store = SqliteStore::in_memory().unwrap();
+fn test_libsql_store_save_load_snapshot() {
+    let mut store = LibsqlStore::in_memory().unwrap();
     let mut state = HashMap::new();
     state.insert("count".to_string(), PersistedValue::Int(42));
     let snapshot = ActorSnapshot {
@@ -1313,8 +1313,8 @@ fn test_sqlite_store_save_load_snapshot() {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_sqlite_store_append_read_journal() {
-    let mut store = SqliteStore::in_memory().unwrap();
+fn test_libsql_store_append_read_journal() {
+    let mut store = LibsqlStore::in_memory().unwrap();
     store
         .append_journal(
             1,
@@ -1345,8 +1345,8 @@ fn test_sqlite_store_append_read_journal() {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_sqlite_store_latest_sequence() {
-    let mut store = SqliteStore::in_memory().unwrap();
+fn test_libsql_store_latest_sequence() {
+    let mut store = LibsqlStore::in_memory().unwrap();
     store
         .save_snapshot(ActorSnapshot {
             actor_id: 1,
@@ -1370,8 +1370,8 @@ fn test_sqlite_store_latest_sequence() {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_sqlite_store_clear() {
-    let mut store = SqliteStore::in_memory().unwrap();
+fn test_libsql_store_clear() {
+    let mut store = LibsqlStore::in_memory().unwrap();
     store
         .save_snapshot(ActorSnapshot {
             actor_id: 1,
@@ -1399,10 +1399,10 @@ fn test_sqlite_store_clear() {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_sqlite_store_persists_to_disk() {
-    let path = std::env::temp_dir().join(format!("nulang_sqlite_test_{}.db", std::process::id()));
+fn test_libsql_store_persists_to_disk() {
+    let path = std::env::temp_dir().join(format!("nulang_libsql_test_{}.db", std::process::id()));
     {
-        let mut store = SqliteStore::new(&path).unwrap();
+        let mut store = LibsqlStore::new(&path).unwrap();
         let mut state = HashMap::new();
         state.insert("x".to_string(), PersistedValue::Float(1.5));
         store
@@ -1426,7 +1426,7 @@ fn test_sqlite_store_persists_to_disk() {
     }
 
     {
-        let store = SqliteStore::new(&path).unwrap();
+        let store = LibsqlStore::new(&path).unwrap();
         let snapshot = store.load_snapshot(1).unwrap();
         assert_eq!(snapshot.sequence, 1);
         assert_eq!(snapshot.state.get("x"), Some(&PersistedValue::Float(1.5)));
@@ -1440,9 +1440,9 @@ fn test_sqlite_store_persists_to_disk() {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_persistent_actor_with_sqlite_store() {
+fn test_persistent_actor_with_libsql_store() {
     let mut rt = Runtime::new();
-    rt.persistence = Box::new(SqliteStore::in_memory().unwrap());
+    rt.persistence = Box::new(LibsqlStore::in_memory().unwrap());
     let mut models = HashMap::new();
     models.insert("count".to_string(), StateModel::Durable);
     let actor_id = rt.spawn_persistent_actor(
@@ -2617,8 +2617,8 @@ fn test_memory_store_append_read_saga_event() {
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn test_sqlite_store_append_read_new_workflow_events() {
-    let mut store = SqliteStore::in_memory().unwrap();
+fn test_libsql_store_append_read_new_workflow_events() {
+    let mut store = LibsqlStore::in_memory().unwrap();
     store.append_timer_set(1, 1, "t1".to_string(), 200).unwrap();
     store
         .append_signal_received(1, 2, "cancel".to_string(), None)

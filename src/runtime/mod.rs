@@ -255,9 +255,6 @@ pub struct Runtime {
     /// Actor ID of the dead-letter queue (created lazily).
     /// Undeliverable messages are routed here.
     pub dlq_actor_id: Option<u64>,
-    /// Turso remote database (optional, gated behind `turso` feature).
-    #[cfg(feature = "turso")]
-    pub turso_store: Option<crate::runtime::persistence::TursoStore>,
     /// Callback invoked when the scheduler loop reaches true quiescence
     /// (empty run queue, no inflight LLM calls, no pending timers).
     /// The embedder (e.g. NLC guest agent) wires this to host signaling.
@@ -307,8 +304,6 @@ impl Runtime {
             spawnable_behaviors: HashMap::new(),
             pending_spawn_responses: HashMap::new(),
             dlq_actor_id: None,
-            #[cfg(feature = "turso")]
-            turso_store: None,
         }
     }
 
@@ -4591,7 +4586,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let mut rt = self.runtime.borrow_mut();
             return rt.query_workflow(workflow_id, &query_name);
         }
-        #[cfg(feature = "turso")]
+        #[cfg(feature = "sqlite")]
         if effect_name == "DB" && op_name == Some("query") {
             let sql = match regs.first().and_then(|v| v.as_string_id()) {
                 Some(id) => match constants.get(id as usize) {
@@ -4602,21 +4597,17 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             };
             let params: Vec<crate::vm::Value> = regs.iter().skip(1).copied().collect();
             let mut rt = self.runtime.borrow_mut();
-            let result = if let Some(ref store) = rt.turso_store {
-                match store.query(&sql, &params) {
-                    Ok(rows) => {
-                        let json = serde_json::to_string(&rows).unwrap_or_default();
-                        let bytes = json.into_bytes();
-                        if let Some(ref mut vm) = rt.vm {
-                            vm.add_runtime_string(0, String::from_utf8_lossy(&bytes).into_owned())
-                        } else {
-                            crate::vm::Value::nil()
-                        }
+            let result = match rt.persistence.query(&sql, &params) {
+                Ok(rows) => {
+                    let json = serde_json::to_string(&rows).unwrap_or_default();
+                    let bytes = json.into_bytes();
+                    if let Some(ref mut vm) = rt.vm {
+                        vm.add_runtime_string(0, String::from_utf8_lossy(&bytes).into_owned())
+                    } else {
+                        crate::vm::Value::nil()
                     }
-                    Err(_) => crate::vm::Value::nil(),
                 }
-            } else {
-                crate::vm::Value::nil()
+                Err(_) => crate::vm::Value::nil(),
             };
             return Some(result);
         }
@@ -4940,7 +4931,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 };
                 return (*self.runtime).query_workflow(workflow_id, &query_name);
             }
-            #[cfg(feature = "turso")]
+            #[cfg(feature = "sqlite")]
             if effect_name == "DB" && op_name == Some("query") {
                 let sql = match regs.first().and_then(|v| v.as_string_id()) {
                     Some(id) => match constants.get(id as usize) {
@@ -4950,20 +4941,17 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     None => return Some(crate::vm::Value::nil()),
                 };
                 let params: Vec<crate::vm::Value> = regs.iter().skip(1).copied().collect();
-                if let Some(ref store) = (*self.runtime).turso_store {
-                    return match store.query(&sql, &params) {
-                        Ok(rows) => {
-                            let json = serde_json::to_string(&rows).unwrap_or_default();
-                            if let Some(ref mut vm) = (*self.runtime).vm {
-                                Some(vm.add_runtime_string(0, json))
-                            } else {
-                                Some(crate::vm::Value::nil())
-                            }
+                return match (*self.runtime).persistence.query(&sql, &params) {
+                    Ok(rows) => {
+                        let json = serde_json::to_string(&rows).unwrap_or_default();
+                        if let Some(ref mut vm) = (*self.runtime).vm {
+                            Some(vm.add_runtime_string(0, json))
+                        } else {
+                            Some(crate::vm::Value::nil())
                         }
-                        Err(_) => Some(crate::vm::Value::nil()),
-                    };
-                }
-                return Some(crate::vm::Value::nil());
+                    }
+                    Err(_) => Some(crate::vm::Value::nil()),
+                };
             }
             if effect_name == "Actor" {
                 return (*self.runtime).perform_actor_builtin(

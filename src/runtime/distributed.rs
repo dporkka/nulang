@@ -282,7 +282,7 @@ impl RemoteActorCache {
     pub fn evict_stale(&mut self) {
         let cutoff = Instant::now() - self.ttl;
         self.entries.retain(|_, info| info.last_accessed >= cutoff);
-        self.access_order.retain(|key| self.entries.contains_key(key));
+        self.access_order.retain(|key| self.entries.get(key).is_some());
     }
 }
 
@@ -765,7 +765,7 @@ pub fn send_distributed(
 /// Non-existent senders (id 0) are silently skipped.
 fn notify_delivery_failed(runtime: &mut Runtime, sender_id: u64, reason: &str) {
     if sender_id == 0 { return; }
-    if !runtime.actors.contains_key(&sender_id) { return; }
+    if !runtime.actors.get(&sender_id).is_some() { return; }
     let code = delivery_failure_code(reason);
     let fail_payload = vec![Value::int(code), Value::nil()];
     runtime.send_message_by_id(sender_id, 0, &fail_payload);
