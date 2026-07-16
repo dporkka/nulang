@@ -850,6 +850,7 @@ impl<'c> FnLowerer<'c> {
                         self.b.assign(dst, mir::RValue::StrConcat(lid, rid));
                     }
                     _ => {
+                        self.b.assign(dst, mir::RValue::Binary(*op, lid, rid));
                     }
                 }
                 Ok(())

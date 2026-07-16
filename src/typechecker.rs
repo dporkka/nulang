@@ -1533,21 +1533,21 @@ impl TypeChecker {
                 let (s1, left_ty) = self.infer_expr(ctx, left)?;
                 let ctx1 = apply_subst_to_ctx(ctx, &s1);
                 let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
-                let combined = compose_subst(&s2, &s1);
 
-                // If both sides unify with String, this is string concatenation.
-                let lty = apply_subst(&left_ty, &combined);
-                let rty = apply_subst(&right_ty, &combined);
+                // If both sides are strings, this is concatenation.
+                let s2s1 = compose_subst(&s2, &s1);
+                let lty = apply_subst(&left_ty, &s2s1);
+                let rty = apply_subst(&right_ty, &s2s1);
                 if lty == Type::string() && rty == Type::string() {
-                    return Ok((combined, Type::string()));
+                    return Ok((s2s1, Type::string()));
                 }
 
-                // Otherwise: numeric addition.
+                // Otherwise: numeric addition (same as Sub/Mul/Div/Mod).
                 let num_var = Type::Var(TypeVar::fresh());
-                let s3 = mgu(&lty, &num_var, span)?;
-                let s_combined = compose_subst(&s3, &combined);
+                let s3 = mgu(&apply_subst(&left_ty, &s1), &num_var, span)?;
+                let s_combined = compose_subst(&s3, &compose_subst(&s2, &s1));
                 let s4 = mgu(
-                    &rty,
+                    &apply_subst(&right_ty, &s_combined),
                     &apply_subst(&num_var, &s_combined),
                     span,
                 )?;
@@ -1564,7 +1564,6 @@ impl TypeChecker {
                 let num_var = Type::Var(TypeVar::fresh());
                 let s3 = mgu(&apply_subst(&left_ty, &s1), &num_var, span)?;
                 let s_combined = compose_subst(&s3, &compose_subst(&s2, &s1));
-
                 let s4 = mgu(
                     &apply_subst(&right_ty, &s_combined),
                     &apply_subst(&num_var, &s_combined),
