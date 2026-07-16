@@ -95,8 +95,7 @@ fn emit_tag_int(builder: &mut FunctionBuilder, value: Value) -> Value {
 
 /// State maintained during compilation of one MIR module.
 pub struct AotContext<'a> {
-    /// The Cranelift JIT module (we reuse JITModule for now; could be
-    /// ObjectModule for true AOT later).
+    /// The Cranelift JIT module.
     pub module: &'a mut JITModule,
     /// Reusable function builder context.
     pub builder_context: &'a mut FunctionBuilderContext,
@@ -104,6 +103,10 @@ pub struct AotContext<'a> {
     pub codegen_ctx: codegen::Context,
     /// Runtime helpers registered with the JIT module.
     pub helpers: HashMap<&'static str, FuncRef>,
+    /// FuncIds of already-compiled functions, indexed by MIR function index.
+    /// Populated by the caller before compiling each function so that
+    /// cross-function calls can look up the callee's FuncId.
+    pub func_ids: Vec<cranelift_module::FuncId>,
 }
 
 impl<'a> AotContext<'a> {
@@ -117,6 +120,7 @@ impl<'a> AotContext<'a> {
             builder_context,
             codegen_ctx,
             helpers: HashMap::new(),
+            func_ids: Vec::new(),
         }
     }
 }
@@ -266,31 +270,22 @@ fn block_param_args(
 // Main entry point: compile a MIR function to a native function pointer
 // ---------------------------------------------------------------------------
 
-/// Compile a single MIR function to native code using Cranelift.
+/// Compile the body of a MIR function that was already declared.
 ///
-/// Returns a raw function pointer with signature `extern "C" fn(u64, u64, ...) -> u64`.
-/// The caller is responsible for boxing/unboxing arguments.
-pub fn compile_mir_function(
+/// `func_id` is the pre-declared function ID from a prior `declare_function` call.
+pub fn compile_mir_function_body(
     aot: &mut AotContext,
     mir_func: &mir::Function,
-    func_index: usize,
-) -> AotResult<cranelift_module::FuncId> {
-    let func_name = format!("nulang_fn_{}", func_index);
-
-    // Build the CLIF function signature.
+    _func_index: usize,
+    func_id: cranelift_module::FuncId,
+) -> AotResult<()> {
+    // Reconstruct the signature for the codegen context.
     let mut sig = aot.module.make_signature();
     for _ in &mir_func.params {
         sig.params.push(AbiParam::new(types::I64));
     }
     sig.returns.push(AbiParam::new(types::I64));
-
-    let func_id = aot
-        .module
-        .declare_function(&func_name, Linkage::Local, &sig)
-        .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
-
-    // Set the function signature on the codegen context before building.
-    aot.codegen_ctx.func.signature = sig.clone();
+    aot.codegen_ctx.func.signature = sig;
 
     // Split module and codegen_ctx for independent borrows.
     let module: &mut JITModule = aot.module;
@@ -306,7 +301,9 @@ pub fn compile_mir_function(
     // used in this block — these need block params when multiple preds exist.
     let block_liveins = compute_liveins(mir_func, &preds, local_base);
 
-    // Single-pass: register helpers and build body.
+    // Pre-resolve cross-function call targets (will fill inside builder scope).
+    let mut call_targets: HashMap<usize, FuncRef> = HashMap::new();
+
     let _helpers = {
         let mut builder = FunctionBuilder::new(&mut codegen_ctx.func, builder_ctx);
         let entry_block = builder.create_block();
@@ -355,6 +352,33 @@ pub fn compile_mir_function(
             h.insert(*name, func_ref);
         }
 
+        // Helper to register a call target FuncRef.
+        let mut register_call_target = |n: usize| {
+            if !call_targets.contains_key(&n) {
+                if let Some(&callee_fid) = aot.func_ids.get(n) {
+                    let local_ref = module.declare_func_in_func(callee_fid, builder.func);
+                    call_targets.insert(n, local_ref);
+                }
+            }
+        };
+
+        // Pre-scan: register all call targets from Call and Closure rvalues.
+        for block in &mir_func.blocks {
+            for stmt in &block.stmts {
+                match stmt {
+                    mir::Stmt::Assign { op: mir::RValue::Call { func: mir::FuncRef::Index(n), .. }, .. } => {
+                        register_call_target(*n);
+                    }
+                    mir::Stmt::Assign { op: mir::RValue::Closure { func, captures }, .. } if captures.is_empty() => {
+                        register_call_target(*func);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Track which locals hold zero-capture closures for call resolution.
+        let mut closure_targets: HashMap<u32, usize> = HashMap::new();
         let mut local_vals: HashMap<u32, Value> = HashMap::new();
 
         for (i, param_id) in mir_func.params.iter().enumerate() {
@@ -402,7 +426,7 @@ pub fn compile_mir_function(
             }
 
             for stmt in &block.stmts {
-                compile_stmt(&mut builder, stmt, &type_meta, &h, &mut local_vals)?;
+                compile_stmt(&mut builder, stmt, &type_meta, &h, &call_targets, &mut closure_targets, &mut local_vals)?;
             }
 
             compile_terminator_with_params(
@@ -420,7 +444,7 @@ pub fn compile_mir_function(
     };
     // Debug: dump CLIF when verbose.
     if std::env::var("NULANG_DUMP_CLIF").is_ok() {
-        eprintln!("=== CLIF for {} ===", func_name);
+        eprintln!("=== CLIF for fn_{} ===", _func_index);
         eprintln!("{}", codegen_ctx.func.display());
     }
 
@@ -430,7 +454,7 @@ pub fn compile_mir_function(
 
     module.clear_context(codegen_ctx);
 
-    Ok(func_id)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -442,19 +466,25 @@ fn compile_stmt(
     stmt: &mir::Stmt,
     type_meta: &TypeMetadata,
     helpers: &HashMap<&str, FuncRef>,
+    call_targets: &HashMap<usize, FuncRef>,
+    closure_targets: &mut HashMap<u32, usize>,
     local_vals: &mut HashMap<u32, Value>,
 ) -> AotResult<()> {
     match stmt {
         mir::Stmt::Assign { dst, op } => {
-            let val = compile_rvalue(builder, op, type_meta, helpers, local_vals)?;
+            // Track zero-capture closures for later call resolution.
+            if let mir::RValue::Closure { func, captures } = op {
+                if captures.is_empty() {
+                    let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
+                    closure_targets.insert(reg, *func);
+                }
+            }
+            let val = compile_rvalue(builder, op, type_meta, helpers, call_targets, closure_targets, local_vals)?;
             let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
             local_vals.insert(reg, val);
             Ok(())
         }
-        _ => Err(AotCompileError::Unsupported(format!(
-            "statement {:?}",
-            stmt
-        ))),
+        _ => Err(AotCompileError::Unsupported(format!("statement {:?}", stmt))),
     }
 }
 
@@ -467,13 +497,13 @@ fn compile_rvalue(
     rv: &mir::RValue,
     type_meta: &TypeMetadata,
     helpers: &HashMap<&str, FuncRef>,
+    call_targets: &HashMap<usize, FuncRef>,
+    closure_targets: &mut HashMap<u32, usize>,
     local_vals: &HashMap<u32, Value>,
 ) -> AotResult<Value> {
     match rv {
-        // Constants
         mir::RValue::Const(c) => compile_const(builder, c),
 
-        // Variable load
         mir::RValue::Load(id) => {
             let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
             local_vals
@@ -482,20 +512,56 @@ fn compile_rvalue(
                 .ok_or_else(|| AotCompileError::Internal(format!("uninitialized local {}", id.0)))
         }
 
-        // Binary operations — typed when both operands are known
         mir::RValue::Binary(op, lhs, rhs) => {
             compile_binary(builder, *op, *lhs, *rhs, type_meta, helpers, local_vals)
         }
 
-        // Unary operations
         mir::RValue::Unary(op, operand) => {
             compile_unary(builder, *op, *operand, type_meta, helpers, local_vals)
         }
 
-        _ => Err(AotCompileError::Unsupported(format!(
-            "rvalue {:?}",
-            rv
-        ))),
+        mir::RValue::Call { func, args } => {
+            let callee_ref = match func {
+                mir::FuncRef::Index(n) => {
+                    call_targets.get(n).copied().ok_or_else(|| {
+                        AotCompileError::Internal(format!("call target fn {} not compiled yet", n))
+                    })?
+                }
+                mir::FuncRef::Local(closure_id) => {
+                    let reg = mir::FunctionBuilder::LOCAL_BASE + closure_id.0;
+                    let target_idx = closure_targets.get(&reg).copied().ok_or_else(|| {
+                        AotCompileError::Unsupported("indirect call: closure target unknown at compile time".into())
+                    })?;
+                    call_targets.get(&target_idx).copied().ok_or_else(|| {
+                        AotCompileError::Internal(format!("call target fn {} not compiled yet", target_idx))
+                    })?
+                }
+            };
+            let arg_vals: Vec<Value> = args
+                .iter()
+                .map(|id| {
+                    let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                    local_vals
+                        .get(&reg)
+                        .copied()
+                        .ok_or_else(|| AotCompileError::Internal("call arg uninitialized".into()))
+                })
+                .collect::<AotResult<Vec<_>>>()?;
+            let call = builder.ins().call(callee_ref, &arg_vals);
+            Ok(builder.inst_results(call)[0])
+        }
+
+        mir::RValue::Closure { func, captures } => {
+            if captures.is_empty() {
+                // Return tagged function index — also register for call resolution.
+                let idx = builder.ins().iconst(types::I64, *func as i64);
+                Ok(emit_tag_int(builder, idx))
+            } else {
+                Err(AotCompileError::Unsupported("closures with captures".into()))
+            }
+        }
+
+        _ => Err(AotCompileError::Unsupported(format!("rvalue {:?}", rv))),
     }
 }
 

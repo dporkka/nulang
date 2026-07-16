@@ -20,6 +20,7 @@ pub mod codegen;
 use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilderContext;
 use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::Module;
 
 use crate::mir;
 use crate::types::NuResult;
@@ -59,21 +60,36 @@ impl AotModule {
         let mut jit_module = JITModule::new(jit_builder);
         let mut builder_context = FunctionBuilderContext::new();
 
-        // Compile each MIR function — collect FuncIds.
+        // Pass 1: declare all functions so forward references resolve.
         let mut func_ids: Vec<cranelift_module::FuncId> =
             Vec::with_capacity(mir_module.functions.len());
+        for (idx, func) in mir_module.functions.iter().enumerate() {
+            let func_name = format!("nulang_fn_{}", idx);
+            let mut sig = jit_module.make_signature();
+            for _ in &func.params {
+                sig.params.push(AbiParam::new(types::I64));
+            }
+            sig.returns.push(AbiParam::new(types::I64));
+            let fid = jit_module
+                .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)
+                .map_err(|e| {
+                    crate::types::NuError::VMError(format!("failed to declare '{}': {}", func.name, e))
+                })?;
+            func_ids.push(fid);
+        }
+
+        // Pass 2: compile each function body with all FuncIds available.
         let mut entry_idx: Option<usize> = None;
 
         for (idx, func) in mir_module.functions.iter().enumerate() {
             let mut ctx = codegen::AotContext::new(&mut jit_module, &mut builder_context);
-
-            let fid = codegen::compile_mir_function(&mut ctx, func, idx).map_err(|e| {
+            ctx.func_ids = func_ids.clone();
+            codegen::compile_mir_function_body(&mut ctx, func, idx, func_ids[idx]).map_err(|e| {
                 crate::types::NuError::VMError(format!(
                     "AOT compilation of '{}' failed: {}",
                     func.name, e
                 ))
             })?;
-            func_ids.push(fid);
 
             if func.name == "__main" || func.name == "main" {
                 if entry_idx.is_none() || func.name == "__main" {
@@ -81,7 +97,6 @@ impl AotModule {
                 }
             }
         }
-
         // Finalize all definitions so function pointers become available.
         jit_module.finalize_definitions().map_err(|e| {
             crate::types::NuError::VMError(format!("failed to finalize JIT definitions: {}", e))
