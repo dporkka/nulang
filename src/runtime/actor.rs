@@ -43,6 +43,120 @@ pub enum ActorPriority {
     Low,
 }
 
+
+// -- Flight recorder (deterministic replay support) ---------------------
+
+/// A single entry in an actor's flight-recorder trace.  Captures enough
+/// information to deterministically replay the message sequence that led
+/// to a crash or unexpected behavior.
+#[derive(Debug, Clone)]
+pub struct TraceEntry {
+    /// Per-actor monotonic sequence number (arrival order).
+    pub seq: u64,
+    /// Actor ID of the sender (0 = system/runtime message).
+    pub sender: u64,
+    /// Target behavior ID.
+    pub behavior_id: u16,
+    /// Number of payload arguments.
+    pub payload_len: usize,
+    /// Human-readable summary of the first few payload values.
+    pub payload_summary: String,
+}
+
+/// A fixed-size ring buffer that records the most recent N messages
+/// delivered to an actor.  When the buffer is full, oldest entries are
+/// overwritten.
+#[derive(Debug, Clone)]
+pub struct FlightRecorder {
+    entries: Vec<TraceEntry>,
+    /// Write cursor (next slot to fill).
+    cursor: usize,
+    /// Monotonic sequence counter for this actor.
+    next_seq: u64,
+    /// Maximum number of entries to retain.
+    max_entries: usize,
+}
+
+impl FlightRecorder {
+    /// Create a new flight recorder retaining up to `max_entries` messages.
+    pub fn new(max_entries: usize) -> Self {
+        FlightRecorder {
+            entries: Vec::with_capacity(max_entries),
+            cursor: 0,
+            next_seq: 0,
+            max_entries,
+        }
+    }
+
+    /// Record a message delivery.
+    pub fn record(&mut self, sender: u64, behavior_id: u16, payload: &[Value]) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+
+        let payload_summary = payload
+            .iter()
+            .take(3)
+            .map(|v| v.to_string_repr())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let entry = TraceEntry {
+            seq,
+            sender,
+            behavior_id,
+            payload_len: payload.len(),
+            payload_summary,
+        };
+
+        if self.entries.len() < self.max_entries {
+            self.entries.push(entry);
+        } else {
+            self.entries[self.cursor] = entry;
+            self.cursor = (self.cursor + 1) % self.max_entries;
+        }
+    }
+
+    /// Return all recorded entries (raw ring buffer — use ordered_entries()
+    /// for chronological order).
+    pub fn entries(&self) -> &[TraceEntry] {
+        &self.entries
+    }
+
+    /// Return entries in chronological order (oldest first), even when the
+    /// ring buffer has wrapped.
+    pub fn ordered_entries(&self) -> Vec<&TraceEntry> {
+        if self.entries.is_empty() {
+            return vec![];
+        }
+        if self.entries.len() < self.max_entries {
+            return self.entries.iter().collect();
+        }
+        // Full ring: oldest is at cursor, newest at cursor-1 (wrapping)
+        let mut result = Vec::with_capacity(self.entries.len());
+        for i in 0..self.entries.len() {
+            let idx = (self.cursor + i) % self.entries.len();
+            result.push(&self.entries[idx]);
+        }
+        result
+    }
+
+    /// Number of entries recorded.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// True when no messages have been recorded.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Clear all recorded entries.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.cursor = 0;
+        self.next_seq = 0;
+    }
+}
 /// An actor: independent unit of computation with isolated state and mailbox.
 pub struct Actor {
     pub id: u64,
@@ -120,6 +234,13 @@ pub struct Actor {
     pub retry_config: Option<crate::ast::AgentRetryConfig>,
     /// Cached parsed fallback configuration for agent actors.
     pub fallback_config: Vec<crate::ast::AgentFallbackEntry>,
+    /// Flight recorder ring buffer for deterministic replay debugging.
+    /// Records the N most recent messages delivered to this actor.
+    pub flight_recorder: FlightRecorder,
+    /// Fields modified since the last checkpoint (incremental persistence).
+    /// Cleared after each successful snapshot. Empty on a freshly spawned
+    /// actor (all fields are serialized on the first checkpoint).
+    pub dirty_fields: HashSet<String>,
 }
 
 /// State of an actor's in-flight timed selective receive.
@@ -196,9 +317,11 @@ impl Actor {
             backend: ActorBackend::default(),
             llm_inflight: false,
             llm_pending_prompt: None,
+            dirty_fields: HashSet::new(),
             llm_completed: None,
             receive_wait: None,
             retry_config: None,
+            flight_recorder: FlightRecorder::new(1000),
             fallback_config: Vec::new(),
         }
     }
@@ -233,9 +356,13 @@ impl Actor {
         self.mailbox.push(msg)
     }
 
-    /// Set or update a named state field.
+    /// Set or update a named state field.  Marks the field dirty for
+    /// incremental persistence (only dirty fields are re-serialized on
+    /// the next checkpoint).
     pub fn set_state_field(&mut self, name: impl Into<String>, value: Value) {
-        self.state_data.insert(name.into(), value);
+        let name_str = name.into();
+        self.dirty_fields.insert(name_str.clone());
+        self.state_data.insert(name_str, value);
     }
 
     /// Get a named state field.

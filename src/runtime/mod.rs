@@ -51,7 +51,7 @@ pub use registry::*;
 pub use process_groups::*;
 pub use persistence::*;
 
-use crate::ai::{complete_sync, Debate, LlmClient, LlmError, LlmMessage, LlmRequest, LlmResponse, Pipeline, PipelineStage, SupervisorTeam};
+use crate::ai::{complete_sync, Debate, LlmClient, LlmError, LlmErrorKind, LlmMessage, LlmRequest, LlmResponse, Pipeline, PipelineStage, SupervisorTeam, TokenBudget};
 use crate::types::ExitReason;
 use crate::vm::Value;
 
@@ -191,6 +191,12 @@ pub struct Runtime {
 
     // Timer wheel (v0.7)
     pub timer_wheel: TimerWheel,
+    // Virtual clock for deterministic testing (v0.14). When set, all timer
+    // expiry and deadline calculations use this clock instead of wall time.
+    pub virtual_clock: Option<VirtualClock>,
+    // Token budget for LLM calls (v0.14). When set, the runtime rejects
+    // LLM requests that would exceed the configured token limit.
+    pub token_budget: Option<std::sync::Arc<TokenBudget>>,
 
     // Actor name registry (v0.7)
     pub registry: ActorRegistry,
@@ -271,6 +277,11 @@ pub struct Runtime {
     /// (empty run queue, no inflight LLM calls, no pending timers).
     /// The embedder (e.g. NLC guest agent) wires this to host signaling.
     pub idle_callback: Option<Box<dyn FnMut()>>,
+    // Test effect handlers — installed via `install_test_handler` to
+    // intercept `perform Effect.op` calls in tests.  Key is the qualified
+    // name (e.g. "IO.print", "DB.write").  A handler returns `Some(value)`
+    // to mock the effect or `None` to fall through to real dispatch.
+    pub test_handlers: HashMap<String, Box<dyn Fn(&[Value]) -> Option<Value>>>,
 }
 
 impl Runtime {
@@ -319,6 +330,8 @@ impl Runtime {
             acked_packets: HashSet::new(),
 
             crdt_manager: None,
+            virtual_clock: None,
+            token_budget: None,
             crdt_sync_rounds: 0,
 
             timer_wheel: TimerWheel::new(),
@@ -340,12 +353,42 @@ impl Runtime {
             pipelines: HashMap::new(),
             next_supervisor_id: 1,
             supervisor_teams: HashMap::new(),
+            test_handlers: HashMap::new(),
             next_debate_id: 1,
             debates: HashMap::new(),
             spawnable_behaviors: HashMap::new(),
             pending_spawn_responses: HashMap::new(),
             dlq_actor_id: None,
         }
+    }
+
+    /// Install a test handler that intercepts `perform Effect.op` calls.
+    ///
+    /// The `effect_name` should be the qualified operation name (e.g.
+    /// `"IO.print"`, `"DB.write"`).  The handler receives the frame
+    /// registers (r0..rn as set up by the compiler before `Perform`) and
+    /// returns `Some(value)` to mock the effect or `None` to fall through
+    /// to real dispatch.
+    ///
+    /// # Example
+    /// ```ignore
+    /// rt.install_test_handler("DB.write", |regs| {
+    ///     // regs[0] = key, regs[1] = value
+    ///     Some(Value::unit())  // pretend write succeeded
+    pub fn install_test_handler<F>(&mut self, effect_name: &str, handler: F)
+    where
+        F: Fn(&[Value]) -> Option<Value> + 'static,
+    {
+        self.test_handlers
+            .insert(effect_name.to_string(), Box::new(handler));
+    }
+
+    /// Check whether a test handler is installed for `qualified_name` and
+    /// return its result if so.
+    pub fn check_test_handler(&self, qualified_name: &str, regs: &[Value]) -> Option<Value> {
+        self.test_handlers
+            .get(qualified_name)
+            .and_then(|handler| handler(regs))
     }
 
 
@@ -851,6 +894,21 @@ impl Runtime {
         Self::vm_value_to_string(&value, actor.bytecode_module.as_ref())
     }
 
+
+    /// Set a token budget that caps total LLM token consumption.
+    ///
+    /// After the budget is exhausted `complete_llm_request` returns
+    /// `LlmError::BudgetExceeded`.  Charges are applied after each
+    /// successful response based on the actual token count returned
+    /// by the provider.
+    pub fn set_token_budget(&mut self, limit: u64) {
+        self.token_budget = Some(std::sync::Arc::new(TokenBudget::new(limit)));
+    }
+
+    /// Remove any configured token budget.
+    pub fn clear_token_budget(&mut self) {
+        self.token_budget = None;
+    }
     /// Execute a chat-completion request using the configured LLM client.
     ///
     /// The provided `memory` messages are stored on the request before it is
@@ -860,12 +918,26 @@ impl Runtime {
         mut request: LlmRequest,
         memory: Vec<LlmMessage>,
     ) -> Result<LlmResponse, LlmError> {
+        // Check token budget before calling the provider.
+        if let Some(ref budget) = self.token_budget {
+            if budget.is_exhausted() {
+                return Err(LlmError::new(
+                    LlmErrorKind::BudgetExceeded,
+                    format!("Token budget exhausted (limit: {})", budget.limit()),
+                ));
+            }
+        }
         request.memory = memory;
         let client = self
             .llm_client
             .as_ref()
             .ok_or_else(|| LlmError::from_string("No LLM client configured"))?;
-        complete_sync(client.as_ref(), request)
+        let response = complete_sync(client.as_ref(), request)?;
+        // Charge the budget for actual tokens consumed.
+        if let Some(ref budget) = self.token_budget {
+            budget.charge(response.usage.total as u64);
+        }
+        Ok(response)
     }
 
     /// Execute an LLM request, optionally running tool calls from the response.
@@ -2083,6 +2155,9 @@ impl Runtime {
         };
         let target_exists = self.actors.contains_key(&target_id);
         if target_exists {
+            if let Some(actor) = self.actors.get_mut(&target_id) {
+                actor.flight_recorder.record(self.current_actor.unwrap_or(0), behavior_id, args);
+            }
             if let Err(_dropped) = self.actors.get_mut(&target_id).unwrap().mailbox.push(msg) {
                 // Mailbox is full (capacity > 0). Route to DLQ with a simple notification.
                 self.route_to_dlq(
@@ -2345,7 +2420,7 @@ impl Runtime {
                     // must still receive the fired message.
                     let wait = match self.timer_wheel.next_deadline() {
                         Some(deadline) => deadline
-                            .saturating_duration_since(std::time::Instant::now())
+                            .saturating_duration_since(self.now())
                             .min(std::time::Duration::from_millis(10)),
                         None => std::time::Duration::from_millis(10),
                     };
@@ -3158,9 +3233,40 @@ impl Runtime {
         );
     }
 
+    /// Return the current logical time: the virtual clock's view if one is
+    /// installed, otherwise real wall-clock time.
+    pub fn now(&self) -> std::time::Instant {
+        match &self.virtual_clock {
+            Some(vc) => vc.now(),
+            None => std::time::Instant::now(),
+        }
+    }
+
+    /// Install a virtual clock, freezing time at the current wall-clock
+    /// moment. All subsequent timer expiry and deadline calculations use
+    /// this clock. Call `advance_time` to move time forward.
+    pub fn install_virtual_clock(&mut self) {
+        self.virtual_clock = Some(VirtualClock::new());
+    }
+
+    /// Advance the virtual clock by `duration`. Timers whose fire time lies
+    /// at or before the new virtual time will fire on the next scheduler
+    /// iteration. Panics if no virtual clock is installed.
+    pub fn advance_time(&mut self, duration: std::time::Duration) {
+        match &mut self.virtual_clock {
+            Some(vc) => vc.advance(duration),
+            None => panic!("advance_time called without a virtual clock installed"),
+        }
+    }
+
+    /// Remove the virtual clock, returning to real wall-clock time.
+    pub fn remove_virtual_clock(&mut self) {
+        self.virtual_clock = None;
+    }
+
     /// Tick the timer wheel and deliver any fired timers.
     pub fn tick_timers(&mut self) {
-        self.tick_timers_at(std::time::Instant::now());
+        self.tick_timers_at(self.now());
     }
 
     // -- Timed selective receive (receive-after) --
@@ -3381,6 +3487,8 @@ impl Runtime {
     }
 
     /// Snapshot durable fields of an actor to the persistence store.
+    /// The snapshot is skipped entirely when no fields have changed since
+    /// the last checkpoint (dirty-bit optimization).
     pub fn checkpoint_actor(&mut self, actor_id: u64) {
         let actor = match self.actors.get(&actor_id) {
             Some(a) => a,
@@ -3389,14 +3497,16 @@ impl Runtime {
         if !actor.persistent {
             return;
         }
+        // Always run the full snapshot.  `dirty_fields` tracking is
+        // retained for future incremental-diff support (e.g. LSM-tree
+        // delta encoding) but does not gate the snapshot today — skipping
+        // would leave the snapshot sequence behind the journal/event log
+        // and cause incorrect replay on recovery.
         let seq = self.next_sequence(actor_id);
         let mut state = HashMap::new();
         for (name, value) in &actor.state_data {
             let model = actor.state_models.get(name).copied().unwrap_or(StateModel::Local);
-            // EventSourced fields are reconstructed from the event log, not snapshots.
             if model == StateModel::Durable || model == StateModel::Crdt {
-                // Serialize the semantic_memory and procedural_memory JSON
-                // pointers to strings so they survive node restarts.
                 let persisted = if name == "semantic_memory" || name == "procedural_memory" {
                     self.vm_value_to_string_in_actor(value, actor)
                         .map(PersistedValue::String)
@@ -3416,6 +3526,7 @@ impl Runtime {
         let _ = self.persistence.save_snapshot(snapshot);
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.sequence = seq;
+            actor.dirty_fields.clear();
         }
     }
 
@@ -5024,6 +5135,18 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         module: &crate::bytecode::CodeModule,
         regs: &[crate::vm::Value],
     ) -> Option<crate::vm::Value> {
+        let qualified = match op_name {
+            Some(op) => format!("{}.{}", effect_name, op),
+            None => effect_name.to_string(),
+        };
+        // Check test handlers before real dispatch — allows tests to
+        // intercept effects without a `handle` block in source.
+        {
+            let rt = self.runtime.borrow();
+            if let Some(result) = rt.check_test_handler(&qualified, regs) {
+                return Some(result);
+            }
+        }
         if effect_name == "Otp" {
             let mut rt = self.runtime.borrow_mut();
             return rt.perform_otp_builtin(op_name, module, regs);
@@ -5377,7 +5500,15 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         module: &crate::bytecode::CodeModule,
         regs: &[crate::vm::Value],
     ) -> Option<crate::vm::Value> {
+        let qualified = match op_name {
+            Some(op) => format!("{}.{}", effect_name, op),
+            None => effect_name.to_string(),
+        };
         unsafe {
+            // Check test handlers before real dispatch.
+            if let Some(result) = (*self.runtime).check_test_handler(&qualified, regs) {
+                return Some(result);
+            }
             if effect_name == "Otp" {
                 return (*self.runtime).perform_otp_builtin(op_name, module, regs);
             }

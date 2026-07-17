@@ -298,18 +298,18 @@ pub struct Lexer<'a> {
     source: &'a str,
     bytes: &'a [u8],
     pos: usize,
-    line: usize,
-    column: usize,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a str) -> Self {
+        // Install a SourceMap so Span::line()/column() can resolve byte
+        // offsets to human-readable positions throughout the compiler
+        // pipeline (error display, LSP, etc.).
+        crate::types::set_source_map(source);
         Lexer {
             source,
             bytes: source.as_bytes(),
             pos: 0,
-            line: 1,
-            column: 1,
         }
     }
 
@@ -340,15 +340,13 @@ impl<'a> Lexer<'a> {
         self.skip_whitespace();
 
         let start = self.pos;
-        let start_line = self.line;
-        let start_col = self.column;
 
         let ch = match self.peek() {
             Some(c) => c,
             None => {
                 return Ok(Token {
                     kind: TokenKind::Eof,
-                    span: Span::new(start, start, start_line, start_col),
+                    span: Span::new(start as u32, start as u32),
                 })
             }
         };
@@ -361,7 +359,7 @@ impl<'a> Lexer<'a> {
                 }
                 Token {
                     kind: TokenKind::Newline,
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             b'/' => {
@@ -383,69 +381,69 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 Token {
                     kind: TokenKind::LParen,
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             b')' => {
                 self.advance();
                 Token {
                     kind: TokenKind::RParen,
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             b'{' => {
                 self.advance();
                 Token {
                     kind: TokenKind::LBrace,
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             b'}' => {
                 self.advance();
                 Token {
                     kind: TokenKind::RBrace,
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             b'[' => {
                 self.advance();
                 Token {
                     kind: TokenKind::LBracket,
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             b']' => {
                 self.advance();
                 Token {
                     kind: TokenKind::RBracket,
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             b',' => {
                 self.advance();
                 Token {
                     kind: TokenKind::Comma,
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             b'@' => {
                 self.advance();
                 Token {
                     kind: TokenKind::At,
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             b';' => {
                 self.advance();
                 Token {
                     kind: TokenKind::Semicolon,
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             _ => {
                 return Err(NuError::LexError {
                     msg: format!("Unexpected character: '{}' (byte {})", ch as char, ch),
-                    span: Span::new(start, start + 1, start_line, start_col),
+                    span: Span::new(start as u32, start as u32 + 1),
                 })
             }
         };
@@ -467,8 +465,6 @@ impl<'a> Lexer<'a> {
 
     fn read_identifier(&mut self) -> Token {
         let start = self.pos;
-        let start_line = self.line;
-        let start_col = self.column;
 
         // First char: lowercase, uppercase, or underscore
         self.advance(); // consume first char
@@ -488,25 +484,23 @@ impl<'a> Lexer<'a> {
         if let Some(kw) = keyword(text) {
             Token {
                 kind: kw,
-                span: Span::new(start, self.pos, start_line, start_col),
+                span: Span::new(start as u32, self.pos as u32),
             }
         } else if text.starts_with(|c: char| c.is_ascii_uppercase()) {
             Token {
                 kind: TokenKind::UpperIdent(text.to_string()),
-                span: Span::new(start, self.pos, start_line, start_col),
+                span: Span::new(start as u32, self.pos as u32),
             }
         } else {
             Token {
                 kind: TokenKind::Ident(text.to_string()),
-                span: Span::new(start, self.pos, start_line, start_col),
+                span: Span::new(start as u32, self.pos as u32),
             }
         }
     }
 
     fn read_number(&mut self) -> NuResult<Token> {
         let start = self.pos;
-        let start_line = self.line;
-        let start_col = self.column;
 
         // Check for hex prefix
         if self.peek() == Some(b'0') {
@@ -525,17 +519,17 @@ impl<'a> Lexer<'a> {
                 if self.pos == hex_start {
                     return Err(NuError::LexError {
                         msg: "Expected hex digits after 0x".to_string(),
-                        span: Span::new(start, self.pos, start_line, start_col),
+                        span: Span::new(start as u32, self.pos as u32),
                     });
                 }
                 let hex_str = &self.source[hex_start..self.pos];
                 let val = i64::from_str_radix(hex_str, 16).map_err(|_| NuError::LexError {
                     msg: format!("Invalid hex number: {}", hex_str),
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 })?;
                 return Ok(Token {
                     kind: TokenKind::IntLit(val),
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 });
             }
         }
@@ -588,7 +582,7 @@ impl<'a> Lexer<'a> {
             if self.pos == exp_start {
                 return Err(NuError::LexError {
                     msg: "Expected digits in exponent".to_string(),
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 });
             }
         }
@@ -598,28 +592,26 @@ impl<'a> Lexer<'a> {
         if is_float {
             let val = num_str.parse::<f64>().map_err(|_| NuError::LexError {
                 msg: format!("Invalid float literal: {}", num_str),
-                span: Span::new(start, self.pos, start_line, start_col),
+                span: Span::new(start as u32, self.pos as u32),
             })?;
             Ok(Token {
                 kind: TokenKind::FloatLit(val),
-                span: Span::new(start, self.pos, start_line, start_col),
+                span: Span::new(start as u32, self.pos as u32),
             })
         } else {
             let val = num_str.parse::<i64>().map_err(|_| NuError::LexError {
                 msg: format!("Invalid integer literal: {}", num_str),
-                span: Span::new(start, self.pos, start_line, start_col),
+                span: Span::new(start as u32, self.pos as u32),
             })?;
             Ok(Token {
                 kind: TokenKind::IntLit(val),
-                span: Span::new(start, self.pos, start_line, start_col),
+                span: Span::new(start as u32, self.pos as u32),
             })
         }
     }
 
     fn read_string(&mut self) -> NuResult<Token> {
         let start = self.pos;
-        let start_line = self.line;
-        let start_col = self.column;
 
         self.advance(); // opening "
 
@@ -642,13 +634,13 @@ impl<'a> Lexer<'a> {
                         Some(other) => {
                             return Err(NuError::LexError {
                                 msg: format!("Unknown escape sequence: \\\\{}", other as char),
-                                span: Span::new(self.pos - 1, self.pos, self.line, self.column),
+                                span: Span::new((self.pos - 1) as u32, self.pos as u32),
                             })
                         }
                         None => {
                             return Err(NuError::LexError {
                                 msg: "Unterminated string escape".to_string(),
-                                span: Span::new(start, self.pos, start_line, start_col),
+                                span: Span::new(start as u32, self.pos as u32),
                             })
                         }
                     }
@@ -672,7 +664,7 @@ impl<'a> Lexer<'a> {
                             None => {
                                 return Err(NuError::LexError {
                                     msg: "Unterminated string literal".to_string(),
-                                    span: Span::new(start, self.pos, start_line, start_col),
+                                    span: Span::new(start as u32, self.pos as u32),
                                 })
                             }
                         }
@@ -681,7 +673,7 @@ impl<'a> Lexer<'a> {
                 None => {
                     return Err(NuError::LexError {
                         msg: "Unterminated string literal".to_string(),
-                        span: Span::new(start, self.pos, start_line, start_col),
+                        span: Span::new(start as u32, self.pos as u32),
                     })
                 }
             }
@@ -689,14 +681,12 @@ impl<'a> Lexer<'a> {
 
         Ok(Token {
             kind: TokenKind::StringLit(result),
-            span: Span::new(start, self.pos, start_line, start_col),
+            span: Span::new(start as u32, self.pos as u32),
         })
     }
 
     fn read_comment(&mut self) -> Token {
         let start = self.pos;
-        let start_line = self.line;
-        let start_col = self.column;
 
         self.advance(); // first '/'
         let kind = self.advance().unwrap_or(b' ');
@@ -720,12 +710,12 @@ impl<'a> Lexer<'a> {
                 if is_doc {
                     Token {
                         kind: TokenKind::DocComment(content),
-                        span: Span::new(start, self.pos, start_line, start_col),
+                        span: Span::new(start as u32, self.pos as u32),
                     }
                 } else {
                     Token {
                         kind: TokenKind::Comment(content),
-                        span: Span::new(start, self.pos, start_line, start_col),
+                        span: Span::new(start as u32, self.pos as u32),
                     }
                 }
             }
@@ -758,7 +748,7 @@ impl<'a> Lexer<'a> {
                 let content = self.source[content_start..self.pos.saturating_sub(2)].to_string();
                 Token {
                     kind: TokenKind::Comment(content),
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 }
             }
             _ => unreachable!(),
@@ -767,8 +757,6 @@ impl<'a> Lexer<'a> {
 
     fn read_operator(&mut self) -> NuResult<Token> {
         let start = self.pos;
-        let start_line = self.line;
-        let start_col = self.column;
 
         let ch = self.advance().unwrap_or(b'\0');
 
@@ -868,14 +856,14 @@ impl<'a> Lexer<'a> {
             _ => {
                 return Err(NuError::LexError {
                     msg: format!("Unexpected operator character: {}", ch as char),
-                    span: Span::new(start, self.pos, start_line, start_col),
+                    span: Span::new(start as u32, self.pos as u32),
                 })
             }
         };
 
         Ok(Token {
             kind,
-            span: Span::new(start, self.pos, start_line, start_col),
+            span: Span::new(start as u32, self.pos as u32),
         })
     }
 
@@ -885,14 +873,8 @@ impl<'a> Lexer<'a> {
 
     fn advance(&mut self) -> Option<u8> {
         let ch = self.bytes.get(self.pos).copied();
-        if let Some(c) = ch {
+        if ch.is_some() {
             self.pos += 1;
-            if c == b'\n' {
-                self.line += 1;
-                self.column = 1;
-            } else {
-                self.column += 1;
-            }
         }
         ch
     }

@@ -3838,6 +3838,213 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    // -- Effect mocking -------------------------------------------------
+
+    #[test]
+    fn test_effect_mocking_intercepts_io_print() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let called: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+        let cb = called.clone();
+
+        rt.borrow_mut().install_test_handler("IO.print", move |_regs| {
+            *cb.borrow_mut() = true;
+            Some(Value::unit())
+        });
+
+        let source = r#"perform IO.print("hello from test handler")"#;
+        let value = run_source_new_with_runtime(source, rt).unwrap();
+        assert_eq!(value, Value::unit());
+        assert!(*called.borrow(), "test handler should have intercepted IO.print");
+    }
+
+    #[test]
+    fn test_effect_mocking_fallback_when_handler_returns_none() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let called: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+        let cb = called.clone();
+
+        // Handler returns None → real IO.print dispatch fires (println!).
+        rt.borrow_mut().install_test_handler("IO.print", move |_regs| {
+            *cb.borrow_mut() = true;
+            None // fall through to real handler
+        });
+
+        let source = r#"perform IO.print("fallthrough test")"#;
+        let value = run_source_new_with_runtime(source, rt).unwrap();
+        assert_eq!(value, Value::unit());
+        assert!(*called.borrow(), "test handler should have been invoked");
+    }
+
+    #[test]
+    fn test_effect_mocking_unregistered_effect_not_intercepted() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        // No handler installed for IO.print → normal dispatch.
+        let source = r#"perform IO.print("normal dispatch")"#;
+        let value = run_source_new_with_runtime(source, rt).unwrap();
+        assert_eq!(value, Value::unit());
+    }
+
+    // -- Virtual clock --------------------------------------------------
+
+    #[test]
+    fn test_virtual_clock_tick_timers_fires_after_advance() {
+        use std::time::Duration;
+
+        let mut rt = Runtime::new();
+        rt.install_virtual_clock();
+
+        // Schedule a timer 5 seconds from now.
+        let _id = rt.timer_wheel.send_after(
+            Duration::from_secs(5),
+            42,  // dummy actor
+            1,   // dummy behavior
+            vec![],
+        );
+
+        // Tick — nothing should fire yet (timer at T+5s, clock at T+0).
+        rt.tick_timers();
+        assert!(!rt.timer_wheel.is_empty(),
+            "timer should still be pending at virtual t=0");
+
+        // Advance 10 seconds — timer at 5s must fire.
+        rt.advance_time(Duration::from_secs(10));
+        rt.tick_timers();
+        assert!(rt.timer_wheel.is_empty(),
+            "timer should have fired and been removed after advancing 10s");
+
+        rt.remove_virtual_clock();
+    }
+
+    #[test]
+    fn test_virtual_clock_now_frozen_until_advanced() {
+        use std::time::Duration;
+
+        let mut rt = Runtime::new();
+        rt.install_virtual_clock();
+
+        let t0 = rt.now();
+        std::thread::sleep(Duration::from_millis(5));
+        let t1 = rt.now();
+        assert_eq!(t0, t1, "virtual clock should not advance with wall time");
+
+        rt.advance_time(Duration::from_secs(1));
+        let t2 = rt.now();
+        assert!(t2 > t0, "virtual clock should advance when explicitly advanced");
+
+        rt.remove_virtual_clock();
+    }
+
+    // -- Token budget ---------------------------------------------------
+
+    #[test]
+    fn test_token_budget_exhausted_rejects_llm_request() {
+        use crate::ai::{LlmErrorKind, MockLlmClient, TokenUsage, LlmResponse, LlmRequest};
+
+        let mut rt = Runtime::new();
+
+        let mock = Box::new(MockLlmClient::new(LlmResponse {
+            content: Some("ok".to_string()),
+            usage: TokenUsage::new(50, 50),
+            tool_calls: vec![],
+            model: "test".to_string(),
+            finish_reason: "stop".to_string(),
+        }));
+        rt.set_llm_client(mock);
+        // Budget of 0 tokens — immediately exhausted.
+        rt.set_token_budget(0);
+
+        let request = LlmRequest {
+            model: "test".to_string(),
+            messages: vec![],
+            tools: vec![],
+            memory: vec![],
+            pricing: None,
+            response_format: None,
+        };
+        let result = rt.complete_llm_request(request, vec![]);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind, LlmErrorKind::BudgetExceeded);
+    }
+
+    #[test]
+    fn test_token_budget_deducts_after_successful_call() {
+        use crate::ai::{MockLlmClient, TokenUsage, LlmResponse, LlmRequest};
+
+        let mut rt = Runtime::new();
+        let mock = Box::new(MockLlmClient::new(LlmResponse {
+            content: Some("ok".to_string()),
+            usage: TokenUsage::new(50, 50),
+            tool_calls: vec![],
+            model: "test".to_string(),
+            finish_reason: "stop".to_string(),
+        }));
+        rt.set_llm_client(mock);
+
+        rt.set_token_budget(500);
+        assert_eq!(rt.token_budget.as_ref().unwrap().remaining(), 500);
+
+        let request = LlmRequest {
+            model: "test".to_string(),
+            messages: vec![],
+            tools: vec![],
+            memory: vec![],
+            pricing: None,
+            response_format: None,
+        };
+        let result = rt.complete_llm_request(request, vec![]);
+        assert!(result.is_ok());
+        assert_eq!(rt.token_budget.as_ref().unwrap().remaining(), 400);
+    }
+
+    // -- Flight recorder ------------------------------------------------
+
+    #[test]
+    fn test_flight_recorder_records_messages() {
+        let mut rt = Runtime::new();
+        let actor_id = rt.spawn_actor(Box::new(|| vec![]));
+
+        // Send three messages
+        rt.send_message_by_id(actor_id, 1, &[Value::int(10)]);
+        rt.send_message_by_id(actor_id, 2, &[Value::int(20), Value::int(21)]);
+        rt.send_message_by_id(actor_id, 1, &[Value::int(30)]);
+
+        let actor = rt.actors.get(&actor_id).unwrap();
+        let entries = actor.flight_recorder.ordered_entries();
+        assert_eq!(entries.len(), 3, "should have recorded 3 messages");
+        assert_eq!(entries[0].seq, 0);
+        assert_eq!(entries[1].seq, 1);
+        assert_eq!(entries[2].seq, 2);
+        assert_eq!(entries[0].behavior_id, 1);
+        assert_eq!(entries[1].behavior_id, 2);
+        assert_eq!(entries[2].behavior_id, 1);
+        assert_eq!(entries[1].payload_len, 2);
+    }
+
+    #[test]
+    fn test_flight_recorder_ring_buffer_wraps() {
+        let mut rt = Runtime::new();
+        let actor_id = rt.spawn_actor(Box::new(|| vec![]));
+        // Flight recorder defaults to 1000 entries. Send 3 and check.
+        for i in 0..3 {
+            rt.send_message_by_id(actor_id, (i % 10) as u16, &[Value::int(i)]);
+        }
+        let actor = rt.actors.get(&actor_id).unwrap();
+        assert_eq!(actor.flight_recorder.len(), 3);
+        assert!(!actor.flight_recorder.is_empty());
+
+        // Clear and verify
+        let actor = rt.actors.get_mut(&actor_id).unwrap();
+        actor.flight_recorder.clear();
+        assert!(actor.flight_recorder.is_empty());
+        assert_eq!(actor.flight_recorder.len(), 0);
+    }
+
     /// The legacy compiler and the HIR/MIR pipeline must agree on actor
     /// semantics too, not just pure expressions — run the same program
     /// through both with independent Runtimes and compare results.

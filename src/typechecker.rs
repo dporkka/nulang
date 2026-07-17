@@ -2443,7 +2443,7 @@ mod tests {
 
     // Helper to create a span
     fn sp() -> Span {
-        Span::new(0, 0, 1, 1)
+        Span::new(0, 0)
     }
 
     // Helper to create an int literal expression

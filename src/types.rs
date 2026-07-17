@@ -654,24 +654,96 @@ impl TypeContext {
 // ---------------------------------------------------------------------------
 // Source Location
 // ---------------------------------------------------------------------------
+// Source Map (offset -> line/column resolution)
+// ---------------------------------------------------------------------------
 
-/// Source span for error reporting.
+use std::cell::RefCell;
+
+thread_local! {
+    /// Thread-local source map used by Span::line()/column() to resolve byte
+    /// offsets into human-readable positions.  Set once per compilation unit
+    /// (by the lexer or test harness) before any Span display.
+    static SOURCE_MAP: RefCell<Option<SourceMap>> = RefCell::new(None);
+}
+
+/// Maps byte offsets to line:column positions for error reporting.
+#[derive(Debug, Clone)]
+pub struct SourceMap {
+    /// Byte offset of the start of each line.  line_starts[0] is always 0.
+    line_starts: Vec<u32>,
+}
+
+impl SourceMap {
+    /// Build a source map from source text.  Line endings are `\n` only.
+    pub fn new(source: &str) -> Self {
+        let mut line_starts = vec![0u32];
+        for (i, &b) in source.as_bytes().iter().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i as u32 + 1);
+            }
+        }
+        SourceMap { line_starts }
+    }
+
+    /// Resolve a byte offset to (1-indexed line, 1-indexed column).
+    pub fn line_col(&self, offset: u32) -> (usize, usize) {
+        let idx = match self.line_starts.binary_search(&offset) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        let line = idx + 1;
+        let col = offset.saturating_sub(self.line_starts[idx]) + 1;
+        (line, col as usize)
+    }
+}
+
+/// Install a SourceMap for the current thread, consuming the source string
+/// to build line-start offsets.  Call before any Span display.
+pub fn set_source_map(source: &str) {
+    let sm = SourceMap::new(source);
+    SOURCE_MAP.with(|slot| {
+        *slot.borrow_mut() = Some(sm);
+    });
+}
+
+/// Clear the thread-local source map (e.g. between tests).
+pub fn clear_source_map() {
+    SOURCE_MAP.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
+/// Compact source span — just byte offsets.  Line/column are resolved on
+/// demand via the thread-local SourceMap (set by the lexer or test harness).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
-    pub start: usize, // byte offset
-    pub end: usize,
-    pub line: usize,
-    pub column: usize,
+    pub start: u32,
+    pub end: u32,
 }
 
 impl Span {
-    pub fn new(start: usize, end: usize, line: usize, column: usize) -> Self {
-        Span {
-            start,
-            end,
-            line,
-            column,
-        }
+    pub fn new(start: u32, end: u32) -> Self {
+        Span { start, end }
+    }
+
+    /// 1-indexed line number (reads from thread-local SourceMap; returns 0
+    /// if none is set).
+    pub fn line(&self) -> usize {
+        SOURCE_MAP.with(|slot| {
+            slot.borrow().as_ref()
+                .map(|sm| sm.line_col(self.start).0)
+                .unwrap_or(0)
+        })
+    }
+
+    /// 1-indexed column (reads from thread-local SourceMap; returns 0 if
+    /// none is set).
+    pub fn column(&self) -> usize {
+        SOURCE_MAP.with(|slot| {
+            slot.borrow().as_ref()
+                .map(|sm| sm.line_col(self.start).1)
+                .unwrap_or(0)
+        })
     }
 }
 
@@ -722,32 +794,32 @@ impl std::fmt::Display for NuError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NuError::LexError { msg, span } => {
-                write!(f, "Lex error at {}:{}: {}", span.line, span.column, msg)
+                write!(f, "Lex error at {}:{}: {}", span.line(), span.column(), msg)
             }
             NuError::ParseError { msg, span } => {
-                write!(f, "Parse error at {}:{}: {}", span.line, span.column, msg)
+                write!(f, "Parse error at {}:{}: {}", span.line(), span.column(), msg)
             }
             NuError::TypeError { msg, span } => {
-                write!(f, "Type error at {}:{}: {}", span.line, span.column, msg)
+                write!(f, "Type error at {}:{}: {}", span.line(), span.column(), msg)
             }
             NuError::EffectError { msg, span } => {
-                write!(f, "Effect error at {}:{}: {}", span.line, span.column, msg)
+                write!(f, "Effect error at {}:{}: {}", span.line(), span.column(), msg)
             }
             NuError::CapError { msg, span } => {
                 write!(
                     f,
                     "Capability error at {}:{}: {}",
-                    span.line, span.column, msg
+                    span.line(), span.column(), msg
                 )
             }
             NuError::FFIError { msg, span } => {
-                write!(f, "FFI error at {}:{}: {}", span.line, span.column, msg)
+                write!(f, "FFI error at {}:{}: {}", span.line(), span.column(), msg)
             }
             NuError::NotYetImplemented { feature, span } => {
                 write!(
                     f,
                     "Not yet implemented at {}:{}: {}",
-                    span.line, span.column, feature
+                    span.line(), span.column(), feature
                 )
             }
             NuError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),

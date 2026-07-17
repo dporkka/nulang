@@ -763,8 +763,9 @@ mod tests {
         let s = Span::default();
         assert_eq!(s.start, 0);
         assert_eq!(s.end, 0);
-        assert_eq!(s.line, 0);
-        assert_eq!(s.column, 0);
+        // line()/column() return 0 when no SourceMap is set (no lexer ran).
+        assert_eq!(s.line(), 0);
+        assert_eq!(s.column(), 0);
     }
 
     #[test]

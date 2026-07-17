@@ -1064,6 +1064,9 @@ impl Default for CapContext {
 pub struct CapabilityAnalyzer {
     /// Accumulated diagnostics.
     pub diagnostics: Vec<String>,
+    /// Spans of LinearIso/Linear variable references that were consumed
+    /// during analysis (for LSP capability visualization).
+    pub consumed_spans: Vec<Span>,
 }
 
 impl CapabilityAnalyzer {
@@ -1071,6 +1074,7 @@ impl CapabilityAnalyzer {
     pub fn new() -> Self {
         CapabilityAnalyzer {
             diagnostics: Vec::new(),
+            consumed_spans: Vec::new(),
         }
     }
 
@@ -1099,6 +1103,8 @@ impl CapabilityAnalyzer {
         span: Span,
         consumed: &mut HashSet<String>,
     ) -> NuResult<()> {
+        // Record the span for LSP visualization regardless of error.
+        self.consumed_spans.push(span);
         if !consumed.insert(name.to_string()) {
             let msg = format!(
                 "linear value `{}` used after being consumed (linear/lineariso bindings may be used at most once)",
@@ -2078,7 +2084,7 @@ mod tests {
             effect: "FS".to_string(),
             op: "read".to_string(),
             args: vec![],
-            span: Span::new(0, 10, 1, 1),
+            span: Span::new(0, 10),
         };
         let result = checker.check_effects(&ctx, &expr, &ctx.allowed_effects);
         assert!(result.is_err());

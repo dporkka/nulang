@@ -52,6 +52,7 @@ pub enum LlmErrorKind {
     AuthError,
     ProviderError,
     FormatError,
+    BudgetExceeded,
     Unknown,
 }
 
@@ -64,6 +65,7 @@ impl std::str::FromStr for LlmErrorKind {
             "AuthError" => Ok(LlmErrorKind::AuthError),
             "ProviderError" => Ok(LlmErrorKind::ProviderError),
             "FormatError" => Ok(LlmErrorKind::FormatError),
+            "BudgetExceeded" => Ok(LlmErrorKind::BudgetExceeded),
             "Unknown" => Ok(LlmErrorKind::Unknown),
             _ => Err(()),
         }

@@ -124,7 +124,7 @@ impl Parser {
                         body: final_expr,
                         annotations: vec![],
                         public: false,
-                        span: Span::new(0, 0, 0, 0),
+                        span: Span::new(0, 0),
                     });
                     break;
                 }

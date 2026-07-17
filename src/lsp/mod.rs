@@ -531,12 +531,12 @@ impl NulangLanguageServer {
             uri: Url::parse("file:///current.nula").unwrap(),
             range: Range {
                 start: Position::new(
-                    s.line.saturating_sub(1) as u32,
-                    s.column.saturating_sub(1) as u32,
+                    s.line().saturating_sub(1) as u32,
+                    s.column().saturating_sub(1) as u32,
                 ),
                 end: Position::new(
-                    s.line.saturating_sub(1) as u32,
-                    s.column.saturating_sub(1) as u32,
+                    s.line().saturating_sub(1) as u32,
+                    s.column().saturating_sub(1) as u32,
                 ),
             },
         };
@@ -599,12 +599,12 @@ impl NulangLanguageServer {
             uri: Url::parse("file:///current.nula").unwrap(),
             range: Range {
                 start: Position::new(
-                    s.line.saturating_sub(1) as u32,
-                    s.column.saturating_sub(1) as u32,
+                    s.line().saturating_sub(1) as u32,
+                    s.column().saturating_sub(1) as u32,
                 ),
                 end: Position::new(
-                    s.line.saturating_sub(1) as u32,
-                    s.column.saturating_sub(1) as u32,
+                    s.line().saturating_sub(1) as u32,
+                    s.column().saturating_sub(1) as u32,
                 ),
             },
         };
@@ -670,12 +670,12 @@ impl NulangLanguageServer {
             uri: Url::parse("file:///current.nula").unwrap(),
             range: Range {
                 start: Position::new(
-                    s.line.saturating_sub(1) as u32,
-                    s.column.saturating_sub(1) as u32,
+                    s.line().saturating_sub(1) as u32,
+                    s.column().saturating_sub(1) as u32,
                 ),
                 end: Position::new(
-                    s.line.saturating_sub(1) as u32,
-                    s.column.saturating_sub(1) as u32,
+                    s.line().saturating_sub(1) as u32,
+                    s.column().saturating_sub(1) as u32,
                 ),
             },
         };
@@ -756,12 +756,12 @@ impl NulangLanguageServer {
                 uri: Url::parse("file:///current.nula").unwrap(),
                 range: Range {
                     start: Position::new(
-                        span.line.saturating_sub(1) as u32,
-                        span.column.saturating_sub(1) as u32,
+                        span.line().saturating_sub(1) as u32,
+                        span.column().saturating_sub(1) as u32,
                     ),
                     end: Position::new(
-                        span.line.saturating_sub(1) as u32,
-                        span.column.saturating_sub(1) as u32,
+                        span.line().saturating_sub(1) as u32,
+                        span.column().saturating_sub(1) as u32,
                     ),
                 },
             },
@@ -915,6 +915,9 @@ impl NulangLanguageServer {
     }
 
     fn sem_tokens(&self, source: &str) -> Vec<SemanticToken> {
+        // Run capability analysis to find consumed linear variable spans.
+        let consumed = self.find_consumed_spans(source);
+
         let mut tokens = Vec::new();
         let mut pl = 0u32;
         let mut pc = 0u32;
@@ -982,12 +985,19 @@ impl NulangLanguageServer {
                     "or", "not",
                 ];
                 let tt: u32 = if kw.contains(&word) { 0 } else { 2 };
+                // Apply READONLY modifier if this variable was consumed (linear).
+                let mut modifiers: u32 = 0;
+                if tt == 2 {
+                    if consumed.iter().any(|&(cs, ce)| cs <= start && start < ce) {
+                        modifiers = 2; // READONLY bit
+                    }
+                }
                 tokens.push(SemanticToken {
                     delta_line: line - pl,
                     delta_start: if line == pl { col - pc } else { col },
                     length: len,
                     token_type: tt,
-                    token_modifiers_bitset: 0,
+                    token_modifiers_bitset: modifiers,
                 });
                 pl = line;
                 pc = col;
@@ -1036,6 +1046,34 @@ impl NulangLanguageServer {
             i += 1;
         }
         tokens
+    }
+
+    /// Run the capability analysis pass and return the byte ranges of
+    /// consumed linear/lineariso variable references.
+    fn find_consumed_spans(&self, source: &str) -> Vec<(usize, usize)> {
+        use crate::ast::Decl;
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, flatten_decls};
+
+        let mut lexer = crate::lexer::Lexer::new(source);
+        let tokens = match lexer.lex() { Ok(t) => t, Err(_) => return vec![] };
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = match parser.parse_module() { Ok(a) => a, Err(_) => return vec![] };
+
+        let mut type_checker = crate::typechecker::TypeChecker::new();
+        if type_checker.check_module(&ast).is_err() { return vec![]; }
+
+        let flat_decls = flatten_decls(&ast.decls);
+        let mut cap_analyzer = CapabilityAnalyzer::new();
+        let cap_ctx = CapContext::new();
+        for decl in &flat_decls {
+            if let Decl::Function { body, .. } = decl {
+                let _ = cap_analyzer.infer_cap(&cap_ctx, body);
+            }
+        }
+
+        cap_analyzer.consumed_spans.iter()
+            .map(|s| (s.start as usize, s.end as usize))
+            .collect()
     }
 
     fn code_actions(source: &str) -> Option<CodeActionResponse> {
@@ -1185,7 +1223,7 @@ fn nu_error_to_diagnostic(err: NuError) -> Diagnostic {
         | NuError::EffectError { msg, span }
         | NuError::CapError { msg, span }
         | NuError::FFIError { msg, span }
-        | NuError::NotYetImplemented { feature: msg, span } => (msg, span.line, span.column),
+        | NuError::NotYetImplemented { feature: msg, span } => (msg, span.line(), span.column()),
         NuError::RuntimeError(msg)
         | NuError::VMError(msg)
         | NuError::PythonError(msg)

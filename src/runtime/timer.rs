@@ -47,6 +47,52 @@ pub enum TimerMessage {
     LlmRetry,
 }
 
+// -- Virtual clock for deterministic testing ---------------------------
+
+/// A manually advanced clock that replaces `Instant::now()` during tests.
+///
+/// When installed on a `Runtime`, all timer scheduling, firing, and
+/// deadline calculations use this clock instead of wall time, enabling
+/// deterministic, sub-second workflow tests.
+#[derive(Debug, Clone)]
+pub struct VirtualClock {
+    /// Wall-clock time captured when the virtual clock was created.
+    base: Instant,
+    /// How far the virtual clock has been advanced beyond `base`.
+    elapsed: Duration,
+}
+
+impl VirtualClock {
+    /// Create a new virtual clock frozen at the current wall time.
+    pub fn new() -> Self {
+        VirtualClock {
+            base: Instant::now(),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    /// The current virtual time.
+    pub fn now(&self) -> Instant {
+        self.base + self.elapsed
+    }
+
+    /// Advance the virtual clock by `duration`.
+    pub fn advance(&mut self, duration: Duration) {
+        self.elapsed += duration;
+    }
+
+    /// Total elapsed virtual time since creation.
+    pub fn elapsed(&self) -> Duration {
+        self.elapsed
+    }
+}
+
+impl Default for VirtualClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A single timer entry in the wheel.
 #[derive(Debug)]
 pub struct TimerEntry {
@@ -421,5 +467,38 @@ mod tests {
         assert_eq!(fired[0].1, TimerMessage::ReceiveWaitTimeout);
         assert!(wheel.is_empty());
         assert!(wheel.remaining(id).is_none());
+    }
+
+    #[test]
+    fn test_virtual_clock_advance_fires_timer() {
+        let mut clock = VirtualClock::new();
+        let start = clock.now();
+
+        // Nothing fired at t=0
+        let wheel = TimerWheel::new();
+        let _id = wheel.send_after(Duration::from_secs(5), 42, 1, vec![Value::int(1)]);
+        assert_eq!(wheel.tick(clock.now()).len(), 0);
+
+        // Advance 3s — still not enough
+        clock.advance(Duration::from_secs(3));
+        assert_eq!(wheel.tick(clock.now()).len(), 0);
+
+        // Advance 3 more seconds — now 6s elapsed, timer at 5s fires
+        clock.advance(Duration::from_secs(3));
+        let fired = wheel.tick(clock.now());
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].0, 42);
+
+        // Virtual clock preserves its base
+        assert!(clock.now() > start);
+        assert!(clock.elapsed() >= Duration::from_secs(6));
+    }
+
+    #[test]
+    fn test_virtual_clock_advance_accumulates() {
+        let mut clock = VirtualClock::new();
+        clock.advance(Duration::from_millis(100));
+        clock.advance(Duration::from_millis(200));
+        assert!(clock.elapsed() >= Duration::from_millis(300));
     }
 }
