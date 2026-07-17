@@ -44,7 +44,7 @@ impl ReplHelper {
                 "parallel", "compensate", "statemachine", "event", "on_entry",
                 "on_exit", "persistent", "local", "durable", "eventsourced",
                 "crdt", "module", "import", "pub", "type", "alias", "extern",
-                "iso", "trn", "ref", "val", "box", "tag", "lineariso",
+                "iso", "trn", "ref", "val", "box", "tag", "lineariso", "linear",
                 "true", "false", "nil", "unit", "for", "loop", "break", "return",
                 "node", "link", "monitor", "exit", "agent", "database",
                 "IO", "Net", "FS", "Rand", "Time", "Spawn", "Send", "LLM",

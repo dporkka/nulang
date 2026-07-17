@@ -1047,6 +1047,7 @@ impl TypeChecker {
                 behavior,
                 args,
                 span,
+                ..
             } => self.infer_send(ctx, actor, behavior, args, *span),
 
             // Ask request

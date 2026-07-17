@@ -1424,6 +1424,7 @@ impl Parser {
                     actor: Box::new(left),
                     behavior,
                     args,
+                    remote: false,
                     span,
                 };
                 continue;
@@ -2127,6 +2128,7 @@ impl Parser {
     fn parse_send_keyword(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
         self.advance(); // consume 'send'
+        let remote = self.consume_if(&TokenKind::Remote);
         let actor = self.parse_expr()?;
         let behavior = self.expect_ident("behavior name")?;
         self.expect(TokenKind::LParen)?;
@@ -2135,6 +2137,7 @@ impl Parser {
             actor: Box::new(actor),
             behavior,
             args,
+            remote,
             span,
         })
     }
@@ -2938,9 +2941,13 @@ impl Parser {
                 self.advance();
                 Ok(Capability::LinearIso)
             }
+            TokenKind::Ident(s) if s == "linear" => {
+                self.advance();
+                Ok(Capability::Linear)
+            }
             _ => Err(NuError::ParseError {
                 msg: format!(
-                    "Expected capability (iso, trn, ref, val, box, tag, lineariso), found {}",
+                    "Expected capability (iso, trn, ref, val, box, tag, lineariso, linear), found {}",
                     current_kind
                 ),
                 span: self.current_span(),

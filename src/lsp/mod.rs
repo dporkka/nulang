@@ -978,7 +978,7 @@ impl NulangLanguageServer {
                     "let", "fn", "fun", "actor", "agent", "workflow", "if", "else", "match",
                     "case", "for", "in", "spawn", "send", "ask", "perform", "handle", "emit",
                     "return", "break", "unit", "nil", "true", "false", "iso", "trn", "ref", "val",
-                    "box", "tag", "type", "effect", "module", "import", "extern", "self", "and",
+                    "box", "tag", "lineariso", "linear", "type", "effect", "module", "import", "extern", "self", "and",
                     "or", "not",
                 ];
                 let tt: u32 = if kw.contains(&word) { 0 } else { 2 };
@@ -1319,7 +1319,7 @@ impl<'a> InlayHintEngine<'a> {
             }
 
             // Capability annotations (iso, val, trn, ref, box, tag)
-            for cap in &["iso", "val", "trn", "ref", "box", "tag"] {
+            for cap in &["iso", "val", "trn", "ref", "box", "tag", "linear"] {
                 if let Some(pos) = line.find(&format!(" :{}", cap)) {
                     annotations.push(TypeAnnotation {
                         line: line_num,

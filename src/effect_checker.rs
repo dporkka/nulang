@@ -1101,7 +1101,7 @@ impl CapabilityAnalyzer {
     ) -> NuResult<()> {
         if !consumed.insert(name.to_string()) {
             let msg = format!(
-                "linear value `{}` used after being consumed (lineariso bindings may be used at most once)",
+                "linear value `{}` used after being consumed (linear/lineariso bindings may be used at most once)",
                 name
             );
             self.diagnostics.push(msg.clone());
@@ -1396,24 +1396,42 @@ impl CapabilityAnalyzer {
             // Send: returns Unit (Val).  The arguments must be sendable
             // (checked separately by check_sendable).  Passing a linear
             // value as a send argument consumes it (the spec'd linear move).
-            Expr::Send { actor, args, .. } => {
+            // When `remote` is true, only Val|Tag|Linear (network-serializable)
+            // capabilities are accepted.
+            Expr::Send { actor, args, remote, .. } => {
                 let _ = self.infer_cap_tracked(ctx, actor, consumed)?;
                 for arg in args {
                     let arg_cap = self.infer_cap_tracked(ctx, arg, consumed)?;
-                    // The argument to send must be sendable.
-                    if !arg_cap.is_sendable() {
-                        let span = expr_span(arg);
-                        self.diagnostics.push(format!(
-                            "send argument with capability {} is not sendable",
-                            arg_cap
-                        ));
-                        return Err(NuError::CapError {
-                            msg: format!(
-                                "send argument must be sendable (iso, val, or tag), got {}",
+                    if *remote {
+                        if !arg_cap.is_remote_sendable() {
+                            let span = expr_span(arg);
+                            self.diagnostics.push(format!(
+                                "remote send argument with capability {} is not network-sendable",
                                 arg_cap
-                            ),
-                            span,
-                        });
+                            ));
+                            return Err(NuError::CapError {
+                                msg: format!(
+                                    "remote send argument must be val, tag, or linear (serializable), got {}",
+                                    arg_cap
+                                ),
+                                span,
+                            });
+                        }
+                    } else {
+                        if !arg_cap.is_sendable() {
+                            let span = expr_span(arg);
+                            self.diagnostics.push(format!(
+                                "send argument with capability {} is not sendable",
+                                arg_cap
+                            ));
+                            return Err(NuError::CapError {
+                                msg: format!(
+                                    "send argument must be sendable (lineariso, iso, linear, val, or tag), got {}",
+                                    arg_cap
+                                ),
+                                span,
+                            });
+                        }
                     }
                 }
                 Ok(Capability::Val)
@@ -1520,18 +1538,25 @@ impl CapabilityAnalyzer {
             // Explicit capability annotation.
             Expr::CapAnnotate { expr: inner, cap, span } => {
                 let inner_cap = self.infer_cap_tracked(ctx, inner, consumed)?;
-                // Re-annotating a linear value as an aliasable capability
-                // would duplicate the unique value; only `lineariso`
-                // (identity) and `iso` (discharging the linear obligation)
-                // are permitted targets.
-                if inner_cap.is_linear() && !matches!(cap, Capability::LinearIso | Capability::Iso)
-                {
-                    let msg = format!(
-                        "cannot downgrade linear capability LinearIso to {}",
-                        cap
-                    );
-                    self.diagnostics.push(msg.clone());
-                    return Err(NuError::CapError { msg, span: *span });
+                // Annotating a linear value with an aliasable capability
+                // would duplicate the value; only identity and the discharge
+                // target are permitted.
+                //   LinearIso -> LinearIso | Iso (discharge to Iso)
+                //   Linear    -> Linear    | Val (discharge to Val)
+                if inner_cap.is_linear() {
+                    let valid = match inner_cap {
+                        Capability::LinearIso => matches!(cap, Capability::LinearIso | Capability::Iso),
+                        Capability::Linear => matches!(cap, Capability::Linear | Capability::Val),
+                        _ => false,
+                    };
+                    if !valid {
+                        let msg = format!(
+                            "cannot downgrade linear capability {} to {}",
+                            inner_cap, cap
+                        );
+                        self.diagnostics.push(msg.clone());
+                        return Err(NuError::CapError { msg, span: *span });
+                    }
                 }
                 Ok(*cap)
             }
@@ -1628,13 +1653,13 @@ impl CapabilityAnalyzer {
 
     /// Check that a capability is sendable (can cross an actor boundary).
     ///
-    /// Sendable capabilities are `Iso`, `Val`, and `Tag`.
+    /// Sendable capabilities are `LinearIso`, `Iso`, `Linear`, `Val`, and `Tag`.
     pub fn check_sendable(&mut self, cap: Capability, span: Span) -> NuResult<()> {
         if cap.is_sendable() {
             Ok(())
         } else {
             let msg = format!(
-                "capability {} is not sendable (must be iso, val, or tag)",
+                "capability {} is not sendable (must be lineariso, iso, linear, val, or tag)",
                 cap
             );
             self.diagnostics.push(msg.clone());
@@ -1932,6 +1957,7 @@ mod tests {
             actor: Box::new(Expr::Var("a".to_string(), s())),
             behavior: "foo".to_string(),
             args: vec![Expr::Literal(Literal::Int(1), s())],
+            remote: false,
             span: s(),
         };
         let row = checker.infer_effects(&ctx, &send).unwrap();
@@ -2201,7 +2227,9 @@ mod tests {
     #[test]
     fn test_check_sendable_passes() {
         let mut analyzer = CapabilityAnalyzer::new();
+        assert!(analyzer.check_sendable(Capability::LinearIso, s()).is_ok());
         assert!(analyzer.check_sendable(Capability::Iso, s()).is_ok());
+        assert!(analyzer.check_sendable(Capability::Linear, s()).is_ok());
         assert!(analyzer.check_sendable(Capability::Val, s()).is_ok());
         assert!(analyzer.check_sendable(Capability::Tag, s()).is_ok());
     }
@@ -2251,6 +2279,7 @@ mod tests {
             actor: Box::new(Expr::Var("a".to_string(), s())),
             behavior: "foo".to_string(),
             args: vec![Expr::Var("ref_var".to_string(), s())],
+            remote: false,
             span: s(),
         };
         // ref_var defaults to Val (sendable), so it passes. Let's test with
@@ -2258,6 +2287,57 @@ mod tests {
         let ctx2 = ctx.with_binding("ref_var", Capability::Ref);
         let result = analyzer.infer_cap(&ctx2, &send);
         assert!(result.is_err(), "send with ref argument should fail");
+    }
+
+    #[test]
+    fn test_cap_remote_send_rejects_iso() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new()
+            .with_binding("a", Capability::Iso)
+            .with_binding("x", Capability::Iso);
+        let send = Expr::Send {
+            actor: Box::new(Expr::Var("a".to_string(), s())),
+            behavior: "foo".to_string(),
+            args: vec![Expr::Var("x".to_string(), s())],
+            remote: true,
+            span: s(),
+        };
+        let result = analyzer.infer_cap(&ctx, &send);
+        assert!(result.is_err(), "remote send with iso argument should fail");
+    }
+
+    #[test]
+    fn test_cap_remote_send_accepts_val() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new()
+            .with_binding("a", Capability::Iso)
+            .with_binding("x", Capability::Val);
+        let send = Expr::Send {
+            actor: Box::new(Expr::Var("a".to_string(), s())),
+            behavior: "foo".to_string(),
+            args: vec![Expr::Var("x".to_string(), s())],
+            remote: true,
+            span: s(),
+        };
+        let result = analyzer.infer_cap(&ctx, &send);
+        assert!(result.is_ok(), "remote send with val argument should pass");
+    }
+
+    #[test]
+    fn test_cap_remote_send_accepts_tag() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new()
+            .with_binding("a", Capability::Iso)
+            .with_binding("x", Capability::Tag);
+        let send = Expr::Send {
+            actor: Box::new(Expr::Var("a".to_string(), s())),
+            behavior: "foo".to_string(),
+            args: vec![Expr::Var("x".to_string(), s())],
+            remote: true,
+            span: s(),
+        };
+        let result = analyzer.infer_cap(&ctx, &send);
+        assert!(result.is_ok(), "remote send with tag argument should pass");
     }
 
     #[test]
@@ -2429,6 +2509,7 @@ mod tests {
             actor: Box::new(lvar("a")),
             behavior: "m".to_string(),
             args: vec![arg],
+            remote: false,
             span: s(),
         }
     }
@@ -2558,7 +2639,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lineariso_promote_to_iso_consumes() {
+    fn test_lineariso_discharge_linear_consumes() {
         let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
         let promote = Expr::CapAnnotate {
             expr: Box::new(lvar("x")),
@@ -2641,6 +2722,120 @@ mod tests {
             span: s(),
         };
         assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Linear capability tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_linear_used_once_ok() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::Linear);
+        let cap = analyzer.infer_cap(&ctx, &call1("f", lvar("x"))).unwrap();
+        assert_eq!(cap, Capability::Val); // Val (f) join Linear (x)
+        assert!(analyzer.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_linear_used_twice_errors() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::Linear);
+        let expr = Expr::Block {
+            exprs: vec![call1("f", lvar("x")), call1("g", lvar("x"))],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
+    }
+
+    #[test]
+    fn test_linear_never_used_ok() {
+        // At-most-once MVP: unused binding is not an error.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::Linear);
+        let expr = Expr::Literal(Literal::Int(42), s());
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_linear_sent_once_ok() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::Linear);
+        let cap = analyzer.infer_cap(&ctx, &send_m(lvar("x"))).unwrap();
+        assert_eq!(cap, Capability::Val);
+        assert!(analyzer.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_linear_remote_send_accepts() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::Linear);
+        let send = Expr::Send {
+            actor: Box::new(lvar("a")),
+            behavior: "m".to_string(),
+            args: vec![lvar("x")],
+            remote: true,
+            span: s(),
+        };
+        let cap = analyzer.infer_cap(&ctx, &send).unwrap();
+        assert_eq!(cap, Capability::Val);
+        assert!(analyzer.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_linear_downgrade_to_ref_errors() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::Linear);
+        let annotate = Expr::CapAnnotate {
+            expr: Box::new(lvar("x")),
+            cap: Capability::Ref,
+            span: s(),
+        };
+        let result = analyzer.infer_cap(&ctx, &annotate);
+        match result {
+            Err(NuError::CapError { msg, .. }) => {
+                assert!(msg.contains("downgrade"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected CapError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_linear_discharge_to_val_ok() {
+        let ctx = CapContext::new().with_binding("x", Capability::Linear);
+        let annotate = Expr::CapAnnotate {
+            expr: Box::new(lvar("x")),
+            cap: Capability::Val,
+            span: s(),
+        };
+        let mut analyzer = CapabilityAnalyzer::new();
+        let cap = analyzer.infer_cap(&ctx, &annotate).unwrap();
+        assert_eq!(cap, Capability::Val);
+        // Discharging to Val consumes the binding.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let expr = Expr::Block {
+            exprs: vec![annotate, call1("f", lvar("x"))],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
+    }
+
+    #[test]
+    fn test_linear_discharge_to_iso_errors() {
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::Linear);
+        let annotate = Expr::CapAnnotate {
+            expr: Box::new(lvar("x")),
+            cap: Capability::Iso,
+            span: s(),
+        };
+        let result = analyzer.infer_cap(&ctx, &annotate);
+        match result {
+            Err(NuError::CapError { msg, .. }) => {
+                assert!(msg.contains("downgrade"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected CapError, got {:?}", other),
+        }
     }
 
     // -----------------------------------------------------------------------

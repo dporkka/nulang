@@ -57,24 +57,21 @@ pub enum PrimitiveType {
 
 /// Reference capability lattice:
 /// ```text
-///        iso
-///         |
-///       lineariso (subtype of iso, tracked for linear consumption)
-///         |
-///        trn
-///         |
-///        ref --- box
-///         |       ^
-///        val      |
-///          \     /
-///           \   /
-///            \ /
-///            tag
+///       LinearIso
+///       /      \
+///     Iso     Linear
+///     / \      /
+///   Trn Val<--/
+///    |   |
+///   Ref Box
+///     \ /
+///     Tag
 /// ```
-/// Subtyping: lineariso <: iso <: trn <: ref <: box, val <: box, ref <: tag, val <: tag, box <: tag
+/// Subtyping: lineariso <: iso <: trn <: ref <: box, linear <: val <: box, ref <: tag, val <: tag, box <: tag
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Capability {
     LinearIso, // Unique ownership with linear type tracking (provably consumed exactly once)
+    Linear,    // Immutable + linear-tracked + remote-sendable ("linear Val")
     Iso,       // Unique ownership (can be sent to another actor)
     Trn,       // Unique writer (can be recovered to iso)
     Ref,       // Shared read/write reference
@@ -87,6 +84,7 @@ impl std::fmt::Display for Capability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Capability::LinearIso => write!(f, "lineariso"),
+            Capability::Linear => write!(f, "linear"),
             Capability::Iso => write!(f, "iso"),
             Capability::Trn => write!(f, "trn"),
             Capability::Ref => write!(f, "ref"),
@@ -103,6 +101,7 @@ impl Capability {
     /// LinearIso behaves like Iso in joins, except LinearIso ⊔ LinearIso = LinearIso.
     pub fn join(self, other: Capability) -> Capability {
         use Capability::*;
+
         match (self, other) {
             // LinearIso joins: LinearIso + LinearIso stays LinearIso
             (LinearIso, LinearIso) => LinearIso,
@@ -118,6 +117,16 @@ impl Capability {
             (LinearIso, Box) | (Box, LinearIso) => Box,
             // LinearIso with Tag (same as Iso with Tag)
             (LinearIso, Tag) | (Tag, LinearIso) => LinearIso,
+
+            // Linear joins: Linear behaves like Val except Linear join Linear = Linear
+            (Linear, Linear) => Linear,
+            (Linear, Val) | (Val, Linear) => Val,
+            (Linear, LinearIso) | (LinearIso, Linear) => Val,
+            (Linear, Iso) | (Iso, Linear) => Val,
+            (Linear, Trn) | (Trn, Linear) => Val,
+            (Linear, Ref) | (Ref, Linear) => Box,
+            (Linear, Box) | (Box, Linear) => Box,
+            (Linear, Tag) | (Tag, Linear) => Linear,
 
             // Original capability joins (unchanged)
             (Iso, Iso) => Iso,
@@ -148,8 +157,13 @@ impl Capability {
     pub fn is_sendable(self) -> bool {
         matches!(
             self,
-            Capability::LinearIso | Capability::Iso | Capability::Val | Capability::Tag
+            Capability::LinearIso | Capability::Linear | Capability::Iso | Capability::Val | Capability::Tag
         )
+    }
+
+    /// Can this capability be sent over the network (serializable)?
+    pub fn is_remote_sendable(self) -> bool {
+        matches!(self, Capability::Linear | Capability::Val | Capability::Tag)
     }
 
     /// Can this capability be read through?
@@ -167,16 +181,21 @@ impl Capability {
 
     /// Is this a linear capability (requires exactly-one consumption tracking)?
     pub fn is_linear(self) -> bool {
-        matches!(self, Capability::LinearIso)
+        matches!(self, Capability::LinearIso | Capability::Linear)
     }
 
-    /// Promote a linear capability to its non-linear form.
-    /// LinearIso -> Iso (linear obligation discharged on send/escape).
-    pub fn promote_to_iso(self) -> Capability {
+    /// Discharge linear tracking: LinearIso→Iso, Linear→Val.
+    pub fn discharge_linear(self) -> Capability {
         match self {
             Capability::LinearIso => Capability::Iso,
+            Capability::Linear => Capability::Val,
             other => other,
         }
+    }
+
+    #[deprecated(note = "use discharge_linear")]
+    pub fn promote_to_iso(self) -> Capability {
+        self.discharge_linear()
     }
 }
 
@@ -788,3 +807,97 @@ impl ExitReason {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_discharge_linear() {
+        assert_eq!(Capability::LinearIso.discharge_linear(), Capability::Iso);
+        assert_eq!(Capability::Linear.discharge_linear(), Capability::Val);
+        assert_eq!(Capability::Iso.discharge_linear(), Capability::Iso);
+        assert_eq!(Capability::Val.discharge_linear(), Capability::Val);
+    }
+
+    #[test]
+    fn test_linear_join_self() {
+        assert_eq!(Capability::Linear.join(Capability::Linear), Capability::Linear);
+    }
+
+    #[test]
+    fn test_linear_join_val() {
+        assert_eq!(Capability::Linear.join(Capability::Val), Capability::Val);
+        assert_eq!(Capability::Val.join(Capability::Linear), Capability::Val);
+    }
+
+    #[test]
+    fn test_linear_join_linearioso() {
+        assert_eq!(Capability::Linear.join(Capability::LinearIso), Capability::Val);
+        assert_eq!(Capability::LinearIso.join(Capability::Linear), Capability::Val);
+    }
+
+    #[test]
+    fn test_linear_join_iso() {
+        assert_eq!(Capability::Linear.join(Capability::Iso), Capability::Val);
+        assert_eq!(Capability::Iso.join(Capability::Linear), Capability::Val);
+    }
+
+    #[test]
+    fn test_linear_join_trn() {
+        assert_eq!(Capability::Linear.join(Capability::Trn), Capability::Val);
+        assert_eq!(Capability::Trn.join(Capability::Linear), Capability::Val);
+    }
+
+    #[test]
+    fn test_linear_join_ref() {
+        assert_eq!(Capability::Linear.join(Capability::Ref), Capability::Box);
+        assert_eq!(Capability::Ref.join(Capability::Linear), Capability::Box);
+    }
+
+    #[test]
+    fn test_linear_join_box() {
+        assert_eq!(Capability::Linear.join(Capability::Box), Capability::Box);
+        assert_eq!(Capability::Box.join(Capability::Linear), Capability::Box);
+    }
+
+    #[test]
+    fn test_linear_join_tag() {
+        assert_eq!(Capability::Linear.join(Capability::Tag), Capability::Linear);
+        assert_eq!(Capability::Tag.join(Capability::Linear), Capability::Linear);
+    }
+
+    #[test]
+    fn test_linear_is_sendable() {
+        assert!(Capability::Linear.is_sendable());
+    }
+
+    #[test]
+    fn test_linear_is_remote_sendable() {
+        assert!(Capability::Linear.is_remote_sendable());
+        assert!(!Capability::Iso.is_remote_sendable());
+        assert!(!Capability::LinearIso.is_remote_sendable());
+    }
+
+    #[test]
+    fn test_linear_is_not_writable() {
+        assert!(!Capability::Linear.is_writable());
+    }
+
+    #[test]
+    fn test_linear_is_readable() {
+        assert!(Capability::Linear.is_readable());
+    }
+
+    #[test]
+    fn test_linear_is_linear() {
+        assert!(Capability::Linear.is_linear());
+        assert!(Capability::LinearIso.is_linear());
+        assert!(!Capability::Iso.is_linear());
+    }
+
+    #[test]
+    fn test_linear_subtype_of_val() {
+        assert!(Capability::Linear.is_subtype_of(Capability::Val));
+    }
+}

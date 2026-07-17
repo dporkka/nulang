@@ -1160,6 +1160,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             behavior,
             args,
             span,
+            ..
         } => {
             let aop = lower_expr(actor, body);
             let aops: Vec<_> = args.iter().map(|a| lower_expr(a, body)).collect();
@@ -1756,6 +1757,7 @@ mod tests {
             actor: Box::new(var("a")),
             behavior: "beh".to_string(),
             args: vec![var("k")],
+            remote: false,
             span,
         };
         let send_vars = used(&send);

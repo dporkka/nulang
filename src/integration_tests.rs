@@ -5008,6 +5008,37 @@ match { a: 2, b: 9 } with {
         assert_eq!(rt.dlq_depth(), 1);
     }
 
+    /// `send remote` keyword enforces network-sendable (val|tag) capabilities.
+    /// This test verifies parsing and compilation; capability enforcement is
+    /// tested in effect_checker unit tests and the CLI `--check` path.
+    #[test]
+    fn test_send_remote_parses_and_compiles() {
+        let source = r#"
+            actor Adder {
+                behavior add(n: Int) { n }
+            }
+            let a = spawn Adder {} in
+                send remote a add(42)
+        "#;
+        let result = check_source(source);
+        assert!(result.is_ok(), "send remote should typecheck: {:?}", result.err());
+    }
+
+    /// The infix form `actor ! behavior(args)` never sets `remote`, so
+    /// capability checks use the standard (iso|val|tag) sendable rule.
+    #[test]
+    fn test_send_infix_has_remote_false() {
+        let source = r#"
+            actor Adder {
+                behavior add(n: Int) { n }
+            }
+            let a = spawn Adder {} in
+                a ! add(42)
+        "#;
+        let result = check_source(source);
+        assert!(result.is_ok(), "infix send should typecheck: {:?}", result.err());
+    }
+
     /// Differential test: the legacy compiler and the HIR/MIR pipeline must
     /// produce identical results over a corpus of pure programs.
     #[test]

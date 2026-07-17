@@ -140,6 +140,7 @@ pub enum Expr {
         actor: Box<Expr>,
         behavior: String,
         args: Vec<Expr>,
+        remote: bool,
         span: Span,
     },
     /// Request/response: ask actor behavior(args)
