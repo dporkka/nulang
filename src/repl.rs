@@ -118,15 +118,8 @@ impl Repl {
 
             buffer.push_str(&line);
 
-            // Track brace depth for multi-line input
-            for c in line.chars() {
-                match c {
-                    '{' | '(' | '[' => depth += 1,
-                    '}' | ')' | ']' => depth = depth.saturating_sub(1),
-                    _ => {}
-                }
-            }
-
+            // Use the lexer to count brace depth — naturally skips strings and comments.
+            depth = Self::brace_depth(&buffer);
             if depth > 0 {
                 continue; // Wait for more input
             }
@@ -345,6 +338,29 @@ impl Repl {
     #[cfg(test)]
     pub(crate) fn last_bytecode(&self) -> Option<&str> {
         self.last_bytecode.as_deref()
+    }
+
+    /// Count net brace/paren/bracket depth using the lexer, which
+    /// naturally skips strings and comments. Returns the total
+    /// unmatched opener count across all three pair types.
+    fn brace_depth(source: &str) -> i32 {
+        let mut lexer = Lexer::new(source);
+        let tokens = match lexer.lex() {
+            Ok(ts) => ts,
+            Err(_) => return 0, // Lex error → treat as "done", let parser report it
+        };
+        let mut depth: i32 = 0;
+        use crate::lexer::TokenKind;
+        for tok in &tokens {
+            match tok.kind {
+                TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket => depth += 1,
+                TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket => {
+                    depth = (depth - 1).max(0);
+                }
+                _ => {}
+            }
+        }
+        depth
     }
 }
 

@@ -14,6 +14,12 @@ static REGION_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeVar(pub u64);
 
+impl std::fmt::Display for TypeVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "'t{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Region(pub u64);
 
@@ -357,6 +363,78 @@ pub enum Type {
     Reference { cap: Capability, inner: Box<Type> },
     /// Existential / type scheme: forall vars. Type
     Scheme { vars: Vec<TypeVar>, body: Box<Type> },
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Type::Var(v) => write!(f, "'t{}", v.0),
+            Type::Primitive(p) => match p {
+                PrimitiveType::Int => write!(f, "Int"),
+                PrimitiveType::Float => write!(f, "Float"),
+                PrimitiveType::Bool => write!(f, "Bool"),
+                PrimitiveType::String => write!(f, "String"),
+                PrimitiveType::Unit => write!(f, "Unit"),
+                PrimitiveType::Nil => write!(f, "Nil"),
+                PrimitiveType::Never => write!(f, "Never"),
+                PrimitiveType::Address => write!(f, "Address"),
+            },
+            Type::Tuple(ts) => {
+                write!(f, "(")?;
+                for (i, t) in ts.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", t)?;
+                }
+                write!(f, ")")
+            }
+            Type::Record(fs) => {
+                write!(f, "{{ ")?;
+                for (i, (n, t)) in fs.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}: {}", n, t)?;
+                }
+                write!(f, " }}")
+            }
+            Type::Variant(vs) => {
+                for (i, (n, t)) in vs.iter().enumerate() {
+                    if i > 0 { write!(f, " | ")?; }
+                    match t {
+                        Some(t) => write!(f, "{} {}", n, t)?,
+                        None => write!(f, "{}", n)?,
+                    }
+                }
+                Ok(())
+            }
+            Type::Array(t) => write!(f, "[{}]", t),
+            Type::Function { param, ret, effect: _, cap: _ } => {
+                write!(f, "{} -> {}", param, ret)
+            }
+            Type::Actor { state, behavior } => {
+                write!(f, "Actor[{}, {}]", state, behavior)
+            }
+            Type::App { constructor, args } => {
+                write!(f, "{}", constructor)?;
+                if !args.is_empty() {
+                    write!(f, "[")?;
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 { write!(f, ", ")?; }
+                        write!(f, "{}", a)?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
+            }
+            Type::Reference { cap, inner } => write!(f, "&{} {}", cap, inner),
+            Type::Scheme { vars, body } => {
+                write!(f, "forall ")?;
+                for (i, v) in vars.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "'t{}", v.0)?;
+                }
+                write!(f, ". {}", body)
+            }
+        }
+    }
 }
 
 /// Reserved pseudo-field name carrying the *row tail* of an open record type.

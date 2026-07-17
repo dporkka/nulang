@@ -99,6 +99,13 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+            "--" => {
+                // Everything after -- is a positional argument.
+                for arg in args[i + 1..].iter() {
+                    positional.push(arg.to_string());
+                }
+                break;
+            }
             "-v" | "--verbose" => opts.verbose = true,
             "-h" | "--help" => {
                 print_help();

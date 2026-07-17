@@ -360,7 +360,7 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
 
         // Anything else is a unification error
         _ => Err(NuError::TypeError {
-            msg: format!("Cannot unify {:?} with {:?}", t1, t2),
+            msg: format!("Cannot unify {} with {}", t1, t2),
             span,
         }),
     }
@@ -588,7 +588,7 @@ fn var_subst(v: TypeVar, t: &Type, span: Span) -> NuResult<Substitution> {
             if occurs_in(v, t) {
                 return Err(NuError::TypeError {
                     msg: format!(
-                        "Occurs check failed: type variable {:?} occurs in {:?}",
+                        "Occurs check failed: type variable {} occurs in {}",
                         v, t
                     ),
                     span,
@@ -2351,7 +2351,7 @@ impl TypeChecker {
             | Type::Primitive(PrimitiveType::Unit) => Ok(()),
             _ => Err(NuError::TypeError {
                 msg: format!(
-                    "Unsupported FFI type: {:?}. Only Int, Float, Bool, String, and Unit are allowed in this MVP.",
+                    "Unsupported FFI type: {}. Only Int, Float, Bool, String, and Unit are allowed in this MVP.",
                     ty
                 ),
                 span,
@@ -3533,7 +3533,7 @@ mod tests {
         match result.unwrap_err() {
             NuError::TypeError { msg, .. } => {
                 assert!(msg.contains("Unsupported FFI type"));
-                assert!(msg.contains("Array"));
+                assert!(msg.contains("[Int]"), "Expected [Int] in FFI error, got: {}", msg);
             }
             other => panic!("Expected TypeError, got {:?}", other),
         }
