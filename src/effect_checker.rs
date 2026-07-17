@@ -308,11 +308,15 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             }
             free_vars(body, &mut body_bound, acc);
         }
+        Expr::While { cond, body, .. } => {
+            free_vars(cond, bound, acc);
+            free_vars(body, bound, acc);
+        }
         Expr::Return(Some(e), _) => {
             free_vars(e, bound, acc);
         }
         Expr::Return(None, _) => {}
-        Expr::Break(_) => {}
+        Expr::Break(..) => {}
     }
 }
 
@@ -785,12 +789,24 @@ impl EffectChecker {
                 Ok(effect_row_union(&r1, &r2))
             }
 
+
+            // While loop: effects of cond + body. Evaluates to unit.
+            Expr::While {
+                cond,
+                body,
+                span,
+            } => {
+                let r1 = self.infer_effects(ctx, cond)?;
+                let r2 = self.infer_effects(ctx, body)?;
+                let _ = span;
+                Ok(effect_row_union(&r1, &r2))
+            }
             // Return: effects of the returned expression (if any).
             Expr::Return(Some(e), _) => self.infer_effects(ctx, e),
             Expr::Return(None, _) => Ok(EffectRow::empty()),
 
             // Break: no effects (it transfers control, doesn't perform an effect).
-            Expr::Break(_) => Ok(EffectRow::empty()),
+            Expr::Break(..) => Ok(EffectRow::empty()),
         }
     }
 
@@ -1565,12 +1581,35 @@ impl CapabilityAnalyzer {
                 Ok(body_cap)
             }
 
+
+            // While loop: capability of body; cond is read-only.
+            Expr::While {
+                cond,
+                body,
+                span,
+            } => {
+                let _ = self.infer_cap_tracked(ctx, cond, consumed)?;
+                let base = consumed.clone();
+                let body_result = self.infer_cap_tracked(ctx, body, consumed);
+                let body_cap = body_result?;
+                if let Some(name) = consumed.difference(&base).next() {
+                    let name = name.clone();
+                    let msg = format!(
+                        "linear value `{}` consumed in loop body may be used more than once",
+                        name
+                    );
+                    self.diagnostics.push(msg.clone());
+                    return Err(NuError::CapError { msg, span: *span });
+                }
+                *consumed = base;
+                Ok(body_cap)
+            }
             // Return: capability of returned value.
             Expr::Return(Some(e), _) => self.infer_cap_tracked(ctx, e, consumed),
             Expr::Return(None, _) => Ok(Capability::Val),
 
             // Break: never returns a value, use Tag.
-            Expr::Break(_) => Ok(Capability::Tag),
+            Expr::Break(..) => Ok(Capability::Tag),
         }
     }
 
@@ -1656,8 +1695,9 @@ fn expr_span(expr: &Expr) -> Span {
         Expr::TypeAnnotate { span, .. } => *span,
         Expr::Pipe { span, .. } => *span,
         Expr::For { span, .. } => *span,
+        Expr::While { span, .. } => *span,
         Expr::Return(_, s) => *s,
-        Expr::Break(s) => *s,
+        Expr::Break(_, s) => *s,
     }
 }
 
@@ -2233,7 +2273,7 @@ mod tests {
     fn test_cap_break_is_tag() {
         let mut analyzer = CapabilityAnalyzer::new();
         let ctx = CapContext::new();
-        let expr = Expr::Break(s());
+        let expr = Expr::Break(None, s());
         let cap = analyzer.infer_cap(&ctx, &expr).unwrap();
         assert_eq!(cap, Capability::Tag);
     }

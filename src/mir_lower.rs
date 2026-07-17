@@ -504,7 +504,7 @@ impl<'c> FnLowerer<'c> {
                 let id = self.unit_temp();
                 self.b.terminate(mir::Terminator::Return(Some(id)));
             }
-            hir::Terminator::Break => {
+            hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
                 return Err(compile_err("break outside of a loop"));
             }
         }
@@ -539,12 +539,13 @@ impl<'c> FnLowerer<'c> {
                 };
                 self.emit_return(id);
             }
-            hir::Terminator::Break => {
+            hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
                 let exit = self
                     .loop_exits
                     .last()
                     .copied()
                     .ok_or_else(|| compile_err("break outside of a loop"))?;
+                // TODO: handle break-with-value by storing value before jump
                 self.b.terminate(mir::Terminator::Jump(exit));
             }
         }
@@ -1077,6 +1078,11 @@ impl<'c> FnLowerer<'c> {
                 iterable,
                 body,
             } => self.lower_for(dst, var, iterable, body),
+            hir::RValue::While {
+                cond,
+                body,
+                ..
+            } => self.lower_while(dst, cond, body),
             hir::RValue::Perform {
                 effect, op, args, ..
             } => {
@@ -1805,7 +1811,7 @@ impl<'c> FnLowerer<'c> {
                     };
                     self.emit_return(id);
                 }
-                hir::Terminator::Break => {
+                hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
                     self.b.terminate(mir::Terminator::Jump(exit));
                 }
             }
@@ -1816,6 +1822,70 @@ impl<'c> FnLowerer<'c> {
         self.b.switch_to(exit);
         // The stable compiler evaluates `for` to integer 0; mirror it so the
         // pipelines stay observationally identical.
+        self.b.assign(dst, mir::RValue::Const(Constant::Int(0)));
+        Ok(())
+    }
+
+    fn lower_while(
+        &mut self,
+        dst: mir::LocalId,
+        cond: &hir::Body,
+        body: &hir::Body,
+    ) -> NuResult<()> {
+        use crate::bytecode::Constant;
+        let head = self.b.create_block();
+        let body_bb = self.b.create_block();
+        let exit = self.b.create_block();
+
+        self.b.terminate(mir::Terminator::Jump(head));
+
+        self.b.switch_to(head);
+        // Lower cond body into head
+        for stmt in &cond.stmts {
+            self.lower_stmt(stmt)?;
+        }
+        let c = match &cond.terminator {
+            hir::Terminator::Yield(op) => self.lower_operand(op)?,
+            hir::Terminator::FnReturn(_) | hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
+                // If cond unconditionally returns/breaks, the branch doesn't matter
+                // But we must provide a dummy local for the branch.
+                let dummy = self.b.add_temp(Type::bool());
+                self.b.assign(dummy, mir::RValue::Const(Constant::Bool(false)));
+                dummy
+            }
+        };
+        
+        if !self.b.is_terminated() {
+            self.b.terminate(mir::Terminator::Branch { cond: c, then_: body_bb, else_: exit });
+        }
+
+        self.b.switch_to(body_bb);
+        self.push_scope();
+        self.loop_exits.push(exit);
+        for stmt in &body.stmts {
+            self.lower_stmt(stmt)?;
+        }
+        if !self.b.is_terminated() {
+            match &body.terminator {
+                hir::Terminator::Yield(_) => {
+                    self.b.terminate(mir::Terminator::Jump(head));
+                }
+                hir::Terminator::FnReturn(op) => {
+                    let id = match op {
+                        Some(op) => self.lower_operand(op)?,
+                        None => self.unit_temp(),
+                    };
+                    self.emit_return(id);
+                }
+                hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
+                    self.b.terminate(mir::Terminator::Jump(exit));
+                }
+            }
+        }
+        self.loop_exits.pop();
+        self.pop_scope();
+
+        self.b.switch_to(exit);
         self.b.assign(dst, mir::RValue::Const(Constant::Int(0)));
         Ok(())
     }
@@ -1855,7 +1925,7 @@ impl<'c> FnLowerer<'c> {
                     };
                     self.emit_return(id);
                 }
-                hir::Terminator::Break => {
+                hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
                     return Err(compile_err("break out of an effect handler body"));
                 }
             }
@@ -1905,7 +1975,7 @@ impl<'c> FnLowerer<'c> {
                         };
                         self.emit_return(id);
                     }
-                    hir::Terminator::Break => {
+                    hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
                         return Err(compile_err("break out of an effect handler"));
                     }
                 }
@@ -2229,7 +2299,7 @@ fn walk_hir_body(body: &hir::Body, acc: &mut HashSet<String>) {
                 walk_hir_operand(op, acc);
             }
         }
-        hir::Terminator::Break => {}
+        hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {}
     }
 }
 
@@ -2312,6 +2382,10 @@ fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
             iterable, body, ..
         } => {
             walk_hir_operand(iterable, acc);
+            walk_hir_body(body, acc);
+        }
+        hir::RValue::While { cond, body, .. } => {
+            walk_hir_body(cond, acc);
             walk_hir_body(body, acc);
         }
         hir::RValue::Spawn { init, .. } => {

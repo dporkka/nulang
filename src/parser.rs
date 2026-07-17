@@ -105,9 +105,15 @@ impl Parser {
                         // remaining tokens as an expression.
                         return Err(e);
                     }
-                    // Not a declaration — try expression
-                    let expr = self.parse_expr()?;
-                    // Wrap expression as synthetic function __main
+                    // Not a declaration — this must be the top-level script body.
+                    // Parse all remaining tokens as a block of expressions,
+                    // using the recursive helper to splice statement-lets.
+                    let exprs = self.collect_block_exprs(None)?;
+                    let final_expr = if exprs.len() == 1 {
+                        exprs.into_iter().next().unwrap()
+                    } else {
+                        Expr::Block { exprs, span: Span::default() }
+                    };
                     decls.push(Decl::Function {
                         name: "__main".to_string(),
                         type_params: vec![],
@@ -115,11 +121,12 @@ impl Parser {
                         ret_type: None,
                         effect: None,
                         cap: None,
-                        body: expr,
+                        body: final_expr,
                         annotations: vec![],
                         public: false,
                         span: Span::new(0, 0, 0, 0),
                     });
+                    break;
                 }
             }
             self.skip_newlines_semicolons();
@@ -294,7 +301,7 @@ impl Parser {
         };
 
         // Effect annotation
-        let effect = if self.consume_if(&TokenKind::Bang) {
+        let effect = if self.consume_if(&TokenKind::Bang) || self.consume_if(&TokenKind::Throws) {
             Some(self.parse_effect_row()?)
         } else {
             None
@@ -349,7 +356,9 @@ impl Parser {
                     } else {
                         Type::unit()
                     };
-                    self.expect(TokenKind::Assign)?;
+                    if !self.consume_if(&TokenKind::Assign) {
+                        self.expect(TokenKind::Colon)?;
+                    }
                     let default = self.parse_expr()?;
                     state_fields.push((field_name, model, ty, default));
                     self.skip_newlines_semicolons();
@@ -1349,7 +1358,7 @@ impl Parser {
         self.expect(TokenKind::RParen)?;
 
         // Optional effect annotation
-        let effect = if self.consume_if(&TokenKind::Bang) {
+        let effect = if self.consume_if(&TokenKind::Bang) || self.consume_if(&TokenKind::Throws) {
             Some(self.parse_effect_row()?)
         } else {
             None
@@ -1438,6 +1447,30 @@ impl Parser {
                 continue;
             }
 
+            // Try operator: expr? desugars to match on Ok/Error
+            if self.consume_if(&TokenKind::Question) {
+                let span = self.current_span();
+                let x = "__try_x".to_string();
+                let e = "__try_e".to_string();
+                left = Expr::Match {
+                    scrutinee: Box::new(left),
+                    arms: vec![
+                        (Pattern::Variant("Ok".to_string(), Some(Box::new(Pattern::Var(x.clone())))), None,
+                         Expr::Var(x, span)),
+                        (Pattern::Variant("Error".to_string(), Some(Box::new(Pattern::Var(e.clone())))), None,
+                         Expr::Return(
+                            Some(Box::new(Expr::App {
+                                func: Box::new(Expr::Var("Error".to_string(), span)),
+                                args: vec![Expr::Var(e, span)],
+                                span,
+                            })),
+                            span,
+                        )),
+                    ],
+                    span,
+                };
+                continue;
+            }
             if self.consume_if(&TokenKind::LBracket) {
                 // Array index: arr[idx]
                 let idx = self.parse_expr()?;
@@ -1583,10 +1616,12 @@ impl Parser {
                     TokenKind::Let => {
                         self.advance();
                         self.skip_newlines();
-                        if self.consume_if(&TokenKind::Rec) {
-                            self.parse_let_rec()
+                        self.consume_if(&TokenKind::Rec);
+                        let name = self.expect_ident("variable name")?;
+                        if self.peek_kind() == &TokenKind::LParen {
+                            self.parse_let_rec_named(name)
                         } else {
-                            self.parse_let()
+                            self.parse_let_named(name)
                         }
                     }
                     TokenKind::If => self.parse_if(),
@@ -1609,6 +1644,7 @@ impl Parser {
                     TokenKind::Emit => self.parse_emit(),
                     TokenKind::Receive => self.parse_receive(),
                     TokenKind::For => self.parse_for(),
+                    TokenKind::While => self.parse_while(),
                     TokenKind::Migrate => self.parse_migrate(),
                     TokenKind::Return => {
                         self.advance();
@@ -1621,7 +1657,12 @@ impl Parser {
                     }
                     TokenKind::Break => {
                         self.advance();
-                        Ok(Expr::Break(self.current_span()))
+                        if self.is_expr_start() {
+                            let val = self.parse_expr()?;
+                            Ok(Expr::Break(Some(Box::new(val)), self.current_span()))
+                        } else {
+                            Ok(Expr::Break(None, self.current_span()))
+                        }
                     }
                     TokenKind::SelfKw => self.parse_self_ref(),
 
@@ -1649,7 +1690,11 @@ impl Parser {
             }
             TokenKind::StringLit(s) => {
                 self.advance();
-                Ok(Expr::Literal(Literal::String(s), span))
+                if s.contains("#{") {
+                    self.parse_interpolated_string(&s, span)
+                } else {
+                    Ok(Expr::Literal(Literal::String(s), span))
+                }
             }
             TokenKind::BoolLit(b) => {
                 self.advance();
@@ -1691,8 +1736,12 @@ impl Parser {
     }
 
     fn parse_let(&mut self) -> NuResult<Expr> {
-        let span = self.current_span();
         let name = self.expect_ident("variable name")?;
+        self.parse_let_named(name)
+    }
+
+    fn parse_let_named(&mut self, name: String) -> NuResult<Expr> {
+        let span = self.current_span();
 
         // Optional type annotation
         let ty = if self.consume_if(&TokenKind::Colon) {
@@ -1703,8 +1752,11 @@ impl Parser {
 
         self.expect(TokenKind::Assign)?;
         let value = self.parse_expr()?;
-        self.expect(TokenKind::In)?;
-        let body = self.parse_expr()?;
+        let body = if self.consume_if(&TokenKind::In) {
+            self.parse_expr()?
+        } else {
+            Expr::Block { exprs: vec![], span: Span::default() }
+        };
         Ok(Expr::Let {
             name,
             ty,
@@ -1715,8 +1767,65 @@ impl Parser {
     }
 
     fn parse_let_rec(&mut self) -> NuResult<Expr> {
-        let span = self.current_span();
         let name = self.expect_ident("function name")?;
+        self.parse_let_rec_named(name)
+    }
+
+    /// Parse a string containing `#{...}` interpolation markers.
+    fn parse_interpolated_string(&self, raw: &str, span: Span) -> NuResult<Expr> {
+        let mut parts: Vec<Expr> = Vec::new();
+        let mut remaining = raw;
+        while let Some(hash_brace) = remaining.find("#{") {
+            if hash_brace > 0 {
+                parts.push(Expr::Literal(
+                    Literal::String(remaining[..hash_brace].to_string()),
+                    span,
+                ));
+            }
+            let expr_start = hash_brace + 2;
+            let expr_str = &remaining[expr_start..];
+            let mut depth = 1u32;
+            let mut expr_end = 0usize;
+            for (i, ch) in expr_str.char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 { expr_end = i; break; }
+                    }
+                    _ => {}
+                }
+            }
+            if depth != 0 {
+                return Err(NuError::ParseError { msg: "Unterminated interpolation: missing '}'".to_string(), span });
+            }
+            let expr_content = &expr_str[..expr_end];
+            let expr = self.parse_inline_expr(expr_content, span)?;
+            parts.push(expr);
+            remaining = &expr_str[expr_end + 1..];
+        }
+        if !remaining.is_empty() {
+            parts.push(Expr::Literal(Literal::String(remaining.to_string()), span));
+        }
+        if parts.len() == 1 {
+            return Ok(parts.into_iter().next().unwrap());
+        }
+        let mut result = parts.remove(0);
+        for part in parts {
+            result = Expr::Binary { op: BinOp::Add, left: Box::new(result), right: Box::new(part), span };
+        }
+        Ok(result)
+    }
+
+    fn parse_inline_expr(&self, source: &str, span: Span) -> NuResult<Expr> {
+        let mut lexer = crate::lexer::Lexer::new(source);
+        let tokens = lexer.lex().map_err(|e| NuError::ParseError { msg: format!("Invalid interpolation expression: {}", e), span })?;
+        let mut sub_parser = Parser::new(tokens);
+        sub_parser.parse_expr()
+    }
+
+    fn parse_let_rec_named(&mut self, name: String) -> NuResult<Expr> {
+        let span = self.current_span();
         self.expect(TokenKind::LParen)?;
         let params = self.parse_params()?;
         self.expect(TokenKind::RParen)?;
@@ -1800,6 +1909,7 @@ impl Parser {
             let expr = self.parse_expr()?;
             arms.push((pat, guard, expr));
             self.skip_newlines_semicolons();
+            self.consume_if(&TokenKind::Comma);
         }
         self.expect(TokenKind::RBrace)?;
 
@@ -1813,21 +1923,56 @@ impl Parser {
     fn parse_block(&mut self) -> NuResult<Expr> {
         let _span = self.current_span();
         self.advance(); // consume '{'
-        let mut exprs = Vec::new();
-        self.skip_newlines();
-        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
-            self.skip_newlines();
-            if self.match_token(&TokenKind::RBrace) {
-                break;
-            }
-            exprs.push(self.parse_expr()?);
-            self.skip_newlines_semicolons();
-        }
+        let exprs = self.collect_block_exprs(Some(TokenKind::RBrace))?;
         self.expect(TokenKind::RBrace)?;
         Ok(Expr::Block {
             exprs,
             span: self.current_span(),
         })
+    }
+
+    /// Collect expressions until `end_token` (or EOF), splicing incomplete
+    /// let-bindings so that `let x = 1` captures following expressions as
+    /// its body. Called recursively so nested statement-lets work correctly.
+    fn collect_block_exprs(&mut self, end_token: Option<TokenKind>) -> NuResult<Vec<Expr>> {
+        let mut exprs = Vec::new();
+        self.skip_newlines();
+        while !self.is_at_end() {
+            if let Some(ref end) = end_token {
+                if self.match_token(end) {
+                    break;
+                }
+            }
+            self.skip_newlines();
+            if self.is_at_end() { break; }
+            if let Some(ref end) = end_token {
+                if self.match_token(end) { break; }
+            }
+            let mut expr = self.parse_expr()?;
+            self.skip_newlines_semicolons();
+            
+            let is_incomplete = matches!(&expr, Expr::Let { body, .. } | Expr::LetRec { body, .. } if matches!(body.as_ref(), Expr::Block { exprs, span } if exprs.is_empty() && span.start == 0 && span.end == 0));
+            
+            if is_incomplete {
+                let rest = self.collect_block_exprs(end_token.clone())?;
+                let new_body = if rest.is_empty() {
+                    Expr::Literal(Literal::Unit, Span::default())
+                } else if rest.len() == 1 {
+                    rest.into_iter().next().unwrap()
+                } else {
+                    Expr::Block { exprs: rest, span: Span::default() }
+                };
+                expr = match expr {
+                    Expr::Let { name, ty, value, span, .. } => Expr::Let { name, ty, value, body: Box::new(new_body), span },
+                    Expr::LetRec { name, params, value, span, .. } => Expr::LetRec { name, params, value, body: Box::new(new_body), span },
+                    _ => unreachable!(),
+                };
+                exprs.push(expr);
+                break;
+            }
+            exprs.push(expr);
+        }
+        Ok(exprs)
     }
 
     fn parse_tuple_or_paren(&mut self) -> NuResult<Expr> {
@@ -1927,7 +2072,9 @@ impl Parser {
                     break;
                 }
                 let field = self.expect_ident("field name")?;
-                self.expect(TokenKind::Assign)?;
+                if !self.consume_if(&TokenKind::Assign) {
+                    self.expect(TokenKind::Colon)?;
+                }
                 let val = self.parse_expr()?;
                 fields.push((field, val));
                 self.skip_newlines_semicolons();
@@ -2226,6 +2373,7 @@ impl Parser {
                 | TokenKind::Emit
                 | TokenKind::Handle
                 | TokenKind::For
+                | TokenKind::While
                 | TokenKind::Migrate
                 | TokenKind::Return
                 | TokenKind::Break
@@ -2300,11 +2448,12 @@ impl Parser {
         let span = self.current_span();
         self.expect(TokenKind::Handle)?;
         let body = self.parse_expr()?;
+        self.consume_if(&TokenKind::With);
         self.expect(TokenKind::LBrace)?;
         let mut handlers = Vec::new();
         self.skip_newlines();
-        while self.peek_kind() == &TokenKind::Pipe {
-            self.advance(); // consume '|'
+        while self.peek_kind() != &TokenKind::RBrace && !self.is_at_end() {
+            self.consume_if(&TokenKind::Pipe);
             let effect_name = self.expect_ident("effect name")?;
             self.expect(TokenKind::Dot)?;
             let op_name = self.expect_ident("operation name")?;
@@ -2346,9 +2495,9 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         let mut arms = Vec::new();
         self.skip_newlines();
-        while self.peek_kind() == &TokenKind::Pipe {
-            self.advance(); // consume '|'
-            let behavior_name = self.expect_ident("behavior name")?;
+        while self.peek_kind() != &TokenKind::RBrace && !self.is_at_end() {
+            self.consume_if(&TokenKind::Pipe);
+                        let behavior_name = self.expect_ident("behavior name")?;
             self.expect(TokenKind::LParen)?;
             let mut params = Vec::new();
             self.skip_newlines();
@@ -2399,6 +2548,14 @@ impl Parser {
             body: Box::new(body),
             span,
         })
+    }
+
+    fn parse_while(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.expect(TokenKind::While)?;
+        let cond = self.parse_expr()?;
+        let body = self.parse_expr()?;
+        Ok(Expr::While { cond: Box::new(cond), body: Box::new(body), span })
     }
 
     fn parse_migrate(&mut self) -> NuResult<Expr> {

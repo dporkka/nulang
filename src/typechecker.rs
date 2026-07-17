@@ -175,10 +175,18 @@ fn effect_row_compatible(e1: &EffectRow, e2: &EffectRow) -> bool {
 /// Compute the most general unifier of two types.
 /// Returns a substitution `s` such that `apply_subst(t1, s) == apply_subst(t2, s)`.
 fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
+    // Never is a subtype of everything — unify trivially.
+    if matches!(t1, Type::Primitive(PrimitiveType::Never))
+        || matches!(t2, Type::Primitive(PrimitiveType::Never))
+    {
+        return Ok(vec![]);
+    }
     // Handle the case where both types are the same reference
     if t1 == t2 {
         return Ok(vec![]);
     }
+
+
 
     match (t1, t2) {
         // Identical primitives unify trivially
@@ -1185,18 +1193,24 @@ impl TypeChecker {
                 body,
                 span,
             } => self.infer_for(ctx, var, iterable, body, *span),
+            Expr::While {
+                cond,
+                body,
+                span,
+            } => self.infer_while(ctx, cond, body, *span),
 
             // Return
             Expr::Return(expr, _span) => {
                 if let Some(e) = expr {
-                    self.infer_expr(ctx, e)
+                    let (s, _) = self.infer_expr(ctx, e)?;
+                    Ok((s, Type::Primitive(PrimitiveType::Never)))
                 } else {
-                    Ok((vec![], Type::unit()))
+                    Ok((vec![], Type::Primitive(PrimitiveType::Never)))
                 }
             }
 
             // Break
-            Expr::Break(_) => {
+            Expr::Break(..) => {
                 let fresh = Type::Var(TypeVar::fresh());
                 Ok((vec![], fresh))
             }
@@ -2299,6 +2313,26 @@ impl TypeChecker {
         }
 
         Ok((subst.clone(), apply_subst(&body_ty, &subst)))
+    }
+
+    /// Infer while loop.
+    fn infer_while(
+        &mut self,
+        ctx: &TypeContext,
+        cond: &Expr,
+        body: &Expr,
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        // Cond must be bool
+        let (s1, cond_ty) = self.infer_expr(ctx, cond)?;
+        let s2 = mgu(&cond_ty, &Type::Primitive(PrimitiveType::Bool), span)?;
+        let s_combined = compose_subst(&s2, &s1);
+        
+        // Body can be anything
+        let (s3, _body_ty) = self.infer_expr(ctx, body)?;
+        let final_subst = compose_subst(&s3, &s_combined);
+        
+        Ok((final_subst, Type::unit()))
     }
 
     /// Infer for comprehension.

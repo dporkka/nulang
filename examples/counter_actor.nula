@@ -8,4 +8,4 @@ actor Counter {
     behavior get() { self.count }
     behavior inc() { self.count + 1 }
 }
-spawn Counter { count = 0 }
+spawn Counter { count: 0 }

@@ -1,33 +1,30 @@
-// State machine example — the `state_machine` keyword desugars to an
-// ordinary actor with a `_sm_state` string field, one behavior per event,
-// and inline on_entry/on_exit hooks. Events target declared states;
-// self-transitions run both exit and entry hooks.
+// TCP Connection — a persistent actor wrapping a network socket,
+// demonstrated through the connection lifecycle.
 //
 // Run with: nulang examples/tcp_connection.nula
 
-state_machine TcpConnection {
-    state Closed
-    state Connecting
-    state Connected
+actor TcpConnection {
+    state connected: Bool = false
 
-    event connect(address): Connecting
-    event connection_established: Connected
-    event disconnect: Closed
-
-    on_entry Connected {
-        perform IO.print("up")
+    behavior connect(address: String) {
+        // establish TCP connection...
+        self.connected = true
     }
 
-    on_exit Connected {
-        perform IO.print("down")
+    behavior connection_established() {
+        // connection handshake complete
+        0
+    }
+
+    behavior disconnect() {
+        self.connected = false
     }
 }
 
 fn main() {
-    let conn = spawn TcpConnection {} in {
-        send conn connect("localhost:8080")
-        send conn connection_established()
-        send conn disconnect()
-        0
-    }
+    let conn = spawn TcpConnection {}
+    conn ! connect("localhost:8080")
+    conn ! connection_established()
+    conn ! disconnect()
+    0
 }

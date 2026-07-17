@@ -26,15 +26,14 @@ actor PoolWorker {
 }
 
 fn main() {
-    let sup = perform Otp.create_supervisor("pool", 3) in
-    let t = perform Otp.set_template(sup, "PoolWorker") in
-    let w1 = perform Otp.start_child(sup) in
-    let w2 = perform Otp.start_child(sup) in {
-        send w1 work(1)
-        send w2 work(2)
-        // Crash w1: the supervisor restarts it from the template, so its
-        // count goes back to 0 with a fresh actor id. w2 keeps its count.
-        send w1 die()
-        0
-    }
+    let sup = perform Otp.create_supervisor("pool", 3)
+    let t = perform Otp.set_template(sup, "PoolWorker")
+    let w1 = perform Otp.start_child(sup)
+    let w2 = perform Otp.start_child(sup)
+    w1 ! work(1)
+    w2 ! work(2)
+    // Crash w1: the supervisor restarts it from the template, so its
+    // count goes back to 0 with a fresh actor id. w2 keeps its count.
+    w1 ! die()
+    0
 }

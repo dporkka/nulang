@@ -1323,6 +1323,22 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, Type::unit())
         }
+        Expr::While { cond, body: b, span } => {
+            let cond_body = lower_body(cond);
+            let loop_body = lower_body(b);
+            let temp = fresh_temp_name();
+            body.push(hir::Stmt::Let {
+                name: temp.clone(),
+                ty: Type::unit(),
+                value: hir::RValue::While {
+                    cond: Box::new(cond_body),
+                    body: Box::new(loop_body),
+                    span: *span,
+                },
+                span: *span,
+            });
+            hir::Operand::Var(temp, Type::unit())
+        }
         Expr::Pipe { left, right, span } => {
             // Lower `x |> f(a, b)` to `f(x, a, b)`, matching the stable
             // compiler's pipe semantics.
@@ -1353,8 +1369,9 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             body.set_terminator(hir::Terminator::FnReturn(op));
             hir::Operand::Unit
         }
-        Expr::Break(_) => {
-            body.set_terminator(hir::Terminator::Break);
+        Expr::Break(val, _span) => {
+            let op = val.as_ref().map(|e| lower_expr(e, body));
+            body.set_terminator(hir::Terminator::Break(op));
             hir::Operand::Unit
         }
     }
@@ -2018,6 +2035,10 @@ fn free_vars(
             let mut new_bound = bound.clone();
             new_bound.insert(var.clone());
             free_vars(body, &new_bound, acc);
+        }
+        Expr::While { cond, body, .. } => {
+            free_vars(cond, bound, acc);
+            free_vars(body, bound, acc);
         }
         Expr::Return(e, _) => {
             if let Some(e) = e {

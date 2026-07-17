@@ -49,11 +49,10 @@ actor Victim {
 }
 
 fn main() {
-    let w = spawn Watcher {} in
-    let v = spawn Victim {} in {
-        send w watch(v)
-        send w check()
-        send v die()
-        0
-    }
+    let w = spawn Watcher {}
+    let v = spawn Victim {}
+    w ! watch(v)
+    w ! check()
+    v ! die()
+    0
 }

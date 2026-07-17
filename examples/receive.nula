@@ -14,7 +14,7 @@ actor Echo {
         // Selective receive: wait-free scan for a `msg` message; binds the
         // payload to `x`. Other queued messages are left in the mailbox.
         receive {
-            | msg(x) => x
+            msg(x) => x
         }
     }
     behavior msg(x: Int) { x }
@@ -23,14 +23,14 @@ actor Echo {
 actor MainActor {
     behavior start() {
         // Spawn the echo actor and send it a message.
-        let echo = spawn Echo {} in
-        send echo respond();
+        let echo = spawn Echo {}
+        echo ! respond();
         unit
     }
 }
 
 fn main() {
-    let main = spawn MainActor {} in
-    send main start();
+    let main = spawn MainActor {}
+    main ! start();
     unit
 }

@@ -68,6 +68,7 @@ pub enum TokenKind {
     Link,
     Exit,
     For,
+    While,
     Loop,
     Break,
     Return,
@@ -84,6 +85,7 @@ pub enum TokenKind {
     Unit,
     Tool,
     Initial,
+    Throws,
     As,
 
     // Identifiers
@@ -204,6 +206,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Link => write!(f, "link"),
             TokenKind::Exit => write!(f, "exit"),
             TokenKind::For => write!(f, "for"),
+            TokenKind::While => write!(f, "while"),
             TokenKind::Loop => write!(f, "loop"),
             TokenKind::Break => write!(f, "break"),
             TokenKind::Return => write!(f, "return"),
@@ -221,6 +224,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Tool => write!(f, "tool"),
             TokenKind::Initial => write!(f, "initial"),
             TokenKind::As => write!(f, "as"),
+            TokenKind::Throws => write!(f, "throws"),
             // Identifiers
             TokenKind::Ident(s) => write!(f, "identifier `{}`", s),
             TokenKind::UpperIdent(s) => write!(f, "type name `{}`", s),
@@ -372,7 +376,7 @@ impl<'a> Lexer<'a> {
             b'0'..=b'9' => self.read_number()?,
             b'"' => self.read_string()?,
             b'+' | b'-' | b'*' | b'%' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'^' | b'~'
-            | b'.' | b':' | b'#' => self.read_operator()?,
+            | b'.' | b':' | b'#' | b'?' => self.read_operator()?,
             b'(' => {
                 self.advance();
                 Token {
@@ -858,6 +862,7 @@ impl<'a> Lexer<'a> {
                     TokenKind::Colon
                 }
             }
+            b'?' => TokenKind::Question,
             _ => {
                 return Err(NuError::LexError {
                     msg: format!("Unexpected operator character: {}", ch as char),
@@ -948,6 +953,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "pub" => Some(TokenKind::Pub),
         "priv" => Some(TokenKind::Priv),
         "where" => Some(TokenKind::Where),
+        "while" => Some(TokenKind::While),
         "migrate" => Some(TokenKind::Migrate),
         "node" => Some(TokenKind::Node),
         "monitor" => Some(TokenKind::Monitor),
@@ -972,6 +978,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "or" => Some(TokenKind::Or),
         "not" => Some(TokenKind::Not),
         "unit" => Some(TokenKind::UnitLit),
+        "throws" => Some(TokenKind::Throws),
         "tool" => Some(TokenKind::Tool),
         "database" => Some(TokenKind::Database),
         "agent" => Some(TokenKind::Agent),

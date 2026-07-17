@@ -173,7 +173,7 @@ impl Body {
     /// True once an explicit control-transfer terminator has been set;
     /// statements lowered after this point are dead code and are dropped.
     pub fn is_terminated(&self) -> bool {
-        matches!(self.terminator, Terminator::FnReturn(_) | Terminator::Break)
+        matches!(self.terminator, Terminator::FnReturn(_) | Terminator::Break(None))
     }
 }
 
@@ -277,6 +277,12 @@ pub enum RValue {
         var: String,
         iterable: Operand,
         body: Box<Body>,
+    },
+    /// While loop: cond { body }; evaluates to unit.
+    While {
+        cond: Box<Body>,
+        body: Box<Body>,
+        span: Span,
     },
     Spawn {
         actor_type: String,
@@ -387,7 +393,7 @@ pub enum Terminator {
     /// function, even inside a branch or loop body.
     FnReturn(Option<Operand>),
     /// An explicit `break` expression: exits the innermost loop.
-    Break,
+    Break(Option<Operand>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -449,6 +455,7 @@ impl RValue {
             RValue::If { ty, .. } => ty.clone(),
             RValue::Match { ty, .. } => ty.clone(),
             RValue::For { .. } => Type::unit(),
+            RValue::While { .. } => Type::unit(),
             RValue::Spawn { ty, .. } => ty.clone(),
             RValue::Send { ty, .. } => ty.clone(),
             RValue::Ask { ty, .. } => ty.clone(),

@@ -210,10 +210,16 @@ pub enum Expr {
         body: Box<Expr>,
         span: Span,
     },
+    /// While loop: while cond { body }
+    While {
+        cond: Box<Expr>,
+        body: Box<Expr>,
+        span: Span,
+    },
     /// Return from function
     Return(Option<Box<Expr>>, Span),
     /// Break from loop
-    Break(Span),
+    Break(Option<Box<Expr>>, Span),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

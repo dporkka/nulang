@@ -1,7 +1,9 @@
-// Recursive Fibonacci — demonstrates closures and recursion.
+// Recursive Fibonacci — demonstrates the function definition shorthand.
+// `let f(x) = expr` is equivalent to `let f = fn(x) { expr }`.
 //
 // Run with: nulang examples/fibonacci.nula
 
 let fib = fn(n) {
     if n <= 1 then n else fib(n - 1) + fib(n - 2)
-} in fib(10)
+}
+fib(10)

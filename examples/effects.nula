@@ -3,6 +3,6 @@
 //
 // Run with: nulang examples/effects.nula
 
-handle perform Math.getAnswer() {
-    | Math.getAnswer() => 42
+handle perform Math.getAnswer() with {
+    Math.getAnswer() => 42
 }
