@@ -416,7 +416,7 @@ fn run_source(source: &str, verbose: bool, backend: &str, out_file: Option<&str>
         "wasm-aot" => {
             let wasm_file = out_file.unwrap_or("out.wasm");
             let cwasm_file = wasm_file.replace(".wasm", ".cwasm");
-            let cwasm_file = if cwasm_file == wasm_file.as_ref() {
+            let cwasm_file = if cwasm_file == wasm_file {
                 format!("{}.cwasm", wasm_file)
             } else {
                 cwasm_file

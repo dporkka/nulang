@@ -13,6 +13,8 @@ use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
 use crate::types::{Capability, NuError, NuResult, Span, Type, TypeContext};
 use crate::vm::{Value, VM};
+use rustyline::error::ReadlineError;
+use rustyline::{Editor, Result as RlResult, history::DefaultHistory};
 
 /// REPL state that persists across evaluations.
 pub struct Repl {
@@ -27,6 +29,66 @@ pub struct Repl {
     last_bytecode: Option<String>,
     /// Last AST (for :ast command display)
     last_ast: Option<AstModule>,
+}
+struct ReplHelper {
+    keywords: Vec<String>,
+}
+
+impl ReplHelper {
+    fn new() -> Self {
+        ReplHelper {
+            keywords: vec![
+                "fn", "let", "rec", "in", "if", "then", "else", "match", "with",
+                "actor", "behavior", "state", "spawn", "send", "ask", "receive",
+                "perform", "handle", "resume", "effect", "workflow", "step",
+                "parallel", "compensate", "statemachine", "event", "on_entry",
+                "on_exit", "persistent", "local", "durable", "eventsourced",
+                "crdt", "module", "import", "pub", "type", "alias", "extern",
+                "iso", "trn", "ref", "val", "box", "tag", "lineariso",
+                "true", "false", "nil", "unit", "for", "loop", "break", "return",
+                "node", "link", "monitor", "exit", "agent", "database",
+                "IO", "Net", "FS", "Rand", "Time", "Spawn", "Send", "LLM",
+                ":help", ":quit", ":type", ":ast", ":bytecode", ":clear",
+                ":reset", ":version",
+            ].into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+impl rustyline::Helper for ReplHelper {}
+
+impl rustyline::highlight::Highlighter for ReplHelper {}
+
+impl rustyline::hint::Hinter for ReplHelper {
+    type Hint = String;
+}
+
+impl rustyline::validate::Validator for ReplHelper {}
+
+impl rustyline::completion::Completer for ReplHelper {
+    type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> RlResult<(usize, Vec<String>)> {
+        // Find the word boundary before the cursor.
+        let start = line[..pos].rfind(|c: char| c.is_whitespace() || c == '(' || c == '{' || c == '[')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prefix = &line[start..pos];
+        if prefix.is_empty() {
+            return Ok((pos, vec![]));
+        }
+        let prefix_lower = prefix.to_lowercase();
+        let matches: Vec<String> = self.keywords.iter()
+            .filter(|kw| kw.to_lowercase().starts_with(&prefix_lower))
+            .cloned()
+            .collect();
+        Ok((start, matches))
+    }
 }
 
 impl Repl {
@@ -46,6 +108,11 @@ impl Repl {
         println!("Nulang v0.1.0 \u{2014} Actor-Based Distributed Language");
         println!("Type :help for commands, :quit to exit\n");
 
+        let mut editor = Editor::<ReplHelper, DefaultHistory>::new()
+            .expect("Failed to create REPL editor");
+        editor.set_helper(Some(ReplHelper::new()));
+        let _ = editor.load_history(".nulang_history");
+
         let mut buffer = String::new();
         let mut brace_stack: Vec<char> = Vec::new();
 
@@ -55,24 +122,30 @@ impl Repl {
             } else {
                 "nulang> ".to_string()
             };
-            print!("{}", prompt);
-            let _ = std::io::Write::flush(&mut std::io::stdout());
 
-            let mut line = String::new();
-            match std::io::stdin().read_line(&mut line) {
-                Ok(0) => break, // EOF
-                Ok(_) => {}
+            let line = match editor.readline(&prompt) {
+                Ok(line) => line,
+                Err(ReadlineError::Interrupted) => {
+                    println!("^C");
+                    buffer.clear();
+                    brace_stack.clear();
+                    continue;
+                }
+                Err(ReadlineError::Eof) => {
+                    println!("Goodbye!");
+                    break;
+                }
                 Err(e) => {
                     eprintln!("Error reading input: {}", e);
                     continue;
                 }
-            }
+            };
 
             let trimmed = line.trim();
 
             // REPL commands (only when not in multi-line mode)
             if brace_stack.is_empty() && trimmed.starts_with(':') {
-                // Extract command and rest
+                editor.add_history_entry(&line).ok();
                 let mut parts = trimmed[1..].splitn(2, ' ');
                 let cmd = parts.next().unwrap_or("");
                 let rest = parts.next().unwrap_or("").trim();
@@ -99,7 +172,7 @@ impl Repl {
                     }
                     "bytecode" | "bc" => self.show_bytecode(),
                     "clear" => {
-                        print!("\x1B[2J\x1B[1;1H"); // ANSI clear screen
+                        print!("\x1B[2J\x1B[1;1H");
                         let _ = std::io::Write::flush(&mut std::io::stdout());
                     }
                     "reset" => {
@@ -121,17 +194,18 @@ impl Repl {
             }
 
             buffer.push_str(&line);
+            buffer.push('\n');
 
-            // Use the lexer to track brace/paren/bracket stack — naturally
-            // skips strings and comments.
+            // Use the lexer to track brace/paren/bracket stack.
             brace_stack = Self::brace_stack(&buffer);
             if !brace_stack.is_empty() {
                 continue; // Wait for more input
             }
 
-            // Execute buffered input
+            // Execute buffered input.
             let input = buffer.trim();
             if !input.is_empty() {
+                editor.add_history_entry(input).ok();
                 if let Err(e) = self.evaluate(input) {
                     self.print_error(&e);
                 }
@@ -139,6 +213,7 @@ impl Repl {
             buffer.clear();
         }
 
+        let _ = editor.save_history(".nulang_history");
         println!();
     }
 

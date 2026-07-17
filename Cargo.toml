@@ -34,6 +34,9 @@ serde_json = "1.0"
 # Manifest/lockfile parsing for the `nula` package manager
 toml = "1"
 
+# REPL line editing, history, and completion
+rustyline = { version = "15", default-features = false, features = ["with-file-history"] }
+
 # Cranelift JIT backend
 cranelift = "0.132"
 cranelift-jit = "0.132"
