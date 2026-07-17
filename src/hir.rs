@@ -117,6 +117,10 @@ pub struct ActorDef {
     pub tools: Vec<crate::ai::request::ToolSchema>,
     pub semantic_memory_dimensions: Option<usize>,
     pub procedural_memory_namespace: Option<String>,
+    /// Serialized fallback configuration (JSON `Vec<AgentFallbackEntry>`).
+    pub fallback_config: String,
+    /// Serialized retry configuration (JSON `Option<AgentRetryConfig>`).
+    pub retry_config: String,
     pub span: Span,
 }
 
@@ -579,6 +583,8 @@ mod tests {
             tools: vec![],
             semantic_memory_dimensions: None,
             procedural_memory_namespace: None,
+            fallback_config: String::new(),
+            retry_config: String::new(),
             span: Span::default(),
         };
         assert_eq!(def.name, "a");

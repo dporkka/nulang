@@ -26,7 +26,7 @@ pub use procedural_memory::{Pattern, ProceduralMemory};
 pub use providers::ollama::OllamaClient;
 pub use providers::openai::OpenAiClient;
 pub use request::{LlmMessage, LlmRequest, ModelPricing, ToolSchema};
-pub use response::{LlmResponse, TokenUsage, ToolCall};
+pub use response::{LlmError, LlmErrorKind, LlmResponse, TokenUsage, ToolCall};
 pub use schema::{function_to_tool_schema, type_to_json_schema};
 pub use semantic_memory::{Document, SemanticMemory};
 pub use supervisor::{SupervisorRuntime, SupervisorTeam, Worker};

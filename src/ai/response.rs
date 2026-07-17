@@ -39,6 +39,85 @@ impl TokenUsage {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
+
+/// Classified error kind for LLM provider failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LlmErrorKind {
+    Timeout,
+    RateLimit,
+    AuthError,
+    ProviderError,
+    FormatError,
+    Unknown,
+}
+
+impl std::str::FromStr for LlmErrorKind {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Timeout" => Ok(LlmErrorKind::Timeout),
+            "RateLimit" => Ok(LlmErrorKind::RateLimit),
+            "AuthError" => Ok(LlmErrorKind::AuthError),
+            "ProviderError" => Ok(LlmErrorKind::ProviderError),
+            "FormatError" => Ok(LlmErrorKind::FormatError),
+            "Unknown" => Ok(LlmErrorKind::Unknown),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Structured error returned by LLM provider clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmError {
+    pub kind: LlmErrorKind,
+    pub message: String,
+    /// Retry-After hint in milliseconds, if the provider supplied one.
+    pub retry_after_ms: Option<u64>,
+}
+
+impl LlmError {
+    /// Create a new error with the given kind and message.
+    pub fn new(kind: LlmErrorKind, message: impl Into<String>) -> Self {
+        LlmError {
+            kind,
+            message: message.into(),
+            retry_after_ms: None,
+        }
+    }
+
+    /// Create an `Unknown` error from a plain string (backward compat path).
+    pub fn from_string(message: impl Into<String>) -> Self {
+        LlmError {
+            kind: LlmErrorKind::Unknown,
+            message: message.into(),
+            retry_after_ms: None,
+        }
+    }
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.kind, self.message)
+    }
+}
+
+impl std::error::Error for LlmError {}
+
+impl From<String> for LlmError {
+    fn from(s: String) -> Self {
+        LlmError::from_string(s)
+    }
+}
+
+impl From<&str> for LlmError {
+    fn from(s: &str) -> Self {
+        LlmError::from_string(s)
+    }
+}
 /// A single tool invocation produced by an LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {

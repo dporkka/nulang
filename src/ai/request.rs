@@ -15,6 +15,17 @@ pub struct LlmRequest {
     pub memory: Vec<LlmMessage>,
     /// Optional per-model pricing information for cost estimation.
     pub pricing: Option<ModelPricing>,
+    /// Optional structured-output format for providers that support it.
+    pub response_format: Option<ResponseFormat>,
+}
+
+/// Structured-output format for LLM providers that support it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseFormat {
+    /// Format type: "json_object" or "json_schema".
+    pub format_type: String,
+    /// The JSON schema object (for "json_schema" format).
+    pub json_schema: Option<serde_json::Value>,
 }
 
 /// Pricing rates for a model, expressed as cost per 1k tokens.

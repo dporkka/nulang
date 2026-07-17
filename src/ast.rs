@@ -359,6 +359,31 @@ pub struct AgentProceduralMemoryConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Agent fallback & retry configuration
+// ---------------------------------------------------------------------------
+/// One entry in an agent's fallback pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentFallbackEntry {
+    pub model: String,
+    pub on: Vec<String>,
+    pub max_tokens: Option<usize>,
+}
+
+/// Backoff strategy for agent LLM retries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AgentBackoff {
+    Exponential { initial_ms: u64, factor: f64, max_ms: u64 },
+    Fixed { delay_ms: u64 },
+}
+
+/// Retry configuration for an agent declaration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentRetryConfig {
+    pub max_attempts: u32,
+    pub backoff: AgentBackoff,
+}
+
+// ---------------------------------------------------------------------------
 // Declarations
 // ---------------------------------------------------------------------------
 
@@ -464,7 +489,7 @@ pub enum Decl {
         compensate: Option<Expr>,
         span: Span,
     },
-    /// Agent declaration (v0.9): agent Name = { model: "...", system_prompt: "...", tools: [...], memory: { max_turns: N }, semantic_memory: { dimensions: D }, procedural_memory: { namespace: "..." } }
+    /// Agent declaration (v0.9): agent Name = { model: "...", system_prompt: "...", tools: [...], memory: { max_turns: N }, semantic_memory: { dimensions: D }, procedural_memory: { namespace: "..." }, fallback: [{ model: "...", on: [Timeout, RateLimit], max_tokens: 8192 }], retry: { max_attempts: 3, backoff: Exponential { initial_ms: 200, factor: 2.0, max_ms: 3000 } } }
     Agent {
         name: String,
         model: String,
@@ -474,6 +499,8 @@ pub enum Decl {
         semantic_memory: Option<AgentSemanticMemoryConfig>,
         procedural_memory: Option<AgentProceduralMemoryConfig>,
         pricing: Option<AgentPricing>,
+        fallback: Vec<AgentFallbackEntry>,
+        retry: Option<AgentRetryConfig>,
         span: Span,
     },
     /// Database declaration: database Name { table Name { col: Type, ... } }

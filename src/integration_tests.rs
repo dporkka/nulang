@@ -6878,4 +6878,38 @@ match { a: 2, b: 9 } with {
             result
         );
     }
+
+    // -----------------------------------------------------------------------
+    // LLM fallback & retry pipeline
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_agent_retry_and_fallback_pipeline() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        // Mock: first call rate-limited, second succeeds after fallback.
+        let client = crate::ai::MockLlmClient::sequence_with_errors(vec![
+            Err(crate::ai::LlmError::new(
+                crate::ai::LlmErrorKind::RateLimit,
+                "429 Too Many Requests",
+            )),
+            Ok(crate::ai::LlmResponse {
+                content: Some("recovered via fallback".to_string()),
+                tool_calls: Vec::new(),
+                model: "fallback-model".to_string(),
+                finish_reason: "stop".to_string(),
+                usage: crate::ai::TokenUsage::new(10, 5),
+            }),
+        ]);
+        rt.borrow_mut().set_llm_client(Box::new(client));
+
+        let source = "fn main() { perform LLM.ask(\"hello\") }";
+        let result = run_source_new_with_runtime(source, rt);
+        match result {
+            Ok(_) => { /* agent responded */ }
+            Err(e) => panic!("agent retry test failed: {}", e),
+        }
+    }
 }

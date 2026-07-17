@@ -541,6 +541,12 @@ pub struct ActorMeta {
     /// Compile-time backend selection for this actor.
     #[serde(default)]
     pub backend: crate::ast::ActorBackendKind,
+    /// Serialized fallback pipeline (JSON `Vec<AgentFallbackEntry>`).
+    #[serde(default)]
+    pub fallback_config: String,
+    /// Serialized retry config (JSON `Option<AgentRetryConfig>`).
+    #[serde(default)]
+    pub retry_config: String,
 }
 impl ActorMeta {
     pub fn new(name: impl Into<String>) -> Self {
@@ -556,6 +562,8 @@ impl ActorMeta {
             semantic_memory_dimensions: None,
             procedural_memory_namespace: None,
             backend: crate::ast::ActorBackendKind::default(),
+            fallback_config: String::new(),
+            retry_config: String::new(),
         }
     }
 }

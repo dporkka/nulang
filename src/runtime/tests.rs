@@ -577,6 +577,8 @@ fn dyn_worker_module(default_count: i64) -> crate::bytecode::CodeModule {
         semantic_memory_dimensions: None,
         procedural_memory_namespace: None,
         backend: crate::ast::ActorBackendKind::Native,
+        fallback_config: String::new(),
+        retry_config: String::new(),
     });
     module
 }
@@ -1600,6 +1602,8 @@ fn test_vm_spawn_creates_persistent_actor() {
         semantic_memory_dimensions: None,
         procedural_memory_namespace: None,
         backend: crate::ast::ActorBackendKind::Native,
+        fallback_config: String::new(),
+        retry_config: String::new(),
     });
     module.add_behavior(BehaviorTableEntry {
         name: "Account.get".to_string(),
@@ -1655,6 +1659,8 @@ fn test_vm_spawn_creates_non_persistent_actor() {
         semantic_memory_dimensions: None,
         procedural_memory_namespace: None,
         backend: crate::ast::ActorBackendKind::Native,
+        fallback_config: String::new(),
+        retry_config: String::new(),
     });
     module.add_behavior(BehaviorTableEntry {
         name: "Counter.inc".to_string(),

@@ -142,6 +142,8 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             tools: Vec::new(),
             semantic_memory_dimensions: None,
             procedural_memory_namespace: None,
+            fallback_config: String::new(),
+            retry_config: String::new(),
             span: *span,
         }),
         Decl::TypeAlias {
@@ -253,6 +255,8 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             semantic_memory,
             procedural_memory,
             pricing,
+            fallback,
+            retry,
             span,
         } => desugar_agent(
             name,
@@ -263,6 +267,8 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             semantic_memory,
             procedural_memory,
             pricing,
+            fallback,
+            retry,
             tools,
             *span,
         ),
@@ -327,6 +333,8 @@ fn desugar_agent(
     semantic_memory: &Option<ast::AgentSemanticMemoryConfig>,
     procedural_memory: &Option<ast::AgentProceduralMemoryConfig>,
     pricing: &Option<ast::AgentPricing>,
+    fallback: &[ast::AgentFallbackEntry],
+    retry: &Option<ast::AgentRetryConfig>,
     available_tools: &[ToolSchema],
     span: Span,
 ) -> hir::Decl {
@@ -441,6 +449,40 @@ fn desugar_agent(
             lit_op(Literal::String(json), str_ty.clone()),
         ));
     }
+
+    // Serialize fallback config into a durable JSON string.
+    let fallback_config_json = serde_json::to_string(&fallback)
+        .unwrap_or_else(|_| "[]".to_string());
+    state_fields.push((
+        "fallback_config".to_string(),
+        ast::StateModel::Durable,
+        str_ty.clone(),
+        lit_op(Literal::String(fallback_config_json), str_ty.clone()),
+    ));
+
+    // Serialize retry config into a durable JSON string.
+    let retry_config_json = serde_json::to_string(&retry)
+        .unwrap_or_else(|_| "null".to_string());
+    state_fields.push((
+        "retry_config".to_string(),
+        ast::StateModel::Durable,
+        str_ty.clone(),
+        lit_op(Literal::String(retry_config_json), str_ty.clone()),
+    ));
+
+    // Tracking fields for the retry/fallback state machine.
+    state_fields.push((
+        "llm_attempt".to_string(),
+        ast::StateModel::Durable,
+        int_ty.clone(),
+        lit_op(Literal::Int(0), int_ty.clone()),
+    ));
+    state_fields.push((
+        "llm_fallback_step".to_string(),
+        ast::StateModel::Durable,
+        int_ty.clone(),
+        lit_op(Literal::Int(0), int_ty.clone()),
+    ));
 
     // Generated ask behavior reads agent state and performs the LLM ask.
     let ask_behavior = ast::Behavior {
@@ -559,6 +601,10 @@ fn desugar_agent(
         )));
     }
 
+    // Already serialized above for state fields; reuse for ActorDef metadata.
+    let fallback_config_str = serde_json::to_string(&fallback).unwrap_or_else(|_| "[]".to_string());
+    let retry_config_str = serde_json::to_string(&retry).unwrap_or_else(|_| "null".to_string());
+
     hir::Decl::Actor(hir::ActorDef {
         name: name.to_string(),
         type_params: Vec::new(),
@@ -571,6 +617,8 @@ fn desugar_agent(
         tools: resolved_tools,
         semantic_memory_dimensions,
         procedural_memory_namespace,
+        fallback_config: fallback_config_str,
+        retry_config: retry_config_str,
         span,
     })
 }
@@ -729,6 +777,8 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
         tools: Vec::new(),
         semantic_memory_dimensions: None,
         procedural_memory_namespace: None,
+        fallback_config: String::new(),
+        retry_config: String::new(),
         span,
     })
 }

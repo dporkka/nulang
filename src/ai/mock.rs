@@ -7,14 +7,14 @@ use async_trait::async_trait;
 
 use crate::ai::client::LlmClient;
 use crate::ai::request::LlmRequest;
-use crate::ai::response::{LlmResponse, TokenUsage, ToolCall};
+use crate::ai::response::{LlmError, LlmResponse, TokenUsage, ToolCall};
 
 /// A test client that returns a fixed response, a sequence of responses, or
 /// tool calls, and optionally records the requests it receives.
 #[derive(Debug, Clone)]
 pub struct MockLlmClient {
     response: LlmResponse,
-    responses: Vec<LlmResponse>,
+    responses: Vec<Result<LlmResponse, LlmError>>,
     index: Arc<AtomicUsize>,
     calls: Arc<Mutex<Vec<LlmRequest>>>,
     delay: std::time::Duration,
@@ -22,18 +22,16 @@ pub struct MockLlmClient {
 
 #[async_trait]
 impl LlmClient for MockLlmClient {
-    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, String> {
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(request);
         }
         if !self.delay.is_zero() {
-            // Runs on the caller's thread under `block_on`, so a blocking
-            // sleep is fine here (used to simulate slow providers).
             std::thread::sleep(self.delay);
         }
         let idx = self.index.fetch_add(1, Ordering::SeqCst);
         if idx < self.responses.len() {
-            Ok(self.responses[idx].clone())
+            self.responses[idx].clone()
         } else {
             Ok(self.response.clone())
         }
@@ -104,16 +102,26 @@ impl MockLlmClient {
         })
     }
 
-    /// Create a mock client that returns each response in order.
+    /// Create a mock client that returns each response in order (all Ok).
+    /// The final response repeats when the sequence is exhausted.
     pub fn sequence(responses: Vec<LlmResponse>) -> Self {
+        Self::sequence_with_errors(
+            responses.into_iter().map(Ok).collect()
+        )
+    }
+
+    /// Create a mock client that returns each result (Ok or Err) in order.
+    /// The final result repeats when the sequence is exhausted.
+    pub fn sequence_with_errors(responses: Vec<Result<LlmResponse, LlmError>>) -> Self {
+        let default_response = LlmResponse {
+            content: None,
+            tool_calls: Vec::new(),
+            model: "mock".to_string(),
+            finish_reason: "stop".to_string(),
+            usage: TokenUsage::default(),
+        };
         Self {
-            response: LlmResponse {
-                content: None,
-                tool_calls: Vec::new(),
-                model: "mock".to_string(),
-                finish_reason: "stop".to_string(),
-                usage: TokenUsage::default(),
-            },
+            response: default_response,
             responses,
             index: Arc::new(AtomicUsize::new(0)),
             calls: Arc::new(Mutex::new(Vec::new())),

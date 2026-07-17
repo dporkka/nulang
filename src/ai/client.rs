@@ -3,13 +3,13 @@
 use async_trait::async_trait;
 
 use crate::ai::request::LlmRequest;
-use crate::ai::response::LlmResponse;
+use crate::ai::response::{LlmError, LlmResponse};
 
 /// Async trait implemented by all LLM provider clients.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// Request a chat completion from the provider.
-    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, String>;
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError>;
 }
 
 /// Synchronous wrapper around an async [`LlmClient`].
@@ -20,7 +20,7 @@ pub trait LlmClient: Send + Sync {
 /// request runs on a dedicated scoped worker thread with its own
 /// current-thread runtime, mirroring the non-blocking `nulang-llm` suspend
 /// path in the actor runtime.
-pub fn complete_sync(client: &dyn LlmClient, request: LlmRequest) -> Result<LlmResponse, String> {
+pub fn complete_sync(client: &dyn LlmClient, request: LlmRequest) -> Result<LlmResponse, LlmError> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::scope(|s| {
         std::thread::Builder::new()
@@ -31,12 +31,12 @@ pub fn complete_sync(client: &dyn LlmClient, request: LlmRequest) -> Result<LlmR
                     .build()
                 {
                     Ok(rt) => rt.block_on(client.complete(request)),
-                    Err(e) => Err(e.to_string()),
+                    Err(e) => Err(LlmError::from_string(e.to_string())),
                 };
                 let _ = tx.send(result);
             })
-            .map_err(|e| e.to_string())?;
-        rx.recv().map_err(|e| e.to_string())?
+            .map_err(|e| LlmError::from_string(e.to_string()))?;
+        rx.recv().map_err(|e| LlmError::from_string(e.to_string()))?
     })
 }
 
@@ -66,7 +66,7 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for TestClient {
-        async fn complete(&self, _request: LlmRequest) -> Result<LlmResponse, String> {
+        async fn complete(&self, _request: LlmRequest) -> Result<LlmResponse, LlmError> {
             Ok(LlmResponse {
                 content: Some("test".to_string()),
                 tool_calls: vec![],

@@ -50,7 +50,7 @@ pub use registry::*;
 pub use process_groups::*;
 pub use persistence::*;
 
-use crate::ai::{complete_sync, Debate, LlmClient, LlmMessage, LlmRequest, LlmResponse, Pipeline, PipelineStage, SupervisorTeam};
+use crate::ai::{complete_sync, Debate, LlmClient, LlmError, LlmMessage, LlmRequest, LlmResponse, Pipeline, PipelineStage, SupervisorTeam};
 use crate::types::ExitReason;
 use crate::vm::Value;
 
@@ -199,8 +199,8 @@ pub struct Runtime {
 
     // Channel receiving results from background LLM worker threads, plus the
     // number of calls currently in flight. Drained by run_scheduler.
-    llm_tx: std::sync::mpsc::Sender<(u64, Result<LlmResponse, String>)>,
-    llm_rx: std::sync::mpsc::Receiver<(u64, Result<LlmResponse, String>)>,
+    llm_tx: std::sync::mpsc::Sender<(u64, Result<LlmResponse, LlmError>)>,
+    llm_rx: std::sync::mpsc::Receiver<(u64, Result<LlmResponse, LlmError>)>,
     llm_inflight_count: usize,
 
     // True while executing a scheduler-driven bytecode behavior, enabling
@@ -703,6 +703,7 @@ impl Runtime {
             tools: module.tools.clone(),
             memory: Vec::new(),
             pricing: Some(pricing),
+            response_format: None,
         })
     }
 
@@ -778,6 +779,7 @@ impl Runtime {
             tools: module.tools.clone(),
             memory: Vec::new(),
             pricing: None,
+            response_format: None,
         })
     }
 
@@ -804,12 +806,12 @@ impl Runtime {
         &self,
         mut request: LlmRequest,
         memory: Vec<LlmMessage>,
-    ) -> Result<LlmResponse, String> {
+    ) -> Result<LlmResponse, LlmError> {
         request.memory = memory;
         let client = self
             .llm_client
             .as_ref()
-            .ok_or_else(|| "No LLM client configured".to_string())?;
+            .ok_or_else(|| LlmError::from_string("No LLM client configured"))?;
         complete_sync(client.as_ref(), request)
     }
 
@@ -831,7 +833,7 @@ impl Runtime {
         mut request: LlmRequest,
         memory: Vec<LlmMessage>,
         module: &crate::bytecode::CodeModule,
-    ) -> Result<LlmResponse, String> {
+    ) -> Result<LlmResponse, LlmError> {
         request.tools = module.tools.clone();
         request.memory = memory.clone();
         let response = self.complete_llm_request(request.clone(), memory.clone())?;
@@ -847,7 +849,7 @@ impl Runtime {
         &mut self,
         module: &crate::bytecode::CodeModule,
         mut response: LlmResponse,
-    ) -> Result<LlmResponse, String> {
+    ) -> Result<LlmResponse, LlmError> {
         if !response.tool_calls.is_empty() {
             let mut results = Vec::new();
             for call in &response.tool_calls {
@@ -1289,19 +1291,249 @@ impl Runtime {
     }
 
     /// Record a completed background LLM call on its actor and resume the
-    /// actor's suspended behavior, if any.
-    fn store_llm_completion(&mut self, actor_id: u64, result: Result<LlmResponse, String>) {
+    /// actor's suspended behavior, if any. Errors trigger the retry/fallback
+    /// pipeline when the actor has a configured agent retry or fallback.
+    fn store_llm_completion(&mut self, actor_id: u64, result: Result<LlmResponse, LlmError>) {
         self.llm_inflight_count = self.llm_inflight_count.saturating_sub(1);
-        let should_resume = if let Some(actor) = self.actors.get_mut(&actor_id) {
+        match result {
+            Ok(response) => {
+                if let Some(actor) = self.actors.get_mut(&actor_id) {
+                    actor.llm_inflight = false;
+                    actor.llm_pending_prompt = None;
+                    actor.llm_completed = Some(Ok(response));
+                }
+                if self.actors.get(&actor_id).map(|a| a.suspended_execution.is_some()).unwrap_or(false) {
+                    self.resume_suspended_llm_step(actor_id);
+                }
+            }
+            Err(error) => {
+                self.handle_llm_error(actor_id, error);
+            }
+        }
+    }
+
+    /// Process an LLM error: decide whether to retry, fall back, or fail.
+    fn handle_llm_error(&mut self, actor_id: u64, error: LlmError) {
+        // Only agent actors have retry/fallback config.
+        let is_agent = self.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false);
+        if !is_agent {
+            // Non-agent actors: store the error and resume.
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.llm_inflight = false;
+                actor.llm_pending_prompt = None;
+                actor.llm_completed = Some(Err(error));
+                if actor.suspended_execution.is_some() {
+                    self.resume_suspended_llm_step(actor_id);
+                    return;
+                }
+            }
+            return;
+        }
+
+        // Read retry and fallback config from the actor's state.
+        let (retry_config_json, fallback_config_json, attempt, fallback_step, _model, prompt) = {
+            let actor = match self.actors.get(&actor_id) {
+                Some(a) => a,
+                None => return,
+            };
+            let module = match actor.bytecode_module.as_ref() {
+                Some(m) => m,
+                None => return,
+            };
+            let retry_json = Self::vm_value_to_string(
+                &actor.get_state_field("retry_config").unwrap_or(crate::vm::Value::nil()),
+                Some(module),
+            ).unwrap_or_default();
+            let fallback_json = Self::vm_value_to_string(
+                &actor.get_state_field("fallback_config").unwrap_or(crate::vm::Value::nil()),
+                Some(module),
+            ).unwrap_or_default();
+            let attempt_val = actor.get_state_field("llm_attempt")
+                .and_then(|v| v.as_int())
+                .unwrap_or(0) as u32;
+            let fallback_step_val = actor.get_state_field("llm_fallback_step")
+                .and_then(|v| v.as_int())
+                .unwrap_or(0) as usize;
+            let model_val = Self::vm_value_to_string(
+                &actor.get_state_field("model").unwrap_or(crate::vm::Value::nil()),
+                Some(module),
+            ).unwrap_or_default();
+            let prompt_val = actor.llm_pending_prompt.clone().unwrap_or_default();
+            (retry_json, fallback_json, attempt_val, fallback_step_val, model_val, prompt_val)
+        };
+
+        let retry_config: Option<crate::ast::AgentRetryConfig> =
+            serde_json::from_str(&retry_config_json).ok();
+        let fallback_config: Vec<crate::ast::AgentFallbackEntry> =
+            serde_json::from_str(&fallback_config_json).unwrap_or_default();
+
+        // --- Retry path ---
+        if let Some(ref retry) = retry_config {
+            if attempt < retry.max_attempts {
+                let new_attempt = attempt + 1;
+                // Update llm_attempt in actor state.
+                if let Some(actor) = self.actors.get_mut(&actor_id) {
+                    actor.llm_inflight = false; // will be set true again on re-dispatch
+                    actor.set_state_field("llm_attempt", crate::vm::Value::int(new_attempt as i64));
+                }
+                let delay_ms = compute_backoff(retry, attempt);
+                self.timer_wheel.schedule_llm_retry(
+                    std::time::Duration::from_millis(delay_ms),
+                    actor_id,
+                );
+                return;
+            }
+        }
+
+        // --- Fallback path ---
+        if fallback_step < fallback_config.len() {
+            let error_kind_name = format!("{:?}", error.kind); // "Timeout", "RateLimit", etc.
+            let fb = &fallback_config[fallback_step];
+            let fb_matches = fb.on.is_empty() || fb.on.iter().any(|k| *k == error_kind_name);
+            let new_fallback_step = fallback_step + 1;
+            if fb_matches {
+                // Swap model and apply context pruning if needed.
+                if let Some(actor) = self.actors.get_mut(&actor_id) {
+                    actor.llm_inflight = false;
+                    let model_ptr = actor.allocate_string(&fb.model);
+                    actor.set_state_field("model", model_ptr);
+                    actor.set_state_field("llm_attempt", crate::vm::Value::int(0));
+                    actor.set_state_field(
+                        "llm_fallback_step",
+                        crate::vm::Value::int(new_fallback_step as i64),
+                    );
+                    if let Some(max_tokens) = fb.max_tokens {
+                        self.prune_episodic_memory(actor_id, max_tokens);
+                    }
+                }
+                // Re-dispatch the LLM request with the new model.
+                self.redispatch_llm_request(actor_id, &prompt);
+                return;
+            }
+            // Current fallback entry's `on` list didn't match this error;
+            // advance to the next entry and retry the decision.
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.set_state_field("llm_attempt", crate::vm::Value::int(0));
+                actor.set_state_field(
+                    "llm_fallback_step",
+                    crate::vm::Value::int(new_fallback_step as i64),
+                );
+            }
+            self.handle_llm_error(actor_id, error);
+            return;
+        }
+
+        // --- Terminal: all retries and fallbacks exhausted ---
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.llm_inflight = false;
             actor.llm_pending_prompt = None;
-            actor.llm_completed = Some(result);
-            actor.suspended_execution.is_some()
+            actor.llm_completed = Some(Err(error));
+            if actor.suspended_execution.is_some() {
+                self.resume_suspended_llm_step(actor_id);
+            }
+        }
+    }
+
+    /// Re-dispatch an in-flight LLM request on retry timer fire.
+    fn handle_llm_retry_timer(&mut self, actor_id: u64) {
+        let prompt = self.actors.get(&actor_id)
+            .and_then(|a| a.llm_pending_prompt.clone())
+            .unwrap_or_default();
+        // Clear old pending prompt so re-dispatch doesn't duplicate.
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.llm_pending_prompt = None;
+        }
+        self.redispatch_llm_request(actor_id, &prompt);
+    }
+
+    /// Build and dispatch an LLM request for the actor, marking it in-flight.
+    fn redispatch_llm_request(&mut self, actor_id: u64, prompt: &str) {
+        let is_agent = self.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false);
+        let request = if is_agent {
+            self.build_agent_llm_request(actor_id, prompt)
         } else {
-            false
+            let model = self.actors.get(&actor_id)
+                .and_then(|a| {
+                    let module = a.bytecode_module.as_ref()?;
+                    Self::vm_value_to_string(
+                        &a.get_state_field("model")?,
+                        Some(module),
+                    )
+                })
+                .unwrap_or_default();
+            self.build_actor_llm_request(actor_id, &model, prompt)
         };
-        if should_resume {
-            self.resume_suspended_llm_step(actor_id);
+        let Some(request) = request else {
+            // Build failed: store nil error and resume.
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.llm_completed = Some(Ok(LlmResponse {
+                    content: None,
+                    tool_calls: Vec::new(),
+                    model: String::new(),
+                    finish_reason: "error".to_string(),
+                    usage: Default::default(),
+                }));
+                if actor.suspended_execution.is_some() {
+                    self.resume_suspended_llm_step(actor_id);
+                    return;
+                }
+            }
+            return;
+        };
+        let Some(client) = self.llm_client.clone() else { return };
+        let tx = self.llm_tx.clone();
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.llm_inflight = true;
+            actor.llm_pending_prompt = Some(prompt.to_string());
+        }
+        self.llm_inflight_count += 1;
+        let _ = std::thread::Builder::new()
+            .name("nulang-llm".to_string())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(tokio_rt) => tokio_rt.block_on(client.complete(request)),
+                        Err(e) => Err(LlmError::from_string(e.to_string())),
+                    }
+                }))
+                .unwrap_or_else(|_| Err(LlmError::from_string("LLM worker thread panicked")));
+                let _ = tx.send((actor_id, result));
+            });
+    }
+
+    /// Prune an agent's episodic memory to fit within `max_tokens`, using a
+    /// character-count heuristic (chars / 4). Always preserves the system
+    /// prompt (which lives in its own state field).
+    fn prune_episodic_memory(&mut self, actor_id: u64, max_tokens: usize) {
+        let memory_json = {
+            let actor = match self.actors.get(&actor_id) { Some(a) => a, None => return };
+            let module = match actor.bytecode_module.as_ref() { Some(m) => m, None => return };
+            Self::vm_value_to_string(
+                &actor.get_state_field("episodic_memory").unwrap_or(crate::vm::Value::nil()),
+                Some(module),
+            ).unwrap_or_default()
+        };
+        let mut memory: crate::ai::EpisodicMemory =
+            serde_json::from_str(&memory_json).unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
+
+        let max_chars = max_tokens.saturating_mul(4);
+        let total_chars: usize = memory.turns.iter().map(|t| t.content.len()).sum();
+        while total_chars > max_chars && !memory.turns.is_empty() {
+            // Remove oldest non-system turn.
+            if memory.turns.len() > 1 {
+                memory.turns.remove(0);
+            } else {
+                break;
+            }
+        }
+
+        let updated_json = serde_json::to_string(&memory).unwrap_or_default();
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            let ptr = actor.allocate_string(&updated_json);
+            actor.set_state_field("episodic_memory", ptr);
         }
     }
 
@@ -3099,6 +3331,9 @@ impl Runtime {
                 TimerMessage::ReceiveWaitTimeout => {
                     self.fire_receive_wait_timeout(target_actor);
                 }
+                TimerMessage::LlmRetry => {
+                    self.handle_llm_retry_timer(target_actor);
+                }
             }
         }
     }
@@ -4756,6 +4991,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             tools: Vec::new(),
             memory: Vec::new(),
             pricing: None,
+            response_format: None,
         };
         rt.complete_llm_request(request, Vec::new()).ok()?.content
     }
@@ -5202,10 +5438,10 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                             .build()
                         {
                             Ok(tokio_rt) => tokio_rt.block_on(client.complete(request)),
-                            Err(e) => Err(e.to_string()),
+                            Err(e) => Err(LlmError::from_string(e.to_string())),
                         }
                     }))
-                    .unwrap_or_else(|_| Err("LLM worker thread panicked".to_string()));
+                    .unwrap_or_else(|_| Err(LlmError::from_string("LLM worker thread panicked")));
                     let _ = tx.send((actor_id, result));
                 });
             match spawned {
@@ -5447,6 +5683,23 @@ fn json_to_vm_value(
         serde_json::Value::String(s) => Ok(vm.allocate_string(&s)),
         _ => Err("Unsupported tool argument type".to_string()),
     }
+}
+
+/// Compute the backoff delay in milliseconds for the given retry attempt
+/// (0-indexed). Applies ±25% jitter to avoid thundering-herd.
+fn compute_backoff(config: &crate::ast::AgentRetryConfig, attempt: u32) -> u64 {
+    let base_ms = match &config.backoff {
+        crate::ast::AgentBackoff::Exponential { initial_ms, factor, max_ms } => {
+            let exp = (*factor).powi(attempt as i32);
+            let delay = (*initial_ms as f64 * exp).min(*max_ms as f64);
+            delay as u64
+        }
+        crate::ast::AgentBackoff::Fixed { delay_ms } => *delay_ms,
+    };
+    // ±25% jitter.
+    let jitter = (base_ms as f64 * 0.25) as i64;
+    let jittered = base_ms as i64 + ((base_ms as i64 % (jitter * 2 + 1)) - jitter);
+    jittered.max(0) as u64
 }
 
 impl Default for Runtime {

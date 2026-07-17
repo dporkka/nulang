@@ -42,6 +42,9 @@ pub enum TimerMessage {
     /// timed out and resumes the suspended behavior, which then runs the
     /// after body.
     ReceiveWaitTimeout,
+    /// Retry an LLM call for the target actor. The runtime re-dispatches
+    /// the in-flight request on fire.
+    LlmRetry,
 }
 
 /// A single timer entry in the wheel.
@@ -203,6 +206,27 @@ impl TimerWheel {
             id,
             target_actor,
             message: TimerMessage::ReceiveWaitTimeout,
+            fire_at,
+            cancelled: AtomicBool::new(false),
+        };
+
+        if let Ok(mut timers) = self.timers.write() {
+            timers.push(entry);
+        }
+
+        id
+    }
+
+    /// Schedule an LLM retry for an actor after a delay. On fire the
+    /// runtime re-builds and re-dispatches the in-flight request.
+    pub fn schedule_llm_retry(&self, delay: Duration, target_actor: u64) -> TimerId {
+        let id = TimerId(self.next_id.fetch_add(1, Ordering::SeqCst));
+        let fire_at = Instant::now() + delay;
+
+        let entry = TimerEntry {
+            id,
+            target_actor,
+            message: TimerMessage::LlmRetry,
             fire_at,
             cancelled: AtomicBool::new(false),
         };

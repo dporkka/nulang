@@ -575,6 +575,8 @@ impl Parser {
         self.expect(TokenKind::Assign)?;
         self.expect(TokenKind::LBrace)?;
 
+        let mut fallback: Vec<AgentFallbackEntry> = Vec::new();
+        let mut retry: Option<AgentRetryConfig> = None;
         let mut model: Option<String> = None;
         let mut system_prompt: Option<String> = None;
         let mut tools: Vec<String> = Vec::new();
@@ -754,6 +756,203 @@ impl Parser {
                         output: output_cost.unwrap_or(0.0),
                     });
                 }
+                "fallback" => {
+                    self.expect(TokenKind::LBracket)?;
+                    self.skip_newlines();
+                    while !self.match_token(&TokenKind::RBracket) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.match_token(&TokenKind::RBracket) {
+                            break;
+                        }
+                        self.expect(TokenKind::LBrace)?;
+                        self.skip_newlines();
+                        let mut fb_model: Option<String> = None;
+                        let mut fb_on: Vec<String> = Vec::new();
+                        let mut fb_max_tokens: Option<usize> = None;
+                        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                            self.skip_newlines();
+                            if self.match_token(&TokenKind::RBrace) {
+                                break;
+                            }
+                            let fb_field = self.expect_ident("fallback field name")?;
+                            self.expect(TokenKind::Colon)?;
+                            match fb_field.as_str() {
+                                "model" => {
+                                    fb_model = Some(self.expect_string("fallback model")?);
+                                }
+                                "on" => {
+                                    self.expect(TokenKind::LBracket)?;
+                                    self.skip_newlines();
+                                    while !self.match_token(&TokenKind::RBracket) && !self.is_at_end() {
+                                        self.skip_newlines();
+                                        if self.match_token(&TokenKind::RBracket) {
+                                            break;
+                                        }
+                                        fb_on.push(self.expect_ident("error kind")?);
+                                        self.skip_newlines();
+                                        if !self.consume_if(&TokenKind::Comma) {
+                                            break;
+                                        }
+                                        self.skip_newlines();
+                                    }
+                                    self.expect(TokenKind::RBracket)?;
+                                }
+                                "max_tokens" => {
+                                    let n = self.expect_int("max_tokens")?;
+                                    fb_max_tokens = Some(n as usize);
+                                }
+                                other => {
+                                    return Err(NuError::ParseError {
+                                        msg: format!("Unknown fallback field: {}", other),
+                                        span: self.current_span(),
+                                    });
+                                }
+                            }
+                            self.skip_newlines();
+                            if !self.consume_if(&TokenKind::Comma) {
+                                break;
+                            }
+                            self.skip_newlines();
+                        }
+                        self.expect(TokenKind::RBrace)?;
+                        let model = fb_model.unwrap_or_default();
+                        fallback.push(AgentFallbackEntry {
+                            model,
+                            on: fb_on,
+                            max_tokens: fb_max_tokens,
+                        });
+                        self.skip_newlines();
+                        if !self.consume_if(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RBracket)?;
+                }
+                "retry" => {
+                    self.expect(TokenKind::LBrace)?;
+                    self.skip_newlines();
+                    let mut max_attempts: Option<u32> = None;
+                    let mut backoff: Option<AgentBackoff> = None;
+                    while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.match_token(&TokenKind::RBrace) {
+                            break;
+                        }
+                        let retry_field = self.expect_ident("retry field name")?;
+                        self.expect(TokenKind::Colon)?;
+                        match retry_field.as_str() {
+                            "max_attempts" => {
+                                let n = self.expect_int("max_attempts")?;
+                                max_attempts = Some(n as u32);
+                            }
+                            "backoff" => {
+                                let name = self.expect_ident("backoff strategy")?;
+                                match name.as_str() {
+                                    "Exponential" => {
+                                        self.expect(TokenKind::LBrace)?;
+                                        self.skip_newlines();
+                                        let mut initial_ms: Option<u64> = None;
+                                        let mut factor: Option<f64> = None;
+                                        let mut max_ms: Option<u64> = None;
+                                        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                                            self.skip_newlines();
+                                            if self.match_token(&TokenKind::RBrace) {
+                                                break;
+                                            }
+                                            let bo_field = self.expect_ident("backoff field")?;
+                                            self.expect(TokenKind::Colon)?;
+                                            match bo_field.as_str() {
+                                                "initial_ms" => {
+                                                    initial_ms = Some(self.expect_int("initial_ms")? as u64);
+                                                }
+                                                "factor" => {
+                                                    factor = Some(self.expect_float("factor")?);
+                                                }
+                                                "max_ms" => {
+                                                    max_ms = Some(self.expect_int("max_ms")? as u64);
+                                                }
+                                                other => {
+                                                    return Err(NuError::ParseError {
+                                                        msg: format!("Unknown Exponential backoff field: {}", other),
+                                                        span: self.current_span(),
+                                                    });
+                                                }
+                                            }
+                                            self.skip_newlines();
+                                            if !self.consume_if(&TokenKind::Comma) {
+                                                break;
+                                            }
+                                            self.skip_newlines();
+                                        }
+                                        self.expect(TokenKind::RBrace)?;
+                                        backoff = Some(AgentBackoff::Exponential {
+                                            initial_ms: initial_ms.unwrap_or(200),
+                                            factor: factor.unwrap_or(2.0),
+                                            max_ms: max_ms.unwrap_or(3000),
+                                        });
+                                    }
+                                    "Fixed" => {
+                                        self.expect(TokenKind::LBrace)?;
+                                        self.skip_newlines();
+                                        let mut delay_ms: Option<u64> = None;
+                                        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                                            self.skip_newlines();
+                                            if self.match_token(&TokenKind::RBrace) {
+                                                break;
+                                            }
+                                            let field = self.expect_ident("Fixed backoff field")?;
+                                            self.expect(TokenKind::Colon)?;
+                                            if field == "delay_ms" {
+                                                delay_ms = Some(self.expect_int("delay_ms")? as u64);
+                                            } else {
+                                                return Err(NuError::ParseError {
+                                                    msg: format!("Unknown Fixed backoff field: {}", field),
+                                                    span: self.current_span(),
+                                                });
+                                            }
+                                            self.skip_newlines();
+                                            if !self.consume_if(&TokenKind::Comma) {
+                                                break;
+                                            }
+                                            self.skip_newlines();
+                                        }
+                                        self.expect(TokenKind::RBrace)?;
+                                        backoff = Some(AgentBackoff::Fixed {
+                                            delay_ms: delay_ms.unwrap_or(1000),
+                                        });
+                                    }
+                                    other => {
+                                        return Err(NuError::ParseError {
+                                            msg: format!("Unknown backoff strategy: {}", other),
+                                            span: self.current_span(),
+                                        });
+                                    }
+                                }
+                            }
+                            other => {
+                                return Err(NuError::ParseError {
+                                    msg: format!("Unknown retry field: {}", other),
+                                    span: self.current_span(),
+                                });
+                            }
+                        }
+                        self.skip_newlines();
+                        if !self.consume_if(&TokenKind::Comma) {
+                            break;
+                        }
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                    retry = Some(AgentRetryConfig {
+                        max_attempts: max_attempts.unwrap_or(3),
+                        backoff: backoff.unwrap_or(AgentBackoff::Exponential {
+                            initial_ms: 200,
+                            factor: 2.0,
+                            max_ms: 3000,
+                        }),
+                    });
+                }
                 other => {
                     return Err(NuError::ParseError {
                         msg: format!("Unknown agent field: {}", other),
@@ -783,6 +982,8 @@ impl Parser {
             semantic_memory,
             procedural_memory,
             pricing,
+            fallback,
+            retry,
             span,
         })
     }

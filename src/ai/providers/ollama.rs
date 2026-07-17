@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::client::LlmClient;
 use crate::ai::request::{LlmMessage, LlmRequest, ToolSchema};
-use crate::ai::response::{LlmResponse, TokenUsage, ToolCall};
+use crate::ai::response::{LlmError, LlmErrorKind, LlmResponse, TokenUsage, ToolCall};
 
 /// Client for the Ollama HTTP API.
 #[derive(Debug, Clone)]
@@ -17,7 +17,7 @@ pub struct OllamaClient {
 
 #[async_trait]
 impl LlmClient for OllamaClient {
-    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, String> {
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         let url = format!("{}/api/chat", self.base_url);
         let model = if request.model.is_empty() {
             self.model.clone()
@@ -39,10 +39,25 @@ impl LlmClient for OllamaClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| e.to_string())?
-            .json::<OllamaChatResponse>()
+            .map_err(|e| LlmError::new(LlmErrorKind::ProviderError, format!("Ollama request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let status_text = response.text().await.unwrap_or_default();
+            let msg = format!("Ollama HTTP {}: {}", status, status_text);
+            return Err(match status.as_u16() {
+                408 => LlmError::new(LlmErrorKind::Timeout, msg),
+                429 => LlmError::new(LlmErrorKind::RateLimit, msg),
+                401 | 403 => LlmError::new(LlmErrorKind::AuthError, msg),
+                s if s >= 500 => LlmError::new(LlmErrorKind::ProviderError, msg),
+                _ => LlmError::new(LlmErrorKind::Unknown, msg),
+            });
+        }
+
+        let response: OllamaChatResponse = response
+            .json()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| LlmError::new(LlmErrorKind::FormatError, format!("Ollama response parse failed: {}", e)))?;
 
         let message = response.message;
         let content = if message.content.is_empty() {

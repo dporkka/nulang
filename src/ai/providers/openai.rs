@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::client::LlmClient;
 use crate::ai::request::{LlmMessage, LlmRequest, ToolSchema};
-use crate::ai::response::{LlmResponse, TokenUsage, ToolCall};
+use crate::ai::response::{LlmError, LlmErrorKind, LlmResponse, TokenUsage, ToolCall};
 
 /// Client for the OpenAI chat completions API.
 #[derive(Debug, Clone)]
@@ -21,7 +21,7 @@ pub struct OpenAiClient {
 
 #[async_trait]
 impl LlmClient for OpenAiClient {
-    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, String> {
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let model = if request.model.is_empty() {
             self.model.clone()
@@ -54,16 +54,24 @@ impl LlmClient for OpenAiClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("OpenAI request failed: {}", e))?
-            .json::<OpenAiChatResponse>()
+            .map_err(|e| classify_reqwest_error(e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let status_text = response.text().await.unwrap_or_default();
+            return Err(classify_http_error(status.as_u16(), &status_text));
+        }
+
+        let response: OpenAiChatResponse = response
+            .json()
             .await
-            .map_err(|e| format!("OpenAI response parse failed: {}", e))?;
+            .map_err(|e| LlmError::new(LlmErrorKind::FormatError, format!("OpenAI response parse failed: {}", e)))?;
 
         let choice = response
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| "OpenAI response contained no choices".to_string())?;
+            .ok_or_else(|| LlmError::new(LlmErrorKind::FormatError, "OpenAI response contained no choices"))?;
 
         let message = choice.message;
         let content = if message
@@ -104,6 +112,32 @@ impl LlmClient for OpenAiClient {
             finish_reason: choice.finish_reason.unwrap_or_default(),
             usage: TokenUsage::new(usage.prompt_tokens, usage.completion_tokens),
         })
+    }
+}
+
+// -- Error classification helpers -------------------------------------------
+
+/// Classify a `reqwest::Error` into an `LlmError`. Timeout → Timeout,
+/// everything else → ProviderError with the error text.
+fn classify_reqwest_error(e: reqwest::Error) -> LlmError {
+    if e.is_timeout() {
+        LlmError::new(LlmErrorKind::Timeout, format!("OpenAI request timed out: {}", e))
+    } else if e.is_connect() {
+        LlmError::new(LlmErrorKind::ProviderError, format!("OpenAI connection failed: {}", e))
+    } else {
+        LlmError::new(LlmErrorKind::ProviderError, format!("OpenAI request failed: {}", e))
+    }
+}
+
+/// Classify an HTTP error status into an `LlmError`.
+fn classify_http_error(status: u16, body: &str) -> LlmError {
+    let msg = format!("OpenAI HTTP {}: {}", status, body);
+    match status {
+        408 => LlmError::new(LlmErrorKind::Timeout, msg),
+        429 => LlmError::new(LlmErrorKind::RateLimit, msg),
+        401 | 403 => LlmError::new(LlmErrorKind::AuthError, msg),
+        s if s >= 500 => LlmError::new(LlmErrorKind::ProviderError, msg),
+        _ => LlmError::new(LlmErrorKind::Unknown, msg),
     }
 }
 
