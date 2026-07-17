@@ -47,10 +47,14 @@ impl Repl {
         println!("Type :help for commands, :quit to exit\n");
 
         let mut buffer = String::new();
-        let mut depth: i32 = 0; // Brace/paren/bracket nesting depth
+        let mut brace_stack: Vec<char> = Vec::new();
 
         loop {
-            let prompt = if depth > 0 { "... " } else { "nulang> " };
+            let prompt = if let Some(&c) = brace_stack.last() {
+                format!("... {} ", c)
+            } else {
+                "nulang> ".to_string()
+            };
             print!("{}", prompt);
             let _ = std::io::Write::flush(&mut std::io::stdout());
 
@@ -67,7 +71,7 @@ impl Repl {
             let trimmed = line.trim();
 
             // REPL commands (only when not in multi-line mode)
-            if depth == 0 && trimmed.starts_with(':') {
+            if brace_stack.is_empty() && trimmed.starts_with(':') {
                 // Extract command and rest
                 let mut parts = trimmed[1..].splitn(2, ' ');
                 let cmd = parts.next().unwrap_or("");
@@ -118,9 +122,10 @@ impl Repl {
 
             buffer.push_str(&line);
 
-            // Use the lexer to count brace depth — naturally skips strings and comments.
-            depth = Self::brace_depth(&buffer);
-            if depth > 0 {
+            // Use the lexer to track brace/paren/bracket stack — naturally
+            // skips strings and comments.
+            brace_stack = Self::brace_stack(&buffer);
+            if !brace_stack.is_empty() {
                 continue; // Wait for more input
             }
 
@@ -340,27 +345,36 @@ impl Repl {
         self.last_bytecode.as_deref()
     }
 
-    /// Count net brace/paren/bracket depth using the lexer, which
-    /// naturally skips strings and comments. Returns the total
-    /// unmatched opener count across all three pair types.
-    fn brace_depth(source: &str) -> i32 {
+    /// Track unmatched brace/paren/bracket openers using the lexer, which
+    /// naturally skips strings and comments. Returns the stack of still-open
+    /// delimiter characters (most recent last). Mismatched closers are
+    /// dropped rather than tracked — the parser will report the error.
+    fn brace_stack(source: &str) -> Vec<char> {
         let mut lexer = Lexer::new(source);
         let tokens = match lexer.lex() {
             Ok(ts) => ts,
-            Err(_) => return 0, // Lex error → treat as "done", let parser report it
+            Err(_) => return Vec::new(), // Lex error → treat as "done"
         };
-        let mut depth: i32 = 0;
+        let mut stack: Vec<char> = Vec::new();
         use crate::lexer::TokenKind;
         for tok in &tokens {
             match tok.kind {
-                TokenKind::LBrace | TokenKind::LParen | TokenKind::LBracket => depth += 1,
-                TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket => {
-                    depth = (depth - 1).max(0);
+                TokenKind::LParen => stack.push('('),
+                TokenKind::LBrace => stack.push('{'),
+                TokenKind::LBracket => stack.push('['),
+                TokenKind::RParen => {
+                    if stack.last() == Some(&'(') { stack.pop(); }
+                }
+                TokenKind::RBrace => {
+                    if stack.last() == Some(&'{') { stack.pop(); }
+                }
+                TokenKind::RBracket => {
+                    if stack.last() == Some(&'[') { stack.pop(); }
                 }
                 _ => {}
             }
         }
-        depth
+        stack
     }
 }
 

@@ -811,7 +811,7 @@ impl EffectChecker {
                 .effects()
                 .iter()
                 .filter(|e| !allowed.contains(e))
-                .map(|e| format!("{:?}", e))
+                .map(|e| format!("{}", e))
                 .collect();
             let span = expr_span(expr);
             let msg = if offending.is_empty() {
@@ -1388,12 +1388,12 @@ impl CapabilityAnalyzer {
                     if !arg_cap.is_sendable() {
                         let span = expr_span(arg);
                         self.diagnostics.push(format!(
-                            "send argument with capability {:?} is not sendable",
+                            "send argument with capability {} is not sendable",
                             arg_cap
                         ));
                         return Err(NuError::CapError {
                             msg: format!(
-                                "send argument must be sendable (iso, val, or tag), got {:?}",
+                                "send argument must be sendable (iso, val, or tag), got {}",
                                 arg_cap
                             ),
                             span,
@@ -1511,7 +1511,7 @@ impl CapabilityAnalyzer {
                 if inner_cap.is_linear() && !matches!(cap, Capability::LinearIso | Capability::Iso)
                 {
                     let msg = format!(
-                        "cannot downgrade linear capability LinearIso to {:?}",
+                        "cannot downgrade linear capability LinearIso to {}",
                         cap
                     );
                     self.diagnostics.push(msg.clone());
@@ -1581,7 +1581,7 @@ impl CapabilityAnalyzer {
         if sub.is_subtype_of(sup) {
             Ok(())
         } else {
-            let msg = format!("capability {:?} is not a subtype of {:?}", sub, sup);
+            let msg = format!("capability {} is not a subtype of {}", sub, sup);
             self.diagnostics.push(msg.clone());
             Err(NuError::CapError { msg, span })
         }
@@ -1595,7 +1595,7 @@ impl CapabilityAnalyzer {
             Ok(())
         } else {
             let msg = format!(
-                "capability {:?} is not sendable (must be iso, val, or tag)",
+                "capability {} is not sendable (must be iso, val, or tag)",
                 cap
             );
             self.diagnostics.push(msg.clone());
@@ -1663,11 +1663,7 @@ fn expr_span(expr: &Expr) -> Span {
 
 /// Format an effect row for diagnostic messages.
 fn format_row(row: &EffectRow) -> String {
-    let effs: Vec<String> = row.effects().iter().map(|e| format!("{:?}", e)).collect();
-    match row {
-        EffectRow::Closed(_) => format!("{{{}}}", effs.join(", ")),
-        EffectRow::Open(_, r) => format!("{{{}, |p{}}}", effs.join(", "), r.0),
-    }
+    format!("{}", row)
 }
 
 /// Add pattern-bound variables to the capability context with a given

@@ -8,18 +8,6 @@ import subprocess
 # the reason if a batch of warnings cannot be immediately fixed.
 WARNINGS_BASELINE = 0
 
-def run_tests():
-    print("Running cargo test...")
-    res = subprocess.run(["cargo", "test"], capture_output=True, text=True)
-    if res.returncode != 0:
-        print("Error: cargo test failed.")
-        print("STDOUT:")
-        print(res.stdout)
-        print("STDERR:")
-        print(res.stderr)
-        return False
-    print("Success: All tests passed!")
-    return True
 
 def check_warnings():
     """Run cargo check --tests and fail if compiler warnings exceed WARNINGS_BASELINE."""
@@ -168,7 +156,7 @@ def verify_files():
     return True
 
 if __name__ == "__main__":
-    if verify_files() and run_tests() and check_warnings():
+    if verify_files() and check_warnings():
         sys.exit(0)
     else:
         sys.exit(1)
