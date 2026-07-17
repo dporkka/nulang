@@ -111,7 +111,10 @@ impl Repl {
         let mut editor = Editor::<ReplHelper, DefaultHistory>::new()
             .expect("Failed to create REPL editor");
         editor.set_helper(Some(ReplHelper::new()));
-        let _ = editor.load_history(".nulang_history");
+        let history_path = std::env::var("HOME")
+            .map(|h| format!("{}/.nulang_history", h))
+            .unwrap_or_else(|_| ".nulang_history".to_string());
+        let _ = editor.load_history(&history_path);
 
         let mut buffer = String::new();
         let mut brace_stack: Vec<char> = Vec::new();
@@ -213,7 +216,7 @@ impl Repl {
             buffer.clear();
         }
 
-        let _ = editor.save_history(".nulang_history");
+        let _ = editor.save_history(&history_path);
         println!();
     }
 

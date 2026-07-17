@@ -86,7 +86,8 @@ async fn main() {
                     opts.backend = args[i + 1].clone();
                     i += 1;
                 } else {
-                    eprintln!("Error: --backend requires an argument (bytecode | wasm | wasm-run | wasm-aot)");
+                    eprintln!("Error: --backend requires an argument (bytecode | native{})",
+                        if cfg!(feature = "wasm-backend") { " | wasm | wasm-run | wasm-aot" } else { "" });
                     std::process::exit(1);
                 }
             }
@@ -461,7 +462,7 @@ fn run_source(source: &str, verbose: bool, backend: &str, out_file: Option<&str>
             }
             return Ok(());
         }
-        _ => {
+        "bytecode" => {
             // Bytecode backend (default).
             let m = compile_with_new_pipeline(&ast, "main")?;
             if verbose {
@@ -487,6 +488,13 @@ fn run_source(source: &str, verbose: bool, backend: &str, out_file: Option<&str>
                 println!("{}", result_str);
             }
             Ok(())
+        }
+        _ => {
+            return Err(nulang::types::NuError::VMError(
+                format!("unknown backend '{}' (expected bytecode | native{})",
+                    backend,
+                    if cfg!(feature = "wasm-backend") { " | wasm | wasm-run | wasm-aot" } else { "" }),
+            ));
         }
     }
 }
