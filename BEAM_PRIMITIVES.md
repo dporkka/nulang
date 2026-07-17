@@ -48,7 +48,7 @@ The BEAM (Bogdan/Bjorn's Erlang Abstract Machine) and OTP (Open Telecom Platform
 | `kill` (reason) | **IMPLEMENTED (with caveat)** | `ExitReason::Kill` via `Runtime::kill_actor` | Documented as untrappable in `src/types.rs`, but `handle_actor_exit` treats it like any abnormal reason — a `trap_exits` actor currently converts it to a message. The `Killed` variant is defined but never constructed. |
 | `normal` (reason) | **IMPLEMENTED** | `ExitReason::Normal` | Normal termination, no link propagation, no supervisor restart for `Transient` children. |
 | `process_flag(trap_exit, true)` | **IMPLEMENTED (runtime API)** | `Actor.trap_exits` field | Convert exit signals to `System`-priority messages. Honored in `Runtime::handle_actor_exit`; settable only from Rust (no language builtin). |
-| `process_flag(priority, Level)` | **ADOPT — NOT IMPLEMENTED** | `actor.set_priority(Level)` | `high`, `normal`, `low`. Bound to scheduler. No actor priority field exists; `MessagePriority` (System/Normal/Bulk) is message-level only and does not affect scheduling. |
+| `process_flag(priority, Level)` | **IMPLEMENTED (see §17.5 item 7)** | `perform Actor.set_priority(0\|1\|2)` | Actor priority field exists since v0.13; scheduler drains High → Normal → Low (FIFO within level). `MessagePriority` is stored on messages but not consulted by the mailbox. See erratum in §17.5 item 7. |
 
 **Design Note:** `ExitReason` is implemented in `src/types.rs` as:
 

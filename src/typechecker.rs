@@ -205,7 +205,7 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             if c1 != c2 {
                 return Err(NuError::TypeError {
                     msg: format!(
-                        "Cannot unify functions with different capabilities: {:?} vs {:?}",
+                        "Cannot unify functions with different capabilities: {} vs {}",
                         c1, c2
                     ),
                     span,
@@ -215,7 +215,7 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             if !effect_row_compatible(e1, e2) {
                 return Err(NuError::TypeError {
                     msg: format!(
-                        "Cannot unify functions with incompatible effects: {:?} vs {:?}",
+                        "Cannot unify functions with incompatible effects: {} vs {}",
                         e1, e2
                     ),
                     span,

@@ -195,7 +195,7 @@ impl Parser {
                 span: self.current_span(),
             }),
             other => Err(NuError::ParseError {
-                msg: format!("Unexpected token in declaration: {:?}", other),
+                msg: format!("Unexpected token in declaration: {}", other),
                 span: self.current_span(),
             }),
         }
@@ -216,7 +216,7 @@ impl Parser {
                 }
                 other => {
                     return Err(NuError::ParseError {
-                        msg: format!("Expected annotation name, found {:?}", other),
+                        msg: format!("Expected annotation name, found {}", other),
                         span: self.current_span(),
                     });
                 }
@@ -375,7 +375,7 @@ impl Parser {
                 _ => {
                     return Err(NuError::ParseError {
                         msg: format!(
-                            "Expected 'state', 'behavior', or 'initial' in actor body, got {:?}",
+                            "Expected 'state', 'behavior', or 'initial' in actor body, got {}",
                             self.peek_kind()
                         ),
                         span: self.current_span(),
@@ -487,7 +487,7 @@ impl Parser {
                 _ => {
                     return Err(NuError::ParseError {
                         msg: format!(
-                            "Expected 'state', 'event', 'on_entry', or 'on_exit' in state_machine body, got {:?}",
+                            "Expected 'state', 'event', 'on_entry', or 'on_exit' in state_machine body, got {}",
                             self.peek_kind()
                         ),
                         span: self.current_span(),
@@ -1113,7 +1113,7 @@ impl Parser {
                 _ => {
                     return Err(NuError::ParseError {
                         msg: format!(
-                            "Expected 'step', 'parallel', or 'compensate' in workflow body, got {:?}",
+                            "Expected 'step', 'parallel', or 'compensate' in workflow body, got {}",
                             self.peek_kind()
                         ),
                         span: self.current_span(),
@@ -1626,7 +1626,7 @@ impl Parser {
                     TokenKind::SelfKw => self.parse_self_ref(),
 
                     _ => Err(NuError::ParseError {
-                        msg: format!("Unexpected token in expression: {:?}", kind),
+                        msg: format!("Unexpected token in expression: {}", kind),
                         span,
                     }),
                 }
@@ -1891,7 +1891,7 @@ impl Parser {
                 s
             }
             _ => return Err(NuError::ParseError {
-                msg: format!("Expected actor name in spawn, got {:?}", self.peek_kind()),
+                msg: format!("Expected actor name in spawn, got {}", self.peek_kind()),
                 span: self.current_span(),
             }),
         };
@@ -2107,7 +2107,7 @@ impl Parser {
             Ok(self.advance())
         } else {
             Err(NuError::ParseError {
-                msg: format!("Expected {:?}", kind),
+                msg: format!("Expected {}", kind),
                 span: self.current_span(),
             })
         }
@@ -2122,7 +2122,7 @@ impl Parser {
                 Ok(s)
             }
             _ => Err(NuError::ParseError {
-                msg: format!("Expected {}, found {:?}", msg, current_kind),
+                msg: format!("Expected {}, found {}", msg, current_kind),
                 span: self.current_span(),
             }),
         }
@@ -2137,7 +2137,7 @@ impl Parser {
                 Ok(s)
             }
             _ => Err(NuError::ParseError {
-                msg: format!("Expected {}, found {:?}", msg, current_kind),
+                msg: format!("Expected {}, found {}", msg, current_kind),
                 span: self.current_span(),
             }),
         }
@@ -2152,7 +2152,7 @@ impl Parser {
                 Ok(n)
             }
             _ => Err(NuError::ParseError {
-                msg: format!("Expected integer {}, found {:?}", msg, current_kind),
+                msg: format!("Expected integer {}, found {}", msg, current_kind),
                 span: self.current_span(),
             }),
         }
@@ -2167,7 +2167,7 @@ impl Parser {
                 Ok(f)
             }
             _ => Err(NuError::ParseError {
-                msg: format!("Expected float {}, found {:?}", msg, current_kind),
+                msg: format!("Expected float {}, found {}", msg, current_kind),
                 span: self.current_span(),
             }),
         }
@@ -2556,7 +2556,7 @@ impl Parser {
                 })
             }
             _ => Err(NuError::ParseError {
-                msg: format!("Expected type, found {:?}", current_kind),
+                msg: format!("Expected type, found {}", current_kind),
                 span: self.current_span(),
             }),
         }
@@ -2783,7 +2783,7 @@ impl Parser {
             }
             _ => Err(NuError::ParseError {
                 msg: format!(
-                    "Expected capability (iso, trn, ref, val, box, tag, lineariso), found {:?}",
+                    "Expected capability (iso, trn, ref, val, box, tag, lineariso), found {}",
                     current_kind
                 ),
                 span: self.current_span(),
@@ -2949,7 +2949,7 @@ impl Parser {
                 Ok(Pattern::Lit(Literal::Unit))
             }
             _ => Err(NuError::ParseError {
-                msg: format!("Expected pattern, found {:?}", current_kind),
+                msg: format!("Expected pattern, found {}", current_kind),
                 span: self.current_span(),
             }),
         }
@@ -3721,7 +3721,7 @@ mod tests {
         assert!(result.is_err(), "Expected parse error for 'module Foo'");
         let msg = format!("{}", result.unwrap_err());
         assert!(
-            msg.contains("LBrace"),
+            msg.contains("{") || msg.contains("brace"),
             "Error should mention the missing brace, got: {}",
             msg
         );

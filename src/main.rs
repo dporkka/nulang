@@ -44,7 +44,7 @@ async fn main() {
     if args[1] == "nula" {
         if let Err(e) = nulang::package::commands::run(&args[2..]) {
             print_error(&e);
-            std::process::exit(1);
+            std::process::exit(exit_code(&e));
         }
         return;
     }
@@ -90,6 +90,15 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+            "--out" => {
+                if i + 1 < args.len() {
+                    opts.out_file = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --out requires a file path argument");
+                    std::process::exit(1);
+                }
+            }
             "-v" | "--verbose" => opts.verbose = true,
             "-h" | "--help" => {
                 print_help();
@@ -117,7 +126,7 @@ async fn main() {
             Ok(path) => println!("Wrote {}", path.display()),
             Err(e) => {
                 print_error(&e);
-                std::process::exit(1);
+                std::process::exit(exit_code(&e));
             }
         }
         return;
@@ -143,9 +152,9 @@ async fn main() {
     }
 
     if let Some(code) = opts.eval_code {
-        if let Err(e) = run_source(&code, opts.verbose, &opts.backend) {
+        if let Err(e) = run_source(&code, opts.verbose, &opts.backend, opts.out_file.as_deref()) {
             print_error(&e);
-            std::process::exit(1);
+            std::process::exit(exit_code(&e));
         }
         return;
     }
@@ -160,7 +169,7 @@ async fn main() {
         };
         if let Err(e) = check_source(&source, opts.verbose) {
             print_error(&e);
-            std::process::exit(1);
+            std::process::exit(exit_code(&e));
         }
         println!("Type check passed.");
         return;
@@ -176,9 +185,9 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) = run_source(&source, opts.verbose, &opts.backend) {
+        if let Err(e) = run_source(&source, opts.verbose, &opts.backend, opts.out_file.as_deref()) {
             print_error(&e);
-            std::process::exit(1);
+            std::process::exit(exit_code(&e));
         }
         return;
     }
@@ -196,6 +205,7 @@ struct Options {
     doc: bool,
     verbose: bool,
     backend: String,
+    out_file: Option<String>,
 }
 
 impl Default for Options {
@@ -208,6 +218,7 @@ impl Default for Options {
             doc: false,
             verbose: false,
             backend: "bytecode".to_string(),
+            out_file: None,
         }
     }
 }
@@ -227,7 +238,14 @@ fn print_help() {
     println!("  -c, --check      Type-check a file (don't run)");
     println!("  --doc            Generate Markdown API docs (docs/api.md)");
     println!("  --lsp            Start Language Server (stdio)");
-    println!("  --backend <b>    Backend: bytecode (default) | native | wasm | wasm-run | wasm-aot");
+    print!("  --backend <b>    Backend: bytecode (default) | native");
+    if cfg!(feature = "wasm-backend") {
+        print!(" | wasm | wasm-run | wasm-aot");
+    }
+    println!();
+    if cfg!(feature = "wasm-backend") {
+        println!("  --out <file>     Output file for WASM backends (default: out.wasm)");
+    }
     println!("  nula <cmd>       Package manager (new, build, test, run)");
     println!("  --version, -V    Print version and exit");
     println!("  -v, --verbose    Show bytecode and AST");
@@ -238,22 +256,34 @@ fn print_error(err: &NuError) {
     eprintln!("Error: {}", err);
 }
 
+/// Map each error kind to a distinct exit code so tooling can
+/// discriminate between syntax, type, runtime, and system errors.
+fn exit_code(err: &NuError) -> i32 {
+    match err {
+        NuError::LexError { .. } => 2,
+        NuError::ParseError { .. } => 3,
+        NuError::TypeError { .. } => 4,
+        NuError::EffectError { .. } => 5,
+        NuError::CapError { .. } => 6,
+        NuError::FFIError { .. } => 7,
+        NuError::NotYetImplemented { .. } => 8,
+        NuError::RuntimeError(_) => 9,
+        NuError::VMError(_) => 10,
+        NuError::PythonError(_) => 11,
+        NuError::PackageError(_) => 12,
+    }
+}
+
 /// Shared frontend: lex -> parse -> typecheck -> effect check -> capability
 /// analysis. Returns the parsed module ready for compilation.
 fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule> {
     // 1. Lex
     let mut lexer = Lexer::new(source);
-    let tokens = lexer.lex().map_err(|e| {
-        eprintln!("Lex error: {}", e);
-        e
-    })?;
+    let tokens = lexer.lex()?;
 
     // 2. Parse
     let mut parser = Parser::new(tokens);
-    let ast = parser.parse_module().map_err(|e| {
-        eprintln!("Parse error: {}", e);
-        e
-    })?;
+    let ast = parser.parse_module()?;
 
     if verbose {
         println!("=== AST ===");
@@ -263,10 +293,7 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
 
     // 3. Type check
     let mut type_checker = TypeChecker::new();
-    let module_type = type_checker.check_module(&ast).map_err(|e| {
-        eprintln!("Type error: {}", e);
-        e
-    })?;
+    let module_type = type_checker.check_module(&ast)?;
 
     if verbose {
         println!("=== Inferred Type ===");
@@ -282,26 +309,16 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
     let flat_decls = nulang::effect_checker::flatten_decls(&ast.decls);
     let mut effect_checker = EffectChecker::new();
     effect_checker
-        .register_function_rows(&flat_decls)
-        .map_err(|e| {
-            eprintln!("Effect error: {}", e);
-            e
-        })?;
+        .register_function_rows(&flat_decls)?;
     for decl in &flat_decls {
-        effect_checker.check_decl(decl).map_err(|e| {
-            eprintln!("Effect error: {}", e);
-            e
-        })?;
+        effect_checker.check_decl(decl)?;
     }
 
     // 5. Capability analysis over the same body set.
     let mut cap_analyzer = CapabilityAnalyzer::new();
     let cap_ctx = CapContext::new();
     let cap_body = |analyzer: &mut CapabilityAnalyzer, body: &nulang::ast::Expr| -> NuResult<()> {
-        analyzer.infer_cap(&cap_ctx, body).map(|_| ()).map_err(|e| {
-            eprintln!("Capability error: {}", e);
-            e
-        })
+        analyzer.infer_cap(&cap_ctx, body).map(|_| ()).map_err(|e| e)
     };
     for decl in flat_decls.iter().copied() {
         match decl {
@@ -350,13 +367,14 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
     Ok(ast)
 }
 
-/// Full pipeline: parse -> typecheck -> effect check -> compile -> execute.
-fn run_source(source: &str, verbose: bool, backend: &str) -> NuResult<()> {
+#[allow(unused_variables)]
+fn run_source(source: &str, verbose: bool, backend: &str, out_file: Option<&str>) -> NuResult<()> {
     let ast = run_frontend(source, verbose)?;
 
     match backend {
         #[cfg(feature = "wasm-backend")]
         "wasm" => {
+            let wasm_file = out_file.unwrap_or("out.wasm");
             let hir = nulang::hir_lower::lower_module(&ast);
             let mir = nulang::mir_lower::lower_module(&hir)?;
             let mut wasm_backend = nulang::mir_wasm::WasmBackend::new();
@@ -364,15 +382,15 @@ fn run_source(source: &str, verbose: bool, backend: &str) -> NuResult<()> {
             if verbose {
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
             }
-            // Write .wasm file.
-            std::fs::write("out.wasm", &wasm_bytes).map_err(|e| {
-                nulang::types::NuError::VMError(format!("failed to write out.wasm: {}", e))
+            std::fs::write(wasm_file, &wasm_bytes).map_err(|e| {
+                nulang::types::NuError::VMError(format!("failed to write {}: {}", wasm_file, e))
             })?;
-            println!("Wrote out.wasm ({} bytes)", wasm_bytes.len());
+            println!("Wrote {} ({} bytes)", wasm_file, wasm_bytes.len());
             return Ok(());
         }
         #[cfg(feature = "wasm-backend")]
         "wasm-run" => {
+            let wasm_file = out_file.unwrap_or("out.wasm");
             let hir = nulang::hir_lower::lower_module(&ast);
             let mir = nulang::mir_lower::lower_module(&hir)?;
             let mut wasm_backend = nulang::mir_wasm::WasmBackend::new();
@@ -380,9 +398,8 @@ fn run_source(source: &str, verbose: bool, backend: &str) -> NuResult<()> {
             if verbose {
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
             }
-            // Write .wasm file for debugging, then run via Wasmtime.
-            std::fs::write("out.wasm", &wasm_bytes).map_err(|e| {
-                nulang::types::NuError::VMError(format!("failed to write out.wasm: {}", e))
+            std::fs::write(wasm_file, &wasm_bytes).map_err(|e| {
+                nulang::types::NuError::VMError(format!("failed to write {}: {}", wasm_file, e))
             })?;
             let mut runtime = nulang::wasm_runtime::WasmRuntime::new(&wasm_bytes, None)?;
             runtime.run()?;
@@ -390,6 +407,13 @@ fn run_source(source: &str, verbose: bool, backend: &str) -> NuResult<()> {
         }
         #[cfg(feature = "wasm-backend")]
         "wasm-aot" => {
+            let wasm_file = out_file.unwrap_or("out.wasm");
+            let cwasm_file = wasm_file.replace(".wasm", ".cwasm");
+            let cwasm_file = if cwasm_file == wasm_file.as_ref() {
+                format!("{}.cwasm", wasm_file)
+            } else {
+                cwasm_file
+            };
             let hir = nulang::hir_lower::lower_module(&ast);
             let mir = nulang::mir_lower::lower_module(&hir)?;
             let mut wasm_backend = nulang::mir_wasm::WasmBackend::new();
@@ -397,12 +421,12 @@ fn run_source(source: &str, verbose: bool, backend: &str) -> NuResult<()> {
             if verbose {
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
             }
-            std::fs::write("out.wasm", &wasm_bytes).map_err(|e| {
-                nulang::types::NuError::VMError(format!("failed to write out.wasm: {}", e))
+            std::fs::write(&wasm_file, &wasm_bytes).map_err(|e| {
+                nulang::types::NuError::VMError(format!("failed to write {}: {}", wasm_file, e))
             })?;
-            println!("Wrote out.wasm ({} bytes)", wasm_bytes.len());
-            nulang::wasm_runtime::aot_compile("out.wasm", "out.cwasm")?;
-            println!("Wrote out.cwasm (precompiled)");
+            println!("Wrote {} ({} bytes)", wasm_file, wasm_bytes.len());
+            nulang::wasm_runtime::aot_compile(&wasm_file, &cwasm_file)?;
+            println!("Wrote {} (precompiled)", cwasm_file);
             return Ok(());
         }
         #[cfg(not(feature = "wasm-backend"))]
@@ -449,10 +473,7 @@ fn run_source(source: &str, verbose: bool, backend: &str) -> NuResult<()> {
             } else {
                 let mut vm = VM::new();
                 vm.load_module(m);
-                vm.run().map_err(|e| {
-                    eprintln!("Runtime error: {}", e);
-                    e
-                })?
+                vm.run().map_err(|e| e)?
             };
             let result_str = value.to_string_repr();
             if result_str != "unit" {
@@ -483,10 +504,7 @@ fn run_with_runtime(
     vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
         runtime.clone(),
     )));
-    let value = vm.run().map_err(|e| {
-        eprintln!("Runtime error: {}", e);
-        e
-    })?;
+    let value = vm.run().map_err(|e| e)?;
     runtime.borrow_mut().run_scheduler();
     Ok((value, runtime))
 }

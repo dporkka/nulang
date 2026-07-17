@@ -3,3 +3,19 @@ check_lib
 cargo_check.log
 .claude/
 out.wasm
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS
+.DS_Store
+
+# Editors
+*.swp
+*.swo
+*~
+
+# WASM build artifacts
+out.cwasm

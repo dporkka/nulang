@@ -71,6 +71,10 @@ as before this flag set existed. Build without them for a leaner binary and
 fewer system dependencies:
 
 | Feature | Enables | Off by default? |
+|----------|---------|-----------------|
+| `python` | PyO3 Python interop (`src/python/`) | No — on by default |
+| `sqlite` | libsql/Turso persistence (`persistence.rs`) | No — on by default |
+| `lsp` | tower-lsp language server (`src/lsp/`) | No — on by default |
 | `wasm-backend` | WASM compiler (`mir_wasm.rs`) + Wasmtime runtime (`wasm_runtime.rs`), `--backend wasm\|wasm-run\|wasm-aot` | Yes — requires `wasmtime` CLI for AOT |
 
 ```bash
@@ -404,8 +408,7 @@ Three high-ROI changes implemented in parallel:
 
 | # | Proposal | Change | Impact |
 |---|----------|--------|--------|
-| 2.3 | mimalloc | `#[global_allocator]` → MiMalloc | 10-20% throughput |
-| 2.1 | Lock-free mailboxes | `crossbeam::ArrayQueue` | ABA-safe, cache-line optimized (later replaced by `SegQueue` in v0.12 — see below) |
+| 2.1 | Lock-free mailboxes | `crossbeam::SegQueue` | ABA-safe, cache-line optimized |
 | 4.2 | Linear type moves | `Capability::LinearIso` + consumption tracking | Zero-cost `iso` sends |
 
 ### v0.9 — Cranelift JIT Backend

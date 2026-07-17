@@ -77,6 +77,20 @@ pub enum Capability {
     Tag,       // Opaque identity only (tagged pointer, no dereference)
 }
 
+impl std::fmt::Display for Capability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Capability::LinearIso => write!(f, "lineariso"),
+            Capability::Iso => write!(f, "iso"),
+            Capability::Trn => write!(f, "trn"),
+            Capability::Ref => write!(f, "ref"),
+            Capability::Val => write!(f, "val"),
+            Capability::Box => write!(f, "box"),
+            Capability::Tag => write!(f, "tag"),
+        }
+    }
+}
+
 impl Capability {
     /// Least upper bound (join) of two capabilities.
     ///
@@ -186,11 +200,59 @@ pub enum Effect {
     UserDefined(String),
 }
 
+impl std::fmt::Display for Effect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Effect::IO => write!(f, "IO"),
+            Effect::Net => write!(f, "Net"),
+            Effect::FS => write!(f, "FS"),
+            Effect::Rand => write!(f, "Rand"),
+            Effect::Time => write!(f, "Time"),
+            Effect::Spawn => write!(f, "Spawn"),
+            Effect::Send => write!(f, "Send"),
+            Effect::Receive => write!(f, "Receive"),
+            Effect::Migrate => write!(f, "Migrate"),
+            Effect::STM => write!(f, "STM"),
+            Effect::Async => write!(f, "Async"),
+            Effect::LLM => write!(f, "LLM"),
+            Effect::Cost => write!(f, "Cost"),
+            Effect::Event => write!(f, "Event"),
+            Effect::FFI => write!(f, "FFI"),
+            Effect::DB => write!(f, "DB"),
+            Effect::UserDefined(s) => write!(f, "{}", s),
+        }
+    }
+}
+
 /// Effect row: either closed (fixed set) or open (set + row variable).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EffectRow {
     Closed(Vec<Effect>),
     Open(Vec<Effect>, Region),
+}
+
+impl std::fmt::Display for EffectRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EffectRow::Closed(effects) => {
+                write!(f, "{{")?;
+                for (i, e) in effects.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", e)?;
+                }
+                write!(f, "}}")
+            }
+            EffectRow::Open(effects, _) => {
+                write!(f, "{{")?;
+                for (i, e) in effects.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{}", e)?;
+                }
+                if !effects.is_empty() { write!(f, ", ")?; }
+                write!(f, "..}}")
+            }
+        }
+    }
 }
 
 impl EffectRow {
