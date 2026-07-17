@@ -116,6 +116,10 @@ pub struct Actor {
     /// ms =>`), from the first suspension until the wait resolves (match,
     /// timeout, or the behavior ends). `None` when no receive-wait is live.
     pub receive_wait: Option<ReceiveWaitState>,
+    /// Cached parsed retry configuration for agent actors.
+    pub retry_config: Option<crate::ast::AgentRetryConfig>,
+    /// Cached parsed fallback configuration for agent actors.
+    pub fallback_config: Vec<crate::ast::AgentFallbackEntry>,
 }
 
 /// State of an actor's in-flight timed selective receive.
@@ -194,6 +198,8 @@ impl Actor {
             llm_pending_prompt: None,
             llm_completed: None,
             receive_wait: None,
+            retry_config: None,
+            fallback_config: Vec::new(),
         }
     }
 

@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use crossbeam::channel as crossbeam_chan;
 
 mod actor;
 mod scheduler;
@@ -150,6 +151,16 @@ fn actor_exit_reason(value: Option<&Value>, constants: &[crate::bytecode::Consta
 // Runtime
 // ---------------------------------------------------------------------------
 
+/// Work item sent to the persistent LLM worker thread.
+struct LlmWorkItem {
+    actor_id: u64,
+    request: LlmRequest,
+    client: Arc<dyn LlmClient>,
+}
+
+// Safety: LlmWorkItem is Send because all fields are Send.
+unsafe impl Send for LlmWorkItem {}
+
 pub struct Runtime {
     pub actors: HashMap<u64, Actor>,
     pub supervisors: HashMap<u64, Supervisor>,
@@ -197,11 +208,12 @@ pub struct Runtime {
     // threads can perform non-blocking `perform LLM.ask` calls.
     llm_client: Option<Arc<dyn LlmClient>>,
 
-    // Channel receiving results from background LLM worker threads, plus the
-    // number of calls currently in flight. Drained by run_scheduler.
-    llm_tx: std::sync::mpsc::Sender<(u64, Result<LlmResponse, LlmError>)>,
+    // Channel receiving results from the persistent LLM worker thread,
+    // plus the number of calls currently in flight. Drained by run_scheduler.
     llm_rx: std::sync::mpsc::Receiver<(u64, Result<LlmResponse, LlmError>)>,
     llm_inflight_count: usize,
+    // Channel to dispatch work to the persistent LLM worker thread.
+    llm_request_tx: Option<crossbeam_chan::Sender<LlmWorkItem>>,
 
     // True while executing a scheduler-driven bytecode behavior, enabling
     // non-blocking suspension on `perform LLM.ask`. Nested synchronous entry
@@ -264,6 +276,35 @@ pub struct Runtime {
 impl Runtime {
     pub fn new() -> Self {
         let (llm_tx, llm_rx) = std::sync::mpsc::channel();
+        let llm_tx_worker = llm_tx.clone();
+        let (llm_request_tx, llm_request_rx) = crossbeam_chan::unbounded::<LlmWorkItem>();
+
+        // Spawn a persistent LLM worker thread that owns its own tokio
+        // runtime. All LLM requests (initial + retries) are dispatched
+        // through this channel instead of spawning a new OS thread per call.
+        let _worker = std::thread::Builder::new()
+            .name("nulang-llm".to_string())
+            .spawn(move || {
+                let tokio_rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                while let Ok(item) = llm_request_rx.recv() {
+                    let result = std::panic::catch_unwind(
+                        std::panic::AssertUnwindSafe(|| {
+                            tokio_rt.block_on(item.client.complete(item.request))
+                        }),
+                    )
+                    .unwrap_or_else(|_| {
+                        Err(LlmError::from_string("LLM worker thread panicked"))
+                    });
+                    let _ = llm_tx_worker.send((item.actor_id, result));
+                }
+            });
+
         Runtime {
             actors: HashMap::new(),
             supervisors: HashMap::new(),
@@ -286,9 +327,9 @@ impl Runtime {
             persistence: Box::new(MemoryStore::new()),
             vm: None,
             llm_client: None,
-            llm_tx,
             llm_rx,
             llm_inflight_count: 0,
+            llm_request_tx: Some(llm_request_tx),
             llm_suspend_enabled: false,
             vm_execution_depth: 0,
             pending_receive_wakes: Vec::new(),
@@ -306,6 +347,7 @@ impl Runtime {
             dlq_actor_id: None,
         }
     }
+
 
     pub fn spawn_actor(
         &mut self,
@@ -442,6 +484,17 @@ impl Runtime {
             if let Some(meta) = meta {
                 if meta.is_agent {
                     actor.is_agent = true;
+                    // Cache parsed retry/fallback configs from actor metadata
+                    // so they don't need to be re-parsed on every LLM error.
+                    for (name, c) in &meta.state_defaults {
+                        if let crate::bytecode::Constant::String(json) = c {
+                            if name == "retry_config" {
+                                actor.retry_config = serde_json::from_str(json).ok();
+                            } else if name == "fallback_config" {
+                                actor.fallback_config = serde_json::from_str(json).unwrap_or_default();
+                            }
+                        }
+                    }
                 }
                 // `constant_to_value` turns Constant::String into nil. Rehydrate
                 // string defaults by allocating them on the actor heap so state
@@ -1330,42 +1383,24 @@ impl Runtime {
             return;
         }
 
-        // Read retry and fallback config from the actor's state.
-        let (retry_config_json, fallback_config_json, attempt, fallback_step, _model, prompt) = {
+        // Read retry/fallback config from cached actor fields (parsed once at
+        // agent init), plus mutable state for attempt tracking and prompt.
+        let (retry_config, fallback_config, attempt, fallback_step, prompt) = {
             let actor = match self.actors.get(&actor_id) {
                 Some(a) => a,
                 None => return,
             };
-            let module = match actor.bytecode_module.as_ref() {
-                Some(m) => m,
-                None => return,
-            };
-            let retry_json = Self::vm_value_to_string(
-                &actor.get_state_field("retry_config").unwrap_or(crate::vm::Value::nil()),
-                Some(module),
-            ).unwrap_or_default();
-            let fallback_json = Self::vm_value_to_string(
-                &actor.get_state_field("fallback_config").unwrap_or(crate::vm::Value::nil()),
-                Some(module),
-            ).unwrap_or_default();
+            let retry = actor.retry_config.clone();
+            let fallback = actor.fallback_config.clone();
             let attempt_val = actor.get_state_field("llm_attempt")
                 .and_then(|v| v.as_int())
                 .unwrap_or(0) as u32;
             let fallback_step_val = actor.get_state_field("llm_fallback_step")
                 .and_then(|v| v.as_int())
                 .unwrap_or(0) as usize;
-            let model_val = Self::vm_value_to_string(
-                &actor.get_state_field("model").unwrap_or(crate::vm::Value::nil()),
-                Some(module),
-            ).unwrap_or_default();
             let prompt_val = actor.llm_pending_prompt.clone().unwrap_or_default();
-            (retry_json, fallback_json, attempt_val, fallback_step_val, model_val, prompt_val)
+            (retry, fallback, attempt_val, fallback_step_val, prompt_val)
         };
-
-        let retry_config: Option<crate::ast::AgentRetryConfig> =
-            serde_json::from_str(&retry_config_json).ok();
-        let fallback_config: Vec<crate::ast::AgentFallbackEntry> =
-            serde_json::from_str(&fallback_config_json).unwrap_or_default();
 
         // --- Retry path ---
         if let Some(ref retry) = retry_config {
@@ -1376,7 +1411,7 @@ impl Runtime {
                     actor.llm_inflight = false; // will be set true again on re-dispatch
                     actor.set_state_field("llm_attempt", crate::vm::Value::int(new_attempt as i64));
                 }
-                let delay_ms = compute_backoff(retry, attempt);
+                let delay_ms = compute_backoff(retry, attempt, actor_id);
                 self.timer_wheel.schedule_llm_retry(
                     std::time::Duration::from_millis(delay_ms),
                     actor_id,
@@ -1480,28 +1515,35 @@ impl Runtime {
             }
             return;
         };
-        let Some(client) = self.llm_client.clone() else { return };
-        let tx = self.llm_tx.clone();
+        if !self.dispatch_llm_request(actor_id, request, prompt) {
+            // Dispatch failed (e.g. worker thread exited): fail gracefully.
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.llm_completed = Some(Ok(LlmResponse {
+                    content: None,
+                    tool_calls: Vec::new(),
+                    model: String::new(),
+                    finish_reason: "error".to_string(),
+                    usage: Default::default(),
+                }));
+                if actor.suspended_execution.is_some() {
+                    self.resume_suspended_llm_step(actor_id);
+                }
+            }
+        }
+    }
+
+    /// Send an LLM request to the persistent worker thread for execution.
+    /// Returns true if the request was dispatched, false if the worker
+    /// channel is unavailable (caller should roll back in-flight state).
+    fn dispatch_llm_request(&mut self, actor_id: u64, request: LlmRequest, prompt: &str) -> bool {
+        let Some(client) = self.llm_client.clone() else { return false };
+        let Some(tx) = self.llm_request_tx.as_ref() else { return false };
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.llm_inflight = true;
             actor.llm_pending_prompt = Some(prompt.to_string());
         }
         self.llm_inflight_count += 1;
-        let _ = std::thread::Builder::new()
-            .name("nulang-llm".to_string())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(tokio_rt) => tokio_rt.block_on(client.complete(request)),
-                        Err(e) => Err(LlmError::from_string(e.to_string())),
-                    }
-                }))
-                .unwrap_or_else(|_| Err(LlmError::from_string("LLM worker thread panicked")));
-                let _ = tx.send((actor_id, result));
-            });
+        tx.send(LlmWorkItem { actor_id, request, client }).is_ok()
     }
 
     /// Prune an agent's episodic memory to fit within `max_tokens`, using a
@@ -3694,6 +3736,22 @@ impl Runtime {
             }
             actor.set_state_field(name, value.to_value());
         }
+        // Parse cached retry/fallback configs from restored state for agents.
+        if is_agent {
+            if let Some(module) = actor.bytecode_module.as_ref().or_else(|| {
+                self.recovery_modules.get(&actor_id).map(|(m, _, _)| m)
+            }) {
+                for (name, c) in module.actor_metadata.iter().flat_map(|m| &m.state_defaults) {
+                    if let crate::bytecode::Constant::String(json) = c {
+                        if name == "retry_config" {
+                            actor.retry_config = serde_json::from_str(&json).ok();
+                        } else if name == "fallback_config" {
+                            actor.fallback_config = serde_json::from_str(&json).unwrap_or_default();
+                        }
+                    }
+                }
+            }
+        }
         // Replay event-sourced events to reconstruct EventSourced fields.
         let events = self.persistence.read_events(actor_id);
         if !events.is_empty() {
@@ -5418,45 +5476,16 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             let Some(request) = request else {
                 return LlmAskResult::Ready(None);
             };
-            let Some(client) = rt.llm_client.clone() else {
-                return LlmAskResult::Ready(None);
-            };
-            let tx = rt.llm_tx.clone();
-            if let Some(actor) = rt.actors.get_mut(&actor_id) {
-                actor.llm_inflight = true;
-                actor.llm_pending_prompt = Some(prompt.to_string());
-            }
-            rt.llm_inflight_count += 1;
-            let spawned = std::thread::Builder::new()
-                .name("nulang-llm".to_string())
-                .spawn(move || {
-                    // Every failure path must still send a result so the
-                    // runtime's inflight counter can never get stuck.
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        match tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                        {
-                            Ok(tokio_rt) => tokio_rt.block_on(client.complete(request)),
-                            Err(e) => Err(LlmError::from_string(e.to_string())),
-                        }
-                    }))
-                    .unwrap_or_else(|_| Err(LlmError::from_string("LLM worker thread panicked")));
-                    let _ = tx.send((actor_id, result));
-                });
-            match spawned {
-                Ok(_) => LlmAskResult::Pending,
-                Err(_) => {
-                    // Could not start the worker: roll back the in-flight
-                    // bookkeeping and fall back to a nil response.
-                    rt.llm_inflight_count = rt.llm_inflight_count.saturating_sub(1);
-                    if let Some(actor) = rt.actors.get_mut(&actor_id) {
-                        actor.llm_inflight = false;
-                        actor.llm_pending_prompt = None;
-                    }
-                    LlmAskResult::Ready(None)
+            if !(*rt).dispatch_llm_request(actor_id, request, prompt) {
+                // Dispatch failed: fall back to a nil response.
+                rt.llm_inflight_count = rt.llm_inflight_count.saturating_sub(1);
+                if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                    actor.llm_inflight = false;
+                    actor.llm_pending_prompt = None;
                 }
+                return LlmAskResult::Ready(None);
             }
+            LlmAskResult::Pending
         }
     }
 
@@ -5686,8 +5715,9 @@ fn json_to_vm_value(
 }
 
 /// Compute the backoff delay in milliseconds for the given retry attempt
-/// (0-indexed). Applies ±25% jitter to avoid thundering-herd.
-fn compute_backoff(config: &crate::ast::AgentRetryConfig, attempt: u32) -> u64 {
+/// (0-indexed). Uses actor_id as a seed for ±25% jitter to avoid
+/// deterministic thundering-herd on clusters.
+fn compute_backoff(config: &crate::ast::AgentRetryConfig, attempt: u32, actor_id: u64) -> u64 {
     let base_ms = match &config.backoff {
         crate::ast::AgentBackoff::Exponential { initial_ms, factor, max_ms } => {
             let exp = (*factor).powi(attempt as i32);
@@ -5696,10 +5726,12 @@ fn compute_backoff(config: &crate::ast::AgentRetryConfig, attempt: u32) -> u64 {
         }
         crate::ast::AgentBackoff::Fixed { delay_ms } => *delay_ms,
     };
-    // ±25% jitter.
-    let jitter = (base_ms as f64 * 0.25) as i64;
-    let jittered = base_ms as i64 + ((base_ms as i64 % (jitter * 2 + 1)) - jitter);
-    jittered.max(0) as u64
+    // ±25% jitter, seeded from actor_id so different actors (or the same
+    // actor on different nodes with different ids) get different jitter.
+    let seed = actor_id.wrapping_mul(6364136223846793005).wrapping_add(attempt as u64);
+    let r = (seed >> 33) as f64 / (1u64 << 31) as f64; // [0, 1)
+    let jittered = base_ms as f64 + (base_ms as f64 * 0.5 * (r - 0.5));
+    jittered.max(0.0) as u64
 }
 
 impl Default for Runtime {

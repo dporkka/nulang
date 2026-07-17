@@ -26,10 +26,11 @@ use crate::mir;
 use crate::type_metadata::{KnownType, TypeMetadata};
 
 // Reuse NaN-tag constants from the JIT shared helpers.
-use crate::value_layout::{PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT};
+use crate::value_layout::{PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT, TAG_NIL};
 
 const TAG_INT_I64: i64 = TAG_INT as i64;
 const TAG_BOOL_I64: i64 = TAG_BOOL as i64;
+const TAG_NIL_I64: i64 = TAG_NIL as i64;
 const PAYLOAD_MASK_I64: i64 = PAYLOAD_MASK as i64;
 const SIGN_BIT_I64: i64 = SIGN_BIT as i64;
 
@@ -688,10 +689,7 @@ fn compile_const(
             Ok(builder.ins().iconst(types::I64, f.to_bits() as i64))
         }
         crate::bytecode::Constant::Bool(b) => {
-            let val = if *b { 1i64 } else { 0i64 };
-            let tag = builder.ins().iconst(types::I64, TAG_BOOL_I64);
-            let v = builder.ins().iconst(types::I64, val);
-            Ok(builder.ins().bor(tag, v))
+            Ok(builder.ins().iconst(types::I64, TAG_BOOL_I64 | if *b { 1 } else { 0 }))
         }
         crate::bytecode::Constant::Unit => {
             Ok(builder.ins().iconst(types::I64, 0x7FF9_0000_0000_0000u64 as i64))
@@ -787,8 +785,37 @@ fn compile_binary(
             }
         }
         BinOp::Div => {
-            // Division always goes through runtime helper (div-by-zero → nil).
-            call_helper(builder, helpers, "nulang_idiv", &[lhs_val, rhs_val])
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int)
+                && mode == CompileMode::Boxed
+            {
+                // Inline div-by-zero → nil check for boxed Int operands.
+                let l = emit_sext48(builder, lhs_val);
+                let r = emit_sext48(builder, rhs_val);
+                let zero = builder.ins().iconst(types::I64, 0);
+                let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
+                let nil = builder.ins().iconst(types::I64, TAG_NIL_I64);
+                let div_result = builder.ins().sdiv(l, r);
+                let tagged = emit_tag_int(builder, div_result);
+                Ok(builder.ins().select(is_zero, nil, tagged))
+            } else {
+                call_helper(builder, helpers, "nulang_idiv", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::Mod => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int)
+                && mode == CompileMode::Boxed
+            {
+                let l = emit_sext48(builder, lhs_val);
+                let r = emit_sext48(builder, rhs_val);
+                let zero = builder.ins().iconst(types::I64, 0);
+                let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
+                let nil = builder.ins().iconst(types::I64, TAG_NIL_I64);
+                let rem_result = builder.ins().srem(l, r);
+                let tagged = emit_tag_int(builder, rem_result);
+                Ok(builder.ins().select(is_zero, nil, tagged))
+            } else {
+                call_helper(builder, helpers, "nulang_imod", &[lhs_val, rhs_val])
+            }
         }
         BinOp::Eq => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
@@ -866,9 +893,20 @@ fn compile_binary(
             }
         }
         BinOp::Ne => {
-            // Not-equal: compare with eq helper, then negate.
-            let eq_result = call_helper(builder, helpers, "nulang_icmp_eq", &[lhs_val, rhs_val])?;
-            call_helper(builder, helpers, "nulang_not", &[eq_result])
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                if mode == CompileMode::Unboxed {
+                    let cmp = builder.ins().icmp(IntCC::NotEqual, lhs_val, rhs_val);
+                    Ok(emit_tag_bool(builder, cmp))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let cmp = builder.ins().icmp(IntCC::NotEqual, l, r);
+                    Ok(emit_tag_bool(builder, cmp))
+                }
+            } else {
+                call_helper(builder, helpers, "nulang_icmp_eq", &[lhs_val, rhs_val])
+                    .and_then(|eq| call_helper(builder, helpers, "nulang_not", &[eq]))
+            }
         }
         _ => Err(AotCompileError::Unsupported(format!("binary op {:?}", op))),
     }
