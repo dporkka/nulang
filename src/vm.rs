@@ -2576,8 +2576,13 @@ impl VM {
                 let s2 = resolve_value_string(&self.modules[module_idx].constants, self.frames[frame_idx].regs[instr.op2 as usize]);
                 let result = format!("{}{}", s1, s2);
                 let bytes = result.into_bytes();
-                self.frames[frame_idx].regs[instr.op3 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(bytes.len(), HeapTypeTag::String) {
-                    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()); }
+                // Allocate len+1 so the null terminator doesn't land in
+                // another allocation's header — the reader scans for \0.
+                self.frames[frame_idx].regs[instr.op3 as usize] = if let Some(ptr) = self.actor_callbacks.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                    }
                     Value::ptr(ptr)
                 } else {
                     Value::nil()
@@ -2588,8 +2593,11 @@ impl VM {
                 let mut input = String::new();
                 self.frames[frame_idx].regs[instr.op1 as usize] = if std::io::stdin().read_line(&mut input).is_ok() {
                     let bytes = input.into_bytes();
-                    if let Some(ptr) = self.actor_callbacks.alloc(bytes.len(), HeapTypeTag::String) {
-                        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()); }
+                    if let Some(ptr) = self.actor_callbacks.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                            *ptr.add(bytes.len()) = 0;
+                        }
                         Value::ptr(ptr)
                     } else {
                         Value::nil()
