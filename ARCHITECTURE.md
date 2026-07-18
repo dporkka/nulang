@@ -73,10 +73,12 @@ Nulang is organized into five strictly layered subsystems. Each layer communicat
 - Data passes across boundaries as plain structs; no shared mutable state
 - Each layer can be tested with mocked adjacent layers
 
-**Implementation note (verified July 2026):** the compiler targets a
-register-VM bytecode, not WASM — nothing in the current tree compiles to or
-runs inside Wasmtime (§2.5–§2.6). Other verified divergences from the target
-design of Layers 2–4, to keep in mind while reading §3–§5:
+**Implementation note (updated July 2026):** the compiler targets a
+register-VM bytecode by default. A WASM backend (`--backend wasm | wasm-run | wasm-aot`)
+exists behind the `wasm-backend` feature flag (src/mir_wasm.rs, src/wasm_runtime.rs).
+A native/AOT backend (`--backend native`) compiles via Cranelift ahead-of-time.
+Other verified divergences from the target design of Layers 2–4, to keep in
+mind while reading §3–§5:
 
 - **Mailboxes are unbounded**, backed by `crossbeam::queue::SegQueue`
   (`src/runtime/mailbox.rs`); push always succeeds — there is no 10,000-slot

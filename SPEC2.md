@@ -51,9 +51,9 @@ This document is the design target for Nulang 2.0. The implementation in this re
 
 **Planned (described in this specification, not implemented):**
 
-- The WebAssembly compilation target, WIT interface generation, and WASI worlds (Chapter 13). The current backend emits bytecode for the register VM.
+- The WebAssembly compilation target (Chapter 13): WASM compilation exists behind the `wasm-backend` feature flag via `--backend wasm|wasm-run|wasm-aot`. WIT interface generation and WASI worlds are not yet implemented.
 - The standard-library modules of Chapter 14 (`Core`, `List`, `Map`, `Set`, `String`, `Json`, `Http`, `Concurrent`, …). The only builtin modules today are `Pipeline`, `Supervisor`, and `Debate`.
-- Typeclasses and type-parameter constraints (Section 3.6), higher-kinded types, `Char` and `Decimal` primitives, character literals, multi-line strings, `\u{...}` escapes, string interpolation, and `++` concatenation syntax.
+- Typeclasses and type-parameter constraints (Section 3.6), higher-kinded types, `Char` and `Decimal` primitives, character literals, multi-line strings, and `\u{...}` escapes.
 - `var` bindings, `consume` / `recover` expressions, record-update syntax `{ r .. f = v }`, ranges, the `**` operator, `<-` message syntax, and indentation-based layout (Section 2.8).
 - Authority capabilities (`capability` declarations on actors, delegation, revocation, auditing — Sections 1.5 and 5.3–5.6), `config` blocks, the `tool` declaration form inside actors, `virtual` actors, `select`, `await`, `await_human`, `sleep_until`, and `retry` blocks.
 - The deployment manifest (`nulang.toml`), `nulang migrate`, and `nulang shell` (Chapter 15, Appendix D).

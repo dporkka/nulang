@@ -5,7 +5,7 @@
 
 ## Project Overview
 
-**Nulang** is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system (Hindley-Milner inference + reference capabilities + row-polymorphic algebraic effects), a register-based bytecode VM, a Cranelift JIT, a WASM backend (MIR→WASM via `wasm-encoder`) with a Wasmtime host runtime, BEAM/OTP primitives, CRDTs, location-transparent distribution, libsql/Turso persistence, PyO3 Python interop, a C-compatible FFI layer, and a v0.9 AI runtime (`src/ai/` — LLM providers, memory, pipelines, debates, supervisor teams). Status: Alpha; 1271 tests pass (`cargo test`), 1277 with `--features wasm-backend`. License: Apache-2.0.
+**Nulang** is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system (Hindley-Milner inference + reference capabilities + row-polymorphic algebraic effects), a register-based bytecode VM, a Cranelift JIT, a WASM backend (MIR→WASM via `wasm-encoder`) with a Wasmtime host runtime, BEAM/OTP primitives, CRDTs, location-transparent distribution, libsql/Turso persistence, PyO3 Python interop, a C-compatible FFI layer, and a v0.9 AI runtime (`src/ai/` — LLM providers, memory, pipelines, debates, supervisor teams). Status: Alpha; 1329 tests pass (`cargo test`), 1336 with `--features wasm-backend`. License: Apache-2.0.
 
 ## Architecture & Data Flow
 
@@ -24,6 +24,14 @@ source &str
   -> MIR codegen (mir_codegen::compile_mir)  -> CodeModule         src/mir_codegen.rs
   -> VM::load_module() + VM::run()        -> Value                 src/vm.rs (register VM + JIT tiering)
 ```
+
+**Native/AOT backend** (`--backend native`):
+```
+source &str
+  -> ... (same frontend pipeline through MIR)
+  -> aot::codegen::compile_module()         -> native object code      src/aot/codegen.rs (MIR → Cranelift CLIF → native)
+```
+Uses Cranelift AOT compilation (`src/aot/`) with compile-time type metadata (`src/type_metadata.rs`) for unboxed native operations. Selectable via `--backend native`.
 
 **WASM backend** (`--backend wasm|wasm-run|wasm-aot`, requires `--features wasm-backend`):
 ```
@@ -84,8 +92,8 @@ Custom TCP wire protocol (`src/runtime/network.rs`): length-prefixed frames, mag
 cargo build                      # dev build (opt-level 0, debug)
 cargo build --release            # release (opt-level 3, LTO, codegen-units 1)
 cargo build --features wasm-backend   # dev build with WASM backend + Wasmtime
-cargo test                       # run all 1271 tests (test profile: no LTO, 16 codegen-units for speed)
-cargo test --features wasm-backend    # run all 1277 tests including WASM backend
+cargo test                       # run all 1329 tests (test profile: no LTO, 16 codegen-units for speed)
+cargo test --features wasm-backend    # run all 1336 tests including WASM backend
 cargo test --release             # run tests under the release profile
 cargo run -- --repl              # interactive REPL (prompt `nulang>`)
 cargo run -- --eval 'perform IO.print("Hello")'   # evaluate a string
@@ -145,7 +153,7 @@ python3 verify_report.py                          # gate: validates codebase_ana
 - **Framework**: standard Rust `#[test]` + `#[cfg(test)]`. No proptest/quickcheck/criterion. No `#[ignore]`/`#[should_panic]`/async tests.
 - **Organization**: two styles — (a) inline `mod tests` at file foot (`lexer.rs`, `parser.rs`, `typechecker.rs`, `effect_checker.rs`, `value_layout.rs`, `vm.rs`, most `runtime/*.rs`, `jit/*`, `python/*`, `ffi/*`, `ai/*`, `lsp/mod.rs`); (b) dedicated test files (`src/integration_tests.rs`, `src/stress_tests.rs`, `src/runtime/tests.rs`, `src/jit/tests.rs`).
 - **Naming**: `test_<subject>` (unit/integration), `stress_<scenario>` (chaos).
-- **Counts** (1277 total with `wasm-backend`, 1271 without): `integration_tests.rs` 227 (end-to-end pipeline via `run_source`/`assert_int`/`run_source_with_runtime`, plus MIR-pipeline variants via `run_source_new`/`assert_int_new`/`run_source_new_with_runtime`, plus selective-receive and receive-after, `Actor.*` builtin-effect and actor-priority, non-blocking LLM suspend/resume, typed-JIT tiering tests, float-threading regression tests, behavior-internal send/spawn tests, workflow query tests, and Otp supervisor effects), `stress_tests.rs` 30 (`stress_*` chaos: mailbox floods, crash/exit cascades, scheduler fairness, CRDT/persistence, GC/cycle-detector churn), `runtime/tests.rs` 106, `jit/tests.rs` 38, `src/package/` 17, `src/docgen.rs` 11, `src/stdlib.rs` 7, `src/mir_wasm.rs` 4, `src/wasm_runtime.rs` 2; the remaining 835 are inline unit tests (`src/ai/` alone has 47). Doc-tests: 3 run, 8 ignored.
+- **Counts** (1336 total with `wasm-backend`, 1329 without): `integration_tests.rs` 227 (end-to-end pipeline via `run_source`/`assert_int`/`run_source_with_runtime`, plus MIR-pipeline variants via `run_source_new`/`assert_int_new`/`run_source_new_with_runtime`, plus selective-receive and receive-after, `Actor.*` builtin-effect and actor-priority, non-blocking LLM suspend/resume, typed-JIT tiering tests, float-threading regression tests, behavior-internal send/spawn tests, workflow query tests, and Otp supervisor effects), `stress_tests.rs` 30 (`stress_*` chaos: mailbox floods, crash/exit cascades, scheduler fairness, CRDT/persistence, GC/cycle-detector churn), `runtime/tests.rs` 106, `jit/tests.rs` 38, `src/package/` 17, `src/docgen.rs` 11, `src/stdlib.rs` 7…
 - **Helpers/fixtures**: `run_source`/`compile_source`/`assert_int` + `SharedMemoryStore` (`Arc<Mutex<MemoryStore>>` impl `PersistenceStore`) for restart simulation (`integration_tests.rs`); `TestContext {counters, log}` (`stress_tests.rs`); `make_jit()` (`jit/tests.rs`).
 - **Run**: `cargo test` (test profile: LTO off, 16 codegen-units for fast parallel builds). `cargo test --release` for optimized runs.
 - **Gate scripts**: `verify_implementation.py` (forbidden-pattern scans for known anti-patterns — Box'd frames, string leaks, `crdt_reg` temp Vec, timer BinaryHeap rebuild, check-then-unwrap — + asserts JIT integration, escape-analysis deadness, scheduler-stats and cycle-detector wiring, then runs `cargo test` and `cargo check --tests` against a zero-warning baseline) and `verify_report.py` (validates `codebase_analysis_report.md`: required sections, ≥5 code snippets, referenced `src/*.rs` paths exist). Each exits 0 only on full pass.

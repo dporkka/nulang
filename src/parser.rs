@@ -1736,10 +1736,6 @@ impl Parser {
         })
     }
 
-    fn parse_let(&mut self) -> NuResult<Expr> {
-        let name = self.expect_ident("variable name")?;
-        self.parse_let_named(name)
-    }
 
     fn parse_let_named(&mut self, name: String) -> NuResult<Expr> {
         let span = self.current_span();
@@ -1767,10 +1763,6 @@ impl Parser {
         })
     }
 
-    fn parse_let_rec(&mut self) -> NuResult<Expr> {
-        let name = self.expect_ident("function name")?;
-        self.parse_let_rec_named(name)
-    }
 
     /// Parse a string containing `#{...}` interpolation markers.
     fn parse_interpolated_string(&self, raw: &str, span: Span) -> NuResult<Expr> {
