@@ -130,6 +130,11 @@ pub enum Packet {
     ActorMessage {
         target_actor: u64,
         behavior_name: String,
+        /// Optional BLAKE3 content hash of the expected behavior implementation.
+        /// Set by the sender if the behavior has a known content hash in the
+        /// sender's module; the receiver MAY verify it against the local
+        /// behavior table during delivery (see process_network_packets).
+        content_hash: Option<[u8; 32]>,
         payload: Vec<Value>,
         /// UTF-8 content for every `Value::string(id)` in `payload`: on the
         /// wire a string-id value indexes **this table**, never the sender's
@@ -157,6 +162,10 @@ pub enum Packet {
     SpawnRequest {
         request_id: u64,
         behavior_name: String,
+        /// Optional BLAKE3 content hash for cross-node behavior identity
+        /// verification. The receiver MAY check this against the local
+        /// `spawnable_behaviors` entry.
+        content_hash: Option<[u8; 32]>,
         initial_state: Vec<(String, Value)>,
         bytecode: Option<Vec<u8>>,
     },
@@ -272,6 +281,7 @@ impl Packet {
             Packet::ActorMessage {
                 target_actor,
                 behavior_name,
+                content_hash,
                 payload,
                 string_table,
                 sender_actor,
@@ -280,6 +290,8 @@ impl Packet {
             } => {
                 buf.extend_from_slice(&target_actor.to_be_bytes());
                 write_string(buf, behavior_name);
+                // content_hash: 1 byte flag + optional 32 bytes
+                write_optional_hash(buf, content_hash);
                 buf.extend_from_slice(&sender_actor.to_be_bytes());
                 buf.extend_from_slice(&sender_node.0.to_be_bytes());
                 buf.push(*priority as u8);
@@ -304,11 +316,14 @@ impl Packet {
             Packet::SpawnRequest {
                 request_id,
                 behavior_name,
+                content_hash,
                 initial_state,
                 bytecode,
             } => {
                 buf.extend_from_slice(&request_id.to_be_bytes());
                 write_string(buf, behavior_name);
+                // content_hash: 1 byte flag + optional 32 bytes
+                write_optional_hash(buf, content_hash);
                 buf.extend_from_slice(&(initial_state.len() as u32).to_be_bytes());
                 for (key, value) in initial_state {
                     write_string(buf, key);
@@ -367,6 +382,9 @@ impl Packet {
         let target_actor = read_u64(payload, 0)?;
         let (behavior_name, name_len) = read_string(payload, 8)?;
         let mut offset = 8usize.checked_add(name_len)?;
+        // content_hash: 1 byte flag + optional 32 bytes
+        let (content_hash, hash_consumed) = read_optional_hash(payload, offset)?;
+        offset = offset.checked_add(hash_consumed)?;
         if payload.len() < offset + 21 {
             return None;
         }
@@ -401,6 +419,7 @@ impl Packet {
         Some(Packet::ActorMessage {
             target_actor,
             behavior_name,
+            content_hash,
             payload: values,
             string_table,
             sender_actor,
@@ -430,6 +449,9 @@ impl Packet {
         let request_id = read_u64(payload, 0)?;
         let (behavior_name, consumed) = read_string(payload, 8)?;
         let mut offset = 8 + consumed;
+        // content_hash: 1 byte flag + optional 32 bytes
+        let (content_hash, hash_consumed) = read_optional_hash(payload, offset)?;
+        offset = offset.checked_add(hash_consumed)?;
         let count = read_u32(payload, offset)? as usize;
         offset += 4;
         let mut initial_state = Vec::with_capacity(count.min(256));
@@ -454,6 +476,7 @@ impl Packet {
         Some(Packet::SpawnRequest {
             request_id,
             behavior_name,
+            content_hash,
             initial_state,
             bytecode,
         })
@@ -691,6 +714,41 @@ fn read_string(bytes: &[u8], offset: usize) -> Option<(String, usize)> {
     }
     let s = String::from_utf8(bytes[start..end].to_vec()).ok()?;
     Some((s, 4 + len))
+}
+
+/// Write an optional BLAKE3 content hash: 1-byte flag (0=None, 1=Some)
+/// followed by 32 bytes when present.
+fn write_optional_hash(buf: &mut Vec<u8>, hash: &Option<[u8; 32]>) {
+    match hash {
+        Some(h) => {
+            buf.push(1);
+            buf.extend_from_slice(h);
+        }
+        None => {
+            buf.push(0);
+        }
+    }
+}
+
+/// Read an optional BLAKE3 content hash.
+///
+/// Returns `(Option<[u8; 32]>, bytes_consumed)`.
+fn read_optional_hash(bytes: &[u8], offset: usize) -> Option<(Option<[u8; 32]>, usize)> {
+    let flag = *bytes.get(offset)?;
+    match flag {
+        0 => Some((None, 1)),
+        1 => {
+            let start = offset + 1;
+            let end = start + 32;
+            if end > bytes.len() {
+                return None;
+            }
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&bytes[start..end]);
+            Some((Some(hash), 33))
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1489,6 +1547,7 @@ mod tests {
         let packet = Packet::ActorMessage {
             target_actor: 42,
             behavior_name: "handle_msg".to_string(),
+            content_hash: None,
             payload: vec![Value::int(123), Value::string(456)],
             string_table: vec![],
             sender_actor: 99,
@@ -1508,12 +1567,10 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn test_packet_actor_message_string_table_roundtrip() {
-        // Payload string ids index the packet's string table; the table
-        // carries UTF-8 content (including non-ASCII) and must round-trip
-        // byte-exactly. Repeated content shares one table entry.
         let packet = Packet::ActorMessage {
             target_actor: 7,
             behavior_name: "store".to_string(),
+            content_hash: None,
             payload: vec![Value::string(0), Value::string(1), Value::string(0)],
             string_table: vec!["hello".to_string(), "wörld ✓".to_string()],
             sender_actor: 3,
@@ -1534,6 +1591,7 @@ mod tests {
         let packet = Packet::ActorMessage {
             target_actor: 7,
             behavior_name: "store".to_string(),
+            content_hash: None,
             payload: vec![Value::string(0)],
             string_table: vec!["hello".to_string()],
             sender_actor: 3,
@@ -1883,6 +1941,7 @@ mod tests {
         let mk = |payload: Vec<Value>, string_table: Vec<String>| Packet::ActorMessage {
             target_actor: 1,
             behavior_name: "h".into(),
+            content_hash: None,
             payload,
             string_table,
             sender_actor: 0,
@@ -1903,10 +1962,10 @@ mod tests {
         )));
 
         // Spawn requests have no receiving-side pool, so strings stay
-        // rejected there.
         let spawn = Packet::SpawnRequest {
             request_id: 1,
             behavior_name: "Counter".into(),
+            content_hash: None,
             initial_state: vec![("name".into(), Value::string(1))],
             bytecode: None,
         };
@@ -1954,6 +2013,7 @@ mod tests {
         let bad = Packet::ActorMessage {
             target_actor: 1,
             behavior_name: "handle".into(),
+            content_hash: None,
             payload: vec![Value::string(42)],
             string_table: vec![],
             sender_actor: 7,
@@ -1991,10 +2051,10 @@ mod tests {
         sleep(Duration::from_millis(100));
 
         // A string payload whose content travels in the packet's string
-        // table is wire-safe and must be delivered unchanged.
         let good = Packet::ActorMessage {
             target_actor: 1,
             behavior_name: "handle".into(),
+            content_hash: None,
             payload: vec![Value::string(0), Value::int(7), Value::string(1)],
             string_table: vec!["hello".into(), "world".into()],
             sender_actor: 7,
@@ -2036,10 +2096,10 @@ mod tests {
         sleep(Duration::from_millis(100));
 
         // Scalar payloads are wire-safe and must be delivered unchanged —
-        // the send-time guard must not over-reject.
         let good = Packet::ActorMessage {
             target_actor: 1,
             behavior_name: "handle".into(),
+            content_hash: None,
             payload: vec![Value::int(123), Value::bool(true), Value::unit()],
             string_table: vec![],
             sender_actor: 7,
@@ -2111,6 +2171,7 @@ mod tests {
         let req = Packet::SpawnRequest {
             request_id: 12345,
             behavior_name: "Counter".into(),
+            content_hash: None,
             initial_state: vec![
                 ("count".into(), Value::int(0)),
                 ("name".into(), Value::string(42)),

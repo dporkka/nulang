@@ -62,6 +62,7 @@ libloading = "0.8"
 wasm-encoder = { version = "0.220", optional = true }
 # WASM runtime using Wasmtime (optional, see [features])
 wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
+blake3 = "1.8"
 
 [lib]
 name = "nulang"

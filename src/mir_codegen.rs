@@ -163,6 +163,24 @@ impl MirCodegen {
         // reordered or interleaved with function compilation.
         for func in &mir.behaviors {
             let offset = self.compile_function(func)?;
+            let end = self.module.instructions.len();
+
+            // Compute BLAKE3 content hash from the compiled bytecode slice +
+            // param types + return type.
+            let bytecode_slice = &self.module.instructions[offset..end];
+            let mut hasher = blake3::Hasher::new();
+            for instr in bytecode_slice {
+                hasher.update(&[instr.opcode as u8, instr.op1, instr.op2, instr.op3]);
+            }
+            let param_count_bytes = (func.params.len() as u32).to_be_bytes();
+            hasher.update(&param_count_bytes);
+            // Hash return type if present
+            if let Some(ref ret_ty) = func.ret {
+                let ty_str = format!("{:?}", ret_ty);
+                hasher.update(ty_str.as_bytes());
+            }
+            let hash_bytes = *hasher.finalize().as_bytes();
+
             self.module
                 .behaviors
                 .push(crate::bytecode::BehaviorTableEntry {
@@ -172,6 +190,8 @@ impl MirCodegen {
                     local_count: LOCAL_BASE as usize + func.locals.len(),
                     effect_mask: 0,
                     compensate_offset: None,
+                    content_hash: Some(hash_bytes),
+                    source_location: None,
                     parallel_branches: None,
                 });
         }

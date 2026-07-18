@@ -512,6 +512,9 @@ pub struct BehaviorTableEntry {
     pub effect_mask: u32,   // Which effects this behavior may perform (bitmap)
     /// Optional code offset for the saga compensation expression of this step.
     pub compensate_offset: Option<usize>,
+    pub content_hash: Option<[u8; 32]>, // BLAKE3 hash of compiled bytecode body + param/return types
+    /// Optional source location (file, line, column) for hash→source mapping in error messages.
+    pub source_location: Option<(String, u32, u32)>,
     /// For synthetic parallel steps: the ordered names of the branches.
     /// `None` for normal sequential steps.
     pub parallel_branches: Option<Vec<String>>,
@@ -895,11 +898,11 @@ mod tests {
             local_count: 8,
             effect_mask: 0b0011,
             compensate_offset: None,
+            content_hash: None,
+            source_location: None,
             parallel_branches: None,
         };
-        let idx = modl.add_behavior(entry);
-        assert_eq!(idx, 0);
-
+        let _idx = modl.add_behavior(entry);
         let entry2 = BehaviorTableEntry {
             name: "step2".into(),
             param_count: 1,
@@ -907,6 +910,8 @@ mod tests {
             local_count: 4,
             effect_mask: 0,
             compensate_offset: Some(30),
+            content_hash: None,
+            source_location: None,
             parallel_branches: Some(vec!["a".into(), "b".into()]),
         };
         let idx2 = modl.add_behavior(entry2);

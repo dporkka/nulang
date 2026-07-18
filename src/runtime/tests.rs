@@ -351,6 +351,8 @@ fn test_restarted_bytecode_child_handles_messages() {
         local_count: 4,
         effect_mask: 0,
         compensate_offset: None,
+        content_hash: None,
+        source_location: None,
         parallel_branches: None,
     });
     module.emit(Instruction::new3(
@@ -548,6 +550,8 @@ fn dyn_worker_module(default_count: i64) -> crate::bytecode::CodeModule {
         local_count: 4,
         effect_mask: 0,
         compensate_offset: None,
+        content_hash: None,
+        source_location: None,
         parallel_branches: None,
     });
     module.emit(Instruction::new3(
@@ -1612,6 +1616,8 @@ fn test_vm_spawn_creates_persistent_actor() {
         local_count: 1,
         effect_mask: 0,
         compensate_offset: None,
+        content_hash: None,
+        source_location: None,
         parallel_branches: None,
     });
     module.emit(Instruction::new3(OpCode::Spawn, 0, 0, 0));
@@ -1669,6 +1675,8 @@ fn test_vm_spawn_creates_non_persistent_actor() {
         local_count: 1,
         effect_mask: 0,
         compensate_offset: None,
+        content_hash: None,
+        source_location: None,
         parallel_branches: None,
     });
     module.emit(Instruction::new3(OpCode::Spawn, 0, 0, 0));

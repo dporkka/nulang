@@ -449,6 +449,8 @@ impl AddressResolver {
     /// `string_table` holds the UTF-8 content for every string-id value in
     /// `payload` (see [`Packet::ActorMessage::string_table`]); pass an empty
     /// vec when the payload carries no strings.
+    /// `content_hash` is an optional BLAKE3 hash of the expected behavior
+    /// implementation; `None` means no hash verification is requested.
     pub fn build_packet(
         &self,
         target_actor: u64,
@@ -457,10 +459,12 @@ impl AddressResolver {
         sender_actor: u64,
         priority: MessagePriority,
         string_table: Vec<String>,
+        content_hash: Option<[u8; 32]>,
     ) -> Packet {
         Packet::ActorMessage {
             target_actor,
             behavior_name: behavior_name.to_string(),
+            content_hash,
             payload,
             string_table,
             sender_actor,
@@ -468,25 +472,30 @@ impl AddressResolver {
             priority,
         }
     }
-
     /// Parse a received network packet into a message for local delivery.
     ///
-    /// Returns `Some((target_actor_id, behavior_name, message, string_table))`
+    /// Returns `Some((target_actor_id, behavior_name, message, string_table, content_hash))`
     /// if the packet is an actor message that should be delivered locally.
     /// The message's `behavior_id` is left as `0` — the caller must resolve
     /// `behavior_name` against the target actor's behavior table before
     /// enqueueing (see [`process_network_packets`]). `string_table` carries
     /// the content for any string-id values in the payload, which the caller
     /// must intern into the target actor's module pool before delivery.
+    /// `content_hash` is an optional BLAKE3 hash for cross-node behavior
+    /// identity verification.
     /// Returns `None` for other packet types (e.g., heartbeats, spawn
     /// requests).
     ///
     /// Also updates the remote cache with the sender information.
-    pub fn parse_packet(&mut self, packet: Packet) -> Option<(u64, String, Message, Vec<String>)> {
+    pub fn parse_packet(
+        &mut self,
+        packet: Packet,
+    ) -> Option<(u64, String, Message, Vec<String>, Option<[u8; 32]>)> {
         match packet {
             Packet::ActorMessage {
                 target_actor,
                 behavior_name,
+                content_hash,
                 payload,
                 string_table,
                 sender_actor,
@@ -503,7 +512,7 @@ impl AddressResolver {
                     sender: sender_actor,
                     priority,
                 };
-                Some((target_actor, behavior_name, msg, string_table))
+                Some((target_actor, behavior_name, msg, string_table, content_hash))
             }
             // Non-actor-message packets are not parsed here.
             _ => None,
@@ -718,9 +727,10 @@ pub fn send_distributed(
                     return;
                 }
             };
-            // Remote sends carry the behavior name; the receiving node
-            // resolves it against the target actor's behavior table on
-            // delivery (see process_network_packets).
+            // Remote sends carry the behavior name and an optional content
+            // hash; the receiving node resolves the name and MAY verify the
+            // hash against its own behavior table on delivery.
+            let content_hash = try_lookup_content_hash(runtime, behavior);
             let packet = resolver.build_packet(
                 actor_id,
                 behavior,
@@ -728,6 +738,7 @@ pub fn send_distributed(
                 runtime.current_actor.unwrap_or(0),
                 MessagePriority::Normal,
                 string_table,
+                content_hash,
             );
 
             if let Some(node_info) = cluster.get_node(node_id) {
@@ -781,6 +792,57 @@ fn delivery_failure_code(reason: &str) -> i64 {
         "target actor not found" => 4,
         _ => 5,
     }
+}
+
+/// Verify that the target actor's behavior at the given index has a matching
+/// content hash. Returns `true` if verification passes (or if the local
+/// behavior entry has no hash — backward compatibility preserves nodes whose
+/// modules were compiled before content hashing was added).
+fn verify_behavior_hash(
+    runtime: &Runtime,
+    target_actor: u64,
+    behavior_id: u16,
+    sender_hash: &[u8; 32],
+) -> bool {
+    let actor = match runtime.actors.get(&target_actor) {
+        Some(a) => a,
+        None => return false,
+    };
+    // Check the per-actor behavior table first (native handler).
+    if actor.behavior_table.get(behavior_id as usize).is_some() {
+        return true; // Native handlers have no hash — accept.
+    }
+    let module = match &actor.bytecode_module {
+        Some(m) => m,
+        None => return false,
+    };
+    let entry = match module.behaviors.get(behavior_id as usize) {
+        Some(e) => e,
+        None => return false,
+    };
+    match &entry.content_hash {
+        Some(local_hash) => local_hash == sender_hash,
+        None => true, // No local hash — backward compatible, accept.
+    }
+}
+
+/// Try to look up the content hash for a behavior name in the current
+/// actor's bytecode module. Returns `None` if no current actor context,
+/// no bytecode module, or the behavior has no content hash.
+///
+/// This is a best-effort lookup: the sender's module may not define the
+/// target behavior (cross-module sends), in which case no hash is
+/// transmitted and no receiver-side verification is performed.
+fn try_lookup_content_hash(runtime: &Runtime, behavior_name: &str) -> Option<[u8; 32]> {
+    let actor_id = runtime.current_actor?;
+    let actor = runtime.actors.get(&actor_id)?;
+    let module = actor.bytecode_module.as_ref()?;
+    let suffix = format!(".{}", behavior_name);
+    module
+        .behaviors
+        .iter()
+        .find(|b| b.name == behavior_name || b.name.ends_with(&suffix))
+        .and_then(|b| b.content_hash)
 }
 
 /// Process all incoming network packets and deliver actor messages.
@@ -845,6 +907,7 @@ pub fn process_network_packets(
                 behavior_name,
                 initial_state,
                 bytecode: _,
+                content_hash: _,
             } => {
                 // MVP: remote spawn only supports behaviors the receiving
                 // runtime has explicitly registered via
@@ -915,7 +978,7 @@ pub fn process_network_packets(
                 runtime.acked_packets.insert(packet_seq);
             }
             _ => {
-                if let Some((target_actor, behavior_name, mut msg, string_table)) =
+                if let Some((target_actor, behavior_name, mut msg, string_table, content_hash)) =
                     resolver.parse_packet(incoming.packet)
                 {
                     // Resolve the behavior name against the target actor's
@@ -926,6 +989,19 @@ pub fn process_network_packets(
                     msg.behavior_id = runtime
                         .behavior_id_for(target_actor, &behavior_name)
                         .unwrap_or(0);
+                    // If the sender attached a content hash, verify it
+                    // against the local behavior table.
+                    if let Some(sender_hash) = content_hash {
+                        if !verify_behavior_hash(runtime, target_actor, msg.behavior_id, &sender_hash) {
+                            eprintln!(
+                                "nulang-net: dropping message to actor {}: behavior '{}' content hash mismatch (possible version skew)",
+                                target_actor, behavior_name
+                            );
+                            notify_delivery_failed(runtime, msg.sender, "behavior content hash mismatch");
+                            ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+                            continue;
+                        }
+                    }
                     // Intern string payloads into the TARGET actor's module
                     // pool — on this (scheduler) thread, never in a network
                     // reader thread. The ids on the wire index the packet's
@@ -1008,6 +1084,7 @@ pub fn spawn_on_node(
         let packet = Packet::SpawnRequest {
             request_id,
             behavior_name: behavior_name.to_string(),
+            content_hash: None,
             initial_state,
             bytecode: None,
         };
@@ -1356,12 +1433,13 @@ mod tests {
             100,  // sender_actor
             MessagePriority::Normal,
             vec!["hello".to_string()],
+            None, // content_hash
         );
-
         match packet {
             Packet::ActorMessage {
                 target_actor,
                 behavior_name,
+                content_hash,
                 payload,
                 string_table,
                 sender_actor,
@@ -1370,6 +1448,7 @@ mod tests {
             } => {
                 assert_eq!(target_actor, 42);
                 assert_eq!(behavior_name, "handle_msg");
+                assert_eq!(content_hash, None);
                 assert_eq!(sender_actor, 100);
                 assert_eq!(sender_node.0, local_node.0); // Same underlying u64
                 assert_eq!(priority, MessagePriority::Normal);
@@ -1391,26 +1470,26 @@ mod tests {
         let packet = Packet::ActorMessage {
             target_actor: 77,
             behavior_name: "inc".to_string(),
+            content_hash: None,
             payload: vec![Value::int(123)],
             string_table: vec![],
             sender_actor: 88,
             sender_node: NodeId(9), // Remote node 9
             priority: MessagePriority::System,
         };
-
         let result = resolver.parse_packet(packet);
         assert!(result.is_some());
 
-        let (target, behavior_name, msg, string_table) = result.unwrap();
+        let (target, behavior_name, msg, string_table, content_hash) = result.unwrap();
         assert_eq!(target, 77);
         assert_eq!(behavior_name, "inc");
+        assert_eq!(content_hash, None);
         // behavior_id is resolved at delivery, not parse time.
         assert_eq!(msg.behavior_id, 0);
         assert_eq!(msg.sender, 88);
         assert_eq!(msg.priority, MessagePriority::System);
         assert_eq!(msg.payload.len(), 1);
         assert!(string_table.is_empty());
-
         // The sender should now be in the cache.
         assert!(resolver.cache_mut().get(NodeId(9), 88).is_some());
     }
