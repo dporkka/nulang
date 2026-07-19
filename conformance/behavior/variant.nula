@@ -1,0 +1,7 @@
+type Option[T] = Some(T) | None
+fn main() {
+    match Some(42) {
+        | Some(v) => v + 1
+        | None => 0
+    }
+}

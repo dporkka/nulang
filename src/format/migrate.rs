@@ -1,0 +1,98 @@
+//! Format migration registry.
+//!
+//! This is the **only** legal place where one `.nbc` format version is
+//! converted into another. Version 1 is frozen; no migration is defined yet
+//! beyond the identity `v1 -> v1`. When a v2 format is introduced (RFC
+//! required), a `v1_to_v2` step is registered here and `migrate_nbc` walks the
+//! chain `v1 -> v2 -> ... -> target` so a runtime that speaks v2 can load a
+//! v1 artifact by transparently running the registered migrations.
+//!
+//! # Stability contract
+//!
+//! A migration is a pure function over bytes: it MUST be deterministic, total
+//! over its declared input version, and preserve the meaning of the encoded
+//! module. Migrations are append-only — once a `vN_to_v(N+1)` step is
+//! published it never changes (a changed migration would silently invalidate
+//! every artifact already upgraded through it). New steps are added; existing
+//! steps are immutable.
+
+use crate::format::constants::{FormatError, NBC_HEADER_LEN};
+
+/// The list of format versions this runtime can migrate *between* (inclusive).
+/// Today only v1 exists, so the only legal migration is the identity v1 -> v1.
+const KNOWN_VERSIONS: &[u32] = &[1];
+
+/// Read the `format_version` field from a `.nbc` header without decoding the
+/// body. Returns `None` if the bytes are too short to contain a header or the
+/// magic does not match (i.e. the input is not a `.nbc` artifact at all).
+pub fn peek_format_version(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < NBC_HEADER_LEN {
+        return None;
+    }
+    if &bytes[0..4] != b"NLBC" {
+        return None;
+    }
+    Some(u32::from_be_bytes(bytes[4..8].try_into().unwrap()))
+}
+
+/// Migrate a `.nbc` artifact from its recorded format version up to
+/// `target_version`, applying each registered step in order.
+///
+/// For now the only registered step is the identity `v1 -> v1`, so any other
+/// request fails with [`FormatError::UnsupportedVersion`]. When v2 lands,
+/// add a `v1_to_v2` step here and this function will walk `v1 -> v2`
+/// automatically.
+pub fn migrate_nbc(bytes: &[u8], target_version: u32) -> Result<Vec<u8>, FormatError> {
+    let from = peek_format_version(bytes).ok_or(FormatError::Truncated {
+        need: NBC_HEADER_LEN,
+        have: bytes.len(),
+    })?;
+    if !KNOWN_VERSIONS.contains(&from) || !KNOWN_VERSIONS.contains(&target_version) {
+        return Err(FormatError::UnsupportedVersion {
+            max_supported: *KNOWN_VERSIONS.last().unwrap(),
+            found: if !KNOWN_VERSIONS.contains(&from) { from } else { target_version },
+        });
+    }
+    // v1 -> v1: identity (the only registered migration today).
+    if from == 1 && target_version == 1 {
+        return Ok(bytes.to_vec());
+    }
+    Err(FormatError::UnsupportedVersion {
+        max_supported: *KNOWN_VERSIONS.last().unwrap(),
+        found: target_version,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
+
+    #[test]
+    fn test_peek_format_version_reads_header() {
+        let bytes = CodeModule::new("t").to_nbc(None).unwrap();
+        assert_eq!(peek_format_version(&bytes), Some(1));
+    }
+
+    #[test]
+    fn test_peek_format_version_rejects_non_nbc() {
+        assert_eq!(peek_format_version(b"nope"), None);
+    }
+
+    #[test]
+    fn test_migrate_identity_v1_to_v1() {
+        let mut m = CodeModule::new("t");
+        m.add_constant(Constant::Int(7));
+        m.emit(Instruction::new0(OpCode::Halt));
+        let bytes = m.to_nbc(None).unwrap();
+        let migrated = migrate_nbc(&bytes, 1).expect("v1->v1 identity");
+        assert_eq!(migrated, bytes, "identity migration must be byte-identical");
+    }
+
+    #[test]
+    fn test_migrate_rejects_unknown_versions() {
+        let bytes = CodeModule::new("t").to_nbc(None).unwrap();
+        let err = migrate_nbc(&bytes, 2).unwrap_err();
+        assert!(matches!(err, FormatError::UnsupportedVersion { .. }));
+    }
+}

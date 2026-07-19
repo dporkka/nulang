@@ -44,6 +44,16 @@ impl PackageSource {
             },
         }
     }
+
+    /// The directory this package's source lives in, if it has a local
+    /// path (for content hashing).
+    fn dir(&self) -> Option<&Path> {
+        match self {
+            PackageSource::Path(dir) => Some(dir),
+            PackageSource::Git { .. } => None, // git clones are hashed at fetch time (TODO)
+            PackageSource::Root => None,
+        }
+    }
 }
 
 /// A package in the resolution graph.
@@ -54,6 +64,33 @@ pub struct ResolvedPackage {
     pub source: PackageSource,
     /// Names of this package's resolved direct dependencies.
     pub dependencies: Vec<String>,
+}
+
+impl ResolvedPackage {
+    /// Compute the BLAKE3 hash of this package's source files (all `.nula`
+    /// files in the package directory, sorted by path, concatenated). Returns
+    /// hex. Empty string if the source directory is unavailable.
+    pub fn content_hash_hex(&self) -> String {
+        let Some(dir) = self.source.dir() else {
+            return String::new();
+        };
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("nula"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        let mut hasher = blake3::Hasher::new();
+        for file in &files {
+            if let Ok(contents) = std::fs::read(file) {
+                hasher.update(&contents);
+            }
+        }
+        hasher.finalize().to_hex().to_string()
+    }
 }
 
 /// The result of resolving a root package: every package in topological
@@ -74,7 +111,8 @@ impl Resolution {
         &self.packages[..self.packages.len() - 1]
     }
 
-    /// Pin every non-root package into a lockfile.
+    /// Pin every non-root package into a lockfile, including the BLAKE3
+    /// content hash of each resolved package's source.
     pub fn to_lockfile(&self) -> Lockfile {
         let mut lockfile = Lockfile::new();
         for package in self.dependencies() {
@@ -82,6 +120,7 @@ impl Resolution {
                 name: package.name.clone(),
                 version: package.version.clone(),
                 source: package.source.lockfile_source(),
+                content_hash: package.content_hash_hex(),
             });
         }
         lockfile
@@ -545,6 +584,37 @@ mod tests {
             NuError::PackageError(msg) => assert!(msg.contains("conflicting sources")),
             other => panic!("expected PackageError, got {:?}", other),
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_lockfile_includes_content_hash() {
+        // A resolved local-path dependency must carry a BLAKE3 content hash
+        // in the lockfile, computed from its .nula source files.
+        let dir = fresh_dir("content_hash");
+        let app_dir = dir.join("app");
+        let util_dir = dir.join("util");
+        write_manifest(&app_dir, "app", "1.0.0", "util = { path = \"../util\" }\n");
+        write_manifest(&util_dir, "util", "0.1.0", "");
+        // A source file whose content we can hash.
+        std::fs::write(util_dir.join("lib.nula"), "fn main() { 1 }").unwrap();
+
+        let manifest = Manifest::load(&app_dir).unwrap();
+        let resolution = resolve(&app_dir, &manifest).unwrap();
+        let lockfile = resolution.to_lockfile();
+        let util = &lockfile.package[0];
+        assert_eq!(util.name, "util");
+        assert!(
+            !util.content_hash.is_empty(),
+            "content_hash must be computed for path dependencies"
+        );
+        // The hash is stable: re-resolve and compare.
+        let lockfile2 = resolve(&app_dir, &manifest).unwrap().to_lockfile();
+        assert_eq!(
+            lockfile2.package[0].content_hash, util.content_hash,
+            "content hash must be stable across resolutions of the same source"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

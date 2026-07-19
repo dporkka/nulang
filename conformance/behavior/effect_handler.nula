@@ -1,0 +1,1 @@
+handle { perform IO.foo() } { | IO.foo() => 1 }

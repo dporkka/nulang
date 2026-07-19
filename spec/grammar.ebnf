@@ -1,0 +1,179 @@
+# Nulang Grammar (EBNF)
+
+> **Authoritative grammar for the Frozen (Core) and Stable tiers** of the
+> Nulang language, per RFC 0002 (Frozen Core) and `GOVERNANCE.md` §2. This
+> file is a Frozen-tier artifact: the Core productions below may not change
+> without a new RFC and a major-version bump. The Stable productions may
+> change only under the deprecation contract.
+>
+> The hand-rolled recursive-descent parser in `src/parser.rs` is the reference
+> implementation of this grammar. The conformance corpus in
+> `conformance/grammar/` (positive + negative examples) validates the parser
+> against this grammar; see `conformance/README.md` for the check harness.
+>
+> Experimental surface (actors' `@backend`, `workflow`, `agent`, FFI `extern`,
+> Python interop, WIT) is **out of scope** for this grammar and is not part of
+> the frozen or stable language.
+>
+> EBNF conventions: `{ X }` = zero or more; `[ X ]` = optional; `X | Y` =
+> alternation; `"tok"` = literal terminal; `(* comment *)`. Newlines and
+> semicolons are equivalent statement separators (`SEP`).
+
+## 1. Lexical conventions
+
+```
+IDENT        = lowercase ( lowercase | uppercase | digit | "_" )*
+UPPER_IDENT  = uppercase ( lowercase | uppercase | digit | "_" )*
+INT_LIT      = digit { digit } | "0x" hex_digit { hex_digit }
+FLOAT_LIT    = digit { digit } "." digit { digit } [ ("e"|"E") ["+"|"-"] digit { digit } ]
+STRING_LIT   = '"' { char_escape | printable_char - '"' } '"'
+CHAR_LIT     = "'" ( char_escape | printable_char - "'" ) "'"
+BOOL_LIT     = "true" | "false"
+```
+
+Reserved keywords (not usable as identifiers): `fn`, `let`, `if`, `else`,
+`match`, `return`, `type`, `alias`, `enum`, `struct`, `effect`, `handle`,
+`perform`, `actor`, `behavior`, `spawn`, `send`, `receive`, `val`, `iso`,
+`trn`, `box`, `tag`, `lineariso`, `true`, `false`, `nil`, `unit`, `pub`,
+`extern`, `where`, `priv`, `loop`, `node`, `monitor`, `link`, `exit`,
+`await`, `subworkflow`, `case`, `do`.
+
+## 2. Core productions (Frozen — RFC 0002)
+
+A Core program is a sequence of declarations. Core excludes actors, all
+effects except `IO.print`/`IO.read`, and all capabilities except `val`.
+
+```
+program        = { decl SEP } ;
+fn_decl        = [ "pub" ] "fn" IDENT "(" [ param_list ] ")" [ "->" type ] block ;
+decl           = fn_decl
+                | type_decl          (* enum / struct / variant *)
+                | alias_decl
+                | const_decl ;
+
+fn_decl        = [ "pub" ] "fn" IDENT "(" [ param_list ] ")" [ ":" type ] block ;
+
+param_list     = param { "," param } ;
+param          = IDENT [ ":" type ] ;
+
+type_decl      = [ "pub" ] "type" UPPER_IDENT [ type_params ]
+                  ( variant_body | record_body ) ;
+type_params    = "[" IDENT { "," IDENT } "]" ;
+variant_body   = "=" variant { "|" variant } ;
+variant        = UPPER_IDENT [ "(" type { "," type } ")" ] ;
+record_body    = "{" { field SEP } "}" ;
+field          = IDENT ":" type ;
+alias_decl     = [ "pub" ] "alias" UPPER_IDENT [ type_params ] "=" type ;
+const_decl     = [ "pub" ] "const" IDENT [ ":" type ] "=" expr ;
+
+(* Expressions — Pratt precedence; listed lowest to highest binding *)
+expr           = assign_expr ;
+assign_expr    = or_expr [ "=" assign_expr ] ;            (* only in `let`/`const` *)
+or_expr        = and_expr { "||" and_expr } ;
+and_expr       = eq_expr { "&&" eq_expr } ;
+eq_expr        = cmp_expr { ( "==" | "!=" ) cmp_expr } ;
+cmp_expr       = add_expr { ( "<" | ">" | "<=" | ">=" ) add_expr } ;
+add_expr       = mul_expr { ( "+" | "-" ) mul_expr } ;
+mul_expr       = unary_expr { ( "*" | "/" | "%" ) unary_expr } ;
+unary_expr     = ( "-" | "!" ) unary_expr | primary ;
+
+primary        = INT_LIT | FLOAT_LIT | STRING_LIT | CHAR_LIT | BOOL_LIT
+                | "nil" | "unit"
+                | IDENT
+                | "(" expr { "," expr } ")"            (* paren or tuple *)
+                | block
+                | if_expr
+                | match_expr
+                | lambda
+                | record_literal
+                | call_expr ;
+
+call_expr      = primary "(" [ expr { "," expr } ")" ] ;  (* desugared in Pratt *)
+record_literal = "{" { field_init SEP } "}" ;
+field_init     = IDENT [ ":" expr ] ;                     (* `x` desugars to `x: x` *)
+
+if_expr        = "if" expr block [ "else" ( if_expr | block ) ] ;
+match_expr     = "match" expr "{" { match_arm SEP } "}" ;
+match_arm      = [ "case" ] pattern "=>" expr ;
+pattern        = "_" | INT_LIT | STRING_LIT | BOOL_LIT
+                | IDENT | UPPER_IDENT [ "(" pattern { "," pattern } ")" ]
+lambda         = "fn" "(" [ param_list ] ")" [ "->" type ] block ;
+block          = "{" { stmt SEP } [ expr ] "}" ;
+stmt           = let_stmt | return_stmt | expr ;
+let_stmt       = "let" IDENT [ ":" type ] "=" expr ;
+return_stmt    = "return" [ expr ] ;
+
+(* Types *)
+type           = arrow_type ;
+arrow_type     = atomic_type { "->" atomic_type } ;
+atomic_type    = UPPER_IDENT [ type_args ]    (* named: Int, Bool, String, Vec<T>, ... *)
+                | "(" [ type { "," type } ] ")" ;
+type_args      = "[" type { "," type } "]" ;
+
+SEP            = newline | ";" ;
+```
+
+## 3. Stable extensions (Stable tier — change requires RFC + deprecation)
+
+These productions extend the Core grammar. They are Stable: breaking changes
+require an RFC and a deprecation cycle.
+
+```
+(* Effects (beyond IO) *)
+decl          += effect_decl ;
+effect_op     = IDENT ":" [ "(" [ type { "," type } ] ")" ] "->" type ;
+perform_expr  = "perform" UPPER_IDENT "." IDENT "(" [ expr_list ] ")" ;
+primary       += perform_expr ;
+primary       += handle_expr ;
+handle_expr   = "handle" expr "{" { handle_arm SEP } "}" ;
+handle_arm    = [ "|" ] UPPER_IDENT "." IDENT "(" [ param_list ] ")" [ "resume" ] "=>" expr ;
+cap           = "val" | "iso" | "trn" | "box" | "tag" | "lineariso" ;
+param         += IDENT ":" type "@" cap ;          (* capability-annotated param *)
+let_stmt      = "let" IDENT ":" type "@" cap "=" expr ;
+
+(* Actors — the universal abstraction (SPEC2 Ch. 8) *)
+decl          += actor_decl ;
+actor_decl    = [ "pub" ] "actor" IDENT "{" { actor_member SEP } "}" ;
+actor_member  = state_field | behavior | fn_decl ;
+state_field   = "state" IDENT [ ":" type ] [ "@" state_model ] [ "=" expr ] ;
+state_model   = "local" | "durable" | "event_sourced" | "crdt" ;
+behavior      = "behavior" IDENT "(" [ param_list ] ")" block ;
+
+(* Actor expressions *)
+spawn_expr    = "spawn" [ cap ] IDENT [ "{" [ init_fields ] "}" ]
+                [ "link" | "monitor" ] ;           (* parser desugar *)
+send_expr     = "send" expr "to" expr ;
+receive_expr  = "receive" "{" { receive_arm SEP } "}"
+                [ "after" expr "=>" block ] ;
+send_expr     = "send" expr IDENT [ "(" [ expr { "," expr } ] ")" ] ;
+primary       += spawn_expr | send_expr | receive_expr ;
+receive_arm   = [ "|" ] IDENT "(" [ param_list ] ")" "=>" expr ;
+(* Pipe operator *)
+primary       = primary "|>" IDENT [ "." IDENT ] ;  (* left-associative, desugars to call *)
+```
+
+## 4. Out of scope (Experimental tier)
+
+The following surface is Experimental and deliberately **not** specified here.
+It may change without RFC and is not part of the frozen or stable language:
+
+- `workflow` and `agent` declarations (AI orchestration).
+- `@backend(native|wasm)` actor annotation.
+- `@tool(description: "...")` function annotation (LLM tool exposure).
+- `extern "lib" { ... }` FFI blocks.
+- `perform Python.call(...)` and the `python` feature surface.
+- `@persistent` and the durable-execution syntax beyond the `@durable`
+  state model (which is Stable).
+- WASM/WIT integration, the `nula` package manager CLI grammar.
+
+When an Experimental feature stabilizes, its productions are added to §3
+under an RFC and removed from this list.
+
+## 5. Parser conformance
+
+The reference parser (`src/parser.rs`) must accept every string in the language
+of §2 ∪ §3 and reject every string outside it (modulo Experimental §4). The
+`conformance/grammar/` corpus contains positive cases (must parse) and negative
+cases (must reject); `conformance/run.rs` executes them against the current
+parser. A drift between this grammar and the parser is a bug in whichever was
+not most recently updated under an RFC.

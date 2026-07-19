@@ -1,0 +1,4 @@
+// Must fail: missing expression
+fn main() {
+    let x = ;
+}

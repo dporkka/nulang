@@ -16,6 +16,9 @@
 //!   --lsp            Start Language Server (stdio)
 //!   --version, -V    Print version and exit
 //!   -v, --verbose    Show bytecode and AST
+//!   nulang --emit-nbc <FILE>   Compile to a .nbc bytecode artifact (don't run)
+//!   nulang <FILE>.nbc          Run a pre-compiled .nbc artifact directly
+//!   nulang --verify <SRC> <FILE>.nbc   Verify source hash, then run
 use mimalloc::MiMalloc;
 
 #[global_allocator]
@@ -108,6 +111,16 @@ async fn main() {
                 break;
             }
             "-v" | "--verbose" => opts.verbose = true,
+            "--emit-nbc" => opts.emit_nbc = true,
+            "--verify" => {
+                if i + 1 < args.len() {
+                    opts.verify_source = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --verify requires a source file path argument");
+                    std::process::exit(1);
+                }
+            }
             "-h" | "--help" => {
                 print_help();
                 return;
@@ -160,6 +173,14 @@ async fn main() {
     }
 
     if let Some(code) = opts.eval_code {
+        if opts.emit_nbc {
+            let out = opts.out_file.clone().unwrap_or_else(|| "out.nbc".to_string());
+            if let Err(e) = compile_source_to_nbc(&code, &out) {
+                print_error(&e);
+                std::process::exit(exit_code(&e));
+            }
+            return;
+        }
         if let Err(e) = run_source(&code, opts.verbose, &opts.backend, opts.out_file.as_deref()) {
             print_error(&e);
             std::process::exit(exit_code(&e));
@@ -183,9 +204,21 @@ async fn main() {
         return;
     }
 
-    // Run a source file
+    // Run a source file, or a pre-compiled `.nbc` artifact.
     if !positional.is_empty() {
         let path = &positional[0];
+
+        // A `.nbc` artifact: load and run directly without invoking the
+        // compiler. This is the durable-distribution path — a `.nbc` minted
+        // in 2026 runs on any conforming runtime in 2126.
+        if path.ends_with(".nbc") {
+            if let Err(e) = run_nbc_file(path, opts.verify_source.as_deref()) {
+                print_error(&e);
+                std::process::exit(exit_code(&e));
+            }
+            return;
+        }
+
         let source = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
@@ -193,6 +226,24 @@ async fn main() {
                 std::process::exit(1);
             }
         };
+
+        // `--emit-nbc`: compile to a `.nbc` artifact and write it, don't run.
+        if opts.emit_nbc {
+            let out = opts.out_file.clone().unwrap_or_else(|| {
+                // foo.nula -> foo.nbc; anything else -> <path>.nbc
+                if let Some(stem) = path.strip_suffix(".nula") {
+                    format!("{stem}.nbc")
+                } else {
+                    format!("{path}.nbc")
+                }
+            });
+            if let Err(e) = compile_source_to_nbc(&source, &out) {
+                print_error(&e);
+                std::process::exit(exit_code(&e));
+            }
+            return;
+        }
+
         if let Err(e) = run_source(&source, opts.verbose, &opts.backend, opts.out_file.as_deref()) {
             print_error(&e);
             std::process::exit(exit_code(&e));
@@ -214,6 +265,11 @@ struct Options {
     verbose: bool,
     backend: String,
     out_file: Option<String>,
+    /// Compile the input to a `.nbc` artifact and write it, don't run.
+    emit_nbc: bool,
+    /// When running a `.nbc` artifact, verify its recorded source hash against
+    /// this source file before executing. Refuses on mismatch.
+    verify_source: Option<String>,
 }
 
 impl Default for Options {
@@ -227,6 +283,8 @@ impl Default for Options {
             verbose: false,
             backend: "bytecode".to_string(),
             out_file: None,
+            emit_nbc: false,
+            verify_source: None,
         }
     }
 }
@@ -254,6 +312,10 @@ fn print_help() {
     if cfg!(feature = "wasm-backend") {
         println!("  --out <file>     Output file for WASM backends (default: out.wasm)");
     }
+    println!("  --emit-nbc       Compile <FILE> (or --eval <CODE>) to a .nbc artifact; don't run");
+    println!("  --out <file>     Output path for --emit-nbc (default: <FILE> with .nbc extension)");
+    println!("  <FILE>.nbc       Run a pre-compiled .nbc artifact directly (no compiler invoked)");
+    println!("  --verify <src>   When running a .nbc artifact, verify its source hash against <src>");
     println!("  nula <cmd>       Package manager (new, build, test, run)");
     println!("  --version, -V    Print version and exit");
     println!("  -v, --verbose    Show bytecode and AST");
@@ -457,7 +519,7 @@ fn run_source(source: &str, verbose: bool, backend: &str, out_file: Option<&str>
             let result_raw = aot_module.run()?;
             let result = nulang::vm::Value::from_raw(result_raw);
             let result_str = result.to_string_repr();
-            if result_str != "unit" {
+            if !result_str.is_empty() && result_str != "unit" && result_str != "()" {
                 println!("{}", result_str);
             }
             return Ok(());
@@ -484,7 +546,7 @@ fn run_source(source: &str, verbose: bool, backend: &str, out_file: Option<&str>
                 vm.run().map_err(|e| e)?
             };
             let result_str = value.to_string_repr();
-            if result_str != "unit" {
+            if !result_str.is_empty() && result_str != "unit" && result_str != "()" {
                 println!("{}", result_str);
             }
             Ok(())
@@ -546,6 +608,72 @@ fn compile_with_new_pipeline(
     let hir = nulang::hir_lower::lower_module(ast);
     let mir = nulang::mir_lower::lower_module(&hir)?;
     nulang::mir_codegen::compile_mir(&mir, name)
+}
+
+/// Compile a source string to a `.nbc` artifact and write it to `out_path`.
+///
+/// The BLAKE3 hash of the source is recorded in the artifact header so a later
+/// `--verify` run can confirm the artifact came from this exact source
+/// (supply-chain integrity). Does not execute the module.
+fn compile_source_to_nbc(source: &str, out_path: &str) -> NuResult<()> {
+    let ast = run_frontend(source, false)?;
+    let m = compile_with_new_pipeline(&ast, "main")?;
+    let source_hash = blake3::hash(source.as_bytes());
+    let bytes = m
+        .to_nbc(Some(*source_hash.as_bytes()))
+        .map_err(|e| nulang::types::NuError::VMError(e.to_string()))?;
+    std::fs::write(out_path, &bytes).map_err(|e| {
+        nulang::types::NuError::VMError(format!("failed to write {out_path}: {e}"))
+    })?;
+    println!(
+        "Wrote {out_path} ({} bytes, .nbc format v{}, language v{})",
+        bytes.len(),
+        nulang::format::constants::BYTECODE_VERSION,
+        nulang::format::constants::LANGUAGE_VERSION,
+    );
+    Ok(())
+}
+
+/// Load and run a `.nbc` artifact directly, optionally verifying its recorded
+/// source hash against a source file. This is the durable-distribution path:
+/// no compiler invocation, no source parse — just `from_nbc` + `VM::run`.
+fn run_nbc_file(path: &str, verify_source: Option<&str>) -> NuResult<()> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        nulang::types::NuError::VMError(format!("cannot read .nbc file '{path}': {e}"))
+    })?;
+    let artifact = nulang::bytecode::CodeModule::from_nbc(&bytes)
+        .map_err(|e| nulang::types::NuError::VMError(e.to_string()))?;
+
+    if let Some(src_path) = verify_source {
+        let source = std::fs::read_to_string(src_path).map_err(|e| {
+            nulang::types::NuError::VMError(format!("cannot read source '{src_path}': {e}"))
+        })?;
+        let computed = blake3::hash(source.as_bytes());
+        match artifact.source_hash {
+            Some(h) if h == *computed.as_bytes() => { /* verified */ }
+            Some(h) => {
+                return Err(nulang::types::NuError::VMError(format!(
+                    "source hash mismatch: artifact recorded {} but source {src_path} hashes to {}",
+                    hex::encode(h),
+                    hex::encode(computed.as_bytes()),
+                )));
+            }
+            None => {
+                return Err(nulang::types::NuError::VMError(
+                    "artifact carries no source hash; cannot verify".into(),
+                ));
+            }
+        }
+    }
+
+    let mut vm = VM::new();
+    vm.load_module(artifact.module);
+    let value = vm.run().map_err(|e| e)?;
+    let result_str = value.to_string_repr();
+    if !result_str.is_empty() && result_str != "unit" && result_str != "()" {
+        println!("{}", result_str);
+    }
+    Ok(())
 }
 
 fn type_to_string(ty: &Type) -> String {

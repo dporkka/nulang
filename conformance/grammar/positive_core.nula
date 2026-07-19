@@ -1,0 +1,11 @@
+fn main() {
+    let x = 6 * 7;
+    if x > 40 {
+        return x;
+    } else {
+        match x {
+            case 42 => 1;
+            case _ => 0;
+        }
+    }
+}

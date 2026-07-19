@@ -1,0 +1,5 @@
+fn main() {
+    let t = true
+    let f = false
+    if t && !f then 1 else 0
+}

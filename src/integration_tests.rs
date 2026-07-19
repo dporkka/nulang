@@ -7251,4 +7251,155 @@ match { a: 2, b: 9 } with {
             Err(e) => panic!("agent retry test failed: {}", e),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // .nbc durable-artifact format (RFC 0001)
+    // -----------------------------------------------------------------------
+
+    /// A module compiled through the full pipeline, serialized to `.nbc`, and
+    /// deserialized must produce a value identical to running the original
+    /// module directly. This is the "run a 2026 program in 2126" guarantee.
+    #[test]
+    fn test_nbc_roundtrip_preserves_execution_result() {
+        let source = "fn main() { let x = 6 * 7; if x > 40 { x + 1 } else { x - 1 } }";
+        let original = compile_source_new(source).expect("compile");
+        let bytes = original.to_nbc(None).expect("encode");
+        let artifact = crate::bytecode::CodeModule::from_nbc(&bytes).expect("decode");
+        assert_eq!(artifact.module, original, "round-trip must preserve the module");
+
+        // Run both and compare observable results.
+        let mut vm_orig = VM::new();
+        vm_orig.load_module(original);
+        let v_orig = vm_orig.run().unwrap();
+
+        let mut vm_nbc = VM::new();
+        vm_nbc.load_module(artifact.module);
+        let v_nbc = vm_nbc.run().unwrap();
+
+        assert_eq!(v_orig, v_nbc, "source-run and .nbc-run must agree");
+        assert_eq!(v_nbc.as_int(), Some(43));
+    }
+
+    /// The source hash recorded by `to_nbc` must round-trip through `from_nbc`
+    /// and must be the actual BLAKE3 of the source — the basis of `--verify`.
+    #[test]
+    fn test_nbc_source_hash_roundtrip_and_blake3() {
+        let source = "fn main() { 100 }";
+        let m = compile_source_new(source).unwrap();
+        let expected_hash = *blake3::hash(source.as_bytes()).as_bytes();
+        let bytes = m.to_nbc(Some(expected_hash)).unwrap();
+        let artifact = crate::bytecode::CodeModule::from_nbc(&bytes).unwrap();
+        assert_eq!(artifact.source_hash, Some(expected_hash));
+    }
+
+    /// A `.nbc` artifact with a future language version is rejected, not
+    /// reinterpreted — the stability contract in action.
+    #[test]
+    fn test_nbc_rejects_future_language_version() {
+        let m = compile_source_new("fn main() { 1 }").unwrap();
+        let mut bytes = m.to_nbc(None).unwrap();
+        // Language version field is at offset 8.
+        bytes[8..12].copy_from_slice(&99u32.to_be_bytes());
+        let err = crate::bytecode::CodeModule::from_nbc(&bytes).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::format::constants::FormatError::IncompatibleLanguage { artifact: 99, .. }
+        ));
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Grammar conformance (RFC 0002 Core + Stable)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_grammar_conformance() {
+        let positive = vec![
+            "fn main() {}",
+            "fn add(a: Int, b: Int) -> Int { a + b }",
+            "type Option[T] = Some(T) | None",
+            "type Point = { x: Int, y: Int }",
+            "actor Counter { state count: Int = 0; behavior inc() { count = count + 1 } }",
+            "fn main() { spawn Counter {} }",
+            "fn main() { send bob hello(\"name\") }",
+            "fn main() { receive { | msg(name) => perform IO.print(name) } }",
+            "effect Rand { int: -> Int }",
+            "fn main() { handle { perform Rand.int() } { | Rand.int() resume => 42 } }",
+        ];
+
+        let negative = vec![
+            "fn main( {",                     // syntax error
+            "let x = ;",                      // missing expr
+            "actor A { fn() {} }",            // actor missing behavior name
+            "type Foo = 1",                   // invalid variant start
+            "receive { case => 1 }",          // missing match arm pattern
+        ];
+
+        for src in positive {
+            let mut lexer = Lexer::new(src);
+            let tokens = lexer.lex().unwrap_or_else(|_| panic!("Lexer failed on positive case: {src}"));
+            let mut parser = Parser::new(tokens);
+            parser.parse_module().unwrap_or_else(|e| panic!("Parser failed on positive case: {src}\nError: {e}"));
+        }
+
+        for src in negative {
+            let mut lexer = Lexer::new(src);
+            if let Ok(tokens) = lexer.lex() {
+                let mut parser = Parser::new(tokens);
+                if parser.parse_module().is_ok() {
+                    panic!("Parser incorrectly accepted negative case: {src}");
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+ // Provider effect — the general, non-transient replacement for LLM.ask
+    // -----------------------------------------------------------------------
+
+    /// `perform Provider.ask("llm", prompt)` must produce the same result as
+    /// `perform LLM.ask(prompt)` when an LLM client is registered. This is
+    /// the longevity path: the language vocabulary references an eternal
+    /// "provider" abstraction, not a transient technology.
+    #[test]
+    fn test_provider_ask_llm_equivalent_to_llm_ask() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut()
+            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+
+        // The new, general Provider effect.
+        let v = run_source_new_with_runtime(
+            "fn main() { perform Provider.ask(\"llm\", \"hello\") }",
+            rt.clone(),
+        )
+        .unwrap();
+        assert!(
+            !v.is_nil(),
+            "Provider.ask(\"llm\", ...) must dispatch to the registered LLM client"
+        );
+    }
+
+    /// `perform Provider.ask("unknown", ...)` with no matching provider
+    /// registration must fall through to an unhandled-effect error (not a
+    /// crash, not a silent nil). User-installed handlers can still catch it.
+    #[test]
+    fn test_provider_ask_unknown_provider_is_unhandled() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut()
+            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+
+        let result = run_source_new_with_runtime(
+            "fn main() { perform Provider.ask(\"unknown\", \"hello\") }",
+            rt,
+        );
+        assert!(
+            result.is_err(),
+            "unknown provider must be an unhandled effect, not a silent nil"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Unhandled effect"),
+            "expected unhandled-effect error, got: {msg}"
+        );
+    }
 }

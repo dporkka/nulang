@@ -63,6 +63,114 @@ Several keywords are reserved in the lexer but not yet wired into the grammar: `
 Where a section is marked **Planned**, its examples show the intended v2.0 syntax and may not parse under the current compiler.
 
 ---
+# Format Stability
+
+This chapter is the **stability contract** for Nulang's durable formats. It is
+ratified by RFC 0001 (see `RFC/0001-format-stability.md`) and is part of the
+Frozen tier (see `CHANGELOG.md`): the contracts below may not be weakened
+without a new RFC and a major-version bump.
+
+## FS.1 The Three Frozen Formats
+
+Nulang has three versioned, frozen binary formats. Each carries a magic-bytes
+identifier and a version number in every emitted artifact and on every wire
+connection. A runtime that encounters a version it does not understand MUST
+reject it with a named error; it MUST NOT reinterpret the bytes under a
+different layout.
+
+| Format | Magic | Version field | Source of truth |
+|--------|-------|---------------|-----------------|
+| `.nbc` bytecode artifact | `NLBC` (4 bytes) | `format_version: u32` | `src/format/constants.rs` |
+| NUL0 wire protocol | `NUL0` (4 bytes) | `version: u32` in handshake | `src/format/constants.rs` |
+| Value layout (i64-tagged) | — | `VALUE_LAYOUT_VERSION: u32` | `src/value_layout.rs` |
+
+The canonical constants live in `src/format/constants.rs`; no other module
+defines format magic bytes or version numbers. Bumping any of these constants
+is a breaking change requiring an RFC.
+
+## FS.2 `.nbc` Byte Layout (Version 1)
+
+A `.nbc` file is the durable, distributable encoding of a compiled module. All
+integers are big-endian.
+
+```text
+offset  size           field
+0       4              magic = b"NLBC"
+4       4              format_version (u32)          — must be ≤ BYTECODE_MAX_VERSION
+8       4              language_version (u32)        — recorded; checked against LANGUAGE_VERSION
+12      32             source_hash (BLAKE3; 0x00..00 if unknown)
+44      4              instr_count (u32)
+48      4*instr_count  instructions (Instruction::encode() → u32)
+48+4n   4              meta_len (u32)
+52+4n   meta_len       metadata = JSON serialization of the module
+```
+
+The header is hand-rolled binary so a runtime can check magic + version in O(1)
+without a serde dependency. The instruction stream is 4 bytes per instruction
+(opcode `u8` + three `u8` operands, big-endian), so the format is coupled to
+the frozen opcode values: an unknown opcode is rejected with
+`FormatError::UnknownOpcode`, never reinterpreted. The metadata body is JSON,
+universally parseable by any conforming runtime in any host language.
+
+Codec: `CodeModule::to_nbc(source_hash) → Vec<u8>` and
+`CodeModule::from_nbc(bytes) → Result<NbcArtifact, FormatError>` in
+`src/format/nbc.rs`.
+
+## FS.3 NUL0 Wire Handshake (Version 1)
+
+Immediately after a TCP connection is established, both sides exchange a
+16-byte handshake before any framed packets:
+
+```text
+[0..4]   magic "NUL0"   (WIRE_MAGIC)
+[4..8]   version u32    (WIRE_VERSION, big-endian)
+[8..16]  node_id u64    (big-endian)
+```
+
+A peer whose magic does not match or whose version does not equal
+`WIRE_VERSION` is refused with an `io::Error` of kind `InvalidData`. The
+negotiated version governs the packet framing for the lifetime of the
+connection; packets themselves carry the existing `[len u32][magic "NUL0"]
+[type u8][seq u64][payload]` framing unchanged.
+
+## FS.4 Stability Contract
+
+1. **A version, once assigned, is frozen.** The byte layout for version *N*
+   never changes after publication. A "change" to a published version is a bug
+   fix to a *deviation* from the published layout, not a layout change.
+
+2. **Opcode values are never reused.** New opcodes are appended at the next
+   free discriminant; an opcode removed in a major version leaves its value
+   permanently retired. An artifact containing a retired opcode is rejected
+   with `FormatError::UnknownOpcode`.
+
+3. **Additive extensions only within a major version.** A new optional section
+   may be appended to the metadata body; older runtimes ignore unknown JSON
+   fields (serde default-deserializes them). A new required field or a changed
+   field meaning requires a new format version and a migration.
+
+4. **Migrations are pure, deterministic, append-only.** A `vN → v(N+1)`
+   migration is registered once in `src/format/migrate.rs` and never modified
+   thereafter. `migrate_nbc(bytes, target)` walks the chain so a runtime
+   speaking v(N+1) loads a vN artifact by running the registered steps.
+
+5. **Language version is distinct from crate version.** The crate
+   (`Cargo.toml`) version may rev freely; the *language* version
+   (`LANGUAGE_VERSION`, recorded in every `.nbc`) moves only on
+   RFC-ratified change. An artifact whose `language_version` exceeds the
+   runtime's is rejected with `FormatError::IncompatibleLanguage`.
+
+## FS.5 Reference: `src/format/`
+
+- `constants.rs` — `BYTECODE_MAGIC`, `BYTECODE_VERSION`, `BYTECODE_MAX_VERSION`,
+  `WIRE_MAGIC`, `WIRE_VERSION`, `VALUE_LAYOUT_VERSION`, `LANGUAGE_VERSION`,
+  `FormatError`.
+- `nbc.rs` — `CodeModule::to_nbc` / `from_nbc`, `NbcArtifact`.
+- `migrate.rs` — `peek_format_version`, `migrate_nbc` (the only legal home for
+  format-version upgrades).
+
+---
+
 
 # Table of Contents
 
@@ -1202,6 +1310,15 @@ The effect system guarantees several safety properties:
 ---
 
 # Chapter 5: Capabilities
+
+> **Longevity Note (Erasable Vocabulary):** The capability *names*
+> (`iso`, `trn`, `ref`, `val`, `box`, `tag`, `lineariso`) are part of the
+> Frozen Core syntax. However, their *semantics* are defined purely by the
+> capability lattice (subtyping and sendability). This guarantees that
+> while the vocabulary is eternal, its interpretation can be safely retargeted
+> by future language versions without breaking existing source syntax. A
+> program written using `lineariso` today remains syntactically valid in 2226,
+> even if the underlying compiler implementation of linear types evolves.
 
 ## 5.1 Capability System Overview
 
@@ -2630,6 +2747,26 @@ let compatible = Binary.deserialize_with_schema(bytes, UserSchema.v2)
 ```
 
 ---
+
+## 14.5 Determinism Contract
+
+Nulang provides a strict determinism contract for sequential Core computation,
+ensuring a program run in 2026 produces bit-identical output in 2226 across
+all conforming runtimes:
+
+1. **Floating-point:** all `Float` arithmetic is IEEE-754 binary64 using
+   round-to-nearest, ties-to-even. Fast-math optimizations that break this
+   are prohibited. NaN payloads are not preserved (they are canonicalized by
+   the value layout).
+2. **Scheduling:** when multiple actors have the same priority and are ready
+   to run, the scheduler dequeue order is strictly FIFO based on enqueue time.
+3. **GC:** garbage collection observability (e.g. weak references, if ever
+   added) is strictly ordered by logical time, not wall-clock time.
+
+A planned Stable-tier extension is a full Numeric Tower (`Int`, `BigInt`,
+`Rat`) to guarantee 200-year overflow-free arithmetic, as `i64` alone is
+insufficient for durable long-horizon computation.
+
 
 # Chapter 15: Operational Model — Planned
 

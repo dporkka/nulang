@@ -44,6 +44,12 @@ pub struct LockedPackage {
     pub version: String,
     /// `path+<dir>` for local dependencies, `git+<url>#<rev>` for git ones.
     pub source: String,
+    /// BLAKE3 hash of the resolved source (hex). A module pinned by content
+    /// hash in 2026 is bit-identically resolvable in 2226 if any conforming
+    /// registry mirrors that hash. Empty string if the hash was not computed
+    /// (e.g. the source was unavailable at lock time).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_hash: String,
 }
 
 impl Lockfile {
@@ -105,11 +111,13 @@ mod tests {
                     name: "util".to_string(),
                     version: "0.1.0".to_string(),
                     source: "path+/home/david/projects/util".to_string(),
+                    content_hash: "aabbcc".to_string(),
                 },
                 LockedPackage {
                     name: "json".to_string(),
                     version: "0.2.0".to_string(),
                     source: "git+https://github.com/example/json.nu.git#v0.2.0".to_string(),
+                    content_hash: String::new(),
                 },
             ],
         }
@@ -150,5 +158,21 @@ mod tests {
             NuError::PackageError(msg) => assert!(msg.contains("version 99")),
             other => panic!("expected PackageError, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_lockfile_content_hash_round_trips() {
+        // A non-empty content_hash must survive serialization + re-parse.
+        let mut lockfile = Lockfile::new();
+        lockfile.package.push(LockedPackage {
+            name: "pinned".to_string(),
+            version: "1.0.0".to_string(),
+            source: "path+/tmp/pinned".to_string(),
+            content_hash: "deadbeef".to_string(),
+        });
+        let toml_text = lockfile.to_toml().expect("serialize");
+        assert!(toml_text.contains("content_hash"), "content_hash must be in TOML: {toml_text}");
+        let parsed = Lockfile::parse(&toml_text).expect("parse");
+        assert_eq!(parsed.package[0].content_hash, "deadbeef");
     }
 }

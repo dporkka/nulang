@@ -1,0 +1,12 @@
+actor Counter {
+    state count: Int = 0
+    behavior inc() { self.count = self.count + 1 }
+    behavior get() { perform IO.print(self.count) }
+}
+fn main() {
+    let c = spawn Counter {} in {
+        send c inc()
+        send c get()
+        unit
+    }
+}

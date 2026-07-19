@@ -1095,6 +1095,24 @@ impl<'c> FnLowerer<'c> {
                     self.b.assign(dst, mir::RValue::LlmAsk { prompt });
                     return Ok(());
                 }
+                // `perform Provider.ask("llm", prompt)` is the longevity-path
+                // equivalent of `perform LLM.ask(prompt)`: the vocabulary
+                // references an eternal "provider" abstraction, not a
+                // transient technology. Lower it to the existing LlmAsk
+                // fast-path (which correctly interns the result string into
+                // the running VM). Non-"llm" providers fall through to the
+                // generic Perform path.
+                if effect == "Provider" && op == "ask" && args.len() == 2 {
+                    if let Some(hir::Operand::Literal(crate::ast::Literal::String(name), _)) =
+                        args.first()
+                    {
+                        if name == "llm" {
+                            let prompt = self.lower_operand(&args[1])?;
+                            self.b.assign(dst, mir::RValue::LlmAsk { prompt });
+                            return Ok(());
+                        }
+                    }
+                }
                 if effect == "Signal" && op == "wait" {
                     if let Some(hir::Operand::Literal(crate::ast::Literal::String(name), _)) =
                         args.first()

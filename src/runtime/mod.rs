@@ -17,6 +17,7 @@ pub(crate) mod heap_serialize;
 pub use heap_serialize::*;
 mod orca_cycle;
 mod supervisor;
+mod supervisor_registry;
 mod cluster;
 mod network;
 pub mod quic_transport;
@@ -40,6 +41,7 @@ pub use mailbox::*;
 pub use heap::*;
 pub use gc::{ForeignRefOp, GcStats, OrcaCoordinator, OrcaGc, OrcaHeap};
 pub use supervisor::*;
+pub use supervisor_registry::*;
 pub use orca_cycle::*;
 pub use cluster::*;
 pub use distributed::*;
@@ -256,10 +258,9 @@ pub struct Runtime {
     // Pipelines (v0.9 AI Runtime)
     pub next_pipeline_id: u64,
     pub pipelines: HashMap<u64, Pipeline>,
-
-    // Supervisor teams (v0.9 AI Runtime)
-    pub next_supervisor_id: u64,
-    pub supervisor_teams: HashMap<u64, SupervisorTeam>,
+    // Supervisor teams (v0.9 AI Runtime) — extracted into a registry so the
+    // god-object shrinks and the subsystem can evolve independently.
+    pub supervisor_teams: SupervisorTeamRegistry,
 
     // Debates (v0.9 AI Runtime)
     pub next_debate_id: u64,
@@ -352,8 +353,7 @@ impl Runtime {
             recovery_modules: HashMap::new(),
             next_pipeline_id: 1,
             pipelines: HashMap::new(),
-            next_supervisor_id: 1,
-            supervisor_teams: HashMap::new(),
+            supervisor_teams: SupervisorTeamRegistry::new(),
             test_handlers: HashMap::new(),
             next_debate_id: 1,
             debates: HashMap::new(),
@@ -626,17 +626,11 @@ impl Runtime {
             .ok_or_else(|| format!("Pipeline {} not found", id))?;
         pipeline.run(self, input)
     }
-
-    /// Create a new empty supervisor team and return its ID.
     pub fn supervisor_new(&mut self) -> u64 {
-        let id = self.next_supervisor_id;
-        self.next_supervisor_id = self.next_supervisor_id.wrapping_add(1);
-        self.supervisor_teams.insert(id, SupervisorTeam::new());
-        id
+        self.supervisor_teams.create()
     }
 
-    /// Add a worker to an existing supervisor team. Returns the same team ID on
-    /// success so fluent construction can continue.
+
     pub fn supervisor_worker(
         &mut self,
         id: u64,
@@ -644,27 +638,20 @@ impl Runtime {
         agent_id: u64,
         description: &str,
     ) -> Result<u64, String> {
-        let team = self
-            .supervisor_teams
-            .get_mut(&id)
-            .ok_or_else(|| format!("Supervisor team {} not found", id))?;
-        team.workers.push(crate::ai::Worker {
-            name: name.to_string(),
-            agent_id,
-            description: description.to_string(),
-        });
-        Ok(id)
+        self.supervisor_teams
+            .add_worker(id, name, agent_id, description)
     }
 
-    /// Run a supervisor team, returning the final worker's output.
     pub fn supervisor_run(&mut self, id: u64, task: &str) -> Result<String, String> {
         let team = self
             .supervisor_teams
+            .teams
             .get(&id)
             .cloned()
             .ok_or_else(|| format!("Supervisor team {} not found", id))?;
         team.run(self, task)
     }
+
 
     /// Create a new debate and return its ID.
     pub fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> u64 {
@@ -5112,6 +5099,63 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 None => crate::vm::Value::nil(),
             });
         }
+        if effect_name == "Provider" && op_name == Some("ask") {
+            // General runtime-registered provider dispatch. The first arg is
+            // the provider name (string); the second is the prompt/request
+            // (string). This is the longevity path: `perform Provider.ask`
+            // references no transient technology, only an eternal "provider"
+            // abstraction. The "llm" provider reuses the existing LLM client.
+            let provider = match regs.get(0).and_then(|v| v.as_string_id()) {
+                Some(id) => match constants.get(id as usize) {
+                    Some(crate::bytecode::Constant::String(s)) => s.clone(),
+                    _ => return None,
+                },
+                None => return None,
+            };
+            let prompt = match regs.get(1) {
+                Some(v) => {
+                    if let Some(id) = v.as_string_id() {
+                        constants.get(id as usize)
+                            .and_then(|c| match c {
+                                crate::bytecode::Constant::String(s) => Some(s.clone()),
+                                _ => None,
+                            }).unwrap_or_default()
+                    } else {
+                        v.to_string_repr()
+                    }
+                }
+                None => return None,
+            };
+            if provider == "llm" {
+                let mut rt = self.runtime.borrow_mut();
+                if rt.llm_client.is_none() {
+                    return Some(crate::vm::Value::nil());
+                }
+                let request = crate::ai::LlmRequest {
+                    model: String::new(),
+                    messages: vec![crate::ai::LlmMessage {
+                        role: "user".to_string(),
+                        content: prompt,
+                    }],
+                    tools: Vec::new(),
+                    memory: Vec::new(),
+                    pricing: None,
+                    response_format: None,
+                };
+                let result = rt.complete_llm_request(request, Vec::new());
+                return Some(match result {
+                    Ok(resp) => match resp.content {
+                        Some(c) => match &mut rt.vm {
+                            Some(vm) => vm.add_runtime_string(0, c),
+                            None => crate::vm::Value::nil(),
+                        },
+                        None => crate::vm::Value::nil(),
+                    },
+                    Err(_) => crate::vm::Value::nil(),
+                });
+            }
+            return None;
+        }
         if effect_name == "Actor" {
             let mut rt = self.runtime.borrow_mut();
             let actor_id = rt.current_actor;
@@ -5498,6 +5542,44 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     return Some(vm.add_runtime_string(0, s));
                 }
                 return Some(crate::vm::Value::nil());
+            }
+            if effect_name == "Provider" && op_name == Some("ask") {
+                // General runtime-registered provider dispatch (actor path).
+                // Mirrors RuntimeVmCallbacks::perform_builtin_effect's Provider
+                // branch. The "llm" provider reuses the agent-aware complete_llm.
+                let provider = match regs.get(0).and_then(|v| v.as_string_id()) {
+                    Some(id) => match constants.get(id as usize) {
+                        Some(crate::bytecode::Constant::String(s)) => s.clone(),
+                        _ => return None,
+                    },
+                    None => return None,
+                };
+                let prompt = match regs.get(1) {
+                    Some(v) => {
+                        if let Some(id) = v.as_string_id() {
+                            constants.get(id as usize)
+                                .and_then(|c| match c {
+                                    crate::bytecode::Constant::String(s) => Some(s.clone()),
+                                    _ => None,
+                                }).unwrap_or_default()
+                        } else {
+                            v.to_string_repr()
+                        }
+                    }
+                    None => return None,
+                };
+                if provider == "llm" {
+                    let content = self.complete_llm("", &prompt);
+                    let rt = &mut *self.runtime;
+                    return Some(match content {
+                        Some(c) => match &mut rt.vm {
+                            Some(vm) => vm.add_runtime_string(0, c),
+                            None => crate::vm::Value::nil(),
+                        },
+                        None => crate::vm::Value::nil(),
+                    });
+                }
+                return None;
             }
             if effect_name == "IO" {
                 if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {

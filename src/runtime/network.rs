@@ -23,9 +23,11 @@
 //! [17..]   type-specific payload
 //! ```
 //!
-//! A small 8-byte node-id handshake is exchanged immediately after the TCP
+//! A 16-byte versioned handshake is exchanged immediately after the TCP
 //! connection is established, *before* either side starts sending framed
-//! packets.
+//! packets: `[magic "NUL0"][version u32][node_id u64]`. A peer whose wire
+//! version does not match [`crate::format::constants::WIRE_VERSION`] is
+//! refused, never silently reinterpreted. See `SPEC2.md` §"Format Stability".
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -79,7 +81,9 @@ impl std::fmt::Display for TransportAddr {
 // ---------------------------------------------------------------------------
 
 /// Magic bytes that prefix every packet payload (after the length header).
-const MAGIC: &[u8] = b"NUL0";
+/// The single source of truth is [`crate::format::constants::WIRE_MAGIC`];
+/// this re-exports it for the packet framer.
+const MAGIC: &[u8] = &crate::format::constants::WIRE_MAGIC;
 
 /// Total size of the fixed packet header: 4 magic + 1 type + 8 seq.
 const PACKET_HEADER_LEN: usize = 13;
@@ -90,6 +94,51 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the sender thread waits on the outgoing channel before
 /// re-checking the shutdown flag.
 const CHANNEL_RECV_TIMEOUT: Duration = Duration::from_millis(100);
+
+// ---------------------------------------------------------------------------
+// Versioned handshake helpers (magic + version + node_id = 16 bytes)
+// ---------------------------------------------------------------------------
+
+/// Write the 16-byte NUL0 versioned handshake to a stream.
+fn write_handshake<W: Write>(w: &mut W, node_id: NodeId) -> io::Result<()> {
+    w.write_all(&crate::format::constants::WIRE_MAGIC)?;
+    w.write_all(&crate::format::constants::WIRE_VERSION.to_be_bytes())?;
+    w.write_all(&node_id.0.to_be_bytes())?;
+    w.flush()
+}
+
+/// Read the 16-byte NUL0 versioned handshake from a stream, validating the
+/// magic and the wire protocol version. Returns the peer's node id. A
+/// mismatched magic or version is a hard error: the connection is refused
+/// rather than the peer's packets being reinterpreted under the wrong layout.
+fn read_handshake<R: Read>(r: &mut R) -> io::Result<NodeId> {
+    let mut buf = [0u8; crate::format::constants::WIRE_HANDSHAKE_LEN];
+    r.read_exact(&mut buf)?;
+    if &buf[0..4] != crate::format::constants::WIRE_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "wire handshake: bad magic, expected {:?}, got {:?}",
+                crate::format::constants::WIRE_MAGIC,
+                &buf[0..4]
+            ),
+        ));
+    }
+    let version = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    if version != crate::format::constants::WIRE_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "wire handshake: peer speaks wire version {version}, this runtime speaks {}",
+                crate::format::constants::WIRE_VERSION
+            ),
+        ));
+    }
+    let node_id = NodeId(u64::from_be_bytes([
+        buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
+    ]));
+    Ok(node_id)
+}
 
 /// Maximum length (in bytes) of a single packet payload we are willing to
 /// deserialize — a simple DoS protection.
@@ -905,13 +954,44 @@ pub struct OutgoingPacket {
 
 /// Manages all network connections for a Nulang node.
 ///
-/// When created via [`bind`][NetworkTransport::bind] the transport spawns
+/// When created via [`bind`][TcpTransport::bind] the transport spawns
 /// two long-lived background threads:
 /// * a **listener** thread that accepts incoming TCP connections and
 ///   spawns a per-connection reader thread;
 /// * a **sender** thread that dequeues [`OutgoingPacket`]s and writes
 ///   them to the appropriate TCP stream (connecting first if necessary).
-pub struct NetworkTransport {
+pub trait NetworkTransport: Send {
+    fn connect(&mut self, node_id: NodeId, addr: std::net::SocketAddr) -> std::io::Result<()>;
+    fn send(&mut self, to_node: NodeId, to_addr: std::net::SocketAddr, packet: Packet);
+    fn receive(&self) -> Vec<IncomingPacket>;
+    fn node_id(&self) -> NodeId;
+    fn listen_addr(&self) -> std::net::SocketAddr;
+    fn disconnect(&mut self, node_id: NodeId);
+    fn shutdown(&mut self);
+    fn connection_count(&self) -> usize;
+    fn connection_addr(&self, node_id: NodeId) -> Option<std::net::SocketAddr>;
+}
+
+impl NetworkTransport for Box<dyn NetworkTransport> {
+    fn connect(&mut self, node_id: NodeId, addr: std::net::SocketAddr) -> std::io::Result<()> {
+        (**self).connect(node_id, addr)
+    }
+    fn send(&mut self, to_node: NodeId, to_addr: std::net::SocketAddr, packet: Packet) {
+        (**self).send(to_node, to_addr, packet)
+    }
+    fn receive(&self) -> Vec<IncomingPacket> {
+        (**self).receive()
+    }
+    fn node_id(&self) -> NodeId { (**self).node_id() }
+    fn listen_addr(&self) -> std::net::SocketAddr { (**self).listen_addr() }
+    fn disconnect(&mut self, node_id: NodeId) { (**self).disconnect(node_id) }
+    fn shutdown(&mut self) { (**self).shutdown() }
+    fn connection_count(&self) -> usize { (**self).connection_count() }
+    fn connection_addr(&self, node_id: NodeId) -> Option<std::net::SocketAddr> {
+        (**self).connection_addr(node_id)
+    }
+}
+pub struct TcpTransport {
     node_id: NodeId,
     listen_addr: SocketAddr,
     /// Active connections to other nodes.
@@ -931,7 +1011,7 @@ pub struct NetworkTransport {
     shutdown_flag: Arc<AtomicBool>,
 }
 
-impl NetworkTransport {
+impl TcpTransport {
     /// Create and bind a new network transport.
     ///
     /// The listener is bound to `addr`.  If `addr` has port `0` an
@@ -987,7 +1067,7 @@ impl NetworkTransport {
             handles.push(handle);
         }
 
-        Ok(NetworkTransport {
+        Ok(TcpTransport {
             node_id,
             listen_addr,
             connections,
@@ -1021,13 +1101,9 @@ impl NetworkTransport {
         stream.set_write_timeout(Some(IO_TIMEOUT))?;
         stream.set_nodelay(true)?;
 
-        // Handshake: send our node_id, read theirs.
-        stream.write_all(&self.node_id.0.to_be_bytes())?;
-        stream.flush()?;
-
-        let mut buf = [0u8; 8];
-        stream.read_exact(&mut buf)?;
-        let peer_id = NodeId(u64::from_be_bytes(buf));
+        // Handshake: send our versioned node_id, read theirs.
+        write_handshake(&mut stream, self.node_id)?;
+        let peer_id = read_handshake(&mut stream)?;
 
         // The peer should identify itself with the expected node_id.
         if peer_id != node_id {
@@ -1158,12 +1234,12 @@ impl NetworkTransport {
     ///
     /// Signals all background threads to stop, joins them, and closes
     /// every active TCP connection.
-    pub fn shutdown(self) {
+    pub fn shutdown(&mut self) {
         // Signal shutdown.
         self.shutdown_flag.store(true, Ordering::SeqCst);
 
         // Drop the outgoing sender so the sender thread wakes up and exits.
-        drop(self.outgoing_tx);
+        let _ = std::mem::replace(&mut self.outgoing_tx, mpsc::sync_channel(1).0);
 
         // Close all connections so reader threads unblock.
         {
@@ -1268,18 +1344,14 @@ fn connection_reader(
     let _ = stream.set_nodelay(true);
 
     // --- Handshake: send local node_id, read remote node_id ---------------
-    if stream.write_all(&local_node_id.0.to_be_bytes()).is_err() {
-        return;
-    }
-    if stream.flush().is_err() {
+    if write_handshake(&mut stream, local_node_id).is_err() {
         return;
     }
 
-    let mut handshake_buf = [0u8; 8];
-    if stream.read_exact(&mut handshake_buf).is_err() {
-        return;
-    }
-    let peer_id = NodeId(u64::from_be_bytes(handshake_buf));
+    let peer_id = match read_handshake(&mut stream) {
+        Ok(id) => id,
+        Err(_) => return,
+    };
 
     // Register the connection.
     {
@@ -1471,12 +1543,8 @@ fn connect_in_sender(
     stream.set_nodelay(true)?;
 
     // Handshake.
-    stream.write_all(&local_node_id.0.to_be_bytes())?;
-    stream.flush()?;
-
-    let mut buf = [0u8; 8];
-    stream.read_exact(&mut buf)?;
-    let peer_id = NodeId(u64::from_be_bytes(buf));
+    write_handshake(&mut stream, local_node_id)?;
+    let peer_id = read_handshake(&mut stream)?;
 
     if peer_id != node_id {
         return Err(io::Error::new(
@@ -1815,7 +1883,7 @@ mod tests {
     #[test]
     fn test_transport_bind() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let transport = NetworkTransport::bind(addr).expect("bind failed");
+        let mut transport = TcpTransport::bind(addr).expect("bind failed");
 
         assert_eq!(
             transport.listen_addr().ip(),
@@ -1838,10 +1906,10 @@ mod tests {
     #[test]
     fn test_transport_connect() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let transport_b = NetworkTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -1874,10 +1942,10 @@ mod tests {
     #[test]
     fn test_transport_send_receive() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let transport_b = NetworkTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -1996,9 +2064,9 @@ mod tests {
     #[test]
     fn test_transport_send_rejects_dangling_string_payload() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let transport_b = NetworkTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2040,9 +2108,9 @@ mod tests {
     #[test]
     fn test_transport_send_delivers_string_payload_with_table() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let transport_b = NetworkTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2085,9 +2153,9 @@ mod tests {
     #[test]
     fn test_transport_send_delivers_scalar_payload() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let transport_b = NetworkTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2133,10 +2201,10 @@ mod tests {
     #[test]
     fn test_transport_sequence_numbers() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let transport_b = NetworkTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2225,10 +2293,10 @@ mod tests {
     #[test]
     fn test_transport_disconnect() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = NetworkTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let transport_b = NetworkTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
 
         let node_b_id = transport_b.node_id();
 
@@ -2243,5 +2311,34 @@ mod tests {
 
         transport_a.shutdown();
         transport_b.shutdown();
+    }
+}
+impl NetworkTransport for TcpTransport {
+    fn connect(&mut self, node_id: NodeId, addr: std::net::SocketAddr) -> std::io::Result<()> {
+        self.connect(node_id, addr)
+    }
+    fn send(&mut self, to_node: NodeId, to_addr: std::net::SocketAddr, packet: Packet) {
+        self.send(to_node, to_addr, packet)
+    }
+    fn receive(&self) -> Vec<IncomingPacket> {
+        self.receive()
+    }
+    fn node_id(&self) -> NodeId {
+        self.node_id()
+    }
+    fn listen_addr(&self) -> std::net::SocketAddr {
+        self.listen_addr()
+    }
+    fn disconnect(&mut self, node_id: NodeId) {
+        self.disconnect(node_id)
+    }
+    fn shutdown(&mut self) {
+        self.shutdown()
+    }
+    fn connection_count(&self) -> usize {
+        self.connection_count()
+    }
+    fn connection_addr(&self, node_id: NodeId) -> Option<std::net::SocketAddr> {
+        self.connection_addr(node_id)
     }
 }

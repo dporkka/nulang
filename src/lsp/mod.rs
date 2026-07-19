@@ -1502,7 +1502,7 @@ impl<'a> CompletionEngine<'a> {
     /// Built-in effect names offered by the completion provider.
     const EFFECTS: &'static [&'static str] = &[
         "IO", "Net", "FS", "Spawn", "Send", "Receive", "Migrate", "STM", "Async", "LLM", "Cost",
-        "Rand", "Time", "Actor",
+        "Rand", "Time", "Actor", "Provider",
     ];
 
     pub fn new(source: &'a str) -> Self {

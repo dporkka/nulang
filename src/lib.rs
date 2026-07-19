@@ -1,3 +1,6 @@
+pub mod format;
+pub mod backends;
+
 pub mod ast;
 pub mod bytecode;
 pub mod docgen;
@@ -26,6 +29,7 @@ pub mod repl;
 pub mod stdlib;
 pub mod typechecker;
 pub mod types;
+pub mod type_ir;
 pub mod value_layout;
 pub mod vm;
 

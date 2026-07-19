@@ -6,6 +6,16 @@ authors = ["David Porkka"]
 license = "Apache-2.0"
 description = "Nulang - Distributed Actor-Based Programming Language with AI Agent Support"
 
+[package.metadata]
+# The Nulang *language* version, distinct from the crate `version` above.
+# The crate version may rev freely; this moves only on RFC-ratified change to
+# Frozen or Stable surfaces (see GOVERNANCE.md and CHANGELOG.md). Recorded in
+# every `.nbc` artifact as the `language_version` header field; a runtime
+# rejects an artifact whose language version exceeds its own. The runtime
+# truth is the `LANGUAGE_VERSION` const in src/format/constants.rs; this field
+# is the human-readable mirror.
+language-version = "1.0.0-frozen"
+
 [features]
 # All optional subsystems are on by default so `cargo build`/`cargo test`
 # behave exactly as before this feature set was introduced. Build with
@@ -21,6 +31,7 @@ python = ["dep:pyo3"]
 sqlite = ["dep:libsql"]
 lsp = ["dep:tower-lsp"]
 wasm-backend = ["dep:wasm-encoder", "dep:wasmtime"]
+wit-bindgen = []
 
 [dependencies]
 # Memory & concurrency
@@ -46,7 +57,7 @@ cranelift-frontend = "0.132"
 
 # LSP server (optional, see [features])
 tower-lsp = { version = "0.20", optional = true }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.37.0", features = ["full", "macros", "net", "rt-multi-thread", "time"] }
 
 # HTTP client for AI provider integrations
 reqwest = { version = "0.12", features = ["json"] }
@@ -61,8 +72,15 @@ libloading = "0.8"
 # WASM binary encoding (optional, see [features])
 wasm-encoder = { version = "0.220", optional = true }
 # WASM runtime using Wasmtime (optional, see [features])
-wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow"] }
+wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow", "component-model"] }
 blake3 = "1.8"
+quinn = "0.10.2"
+rustls = { version = "0.21.12", features = ["quic", "dangerous_configuration"] }
+rcgen = "0.11.3"
+multihash = "0.19.1"
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+hex = "0.4.3"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 
 [lib]
 name = "nulang"
