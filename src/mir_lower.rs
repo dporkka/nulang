@@ -123,7 +123,7 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
                 procedural_memory_namespace: a.procedural_memory_namespace.clone(),
                 backend: crate::ast::ActorBackendKind::Native,
                 fallback_config: a.fallback_config.clone(),
-                retry_config: a.retry_config.clone(),
+                retry_config: a.retry_config.clone(), type_hash: None,
             });
         }
         hir::Decl::Workflow { name, .. } => {
@@ -1323,25 +1323,27 @@ impl<'c> FnLowerer<'c> {
 
     // -- Control flow constructs ----------------------------------------------
 
-    /// Lower `receive { | Behavior(params) => expr ... }` to selective
-    /// receive dispatch: a `ReceiveMatch` rvalue scans the mailbox for the
-    /// first message matching any arm (mailbox order), then a compare chain
-    /// over the matched arm index selects the arm body, binding the arm's
-    /// params to the payload registers. When nothing matches, control falls
-    /// through to a fallback block that runs the legacy pop-any `Receive`.
+    /// Lower `receive { | Behavior(pat, ...) if guard => expr ... }` to
+    /// selective receive dispatch with pattern matching and guards.
     ///
-    /// With an `after ms => timeout_body` clause the scan instead uses the
-    /// timed-wait `ReceiveWait` rvalue: the timeout expression is evaluated
-    /// first (codegen stages its value into r0), and on no match the VM
-    /// suspends the actor until a matching message arrives or the timer
-    /// fires. The no-match block then lowers `timeout_body` instead of the
-    /// legacy pop-any `Receive` — a non-positive timeout therefore runs the
-    /// timeout body immediately (Erlang-style non-blocking poll), never the
-    /// legacy fallthrough.
+    /// A `ReceiveMatch`/`ReceiveWait` rvalue scans the mailbox for the first
+    /// message whose behavior id matches any arm. Then a compare chain over
+    /// the matched arm index selects the arm body. For each arm, the payload
+    /// temps are tested against the arm's patterns (using `pattern_test`),
+    /// and if a guard is present, it is evaluated. If all tests pass, the
+    /// arm's pattern variables are bound (via `bind_pattern`) and a
+    /// `ReceiveCommit` rvalue removes the matched message from the
+    /// skip-buffer. If any test fails, control falls through to a retry
+    /// block that re-emits the `ReceiveMatch` scan, which skips the
+    /// already-tried message in the skip-buffer.
+    ///
+    /// When nothing matches (scan returns None → arm-count sentinel), the
+    /// no-match block runs the legacy pop-any `Receive` or, with `after`,
+    /// the timeout body.
     fn lower_receive(
         &mut self,
         dst: mir::LocalId,
-        arms: &[(String, Vec<String>, Box<hir::Body>)],
+        arms: &[(String, Vec<Pattern>, Option<Box<hir::Body>>, Box<hir::Body>)],
         after: &Option<(Box<hir::Body>, Box<hir::Body>)>,
     ) -> NuResult<()> {
         use crate::bytecode::Constant;
@@ -1349,17 +1351,15 @@ impl<'c> FnLowerer<'c> {
             self.b.assign(dst, mir::RValue::Receive);
             return Ok(());
         }
-        // Arm behavior names resolve to behavior-table indices exactly like
-        // `send` does (suffix match on "Actor.behavior"); message behavior
-        // ids are those same global indices.
         let behavior_ids: Vec<u16> = arms
             .iter()
-            .map(|(name, _, _)| self.ctx.send_behavior_idx("", name) as u16)
+            .map(|(name, _, _, _)| self.ctx.send_behavior_idx("", name) as u16)
             .collect();
-        let max_params = arms.iter().map(|(_, p, _)| p.len()).max().unwrap_or(0);
-        // For the timed form, evaluate the timeout expression first. The temp
-        // must be allocated BEFORE the arm-index/payload run below so that run
-        // stays contiguous.
+        let max_params = arms
+            .iter()
+            .map(|(_, p, _, _)| p.len())
+            .max()
+            .unwrap_or(0);
         let timeout = match after {
             Some((ms_body, _)) => {
                 let timeout = self.b.add_temp(Type::int());
@@ -1370,17 +1370,24 @@ impl<'c> FnLowerer<'c> {
             }
             None => None,
         };
-        // dst of ReceiveMatch/ReceiveWait and the payload temps must form one
-        // contiguous register run: the VM writes payload[i] into reg dst+1+i.
         let arm_idx = self.b.add_temp(Type::int());
         let payload_temps: Vec<mir::LocalId> = (0..max_params)
             .map(|_| self.b.add_temp(Type::unit()))
             .collect();
+        let join = self.b.create_block();
+        let no_match = self.b.create_block();
+        // The scan block is emitted once; pattern/guard failure jumps back to
+        // it for a retry. The skip-buffer skips already-tried messages.
+        let scan = self.b.create_block();
+        // Jump from the entry block to the scan block (the scan block
+        // re-executes on pattern/guard retry).
+        self.b.terminate(mir::Terminator::Jump(scan));
+        self.b.switch_to(scan);
         match timeout {
             Some(timeout) => self.b.assign(
                 arm_idx,
                 mir::RValue::ReceiveWait {
-                    behavior_ids,
+                    behavior_ids: behavior_ids.clone(),
                     max_params,
                     timeout,
                 },
@@ -1388,15 +1395,15 @@ impl<'c> FnLowerer<'c> {
             None => self.b.assign(
                 arm_idx,
                 mir::RValue::ReceiveMatch {
-                    behavior_ids,
+                    behavior_ids: behavior_ids.clone(),
                     max_params,
                 },
             ),
         }
-
-        let join = self.b.create_block();
-        let no_match = self.b.create_block();
-        for (i, (_name, params, arm_body)) in arms.iter().enumerate() {
+        // Compare chain: dispatch on arm_idx. For each arm, test patterns +
+        // guard. On pass: commit + bind + arm body -> join. On fail: jump to
+        // `scan` (retry). The last arm's else_ goes to `no_match`.
+        for (i, (_name, patterns, guard, arm_body)) in arms.iter().enumerate() {
             let test = self.b.add_temp(Type::bool());
             let idx_const = self.b.add_temp(Type::int());
             self.b
@@ -1417,26 +1424,68 @@ impl<'c> FnLowerer<'c> {
                 else_: next_bb,
             });
             self.b.switch_to(arm_bb);
+            // Bind pattern variables to payload temps first (guards reference
+            // them). The pattern_test calls above already verified the
+            // structural match; bind_pattern binds the variables for use in
+            // the guard and arm body.
             self.push_scope();
-            for (p, &temp) in params.iter().zip(payload_temps.iter()) {
-                self.bind(p, temp);
+            for (pat, &temp) in patterns.iter().zip(payload_temps.iter()) {
+                self.bind_pattern(pat, temp);
             }
+            // Test payload patterns. Each pattern slot is tested against its
+            // corresponding payload temp. All must pass.
+            let pat_tests: Vec<mir::LocalId> = patterns
+                .iter()
+                .enumerate()
+                .map(|(j, pat)| self.pattern_test(pat, payload_temps[j]).unwrap())
+                .collect();
+            let pass_bb = self.b.create_block();
+            // AND all pattern tests + guard into a single bool.
+            let mut acc = if pat_tests.is_empty() {
+                let t = self.b.add_temp(Type::bool());
+                self.b.assign(t, mir::RValue::Const(Constant::Bool(true)));
+                t
+            } else {
+                pat_tests[0]
+            };
+            for &pt in pat_tests.get(1..).unwrap_or(&[]) {
+                let combined = self.b.add_temp(Type::bool());
+                self.b.assign(
+                    combined,
+                    mir::RValue::Binary(crate::ast::BinOp::And, acc, pt),
+                );
+                acc = combined;
+            }
+            if let Some(guard_body) = guard {
+                let guard_result = self.b.add_temp(Type::bool());
+                let guard_cont = self.b.create_block();
+                self.lower_body_into(guard_body, guard_result, guard_cont)?;
+                self.b.switch_to(guard_cont);
+                let combined = self.b.add_temp(Type::bool());
+                self.b.assign(
+                    combined,
+                    mir::RValue::Binary(crate::ast::BinOp::And, acc, guard_result),
+                );
+                acc = combined;
+            }
+            self.b.terminate(mir::Terminator::Branch {
+                cond: acc,
+                then_: pass_bb,
+                else_: scan, // On failure, retry the scan.
+            });
+            self.b.switch_to(pass_bb);
+            // Commit: remove the matched message from the skip-buffer.
+            let _commit = self.b.add_temp(Type::unit());
+            self.b.assign(_commit, mir::RValue::ReceiveCommit);
             self.lower_body_into(arm_body, dst, join)?;
             self.pop_scope();
             self.b.switch_to(next_bb);
         }
+        // No-match block.
         if arms.is_empty() {
-            // No arms to dispatch: nothing can match, so control reaches the
-            // no-match block unconditionally.
             self.b.terminate(mir::Terminator::Jump(no_match));
-            self.b.switch_to(no_match);
         }
-
-        // No-match block. Without `after`, preserve the legacy non-blocking
-        // behavior — pop the next message regardless of behavior and yield
-        // its first payload value (nil when empty). With `after`, run the
-        // timeout body (the VM writes the arm-count sentinel once the timer
-        // fires, or immediately for a non-positive timeout).
+        self.b.switch_to(no_match);
         match after {
             Some((_, timeout_body)) => {
                 self.lower_body_into(timeout_body, dst, join)?;
@@ -2169,6 +2218,7 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         | SignalWait { .. }
         | Receive
         | ReceiveMatch { .. }
+        | ReceiveCommit
         | PipelineNew
         | SupervisorNew
         | Spawn { .. }
@@ -2413,7 +2463,10 @@ fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
             }
         }
         hir::RValue::Receive { arms, after, .. } => {
-            for (_, _, arm_body) in arms {
+            for (_, _patterns, guard, arm_body) in arms {
+                if let Some(g) = guard {
+                    walk_hir_body(g, acc);
+                }
                 walk_hir_body(arm_body, acc);
             }
             if let Some((ms_body, timeout_body)) = after {

@@ -773,6 +773,10 @@ impl MirCodegen {
                     dst,
                 ));
             }
+            mir::RValue::ReceiveCommit => {
+                // Commit: removes the matched message from the skip-buffer.
+                self.emit(Instruction::new0(OpCode::ReceiveCommit));
+            }
             mir::RValue::FFICall { idx, args } => {
                 self.stage_args(args)?;
                 self.emit(Instruction::new3(
@@ -1304,6 +1308,7 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
         | SignalWait { .. }
         | Receive
         | ReceiveMatch { .. }
+        | ReceiveCommit
         | PipelineNew
         | SupervisorNew
         | Spawn { .. }

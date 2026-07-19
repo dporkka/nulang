@@ -13,7 +13,8 @@
 
 use crate::vm::Value;
 use crossbeam::queue::SegQueue;
-
+use std::cell::RefCell;
+use std::collections::VecDeque;
 /// Message sent between actors.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
@@ -43,7 +44,24 @@ pub struct Mailbox {
     system_queue: SegQueue<Message>,
     normal_queue: SegQueue<Message>,
     capacity: usize,
+    /// Skip-buffer for non-matching normal messages drained during selective
+    /// receive (`receive_match`).  Messages popped from `normal_queue` during
+    /// a scan that do not match any candidate behavior id stay here in FIFO
+    /// order until a later `receive_match` finds a match, `pop` retrieves
+    /// them, or `flush_skip_buffer` returns them to `normal_queue` at the end
+    /// of the actor's turn.  System messages are NOT placed here — they are
+    /// scanned directly from `system_queue` to preserve priority ordering.
+    skip_buffer: RefCell<VecDeque<(Message, bool)>>,
 }
+
+// SAFETY: `Mailbox` is `Sync` because the only `!Sync` field,
+// `skip_buffer: RefCell<VecDeque<Message>>`, is accessed exclusively from
+// the scheduler thread (all `receive_match`/`pop`/`flush_skip_buffer` calls
+// happen within `step_actor` or the VM's `ReceiveMatch` handler, both of
+// which run on the single scheduler thread).  The `SegQueue` fields are
+// already `Sync` (lock-free concurrent queues) and may be safely pushed
+// from multiple threads — this is what `test_concurrent_push` exercises.
+unsafe impl Sync for Mailbox {}
 
 impl Mailbox {
     /// Create a new mailbox.
@@ -55,6 +73,7 @@ impl Mailbox {
             system_queue: SegQueue::new(),
             normal_queue: SegQueue::new(),
             capacity,
+            skip_buffer: RefCell::new(VecDeque::new()),
         }
     }
 
@@ -78,28 +97,62 @@ impl Mailbox {
 
     /// Pop the highest-priority message.
     ///
-    /// Always drains the system queue first; falls back to the normal
-    /// queue only when no system messages are pending.
+    /// Checks the system queue first (priority), then the skip-buffer
+    /// (non-matching normal messages staged during a prior `receive_match`),
+    /// then the normal queue.
     pub fn pop(&self) -> Option<Message> {
-        self.system_queue.pop().or_else(|| self.normal_queue.pop())
+        self.system_queue
+            .pop()
+            .or_else(|| self.skip_buffer.borrow_mut().pop_front().map(|(m, _)| m))
+            .or_else(|| self.normal_queue.pop())
     }
 
-    /// Selective receive: scan both queues in priority order for the first
-    /// message whose behavior id appears in `behavior_ids`.
+    /// Selective receive: scan for the first message whose behavior id
+    /// appears in `behavior_ids`.
     ///
-    /// System messages are scanned first, preserving priority even across
-    /// selective dispatch.  Non-matching messages are re-queued into their
-    /// original band so relative FIFO order is preserved.
+    /// System messages are scanned first (via `scan_queue` — they are rare
+    /// and must preserve priority).  Normal messages use the skip-buffer:
+    /// on the first call the `normal_queue` is drained into the buffer and
+    /// scanned; non-matching messages stay in the buffer so the next call
+    /// does not re-drain the concurrent queue.  This makes repeated
+    /// selective receive O(skipped) amortized instead of O(N) per call.
     pub fn receive_match(&self, behavior_ids: &[u16]) -> Option<(usize, Vec<Value>)> {
-        // Scan system queue first.
+        // Scan system queue first (small, rare — drain-scan-requeue is fine).
         if let Some(result) = Self::scan_queue(&self.system_queue, behavior_ids) {
             return Some(result);
         }
-        // Then scan normal queue.
-        Self::scan_queue(&self.normal_queue, behavior_ids)
+        // Try the skip-buffer: scan for the first un-tried message whose
+        // behavior id matches. Mark it "tried" and return a clone of its
+        // payload. The message stays in the buffer until `commit_receive_match`
+        // removes it or `reset_receive_match` clears the tried flag.
+        let mut buf = self.skip_buffer.borrow_mut();
+        for i in 0..buf.len() {
+            let (tried, bid) = (buf[i].1, buf[i].0.behavior_id);
+            if !tried {
+                if let Some(pos) = behavior_ids.iter().position(|&id| id == bid) {
+                    buf[i].1 = true; // mark tried
+                    return Some((pos, buf[i].0.payload.clone()));
+                }
+            }
+        }
+        // Drain the normal queue into the buffer, then scan again.
+        while let Some(msg) = self.normal_queue.pop() {
+            buf.push_back((msg, false));
+        }
+        for i in 0..buf.len() {
+            let (tried, bid) = (buf[i].1, buf[i].0.behavior_id);
+            if !tried {
+                if let Some(pos) = behavior_ids.iter().position(|&id| id == bid) {
+                    buf[i].1 = true; // mark tried
+                    return Some((pos, buf[i].0.payload.clone()));
+                }
+            }
+        }
+        None
     }
 
-    /// Drain and scan a single queue for a matching message.
+    /// Drain and scan a single queue for a matching message.  Used for the
+    /// system queue only (small, rare); the normal queue uses the skip-buffer.
     fn scan_queue(
         queue: &SegQueue<Message>,
         behavior_ids: &[u16],
@@ -125,24 +178,32 @@ impl Mailbox {
         found
     }
 
-    /// Total message count across both queues (approximate).
+    /// Total message count across system queue, skip-buffer, and normal
+    /// queue (approximate — concurrent queue lengths are snapshots).
     pub fn len(&self) -> usize {
-        self.system_queue.len() + self.normal_queue.len()
+        self.system_queue.len() + self.skip_buffer.borrow().len() + self.normal_queue.len()
     }
 
-    /// True when both queues are empty.
+    /// True when all queues and the skip-buffer are empty.
     pub fn is_empty(&self) -> bool {
-        self.system_queue.is_empty() && self.normal_queue.is_empty()
+        self.system_queue.is_empty()
+            && self.skip_buffer.borrow().is_empty()
+            && self.normal_queue.is_empty()
     }
 
-    /// Drain both queues (system first) into a cloned snapshot, then
-    /// restore all messages.
+    /// Drain system queue, skip-buffer, and normal queue (in priority/FIFO
+    /// order) into a cloned snapshot, then restore all messages.
     pub fn drain(&self) -> Vec<Message> {
         let mut snapshot = Vec::with_capacity(self.len());
         // Drain system first.
         while let Some(msg) = self.system_queue.pop() {
             snapshot.push(msg);
         }
+        // Then skip-buffer (normal messages staged during selective receive).
+        while let Some((msg, _)) = self.skip_buffer.borrow_mut().pop_front() {
+            snapshot.push(msg);
+        }
+        // Then normal queue.
         while let Some(msg) = self.normal_queue.pop() {
             snapshot.push(msg);
         }
@@ -157,9 +218,42 @@ impl Mailbox {
         snapshot
     }
 
+    /// Return all skip-buffer messages to `normal_queue`, then clear the
+    pub fn flush_skip_buffer(&self) {
+        let mut buf = self.skip_buffer.borrow_mut();
+        while let Some((msg, _)) = buf.pop_front() {
+            self.normal_queue.push(msg);
+        }
+    }
+
     /// Return the configured capacity (0 = unbounded).
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Commit a selective receive: remove the first "tried" message from
+    /// the skip-buffer and clear remaining "tried" flags. Called after a
+    /// pattern+guard check succeeds.
+    pub fn commit_receive_match(&self) {
+        let mut buf = self.skip_buffer.borrow_mut();
+        // Remove the first tried entry.
+        if let Some(idx) = buf.iter().position(|(_, tried)| *tried) {
+            buf.remove(idx);
+        }
+        // Clear remaining tried flags.
+        for (_, tried) in buf.iter_mut() {
+            *tried = false;
+        }
+    }
+
+    /// Reset "tried" flags in the skip-buffer. Called when
+    /// `receive_match` returns `None`, preparing the buffer for the next
+    /// receive expression.
+    pub fn reset_receive_match(&self) {
+        let mut buf = self.skip_buffer.borrow_mut();
+        for (_, tried) in buf.iter_mut() {
+            *tried = false;
+        }
     }
 }
 
@@ -343,6 +437,8 @@ mod tests {
 
         let found = mb.receive_match(&[2]);
         assert_eq!(found, Some((0, vec![Value::int(42)])));
+        // Commit: remove the matched ("tried") message from the skip-buffer.
+        mb.commit_receive_match();
 
         // The mailbox must still serve A before C: selective receive only
         // removes the matched message, it must not reorder the rest.

@@ -2492,12 +2492,12 @@ impl Parser {
         self.skip_newlines();
         while self.peek_kind() != &TokenKind::RBrace && !self.is_at_end() {
             self.consume_if(&TokenKind::Pipe);
-                        let behavior_name = self.expect_ident("behavior name")?;
+                    let behavior_name = self.expect_ident("behavior name")?;
             self.expect(TokenKind::LParen)?;
             let mut params = Vec::new();
             self.skip_newlines();
             while self.peek_kind() != &TokenKind::RParen && !self.is_at_end() {
-                params.push(self.expect_ident("param name")?);
+                params.push(self.parse_pattern()?);
                 self.skip_newlines();
                 if !self.consume_if(&TokenKind::Comma) {
                     break;
@@ -2505,9 +2505,16 @@ impl Parser {
                 self.skip_newlines();
             }
             self.expect(TokenKind::RParen)?;
+            // Optional guard: `| Behavior(pat) if cond => body`. The guard
+            // may reference variables bound by the payload patterns.
+            let guard = if self.consume_if(&TokenKind::If) {
+                Some(Box::new(self.parse_expr()?))
+            } else {
+                None
+            };
             self.expect(TokenKind::FatArrow)?;
             let body = self.parse_expr()?;
-            arms.push((behavior_name, params, body));
+            arms.push((behavior_name, params, guard, body));
             self.skip_newlines_semicolons();
         }
         self.expect(TokenKind::RBrace)?;
@@ -3734,7 +3741,7 @@ mod tests {
             Expr::Receive { arms, after, .. } => {
                 assert_eq!(arms.len(), 1);
                 assert_eq!(arms[0].0, "Msg");
-                assert_eq!(arms[0].1, vec!["x".to_string()]);
+                assert_eq!(arms[0].1, vec![Pattern::Var("x".to_string())]);
                 let (ms, body) = after.expect("after clause");
                 assert!(matches!(ms.as_ref(), Expr::Literal(Literal::Int(100), _)));
                 assert!(matches!(body.as_ref(), Expr::Literal(Literal::Int(0), _)));

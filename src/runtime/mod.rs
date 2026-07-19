@@ -19,6 +19,7 @@ mod orca_cycle;
 mod supervisor;
 mod cluster;
 mod network;
+pub mod quic_transport;
 mod distributed;
 mod distributed_context;
 use distributed_context::DistributedContext;
@@ -2919,6 +2920,10 @@ impl Runtime {
                 }
             };
             actor.increment_reductions(1);
+            // Flush the selective-receive skip-buffer back to the normal
+            // queue so the next turn starts clean and is_empty() correctly
+            // reflects pending messages.
+            actor.mailbox.flush_skip_buffer();
             if actor.mailbox.is_empty() {
                 // Turn over: next scheduling starts with a fresh budget.
                 actor.reset_reductions();
@@ -4600,7 +4605,7 @@ impl Runtime {
     // -- Distributed Actor System --
 
     pub fn enable_distribution(&mut self, bind_addr: std::net::SocketAddr) -> std::io::Result<()> {
-        let transport = NetworkTransport::bind(bind_addr)?;
+        let transport = Box::new(crate::runtime::network::TcpTransport::bind(bind_addr)?);
         // Advertise the actual listen address (not `bind_addr`, which may
         // carry port 0) so peers can reach us at the address the cluster
         // records for this node.
@@ -5255,6 +5260,24 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         rt.hold_payload_refs(actor_id, &payload);
         Some((pos, payload))
     }
+
+    fn commit_receive_match(&mut self) {
+        let mut rt = self.runtime.borrow_mut();
+        if let Some(actor_id) = rt.current_actor {
+            if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                actor.mailbox.commit_receive_match();
+            }
+        }
+    }
+
+    fn reset_receive_match(&mut self) {
+        let mut rt = self.runtime.borrow_mut();
+        if let Some(actor_id) = rt.current_actor {
+            if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                actor.mailbox.reset_receive_match();
+            }
+        }
+    }
 }
 
 /// Raw-pointer callbacks used when the runtime itself executes an actor's
@@ -5739,6 +5762,22 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             // cannot fire into a later wait on this actor.
             if let Some(wait) = wait {
                 rt.timer_wheel.cancel(wait.timer_id);
+            }
+        }
+    }
+
+    fn commit_receive_match(&mut self) {
+        unsafe {
+            if let Some(actor) = (*self.runtime).actors.get_mut(&self.actor_id) {
+                actor.mailbox.commit_receive_match();
+            }
+        }
+    }
+
+    fn reset_receive_match(&mut self) {
+        unsafe {
+            if let Some(actor) = (*self.runtime).actors.get_mut(&self.actor_id) {
+                actor.mailbox.reset_receive_match();
             }
         }
     }

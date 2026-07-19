@@ -233,6 +233,11 @@ pub enum RValue {
         max_params: usize,
         timeout: LocalId,
     },
+    /// Commit a selective receive: removes the matched ("tried") message from
+    /// the skip-buffer and clears remaining "tried" flags. Emitted after a
+    /// pattern+guard check succeeds, before binding pattern variables and
+    /// entering the arm body. Bytecode `OpCode::ReceiveCommit`.
+    ReceiveCommit,
     FFICall {
         idx: usize,
         args: Vec<LocalId>,
@@ -574,6 +579,7 @@ mod tests {
             max_params: 1,
             timeout: LocalId(0),
         };
+        let _ = RValue::ReceiveCommit;
         let _ = RValue::FFICall {
             idx: 0,
             args: vec![LocalId(0)],

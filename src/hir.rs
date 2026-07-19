@@ -314,7 +314,7 @@ pub enum RValue {
         ty: Type,
     },
     Receive {
-        arms: Vec<(String, Vec<String>, Box<Body>)>,
+        arms: Vec<(String, Vec<Pattern>, Option<Box<Body>>, Box<Body>)>,
         /// Optional `after ms => body` clause: `(timeout_ms, timeout_body)`.
         after: Option<(Box<Body>, Box<Body>)>,
         ty: Type,

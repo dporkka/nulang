@@ -466,6 +466,7 @@ pub fn analyze_region(
             | OpCode::SelfOp
             | OpCode::Receive
             | OpCode::ReceiveMatch
+            | OpCode::ReceiveCommit
             | OpCode::Monitor
             | OpCode::Demon
             | OpCode::Link

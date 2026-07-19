@@ -244,12 +244,13 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             }
         }
         Expr::Receive { arms, after, .. } => {
-            for (_, params, body_expr) in arms {
+            for (_, patterns, guard, body_expr) in arms {
                 let mut arm_bound = bound.clone();
-                for p in params {
-                    if !arm_bound.contains(p) {
-                        arm_bound.push(p.clone());
-                    }
+                for pat in patterns {
+                    pat_bound_vars(pat, &mut arm_bound);
+                }
+                if let Some(g) = guard {
+                    free_vars(g, &mut arm_bound, acc);
                 }
                 free_vars(body_expr, &mut arm_bound, acc);
             }
@@ -655,12 +656,19 @@ impl EffectChecker {
             // Receive: adds the Receive effect. Arm parameters shadow
             // same-named module functions inside their arm body. The optional
             // `after` clause contributes the effects of its timeout
-            // expression and body.
             Expr::Receive { arms, after, .. } => {
                 let mut row = EffectRow::singleton(Effect::Receive);
-                for (_, params, body_expr) in arms {
-                    let arm_row = self.infer_with_bound(ctx, params, body_expr)?;
+                for (_, patterns, guard, body_expr) in arms {
+                    let mut names: Vec<String> = Vec::new();
+                    for pat in patterns {
+                        pat_bound_vars(pat, &mut names);
+                    }
+                    let arm_row = self.infer_with_bound(ctx, &names, body_expr)?;
                     row = effect_row_union(&row, &arm_row);
+                    if let Some(g) = guard {
+                        let guard_row = self.infer_with_bound(ctx, &names, g)?;
+                        row = effect_row_union(&row, &guard_row);
+                    }
                 }
                 if let Some((ms, timeout_body)) = after {
                     row = effect_row_union(&row, &self.infer_effects(ctx, ms)?);
@@ -1472,32 +1480,46 @@ impl CapabilityAnalyzer {
                 let base = consumed.clone();
                 let mut cap = Capability::Tag;
                 let mut merged: Option<HashSet<String>> = None;
-                let no_params: &[String] = &[];
-                let timeout_arm: Vec<(&[String], &Expr)> = match after {
-                    Some((_, body)) => vec![(no_params, &**body)],
-                    None => Vec::new(),
-                };
-                for (params, body_expr) in arms
-                    .iter()
-                    .map(|(_, p, b)| (p.as_slice(), b))
-                    .chain(timeout_arm)
-                {
+                for (_, patterns, guard, body_expr) in arms {
                     *consumed = base.clone();
                     let mut arm_ctx = ctx.clone();
-                    // Arm parameters shadow outer bindings; hide (and restore)
-                    // their outer consumption state.
-                    let mut saved = Vec::new();
-                    for p in params {
-                        arm_ctx = arm_ctx.with_binding(p.clone(), Capability::Val);
-                        saved.push((p.clone(), consumed.remove(p)));
+                    // Pattern-bound names shadow outer bindings inside the
+                    // arm; hide (and restore) their outer consumption state.
+                    let mut pat_names: Vec<String> = Vec::new();
+                    for pat in patterns {
+                        add_pat_bindings(pat, &mut arm_ctx, Capability::Val);
+                        pat_binding_names(pat, &mut pat_names);
                     }
-                    let arm_result = self.infer_cap_tracked(&arm_ctx, body_expr, consumed);
+                    let saved: Vec<(String, bool)> = pat_names
+                        .iter()
+                        .map(|n| (n.clone(), consumed.remove(n)))
+                        .collect();
+                    // A guard runs under the same condition as the arm body,
+                    // so its capability and consumption fold into the arm.
+                    let guard_result = match guard {
+                        Some(guard_expr) => {
+                            self.infer_cap_tracked(&arm_ctx, guard_expr, consumed)
+                        }
+                        None => Ok(Capability::Tag),
+                    };
+                    let arm_result =
+                        self.infer_cap_tracked(&arm_ctx, body_expr, consumed);
                     for (n, was_consumed) in saved {
                         consumed.remove(&n);
                         if was_consumed {
                             consumed.insert(n);
                         }
                     }
+                    cap = cap.join(guard_result?.join(arm_result?));
+                    merged = Some(match merged {
+                        None => consumed.clone(),
+                        Some(m) => m.intersection(consumed).cloned().collect(),
+                    });
+                }
+                // Timeout arm: no pattern bindings.
+                if let Some((_, body)) = after {
+                    *consumed = base.clone();
+                    let arm_result = self.infer_cap_tracked(ctx, body, consumed);
                     cap = cap.join(arm_result?);
                     merged = Some(match merged {
                         None => consumed.clone(),
@@ -2403,7 +2425,8 @@ mod tests {
         let receive = Expr::Receive {
             arms: vec![(
                 "Msg".to_string(),
-                vec!["x".to_string()],
+                vec![Pattern::Var("x".to_string())],
+                None,
                 Expr::Var("x".to_string(), s()),
             )],
             after: None,
@@ -2423,6 +2446,7 @@ mod tests {
             arms: vec![(
                 "Msg".to_string(),
                 vec![],
+                None,
                 Expr::Literal(Literal::Int(0), s()),
             )],
             after: Some((

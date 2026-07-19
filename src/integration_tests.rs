@@ -5168,6 +5168,107 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// Literal pattern in selective receive: `receive { | Msg(42) => ... }`
+    /// only matches when the payload equals the literal.
+    #[test]
+    fn test_receive_pattern_literal_match() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor P {
+                state seen = 0
+                behavior drain() {
+                    self.seen = receive {
+                        | msg(n) if n > 10 => n
+                        | msg(n) => 0
+                    }
+                }
+                behavior msg(n: Int) { n }
+            }
+            let c = spawn P { seen = 0 } in {
+                send c drain()
+                send c msg(5)
+                send c msg(20)
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().unwrap();
+        rt.borrow_mut().run_scheduler();
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(20),
+            "guard n > 10 should skip msg(5) and match msg(20)"
+        );
+    }
+
+    /// Guard in selective receive: `receive { | Msg(x) if x > 100 => ... }`
+    /// skips messages that don't satisfy the guard.
+    #[test]
+    fn test_receive_guard_skips_non_matching() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor G {
+                state result = 0
+                behavior wait() {
+                    self.result = receive {
+                        | ping(x) if x > 100 => x
+                    } after 5000 => 999
+                }
+                behavior ping(x: Int) { x }
+            }
+            let g = spawn G { result = 0 } in {
+                send g wait()
+                send g ping(5)
+                send g ping(200)
+                g
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().unwrap();
+        rt.borrow_mut().run_scheduler();
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("result").and_then(|v| v.as_int()),
+            Some(200),
+            "guard x > 100 should skip ping(5) and match ping(200)"
+        );
+    }
+
+    /// Wildcard pattern: `receive { | Msg(_) => ... }` matches any payload.
+    #[test]
+    fn test_receive_pattern_wildcard() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor W {
+                state got = 0
+                behavior drain() {
+                    self.got = receive {
+                        | data(_) => 42
+                    }
+                }
+                behavior data(x: Int) { x }
+            }
+            let c = spawn W { got = 0 } in {
+                send c drain()
+                send c data(7)
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value.as_actor_id().unwrap();
+        rt.borrow_mut().run_scheduler();
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("got").and_then(|v| v.as_int()),
+            Some(42),
+            "wildcard pattern should match any message"
+        );
+    }
+
     /// A behavior that sends to its own actor (self-send): the message is
     /// delivered normally and processed in a later turn.
     #[test]

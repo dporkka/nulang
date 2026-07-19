@@ -178,6 +178,10 @@ pub enum OpCode {
     // sentinel to the after-clause body (no legacy pop-any Receive
     // fallthrough in the timed form).
     ReceiveWait = 0xA0,
+    /// Commit a selective receive: removes the matched ("tried") message
+    /// from the skip-buffer and clears remaining "tried" flags. No operands.
+    /// Emitted after a pattern+guard check succeeds.
+    ReceiveCommit = 0xA1,
 
 
     // == FFI (0xB0-0xBF) ==
@@ -335,6 +339,7 @@ impl OpCode {
             0x9E => Some(PipelineStage),
             0x9F => Some(PipelineRun),
             0xA0 => Some(ReceiveWait),
+            0xA1 => Some(ReceiveCommit),
             0xB0 => Some(FFICall),
             0xC0 => Some(SupervisorNew),
             0xC1 => Some(SupervisorWorker),
@@ -550,6 +555,9 @@ pub struct ActorMeta {
     /// Serialized retry config (JSON `Option<AgentRetryConfig>`).
     #[serde(default)]
     pub retry_config: String,
+    /// NTIR structural type hash.
+    #[serde(default)]
+    pub type_hash: Option<[u8; 32]>,
 }
 impl ActorMeta {
     pub fn new(name: impl Into<String>) -> Self {
@@ -567,6 +575,7 @@ impl ActorMeta {
             backend: crate::ast::ActorBackendKind::default(),
             fallback_config: String::new(),
             retry_config: String::new(),
+            type_hash: None,
         }
     }
 }
@@ -762,7 +771,7 @@ mod tests {
             .chain(0x80..=0x8F)
             .chain(0x90..=0x93)
             .chain(0x94..=0x9F)
-            .chain(0xA0..=0xA0)
+            .chain(0xA0..=0xA1)
             .chain(0xB0..=0xB0)
             .chain(0xC0..=0xC5)
             .chain(0xD0..=0xD5)

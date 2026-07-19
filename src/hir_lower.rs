@@ -14,7 +14,7 @@
 use crate::ai::request::ToolSchema;
 use crate::ai::schema::function_to_tool_schema;
 use crate::ast;
-use crate::ast::{BinOp, Decl, Expr, FunctionAnnotation, Literal};
+use crate::ast::{BinOp, Decl, Expr, FunctionAnnotation, Literal, Pattern};
 use crate::hir;
 use crate::types::{Capability, EffectRow, Span, Type};
 
@@ -1258,7 +1258,17 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         Expr::Receive { arms, after, span } => {
             let arms_hir: Vec<_> = arms
                 .iter()
-                .map(|(name, params, e)| (name.clone(), params.clone(), Box::new(lower_body(e))))
+                .map(|(name, patterns, guard, e)| {
+                    let guard_hir = guard
+                        .as_ref()
+                        .map(|g| Box::new(lower_body(g)));
+                    (
+                        name.clone(),
+                        patterns.clone(),
+                        guard_hir,
+                        Box::new(lower_body(e)),
+                    )
+                })
                 .collect();
             let after_hir = after
                 .as_ref()
@@ -1812,7 +1822,8 @@ mod tests {
         let receive = Expr::Receive {
             arms: vec![(
                 "Msg".to_string(),
-                vec!["p".to_string()],
+                vec![Pattern::Var("p".to_string())],
+                None,
                 Expr::Binary {
                     op: BinOp::Add,
                     left: Box::new(var("k")),
@@ -1829,7 +1840,12 @@ mod tests {
 
         // receive { | Msg() => 0 } after k => t: timeout expr and body are free.
         let receive_after = Expr::Receive {
-            arms: vec![("Msg".to_string(), vec![], Expr::Literal(Literal::Int(0), span))],
+            arms: vec![(
+                "Msg".to_string(),
+                vec![],
+                None,
+                Expr::Literal(Literal::Int(0), span),
+            )],
             after: Some((Box::new(var("k")), Box::new(var("t")))),
             span,
         };
@@ -2082,10 +2098,13 @@ fn free_vars(
             }
         }
         Expr::Receive { arms, after, .. } => {
-            for (_, params, arm_expr) in arms {
+            for (_, patterns, guard, arm_expr) in arms {
                 let mut arm_bound = bound.clone();
-                for p in params {
-                    arm_bound.insert(p.clone());
+                for pat in patterns {
+                    pattern_bindings(pat, &mut arm_bound);
+                }
+                if let Some(g) = guard {
+                    free_vars(g, &arm_bound, acc);
                 }
                 free_vars(arm_expr, &arm_bound, acc);
             }

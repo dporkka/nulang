@@ -150,9 +150,14 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
-    /// Receive: receive { | Behavior => expr } [after ms => timeout_expr]
+    /// Receive: receive { | Behavior(params) => expr } [after ms => timeout_expr]
+    ///
+    /// Each arm carries the behavior name, a list of payload patterns
+    /// (one per payload slot; `Pattern::Var(name)` for a simple binding,
+    /// `Pattern::Wild` for `_`, `Pattern::Lit(_)` for a literal test, etc.),
+    /// an optional guard expression (`if cond`), and the arm body.
     Receive {
-        arms: Vec<(String, Vec<String>, Expr)>,
+        arms: Vec<(String, Vec<Pattern>, Option<Box<Expr>>, Expr)>,
         /// Optional timeout clause: `(timeout_ms, timeout_body)`. `timeout_ms`
         /// is an Int expression; on no matching message the actor waits up to
         /// that many milliseconds, then evaluates `timeout_body`.

@@ -181,8 +181,7 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
     {
         return Ok(vec![]);
     }
-    // Handle the case where both types are the same reference
-    if t1 == t2 {
+    if t1 == t2 || (t1.is_ground() && t2.is_ground() && t1.to_ntir().hash() == t2.to_ntir().hash()) {
         return Ok(vec![]);
     }
 

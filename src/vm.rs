@@ -320,6 +320,17 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// pending receive-wait timeout state for the current actor so a stale
     /// timer cannot fire into a later wait. Default is a no-op.
     fn receive_wait_matched(&mut self) {}
+
+    /// Commit a selective receive: remove the matched ("tried") message from
+    /// the skip-buffer and clear remaining "tried" flags. Called after a
+    /// pattern+guard check succeeds. Default is a no-op (standalone VM has no
+    /// skip-buffer).
+    fn commit_receive_match(&mut self) {}
+
+    /// Reset "tried" flags in the skip-buffer. Called when
+    /// `try_receive_match` returns `None`, preparing the buffer for the next
+    /// receive expression. Default is a no-op.
+    fn reset_receive_match(&mut self) {}
 }
 
 /// Standalone callbacks used when the VM runs without an actor runtime.
@@ -2410,6 +2421,37 @@ impl VM {
                     Some((effect, op)) => (effect.to_string(), Some(op.to_string())),
                     None => (qualified_name.clone(), None),
                 };
+                // Fast path: no user handlers installed — skip the
+                // rposition walk and dispatch directly to the built-in
+ // effect callback.  This is the common case for Actor.* builtins in
+                // actor bytecode (no user handler, empty handler_stack).
+                if self.handler_stack.is_empty() {
+                    let result = match self.modules.get(module_idx) {
+                        Some(module) => self.actor_callbacks.perform_builtin_effect_in_module(
+                            &effect_name,
+                            op_name.as_deref(),
+                            module,
+                            &self.frames[frame_idx].regs,
+                        ),
+                        None => self.actor_callbacks.perform_builtin_effect(
+                            &effect_name,
+                            op_name.as_deref(),
+                            &[],
+                            &self.frames[frame_idx].regs,
+                        ),
+                    };
+                    if let Some(result) = result {
+                        self.frames[frame_idx].regs[dst_reg as usize] = result;
+                    } else {
+                        return Err(NuError::EffectError {
+                            msg: format!("Unhandled effect: '{}'", qualified_name),
+                            span: Span::default(),
+                        });
+                    }
+                    // PC already advanced by the main loop (line 1516);
+                    // fall through to the next instruction.
+                    return Ok(());
+                }
                 // A binding matches when it names the exact "Effect.op"
                 // pair. Bindings that carry a bare effect name (no '.')
                 // predate op-qualified dispatch and match any op of that
@@ -2809,6 +2851,7 @@ impl VM {
                         }
                     }
                     None => {
+                        self.actor_callbacks.reset_receive_match();
                         self.frames[frame_idx].regs[dst] = Value::int(ids.len() as i64);
                     }
                 }
@@ -2853,9 +2896,19 @@ impl VM {
                             self.frames[frame_idx].pc -= 1;
                             return Err(NuError::VMError("ReceiveWait:suspend".into()));
                         }
+                        self.actor_callbacks.reset_receive_match();
                         self.frames[frame_idx].regs[dst] = Value::int(ids.len() as i64);
                     }
                 }
+            }
+
+            // -- Commit a selective receive --
+            // Removes the matched ("tried") message from the skip-buffer and
+            // clears remaining "tried" flags. Emitted after a pattern+guard
+            // check succeeds, before binding pattern variables and entering
+            // the arm body.
+            OpCode::ReceiveCommit => {
+                self.actor_callbacks.commit_receive_match();
             }
 
             // All other opcodes are not yet implemented in the interpreter.
