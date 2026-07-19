@@ -1,0 +1,92 @@
+---
+title: Nulang
+description: A distributed, actor-based programming language with algebraic effects and row-polymorphic types.
+template: splash
+hero:
+  tagline: Build fault-tolerant distributed systems with the elegance of algebraic effects and row-polymorphic types.
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Get Started
+      link: /getting-started/installation/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/dporkka/nulang
+      icon: external
+      variant: secondary
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why Nulang?
+
+Nulang fuses Erlang-style fault tolerance with a modern type system: Hindley-Milner inference, Pony-inspired reference capabilities, and Koka-style row-polymorphic algebraic effects. It compiles to a register-based bytecode VM with Cranelift JIT tiering, WASM, and native AOT backends.
+
+<CardGrid stagger>
+  <Card title="Distributed Actors" icon="setting">
+    Location-transparent actors with BEAM/OTP primitives — spawn, link, monitor, supervise. Automatic clustering with gossip membership and CRDT state replication.
+  </Card>
+  <Card title="Algebraic Effects" icon="puzzle">
+    Koka-inspired row-polymorphic effects with compile-time checking. Handle, perform, resume — algebraic effect handlers compose freely without monad transformers.
+  </Card>
+  <Card title="Row-Polymorphic Types" icon="document">
+    Full Hindley-Milner type inference with row polymorphism for both records and effects. Pony-inspired reference capabilities (iso, trn, ref, val, box, tag) enforced at compile time.
+  </Card>
+  <Card title="BEAM/OTP Primitives" icon="star">
+    Supervision trees (one_for_one, one_for_all, rest_for_one, simple_one_for_one), process groups, named registration, and exit trapping — battle-tested fault tolerance patterns.
+  </Card>
+  <Card title="WASM Backend" icon="add-reaction">
+    Compile to WebAssembly with full MIR→WASM translation. Run in Wasmtime with 4GiB guard pages, SIMD support, and AOT compilation for near-native performance.
+  </Card>
+  <Card title="AI Runtime" icon="information">
+    Built-in LLM integration with provider-agnostic API (OpenAI, Ollama). Agent pipelines, debate teams, supervisor hierarchies, and episodic/semantic/procedural memory.
+  </Card>
+</CardGrid>
+
+## Quick Example
+
+```nulang
+// A simple counter actor
+actor Counter {
+    state count: Int = 0
+
+    behavior inc() {
+        self.count = self.count + 1
+    }
+
+    behavior get(sender: Actor) {
+        send sender reply(self.count)
+    }
+}
+
+// Spawn and use it
+let counter = spawn Counter {} in {
+    send counter inc()
+    send counter inc()
+    // counter.count is now 2
+    counter
+}
+```
+
+## Installation
+
+```bash
+# Clone and build from source
+git clone https://github.com/dporkka/nulang.git
+cd nulang
+cargo build --release
+
+# Start the REPL
+cargo run -- --repl
+```
+
+## Support
+
+Nulang is open source under the Apache 2.0 license. If you find it valuable, consider supporting its development.
+
+<div style="margin-top:1.5rem;">
+  <a href="https://buy.stripe.com/cNidR932O6du6nK6eX1RC02" style="display:inline-block;padding:0.75rem 1.5rem;background:#635bff;color:#fff;border-radius:0.5rem;text-decoration:none;font-weight:600;">
+    ♥ Support Nulang Development
+  </a>
+</div>

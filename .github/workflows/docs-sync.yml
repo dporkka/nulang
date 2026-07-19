@@ -1,0 +1,54 @@
+name: Docs Sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Trigger when compiler or stdlib source changes.
+      # The actual repo has source in src/, not compiler/.
+      - 'src/**'
+      - 'examples/**'
+      - 'scripts/**'
+      - '.github/workflows/docs-sync.yml'
+
+jobs:
+  sync-docs:
+    name: Sync Standard Library Docs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # Required for auto-committing doc changes
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Generate docs
+        run: node scripts/generate-docs.js
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/src/content/docs/stdlib/ docs/api.md
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "docs: auto-sync stdlib reference [skip ci]"
+            git push
+          fi

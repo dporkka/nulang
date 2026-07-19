@@ -19,3 +19,8 @@ __pycache__/
 
 # WASM build artifacts
 out.cwasm
+
+# Astro / docs build artifacts
+docs/dist/
+docs/.astro/
+docs/node_modules/

@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Dark mode first (Starlight uses [data-theme="dark"]) ── */
+:root {
+  --sl-color-accent-low: #1a1a2e;
+  --sl-color-accent: #6c63ff;
+  --sl-color-accent-high: #b4adff;
+  --sl-color-text: #e4e4e7;
+  --sl-color-text-accent: #ffffff;
+  --sl-color-bg: #0a0a0f;
+  --sl-color-bg-nav: #0f0f1a;
+  --sl-color-bg-sidebar: #0f0f1a;
+  --sl-color-hairline: #27272a;
+  --sl-color-bg-inline-code: #1e1e2e;
+}
+
+/* Light mode overrides */
+:root[data-theme="light"] {
+  --sl-color-accent-low: #e8e6ff;
+  --sl-color-accent: #6c63ff;
+  --sl-color-accent-high: #3d3599;
+  --sl-color-text: #18181b;
+  --sl-color-text-accent: #000000;
+  --sl-color-bg: #ffffff;
+  --sl-color-bg-nav: #fafafa;
+  --sl-color-bg-sidebar: #fafafa;
+  --sl-color-hairline: #e4e4e7;
+  --sl-color-bg-inline-code: #f4f4f5;
+}
+
+/* ── Code Block Component ── */
+.code-block-wrapper {
+  @apply rounded-lg border border-gray-700 overflow-hidden my-6;
+}
+
+.code-block-header {
+  @apply flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700;
+}
+
+.code-block-filename {
+  @apply text-xs text-gray-400 font-mono;
+}
+
+.copy-button {
+  @apply text-xs px-2 py-1 rounded bg-gray-700 text-gray-300
+         hover:bg-gray-600 hover:text-white transition-colors
+         cursor-pointer border-none;
+}
+
+/* ── Footer ── */
+.site-footer {
+  @apply border-t border-gray-800 py-8 mt-16 text-center;
+}
+
+.footer-links {
+  @apply flex items-center justify-center gap-6 flex-wrap;
+}
+
+.footer-links a {
+  @apply text-sm text-gray-400 hover:text-gray-200 transition-colors no-underline;
+}
+
+/* ── Landing Page Hero ── */
+.hero-gradient {
+  background: linear-gradient(135deg, #1a1a2e 0%, #6c63ff 50%, #b4adff 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* ── Feature Cards ── */
+.feature-grid {
+  @apply grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 my-12;
+}
+
+.feature-card {
+  @apply p-6 rounded-lg border border-gray-800 bg-gray-900/50
+         hover:border-gray-700 hover:bg-gray-900 transition-all;
+}
+
+.feature-card h3 {
+  @apply text-lg font-semibold mb-2;
+}
+
+.feature-card p {
+  @apply text-sm text-gray-400;
+}

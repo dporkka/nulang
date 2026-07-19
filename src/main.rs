@@ -31,6 +31,8 @@ use nulang::repl::Repl;
 use nulang::typechecker::TypeChecker;
 use nulang::types::{NuError, NuResult, Type};
 use nulang::vm::VM;
+use nulang::stdlib::StdLib;
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() {
@@ -116,6 +118,15 @@ async fn main() {
                 }
                 break;
             }
+            "--emit-stdlib-docs" => {
+                if i + 1 < args.len() {
+                    opts.emit_stdlib_docs = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --emit-stdlib-docs requires a directory argument");
+                    std::process::exit(1);
+                }
+            }
             "-v" | "--verbose" => opts.verbose = true,
             "--emit-nbc" => opts.emit_nbc = true,
             "--verify" => {
@@ -154,6 +165,17 @@ async fn main() {
             Err(e) => {
                 print_error(&e);
                 std::process::exit(exit_code(&e));
+            }
+        }
+        return;
+    }
+
+    if let Some(dir) = opts.emit_stdlib_docs {
+        match emit_stdlib_docs(&dir) {
+            Ok(()) => println!("Stdlib docs written to {}", dir),
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
             }
         }
         return;
@@ -284,6 +306,8 @@ struct Options {
     /// When running a `.nbc` artifact, verify its recorded source hash against
     /// this source file before executing. Refuses on mismatch.
     verify_source: Option<String>,
+    /// Output directory for --emit-stdlib-docs.
+    emit_stdlib_docs: Option<String>,
 }
 
 impl Default for Options {
@@ -299,6 +323,7 @@ impl Default for Options {
             out_file: None,
             emit_nbc: false,
             verify_source: None,
+            emit_stdlib_docs: None,
         }
     }
 }
@@ -317,6 +342,7 @@ fn print_help() {
     println!("  -e, --eval       Evaluate a code string");
     println!("  -c, --check      Type-check a file (don't run)");
     println!("  --doc            Generate Markdown API docs (docs/api.md)");
+    println!("  --emit-stdlib-docs <dir>  Generate per-effect stdlib Markdown docs into <dir>");
     println!("  --lsp            Start Language Server (stdio)");
     print!("  --backend <b>    Backend: bytecode (default) | native");
     if cfg!(feature = "wasm-backend") {
@@ -336,6 +362,77 @@ fn print_help() {
     println!("  --version, -V    Print version and exit");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  -h, --help       Show this help message");
+}
+
+/// Generate per-effect stdlib Markdown docs into the given directory.
+fn emit_stdlib_docs(dir: &str) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::io::Write;
+
+    let out_dir = PathBuf::from(dir);
+    fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("Cannot create directory '{}': {}", dir, e))?;
+
+    let stdlib = StdLib::new();
+    let mut by_effect: BTreeMap<&str, Vec<&nulang::stdlib::BuiltinOp>> = BTreeMap::new();
+    for op in stdlib.ops() {
+        by_effect.entry(op.effect).or_default().push(op);
+    }
+
+    let mut index_content = String::from("---\ntitle: Standard Library\ndescription: Built-in effects and operations\n---\n\n");
+    index_content.push_str("# Standard Library\n\n");
+    index_content.push_str("Auto-generated reference for built-in effect operations.\n\n");
+    index_content.push_str("| Effect | Operations |\n");
+    index_content.push_str("|--------|------------|\n");
+
+    for (&effect_name, ops) in &by_effect {
+        let op_list: Vec<String> = ops.iter().map(|o| format!("`{}`", o.op)).collect();
+        let link = format!("[{0}](/stdlib/{1}/)", effect_name, effect_name.to_lowercase());
+        index_content.push_str(&format!("| {} | {} |\n", link, op_list.join(", ")));
+
+        // Write per-effect page
+        let mut page = String::new();
+        page.push_str("---\n");
+        page.push_str(&format!("title: \"{} Effect\"\n", effect_name));
+        page.push_str(&format!("description: \"Built-in {} effect operations\"\n", effect_name));
+        page.push_str("---\n\n");
+        page.push_str(&format!("# {} Effect\n\n", effect_name));
+        page.push_str("| Operation | Signature | Description |\n");
+        page.push_str("|-----------|-----------|-------------|\n");
+        for op in ops {
+            page.push_str(&format!(
+                "| `{}` | `{}` | {} |\n",
+                op.name,
+                op.signature.replace('|', "\\|"),
+                op.description
+            ));
+        }
+        page.push_str(&format!(
+            "\n_Implementation site: {}_\n",
+            match ops.first().map(|o| o.implemented_in) {
+                Some(nulang::stdlib::ImplSite::StandaloneVm) => "Standalone VM",
+                Some(nulang::stdlib::ImplSite::RuntimeHost) => "Runtime Host",
+                None => "Unknown",
+            }
+        ));
+
+        let filename = out_dir.join(format!("{}.md", effect_name.to_lowercase()));
+        let mut file = fs::File::create(&filename)
+            .map_err(|e| format!("Cannot create '{}': {}", filename.display(), e))?;
+        file.write_all(page.as_bytes())
+            .map_err(|e| format!("Cannot write '{}': {}", filename.display(), e))?;
+    }
+
+    // Write overall index
+    index_content.push_str("\n_Generated from `src/stdlib.rs` built-in registry._\n");
+    let index_path = out_dir.join("index.md");
+    let mut file = fs::File::create(&index_path)
+        .map_err(|e| format!("Cannot create '{}': {}", index_path.display(), e))?;
+    file.write_all(index_content.as_bytes())
+        .map_err(|e| format!("Cannot write '{}': {}", index_path.display(), e))?;
+
+    Ok(())
 }
 
 fn print_error(err: &NuError) {
