@@ -24,3 +24,6 @@ out.cwasm
 docs/dist/
 docs/.astro/
 docs/node_modules/
+
+# Wrangler local state
+.wrangler/
