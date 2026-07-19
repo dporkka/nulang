@@ -52,3 +52,16 @@ jobs:
             git commit -m "docs: auto-sync stdlib reference [skip ci]"
             git push
           fi
+
+      - name: Build Astro site
+        run: |
+          cd docs
+          npm install
+          npm run build
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy docs/dist --project-name nulang-docs --branch main
