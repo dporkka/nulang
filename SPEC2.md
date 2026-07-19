@@ -214,6 +214,35 @@ The synthesis of these features produces a language with four defining character
 
 **Durable execution by default.** Any actor can be declared `persistent`, which enables automatic checkpointing, event journaling, and deterministic replay. Persistent actors form the building blocks of workflows—long-running compositions that survive crashes, support compensation, and orchestrate human-in-the-loop interactions.
 
+## 1.1a Nulang Core (Frozen — RFC 0002)
+
+Nulang **Core** is the minimal, frozen subset of the language. It is defined
+in RFC 0002 and is the invariant kernel every conforming implementation must
+support — including the self-hosting bootstrap compiler (`bootstrap/`). Core
+consists of:
+
+- **Expressions:** `fn`, `let`, `if`/`else`, `match`, closures, `return`.
+- **Types:** `Int`, `Bool`, `String`, `Unit`, `Nil`; `Vec<T>`, `Map<K,V>`;
+  tuples; records; `enum`. HM type inference over this subset.
+- **Effects:** `IO.print` and `IO.read` only (terminal I/O).
+- **Capabilities:** `val` only (immutable, sendable).
+
+Core **excludes** actors, effects beyond IO, capabilities beyond `val`,
+distribution, persistence, FFI, AI, JIT, WASM, and Python interop.
+Every Core program is a valid Nulang program; every Core program valid
+today is valid in every future language version.
+
+The self-hosting bootstrap compiler (`bootstrap/compiler_core.nula`) is
+written in Core and targets the `.nbc` format (RFC 0001). Stage 1 compiles
+Core programs; Stage 2 compiles itself. The Rust implementation remains the
+fast path; the bootstrap compiler is the longevity path.
+
+**Note:** Core currently lacks `String.charAt` and `String.length`
+primitives, which blocks the bootstrap compiler's lexer from iterating
+source characters. These are a planned Stable-tier addition tracked in
+`bootstrap/README.md`.
+
+
 ## 1.2 Design Philosophy
 
 Nulang's design is guided by five principles that influence every aspect of the language, from syntax to runtime architecture.

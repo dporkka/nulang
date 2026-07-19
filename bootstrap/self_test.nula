@@ -1,0 +1,16 @@
+// bootstrap/self_test.nula — Core conformance target for self-hosting.
+// The bootstrap compiler (Stage 2) must compile this program through the
+// full pipeline and produce the same output as the Rust compiler.
+//
+// Run directly with: nulang bootstrap/self_test.nula
+// Expected output: 55 (fib(10))
+
+fn fib(n: Int) -> Int {
+    if n <= 1 then n
+    else fib(n - 1) + fib(n - 2)
+}
+
+fn main() {
+    let result = fib(10)
+    perform IO.print(result)
+}
