@@ -4,7 +4,7 @@ import tailwindcss from '@astrojs/tailwind';
 
 // https://starlight.astro.build/reference/configuration
 export default defineConfig({
-  site: 'https://nulang.com',
+  site: 'https://nulang.org',
   integrations: [
     starlight({
       title: 'Nulang',

@@ -1,5 +1,5 @@
 # Nulang Documentation — Cloudflare Pages
-# Deployed at: https://nulang.com
+# Deployed at: https://nulang.org
 #
 # This is the minimal wrangler config for the Astro Starlight docs site.
 # Primary deployment is via Cloudflare Pages Git integration.
@@ -14,7 +14,7 @@ compatibility_date = "2026-07-19"
 #   Build command:     cd docs && npm install && npm run build
 #   Output directory:  docs/dist
 #   Build watch paths: docs/**
-#   Custom domain:     nulang.com
+#   Custom domain:     nulang.org
 #
 # Email Routing (configured in Cloudflare dashboard):
-#   support@nulang.com → davidporkka@gmail.com
+#   support@nulang.org → davidporkka@gmail.com
