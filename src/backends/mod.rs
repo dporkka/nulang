@@ -136,10 +136,6 @@ mod tests {
     #[test]
     fn test_transport_is_network_transport() {
         // Transport is auto-implemented for any NetworkTransport.
-        fn accepts_transport<T: Transport>(_t: &T) {}
-        fn accepts_network<N: crate::runtime::NetworkTransport>(n: &N) {
-            accepts_transport(n);
-        }
         // We can't construct a TcpTransport without binding a port, but the
         // blanket impl compiles — this test verifies the type-level wiring.
         fn check_blanket<T: crate::runtime::NetworkTransport>() {

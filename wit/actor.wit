@@ -1,0 +1,6 @@
+package nulang:runtime;
+world actor {
+    export init: func() -> s64;
+    export handle-message: func(msg: list<u8>) -> s64;
+    export checkpoint: func() -> list<u8>;
+}

@@ -245,9 +245,7 @@ fn register_runtime_helpers<M: Module>(
         helpers.insert(*helper, func_ref);
     }
 
-    let reg3_helpers: &[(RuntimeHelper, &str)] = &[
-        (RuntimeHelper::ArrLen, "nulang_arr_len"),
-    ];
+    let reg3_helpers: &[(RuntimeHelper, &str)] = &[(RuntimeHelper::ArrLen, "nulang_arr_len")];
     for (helper, name) in reg3_helpers {
         let func_id = module
             .declare_function(name, Linkage::Import, &make_void_reg3_sig(module))
@@ -694,31 +692,44 @@ pub fn compile_bytecode_region(
             }
             OpCode::DbgPrint => {}
 
-
             OpCode::ArrLoad => {
                 emit_arr_load(
-                    &mut builder, regs_ptr,
-                    instr.op1 as usize, instr.op2 as usize, instr.op3 as usize,
+                    &mut builder,
+                    regs_ptr,
+                    instr.op1 as usize,
+                    instr.op2 as usize,
+                    instr.op3 as usize,
                 );
             }
             OpCode::ArrStore => {
                 emit_reg_call4(
-                    &mut builder, &helpers, regs_ptr,
-                    instr.op1, instr.op2, instr.op3,
+                    &mut builder,
+                    &helpers,
+                    regs_ptr,
+                    instr.op1,
+                    instr.op2,
+                    instr.op3,
                     RuntimeHelper::ArrStore,
                 );
             }
             OpCode::ArrLen => {
                 emit_reg_call3(
-                    &mut builder, &helpers, regs_ptr,
-                    instr.op1, instr.op3,
+                    &mut builder,
+                    &helpers,
+                    regs_ptr,
+                    instr.op1,
+                    instr.op3,
                     RuntimeHelper::ArrLen,
                 );
             }
             OpCode::FieldL => {
                 emit_reg_call4(
-                    &mut builder, &helpers, regs_ptr,
-                    instr.op1, instr.op2, instr.op3,
+                    &mut builder,
+                    &helpers,
+                    regs_ptr,
+                    instr.op1,
+                    instr.op2,
+                    instr.op3,
                     RuntimeHelper::FieldL,
                 );
             }
@@ -799,7 +810,13 @@ fn emit_const(builder: &mut FunctionBuilder, regs_ptr: Value, dst: usize, value:
     store_reg(builder, regs_ptr, dst, tagged);
 }
 
-pub(crate) fn emit_arr_load(builder: &mut FunctionBuilder, regs_ptr: Value, arr_reg: usize, idx_reg: usize, dst: usize) {
+pub(crate) fn emit_arr_load(
+    builder: &mut FunctionBuilder,
+    regs_ptr: Value,
+    arr_reg: usize,
+    idx_reg: usize,
+    dst: usize,
+) {
     // Load NaN-boxed array pointer and index.
     let arr_val = load_reg(builder, regs_ptr, arr_reg);
     let idx_val = load_reg(builder, regs_ptr, idx_reg);
@@ -810,11 +827,15 @@ pub(crate) fn emit_arr_load(builder: &mut FunctionBuilder, regs_ptr: Value, arr_
     // dereference. The `#[repr(C)]` `OrcaHeader` sits immediately before
     // the payload pointer; field offsets come from `offset_of!` so they
     // track the struct layout.
-    let header_size = builder.ins().iconst(types::I64, ActorHeap::HEADER_SIZE as i64);
+    let header_size = builder
+        .ins()
+        .iconst(types::I64, ActorHeap::HEADER_SIZE as i64);
     let nil_bits = builder.ins().iconst(types::I64, TAG_NIL as i64);
 
     let arr_tag = builder.ins().band_imm(arr_val, TAG_MASK as i64);
-    let is_ptr = builder.ins().icmp_imm(IntCC::Equal, arr_tag, TAG_PTR as i64);
+    let is_ptr = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, arr_tag, TAG_PTR as i64);
     // Extract raw pointer (mask off tag bits from NaN-boxed pointer).
     let arr_ptr = builder.ins().band_imm(arr_val, PAYLOAD_MASK as i64);
     let non_null = builder.ins().icmp_imm(IntCC::NotEqual, arr_ptr, 0);
@@ -826,7 +847,9 @@ pub(crate) fn emit_arr_load(builder: &mut FunctionBuilder, regs_ptr: Value, arr_
     let nil_blk = builder.create_block();
     let merge_blk = builder.create_block();
 
-    builder.ins().brif(can_read_header, header_blk, &[], nil_blk, &[]);
+    builder
+        .ins()
+        .brif(can_read_header, header_blk, &[], nil_blk, &[]);
 
     // Header check: the object must carry the Array type tag.
     builder.switch_to_block(header_blk);
@@ -857,7 +880,9 @@ pub(crate) fn emit_arr_load(builder: &mut FunctionBuilder, regs_ptr: Value, arr_
     let shifted = builder.ins().ishl_imm(idx_val, 16);
     let idx_sext = builder.ins().sshr_imm(shifted, 16);
     let idx_tag = builder.ins().band_imm(idx_val, TAG_MASK as i64);
-    let is_int = builder.ins().icmp_imm(IntCC::Equal, idx_tag, TAG_INT as i64);
+    let is_int = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, idx_tag, TAG_INT as i64);
     let zero = builder.ins().iconst(types::I64, 0);
     let idx_raw = builder.ins().select(is_int, idx_sext, zero);
     let in_bounds = builder.ins().icmp(IntCC::UnsignedLessThan, idx_raw, len);
@@ -885,8 +910,6 @@ pub(crate) fn emit_arr_load(builder: &mut FunctionBuilder, regs_ptr: Value, arr_
     builder.seal_block(merge_blk);
     builder.switch_to_block(merge_blk);
 }
-
-
 
 fn emit_binop(
     builder: &mut FunctionBuilder,

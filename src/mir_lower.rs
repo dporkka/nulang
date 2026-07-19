@@ -123,7 +123,8 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
                 procedural_memory_namespace: a.procedural_memory_namespace.clone(),
                 backend: crate::ast::ActorBackendKind::Native,
                 fallback_config: a.fallback_config.clone(),
-                retry_config: a.retry_config.clone(), type_hash: None,
+                retry_config: a.retry_config.clone(),
+                type_hash: None,
             });
         }
         hir::Decl::Workflow { name, .. } => {
@@ -847,7 +848,8 @@ impl<'c> FnLowerer<'c> {
                     (crate::ast::BinOp::Ne, true) => {
                         let eq_dst = self.b.add_temp(Type::bool());
                         self.b.assign(eq_dst, mir::RValue::StringEq(lid, rid));
-                        self.b.assign(dst, mir::RValue::Unary(crate::ast::UnOp::Not, eq_dst));
+                        self.b
+                            .assign(dst, mir::RValue::Unary(crate::ast::UnOp::Not, eq_dst));
                     }
                     (crate::ast::BinOp::Add, true) => {
                         self.b.assign(dst, mir::RValue::StrConcat(lid, rid));
@@ -950,8 +952,7 @@ impl<'c> FnLowerer<'c> {
                 // enclosing locals they use: free vars of the body minus
                 // params and the self name, filtered to what is actually
                 // in scope here.
-                let mut exclude: HashSet<String> =
-                    params.iter().map(|(n, _)| n.clone()).collect();
+                let mut exclude: HashSet<String> = params.iter().map(|(n, _)| n.clone()).collect();
                 exclude.insert(name.clone());
                 let capture_names: Vec<String> = hir_body_used_vars(body, &exclude)
                     .into_iter()
@@ -961,8 +962,14 @@ impl<'c> FnLowerer<'c> {
                     .iter()
                     .map(|n| self.lookup(n).expect("capture just resolved"))
                     .collect();
-                let lifted =
-                    lower_lifted(self.ctx, &lname, params, &capture_names, Some((name, idx)), body)?;
+                let lifted = lower_lifted(
+                    self.ctx,
+                    &lname,
+                    params,
+                    &capture_names,
+                    Some((name, idx)),
+                    body,
+                )?;
                 self.ctx.fill_function(idx, lifted);
                 if capture_ids.is_empty() {
                     // No captures: the binding holds the function-table
@@ -1078,11 +1085,7 @@ impl<'c> FnLowerer<'c> {
                 iterable,
                 body,
             } => self.lower_for(dst, var, iterable, body),
-            hir::RValue::While {
-                cond,
-                body,
-                ..
-            } => self.lower_while(dst, cond, body),
+            hir::RValue::While { cond, body, .. } => self.lower_while(dst, cond, body),
             hir::RValue::Perform {
                 effect, op, args, ..
             } => {
@@ -1373,11 +1376,7 @@ impl<'c> FnLowerer<'c> {
             .iter()
             .map(|(name, _, _, _)| self.ctx.send_behavior_idx("", name) as u16)
             .collect();
-        let max_params = arms
-            .iter()
-            .map(|(_, p, _, _)| p.len())
-            .max()
-            .unwrap_or(0);
+        let max_params = arms.iter().map(|(_, p, _, _)| p.len()).max().unwrap_or(0);
         let timeout = match after {
             Some((ms_body, _)) => {
                 let timeout = self.b.add_temp(Type::int());
@@ -1686,8 +1685,7 @@ impl<'c> FnLowerer<'c> {
                 // HeapTypeTag::Array) and no tuple-length opcode exists —
                 // so an arity test would require a new VM opcode.
                 if pats.is_empty() {
-                    self.b
-                        .assign(dst, mir::RValue::Const(Constant::Bool(true)));
+                    self.b.assign(dst, mir::RValue::Const(Constant::Bool(true)));
                 } else {
                     let mut acc: Option<mir::LocalId> = None;
                     for (i, sub) in pats.iter().enumerate() {
@@ -1726,8 +1724,7 @@ impl<'c> FnLowerer<'c> {
                 // sub-patterns reject and variable sub-patterns bind. An
                 // empty record pattern matches vacuously.
                 if fields.is_empty() {
-                    self.b
-                        .assign(dst, mir::RValue::Const(Constant::Bool(true)));
+                    self.b.assign(dst, mir::RValue::Const(Constant::Bool(true)));
                 } else {
                     let mut acc: Option<mir::LocalId> = None;
                     for (field, sub) in fields {
@@ -1913,17 +1910,24 @@ impl<'c> FnLowerer<'c> {
         }
         let c = match &cond.terminator {
             hir::Terminator::Yield(op) => self.lower_operand(op)?,
-            hir::Terminator::FnReturn(_) | hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
+            hir::Terminator::FnReturn(_)
+            | hir::Terminator::Break(None)
+            | hir::Terminator::Break(Some(_)) => {
                 // If cond unconditionally returns/breaks, the branch doesn't matter
                 // But we must provide a dummy local for the branch.
                 let dummy = self.b.add_temp(Type::bool());
-                self.b.assign(dummy, mir::RValue::Const(Constant::Bool(false)));
+                self.b
+                    .assign(dummy, mir::RValue::Const(Constant::Bool(false)));
                 dummy
             }
         };
-        
+
         if !self.b.is_terminated() {
-            self.b.terminate(mir::Terminator::Branch { cond: c, then_: body_bb, else_: exit });
+            self.b.terminate(mir::Terminator::Branch {
+                cond: c,
+                then_: body_bb,
+                else_: exit,
+            });
         }
 
         self.b.switch_to(body_bb);
@@ -2149,11 +2153,10 @@ fn fuse_single_use_temps(func: &mut mir::Function) {
                 continue;
             };
             let can_fuse = match fused.last() {
-                Some(mir::Stmt::Assign { dst: def_dst, op: def_op }) => {
-                    *def_dst == src
-                        && fusable[src.0 as usize]
-                        && !rvalue_mentions(def_op, src)
-                }
+                Some(mir::Stmt::Assign {
+                    dst: def_dst,
+                    op: def_op,
+                }) => *def_dst == src && fusable[src.0 as usize] && !rvalue_mentions(def_op, src),
                 _ => false,
             };
             if can_fuse {
@@ -2243,7 +2246,10 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         | SelfRef
         | StateGet { .. } => {}
         ReceiveWait { timeout, .. } => out.push(*timeout),
-        Load(x) | ArrayLen(x) | Unary(_, x) | LlmAsk { prompt: x }
+        Load(x)
+        | ArrayLen(x)
+        | Unary(_, x)
+        | LlmAsk { prompt: x }
         | CapabilityCheck { val: x }
         | DebateRun { id: x } => out.push(*x),
         LoadFieldNamed { obj, .. } | LoadFieldPos { obj, .. } => out.push(*obj),
@@ -2336,10 +2342,7 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
 fn hir_body_used_vars(body: &hir::Body, exclude: &HashSet<String>) -> Vec<String> {
     let mut acc = HashSet::new();
     walk_hir_body(body, &mut acc);
-    let mut names: Vec<String> = acc
-        .into_iter()
-        .filter(|n| !exclude.contains(n))
-        .collect();
+    let mut names: Vec<String> = acc.into_iter().filter(|n| !exclude.contains(n)).collect();
     names.sort();
     names
 }
@@ -2446,9 +2449,7 @@ fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
                 walk_hir_body(arm_body, acc);
             }
         }
-        hir::RValue::For {
-            iterable, body, ..
-        } => {
+        hir::RValue::For { iterable, body, .. } => {
             walk_hir_operand(iterable, acc);
             walk_hir_body(body, acc);
         }
@@ -2472,9 +2473,7 @@ fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
                 walk_hir_operand(a, acc);
             }
         }
-        hir::RValue::Handle {
-            body, handlers, ..
-        } => {
+        hir::RValue::Handle { body, handlers, .. } => {
             walk_hir_body(body, acc);
             for h in handlers {
                 walk_hir_body(&h.body, acc);
@@ -2662,8 +2661,20 @@ mod tests {
         fuse_single_use_temps(&mut func);
         let stmts = &func.blocks[0].stmts;
         assert_eq!(stmts.len(), 3, "multi-use temp must not fuse: {:?}", stmts);
-        assert!(matches!(stmts[1], mir::Stmt::Assign { op: mir::RValue::Load(_), .. }));
-        assert!(matches!(stmts[2], mir::Stmt::Assign { op: mir::RValue::Load(_), .. }));
+        assert!(matches!(
+            stmts[1],
+            mir::Stmt::Assign {
+                op: mir::RValue::Load(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            stmts[2],
+            mir::Stmt::Assign {
+                op: mir::RValue::Load(_),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -2681,8 +2692,19 @@ mod tests {
         let mut func = b.build();
         fuse_single_use_temps(&mut func);
         let stmts = &func.blocks[0].stmts;
-        assert_eq!(stmts.len(), 3, "non-adjacent Load must not fuse: {:?}", stmts);
-        assert!(matches!(stmts[2], mir::Stmt::Assign { op: mir::RValue::Load(_), .. }));
+        assert_eq!(
+            stmts.len(),
+            3,
+            "non-adjacent Load must not fuse: {:?}",
+            stmts
+        );
+        assert!(matches!(
+            stmts[2],
+            mir::Stmt::Assign {
+                op: mir::RValue::Load(_),
+                ..
+            }
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -2701,7 +2723,9 @@ mod tests {
         assert!(!binding.resume, "resume flag must reach MIR");
         let body = &main.blocks[binding.body.0 as usize];
         assert!(
-            body.stmts.iter().any(|s| matches!(s, mir::Stmt::PopHandler)),
+            body.stmts
+                .iter()
+                .any(|s| matches!(s, mir::Stmt::PopHandler)),
             "abortive handler must pop the handler frame: {:?}",
             body
         );
@@ -2728,7 +2752,10 @@ mod tests {
             body.terminator
         );
         assert!(
-            !body.stmts.iter().any(|s| matches!(s, mir::Stmt::PopHandler)),
+            !body
+                .stmts
+                .iter()
+                .any(|s| matches!(s, mir::Stmt::PopHandler)),
             "resuming handler must not pop the frame (the body does)"
         );
     }
@@ -2739,14 +2766,17 @@ mod tests {
         // the VM handler_stack, so it must unwind that frame (PopHandler)
         // before returning — otherwise the frame leaks and a later
         // unhandled perform dispatches into the dead function.
-        let module =
-            lower_source("fn f() -> Int { handle { perform E.op() } { | E.op() => return 7 } } f()")
-                .unwrap();
+        let module = lower_source(
+            "fn f() -> Int { handle { perform E.op() } { | E.op() => return 7 } } f()",
+        )
+        .unwrap();
         let f = find_fn(&module, "f");
         let binding = &f.handler_tables[0].bindings[0];
         let body = &f.blocks[binding.body.0 as usize];
         assert!(
-            body.stmts.iter().any(|s| matches!(s, mir::Stmt::PopHandler)),
+            body.stmts
+                .iter()
+                .any(|s| matches!(s, mir::Stmt::PopHandler)),
             "return inside a handler body must pop the handler frame: {:?}",
             body
         );
@@ -2842,8 +2872,7 @@ mod tests {
         // FieldL via LoadFieldPos) so the sub-patterns are tested and the
         // bindings are wired — previously the arm matched unconditionally
         // and the element bindings were never emitted.
-        let module =
-            lower_source("let t = (1, 2) in match t { | (a, b) => a + b }").unwrap();
+        let module = lower_source("let t = (1, 2) in match t { | (a, b) => a + b }").unwrap();
         let main = find_fn(&module, "__main");
         let mut indices: Vec<u8> = main
             .blocks
@@ -2922,19 +2951,22 @@ mod tests {
         // legacy pop-any Receive must NOT appear.
         let module = lower_source("receive { | Msg(x) => x } after 100 => 0").unwrap();
         let main = find_fn(&module, "__main");
-        let wait = main.blocks.iter().flat_map(|b| b.stmts.iter()).find_map(|s| {
-            match s {
+        let wait = main
+            .blocks
+            .iter()
+            .flat_map(|b| b.stmts.iter())
+            .find_map(|s| match s {
                 mir::Stmt::Assign {
-                    op: mir::RValue::ReceiveWait {
-                        behavior_ids,
-                        max_params,
-                        ..
-                    },
+                    op:
+                        mir::RValue::ReceiveWait {
+                            behavior_ids,
+                            max_params,
+                            ..
+                        },
                     ..
                 } => Some((behavior_ids.len(), *max_params)),
                 _ => None,
-            }
-        });
+            });
         let (n_ids, max_params) = wait.unwrap_or_else(|| {
             panic!("receive-after must lower to ReceiveWait: {:?}", main.blocks)
         });

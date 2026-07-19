@@ -345,51 +345,63 @@ fn test_jit_session_simd_enabled() {
 fn build_simd_iadd_module(limit: i64) -> CodeModule {
     let mut m = CodeModule::new("simd_iadd");
     let c_limit = m.add_constant(Constant::Int(limit));
-    let c_two   = m.add_constant(Constant::Int(2));
-    let c_mid   = m.add_constant(Constant::Int(limit / 2));
+    let c_two = m.add_constant(Constant::Int(2));
+    let c_mid = m.add_constant(Constant::Int(limit / 2));
 
     let emit_c = |m: &mut CodeModule, idx: usize, dst: u8| {
-        m.emit(Instruction::new3(OpCode::ConstU,
-            ((idx >> 8) & 0xFF) as u8, (idx & 0xFF) as u8, dst));
+        m.emit(Instruction::new3(
+            OpCode::ConstU,
+            ((idx >> 8) & 0xFF) as u8,
+            (idx & 0xFF) as u8,
+            dst,
+        ));
     };
 
     // -- Allocate a(r4), b(r5), c(r6) --
-    emit_c(&mut m, c_limit, 0);                         //  0: r0 = limit
-    m.emit(Instruction::new2(OpCode::ArrAlloc, 0, 4));  //  1: r4 = a
-    m.emit(Instruction::new2(OpCode::ArrAlloc, 0, 5));  //  2: r5 = b
-    m.emit(Instruction::new2(OpCode::ArrAlloc, 0, 6));  //  3: r6 = c
+    emit_c(&mut m, c_limit, 0); //  0: r0 = limit
+    m.emit(Instruction::new2(OpCode::ArrAlloc, 0, 4)); //  1: r4 = a
+    m.emit(Instruction::new2(OpCode::ArrAlloc, 0, 5)); //  2: r5 = b
+    m.emit(Instruction::new2(OpCode::ArrAlloc, 0, 6)); //  3: r6 = c
 
     // -- Fill a[i]=i, b[i]=2*i (non-SIMD fill loop) --
-    m.emit(Instruction::new1(OpCode::Const0, 7));       //  4: r7 = 0
-    emit_c(&mut m, c_two, 8);                           //  5: r8 = 2
-    emit_c(&mut m, c_limit, 10);                        //  6: r10 = limit
-    // fill body (pc 7..=12)
-    m.emit(Instruction::new1(OpCode::IInc, 7));         //  7: i++
-    m.emit(Instruction::new3(OpCode::IMul, 7, 8, 9));   //  8: r9 = i*2
-    m.emit(Instruction::new3(OpCode::ArrStore, 4, 7, 7));//  9: a[i] = i
-    m.emit(Instruction::new3(OpCode::ArrStore, 5, 7, 9));// 10: b[i] = 2*i
-    m.emit(Instruction::new3(OpCode::ICmpLt, 7, 10, 11));// 11: r11 = i < limit
-    let back: i16 = -6;                                  // back to pc 7
-    m.emit(Instruction::new3(OpCode::JmpT, 11,
-        ((back as u16)>>8) as u8, (back as u16 & 0xFF) as u8)); // 12: JmpT
+    m.emit(Instruction::new1(OpCode::Const0, 7)); //  4: r7 = 0
+    emit_c(&mut m, c_two, 8); //  5: r8 = 2
+    emit_c(&mut m, c_limit, 10); //  6: r10 = limit
+                                 // fill body (pc 7..=12)
+    m.emit(Instruction::new1(OpCode::IInc, 7)); //  7: i++
+    m.emit(Instruction::new3(OpCode::IMul, 7, 8, 9)); //  8: r9 = i*2
+    m.emit(Instruction::new3(OpCode::ArrStore, 4, 7, 7)); //  9: a[i] = i
+    m.emit(Instruction::new3(OpCode::ArrStore, 5, 7, 9)); // 10: b[i] = 2*i
+    m.emit(Instruction::new3(OpCode::ICmpLt, 7, 10, 11)); // 11: r11 = i < limit
+    let back: i16 = -6; // back to pc 7
+    m.emit(Instruction::new3(
+        OpCode::JmpT,
+        11,
+        ((back as u16) >> 8) as u8,
+        (back as u16 & 0xFF) as u8,
+    )); // 12: JmpT
 
     // -- SIMD-able compute: c[i] = a[i] + b[i] (pc 13..) --
-    m.emit(Instruction::new1(OpCode::Const0, 7));       // 13: r7 = 0
-    // compute body (pc 14..=19): ArrLoad+ArrLoad+IAdd+ArrStore+IInc+cmp+branch
+    m.emit(Instruction::new1(OpCode::Const0, 7)); // 13: r7 = 0
+                                                  // compute body (pc 14..=19): ArrLoad+ArrLoad+IAdd+ArrStore+IInc+cmp+branch
     m.emit(Instruction::new3(OpCode::ArrLoad, 4, 7, 9)); // 14: r9 = a[i]
-    m.emit(Instruction::new3(OpCode::ArrLoad, 5, 7, 10));// 15: r10 = b[i]
-    m.emit(Instruction::new3(OpCode::IAdd, 9, 10, 11));  // 16: r11 = a[i]+b[i]
-    m.emit(Instruction::new3(OpCode::ArrStore, 6, 7, 11));// 17: c[i] = a[i]+b[i]
-    m.emit(Instruction::new1(OpCode::IInc, 7));          // 18: i++
-    m.emit(Instruction::new3(OpCode::ICmpLt, 7, 0, 8));  // 19: r8 = i < limit
-    let back2: i16 = -6;                                  // back to pc 14
-    m.emit(Instruction::new3(OpCode::JmpT, 8,
-        ((back2 as u16)>>8) as u8, (back2 as u16 & 0xFF) as u8)); // 20: JmpT
+    m.emit(Instruction::new3(OpCode::ArrLoad, 5, 7, 10)); // 15: r10 = b[i]
+    m.emit(Instruction::new3(OpCode::IAdd, 9, 10, 11)); // 16: r11 = a[i]+b[i]
+    m.emit(Instruction::new3(OpCode::ArrStore, 6, 7, 11)); // 17: c[i] = a[i]+b[i]
+    m.emit(Instruction::new1(OpCode::IInc, 7)); // 18: i++
+    m.emit(Instruction::new3(OpCode::ICmpLt, 7, 0, 8)); // 19: r8 = i < limit
+    let back2: i16 = -6; // back to pc 14
+    m.emit(Instruction::new3(
+        OpCode::JmpT,
+        8,
+        ((back2 as u16) >> 8) as u8,
+        (back2 as u16 & 0xFF) as u8,
+    )); // 20: JmpT
 
     // -- Read back c[limit/2] --
-    emit_c(&mut m, c_mid, 7);                           // 21: r7 = limit/2
+    emit_c(&mut m, c_mid, 7); // 21: r7 = limit/2
     m.emit(Instruction::new3(OpCode::ArrLoad, 6, 7, 0)); // 22: r0 = c[limit/2]
-    m.emit(Instruction::new0(OpCode::Halt));             // 23
+    m.emit(Instruction::new0(OpCode::Halt)); // 23
     m.entry_point = Some(0);
     m
 }
@@ -1042,7 +1054,7 @@ fn test_absent_metadata_uses_scalar_path() {
                                                           // Clobber AFTER all constant setup so no register fact survives the
                                                           // meet at the loop head: forward state is all-Unknown here.
     clobbered.emit(Instruction::new2(OpCode::Spawn, 0, 0)); // 5: clobbers analysis state
-                                                             // Loop body (pc 6..=12): same shape as make_int_loop_module.
+                                                            // Loop body (pc 6..=12): same shape as make_int_loop_module.
     clobbered.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0));
     clobbered.emit(Instruction::new3(OpCode::IAdd, 1, 7, 1));
     clobbered.emit(Instruction::new3(OpCode::IAdd, 0, 7, 0));
@@ -1067,6 +1079,8 @@ fn test_absent_metadata_uses_scalar_path() {
     // The 5-instruction prologue (pc 0-4, constant loads) may compile
     // via the typed path with the lowered threshold (>=3).  The loop
     // body itself (clobbered by Spawn) must stay scalar.
-    assert!(vm.jit_typed_compiled_count() <= 1,
-        "only the prologue may use typed path; loop body must stay scalar");
+    assert!(
+        vm.jit_typed_compiled_count() <= 1,
+        "only the prologue may use typed path; loop body must stay scalar"
+    );
 }

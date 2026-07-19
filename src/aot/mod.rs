@@ -49,10 +49,11 @@ impl AotModule {
         })?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
-            .map_err(|e| crate::types::NuError::VMError(format!("failed to finalize ISA: {}", e)))?;
+            .map_err(|e| {
+                crate::types::NuError::VMError(format!("failed to finalize ISA: {}", e))
+            })?;
 
-        let mut jit_builder =
-            JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
         // Register NaN-tag-aware runtime helpers.
         register_runtime_helpers(&mut jit_builder);
@@ -77,7 +78,10 @@ impl AotModule {
             let fid = jit_module
                 .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)
                 .map_err(|e| {
-                    crate::types::NuError::VMError(format!("failed to declare '{}': {}", func.name, e))
+                    crate::types::NuError::VMError(format!(
+                        "failed to declare '{}': {}",
+                        func.name, e
+                    ))
                 })?;
             func_ids.push(fid);
 
@@ -92,7 +96,10 @@ impl AotModule {
                 let ub_fid = jit_module
                     .declare_function(&ub_name, cranelift_module::Linkage::Local, &ub_sig)
                     .map_err(|e| {
-                        crate::types::NuError::VMError(format!("failed to declare unboxed '{}': {}", func.name, e))
+                        crate::types::NuError::VMError(format!(
+                            "failed to declare unboxed '{}': {}",
+                            func.name, e
+                        ))
                     })?;
                 unboxed_ids[idx] = Some(ub_fid);
             }
@@ -111,7 +118,14 @@ impl AotModule {
                 let mut ctx2 = codegen::AotContext::new(&mut jit_module, &mut builder_context);
                 ctx2.func_ids = func_ids.clone();
                 ctx2.func_ids[idx] = ub_fid; // Step 4d: self-calls use unboxed variant
-                codegen::compile_mir_function_body(&mut ctx2, func, idx, ub_fid, codegen::CompileMode::Unboxed).map_err(|e| {
+                codegen::compile_mir_function_body(
+                    &mut ctx2,
+                    func,
+                    idx,
+                    ub_fid,
+                    codegen::CompileMode::Unboxed,
+                )
+                .map_err(|e| {
                     crate::types::NuError::VMError(format!(
                         "AOT compilation of unboxed '{}' failed: {}",
                         func.name, e
@@ -120,7 +134,13 @@ impl AotModule {
 
                 // Compile boxing wrapper as the boxed function table entry.
                 let mut ctx3 = codegen::AotContext::new(&mut jit_module, &mut builder_context);
-                codegen::compile_boxing_wrapper(&mut ctx3, func.params.len(), func_ids[idx], ub_fid).map_err(|e| {
+                codegen::compile_boxing_wrapper(
+                    &mut ctx3,
+                    func.params.len(),
+                    func_ids[idx],
+                    ub_fid,
+                )
+                .map_err(|e| {
                     crate::types::NuError::VMError(format!(
                         "AOT boxing wrapper for '{}' failed: {}",
                         func.name, e
@@ -130,7 +150,14 @@ impl AotModule {
                 // Normal boxed compilation for non-all-Int functions.
                 let mut ctx = codegen::AotContext::new(&mut jit_module, &mut builder_context);
                 ctx.func_ids = func_ids.clone();
-                codegen::compile_mir_function_body(&mut ctx, func, idx, func_ids[idx], codegen::CompileMode::Boxed).map_err(|e| {
+                codegen::compile_mir_function_body(
+                    &mut ctx,
+                    func,
+                    idx,
+                    func_ids[idx],
+                    codegen::CompileMode::Boxed,
+                )
+                .map_err(|e| {
                     crate::types::NuError::VMError(format!(
                         "AOT compilation of '{}' failed: {}",
                         func.name, e
@@ -166,15 +193,11 @@ impl AotModule {
     /// The entry point is `__main` if it exists, otherwise `main`, otherwise
     /// the first function. Returns the NaN-tagged result value.
     pub fn run(&self) -> NuResult<u64> {
-        let idx = self
-            .entry_idx
-            .unwrap_or(0);
+        let idx = self.entry_idx.unwrap_or(0);
         let ptr = self
             .compiled_funcs
             .get(idx)
-            .ok_or_else(|| {
-                crate::types::NuError::VMError("no compiled entry point".into())
-            })?;
+            .ok_or_else(|| crate::types::NuError::VMError("no compiled entry point".into()))?;
 
         // Call the compiled function. Signature: extern "C" fn() -> u64
         // (for the entry point with no params).
@@ -191,18 +214,42 @@ fn register_runtime_helpers(builder: &mut JITBuilder) {
         ("nulang_imul", crate::jit::runtime::nulang_imul as *const u8),
         ("nulang_idiv", crate::jit::runtime::nulang_idiv as *const u8),
         ("nulang_imod", crate::jit::runtime::nulang_imod as *const u8),
-        ("nulang_icmp_eq", crate::jit::runtime::nulang_icmp_eq as *const u8),
-        ("nulang_icmp_lt", crate::jit::runtime::nulang_icmp_lt as *const u8),
-        ("nulang_icmp_gt", crate::jit::runtime::nulang_icmp_gt as *const u8),
-        ("nulang_icmp_le", crate::jit::runtime::nulang_icmp_le as *const u8),
-        ("nulang_icmp_ge", crate::jit::runtime::nulang_icmp_ge as *const u8),
+        (
+            "nulang_icmp_eq",
+            crate::jit::runtime::nulang_icmp_eq as *const u8,
+        ),
+        (
+            "nulang_icmp_lt",
+            crate::jit::runtime::nulang_icmp_lt as *const u8,
+        ),
+        (
+            "nulang_icmp_gt",
+            crate::jit::runtime::nulang_icmp_gt as *const u8,
+        ),
+        (
+            "nulang_icmp_le",
+            crate::jit::runtime::nulang_icmp_le as *const u8,
+        ),
+        (
+            "nulang_icmp_ge",
+            crate::jit::runtime::nulang_icmp_ge as *const u8,
+        ),
         ("nulang_fadd", crate::jit::runtime::nulang_fadd as *const u8),
         ("nulang_fsub", crate::jit::runtime::nulang_fsub as *const u8),
         ("nulang_fmul", crate::jit::runtime::nulang_fmul as *const u8),
         ("nulang_fdiv", crate::jit::runtime::nulang_fdiv as *const u8),
-        ("nulang_fcmp_eq", crate::jit::runtime::nulang_fcmp_eq as *const u8),
-        ("nulang_fcmp_lt", crate::jit::runtime::nulang_fcmp_lt as *const u8),
-        ("nulang_fcmp_gt", crate::jit::runtime::nulang_fcmp_gt as *const u8),
+        (
+            "nulang_fcmp_eq",
+            crate::jit::runtime::nulang_fcmp_eq as *const u8,
+        ),
+        (
+            "nulang_fcmp_lt",
+            crate::jit::runtime::nulang_fcmp_lt as *const u8,
+        ),
+        (
+            "nulang_fcmp_gt",
+            crate::jit::runtime::nulang_fcmp_gt as *const u8,
+        ),
         ("nulang_ineg", crate::jit::runtime::nulang_ineg as *const u8),
         ("nulang_iinc", crate::jit::runtime::nulang_iinc as *const u8),
         ("nulang_idec", crate::jit::runtime::nulang_idec as *const u8),
@@ -214,12 +261,17 @@ fn register_runtime_helpers(builder: &mut JITBuilder) {
         ("nulang_xor", crate::jit::runtime::nulang_xor as *const u8),
         ("nulang_shl", crate::jit::runtime::nulang_shl as *const u8),
         ("nulang_shr", crate::jit::runtime::nulang_shr as *const u8),
-        ("nulang_bitand", crate::jit::runtime::nulang_bitand as *const u8),
-        ("nulang_bitor", crate::jit::runtime::nulang_bitor as *const u8),
+        (
+            "nulang_bitand",
+            crate::jit::runtime::nulang_bitand as *const u8,
+        ),
+        (
+            "nulang_bitor",
+            crate::jit::runtime::nulang_bitor as *const u8,
+        ),
         ("nulang_fneg", crate::jit::runtime::nulang_fneg as *const u8),
     ];
     for (name, ptr) in helpers {
         builder.symbol(*name, *ptr);
     }
 }
-

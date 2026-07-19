@@ -322,7 +322,6 @@ fn apply_type_transfer(instr: &Instruction, module: &CodeModule, state: &mut [Kn
             state[op2] = KnownType::Int;
         }
 
-
         // ArrLoad result is Unknown (array elements have runtime-only types).
         OpCode::ArrLoad => {
             state[op3] = KnownType::Unknown;
@@ -1569,10 +1568,15 @@ pub fn compile_bytecode_region_typed(
             // -- Debug --
             OpCode::DbgPrint => {}
 
-
             // -- Array operations (typed): same implementation as scalar --
             OpCode::ArrLoad => {
-                emit_arr_load(&mut builder, regs_ptr, instr.op1 as usize, instr.op2 as usize, instr.op3 as usize);
+                emit_arr_load(
+                    &mut builder,
+                    regs_ptr,
+                    instr.op1 as usize,
+                    instr.op2 as usize,
+                    instr.op3 as usize,
+                );
             }
             // Everything else
             _ => {

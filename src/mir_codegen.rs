@@ -58,7 +58,6 @@ struct JumpPatch {
     kind: JumpKind,
 }
 
-
 pub struct MirCodegen {
     module: CodeModule,
     /// Module-wide record field ids, mirroring the stable compiler's layout.
@@ -90,7 +89,10 @@ impl MirCodegen {
     /// Whether the given local of the function currently being compiled is
     /// known to hold a Float at runtime.
     fn is_float_local(&self, id: mir::LocalId) -> bool {
-        self.float_locals.get(id.0 as usize).copied().unwrap_or(false)
+        self.float_locals
+            .get(id.0 as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Constant-pool index for a `self.field` name, reusing an existing
@@ -1382,7 +1384,12 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
                 cp(&mut out, *a);
             }
         }
-        PipelineStage { id, name, actor, template } => {
+        PipelineStage {
+            id,
+            name,
+            actor,
+            template,
+        } => {
             for x in [id, name, actor, template] {
                 cp(&mut out, *x);
             }
@@ -1391,7 +1398,12 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
             cp(&mut out, *id);
             cp(&mut out, *input);
         }
-        SupervisorWorker { id, name, actor, description } => {
+        SupervisorWorker {
+            id,
+            name,
+            actor,
+            description,
+        } => {
             for x in [id, name, actor, description] {
                 cp(&mut out, *x);
             }
@@ -1400,12 +1412,21 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
             cp(&mut out, *id);
             cp(&mut out, *task);
         }
-        DebateNew { topic, rounds, threshold } => {
+        DebateNew {
+            topic,
+            rounds,
+            threshold,
+        } => {
             cp(&mut out, *topic);
             cp(&mut out, *rounds);
             cp(&mut out, *threshold);
         }
-        DebateParticipant { id, name, stance, actor } => {
+        DebateParticipant {
+            id,
+            name,
+            stance,
+            actor,
+        } => {
             for x in [id, name, stance, actor] {
                 cp(&mut out, *x);
             }
@@ -1430,10 +1451,9 @@ fn stmt_uses(stmt: &mir::Stmt) -> Vec<(usize, UseKind)> {
             (src.0 as usize, UseKind::Retaining),
         ],
         mir::Stmt::EnterHandle { .. } | mir::Stmt::PopHandler => Vec::new(),
-        mir::Stmt::Emit { args, .. } => args
-            .iter()
-            .map(|a| (a.0 as usize, UseKind::Copy))
-            .collect(),
+        mir::Stmt::Emit { args, .. } => {
+            args.iter().map(|a| (a.0 as usize, UseKind::Copy)).collect()
+        }
         // StateSet stores into actor state without retaining, so the stored
         // value must keep its register reference: treat it as a copy.
         mir::Stmt::StateSet { src, .. } => vec![(src.0 as usize, UseKind::Copy)],
@@ -1483,7 +1503,11 @@ fn plan_drops(func: &mir::Function) -> DropPlan {
         return plan;
     }
 
-    let ptr_ty: Vec<bool> = func.locals.iter().map(|l| may_hold_heap_ptr(&l.ty)).collect();
+    let ptr_ty: Vec<bool> = func
+        .locals
+        .iter()
+        .map(|l| may_hold_heap_ptr(&l.ty))
+        .collect();
 
     // Locals that receive their value outside MIR assignments can never be
     // proven solely owned.
@@ -1524,9 +1548,8 @@ fn plan_drops(func: &mir::Function) -> DropPlan {
                     defs_owning[d] = false;
                 }
                 match op {
-                    mir::RValue::LoadFieldNamed { obj, .. } | mir::RValue::LoadFieldPos { obj, .. } => {
-                        loads.push((d, obj.0 as usize))
-                    }
+                    mir::RValue::LoadFieldNamed { obj, .. }
+                    | mir::RValue::LoadFieldPos { obj, .. } => loads.push((d, obj.0 as usize)),
                     mir::RValue::ArrayLoad { arr, .. } => loads.push((d, arr.0 as usize)),
                     _ => {}
                 }
@@ -1645,8 +1668,15 @@ fn plan_drops(func: &mir::Function) -> DropPlan {
             }
         }
         for c in 0..nlocals {
-            if candidate[c] && held_in.contains(&c) && !live_in[bi].contains(&c) && esc_clear(c, &live_in[bi]) {
-                plan.block_entry.entry(bi).or_default().push(func.locals[c].id);
+            if candidate[c]
+                && held_in.contains(&c)
+                && !live_in[bi].contains(&c)
+                && esc_clear(c, &live_in[bi])
+            {
+                plan.block_entry
+                    .entry(bi)
+                    .or_default()
+                    .push(func.locals[c].id);
             }
         }
     }
@@ -2182,8 +2212,7 @@ mod tests {
         // then ReceiveWait (0xA0) carries the candidate-ids spec constant in
         // op1+op2 and the arm-index/payload base register in op3, exactly
         // like ReceiveMatch. (Compiling only — the VM handler is wave 2.)
-        let module =
-            compile_mir_source("receive { | Msg(x) => x } after 100 => 0").unwrap();
+        let module = compile_mir_source("receive { | Msg(x) => x } after 100 => 0").unwrap();
         let pos = module
             .instructions
             .iter()

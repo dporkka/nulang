@@ -384,8 +384,14 @@ pub struct AgentFallbackEntry {
 /// Backoff strategy for agent LLM retries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AgentBackoff {
-    Exponential { initial_ms: u64, factor: f64, max_ms: u64 },
-    Fixed { delay_ms: u64 },
+    Exponential {
+        initial_ms: u64,
+        factor: f64,
+        max_ms: u64,
+    },
+    Fixed {
+        delay_ms: u64,
+    },
 }
 
 /// Retry configuration for an agent declaration.
@@ -704,8 +710,8 @@ mod tests {
         let i = Literal::Int(42);
         assert_eq!(format!("{:?}", i), "Int(42)");
 
-        let f = Literal::Float(3.14);
-        assert_eq!(format!("{:?}", f), "Float(3.14)");
+        let f = Literal::Float(1.5);
+        assert_eq!(format!("{:?}", f), "Float(1.5)");
 
         let s = Literal::String("hello".to_string());
         assert_eq!(format!("{:?}", s), "String(\"hello\")");
@@ -913,11 +919,15 @@ mod tests {
         // connect: one exit-hook if (Closed), the transition assign, the
         // Connecting entry hook, and the trailing nil.
         assert_eq!(exprs.len(), 4);
-        assert!(matches!(&exprs[0], Expr::If { else_branch: None, .. }));
-        assert!(
-            matches!(&exprs[1], Expr::Assign { value, .. }
-                if matches!(value.as_ref(), Expr::Literal(Literal::String(s), _) if s == "Connecting"))
-        );
+        assert!(matches!(
+            &exprs[0],
+            Expr::If {
+                else_branch: None,
+                ..
+            }
+        ));
+        assert!(matches!(&exprs[1], Expr::Assign { value, .. }
+                if matches!(value.as_ref(), Expr::Literal(Literal::String(s), _) if s == "Connecting")));
         assert!(matches!(&exprs[2], Expr::Literal(Literal::Unit, _)));
         assert!(matches!(&exprs[3], Expr::Literal(Literal::Nil, _)));
         // disconnect targets Closed, which has no entry hook: no inline hook.

@@ -81,9 +81,8 @@ impl Manifest {
     /// Load and parse the manifest in `dir`.
     pub fn load(dir: &Path) -> NuResult<Manifest> {
         let path = dir.join(MANIFEST_FILE);
-        let source = std::fs::read_to_string(&path).map_err(|e| {
-            NuError::PackageError(format!("cannot read {}: {}", path.display(), e))
-        })?;
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| NuError::PackageError(format!("cannot read {}: {}", path.display(), e)))?;
         Self::parse(&source)
     }
 }
@@ -136,7 +135,10 @@ mod tests {
         let json = &manifest.dependencies["json"];
         match json {
             Dependency::Detailed(d) => {
-                assert_eq!(d.git.as_deref(), Some("https://github.com/example/json.nu.git"));
+                assert_eq!(
+                    d.git.as_deref(),
+                    Some("https://github.com/example/json.nu.git")
+                );
                 assert_eq!(d.tag.as_deref(), Some("v0.2.0"));
                 assert_eq!(d.path, None);
             }

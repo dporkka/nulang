@@ -61,21 +61,36 @@ pub struct WasmBackend {
 impl WasmBackend {
     pub fn new() -> Self {
         let mut types = TypeSection::new();
-        types.ty().function([], [ValType::I64]);                                 // 0
-        types.ty().function([ValType::I64], [ValType::I64]);                     // 1
-        types.ty().function([ValType::I64, ValType::I64], [ValType::I64]);       // 2
-        types.ty().function([ValType::I32, ValType::I32], [ValType::I64]);       // 3
+        types.ty().function([], [ValType::I64]); // 0
+        types.ty().function([ValType::I64], [ValType::I64]); // 1
+        types
+            .ty()
+            .function([ValType::I64, ValType::I64], [ValType::I64]); // 2
+        types
+            .ty()
+            .function([ValType::I32, ValType::I32], [ValType::I64]); // 3
 
         let mut imports = ImportSection::new();
-        imports.import("env", "memory", MemoryType {
-            minimum: 1, maximum: None, memory64: false, shared: false,
-            page_size_log2: None,
-        });
-        imports.import("env", "nulang_alloc",    EntityType::Function(TY_VOID_TO_I64));   // FIXME: wrong type idx
-        imports.import("env", "nulang_dispatch", EntityType::Function(TY_VOID_TO_I64));   // FIXME
-        imports.import("env", "log",             EntityType::Function(TY_I32I32_TO_I64));
-        imports.import("env", "io_print",        EntityType::Function(TY_I32I32_TO_I64));
-        imports.import("env", "io_read",         EntityType::Function(TY_VOID_TO_I64));
+        imports.import(
+            "env",
+            "memory",
+            MemoryType {
+                minimum: 1,
+                maximum: None,
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            },
+        );
+        imports.import("env", "nulang_alloc", EntityType::Function(TY_VOID_TO_I64)); // FIXME: wrong type idx
+        imports.import(
+            "env",
+            "nulang_dispatch",
+            EntityType::Function(TY_VOID_TO_I64),
+        ); // FIXME
+        imports.import("env", "log", EntityType::Function(TY_I32I32_TO_I64));
+        imports.import("env", "io_print", EntityType::Function(TY_I32I32_TO_I64));
+        imports.import("env", "io_read", EntityType::Function(TY_VOID_TO_I64));
 
         // Fix up import type indices — imports reference the type section,
         // not the import index. The alloc/dispatch type refs need to point
@@ -147,11 +162,13 @@ impl WasmBackend {
             self.compile_function(func, mir.functions.len() + idx);
         }
 
-        self.exports.export("nulang_init", ExportKind::Func, FUNC_IMPORT_COUNT);
+        self.exports
+            .export("nulang_init", ExportKind::Func, FUNC_IMPORT_COUNT);
 
         // Emit data segment.
         if !self.string_data.is_empty() {
-            self.data.active(0, &ConstExpr::i32_const(0), self.string_data.clone());
+            self.data
+                .active(0, &ConstExpr::i32_const(0), self.string_data.clone());
         }
 
         // Build module.
@@ -176,16 +193,20 @@ impl WasmBackend {
         // Alloc: (i32) -> i32
         let ty_alloc = self.ensure_type(vec![ValType::I32], vec![ValType::I32]);
         // Dispatch: (i32, i32, i32, i32) -> ()
-        let ty_dispatch = self.ensure_type(
-            vec![ValType::I32; 4],
-            vec![],
-        );
+        let ty_dispatch = self.ensure_type(vec![ValType::I32; 4], vec![]);
 
         let mut imports = ImportSection::new();
-        imports.import("env", "memory", MemoryType {
-            minimum: 1, maximum: None, memory64: false, shared: false,
-            page_size_log2: None,
-        });
+        imports.import(
+            "env",
+            "memory",
+            MemoryType {
+                minimum: 1,
+                maximum: None,
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            },
+        );
         imports.import("env", "nulang_alloc", EntityType::Function(ty_alloc));
         imports.import("env", "nulang_dispatch", EntityType::Function(ty_dispatch));
         imports.import("env", "log", EntityType::Function(TY_I32I32_TO_I64));
@@ -272,10 +293,18 @@ impl WasmBackend {
             let bid = order[i];
             let block = &func.blocks[bid.0 as usize];
             match &block.terminator {
-                Terminator::Jump(t) => { if seen.insert(*t) { order.push(*t); } }
+                Terminator::Jump(t) => {
+                    if seen.insert(*t) {
+                        order.push(*t);
+                    }
+                }
                 Terminator::Branch { then_, else_, .. } => {
-                    if seen.insert(*then_) { order.push(*then_); }
-                    if seen.insert(*else_) { order.push(*else_); }
+                    if seen.insert(*then_) {
+                        order.push(*then_);
+                    }
+                    if seen.insert(*else_) {
+                        order.push(*else_);
+                    }
                 }
                 _ => {}
             }
@@ -312,8 +341,12 @@ impl WasmBackend {
 
     fn compile_rvalue(&self, body: &mut Function, rvalue: &RValue, func: &mir::Function) {
         match rvalue {
-            RValue::Const(c) => { self.compile_const(body, c); }
-            RValue::Load(l) => { body.instruction(&Instruction::LocalGet(self.mir_local(l, func))); }
+            RValue::Const(c) => {
+                self.compile_const(body, c);
+            }
+            RValue::Load(l) => {
+                body.instruction(&Instruction::LocalGet(self.mir_local(l, func)));
+            }
             RValue::Binary(op, a, b) => {
                 // Attempt SIMD lowering first; fall through to scalar if
                 // operands are not adjacent array-element loads.
@@ -326,7 +359,9 @@ impl WasmBackend {
             RValue::Unary(_, _) => {
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
             }
-            RValue::Call { func: fr, args } => { self.compile_call(body, fr, args, func); }
+            RValue::Call { func: fr, args } => {
+                self.compile_call(body, fr, args, func);
+            }
             RValue::Perform { effect, op, args } => {
                 self.compile_perform(body, effect, op, args, func);
             }
@@ -339,11 +374,11 @@ impl WasmBackend {
     fn compile_const(&self, body: &mut Function, c: &crate::bytecode::Constant) {
         use crate::bytecode::Constant;
         let bits: i64 = match c {
-            Constant::Int(n)   => value_layout::tag_int(*n) as i64,
+            Constant::Int(n) => value_layout::tag_int(*n) as i64,
             Constant::Float(f) => f.to_bits() as i64,
-            Constant::Bool(b)  => value_layout::tag_bool(*b) as i64,
-            Constant::Nil      => value_layout::TAG_NIL as i64,
-            Constant::Unit     => value_layout::TAG_UNIT as i64,
+            Constant::Bool(b) => value_layout::tag_bool(*b) as i64,
+            Constant::Nil => value_layout::TAG_NIL as i64,
+            Constant::Unit => value_layout::TAG_UNIT as i64,
             Constant::String(s) => {
                 // Tag as string with the interned offset in payload.
                 // Actually, strings in Nulang are interned: Value::string(idx).
@@ -356,7 +391,13 @@ impl WasmBackend {
         body.instruction(&Instruction::I64Const(bits));
     }
 
-    fn compile_call(&self, body: &mut Function, fr: &FuncRef, args: &[LocalId], func: &mir::Function) {
+    fn compile_call(
+        &self,
+        body: &mut Function,
+        fr: &FuncRef,
+        args: &[LocalId],
+        func: &mir::Function,
+    ) {
         match fr {
             FuncRef::Index(idx) => {
                 for a in args {
@@ -428,11 +469,21 @@ impl WasmBackend {
         body.instruction(&Instruction::LocalGet(254));
 
         match op {
-            BinOp::Add => { body.instruction(&Instruction::I64Add); }
-            BinOp::Sub => { body.instruction(&Instruction::I64Sub); }
-            BinOp::Mul => { body.instruction(&Instruction::I64Mul); }
-            BinOp::Div => { body.instruction(&Instruction::I64DivS); }
-            BinOp::Mod => { body.instruction(&Instruction::I64RemS); }
+            BinOp::Add => {
+                body.instruction(&Instruction::I64Add);
+            }
+            BinOp::Sub => {
+                body.instruction(&Instruction::I64Sub);
+            }
+            BinOp::Mul => {
+                body.instruction(&Instruction::I64Mul);
+            }
+            BinOp::Div => {
+                body.instruction(&Instruction::I64DivS);
+            }
+            BinOp::Mod => {
+                body.instruction(&Instruction::I64RemS);
+            }
             cmp @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) => {
                 match cmp {
                     BinOp::Eq => body.instruction(&Instruction::I64Eq),
@@ -500,7 +551,6 @@ impl WasmBackend {
         }
     }
 
-
     // ── SIMD lowering ──────────────────────────────────────────────
     //
     // WASM SIMD (0xFD prefix) opcodes for vectorized array operations.
@@ -561,7 +611,7 @@ impl WasmBackend {
             BinOp::Add => 0xC6, // i64x2.add
             BinOp::Sub => 0xCD, // i64x2.sub
             BinOp::Mul => 0xCB, // i64x2.mul
-            _ => return,         // unsupported op — fall through to scalar
+            _ => return,        // unsupported op — fall through to scalar
         };
         self.emit_simd(body, simd_op, &[]);
     }
@@ -621,10 +671,14 @@ impl WasmBackend {
     fn mir_local(&self, local: &LocalId, func: &mir::Function) -> u32 {
         let pc = func.params.len() as u32;
         for (i, p) in func.params.iter().enumerate() {
-            if p == local { return i as u32; }
+            if p == local {
+                return i as u32;
+            }
         }
         for (i, c) in func.captures.iter().enumerate() {
-            if c == local { return pc + i as u32; }
+            if c == local {
+                return pc + i as u32;
+            }
         }
         pc + func.captures.len() as u32 + local.0
     }

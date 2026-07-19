@@ -66,8 +66,8 @@
 use std::collections::HashMap;
 
 use crate::runtime::heap::{ActorHeap, TypeTag};
-use crate::vm::{Continuation, Frame, HandlerFrame, Value, VM};
 use crate::value_layout::{self, PAYLOAD_MASK, TAG_CLOSURE, TAG_MASK, TAG_PTR, TAG_STRING};
+use crate::vm::{Continuation, Frame, HandlerFrame, Value, VM};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -194,10 +194,25 @@ pub fn deserialize_continuation(
     let obj_table = read_objects(bytes, &mut offset, num_objects, &string_table, vm)?;
 
     // Read closure environments.
-    let closure_envs = read_closures(bytes, &mut offset, num_closures, &string_table, &obj_table, vm)?;
+    let closure_envs = read_closures(
+        bytes,
+        &mut offset,
+        num_closures,
+        &string_table,
+        &obj_table,
+        vm,
+    )?;
 
     // Read frames.
-    let frames = read_frames(bytes, &mut offset, num_frames, &closure_envs, &string_table, &obj_table, vm)?;
+    let frames = read_frames(
+        bytes,
+        &mut offset,
+        num_frames,
+        &closure_envs,
+        &string_table,
+        &obj_table,
+        vm,
+    )?;
 
     // Read handler stack.
     let handler_stack = read_handlers(bytes, &mut offset, num_handlers)?;
@@ -317,12 +332,10 @@ fn walk_value(
 
         // Recursively walk container slots.
         match header.type_tag {
-            TypeTag::Array | TypeTag::Record | TypeTag::Tuple
-            | TypeTag::Closure | TypeTag::Map => {
+            TypeTag::Array | TypeTag::Record | TypeTag::Tuple | TypeTag::Closure | TypeTag::Map => {
                 let slot_count = payload_size as usize / std::mem::size_of::<Value>();
-                let slots = unsafe {
-                    std::slice::from_raw_parts(payload_ptr as *const Value, slot_count)
-                };
+                let slots =
+                    unsafe { std::slice::from_raw_parts(payload_ptr as *const Value, slot_count) };
                 for slot in slots {
                     walk_value(ctx, *slot, vm, module_idx)?;
                 }
@@ -343,11 +356,7 @@ fn walk_value(
 
 /// Resolve a TAG_CLOSURE Value to a closure environment index in the
 /// serialized closure table. Adds the env if not already present.
-fn resolve_closure_env(
-    value: Value,
-    vm: &VM,
-    ctx: &mut SerializeCtx,
-) -> Option<u32> {
+fn resolve_closure_env(value: Value, vm: &VM, ctx: &mut SerializeCtx) -> Option<u32> {
     let raw = value.as_raw();
     if (raw & TAG_MASK) != TAG_CLOSURE {
         return None;
@@ -374,11 +383,7 @@ fn resolve_closure_env(
 }
 
 /// Resolve a frame's closure env to a serialized closure index.
-fn resolve_frame_closure(
-    frame: &Frame,
-    vm: &VM,
-    ctx: &mut SerializeCtx,
-) -> Option<u32> {
+fn resolve_frame_closure(frame: &Frame, vm: &VM, ctx: &mut SerializeCtx) -> Option<u32> {
     let v = frame.closure_env?;
     resolve_closure_env(v, vm, ctx)
 }
@@ -413,8 +418,7 @@ fn write_objects(buf: &mut Vec<u8>, ctx: &SerializeCtx) {
         buf.extend_from_slice(&obj.payload_size.to_be_bytes());
 
         match obj.type_tag {
-            TypeTag::Array | TypeTag::Record | TypeTag::Tuple
-            | TypeTag::Closure | TypeTag::Map => {
+            TypeTag::Array | TypeTag::Record | TypeTag::Tuple | TypeTag::Closure | TypeTag::Map => {
                 // Container: rewrite TAG_PTR and TAG_STRING in Value slots.
                 let slot_count = obj.payload_size as usize / std::mem::size_of::<Value>();
                 let slots = unsafe {
@@ -530,10 +534,7 @@ fn write_handlers(buf: &mut Vec<u8>, ctx: &SerializeCtx) {
 // ===========================================================================
 
 /// Read and validate the header.
-fn read_header(
-    bytes: &[u8],
-    offset: &mut usize,
-) -> Result<(u32, u32, u32, u32, u32, u32), String> {
+fn read_header(bytes: &[u8], offset: &mut usize) -> Result<(u32, u32, u32, u32, u32, u32), String> {
     let min_size = 4 + 4 + 4 + 32 + 4 * 6;
     if bytes.len() < min_size {
         return Err("truncated header".into());
@@ -563,7 +564,14 @@ fn read_header(
     let num_frames = read_u32(bytes, offset);
     let num_handlers = read_u32(bytes, offset);
 
-    Ok((flags, num_objects, num_strings, num_closures, num_frames, num_handlers))
+    Ok((
+        flags,
+        num_objects,
+        num_strings,
+        num_closures,
+        num_frames,
+        num_handlers,
+    ))
 }
 
 fn read_u32(bytes: &[u8], offset: &mut usize) -> u32 {
@@ -572,11 +580,7 @@ fn read_u32(bytes: &[u8], offset: &mut usize) -> u32 {
     v
 }
 
-fn read_string_table(
-    bytes: &[u8],
-    offset: &mut usize,
-    count: u32,
-) -> Result<Vec<String>, String> {
+fn read_string_table(bytes: &[u8], offset: &mut usize, count: u32) -> Result<Vec<String>, String> {
     let mut table = Vec::with_capacity(count as usize);
     for _ in 0..count {
         if *offset + 2 > bytes.len() {
@@ -622,8 +626,14 @@ fn read_objects(
             .ok_or_else(|| format!("unknown type tag {} at object {}", type_tag_byte, id))?;
 
         let heap_tag = tag; // TypeTag in heap module is the same as HeapTypeTag
-        let ptr = vm.alloc_on_heap(payload_size as usize, heap_tag)
-            .ok_or_else(|| format!("allocation failed for object {} ({} bytes)", id, payload_size))?;
+        let ptr = vm
+            .alloc_on_heap(payload_size as usize, heap_tag)
+            .ok_or_else(|| {
+                format!(
+                    "allocation failed for object {} ({} bytes)",
+                    id, payload_size
+                )
+            })?;
 
         obj_table.insert(id, ptr);
         obj_meta.push((id, tag, payload_size, payload_offset));
@@ -637,18 +647,15 @@ fn read_objects(
         let ptr = obj_table[&_id];
 
         match tag {
-            TypeTag::Array | TypeTag::Record | TypeTag::Tuple
-            | TypeTag::Closure | TypeTag::Map => {
+            TypeTag::Array | TypeTag::Record | TypeTag::Tuple | TypeTag::Closure | TypeTag::Map => {
                 // Container: copy Values, remapping TAG_PTR and TAG_STRING.
                 let slot_count = *payload_size as usize / std::mem::size_of::<Value>();
-                let dst_slots = unsafe {
-                    std::slice::from_raw_parts_mut(ptr as *mut Value, slot_count)
-                };
+                let dst_slots =
+                    unsafe { std::slice::from_raw_parts_mut(ptr as *mut Value, slot_count) };
                 for si in 0..slot_count {
                     let src_start = *payload_offset + si * 8;
-                    let raw = u64::from_le_bytes(
-                        bytes[src_start..src_start + 8].try_into().unwrap()
-                    );
+                    let raw =
+                        u64::from_le_bytes(bytes[src_start..src_start + 8].try_into().unwrap());
                     dst_slots[si] = deserialize_one_value(raw, string_table, &obj_table, vm);
                 }
             }
@@ -749,8 +756,7 @@ fn read_frames(
         *offset += 2;
         let return_dst = bytes[*offset];
         *offset += 1;
-        let caller_idx_raw =
-            i32::from_be_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+        let caller_idx_raw = i32::from_be_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
         *offset += 4;
         let has_closure = bytes[*offset];
         *offset += 1;
@@ -782,8 +788,7 @@ fn read_frames(
             Some(caller_idx_raw as usize)
         };
 
-        let num_regs =
-            u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().unwrap()) as usize;
+        let num_regs = u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().unwrap()) as usize;
         *offset += 2;
 
         // Read register indices.
@@ -792,9 +797,8 @@ fn read_frames(
             if *offset + 2 > bytes.len() {
                 return Err("truncated reg index".into());
             }
-            reg_indices.push(
-                u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().unwrap()) as usize,
-            );
+            reg_indices
+                .push(u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().unwrap()) as usize);
             *offset += 2;
         }
 

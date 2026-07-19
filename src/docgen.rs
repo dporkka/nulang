@@ -185,7 +185,10 @@ pub fn generate_project_docs(root: &Path) -> NuResult<String> {
         let source = fs::read_to_string(&path).map_err(|e| {
             NuError::RuntimeError(format!("docgen: cannot read {}: {}", path.display(), e))
         })?;
-        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("module");
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("module");
         let module = parse_module_doc(&source, name);
         // Files without any docs or declarations add only an empty heading.
         if module.doc.is_empty() && module.decls.is_empty() {
@@ -203,11 +206,19 @@ pub fn write_project_docs(root: &Path) -> NuResult<PathBuf> {
     let markdown = generate_project_docs(root)?;
     let docs_dir = root.join("docs");
     fs::create_dir_all(&docs_dir).map_err(|e| {
-        NuError::RuntimeError(format!("docgen: cannot create {}: {}", docs_dir.display(), e))
+        NuError::RuntimeError(format!(
+            "docgen: cannot create {}: {}",
+            docs_dir.display(),
+            e
+        ))
     })?;
     let out_path = docs_dir.join("api.md");
     fs::write(&out_path, markdown).map_err(|e| {
-        NuError::RuntimeError(format!("docgen: cannot write {}: {}", out_path.display(), e))
+        NuError::RuntimeError(format!(
+            "docgen: cannot write {}: {}",
+            out_path.display(),
+            e
+        ))
     })?;
     Ok(out_path)
 }
@@ -244,11 +255,8 @@ mod tests {
     /// Unique scratch dir per test (the suite runs tests in parallel, and a
     /// re-run must not see a previous run's leftover files).
     fn fresh_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "nulang_docgen_test_{}_{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("nulang_docgen_test_{}_{}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -267,7 +275,8 @@ mod tests {
 
     #[test]
     fn test_module_doc_comment_collected() {
-        let source = "//! Math utilities.\n//!\n//! Safe to use anywhere.\nfn pi() -> Float { 3.14 }\n";
+        let source =
+            "//! Math utilities.\n//!\n//! Safe to use anywhere.\nfn pi() -> Float { 3.14 }\n";
         let module = parse_module_doc(source, "math");
         assert_eq!(module.doc, "Math utilities.\n\nSafe to use anywhere.");
         assert_eq!(module.decls.len(), 1);

@@ -231,7 +231,6 @@ impl MVRegister<String> {
 // 3. RGA
 // ---------------------------------------------------------------------------
 
-
 #[derive(Debug, Clone)]
 pub struct RGAElement<T: Clone> {
     pub id: LamportTime,

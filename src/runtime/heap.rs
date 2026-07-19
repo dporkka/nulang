@@ -1102,15 +1102,23 @@ fn test_heap_grows_beyond_initial_block() {
     // chain two extra blocks (≈150KB committed).
     let mut ptrs = Vec::new();
     for i in 0..1200usize {
-        let p = heap.alloc(64, TypeTag::Raw).expect("alloc past 64KB failed");
+        let p = heap
+            .alloc(64, TypeTag::Raw)
+            .expect("alloc past 64KB failed");
         unsafe {
             *(p as *mut u64) = i as u64;
         }
         ptrs.push(p);
     }
 
-    assert!(heap.retired_blocks.len() >= 2, "heap should have chained blocks");
-    assert!(heap.used() > 64 * 1024, "used() is cumulative across blocks");
+    assert!(
+        heap.retired_blocks.len() >= 2,
+        "heap should have chained blocks"
+    );
+    assert!(
+        heap.used() > 64 * 1024,
+        "used() is cumulative across blocks"
+    );
     assert_eq!(heap.live_count(), 1200);
 
     // Objects never move: every marker written before growth is intact.
@@ -1194,12 +1202,18 @@ fn test_reset_after_growth() {
     assert_eq!(heap.live_count(), 0);
     assert_eq!(heap.used(), 0);
     assert_eq!(heap.free_list_count(), 0);
-    assert!(heap.retired_blocks.is_empty(), "reset must release chained blocks");
+    assert!(
+        heap.retired_blocks.is_empty(),
+        "reset must release chained blocks"
+    );
 
     // The heap is fully functional after reset, including growing again.
     let mut ptrs = Vec::new();
     for _ in 0..1200 {
-        ptrs.push(heap.alloc(64, TypeTag::Raw).expect("alloc after reset failed"));
+        ptrs.push(
+            heap.alloc(64, TypeTag::Raw)
+                .expect("alloc after reset failed"),
+        );
     }
     assert_eq!(heap.live_count(), 1200);
     assert!(heap.retired_blocks.len() >= 2);
@@ -1590,7 +1604,13 @@ fn test_free_then_larger_alloc_same_class_preserves_neighbor() {
     // Snapshot B's header.
     let (b_ref, b_foreign, b_size, b_class, b_tag) = unsafe {
         let h = &*ActorHeap::header_of(b);
-        (h.ref_count, h.foreign_count, h.size, h.size_class, h.type_tag)
+        (
+            h.ref_count,
+            h.foreign_count,
+            h.size,
+            h.size_class,
+            h.type_tag,
+        )
     };
 
     // Free A, then allocate a larger object in the same class (payload 40 ->

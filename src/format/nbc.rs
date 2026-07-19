@@ -36,7 +36,7 @@
 
 use crate::bytecode::{CodeModule, Constant, Instruction};
 use crate::format::constants::{
-    self, BYTECODE_MAGIC, BYTECODE_MAX_VERSION, BYTECODE_VERSION, FormatError, LANGUAGE_VERSION,
+    FormatError, BYTECODE_MAGIC, BYTECODE_MAX_VERSION, BYTECODE_VERSION, LANGUAGE_VERSION,
     NBC_HEADER_LEN,
 };
 
@@ -98,8 +98,8 @@ impl CodeModule {
         // --- Metadata body (JSON; instructions field cleared) -----------
         let mut meta_module = self.clone();
         meta_module.instructions.clear();
-        let meta_bytes = serde_json::to_vec(&meta_module)
-            .map_err(|e| FormatError::BodyDecode(e.to_string()))?;
+        let meta_bytes =
+            serde_json::to_vec(&meta_module).map_err(|e| FormatError::BodyDecode(e.to_string()))?;
         buf.extend_from_slice(&(meta_bytes.len() as u32).to_be_bytes());
         buf.extend_from_slice(&meta_bytes);
 
@@ -178,9 +178,8 @@ impl CodeModule {
                 have: bytes.len(),
             });
         }
-        let meta_len = u32::from_be_bytes(
-            bytes[meta_len_off..meta_len_off + 4].try_into().unwrap(),
-        ) as usize;
+        let meta_len =
+            u32::from_be_bytes(bytes[meta_len_off..meta_len_off + 4].try_into().unwrap()) as usize;
         let meta_off = meta_len_off + 4;
         if bytes.len() < meta_off + meta_len {
             return Err(FormatError::LengthMismatch {
@@ -270,7 +269,10 @@ mod tests {
         // Bump the format version field (offset 4) to a future version.
         bytes[4..8].copy_from_slice(&99u32.to_be_bytes());
         let err = CodeModule::from_nbc(&bytes).unwrap_err();
-        assert!(matches!(err, FormatError::UnsupportedVersion { found: 99, .. }));
+        assert!(matches!(
+            err,
+            FormatError::UnsupportedVersion { found: 99, .. }
+        ));
     }
 
     #[test]
@@ -279,7 +281,10 @@ mod tests {
         // Bump the language version field (offset 8) to a future version.
         bytes[8..12].copy_from_slice(&99u32.to_be_bytes());
         let err = CodeModule::from_nbc(&bytes).unwrap_err();
-        assert!(matches!(err, FormatError::IncompatibleLanguage { artifact: 99, .. }));
+        assert!(matches!(
+            err,
+            FormatError::IncompatibleLanguage { artifact: 99, .. }
+        ));
     }
 
     #[test]
@@ -291,7 +296,7 @@ mod tests {
         buf.extend_from_slice(&1u32.to_be_bytes()); // language version
         buf.extend_from_slice(&[0u8; 32]); // source hash
         buf.extend_from_slice(&1u32.to_be_bytes()); // instr_count = 1
-        // One instruction with an unknown opcode 0xFE.
+                                                    // One instruction with an unknown opcode 0xFE.
         let bad_instr: u32 = (0xFEu32 << 24) | 0;
         buf.extend_from_slice(&bad_instr.to_be_bytes());
         // Empty metadata body.

@@ -342,7 +342,10 @@ impl LanguageServer for NulangLanguageServer {
             None => return Ok(None),
         };
         drop(docs);
-        Ok(Self::sig_help(&source, params.text_document_position_params.position))
+        Ok(Self::sig_help(
+            &source,
+            params.text_document_position_params.position,
+        ))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -978,11 +981,47 @@ impl NulangLanguageServer {
                 let word = &source[start..i];
                 let len = (i - start) as u32;
                 let kw = [
-                    "let", "fn", "fun", "actor", "agent", "workflow", "if", "else", "match",
-                    "case", "for", "in", "spawn", "send", "ask", "perform", "handle", "emit",
-                    "return", "break", "unit", "nil", "true", "false", "iso", "trn", "ref", "val",
-                    "box", "tag", "lineariso", "linear", "type", "effect", "module", "import", "extern", "self", "and",
-                    "or", "not",
+                    "let",
+                    "fn",
+                    "fun",
+                    "actor",
+                    "agent",
+                    "workflow",
+                    "if",
+                    "else",
+                    "match",
+                    "case",
+                    "for",
+                    "in",
+                    "spawn",
+                    "send",
+                    "ask",
+                    "perform",
+                    "handle",
+                    "emit",
+                    "return",
+                    "break",
+                    "unit",
+                    "nil",
+                    "true",
+                    "false",
+                    "iso",
+                    "trn",
+                    "ref",
+                    "val",
+                    "box",
+                    "tag",
+                    "lineariso",
+                    "linear",
+                    "type",
+                    "effect",
+                    "module",
+                    "import",
+                    "extern",
+                    "self",
+                    "and",
+                    "or",
+                    "not",
                 ];
                 let tt: u32 = if kw.contains(&word) { 0 } else { 2 };
                 // Apply READONLY modifier if this variable was consumed (linear).
@@ -1052,15 +1091,23 @@ impl NulangLanguageServer {
     /// consumed linear/lineariso variable references.
     fn find_consumed_spans(&self, source: &str) -> Vec<(usize, usize)> {
         use crate::ast::Decl;
-        use crate::effect_checker::{CapContext, CapabilityAnalyzer, flatten_decls};
+        use crate::effect_checker::{flatten_decls, CapContext, CapabilityAnalyzer};
 
         let mut lexer = crate::lexer::Lexer::new(source);
-        let tokens = match lexer.lex() { Ok(t) => t, Err(_) => return vec![] };
+        let tokens = match lexer.lex() {
+            Ok(t) => t,
+            Err(_) => return vec![],
+        };
         let mut parser = crate::parser::Parser::new(tokens);
-        let ast = match parser.parse_module() { Ok(a) => a, Err(_) => return vec![] };
+        let ast = match parser.parse_module() {
+            Ok(a) => a,
+            Err(_) => return vec![],
+        };
 
         let mut type_checker = crate::typechecker::TypeChecker::new();
-        if type_checker.check_module(&ast).is_err() { return vec![]; }
+        if type_checker.check_module(&ast).is_err() {
+            return vec![];
+        }
 
         let flat_decls = flatten_decls(&ast.decls);
         let mut cap_analyzer = CapabilityAnalyzer::new();
@@ -1071,7 +1118,9 @@ impl NulangLanguageServer {
             }
         }
 
-        cap_analyzer.consumed_spans.iter()
+        cap_analyzer
+            .consumed_spans
+            .iter()
             .map(|s| (s.start as usize, s.end as usize))
             .collect()
     }
@@ -1495,8 +1544,25 @@ pub struct CompletionEngine<'a> {
 impl<'a> CompletionEngine<'a> {
     /// Nulang language keywords offered by the completion provider.
     const KEYWORDS: &'static [&'static str] = &[
-        "fn", "let", "if", "else", "match", "effect", "actor", "state_machine", "type", "module",
-        "import", "handle", "perform", "resume", "return", "true", "false", "nil", "unit",
+        "fn",
+        "let",
+        "if",
+        "else",
+        "match",
+        "effect",
+        "actor",
+        "state_machine",
+        "type",
+        "module",
+        "import",
+        "handle",
+        "perform",
+        "resume",
+        "return",
+        "true",
+        "false",
+        "nil",
+        "unit",
     ];
 
     /// Built-in effect names offered by the completion provider.

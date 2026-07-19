@@ -77,8 +77,10 @@ impl TokenBudget {
         loop {
             let new = (current + tokens).min(self.limit);
             match self.used.compare_exchange_weak(
-                current, new,
-                Ordering::Relaxed, Ordering::Relaxed,
+                current,
+                new,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
             ) {
                 Ok(_) => break,
                 Err(actual) => current = actual,

@@ -1,5 +1,6 @@
 //! Shared type definitions used across all Nulang compiler and runtime modules.
 
+use crate::type_ir::NtirNode;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -157,7 +158,11 @@ impl Capability {
     pub fn is_sendable(self) -> bool {
         matches!(
             self,
-            Capability::LinearIso | Capability::Linear | Capability::Iso | Capability::Val | Capability::Tag
+            Capability::LinearIso
+                | Capability::Linear
+                | Capability::Iso
+                | Capability::Val
+                | Capability::Tag
         )
     }
 
@@ -262,7 +267,9 @@ impl std::fmt::Display for EffectRow {
             EffectRow::Closed(effects) => {
                 write!(f, "{{")?;
                 for (i, e) in effects.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", e)?;
                 }
                 write!(f, "}}")
@@ -270,10 +277,14 @@ impl std::fmt::Display for EffectRow {
             EffectRow::Open(effects, _) => {
                 write!(f, "{{")?;
                 for (i, e) in effects.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", e)?;
                 }
-                if !effects.is_empty() { write!(f, ", ")?; }
+                if !effects.is_empty() {
+                    write!(f, ", ")?;
+                }
                 write!(f, "..}}")
             }
         }
@@ -401,7 +412,9 @@ impl std::fmt::Display for Type {
             Type::Tuple(ts) => {
                 write!(f, "(")?;
                 for (i, t) in ts.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", t)?;
                 }
                 write!(f, ")")
@@ -409,14 +422,18 @@ impl std::fmt::Display for Type {
             Type::Record(fs) => {
                 write!(f, "{{ ")?;
                 for (i, (n, t)) in fs.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}: {}", n, t)?;
                 }
                 write!(f, " }}")
             }
             Type::Variant(vs) => {
                 for (i, (n, t)) in vs.iter().enumerate() {
-                    if i > 0 { write!(f, " | ")?; }
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
                     match t {
                         Some(t) => write!(f, "{} {}", n, t)?,
                         None => write!(f, "{}", n)?,
@@ -425,7 +442,12 @@ impl std::fmt::Display for Type {
                 Ok(())
             }
             Type::Array(t) => write!(f, "[{}]", t),
-            Type::Function { param, ret, effect: _, cap: _ } => {
+            Type::Function {
+                param,
+                ret,
+                effect: _,
+                cap: _,
+            } => {
                 write!(f, "{} -> {}", param, ret)
             }
             Type::Actor { state, behavior } => {
@@ -436,7 +458,9 @@ impl std::fmt::Display for Type {
                 if !args.is_empty() {
                     write!(f, "[")?;
                     for (i, a) in args.iter().enumerate() {
-                        if i > 0 { write!(f, ", ")?; }
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
                         write!(f, "{}", a)?;
                     }
                     write!(f, "]")?;
@@ -447,7 +471,9 @@ impl std::fmt::Display for Type {
             Type::Scheme { vars, body } => {
                 write!(f, "forall ")?;
                 for (i, v) in vars.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "'t{}", v.0)?;
                 }
                 write!(f, ". {}", body)
@@ -474,6 +500,92 @@ impl std::fmt::Display for Type {
 pub const RECORD_ROW_TAIL_FIELD: &str = "..";
 
 impl Type {
+    /// Convert to an NTIR structural representation for content-addressed hashing.
+    pub fn to_ntir(&self) -> NtirNode {
+        self.to_ntir_with_stack(&mut Vec::new())
+    }
+
+    fn to_ntir_with_stack(&self, stack: &mut Vec<TypeVar>) -> NtirNode {
+        if let Type::Var(v) = self {
+            if let Some(pos) = stack.iter().rev().position(|x| x == v) {
+                return NtirNode::Cycle(pos as u64);
+            }
+        }
+
+        let push_var = if let Type::Var(v) = self {
+            stack.push(*v);
+            true
+        } else {
+            false
+        };
+
+        let res = match self {
+            Type::Var(_) => NtirNode::Primitive(PrimitiveType::Unit),
+            Type::Primitive(p) => NtirNode::Primitive(p.clone()),
+            Type::Tuple(ts) => {
+                NtirNode::Tuple(ts.iter().map(|t| t.to_ntir_with_stack(stack)).collect())
+            }
+            Type::Record(fs) => {
+                let mut mapped: Vec<_> = fs
+                    .iter()
+                    .map(|(n, t)| (n.clone(), t.to_ntir_with_stack(stack)))
+                    .collect();
+                mapped.sort_by(|a, b| a.0.cmp(&b.0));
+                NtirNode::Record(mapped)
+            }
+            Type::Variant(vs) => {
+                let mut mapped: Vec<_> = vs
+                    .iter()
+                    .map(|(n, t_opt)| {
+                        let t_ntir = match t_opt {
+                            Some(t) => t.to_ntir_with_stack(stack),
+                            None => NtirNode::Primitive(PrimitiveType::Unit),
+                        };
+                        (n.clone(), t_ntir)
+                    })
+                    .collect();
+                mapped.sort_by(|a, b| a.0.cmp(&b.0));
+                NtirNode::Variant(mapped)
+            }
+            Type::Array(inner) => NtirNode::Tuple(vec![inner.to_ntir_with_stack(stack)]),
+            Type::Function {
+                param, ret, cap, ..
+            } => NtirNode::Capability(
+                *cap,
+                Box::new(NtirNode::Tuple(vec![
+                    param.to_ntir_with_stack(stack),
+                    ret.to_ntir_with_stack(stack),
+                ])),
+            ),
+            Type::Actor { state, behavior } => NtirNode::Tuple(vec![
+                state.to_ntir_with_stack(stack),
+                behavior.to_ntir_with_stack(stack),
+            ]),
+            Type::App { constructor, args } => {
+                let mut elems = vec![constructor.to_ntir_with_stack(stack)];
+                for a in args {
+                    elems.push(a.to_ntir_with_stack(stack));
+                }
+                NtirNode::Tuple(elems)
+            }
+            Type::Reference { cap, inner } => {
+                NtirNode::Capability(*cap, Box::new(inner.to_ntir_with_stack(stack)))
+            }
+            Type::Scheme { body, .. } => body.to_ntir_with_stack(stack),
+        };
+
+        if push_var {
+            stack.pop();
+        }
+        res
+    }
+
+    /// True if the type contains no free type variables.
+    pub fn is_ground(&self) -> bool {
+        let mut fv = Vec::new();
+        self.collect_free_vars(&mut fv);
+        fv.is_empty()
+    }
     pub fn int() -> Type {
         Type::Primitive(PrimitiveType::Int)
     }
@@ -542,9 +654,7 @@ impl Type {
             // Function values are created per call — refs in their types are safe.
             Type::Function { .. } => {}
             Type::Tuple(ts) => ts.iter().for_each(|t| t.collect_ref_free_vars(acc)),
-            Type::Record(fs) => fs
-                .iter()
-                .for_each(|(_, t)| t.collect_ref_free_vars(acc)),
+            Type::Record(fs) => fs.iter().for_each(|(_, t)| t.collect_ref_free_vars(acc)),
             Type::Variant(vs) => vs.iter().for_each(|(_, t)| {
                 if let Some(t) = t {
                     t.collect_ref_free_vars(acc)
@@ -730,7 +840,8 @@ impl Span {
     /// if none is set).
     pub fn line(&self) -> usize {
         SOURCE_MAP.with(|slot| {
-            slot.borrow().as_ref()
+            slot.borrow()
+                .as_ref()
                 .map(|sm| sm.line_col(self.start).0)
                 .unwrap_or(0)
         })
@@ -740,7 +851,8 @@ impl Span {
     /// none is set).
     pub fn column(&self) -> usize {
         SOURCE_MAP.with(|slot| {
-            slot.borrow().as_ref()
+            slot.borrow()
+                .as_ref()
                 .map(|sm| sm.line_col(self.start).1)
                 .unwrap_or(0)
         })
@@ -786,7 +898,7 @@ pub enum NuError {
     },
     RuntimeError(String),
     VMError(String),
-    PythonError(String), // Python interop error
+    PythonError(String),  // Python interop error
     PackageError(String), // `nula` package manager error (manifest/lockfile/resolution)
 }
 
@@ -797,19 +909,39 @@ impl std::fmt::Display for NuError {
                 write!(f, "Lex error at {}:{}: {}", span.line(), span.column(), msg)
             }
             NuError::ParseError { msg, span } => {
-                write!(f, "Parse error at {}:{}: {}", span.line(), span.column(), msg)
+                write!(
+                    f,
+                    "Parse error at {}:{}: {}",
+                    span.line(),
+                    span.column(),
+                    msg
+                )
             }
             NuError::TypeError { msg, span } => {
-                write!(f, "Type error at {}:{}: {}", span.line(), span.column(), msg)
+                write!(
+                    f,
+                    "Type error at {}:{}: {}",
+                    span.line(),
+                    span.column(),
+                    msg
+                )
             }
             NuError::EffectError { msg, span } => {
-                write!(f, "Effect error at {}:{}: {}", span.line(), span.column(), msg)
+                write!(
+                    f,
+                    "Effect error at {}:{}: {}",
+                    span.line(),
+                    span.column(),
+                    msg
+                )
             }
             NuError::CapError { msg, span } => {
                 write!(
                     f,
                     "Capability error at {}:{}: {}",
-                    span.line(), span.column(), msg
+                    span.line(),
+                    span.column(),
+                    msg
                 )
             }
             NuError::FFIError { msg, span } => {
@@ -819,7 +951,9 @@ impl std::fmt::Display for NuError {
                 write!(
                     f,
                     "Not yet implemented at {}:{}: {}",
-                    span.line(), span.column(), feature
+                    span.line(),
+                    span.column(),
+                    feature
                 )
             }
             NuError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
@@ -879,7 +1013,6 @@ impl ExitReason {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -894,7 +1027,10 @@ mod tests {
 
     #[test]
     fn test_linear_join_self() {
-        assert_eq!(Capability::Linear.join(Capability::Linear), Capability::Linear);
+        assert_eq!(
+            Capability::Linear.join(Capability::Linear),
+            Capability::Linear
+        );
     }
 
     #[test]
@@ -905,8 +1041,14 @@ mod tests {
 
     #[test]
     fn test_linear_join_linearioso() {
-        assert_eq!(Capability::Linear.join(Capability::LinearIso), Capability::Val);
-        assert_eq!(Capability::LinearIso.join(Capability::Linear), Capability::Val);
+        assert_eq!(
+            Capability::Linear.join(Capability::LinearIso),
+            Capability::Val
+        );
+        assert_eq!(
+            Capability::LinearIso.join(Capability::Linear),
+            Capability::Val
+        );
     }
 
     #[test]

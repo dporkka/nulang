@@ -69,9 +69,8 @@ impl Lockfile {
 
     /// Parse lockfile TOML text.
     pub fn parse(source: &str) -> NuResult<Lockfile> {
-        let lockfile: Lockfile = toml::from_str(source).map_err(|e| {
-            NuError::PackageError(format!("invalid {}: {}", LOCKFILE_FILE, e))
-        })?;
+        let lockfile: Lockfile = toml::from_str(source)
+            .map_err(|e| NuError::PackageError(format!("invalid {}: {}", LOCKFILE_FILE, e)))?;
         if lockfile.version != LOCKFILE_VERSION {
             return Err(NuError::PackageError(format!(
                 "unsupported {} version {} (expected {})",
@@ -84,17 +83,15 @@ impl Lockfile {
     /// Write the lockfile into `dir`.
     pub fn save(&self, dir: &Path) -> NuResult<()> {
         let path = dir.join(LOCKFILE_FILE);
-        std::fs::write(&path, self.to_toml()?).map_err(|e| {
-            NuError::PackageError(format!("cannot write {}: {}", path.display(), e))
-        })
+        std::fs::write(&path, self.to_toml()?)
+            .map_err(|e| NuError::PackageError(format!("cannot write {}: {}", path.display(), e)))
     }
 
     /// Read the lockfile from `dir`.
     pub fn load(dir: &Path) -> NuResult<Lockfile> {
         let path = dir.join(LOCKFILE_FILE);
-        let source = std::fs::read_to_string(&path).map_err(|e| {
-            NuError::PackageError(format!("cannot read {}: {}", path.display(), e))
-        })?;
+        let source = std::fs::read_to_string(&path)
+            .map_err(|e| NuError::PackageError(format!("cannot read {}: {}", path.display(), e)))?;
         Self::parse(&source)
     }
 }
@@ -133,10 +130,7 @@ mod tests {
 
     #[test]
     fn test_lockfile_file_round_trip() {
-        let dir = std::env::temp_dir().join(format!(
-            "nulang_lockfile_test_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("nulang_lockfile_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch dir should be created");
 
@@ -171,7 +165,10 @@ mod tests {
             content_hash: "deadbeef".to_string(),
         });
         let toml_text = lockfile.to_toml().expect("serialize");
-        assert!(toml_text.contains("content_hash"), "content_hash must be in TOML: {toml_text}");
+        assert!(
+            toml_text.contains("content_hash"),
+            "content_hash must be in TOML: {toml_text}"
+        );
         let parsed = Lockfile::parse(&toml_text).expect("parse");
         assert_eq!(parsed.package[0].content_hash, "deadbeef");
     }

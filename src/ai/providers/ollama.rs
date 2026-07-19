@@ -39,7 +39,12 @@ impl LlmClient for OllamaClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError::new(LlmErrorKind::ProviderError, format!("Ollama request failed: {}", e)))?;
+            .map_err(|e| {
+                LlmError::new(
+                    LlmErrorKind::ProviderError,
+                    format!("Ollama request failed: {}", e),
+                )
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -54,10 +59,12 @@ impl LlmClient for OllamaClient {
             });
         }
 
-        let response: OllamaChatResponse = response
-            .json()
-            .await
-            .map_err(|e| LlmError::new(LlmErrorKind::FormatError, format!("Ollama response parse failed: {}", e)))?;
+        let response: OllamaChatResponse = response.json().await.map_err(|e| {
+            LlmError::new(
+                LlmErrorKind::FormatError,
+                format!("Ollama response parse failed: {}", e),
+            )
+        })?;
 
         let message = response.message;
         let content = if message.content.is_empty() {

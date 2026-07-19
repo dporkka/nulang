@@ -14,7 +14,7 @@ use crate::typechecker::TypeChecker;
 use crate::types::{Capability, NuError, NuResult, Span, Type, TypeContext};
 use crate::vm::{Value, VM};
 use rustyline::error::ReadlineError;
-use rustyline::{Editor, Result as RlResult, history::DefaultHistory};
+use rustyline::{history::DefaultHistory, Editor, Result as RlResult};
 
 /// REPL state that persists across evaluations.
 pub struct Repl {
@@ -38,19 +38,87 @@ impl ReplHelper {
     fn new() -> Self {
         ReplHelper {
             keywords: vec![
-                "fn", "let", "rec", "in", "if", "then", "else", "match", "with",
-                "actor", "behavior", "state", "spawn", "send", "ask", "receive",
-                "perform", "handle", "resume", "effect", "workflow", "step",
-                "parallel", "compensate", "statemachine", "event", "on_entry",
-                "on_exit", "persistent", "local", "durable", "eventsourced",
-                "crdt", "module", "import", "pub", "type", "alias", "extern",
-                "iso", "trn", "ref", "val", "box", "tag", "lineariso", "linear",
-                "true", "false", "nil", "unit", "for", "loop", "break", "return",
-                "node", "link", "monitor", "exit", "agent", "database",
-                "IO", "Net", "FS", "Rand", "Time", "Spawn", "Send", "LLM",
-                ":help", ":quit", ":type", ":ast", ":bytecode", ":clear",
-                ":reset", ":version",
-            ].into_iter().map(|s| s.to_string()).collect(),
+                "fn",
+                "let",
+                "rec",
+                "in",
+                "if",
+                "then",
+                "else",
+                "match",
+                "with",
+                "actor",
+                "behavior",
+                "state",
+                "spawn",
+                "send",
+                "ask",
+                "receive",
+                "perform",
+                "handle",
+                "resume",
+                "effect",
+                "workflow",
+                "step",
+                "parallel",
+                "compensate",
+                "statemachine",
+                "event",
+                "on_entry",
+                "on_exit",
+                "persistent",
+                "local",
+                "durable",
+                "eventsourced",
+                "crdt",
+                "module",
+                "import",
+                "pub",
+                "type",
+                "alias",
+                "extern",
+                "iso",
+                "trn",
+                "ref",
+                "val",
+                "box",
+                "tag",
+                "lineariso",
+                "linear",
+                "true",
+                "false",
+                "nil",
+                "unit",
+                "for",
+                "loop",
+                "break",
+                "return",
+                "node",
+                "link",
+                "monitor",
+                "exit",
+                "agent",
+                "database",
+                "IO",
+                "Net",
+                "FS",
+                "Rand",
+                "Time",
+                "Spawn",
+                "Send",
+                "LLM",
+                ":help",
+                ":quit",
+                ":type",
+                ":ast",
+                ":bytecode",
+                ":clear",
+                ":reset",
+                ":version",
+            ]
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect(),
         }
     }
 }
@@ -75,7 +143,8 @@ impl rustyline::completion::Completer for ReplHelper {
         _ctx: &rustyline::Context<'_>,
     ) -> RlResult<(usize, Vec<String>)> {
         // Find the word boundary before the cursor.
-        let start = line[..pos].rfind(|c: char| c.is_whitespace() || c == '(' || c == '{' || c == '[')
+        let start = line[..pos]
+            .rfind(|c: char| c.is_whitespace() || c == '(' || c == '{' || c == '[')
             .map(|i| i + 1)
             .unwrap_or(0);
         let prefix = &line[start..pos];
@@ -83,7 +152,9 @@ impl rustyline::completion::Completer for ReplHelper {
             return Ok((pos, vec![]));
         }
         let prefix_lower = prefix.to_lowercase();
-        let matches: Vec<String> = self.keywords.iter()
+        let matches: Vec<String> = self
+            .keywords
+            .iter()
             .filter(|kw| kw.to_lowercase().starts_with(&prefix_lower))
             .cloned()
             .collect();
@@ -108,8 +179,8 @@ impl Repl {
         println!("Nulang v0.1.0 \u{2014} Actor-Based Distributed Language");
         println!("Type :help for commands, :quit to exit\n");
 
-        let mut editor = Editor::<ReplHelper, DefaultHistory>::new()
-            .expect("Failed to create REPL editor");
+        let mut editor =
+            Editor::<ReplHelper, DefaultHistory>::new().expect("Failed to create REPL editor");
         editor.set_helper(Some(ReplHelper::new()));
         let history_path = std::env::var("HOME")
             .map(|h| format!("{}/.nulang_history", h))
@@ -441,13 +512,19 @@ impl Repl {
                 TokenKind::LBrace => stack.push('{'),
                 TokenKind::LBracket => stack.push('['),
                 TokenKind::RParen => {
-                    if stack.last() == Some(&'(') { stack.pop(); }
+                    if stack.last() == Some(&'(') {
+                        stack.pop();
+                    }
                 }
                 TokenKind::RBrace => {
-                    if stack.last() == Some(&'{') { stack.pop(); }
+                    if stack.last() == Some(&'{') {
+                        stack.pop();
+                    }
                 }
                 TokenKind::RBracket => {
-                    if stack.last() == Some(&'[') { stack.pop(); }
+                    if stack.last() == Some(&'[') {
+                        stack.pop();
+                    }
                 }
                 _ => {}
             }

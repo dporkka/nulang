@@ -89,8 +89,14 @@ async fn main() {
                     opts.backend = args[i + 1].clone();
                     i += 1;
                 } else {
-                    eprintln!("Error: --backend requires an argument (bytecode | native{})",
-                        if cfg!(feature = "wasm-backend") { " | wasm | wasm-run | wasm-aot" } else { "" });
+                    eprintln!(
+                        "Error: --backend requires an argument (bytecode | native{})",
+                        if cfg!(feature = "wasm-backend") {
+                            " | wasm | wasm-run | wasm-aot"
+                        } else {
+                            ""
+                        }
+                    );
                     std::process::exit(1);
                 }
             }
@@ -174,7 +180,10 @@ async fn main() {
 
     if let Some(code) = opts.eval_code {
         if opts.emit_nbc {
-            let out = opts.out_file.clone().unwrap_or_else(|| "out.nbc".to_string());
+            let out = opts
+                .out_file
+                .clone()
+                .unwrap_or_else(|| "out.nbc".to_string());
             if let Err(e) = compile_source_to_nbc(&code, &out) {
                 print_error(&e);
                 std::process::exit(exit_code(&e));
@@ -244,7 +253,12 @@ async fn main() {
             return;
         }
 
-        if let Err(e) = run_source(&source, opts.verbose, &opts.backend, opts.out_file.as_deref()) {
+        if let Err(e) = run_source(
+            &source,
+            opts.verbose,
+            &opts.backend,
+            opts.out_file.as_deref(),
+        ) {
             print_error(&e);
             std::process::exit(exit_code(&e));
         }
@@ -315,7 +329,9 @@ fn print_help() {
     println!("  --emit-nbc       Compile <FILE> (or --eval <CODE>) to a .nbc artifact; don't run");
     println!("  --out <file>     Output path for --emit-nbc (default: <FILE> with .nbc extension)");
     println!("  <FILE>.nbc       Run a pre-compiled .nbc artifact directly (no compiler invoked)");
-    println!("  --verify <src>   When running a .nbc artifact, verify its source hash against <src>");
+    println!(
+        "  --verify <src>   When running a .nbc artifact, verify its source hash against <src>"
+    );
     println!("  nula <cmd>       Package manager (new, build, test, run)");
     println!("  --version, -V    Print version and exit");
     println!("  -v, --verbose    Show bytecode and AST");
@@ -378,8 +394,7 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
     // typechecker's flatten_decls).
     let flat_decls = nulang::effect_checker::flatten_decls(&ast.decls);
     let mut effect_checker = EffectChecker::new();
-    effect_checker
-        .register_function_rows(&flat_decls)?;
+    effect_checker.register_function_rows(&flat_decls)?;
     for decl in &flat_decls {
         effect_checker.check_decl(decl)?;
     }
@@ -388,7 +403,10 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
     let mut cap_analyzer = CapabilityAnalyzer::new();
     let cap_ctx = CapContext::new();
     let cap_body = |analyzer: &mut CapabilityAnalyzer, body: &nulang::ast::Expr| -> NuResult<()> {
-        analyzer.infer_cap(&cap_ctx, body).map(|_| ()).map_err(|e| e)
+        analyzer
+            .infer_cap(&cap_ctx, body)
+            .map(|_| ())
+            .map_err(|e| e)
     };
     for decl in flat_decls.iter().copied() {
         match decl {
@@ -511,8 +529,12 @@ fn run_source(source: &str, verbose: bool, backend: &str, out_file: Option<&str>
             if verbose {
                 println!("=== AOT native compilation ===");
                 for func in &mir.functions {
-                    println!("  fn {} ({} locals, {} blocks)",
-                        func.name, func.locals.len(), func.blocks.len());
+                    println!(
+                        "  fn {} ({} locals, {} blocks)",
+                        func.name,
+                        func.locals.len(),
+                        func.blocks.len()
+                    );
                 }
             }
             let aot_module = nulang::aot::AotModule::compile(&mir)?;
@@ -552,11 +574,15 @@ fn run_source(source: &str, verbose: bool, backend: &str, out_file: Option<&str>
             Ok(())
         }
         _ => {
-            return Err(nulang::types::NuError::VMError(
-                format!("unknown backend '{}' (expected bytecode | native{})",
-                    backend,
-                    if cfg!(feature = "wasm-backend") { " | wasm | wasm-run | wasm-aot" } else { "" }),
-            ));
+            return Err(nulang::types::NuError::VMError(format!(
+                "unknown backend '{}' (expected bytecode | native{})",
+                backend,
+                if cfg!(feature = "wasm-backend") {
+                    " | wasm | wasm-run | wasm-aot"
+                } else {
+                    ""
+                }
+            )));
         }
     }
 }
@@ -574,8 +600,7 @@ fn run_with_runtime(
     nulang::vm::Value,
     std::rc::Rc<std::cell::RefCell<nulang::runtime::Runtime>>,
 )> {
-    let runtime =
-        std::rc::Rc::new(std::cell::RefCell::new(nulang::runtime::Runtime::new()));
+    let runtime = std::rc::Rc::new(std::cell::RefCell::new(nulang::runtime::Runtime::new()));
     let mut vm = VM::new();
     vm.load_module(m);
     vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
@@ -622,9 +647,8 @@ fn compile_source_to_nbc(source: &str, out_path: &str) -> NuResult<()> {
     let bytes = m
         .to_nbc(Some(*source_hash.as_bytes()))
         .map_err(|e| nulang::types::NuError::VMError(e.to_string()))?;
-    std::fs::write(out_path, &bytes).map_err(|e| {
-        nulang::types::NuError::VMError(format!("failed to write {out_path}: {e}"))
-    })?;
+    std::fs::write(out_path, &bytes)
+        .map_err(|e| nulang::types::NuError::VMError(format!("failed to write {out_path}: {e}")))?;
     println!(
         "Wrote {out_path} ({} bytes, .nbc format v{}, language v{})",
         bytes.len(),

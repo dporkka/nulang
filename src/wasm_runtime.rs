@@ -76,18 +76,32 @@ impl WasmRuntime {
         // Build a Linker and define all host imports.
         let mut linker: Linker<HostState> = Linker::new(&engine);
 
-        linker.func_wrap("env", "nulang_alloc", host_alloc).map_err(map_wasmtime_err)?;
-        linker.func_wrap("env", "nulang_dispatch", host_dispatch).map_err(map_wasmtime_err)?;
-        linker.func_wrap("env", "log", host_log).map_err(map_wasmtime_err)?;
-        linker.func_wrap("env", "io_print", host_print).map_err(map_wasmtime_err)?;
-        linker.func_wrap("env", "io_read", host_read).map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "nulang_alloc", host_alloc)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "nulang_dispatch", host_dispatch)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "log", host_log)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "io_print", host_print)
+            .map_err(map_wasmtime_err)?;
+        linker
+            .func_wrap("env", "io_read", host_read)
+            .map_err(map_wasmtime_err)?;
 
         // Provide memory: 1-page (64KB) linear memory.
         let mem_type = MemoryType::new(1, None);
         let memory = Memory::new(&mut store, mem_type).map_err(map_wasmtime_err)?;
-        linker.define(&mut store, "env", "memory", memory).map_err(map_wasmtime_err)?;
+        linker
+            .define(&mut store, "env", "memory", memory)
+            .map_err(map_wasmtime_err)?;
 
-        let instance = linker.instantiate(&mut store, &module).map_err(map_wasmtime_err)?;
+        let instance = linker
+            .instantiate(&mut store, &module)
+            .map_err(map_wasmtime_err)?;
 
         // Initialize bump allocator offset to after the data segment.
         if let Some(exported_mem) = instance.get_memory(&mut store, "memory") {
@@ -118,11 +132,7 @@ impl WasmRuntime {
 // ── Host import functions ────────────────────────────────────────────
 
 /// `env.io_print(offset: i32, len: i32) -> i64`
-fn host_print(
-    mut caller: Caller<'_, HostState>,
-    offset: i32,
-    len: i32,
-) -> Result<i64, Error> {
+fn host_print(mut caller: Caller<'_, HostState>, offset: i32, len: i32) -> Result<i64, Error> {
     let mem = get_memory(&mut caller)?;
     let data = mem.data(&caller);
     let off = offset as usize;
@@ -139,11 +149,7 @@ fn host_read(_caller: Caller<'_, HostState>) -> Result<i64, Error> {
 }
 
 /// `env.log(offset: i32, len: i32) -> i64`
-fn host_log(
-    mut caller: Caller<'_, HostState>,
-    offset: i32,
-    len: i32,
-) -> Result<i64, Error> {
+fn host_log(mut caller: Caller<'_, HostState>, offset: i32, len: i32) -> Result<i64, Error> {
     let mem = get_memory(&mut caller)?;
     let data = mem.data(&caller);
     let off = offset as usize;
@@ -156,13 +162,11 @@ fn host_log(
 /// `env.nulang_alloc(size: i32) -> i32`
 ///
 /// Simple bump allocator in WASM linear memory. Single-threaded.
-fn host_alloc(
-    mut caller: Caller<'_, HostState>,
-    size: i32,
-) -> Result<i32, Error> {
+fn host_alloc(mut caller: Caller<'_, HostState>, size: i32) -> Result<i32, Error> {
     let size = (size as u32 + 7) & !7u32; // align to 8
     let offset = caller.data().alloc_offset;
-    let required = offset.checked_add(size)
+    let required = offset
+        .checked_add(size)
         .ok_or_else(|| Error::msg("alloc overflow"))?;
     let mem = get_memory(&mut caller)?;
     let current_size = mem.data_size(&caller) as u32;
@@ -178,13 +182,7 @@ fn host_alloc(
 /// `env.nulang_dispatch(a: i32, b: i32, c: i32, d: i32)`
 ///
 /// Stub: effect dispatch through the actor runtime is not yet wired.
-fn host_dispatch(
-    _caller: Caller<'_, HostState>,
-    _a: i32,
-    _b: i32,
-    _c: i32,
-    _d: i32,
-) {
+fn host_dispatch(_caller: Caller<'_, HostState>, _a: i32, _b: i32, _c: i32, _d: i32) {
     // No-op for now.
 }
 
@@ -209,9 +207,7 @@ pub fn aot_compile(wasm_path: &str, cwasm_path: &str) -> NuResult<()> {
     let output = std::process::Command::new("wasmtime")
         .args(["compile", wasm_path, "-o", cwasm_path])
         .output()
-        .map_err(|e| {
-            NuError::VMError(format!("wasmtime compile not found: {}", e))
-        })?;
+        .map_err(|e| NuError::VMError(format!("wasmtime compile not found: {}", e)))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(NuError::VMError(format!(
@@ -227,23 +223,36 @@ pub fn load_precompiled(cwasm_bytes: &[u8]) -> NuResult<WasmRuntime> {
     let config = default_wasm_config();
     let engine = Engine::new(&config).map_err(map_wasmtime_err)?;
 
-    let module = unsafe { Module::deserialize(&engine, cwasm_bytes) }
-        .map_err(map_wasmtime_err)?;
+    let module = unsafe { Module::deserialize(&engine, cwasm_bytes) }.map_err(map_wasmtime_err)?;
 
     let mut store = Store::new(&engine, HostState::default());
     let mut linker: Linker<HostState> = Linker::new(&engine);
 
-    linker.func_wrap("env", "nulang_alloc", host_alloc).map_err(map_wasmtime_err)?;
-    linker.func_wrap("env", "nulang_dispatch", host_dispatch).map_err(map_wasmtime_err)?;
-    linker.func_wrap("env", "log", host_log).map_err(map_wasmtime_err)?;
-    linker.func_wrap("env", "io_print", host_print).map_err(map_wasmtime_err)?;
-    linker.func_wrap("env", "io_read", host_read).map_err(map_wasmtime_err)?;
+    linker
+        .func_wrap("env", "nulang_alloc", host_alloc)
+        .map_err(map_wasmtime_err)?;
+    linker
+        .func_wrap("env", "nulang_dispatch", host_dispatch)
+        .map_err(map_wasmtime_err)?;
+    linker
+        .func_wrap("env", "log", host_log)
+        .map_err(map_wasmtime_err)?;
+    linker
+        .func_wrap("env", "io_print", host_print)
+        .map_err(map_wasmtime_err)?;
+    linker
+        .func_wrap("env", "io_read", host_read)
+        .map_err(map_wasmtime_err)?;
 
     let mem_type = MemoryType::new(1, None);
     let memory = Memory::new(&mut store, mem_type).map_err(map_wasmtime_err)?;
-    linker.define(&mut store, "env", "memory", memory).map_err(map_wasmtime_err)?;
+    linker
+        .define(&mut store, "env", "memory", memory)
+        .map_err(map_wasmtime_err)?;
 
-    let instance = linker.instantiate(&mut store, &module).map_err(map_wasmtime_err)?;
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(map_wasmtime_err)?;
 
     if let Some(exported_mem) = instance.get_memory(&mut store, "memory") {
         let data_end = exported_mem.data_size(&store);

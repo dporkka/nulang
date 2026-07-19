@@ -142,7 +142,10 @@ mod tests {
 
     #[test]
     fn test_format_error_display_mentions_version() {
-        let e = FormatError::UnsupportedVersion { max_supported: 1, found: 2 };
+        let e = FormatError::UnsupportedVersion {
+            max_supported: 1,
+            found: 2,
+        };
         let s = format!("{e}");
         assert!(s.contains("version 2") && s.contains("max 1"), "got: {s}");
     }

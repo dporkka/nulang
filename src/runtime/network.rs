@@ -47,7 +47,6 @@ use super::MessagePriority;
 use super::NodeId;
 use crate::vm::Value;
 
-
 // ---------------------------------------------------------------------------
 // TransportAddr — network address for TCP or Unix domain sockets
 // ---------------------------------------------------------------------------
@@ -62,9 +61,13 @@ pub enum TransportAddr {
 }
 
 impl TransportAddr {
-    pub fn tcp(addr: SocketAddr) -> Self { TransportAddr::Tcp(addr) }
+    pub fn tcp(addr: SocketAddr) -> Self {
+        TransportAddr::Tcp(addr)
+    }
     #[cfg(unix)]
-    pub fn unix(path: impl Into<std::path::PathBuf>) -> Self { TransportAddr::Unix(path.into()) }
+    pub fn unix(path: impl Into<std::path::PathBuf>) -> Self {
+        TransportAddr::Unix(path.into())
+    }
 }
 
 impl std::fmt::Display for TransportAddr {
@@ -685,8 +688,7 @@ fn write_value(buf: &mut Vec<u8>, v: &Value) {
 /// safe only when `strings_ok` — i.e. the enclosing packet carries a string
 /// table with the content (actor messages do; spawn requests do not).
 fn value_is_wire_safe(v: &Value, strings_ok: bool) -> bool {
-    !(v.is_ptr() || v.is_actor_ref() || v.is_closure())
-        && (strings_ok || !v.is_string())
+    !(v.is_ptr() || v.is_actor_ref() || v.is_closure()) && (strings_ok || !v.is_string())
 }
 
 /// True if every payload [`Value`] carried by `packet` is wire-safe.
@@ -705,13 +707,12 @@ fn packet_payload_wire_safe(packet: &Packet) -> bool {
             ..
         } => payload.iter().all(|v| {
             value_is_wire_safe(v, true)
-                && v
-                    .as_string_id()
+                && v.as_string_id()
                     .map_or(true, |id| (id as usize) < string_table.len())
         }),
-        Packet::SpawnRequest { initial_state, .. } => {
-            initial_state.iter().all(|(_, v)| value_is_wire_safe(v, false))
-        }
+        Packet::SpawnRequest { initial_state, .. } => initial_state
+            .iter()
+            .all(|(_, v)| value_is_wire_safe(v, false)),
         _ => true,
     }
 }
@@ -982,11 +983,21 @@ impl NetworkTransport for Box<dyn NetworkTransport> {
     fn receive(&self) -> Vec<IncomingPacket> {
         (**self).receive()
     }
-    fn node_id(&self) -> NodeId { (**self).node_id() }
-    fn listen_addr(&self) -> std::net::SocketAddr { (**self).listen_addr() }
-    fn disconnect(&mut self, node_id: NodeId) { (**self).disconnect(node_id) }
-    fn shutdown(&mut self) { (**self).shutdown() }
-    fn connection_count(&self) -> usize { (**self).connection_count() }
+    fn node_id(&self) -> NodeId {
+        (**self).node_id()
+    }
+    fn listen_addr(&self) -> std::net::SocketAddr {
+        (**self).listen_addr()
+    }
+    fn disconnect(&mut self, node_id: NodeId) {
+        (**self).disconnect(node_id)
+    }
+    fn shutdown(&mut self) {
+        (**self).shutdown()
+    }
+    fn connection_count(&self) -> usize {
+        (**self).connection_count()
+    }
     fn connection_addr(&self, node_id: NodeId) -> Option<std::net::SocketAddr> {
         (**self).connection_addr(node_id)
     }
@@ -2022,7 +2033,10 @@ mod tests {
             vec!["hello".into()]
         )));
         // Dangling id: no table entry at index 3.
-        assert!(!packet_payload_wire_safe(&mk(vec![Value::string(3)], vec![])));
+        assert!(!packet_payload_wire_safe(&mk(
+            vec![Value::string(3)],
+            vec![]
+        )));
         // Heap values stay rejected even with a table present.
         assert!(!packet_payload_wire_safe(&mk(
             vec![Value::ptr(std::ptr::null_mut())],

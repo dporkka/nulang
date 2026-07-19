@@ -36,7 +36,8 @@ pub fn complete_sync(client: &dyn LlmClient, request: LlmRequest) -> Result<LlmR
                 let _ = tx.send(result);
             })
             .map_err(|e| LlmError::from_string(e.to_string()))?;
-        rx.recv().map_err(|e| LlmError::from_string(e.to_string()))?
+        rx.recv()
+            .map_err(|e| LlmError::from_string(e.to_string()))?
     })
 }
 

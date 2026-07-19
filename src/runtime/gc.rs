@@ -846,8 +846,7 @@ mod tests {
         assert_eq!(header.payload_size, 64, "payload_size should match");
 
         assert_eq!(
-            gc.stats.objects_allocated,
-            1,
+            gc.stats.objects_allocated, 1,
             "stats should track allocation"
         );
     }
@@ -1403,7 +1402,10 @@ mod tests {
         // on the owning side, which frees the object.
         let holds = receiver_gc.take_held_refs();
         assert_eq!(holds.len(), 1);
-        assert!(receiver_gc.take_held_refs().is_empty(), "drain is idempotent");
+        assert!(
+            receiver_gc.take_held_refs().is_empty(),
+            "drain is idempotent"
+        );
         for (owner_id, header) in holds {
             assert_eq!(owner_id, 1);
             owner_gc.process_foreign_op(
@@ -1416,6 +1418,10 @@ mod tests {
                 },
             );
         }
-        assert_eq!(heap.live_count(), 0, "object freed once the hold is released");
+        assert_eq!(
+            heap.live_count(),
+            0,
+            "object freed once the hold is released"
+        );
     }
 }

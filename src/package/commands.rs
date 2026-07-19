@@ -49,9 +49,8 @@ fn print_usage() {
 
 /// `nula new <name>`: scaffold a package directory.
 fn cmd_new(name: Option<&str>) -> NuResult<()> {
-    let name = name.ok_or_else(|| {
-        NuError::PackageError("nula new requires a package name".to_string())
-    })?;
+    let name =
+        name.ok_or_else(|| NuError::PackageError("nula new requires a package name".to_string()))?;
     if name.is_empty()
         || !name
             .chars()
@@ -82,7 +81,10 @@ fn scaffold_package(dir: &Path, name: &str) -> NuResult<()> {
     })?;
     std::fs::write(
         dir.join(MANIFEST_FILE),
-        format!("[package]\nname = \"{}\"\nversion = \"0.1.0\"\n\n[dependencies]\n", name),
+        format!(
+            "[package]\nname = \"{}\"\nversion = \"0.1.0\"\n\n[dependencies]\n",
+            name
+        ),
     )
     .map_err(|e| NuError::PackageError(format!("cannot write {}: {}", MANIFEST_FILE, e)))?;
     std::fs::write(
@@ -168,7 +170,10 @@ fn cmd_test() -> NuResult<()> {
     };
     test_files.sort();
     if test_files.is_empty() {
-        println!("No tests found ({} does not exist or has no .nula files).", tests_dir.display());
+        println!(
+            "No tests found ({} does not exist or has no .nula files).",
+            tests_dir.display()
+        );
         return Ok(());
     }
     let mut failed = 0;
@@ -184,10 +189,7 @@ fn cmd_test() -> NuResult<()> {
     }
     println!("{} passed, {} failed", test_files.len() - failed, failed);
     if failed > 0 {
-        return Err(NuError::PackageError(format!(
-            "{} test(s) failed",
-            failed
-        )));
+        return Err(NuError::PackageError(format!("{} test(s) failed", failed)));
     }
     Ok(())
 }
@@ -199,10 +201,7 @@ mod tests {
 
     #[test]
     fn test_scaffold_package_creates_valid_manifest() {
-        let dir = std::env::temp_dir().join(format!(
-            "nulang_nula_new_test_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("nulang_nula_new_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         scaffold_package(&dir, "my-app").expect("scaffold should succeed");

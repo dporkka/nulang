@@ -183,7 +183,6 @@ pub enum OpCode {
     /// Emitted after a pattern+guard check succeeds.
     ReceiveCommit = 0xA1,
 
-
     // == FFI (0xB0-0xBF) ==
     FFICall = 0xB0, // Call foreign function (func_idx high, func_idx low, dst)
 
@@ -818,8 +817,8 @@ mod tests {
         assert_eq!(c_int, Constant::Int(42));
         assert_ne!(c_int, Constant::Int(0));
 
-        let c_float = Constant::Float(3.14);
-        assert_eq!(c_float, Constant::Float(3.14));
+        let c_float = Constant::Float(1.5);
+        assert_eq!(c_float, Constant::Float(1.5));
 
         let c_str = Constant::String("hello".into());
         assert_eq!(c_str, Constant::String("hello".into()));

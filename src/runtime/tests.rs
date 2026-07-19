@@ -249,7 +249,10 @@ fn test_restarted_child_restores_behavior_and_state() {
     {
         let actor = rt.actors.get_mut(&child_id).unwrap();
         actor.register_behavior("inc", |actor, args| {
-            let n = actor.get_state_field("count").and_then(|v| v.as_int()).unwrap_or(0);
+            let n = actor
+                .get_state_field("count")
+                .and_then(|v| v.as_int())
+                .unwrap_or(0);
             let by = args.get(0).and_then(|v| v.as_int()).unwrap_or(1);
             actor.set_state_field("count", Value::int(n + by));
         });
@@ -286,7 +289,10 @@ fn test_supervisor_restart_hydrates_from_persistence() {
     {
         let actor = rt.actors.get_mut(&child_id).unwrap();
         actor.register_behavior("inc", |actor, args| {
-            let n = actor.get_state_field("count").and_then(|v| v.as_int()).unwrap_or(0);
+            let n = actor
+                .get_state_field("count")
+                .and_then(|v| v.as_int())
+                .unwrap_or(0);
             let by = args.get(0).and_then(|v| v.as_int()).unwrap_or(1);
             actor.set_state_field("count", Value::int(n + by));
         });
@@ -412,8 +418,16 @@ fn test_restart_all_unregisters_names_and_notifies_monitors() {
     let sup_id = rt.create_supervisor("all_sup", RestartStrategy::OneForAll);
     let trigger = rt.spawn_actor(Box::new(|| vec![]));
     let sibling = rt.spawn_actor(Box::new(|| vec![]));
-    rt.supervise_child(sup_id, ChildSpec::new("trigger", RestartPolicy::Permanent), trigger);
-    rt.supervise_child(sup_id, ChildSpec::new("sibling", RestartPolicy::Permanent), sibling);
+    rt.supervise_child(
+        sup_id,
+        ChildSpec::new("trigger", RestartPolicy::Permanent),
+        trigger,
+    );
+    rt.supervise_child(
+        sup_id,
+        ChildSpec::new("sibling", RestartPolicy::Permanent),
+        sibling,
+    );
     rt.registry.register("sibling_name", sibling).unwrap();
     let watcher = rt.spawn_actor(Box::new(|| vec![]));
     rt.monitor(watcher, sibling);
@@ -454,7 +468,11 @@ fn test_supervisor_shutdown_cleans_up_children() {
         fragile,
     );
     let sibling = rt.spawn_actor(Box::new(|| vec![]));
-    rt.supervise_child(sup_id, ChildSpec::new("sibling", RestartPolicy::Permanent), sibling);
+    rt.supervise_child(
+        sup_id,
+        ChildSpec::new("sibling", RestartPolicy::Permanent),
+        sibling,
+    );
     rt.registry.register("sibling_name", sibling).unwrap();
     let watcher = rt.spawn_actor(Box::new(|| vec![]));
     rt.monitor(watcher, sibling);
@@ -575,6 +593,7 @@ fn dyn_worker_module(default_count: i64) -> crate::bytecode::CodeModule {
         state_models: vec![("count".to_string(), crate::ast::StateModel::Local)],
         state_defaults: vec![("count".to_string(), Constant::Int(default_count))],
         behavior_indices: vec![0],
+        type_hash: None,
         is_workflow: false,
         is_agent: false,
         tools: vec![],
@@ -1063,7 +1082,6 @@ fn test_fire_receive_wait_timeout_without_suspension_clears_state() {
     );
 }
 
-
 // -- Process Groups (5 tests) --
 
 #[test]
@@ -1353,7 +1371,11 @@ fn test_event_sourced_counter_replays_from_event_log() {
     }
 
     let count = rt.actors.get(&actor_id).unwrap().get_state_field("counter");
-    assert_eq!(count, Some(Value::int(5)), "counter should be 5 after 5 events");
+    assert_eq!(
+        count,
+        Some(Value::int(5)),
+        "counter should be 5 after 5 events"
+    );
 
     rt.checkpoint_actor(actor_id);
     let snapshot = rt.persistence.load_snapshot(actor_id).unwrap();
@@ -1600,6 +1622,7 @@ fn test_vm_spawn_creates_persistent_actor() {
         state_models: vec![("balance".to_string(), crate::ast::StateModel::Durable)],
         state_defaults: vec![("balance".to_string(), Constant::Int(100))],
         behavior_indices: vec![0],
+        type_hash: None,
         is_workflow: false,
         is_agent: false,
         tools: vec![],
@@ -1659,6 +1682,7 @@ fn test_vm_spawn_creates_non_persistent_actor() {
         state_models: vec![("count".to_string(), crate::ast::StateModel::Local)],
         state_defaults: vec![("count".to_string(), Constant::Int(0))],
         behavior_indices: vec![0],
+        type_hash: None,
         is_workflow: false,
         is_agent: false,
         tools: vec![],
@@ -2270,8 +2294,7 @@ fn test_cross_actor_send_foreign_count_lifecycle() {
         let header = &*ActorHeap::header_of(ptr);
         assert_eq!(header.ref_count, 1);
         assert_eq!(
-            header.foreign_count,
-            1,
+            header.foreign_count, 1,
             "foreign_count should increment when ref is sent"
         );
     }
@@ -2282,8 +2305,7 @@ fn test_cross_actor_send_foreign_count_lifecycle() {
         let header = &*ActorHeap::header_of(ptr);
         assert_eq!(header.ref_count, 1);
         assert_eq!(
-            header.foreign_count,
-            0,
+            header.foreign_count, 0,
             "foreign_count should decrement after op is processed on owning actor"
         );
     }
@@ -2317,7 +2339,7 @@ fn test_vm_drop_ref_defers_object_with_foreign_refs() {
 
     // Simulate an in-flight foreign reference held by another actor.
     unsafe {
-(*ActorHeap::header_of(ptr)).foreign_count = 1;
+        (*ActorHeap::header_of(ptr)).foreign_count = 1;
     }
 
     cb.drop_ref(ptr);
@@ -2329,7 +2351,7 @@ fn test_vm_drop_ref_defers_object_with_foreign_refs() {
 
     // Once the foreign reference goes away, the deferred pass reclaims it.
     unsafe {
-(*ActorHeap::header_of(ptr)).foreign_count = 0;
+        (*ActorHeap::header_of(ptr)).foreign_count = 0;
     }
     {
         let mut rt_mut = rt.borrow_mut();
@@ -2897,7 +2919,13 @@ fn pump_until_converged(nodes: &mut [&mut Runtime], expected: usize, timeout: Du
         let mut counts = Vec::new();
         for rt in nodes.iter_mut() {
             rt.process_network();
-            counts.push(rt.distributed.cluster.as_ref().unwrap().healthy_node_count());
+            counts.push(
+                rt.distributed
+                    .cluster
+                    .as_ref()
+                    .unwrap()
+                    .healthy_node_count(),
+            );
         }
         if counts.iter().all(|&c| c == expected) {
             return;
@@ -2915,7 +2943,7 @@ fn pump_until_converged(nodes: &mut [&mut Runtime], expected: usize, timeout: Du
 /// Shut down the transports of the given nodes.
 fn shutdown_nodes(nodes: &mut [&mut Runtime]) {
     for rt in nodes.iter_mut() {
-        if let Some(transport) = rt.distributed.transport.take() {
+        if let Some(mut transport) = rt.distributed.transport.take() {
             transport.shutdown();
         }
     }
@@ -2936,7 +2964,8 @@ fn test_three_node_cluster_membership_converges() {
     // The local node's own cluster entry must carry the real listen
     // address, not the port-0 bind address.
     assert_eq!(
-        rt_a.distributed.cluster
+        rt_a.distributed
+            .cluster
             .as_ref()
             .unwrap()
             .get_node(node_a)
@@ -2977,7 +3006,8 @@ fn test_three_node_cluster_membership_converges() {
 
     // Addresses learned by seeding carry the peer's real listen address.
     assert_eq!(
-        rt_b.distributed.cluster
+        rt_b.distributed
+            .cluster
             .as_ref()
             .unwrap()
             .get_node(node_a)
@@ -2986,7 +3016,8 @@ fn test_three_node_cluster_membership_converges() {
         addr_a
     );
     assert_eq!(
-        rt_c.distributed.cluster
+        rt_c.distributed
+            .cluster
             .as_ref()
             .unwrap()
             .get_node(node_b)
@@ -3103,7 +3134,8 @@ fn test_three_node_gossip_converges_chain_seeded() {
     // A learned about C (and vice versa) purely through B's gossip relay,
     // and both views consider the relayed peer healthy.
     let info_c_on_a = rt_a
-        .distributed.cluster
+        .distributed
+        .cluster
         .as_ref()
         .unwrap()
         .get_node(node_c)
@@ -3114,7 +3146,8 @@ fn test_three_node_gossip_converges_chain_seeded() {
         "A should see C as healthy"
     );
     let info_a_on_c = rt_c
-        .distributed.cluster
+        .distributed
+        .cluster
         .as_ref()
         .unwrap()
         .get_node(node_a)

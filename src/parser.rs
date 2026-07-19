@@ -112,7 +112,10 @@ impl Parser {
                     let final_expr = if exprs.len() == 1 {
                         exprs.into_iter().next().unwrap()
                     } else {
-                        Expr::Block { exprs, span: Span::default() }
+                        Expr::Block {
+                            exprs,
+                            span: Span::default(),
+                        }
                     };
                     decls.push(Decl::Function {
                         name: "__main".to_string(),
@@ -259,10 +262,15 @@ impl Parser {
                     let kind = match kind_str.as_str() {
                         "native" => crate::ast::ActorBackendKind::Native,
                         "wasm" => crate::ast::ActorBackendKind::WasmComponent,
-                        other => return Err(NuError::ParseError {
-                            msg: format!("Unknown backend '{}'; expected 'native' or 'wasm'", other),
-                            span: self.current_span(),
-                        }),
+                        other => {
+                            return Err(NuError::ParseError {
+                                msg: format!(
+                                    "Unknown backend '{}'; expected 'native' or 'wasm'",
+                                    other
+                                ),
+                                span: self.current_span(),
+                            })
+                        }
                     };
                     annotations.push(FunctionAnnotation::Backend { kind });
                 }
@@ -530,7 +538,10 @@ impl Parser {
         for (i, event) in events.iter().enumerate() {
             if events[..i].iter().any(|e| e.name == event.name) {
                 return Err(NuError::ParseError {
-                    msg: format!("duplicate event '{}' in state_machine '{}'", event.name, name),
+                    msg: format!(
+                        "duplicate event '{}' in state_machine '{}'",
+                        event.name, name
+                    ),
                     span: event.span,
                 });
             }
@@ -792,7 +803,9 @@ impl Parser {
                                 "on" => {
                                     self.expect(TokenKind::LBracket)?;
                                     self.skip_newlines();
-                                    while !self.match_token(&TokenKind::RBracket) && !self.is_at_end() {
+                                    while !self.match_token(&TokenKind::RBracket)
+                                        && !self.is_at_end()
+                                    {
                                         self.skip_newlines();
                                         if self.match_token(&TokenKind::RBracket) {
                                             break;
@@ -864,7 +877,9 @@ impl Parser {
                                         let mut initial_ms: Option<u64> = None;
                                         let mut factor: Option<f64> = None;
                                         let mut max_ms: Option<u64> = None;
-                                        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                                        while !self.match_token(&TokenKind::RBrace)
+                                            && !self.is_at_end()
+                                        {
                                             self.skip_newlines();
                                             if self.match_token(&TokenKind::RBrace) {
                                                 break;
@@ -873,17 +888,22 @@ impl Parser {
                                             self.expect(TokenKind::Colon)?;
                                             match bo_field.as_str() {
                                                 "initial_ms" => {
-                                                    initial_ms = Some(self.expect_int("initial_ms")? as u64);
+                                                    initial_ms =
+                                                        Some(self.expect_int("initial_ms")? as u64);
                                                 }
                                                 "factor" => {
                                                     factor = Some(self.expect_float("factor")?);
                                                 }
                                                 "max_ms" => {
-                                                    max_ms = Some(self.expect_int("max_ms")? as u64);
+                                                    max_ms =
+                                                        Some(self.expect_int("max_ms")? as u64);
                                                 }
                                                 other => {
                                                     return Err(NuError::ParseError {
-                                                        msg: format!("Unknown Exponential backoff field: {}", other),
+                                                        msg: format!(
+                                                            "Unknown Exponential backoff field: {}",
+                                                            other
+                                                        ),
                                                         span: self.current_span(),
                                                     });
                                                 }
@@ -905,7 +925,9 @@ impl Parser {
                                         self.expect(TokenKind::LBrace)?;
                                         self.skip_newlines();
                                         let mut delay_ms: Option<u64> = None;
-                                        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                                        while !self.match_token(&TokenKind::RBrace)
+                                            && !self.is_at_end()
+                                        {
                                             self.skip_newlines();
                                             if self.match_token(&TokenKind::RBrace) {
                                                 break;
@@ -913,10 +935,14 @@ impl Parser {
                                             let field = self.expect_ident("Fixed backoff field")?;
                                             self.expect(TokenKind::Colon)?;
                                             if field == "delay_ms" {
-                                                delay_ms = Some(self.expect_int("delay_ms")? as u64);
+                                                delay_ms =
+                                                    Some(self.expect_int("delay_ms")? as u64);
                                             } else {
                                                 return Err(NuError::ParseError {
-                                                    msg: format!("Unknown Fixed backoff field: {}", field),
+                                                    msg: format!(
+                                                        "Unknown Fixed backoff field: {}",
+                                                        field
+                                                    ),
                                                     span: self.current_span(),
                                                 });
                                             }
@@ -1008,7 +1034,9 @@ impl Parser {
         let mut tables: Vec<DatabaseTable> = Vec::new();
         while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
             self.skip_newlines();
-            if self.match_token(&TokenKind::RBrace) { break; }
+            if self.match_token(&TokenKind::RBrace) {
+                break;
+            }
             // Each table: Name { col: Type modifier*, ... }
             let table_name = self.expect_ident("table name")?;
             self.expect(TokenKind::LBrace)?;
@@ -1016,12 +1044,15 @@ impl Parser {
             let mut columns: Vec<DatabaseColumn> = Vec::new();
             while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
                 self.skip_newlines();
-                if self.match_token(&TokenKind::RBrace) { break; }
+                if self.match_token(&TokenKind::RBrace) {
+                    break;
+                }
                 let col_name = self.expect_ident("column name")?;
                 self.expect(TokenKind::Colon)?;
                 let col_type = self.parse_type()?;
                 let mut modifiers: Vec<String> = Vec::new();
-                while matches!(self.peek_kind(),
+                while matches!(
+                    self.peek_kind(),
                     TokenKind::Ident(_) | TokenKind::UpperIdent(_)
                 ) {
                     let m = self.expect_ident("column modifier")?;
@@ -1456,17 +1487,29 @@ impl Parser {
                 left = Expr::Match {
                     scrutinee: Box::new(left),
                     arms: vec![
-                        (Pattern::Variant("Ok".to_string(), Some(Box::new(Pattern::Var(x.clone())))), None,
-                         Expr::Var(x, span)),
-                        (Pattern::Variant("Error".to_string(), Some(Box::new(Pattern::Var(e.clone())))), None,
-                         Expr::Return(
-                            Some(Box::new(Expr::App {
-                                func: Box::new(Expr::Var("Error".to_string(), span)),
-                                args: vec![Expr::Var(e, span)],
+                        (
+                            Pattern::Variant(
+                                "Ok".to_string(),
+                                Some(Box::new(Pattern::Var(x.clone()))),
+                            ),
+                            None,
+                            Expr::Var(x, span),
+                        ),
+                        (
+                            Pattern::Variant(
+                                "Error".to_string(),
+                                Some(Box::new(Pattern::Var(e.clone()))),
+                            ),
+                            None,
+                            Expr::Return(
+                                Some(Box::new(Expr::App {
+                                    func: Box::new(Expr::Var("Error".to_string(), span)),
+                                    args: vec![Expr::Var(e, span)],
+                                    span,
+                                })),
                                 span,
-                            })),
-                            span,
-                        )),
+                            ),
+                        ),
                     ],
                     span,
                 };
@@ -1736,7 +1779,6 @@ impl Parser {
         })
     }
 
-
     fn parse_let_named(&mut self, name: String) -> NuResult<Expr> {
         let span = self.current_span();
 
@@ -1752,7 +1794,10 @@ impl Parser {
         let body = if self.consume_if(&TokenKind::In) {
             self.parse_expr()?
         } else {
-            Expr::Block { exprs: vec![], span: Span::default() }
+            Expr::Block {
+                exprs: vec![],
+                span: Span::default(),
+            }
         };
         Ok(Expr::Let {
             name,
@@ -1762,7 +1807,6 @@ impl Parser {
             span,
         })
     }
-
 
     /// Parse a string containing `#{...}` interpolation markers.
     fn parse_interpolated_string(&self, raw: &str, span: Span) -> NuResult<Expr> {
@@ -1784,13 +1828,19 @@ impl Parser {
                     '{' => depth += 1,
                     '}' => {
                         depth -= 1;
-                        if depth == 0 { expr_end = i; break; }
+                        if depth == 0 {
+                            expr_end = i;
+                            break;
+                        }
                     }
                     _ => {}
                 }
             }
             if depth != 0 {
-                return Err(NuError::ParseError { msg: "Unterminated interpolation: missing '}'".to_string(), span });
+                return Err(NuError::ParseError {
+                    msg: "Unterminated interpolation: missing '}'".to_string(),
+                    span,
+                });
             }
             let expr_content = &expr_str[..expr_end];
             let expr = self.parse_inline_expr(expr_content, span)?;
@@ -1805,14 +1855,22 @@ impl Parser {
         }
         let mut result = parts.remove(0);
         for part in parts {
-            result = Expr::Binary { op: BinOp::Add, left: Box::new(result), right: Box::new(part), span };
+            result = Expr::Binary {
+                op: BinOp::Add,
+                left: Box::new(result),
+                right: Box::new(part),
+                span,
+            };
         }
         Ok(result)
     }
 
     fn parse_inline_expr(&self, source: &str, span: Span) -> NuResult<Expr> {
         let mut lexer = crate::lexer::Lexer::new(source);
-        let tokens = lexer.lex().map_err(|e| NuError::ParseError { msg: format!("Invalid interpolation expression: {}", e), span })?;
+        let tokens = lexer.lex().map_err(|e| NuError::ParseError {
+            msg: format!("Invalid interpolation expression: {}", e),
+            span,
+        })?;
         let mut sub_parser = Parser::new(tokens);
         sub_parser.parse_expr()
     }
@@ -1937,15 +1995,19 @@ impl Parser {
                 }
             }
             self.skip_newlines();
-            if self.is_at_end() { break; }
+            if self.is_at_end() {
+                break;
+            }
             if let Some(ref end) = end_token {
-                if self.match_token(end) { break; }
+                if self.match_token(end) {
+                    break;
+                }
             }
             let mut expr = self.parse_expr()?;
             self.skip_newlines_semicolons();
-            
+
             let is_incomplete = matches!(&expr, Expr::Let { body, .. } | Expr::LetRec { body, .. } if matches!(body.as_ref(), Expr::Block { exprs, span } if exprs.is_empty() && span.start == 0 && span.end == 0));
-            
+
             if is_incomplete {
                 let rest = self.collect_block_exprs(end_token.clone())?;
                 let new_body = if rest.is_empty() {
@@ -1953,11 +2015,38 @@ impl Parser {
                 } else if rest.len() == 1 {
                     rest.into_iter().next().unwrap()
                 } else {
-                    Expr::Block { exprs: rest, span: Span::default() }
+                    Expr::Block {
+                        exprs: rest,
+                        span: Span::default(),
+                    }
                 };
                 expr = match expr {
-                    Expr::Let { name, ty, value, span, .. } => Expr::Let { name, ty, value, body: Box::new(new_body), span },
-                    Expr::LetRec { name, params, value, span, .. } => Expr::LetRec { name, params, value, body: Box::new(new_body), span },
+                    Expr::Let {
+                        name,
+                        ty,
+                        value,
+                        span,
+                        ..
+                    } => Expr::Let {
+                        name,
+                        ty,
+                        value,
+                        body: Box::new(new_body),
+                        span,
+                    },
+                    Expr::LetRec {
+                        name,
+                        params,
+                        value,
+                        span,
+                        ..
+                    } => Expr::LetRec {
+                        name,
+                        params,
+                        value,
+                        body: Box::new(new_body),
+                        span,
+                    },
                     _ => unreachable!(),
                 };
                 exprs.push(expr);
@@ -2003,11 +2092,11 @@ impl Parser {
     fn parse_spawn(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
         self.advance(); // consume 'spawn'
-        // Optional `link`/`monitor` modifier (BEAM spawn_link/spawn_monitor).
-        // `spawn link A { ... }` desugars right here to
-        // `let __spawn_ref = spawn A { ... } in { perform Actor.link(__spawn_ref); __spawn_ref }`
-        // (likewise `Actor.monitor`), so the form typechecks exactly like a
-        // plain spawn (actor ref) and needs no new IR nodes or opcodes.
+                        // Optional `link`/`monitor` modifier (BEAM spawn_link/spawn_monitor).
+                        // `spawn link A { ... }` desugars right here to
+                        // `let __spawn_ref = spawn A { ... } in { perform Actor.link(__spawn_ref); __spawn_ref }`
+                        // (likewise `Actor.monitor`), so the form typechecks exactly like a
+                        // plain spawn (actor ref) and needs no new IR nodes or opcodes.
         let link_op = match self.peek_kind() {
             TokenKind::Link => {
                 self.advance();
@@ -2028,10 +2117,12 @@ impl Parser {
                 self.advance();
                 s
             }
-            _ => return Err(NuError::ParseError {
-                msg: format!("Expected actor name in spawn, got {}", self.peek_kind()),
-                span: self.current_span(),
-            }),
+            _ => {
+                return Err(NuError::ParseError {
+                    msg: format!("Expected actor name in spawn, got {}", self.peek_kind()),
+                    span: self.current_span(),
+                })
+            }
         };
         let actor_type = Expr::Var(actor_name, span);
 
@@ -2492,7 +2583,7 @@ impl Parser {
         self.skip_newlines();
         while self.peek_kind() != &TokenKind::RBrace && !self.is_at_end() {
             self.consume_if(&TokenKind::Pipe);
-                    let behavior_name = self.expect_ident("behavior name")?;
+            let behavior_name = self.expect_ident("behavior name")?;
             self.expect(TokenKind::LParen)?;
             let mut params = Vec::new();
             self.skip_newlines();
@@ -2557,7 +2648,11 @@ impl Parser {
         self.expect(TokenKind::While)?;
         let cond = self.parse_expr()?;
         let body = self.parse_expr()?;
-        Ok(Expr::While { cond: Box::new(cond), body: Box::new(body), span })
+        Ok(Expr::While {
+            cond: Box::new(cond),
+            body: Box::new(body),
+            span,
+        })
     }
 
     fn parse_migrate(&mut self) -> NuResult<Expr> {
@@ -2820,10 +2915,7 @@ impl Parser {
                 j += 1;
             }
             // Optional 'alias' keyword between 'type' and the name.
-            if matches!(
-                self.tokens.get(j).map(|t| &t.kind),
-                Some(TokenKind::Alias)
-            ) {
+            if matches!(self.tokens.get(j).map(|t| &t.kind), Some(TokenKind::Alias)) {
                 j += 1;
             }
             match self.tokens.get(j).map(|t| &t.kind) {
@@ -3517,12 +3609,11 @@ mod tests {
         let ast = parse(source).unwrap();
         match &ast.decls[0] {
             Decl::Actor {
-                name,
-                initializer,
-                ..
+                name, initializer, ..
             } => {
                 assert_eq!(name, "Counter");
-                let (init_name, params, _body) = initializer.as_ref().expect("should have initializer");
+                let (init_name, params, _body) =
+                    initializer.as_ref().expect("should have initializer");
                 assert_eq!(init_name, "init");
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0].0, "start_val");
@@ -3675,7 +3766,9 @@ mod tests {
         };
         assert_eq!(name, "__spawn_ref");
         match value.as_ref() {
-            Expr::Spawn { actor_type, init, .. } => {
+            Expr::Spawn {
+                actor_type, init, ..
+            } => {
                 assert!(matches!(actor_type.as_ref(), Expr::Var(n, _) if n == "Counter"));
                 assert_eq!(init.len(), 1);
                 assert_eq!(init[0].0, "count");
@@ -3686,7 +3779,9 @@ mod tests {
             Expr::Block { exprs, .. } => {
                 assert_eq!(exprs.len(), 2);
                 match &exprs[0] {
-                    Expr::Perform { effect, op, args, .. } => {
+                    Expr::Perform {
+                        effect, op, args, ..
+                    } => {
                         assert_eq!(effect, "Actor");
                         assert_eq!(op, "link");
                         assert_eq!(args.len(), 1);
@@ -4308,7 +4403,11 @@ mod tests {
         let err = parse(source).unwrap_err();
         match err {
             NuError::ParseError { msg, .. } => {
-                assert!(msg.contains("requires at least one 'state <Name>'"), "{}", msg)
+                assert!(
+                    msg.contains("requires at least one 'state <Name>'"),
+                    "{}",
+                    msg
+                )
             }
             _ => panic!("Expected ParseError"),
         }
@@ -4325,7 +4424,11 @@ mod tests {
         let err = parse(source).unwrap_err();
         match err {
             NuError::ParseError { msg, .. } => {
-                assert!(msg.contains("on_entry hook references unknown state 'B'"), "{}", msg)
+                assert!(
+                    msg.contains("on_entry hook references unknown state 'B'"),
+                    "{}",
+                    msg
+                )
             }
             _ => panic!("Expected ParseError"),
         }
@@ -4361,7 +4464,11 @@ mod tests {
         let err = parse(source).unwrap_err();
         match err {
             NuError::ParseError { msg, .. } => {
-                assert!(msg.contains("duplicate on_exit hook for state 'A'"), "{}", msg)
+                assert!(
+                    msg.contains("duplicate on_exit hook for state 'A'"),
+                    "{}",
+                    msg
+                )
             }
             _ => panic!("Expected ParseError"),
         }

@@ -296,7 +296,12 @@ impl Supervisor {
     /// Returns the new actor id, or `None` if no template was captured — in
     /// that case the failure is logged so the caller can escalate instead of
     /// silently creating a zombie actor that drops every message.
-    fn rebuild_child(&self, spec: &ChildSpec, runtime: &mut Runtime, old_actor_id: u64) -> Option<u64> {
+    fn rebuild_child(
+        &self,
+        spec: &ChildSpec,
+        runtime: &mut Runtime,
+        old_actor_id: u64,
+    ) -> Option<u64> {
         let template = match &spec.restart {
             Some(t) => t,
             None => {

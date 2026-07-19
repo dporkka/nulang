@@ -455,9 +455,9 @@ impl FunctionBuilder {
 
     pub fn build(self) -> Function {
         let type_metadata = crate::type_metadata::TypeMetadata::from_mir_locals(
-            self.locals.iter().map(|loc| {
-                (Self::LOCAL_BASE as usize + loc.id.0 as usize, &loc.ty)
-            }),
+            self.locals
+                .iter()
+                .map(|loc| (Self::LOCAL_BASE as usize + loc.id.0 as usize, &loc.ty)),
         );
         Function {
             name: self.name,

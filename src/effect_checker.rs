@@ -797,13 +797,8 @@ impl EffectChecker {
                 Ok(effect_row_union(&r1, &r2))
             }
 
-
             // While loop: effects of cond + body. Evaluates to unit.
-            Expr::While {
-                cond,
-                body,
-                span,
-            } => {
+            Expr::While { cond, body, span } => {
                 let r1 = self.infer_effects(ctx, cond)?;
                 let r2 = self.infer_effects(ctx, body)?;
                 let _ = span;
@@ -891,7 +886,10 @@ impl EffectChecker {
                 } = decl
                 {
                     let inferred = self.infer_effects(&ctx, body)?;
-                    let entry = self.fn_rows.entry(name.clone()).or_insert_with(EffectRow::empty);
+                    let entry = self
+                        .fn_rows
+                        .entry(name.clone())
+                        .or_insert_with(EffectRow::empty);
                     // Grow only when the inferred row contributes an effect
                     // not already recorded (a plain `!=` on the union would
                     // never stabilize, since union appends duplicates).
@@ -1160,7 +1158,9 @@ impl CapabilityAnalyzer {
             // Lambda: capability is the join of all captured free variables.
             // If there are no captures, it defaults to `Val` (a pure function
             // with no mutable state is immutable).
-            Expr::Lambda { params, body, span, .. } => {
+            Expr::Lambda {
+                params, body, span, ..
+            } => {
                 let mut free = Vec::new();
                 let mut bound: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
                 free_vars(body, &mut bound, &mut free);
@@ -1251,10 +1251,10 @@ impl CapabilityAnalyzer {
                 ..
             } => {
                 let _ = self.infer_cap_tracked(ctx, cond, consumed)?; // cond cap not part of result
-                // Branch merge: analyze each branch from the same base set,
-                // then keep only the bindings consumed on *every* fall-through
-                // path (a use in one branch must not poison a sibling branch;
-                // a missing else branch consumes nothing).
+                                                                      // Branch merge: analyze each branch from the same base set,
+                                                                      // then keep only the bindings consumed on *every* fall-through
+                                                                      // path (a use in one branch must not poison a sibling branch;
+                                                                      // a missing else branch consumes nothing).
                 let base = consumed.clone();
                 let then_cap = self.infer_cap_tracked(ctx, then_branch, consumed)?;
                 let then_set = std::mem::replace(consumed, base);
@@ -1412,7 +1412,12 @@ impl CapabilityAnalyzer {
             // value as a send argument consumes it (the spec'd linear move).
             // When `remote` is true, only Val|Tag|Linear (network-serializable)
             // capabilities are accepted.
-            Expr::Send { actor, args, remote, .. } => {
+            Expr::Send {
+                actor,
+                args,
+                remote,
+                ..
+            } => {
                 let _ = self.infer_cap_tracked(ctx, actor, consumed)?;
                 for arg in args {
                     let arg_cap = self.infer_cap_tracked(ctx, arg, consumed)?;
@@ -1497,13 +1502,10 @@ impl CapabilityAnalyzer {
                     // A guard runs under the same condition as the arm body,
                     // so its capability and consumption fold into the arm.
                     let guard_result = match guard {
-                        Some(guard_expr) => {
-                            self.infer_cap_tracked(&arm_ctx, guard_expr, consumed)
-                        }
+                        Some(guard_expr) => self.infer_cap_tracked(&arm_ctx, guard_expr, consumed),
                         None => Ok(Capability::Tag),
                     };
-                    let arm_result =
-                        self.infer_cap_tracked(&arm_ctx, body_expr, consumed);
+                    let arm_result = self.infer_cap_tracked(&arm_ctx, body_expr, consumed);
                     for (n, was_consumed) in saved {
                         consumed.remove(&n);
                         if was_consumed {
@@ -1564,7 +1566,11 @@ impl CapabilityAnalyzer {
             }
 
             // Explicit capability annotation.
-            Expr::CapAnnotate { expr: inner, cap, span } => {
+            Expr::CapAnnotate {
+                expr: inner,
+                cap,
+                span,
+            } => {
                 let inner_cap = self.infer_cap_tracked(ctx, inner, consumed)?;
                 // Annotating a linear value with an aliasable capability
                 // would duplicate the value; only identity and the discharge
@@ -1573,7 +1579,9 @@ impl CapabilityAnalyzer {
                 //   Linear    -> Linear    | Val (discharge to Val)
                 if inner_cap.is_linear() {
                     let valid = match inner_cap {
-                        Capability::LinearIso => matches!(cap, Capability::LinearIso | Capability::Iso),
+                        Capability::LinearIso => {
+                            matches!(cap, Capability::LinearIso | Capability::Iso)
+                        }
                         Capability::Linear => matches!(cap, Capability::Linear | Capability::Val),
                         _ => false,
                     };
@@ -1634,13 +1642,8 @@ impl CapabilityAnalyzer {
                 Ok(body_cap)
             }
 
-
             // While loop: capability of body; cond is read-only.
-            Expr::While {
-                cond,
-                body,
-                span,
-            } => {
+            Expr::While { cond, body, span } => {
                 let _ = self.infer_cap_tracked(ctx, cond, consumed)?;
                 let base = consumed.clone();
                 let body_result = self.infer_cap_tracked(ctx, body, consumed);
@@ -2565,7 +2568,11 @@ mod tests {
         match result {
             Err(NuError::CapError { msg, .. }) => {
                 assert!(msg.contains("x"), "error should name the binding: {}", msg);
-                assert!(msg.contains("linear"), "error should mention linearity: {}", msg);
+                assert!(
+                    msg.contains("linear"),
+                    "error should mention linearity: {}",
+                    msg
+                );
             }
             other => panic!("expected CapError, got {:?}", other),
         }
@@ -2712,10 +2719,7 @@ mod tests {
         let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
         let expr = Expr::For {
             var: "i".to_string(),
-            iterable: Box::new(Expr::Array(
-                vec![Expr::Literal(Literal::Int(1), s())],
-                s(),
-            )),
+            iterable: Box::new(Expr::Array(vec![Expr::Literal(Literal::Int(1), s())], s())),
             body: Box::new(call1("f", lvar("x"))),
             span: s(),
         };
@@ -2956,9 +2960,8 @@ mod tests {
     fn test_check_module_rejects_module_nested_effect_violation() {
         // Finding: declarations nested in `module {}` must be effect-checked
         // just like top-level ones.
-        let ast = parse_module(
-            "module M {\n  fn pure() -> Unit ! {} { perform IO.print(\"x\") }\n}",
-        );
+        let ast =
+            parse_module("module M {\n  fn pure() -> Unit ! {} { perform IO.print(\"x\") }\n}");
         let mut checker = EffectChecker::new();
         let result = checker.check_module(&ast.decls);
         assert!(
@@ -2978,7 +2981,11 @@ mod tests {
         );
         let mut checker = EffectChecker::new();
         let result = checker.check_module(&ast.decls);
-        assert!(result.is_ok(), "pure functions must pass: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "pure functions must pass: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -3027,12 +3034,16 @@ mod tests {
             span: s(),
         };
         assert!(
-            checker.check_effects(&ctx, &shadowed, &EffectRow::empty()).is_ok(),
+            checker
+                .check_effects(&ctx, &shadowed, &EffectRow::empty())
+                .is_ok(),
             "call through a shadowing local binding must be pure"
         );
         // Control: the unshadowed direct call must be charged IO.
         assert!(
-            checker.check_effects(&ctx, &call("do_io"), &EffectRow::empty()).is_err(),
+            checker
+                .check_effects(&ctx, &call("do_io"), &EffectRow::empty())
+                .is_err(),
             "unshadowed direct call must propagate the callee row"
         );
     }

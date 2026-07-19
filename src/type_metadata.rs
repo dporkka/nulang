@@ -42,7 +42,6 @@ pub struct TypeMetadata {
     pub reg_types: HashMap<usize, KnownType>,
 }
 
-
 /// Convert a language-level `Type` to a `KnownType` for code generation.
 ///
 /// Only primitive types are statically known; polymorphic, compound, and

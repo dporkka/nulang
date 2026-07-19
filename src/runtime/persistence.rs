@@ -407,7 +407,10 @@ impl PersistenceStore for MemoryStore {
             .get(&actor_id)
             .and_then(|e| e.last().map(|ev| ev.sequence))
             .unwrap_or(0);
-        snapshot_seq.max(journal_seq).max(wf_event_seq).max(event_seq)
+        snapshot_seq
+            .max(journal_seq)
+            .max(wf_event_seq)
+            .max(event_seq)
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
@@ -591,7 +594,10 @@ impl PersistenceStore for JsonFileStore {
             .last()
             .map(|e| e.sequence)
             .unwrap_or(0);
-        snapshot_seq.max(journal_seq).max(wf_event_seq).max(event_seq)
+        snapshot_seq
+            .max(journal_seq)
+            .max(wf_event_seq)
+            .max(event_seq)
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
@@ -615,6 +621,7 @@ impl PersistenceStore for JsonFileStore {
 ///
 /// The same store also serves `perform DB.query(sql, params)` from Nulang
 /// code via the `query()` method exposed through `PersistenceStore::query`.
+#[cfg(feature = "sqlite")]
 pub struct LibsqlStore {
     conn: std::sync::Mutex<libsql::Connection>,
     rt: tokio::runtime::Runtime,
@@ -632,17 +639,22 @@ impl LibsqlStore {
         } else {
             path.to_string_lossy().into_owned()
         };
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let rt =
+            tokio::runtime::Runtime::new().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         let db = rt.block_on(async {
             libsql::Builder::new_local(&db_path)
                 .build()
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
         })?;
-        let conn = db.connect()
+        let conn = db
+            .connect()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        let store = LibsqlStore { conn: std::sync::Mutex::new(conn), rt, path };
+        let store = LibsqlStore {
+            conn: std::sync::Mutex::new(conn),
+            rt,
+            path,
+        };
         store.ensure_tables()?;
         Ok(store)
     }
@@ -652,21 +664,28 @@ impl LibsqlStore {
 
     /// Connect to a remote Turso database.
     pub fn new_remote(url: &str, auth_token: &str) -> io::Result<Self> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let rt =
+            tokio::runtime::Runtime::new().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         let db = rt.block_on(async {
             libsql::Builder::new_remote(url.to_string(), auth_token.to_string())
                 .build()
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
         })?;
-        let conn = db.connect()
+        let conn = db
+            .connect()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        let store = LibsqlStore { conn: std::sync::Mutex::new(conn), rt, path: PathBuf::from(url) };
+        let store = LibsqlStore {
+            conn: std::sync::Mutex::new(conn),
+            rt,
+            path: PathBuf::from(url),
+        };
         store.ensure_tables()?;
         Ok(store)
     }
-    pub fn path(&self) -> &Path { &self.path }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 
     fn ensure_tables(&self) -> io::Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -679,9 +698,13 @@ impl LibsqlStore {
                     waiting_signal TEXT
                 )",
                 (),
-            ).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             // Migrate databases created before the waiting_signal column existed.
-            let _ = conn.execute("ALTER TABLE snapshots ADD COLUMN waiting_signal TEXT", ()).await;
+            let _ = conn
+                .execute("ALTER TABLE snapshots ADD COLUMN waiting_signal TEXT", ())
+                .await;
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS journal (
                     actor_id INTEGER NOT NULL,
@@ -691,7 +714,9 @@ impl LibsqlStore {
                     PRIMARY KEY (actor_id, sequence)
                 )",
                 (),
-            ).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS workflow_events (
                     actor_id INTEGER NOT NULL,
@@ -700,7 +725,9 @@ impl LibsqlStore {
                     PRIMARY KEY (actor_id, sequence)
                 )",
                 (),
-            ).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS events (
                     actor_id INTEGER NOT NULL,
@@ -711,7 +738,9 @@ impl LibsqlStore {
                     PRIMARY KEY (actor_id, sequence)
                 )",
                 (),
-            ).await.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            )
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             Ok(())
         })
     }
@@ -720,14 +749,23 @@ impl LibsqlStore {
     pub fn query(&self, sql: &str, params: &[Value]) -> io::Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         self.rt.block_on(async {
-            let param_values: Vec<String> = params.iter().map(|v| {
-                if let Some(i) = v.as_int() { i.to_string() }
-                else if let Some(f) = v.as_float() { f.to_string() }
-                else if let Some(b) = v.as_bool() { b.to_string() }
-                else { v.to_string_repr() }
-            }).collect();
+            let param_values: Vec<String> = params
+                .iter()
+                .map(|v| {
+                    if let Some(i) = v.as_int() {
+                        i.to_string()
+                    } else if let Some(f) = v.as_float() {
+                        f.to_string()
+                    } else if let Some(b) = v.as_bool() {
+                        b.to_string()
+                    } else {
+                        v.to_string_repr()
+                    }
+                })
+                .collect();
             let param_refs: Vec<&str> = param_values.iter().map(|s| s.as_str()).collect();
-            let mut rows = conn.query(sql, libsql::params_from_iter(param_refs))
+            let mut rows = conn
+                .query(sql, libsql::params_from_iter(param_refs))
                 .await
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             let mut results = Vec::new();
@@ -736,12 +774,19 @@ impl LibsqlStore {
                     Ok(Some(row)) => {
                         let mut cols: Vec<serde_json::Value> = Vec::new();
                         for i in 0..row.column_count() {
-                            let val = row.get_value(i)
+                            let val = row
+                                .get_value(i)
                                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
                             let json_val = match val {
                                 libsql::Value::Null => serde_json::Value::Null,
-                                libsql::Value::Integer(n) => serde_json::value::Number::from_i128(n as i128).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
-                                libsql::Value::Real(f) => serde_json::value::Number::from_f64(f).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),
+                                libsql::Value::Integer(n) => {
+                                    serde_json::value::Number::from_i128(n as i128)
+                                        .map(serde_json::Value::Number)
+                                        .unwrap_or(serde_json::Value::Null)
+                                }
+                                libsql::Value::Real(f) => serde_json::value::Number::from_f64(f)
+                                    .map(serde_json::Value::Number)
+                                    .unwrap_or(serde_json::Value::Null),
                                 libsql::Value::Text(s) => serde_json::Value::String(s),
                                 libsql::Value::Blob(_) => serde_json::Value::Null,
                             };
@@ -778,10 +823,13 @@ impl PersistenceStore for LibsqlStore {
     fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
         let conn = self.conn.lock().unwrap();
         self.rt.block_on(async {
-            let mut rows = conn.query(
-                "SELECT sequence, state, waiting_signal FROM snapshots WHERE actor_id = ?1",
-                libsql::params![actor_id as i64],
-            ).await.ok()?;
+            let mut rows = conn
+                .query(
+                    "SELECT sequence, state, waiting_signal FROM snapshots WHERE actor_id = ?1",
+                    libsql::params![actor_id as i64],
+                )
+                .await
+                .ok()?;
             let row = rows.next().await.ok()??;
             let sequence: i64 = row.get(0).ok()?;
             let state_json: String = row.get(1).ok()?;
@@ -811,11 +859,14 @@ impl PersistenceStore for LibsqlStore {
     fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
         let conn = self.conn.lock().unwrap();
         self.rt.block_on(async {
-            let mut rows = match conn.query(
-                "SELECT sequence, behavior_id, payload FROM journal
+            let mut rows = match conn
+                .query(
+                    "SELECT sequence, behavior_id, payload FROM journal
                  WHERE actor_id = ?1 ORDER BY sequence ASC",
-                libsql::params![actor_id as i64],
-            ).await {
+                    libsql::params![actor_id as i64],
+                )
+                .await
+            {
                 Ok(r) => r,
                 Err(_) => return Vec::new(),
             };
@@ -823,10 +874,20 @@ impl PersistenceStore for LibsqlStore {
             loop {
                 match rows.next().await {
                     Ok(Some(row)) => {
-                        let seq: i64 = match row.get(0) { Ok(v) => v, Err(_) => continue };
-                        let bid: i64 = match row.get(1) { Ok(v) => v, Err(_) => continue };
-                        let payload_json: String = match row.get(2) { Ok(v) => v, Err(_) => continue };
-                        let payload: Vec<PersistedValue> = match serde_json::from_str(&payload_json) {
+                        let seq: i64 = match row.get(0) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let bid: i64 = match row.get(1) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let payload_json: String = match row.get(2) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let payload: Vec<PersistedValue> = match serde_json::from_str(&payload_json)
+                        {
                             Ok(p) => p,
                             Err(_) => continue,
                         };
@@ -852,18 +913,24 @@ impl PersistenceStore for LibsqlStore {
             conn.execute(
                 "INSERT INTO workflow_events (actor_id, sequence, event) VALUES (?1, ?2, ?3)",
                 libsql::params![actor_id as i64, event.sequence() as i64, event_json],
-            ).await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
         })
     }
 
     fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
         let conn = self.conn.lock().unwrap();
         self.rt.block_on(async {
-            let mut rows = match conn.query(
-                "SELECT event FROM workflow_events
+            let mut rows = match conn
+                .query(
+                    "SELECT event FROM workflow_events
                  WHERE actor_id = ?1 ORDER BY sequence ASC",
-                libsql::params![actor_id as i64],
-            ).await {
+                    libsql::params![actor_id as i64],
+                )
+                .await
+            {
                 Ok(r) => r,
                 Err(_) => return Vec::new(),
             };
@@ -871,7 +938,10 @@ impl PersistenceStore for LibsqlStore {
             loop {
                 match rows.next().await {
                     Ok(Some(row)) => {
-                        let event_json: String = match row.get(0) { Ok(v) => v, Err(_) => continue };
+                        let event_json: String = match row.get(0) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
                         if let Ok(event) = serde_json::from_str(&event_json) {
                             events.push(event);
                         }
@@ -899,11 +969,14 @@ impl PersistenceStore for LibsqlStore {
     fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
         let conn = self.conn.lock().unwrap();
         self.rt.block_on(async {
-            let mut rows = match conn.query(
-                "SELECT sequence, field_name, event_name, args FROM events
+            let mut rows = match conn
+                .query(
+                    "SELECT sequence, field_name, event_name, args FROM events
                  WHERE actor_id = ?1 ORDER BY sequence ASC",
-                libsql::params![actor_id as i64],
-            ).await {
+                    libsql::params![actor_id as i64],
+                )
+                .await
+            {
                 Ok(r) => r,
                 Err(_) => return Vec::new(),
             };
@@ -911,10 +984,22 @@ impl PersistenceStore for LibsqlStore {
             loop {
                 match rows.next().await {
                     Ok(Some(row)) => {
-                        let seq: i64 = match row.get(0) { Ok(v) => v, Err(_) => continue };
-                        let field_name: String = match row.get(1) { Ok(v) => v, Err(_) => continue };
-                        let event_name: String = match row.get(2) { Ok(v) => v, Err(_) => continue };
-                        let args_json: String = match row.get(3) { Ok(v) => v, Err(_) => continue };
+                        let seq: i64 = match row.get(0) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let field_name: String = match row.get(1) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let event_name: String = match row.get(2) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let args_json: String = match row.get(3) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
                         let args: Vec<PersistedValue> = match serde_json::from_str(&args_json) {
                             Ok(p) => p,
                             Err(_) => continue,
@@ -979,14 +1064,34 @@ impl PersistenceStore for LibsqlStore {
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
         let conn = self.conn.lock().unwrap();
         self.rt.block_on(async {
-            conn.execute("DELETE FROM snapshots WHERE actor_id = ?1", libsql::params![actor_id as i64])
-                .await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            conn.execute("DELETE FROM journal WHERE actor_id = ?1", libsql::params![actor_id as i64])
-                .await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            conn.execute("DELETE FROM workflow_events WHERE actor_id = ?1", libsql::params![actor_id as i64])
-                .await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-            conn.execute("DELETE FROM events WHERE actor_id = ?1", libsql::params![actor_id as i64])
-                .await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "DELETE FROM snapshots WHERE actor_id = ?1",
+                libsql::params![actor_id as i64],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "DELETE FROM journal WHERE actor_id = ?1",
+                libsql::params![actor_id as i64],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "DELETE FROM workflow_events WHERE actor_id = ?1",
+                libsql::params![actor_id as i64],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            conn.execute(
+                "DELETE FROM events WHERE actor_id = ?1",
+                libsql::params![actor_id as i64],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
             Ok(())
         })
     }

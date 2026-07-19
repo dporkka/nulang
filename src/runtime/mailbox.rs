@@ -153,10 +153,7 @@ impl Mailbox {
 
     /// Drain and scan a single queue for a matching message.  Used for the
     /// system queue only (small, rare); the normal queue uses the skip-buffer.
-    fn scan_queue(
-        queue: &SegQueue<Message>,
-        behavior_ids: &[u16],
-    ) -> Option<(usize, Vec<Value>)> {
+    fn scan_queue(queue: &SegQueue<Message>, behavior_ids: &[u16]) -> Option<(usize, Vec<Value>)> {
         let mut drained: Vec<Message> = Vec::new();
         while let Some(msg) = queue.pop() {
             drained.push(msg);

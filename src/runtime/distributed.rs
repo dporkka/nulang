@@ -42,9 +42,9 @@ use std::time::{Duration, Instant};
 // Imports from sibling modules in the runtime
 // ---------------------------------------------------------------------------
 
-use super::{ClusterState, NodeId, NodeStatus};
 use super::mailbox::{Message, MessagePriority};
 use super::network::{NetworkTransport, Packet};
+use super::{ClusterState, NodeId, NodeStatus};
 use crate::runtime::Runtime;
 use crate::vm::Value;
 
@@ -187,7 +187,9 @@ impl RemoteActorCache {
     pub fn get(&mut self, node_id: NodeId, actor_id: u64) -> Option<&RemoteActorInfo> {
         let key = (node_id, actor_id);
         // Check staleness first (immutable borrow) to avoid double mutable borrow.
-        let is_stale = self.entries.get(&key)
+        let is_stale = self
+            .entries
+            .get(&key)
             .map(|info| info.last_accessed.elapsed() > self.ttl)
             .unwrap_or(false);
         if is_stale {
@@ -282,7 +284,8 @@ impl RemoteActorCache {
     pub fn evict_stale(&mut self) {
         let cutoff = Instant::now() - self.ttl;
         self.entries.retain(|_, info| info.last_accessed >= cutoff);
-        self.access_order.retain(|key| self.entries.get(key).is_some());
+        self.access_order
+            .retain(|key| self.entries.get(key).is_some());
     }
 }
 
@@ -353,11 +356,7 @@ impl AddressResolver {
     /// For local addresses, returns [`ResolveResult::Local`].
     /// For remote addresses, checks the cluster membership to verify
     /// the node is healthy, then returns [`ResolveResult::Remote`].
-    pub fn resolve(
-        &mut self,
-        cluster: &ClusterState,
-        address: ActorAddress,
-    ) -> ResolveResult {
+    pub fn resolve(&mut self, cluster: &ClusterState, address: ActorAddress) -> ResolveResult {
         match address {
             ActorAddress::Local { actor_id } => {
                 self.stats.local_resolves += 1;
@@ -555,7 +554,7 @@ impl AddressResolver {
 /// use nulang_runtime::distributed::{ActorAddress, DistributedRuntimeImpl};
 ///
 /// let mut runtime = Runtime::new();
-/// let mut transport = NetworkTransport::bind(addr).unwrap();
+/// let mut transport = crate::runtime::network::TcpTransport::bind(addr).unwrap();
 /// let mut cluster = ClusterState::new(local_node, addr);
 /// let mut resolver = AddressResolver::new(local_node);
 ///
@@ -574,7 +573,7 @@ pub trait DistributedRuntime {
     /// over the network transport.
     fn send_distributed(
         &mut self,
-        transport: &mut NetworkTransport,
+        transport: &mut dyn NetworkTransport,
         cluster: &ClusterState,
         resolver: &mut AddressResolver,
         target: ActorAddress,
@@ -590,7 +589,7 @@ pub trait DistributedRuntime {
     /// why the transport is taken mutably: replies go back over the wire).
     fn process_network_packets(
         &mut self,
-        transport: &mut NetworkTransport,
+        transport: &mut dyn NetworkTransport,
         cluster: &mut ClusterState,
         resolver: &mut AddressResolver,
     );
@@ -601,7 +600,7 @@ pub trait DistributedRuntime {
     /// If `node` is remote, sends a spawn request over the network.
     fn spawn_on_node(
         &mut self,
-        transport: &mut NetworkTransport,
+        transport: &mut dyn NetworkTransport,
         node: NodeId,
         behavior_name: &str,
         initial_state: Vec<(String, Value)>,
@@ -637,19 +636,27 @@ impl<'a> DistributedRuntimeImpl<'a> {
 impl<'a> DistributedRuntime for DistributedRuntimeImpl<'a> {
     fn send_distributed(
         &mut self,
-        transport: &mut NetworkTransport,
+        transport: &mut dyn NetworkTransport,
         cluster: &ClusterState,
         resolver: &mut AddressResolver,
         target: ActorAddress,
         behavior: &str,
         args: &[Value],
     ) {
-        send_distributed(self.runtime, transport, cluster, resolver, target, behavior, args)
+        send_distributed(
+            self.runtime,
+            transport,
+            cluster,
+            resolver,
+            target,
+            behavior,
+            args,
+        )
     }
 
     fn process_network_packets(
         &mut self,
-        transport: &mut NetworkTransport,
+        transport: &mut dyn NetworkTransport,
         cluster: &mut ClusterState,
         resolver: &mut AddressResolver,
     ) {
@@ -658,7 +665,7 @@ impl<'a> DistributedRuntime for DistributedRuntimeImpl<'a> {
 
     fn spawn_on_node(
         &mut self,
-        _transport: &mut NetworkTransport,
+        _transport: &mut dyn NetworkTransport,
         node: NodeId,
         _behavior_name: &str,
         _initial_state: Vec<(String, Value)>,
@@ -698,7 +705,7 @@ impl<'a> DistributedRuntime for DistributedRuntimeImpl<'a> {
 /// ```
 pub fn send_distributed(
     runtime: &mut Runtime,
-    transport: &mut NetworkTransport,
+    transport: &mut dyn NetworkTransport,
     cluster: &ClusterState,
     resolver: &mut AddressResolver,
     target: ActorAddress,
@@ -757,10 +764,7 @@ pub fn send_distributed(
             }
         }
         ResolveResult::Unresolvable { reason } => {
-            eprintln!(
-                "nulang-net: dropping message to {:?}: {}",
-                target, reason
-            );
+            eprintln!("nulang-net: dropping message to {:?}: {}", target, reason);
             let sender = runtime.current_actor.unwrap_or(0);
             notify_delivery_failed(runtime, sender, &reason);
         }
@@ -775,8 +779,12 @@ pub fn send_distributed(
 /// 3=string intern failed on receiver, 4=target actor not found, 5=unknown.
 /// Non-existent senders (id 0) are silently skipped.
 fn notify_delivery_failed(runtime: &mut Runtime, sender_id: u64, reason: &str) {
-    if sender_id == 0 { return; }
-    if !runtime.actors.get(&sender_id).is_some() { return; }
+    if sender_id == 0 {
+        return;
+    }
+    if !runtime.actors.get(&sender_id).is_some() {
+        return;
+    }
     let code = delivery_failure_code(reason);
     let fail_payload = vec![Value::int(code), Value::nil()];
     runtime.send_message_by_id(sender_id, 0, &fail_payload);
@@ -854,7 +862,7 @@ fn try_lookup_content_hash(runtime: &Runtime, behavior_name: &str) -> Option<[u8
 
 /// Send a transport-level acknowledgement for a successfully processed packet.
 fn ack_packet(
-    transport: &mut NetworkTransport,
+    transport: &mut dyn NetworkTransport,
     cluster: &ClusterState,
     from_node: NodeId,
     seq: u64,
@@ -870,7 +878,7 @@ fn ack_packet(
 
 pub fn process_network_packets(
     runtime: &mut Runtime,
-    transport: &mut NetworkTransport,
+    transport: &mut dyn NetworkTransport,
     cluster: &mut ClusterState,
     resolver: &mut AddressResolver,
 ) {
@@ -949,10 +957,9 @@ pub fn process_network_packets(
                 // remote actor id (`Runtime::take_spawn_response`). The
                 // id carried by spawn_on_node's placeholder address is the
                 // request id, not a usable actor id.
-                runtime.pending_spawn_responses.insert(
-                    request_id,
-                    if success { Some(actor_id) } else { None },
-                );
+                runtime
+                    .pending_spawn_responses
+                    .insert(request_id, if success { Some(actor_id) } else { None });
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
             Packet::CrdtSync { ops } => {
@@ -992,12 +999,21 @@ pub fn process_network_packets(
                     // If the sender attached a content hash, verify it
                     // against the local behavior table.
                     if let Some(sender_hash) = content_hash {
-                        if !verify_behavior_hash(runtime, target_actor, msg.behavior_id, &sender_hash) {
+                        if !verify_behavior_hash(
+                            runtime,
+                            target_actor,
+                            msg.behavior_id,
+                            &sender_hash,
+                        ) {
                             eprintln!(
                                 "nulang-net: dropping message to actor {}: behavior '{}' content hash mismatch (possible version skew)",
                                 target_actor, behavior_name
                             );
-                            notify_delivery_failed(runtime, msg.sender, "behavior content hash mismatch");
+                            notify_delivery_failed(
+                                runtime,
+                                msg.sender,
+                                "behavior content hash mismatch",
+                            );
                             ack_packet(transport, cluster, incoming.from_node, incoming.seq);
                             continue;
                         }
@@ -1014,7 +1030,11 @@ pub fn process_network_packets(
                             "nulang-net: dropping message to actor {}: string payload cannot be interned (target actor missing or has no module pool)",
                             target_actor
                         );
-                        notify_delivery_failed(runtime, msg.sender, "string intern failed on receiver");
+                        notify_delivery_failed(
+                            runtime,
+                            msg.sender,
+                            "string intern failed on receiver",
+                        );
                         continue;
                     }
                     if let Some(actor) = runtime.actors.get_mut(&target_actor) {
@@ -1040,12 +1060,16 @@ pub fn process_network_packets(
 /// The full-state `Packet::CrdtSync` path remains available for
 /// join/reset and as the repair mechanism after message loss.
 pub fn sync_crdts_delta(runtime: &mut Runtime) {
-    if !runtime.distributed.enabled { return; }
+    if !runtime.distributed.enabled {
+        return;
+    }
     let ops = match &mut runtime.crdt_manager {
         Some(m) => m.generate_delta_sync_ops(),
         None => return,
     };
-    if ops.is_empty() { return; }
+    if ops.is_empty() {
+        return;
+    }
     let packet = Packet::CrdtDeltaSync { ops };
     if let Some(cluster) = &runtime.distributed.cluster {
         for member in cluster.healthy_members() {
@@ -1069,7 +1093,7 @@ pub fn sync_crdts_delta(runtime: &mut Runtime) {
 /// anything else is rejected with `success: false`.
 pub fn spawn_on_node(
     runtime: &mut Runtime,
-    transport: &mut NetworkTransport,
+    transport: &mut dyn NetworkTransport,
     cluster: &ClusterState,
     resolver: &AddressResolver,
     node: NodeId,
@@ -1137,7 +1161,9 @@ fn resolve_wire_strings(runtime: &Runtime, args: &[Value]) -> Option<(Vec<Value>
     let mut payload = args.to_vec();
     let mut table: Vec<String> = Vec::new();
     for value in payload.iter_mut() {
-        let Some(id) = value.as_string_id() else { continue };
+        let Some(id) = value.as_string_id() else {
+            continue;
+        };
         let content = resolve_sender_string(runtime, id)?;
         // Reuse a table entry for repeated content within one packet.
         let idx = match table.iter().position(|s| s == &content) {
@@ -1184,8 +1210,12 @@ fn intern_wire_strings(
     };
     let vm = runtime.vm.as_mut().expect("a module index implies a VM");
     for value in payload.iter_mut() {
-        let Some(id) = value.as_string_id() else { continue };
-        let Some(content) = string_table.get(id as usize) else { return false };
+        let Some(id) = value.as_string_id() else {
+            continue;
+        };
+        let Some(content) = string_table.get(id as usize) else {
+            return false;
+        };
         *value = intern_pool_string(vm, module_idx, content);
     }
     true
@@ -1334,10 +1364,22 @@ mod tests {
         cache.put(NodeId(4), 40);
         assert_eq!(cache.len(), 3);
 
-        assert!(cache.get(NodeId(1), 10).is_some(), "(1,10) should still be cached");
-        assert!(cache.get(NodeId(3), 30).is_some(), "(3,30) should still be cached");
-        assert!(cache.get(NodeId(4), 40).is_some(), "(4,40) should be cached");
-        assert!(cache.get(NodeId(2), 20).is_none(), "(2,20) should have been evicted");
+        assert!(
+            cache.get(NodeId(1), 10).is_some(),
+            "(1,10) should still be cached"
+        );
+        assert!(
+            cache.get(NodeId(3), 30).is_some(),
+            "(3,30) should still be cached"
+        );
+        assert!(
+            cache.get(NodeId(4), 40).is_some(),
+            "(4,40) should be cached"
+        );
+        assert!(
+            cache.get(NodeId(2), 20).is_none(),
+            "(2,20) should have been evicted"
+        );
     }
 
     // -- 6. Resolver: local address ------------------------------------------
@@ -1370,7 +1412,13 @@ mod tests {
         let address = ActorAddress::remote(peer_id, 55);
         let result = resolver.resolve(&cluster, address);
 
-        assert_eq!(result, ResolveResult::Remote { node_id: peer_id, actor_id: 55 });
+        assert_eq!(
+            result,
+            ResolveResult::Remote {
+                node_id: peer_id,
+                actor_id: 55
+            }
+        );
         assert_eq!(resolver.stats().remote_resolves, 1);
         // Should be cached after resolution.
         assert!(resolver.cache_mut().get(peer_id, 55).is_some());
@@ -1427,10 +1475,10 @@ mod tests {
         let resolver = AddressResolver::new(local_node);
 
         let packet = resolver.build_packet(
-            42,   // target_actor
+            42, // target_actor
             "handle_msg",
             vec![Value::int(7), Value::string(0)],
-            100,  // sender_actor
+            100, // sender_actor
             MessagePriority::Normal,
             vec!["hello".to_string()],
             None, // content_hash
@@ -1506,7 +1554,7 @@ mod tests {
         let mut resolver = AddressResolver::new(local_node);
 
         // Create a transport — bind to port 0 to get an ephemeral port.
-        let transport = NetworkTransport::bind(addr(0));
+        let transport = crate::runtime::network::TcpTransport::bind(addr(0));
         if let Ok(mut transport) = transport {
             let mut dist = DistributedRuntimeImpl::new(&mut runtime);
 
@@ -1578,8 +1626,14 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
 
-        let d = ResolveResult::Remote { node_id: NodeId(1), actor_id: 5 };
-        let e = ResolveResult::Remote { node_id: NodeId(1), actor_id: 5 };
+        let d = ResolveResult::Remote {
+            node_id: NodeId(1),
+            actor_id: 5,
+        };
+        let e = ResolveResult::Remote {
+            node_id: NodeId(1),
+            actor_id: 5,
+        };
         assert_eq!(d, e);
     }
 
@@ -1617,9 +1671,8 @@ mod tests {
         // placeholder id 0 would dispatch "dec" instead, so this test
         // fails without name-based dispatch.
         let mut runtime_b = Runtime::new();
-        let actor_b = runtime_b.spawn_actor(Box::new(|| {
-            vec![("count".to_string(), Value::int(0))]
-        }));
+        let actor_b =
+            runtime_b.spawn_actor(Box::new(|| vec![("count".to_string(), Value::int(0))]));
         {
             let actor = runtime_b.actors.get_mut(&actor_b).unwrap();
             actor.register_behavior("dec", |actor, _args| {
@@ -1628,20 +1681,22 @@ mod tests {
                 }
             });
             actor.register_behavior("inc", |actor, args| {
-                let n = actor.get_state_field("count").and_then(|v| v.as_int()).unwrap_or(0);
+                let n = actor
+                    .get_state_field("count")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0);
                 let by = args.get(0).and_then(|v| v.as_int()).unwrap_or(1);
                 actor.set_state_field("count", Value::int(n + by));
             });
         }
 
-        let mut transport_a = NetworkTransport::bind(addr(0)).unwrap();
-        let mut transport_b = NetworkTransport::bind(addr(0)).unwrap();
+        let mut transport_a = crate::runtime::network::TcpTransport::bind(addr(0)).unwrap();
+        let mut transport_b = crate::runtime::network::TcpTransport::bind(addr(0)).unwrap();
         let node_b = transport_b.node_id();
         let addr_b = transport_b.listen_addr();
 
         // Node A's cluster knows B as a healthy peer.
-        let mut cluster_a =
-            ClusterState::new(transport_a.node_id(), transport_a.listen_addr());
+        let mut cluster_a = ClusterState::new(transport_a.node_id(), transport_a.listen_addr());
         cluster_a.handle_heartbeat(node_b, addr_b);
         let mut resolver_a = AddressResolver::new(transport_a.node_id());
         let mut runtime_a = Runtime::new();
@@ -1652,7 +1707,7 @@ mod tests {
 
         let target = ActorAddress::remote(node_b, actor_b);
         let deliver = |runtime_b: &mut Runtime,
-                       transport_b: &mut NetworkTransport,
+                       transport_b: &mut dyn NetworkTransport,
                        cluster_b: &mut ClusterState,
                        resolver_b: &mut AddressResolver| {
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -1672,28 +1727,62 @@ mod tests {
 
         // Named behavior: must dispatch "inc" (id 1), not "dec" (id 0).
         send_distributed(
-            &mut runtime_a, &mut transport_a, &cluster_a, &mut resolver_a,
-            target, "inc", &[Value::int(5)],
+            &mut runtime_a,
+            &mut transport_a,
+            &cluster_a,
+            &mut resolver_a,
+            target,
+            "inc",
+            &[Value::int(5)],
         );
-        deliver(&mut runtime_b, &mut transport_b, &mut cluster_b, &mut resolver_b);
+        deliver(
+            &mut runtime_b,
+            &mut transport_b,
+            &mut cluster_b,
+            &mut resolver_b,
+        );
         runtime_b.step_actor(actor_b);
         let count = runtime_b
-            .actors.get(&actor_b).unwrap()
-            .get_state_field("count").and_then(|v| v.as_int()).unwrap();
-        assert_eq!(count, 5, "remote send must dispatch the named behavior \"inc\"");
+            .actors
+            .get(&actor_b)
+            .unwrap()
+            .get_state_field("count")
+            .and_then(|v| v.as_int())
+            .unwrap();
+        assert_eq!(
+            count, 5,
+            "remote send must dispatch the named behavior \"inc\""
+        );
 
         // Unknown behavior name: falls back to behavior 0, mirroring
         // `Runtime::send_message`'s `unwrap_or(0)` for local sends.
         send_distributed(
-            &mut runtime_a, &mut transport_a, &cluster_a, &mut resolver_a,
-            target, "no_such_behavior", &[],
+            &mut runtime_a,
+            &mut transport_a,
+            &cluster_a,
+            &mut resolver_a,
+            target,
+            "no_such_behavior",
+            &[],
         );
-        deliver(&mut runtime_b, &mut transport_b, &mut cluster_b, &mut resolver_b);
+        deliver(
+            &mut runtime_b,
+            &mut transport_b,
+            &mut cluster_b,
+            &mut resolver_b,
+        );
         runtime_b.step_actor(actor_b);
         let count = runtime_b
-            .actors.get(&actor_b).unwrap()
-            .get_state_field("count").and_then(|v| v.as_int()).unwrap();
-        assert_eq!(count, 4, "unknown behavior name must fall back to behavior 0 (\"dec\")");
+            .actors
+            .get(&actor_b)
+            .unwrap()
+            .get_state_field("count")
+            .and_then(|v| v.as_int())
+            .unwrap();
+        assert_eq!(
+            count, 4,
+            "unknown behavior name must fall back to behavior 0 (\"dec\")"
+        );
 
         transport_a.shutdown();
         transport_b.shutdown();
@@ -1782,7 +1871,12 @@ mod tests {
         assert!(intern_wire_strings(&mut rt, actor_id, &mut payload, &table));
         assert_eq!(payload[0], Value::string(1));
         assert_eq!(payload[1], Value::int(9), "scalars must pass through");
-        let module_idx = rt.actors.get(&actor_id).unwrap().bytecode_module_idx.unwrap();
+        let module_idx = rt
+            .actors
+            .get(&actor_id)
+            .unwrap()
+            .bytecode_module_idx
+            .unwrap();
         let vm = rt.vm.as_ref().unwrap();
         assert_eq!(
             vm.constant_string(module_idx, payload[0].as_string_id().unwrap()),
@@ -1793,7 +1887,12 @@ mod tests {
         // Repeated content dedups against the existing pool entry — the
         // pool must not grow per message.
         let mut payload2 = vec![Value::string(0)];
-        assert!(intern_wire_strings(&mut rt, actor_id, &mut payload2, &table));
+        assert!(intern_wire_strings(
+            &mut rt,
+            actor_id,
+            &mut payload2,
+            &table
+        ));
         assert_eq!(payload2[0], Value::string(1));
         assert_eq!(
             rt.vm.as_ref().unwrap().modules[module_idx].constants.len(),
@@ -1842,9 +1941,8 @@ mod tests {
         let mut runtime_b = Runtime::new();
         let mut module_b = CodeModule::new("receiver");
         module_b.add_constant(Constant::String("DECOY-RECEIVER-LOCAL".to_string()));
-        let actor_b = runtime_b.spawn_actor(Box::new(|| {
-            vec![("received".to_string(), Value::nil())]
-        }));
+        let actor_b =
+            runtime_b.spawn_actor(Box::new(|| vec![("received".to_string(), Value::nil())]));
         {
             let actor = runtime_b.actors.get_mut(&actor_b).unwrap();
             actor.bytecode_module = Some(module_b);
@@ -1854,14 +1952,13 @@ mod tests {
             });
         }
 
-        let mut transport_a = NetworkTransport::bind(addr(0)).unwrap();
-        let mut transport_b = NetworkTransport::bind(addr(0)).unwrap();
+        let mut transport_a = crate::runtime::network::TcpTransport::bind(addr(0)).unwrap();
+        let mut transport_b = crate::runtime::network::TcpTransport::bind(addr(0)).unwrap();
         let node_b = transport_b.node_id();
         let addr_b = transport_b.listen_addr();
 
         // Node A's cluster knows B as a healthy peer.
-        let mut cluster_a =
-            ClusterState::new(transport_a.node_id(), transport_a.listen_addr());
+        let mut cluster_a = ClusterState::new(transport_a.node_id(), transport_a.listen_addr());
         cluster_a.handle_heartbeat(node_b, addr_b);
         let mut resolver_a = AddressResolver::new(transport_a.node_id());
 
@@ -1871,13 +1968,23 @@ mod tests {
 
         let target = ActorAddress::remote(node_b, actor_b);
         send_distributed(
-            &mut runtime_a, &mut transport_a, &cluster_a, &mut resolver_a,
-            target, "store", &[Value::string(0)],
+            &mut runtime_a,
+            &mut transport_a,
+            &cluster_a,
+            &mut resolver_a,
+            target,
+            "store",
+            &[Value::string(0)],
         );
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
-            process_network_packets(&mut runtime_b, &mut transport_b, &mut cluster_b, &mut resolver_b);
+            process_network_packets(
+                &mut runtime_b,
+                &mut transport_b,
+                &mut cluster_b,
+                &mut resolver_b,
+            );
             let pending = runtime_b
                 .actors
                 .get(&actor_b)
@@ -1889,23 +1996,36 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(
-            runtime_b.actors.get(&actor_b).map(|a| a.mailbox.len()).unwrap_or(0) > 0,
+            runtime_b
+                .actors
+                .get(&actor_b)
+                .map(|a| a.mailbox.len())
+                .unwrap_or(0)
+                > 0,
             "string message was not delivered to the remote actor's mailbox"
         );
 
         runtime_b.step_actor(actor_b);
 
         let stored = runtime_b
-            .actors.get(&actor_b).unwrap()
-            .get_state_field("received").unwrap();
+            .actors
+            .get(&actor_b)
+            .unwrap()
+            .get_state_field("received")
+            .unwrap();
         let stored_id = stored
             .as_string_id()
             .expect("payload must arrive as a string value");
         let module_idx = runtime_b
-            .actors.get(&actor_b).unwrap()
-            .bytecode_module_idx.unwrap();
+            .actors
+            .get(&actor_b)
+            .unwrap()
+            .bytecode_module_idx
+            .unwrap();
         let content = runtime_b
-            .vm.as_ref().unwrap()
+            .vm
+            .as_ref()
+            .unwrap()
             .constant_string(module_idx, stored_id);
         assert_eq!(
             content,

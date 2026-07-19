@@ -387,7 +387,11 @@ mod tests {
                 "signature of '{}' must start with the op name",
                 op.name
             );
-            assert!(!op.description.is_empty(), "'{}' needs a description", op.name);
+            assert!(
+                !op.description.is_empty(),
+                "'{}' needs a description",
+                op.name
+            );
         }
     }
 
@@ -445,7 +449,11 @@ mod tests {
         let lib = StdLib::new();
         let err = lib.require("Net.send").unwrap_err();
         let msg = format!("{}", err);
-        assert!(msg.contains("Net.send"), "error must name the operation: {}", msg);
+        assert!(
+            msg.contains("Net.send"),
+            "error must name the operation: {}",
+            msg
+        );
     }
 
     #[test]

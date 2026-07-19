@@ -61,7 +61,7 @@ impl WireValue {
             WireValue::Int(i) => Value::int(*i),
             WireValue::Float(f) => Value::float(*f),
             WireValue::String(_s) => Value::nil(), // stub: string allocation
-            _ => Value::nil(), // stub: compound types
+            _ => Value::nil(),                     // stub: compound types
         }
     }
 }

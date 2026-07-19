@@ -5,8 +5,8 @@
 //! scheduler fairness under load.
 
 use std::collections::HashMap;
-use std::time::Duration;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::runtime::*;

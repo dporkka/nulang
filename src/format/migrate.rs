@@ -50,7 +50,11 @@ pub fn migrate_nbc(bytes: &[u8], target_version: u32) -> Result<Vec<u8>, FormatE
     if !KNOWN_VERSIONS.contains(&from) || !KNOWN_VERSIONS.contains(&target_version) {
         return Err(FormatError::UnsupportedVersion {
             max_supported: *KNOWN_VERSIONS.last().unwrap(),
-            found: if !KNOWN_VERSIONS.contains(&from) { from } else { target_version },
+            found: if !KNOWN_VERSIONS.contains(&from) {
+                from
+            } else {
+                target_version
+            },
         });
     }
     // v1 -> v1: identity (the only registered migration today).

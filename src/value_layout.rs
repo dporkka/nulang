@@ -204,7 +204,9 @@ mod tests {
             assert!(
                 seen.insert(upper),
                 "tag {} ({:#018x}) upper 16 bits {:#06x} collide with another tag",
-                name, tag, upper
+                name,
+                tag,
+                upper
             );
         }
     }
@@ -261,17 +263,17 @@ mod tests {
     #[test]
     fn test_is_float_raw() {
         // Real floats (non-NaN) should be detected.
-        assert!(is_float_raw(0u64));                          // +0.0
-        assert!(is_float_raw(0x3FF0_0000_0000_0000));         // 1.0
-        assert!(is_float_raw(0x4000_0000_0000_0000));         // 2.0
-        assert!(is_float_raw(0x7FF0_0000_0000_0000));         // +inf
-        // Tagged values should NOT be detected as floats.
+        assert!(is_float_raw(0u64)); // +0.0
+        assert!(is_float_raw(0x3FF0_0000_0000_0000)); // 1.0
+        assert!(is_float_raw(0x4000_0000_0000_0000)); // 2.0
+        assert!(is_float_raw(0x7FF0_0000_0000_0000)); // +inf
+                                                      // Tagged values should NOT be detected as floats.
         assert!(!is_float_raw(tag_int(1)));
         assert!(!is_float_raw(TAG_NIL));
         assert!(!is_float_raw(TAG_PTR | 0x1000));
         assert!(!is_float_raw(TAG_CLOSURE | 0x10));
         // NaN values with different upper bits (not a known tag) ARE floats.
-        assert!(is_float_raw(0x7FF5_0000_0000_0000));         // NaN, not a tag
+        assert!(is_float_raw(0x7FF5_0000_0000_0000)); // NaN, not a tag
     }
 
     #[test]

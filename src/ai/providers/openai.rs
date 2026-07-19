@@ -62,16 +62,19 @@ impl LlmClient for OpenAiClient {
             return Err(classify_http_error(status.as_u16(), &status_text));
         }
 
-        let response: OpenAiChatResponse = response
-            .json()
-            .await
-            .map_err(|e| LlmError::new(LlmErrorKind::FormatError, format!("OpenAI response parse failed: {}", e)))?;
+        let response: OpenAiChatResponse = response.json().await.map_err(|e| {
+            LlmError::new(
+                LlmErrorKind::FormatError,
+                format!("OpenAI response parse failed: {}", e),
+            )
+        })?;
 
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| LlmError::new(LlmErrorKind::FormatError, "OpenAI response contained no choices"))?;
+        let choice = response.choices.into_iter().next().ok_or_else(|| {
+            LlmError::new(
+                LlmErrorKind::FormatError,
+                "OpenAI response contained no choices",
+            )
+        })?;
 
         let message = choice.message;
         let content = if message
@@ -121,11 +124,20 @@ impl LlmClient for OpenAiClient {
 /// everything else → ProviderError with the error text.
 fn classify_reqwest_error(e: reqwest::Error) -> LlmError {
     if e.is_timeout() {
-        LlmError::new(LlmErrorKind::Timeout, format!("OpenAI request timed out: {}", e))
+        LlmError::new(
+            LlmErrorKind::Timeout,
+            format!("OpenAI request timed out: {}", e),
+        )
     } else if e.is_connect() {
-        LlmError::new(LlmErrorKind::ProviderError, format!("OpenAI connection failed: {}", e))
+        LlmError::new(
+            LlmErrorKind::ProviderError,
+            format!("OpenAI connection failed: {}", e),
+        )
     } else {
-        LlmError::new(LlmErrorKind::ProviderError, format!("OpenAI request failed: {}", e))
+        LlmError::new(
+            LlmErrorKind::ProviderError,
+            format!("OpenAI request failed: {}", e),
+        )
     }
 }
 

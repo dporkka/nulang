@@ -1067,7 +1067,11 @@ describe
     #[test]
     fn test_type_alias_expansion_end_to_end() {
         let ok = check_source("type alias MyInt = Int\nfn f(x: MyInt) -> MyInt { x }\nf(1)");
-        assert!(ok.is_ok(), "alias use with Int should check, got {:?}", ok.err());
+        assert!(
+            ok.is_ok(),
+            "alias use with Int should check, got {:?}",
+            ok.err()
+        );
         let bad = check_source("type alias MyInt = Int\nfn f(x: MyInt) -> MyInt { x }\nf(\"s\")");
         assert!(
             bad.is_err(),
@@ -1077,8 +1081,9 @@ describe
 
     #[test]
     fn test_record_type_annotation_end_to_end() {
-        let result =
-            check_source("type Point = { x: Int, y: Int }\nfn get_x(p: Point) -> Int { p.x }\nget_x");
+        let result = check_source(
+            "type Point = { x: Int, y: Int }\nfn get_x(p: Point) -> Int { p.x }\nget_x",
+        );
         assert!(
             result.is_ok(),
             "record type name in annotation should check, got {:?}",
@@ -1896,7 +1901,11 @@ match { a: 2, b: 9 } with {
         let mut vm = VM::new();
         vm.load_module(module);
         let value = vm.run().unwrap();
-        assert_eq!(value.as_float(), Some(0.5), "typed-path float math must be exact");
+        assert_eq!(
+            value.as_float(),
+            Some(0.5),
+            "typed-path float math must be exact"
+        );
         assert!(
             vm.jit_typed_compiled_count() >= 1,
             "hot float function must compile through the type-directed JIT path"
@@ -2067,10 +2076,7 @@ match { a: 2, b: 9 } with {
     #[test]
     fn test_string_concat_and_int_to_string() {
         assert_string(r#""hello " + "world""#, "hello world");
-        assert_string(
-            r#""count: " + perform Int.to_string(42)"#,
-            "count: 42",
-        );
+        assert_string(r#""count: " + perform Int.to_string(42)"#, "count: 42");
     }
 
     #[test]
@@ -2850,7 +2856,11 @@ match { a: 2, b: 9 } with {
         };
         let actor_id = {
             let rt = rt.borrow();
-            assert_eq!(rt.actors.len(), 1, "exactly one workflow actor should exist");
+            assert_eq!(
+                rt.actors.len(),
+                1,
+                "exactly one workflow actor should exist"
+            );
             *rt.actors.keys().next().unwrap()
         };
 
@@ -2870,7 +2880,8 @@ match { a: 2, b: 9 } with {
 
         let events_before = store.read_workflow_events(actor_id).len();
 
-        rt.borrow_mut().register_workflow_query(actor_id, "progress", handler);
+        rt.borrow_mut()
+            .register_workflow_query(actor_id, "progress", handler);
         let result = rt.borrow_mut().query_workflow(actor_id, "progress");
         assert_eq!(
             result.and_then(|v| v.as_int()),
@@ -2954,11 +2965,16 @@ match { a: 2, b: 9 } with {
         };
         let actor_id = {
             let rt = rt.borrow();
-            assert_eq!(rt.actors.len(), 1, "exactly one workflow actor should exist");
+            assert_eq!(
+                rt.actors.len(),
+                1,
+                "exactly one workflow actor should exist"
+            );
             *rt.actors.keys().next().unwrap()
         };
 
-        rt.borrow_mut().register_workflow_query(actor_id, "progress", handler);
+        rt.borrow_mut()
+            .register_workflow_query(actor_id, "progress", handler);
         rt.borrow_mut().send_message(actor_id, "bump", &[]);
         rt.borrow_mut().run_scheduler();
         rt.borrow_mut().send_message(actor_id, "inspect", &[]);
@@ -2998,7 +3014,10 @@ match { a: 2, b: 9 } with {
             }
         "#;
         let (value, _ty) = run_source(source).unwrap();
-        assert!(value.is_nil(), "Actor.* effects should yield nil outside a runtime");
+        assert!(
+            value.is_nil(),
+            "Actor.* effects should yield nil outside a runtime"
+        );
     }
 
     #[test]
@@ -3024,7 +3043,9 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let peer_id = value.as_actor_id().expect("spawn should return an actor ref");
+        let peer_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor ref");
 
         rt.borrow_mut().run_scheduler();
 
@@ -3059,7 +3080,9 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let peer_id = value.as_actor_id().expect("spawn should return an actor ref");
+        let peer_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor ref");
 
         rt.borrow_mut().run_scheduler();
 
@@ -3094,7 +3117,9 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let peer_id = value.as_actor_id().expect("spawn should return an actor ref");
+        let peer_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor ref");
 
         rt.borrow_mut().run_scheduler();
 
@@ -3129,7 +3154,9 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let victim_id = value.as_actor_id().expect("spawn should return an actor ref");
+        let victim_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor ref");
 
         rt.borrow_mut().run_scheduler();
         let peer_id = rt
@@ -3169,7 +3196,9 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let peer_id = value.as_actor_id().expect("spawn should return an actor ref");
+        let peer_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor ref");
 
         rt.borrow_mut().run_scheduler();
 
@@ -3203,7 +3232,9 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let watcher_id = value.as_actor_id().expect("spawn should return an actor ref");
+        let watcher_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor ref");
 
         rt.borrow_mut().run_scheduler();
 
@@ -3243,7 +3274,9 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let watcher_id = value.as_actor_id().expect("spawn should return an actor ref");
+        let watcher_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor ref");
 
         rt.borrow_mut().run_scheduler();
 
@@ -3280,7 +3313,9 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let hero_id = value.as_actor_id().expect("spawn should return an actor ref");
+        let hero_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor ref");
 
         rt.borrow_mut().run_scheduler();
 
@@ -3297,7 +3332,9 @@ match { a: 2, b: 9 } with {
             "whereis should resolve the registered name to the actor ref"
         );
         assert!(
-            hero.get_state_field("gone").map(|v| v.is_nil()).unwrap_or(false),
+            hero.get_state_field("gone")
+                .map(|v| v.is_nil())
+                .unwrap_or(false),
             "whereis should return nil for an unregistered name"
         );
     }
@@ -3315,7 +3352,9 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let leaver_id = value.as_actor_id().expect("spawn should return an actor ref");
+        let leaver_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor ref");
 
         rt.borrow_mut().run_scheduler();
 
@@ -3349,7 +3388,9 @@ match { a: 2, b: 9 } with {
             "watcher should see the link exit signal and the monitor DOWN"
         );
         assert_eq!(
-            watcher.get_state_field("seen").and_then(|v| v.as_actor_id()),
+            watcher
+                .get_state_field("seen")
+                .and_then(|v| v.as_actor_id()),
             Some(watcher_id),
             "whereis should resolve the registered name to the actor ref"
         );
@@ -3373,7 +3414,10 @@ match { a: 2, b: 9 } with {
             }
         "#;
         let (value, _ty) = run_source(source).unwrap();
-        assert!(value.is_nil(), "Otp.* effects should yield nil outside a runtime");
+        assert!(
+            value.is_nil(),
+            "Otp.* effects should yield nil outside a runtime"
+        );
     }
 
     #[test]
@@ -3414,7 +3458,11 @@ match { a: 2, b: 9 } with {
             .iter()
             .map(|(_, id)| *id)
             .collect();
-        assert_eq!(children.len(), 2, "two dynamic children should be supervised");
+        assert_eq!(
+            children.len(),
+            2,
+            "two dynamic children should be supervised"
+        );
         for (child, want) in children.iter().zip([1, 2]) {
             assert_eq!(
                 rt.borrow().actors[child]
@@ -3434,8 +3482,15 @@ match { a: 2, b: 9 } with {
             .iter()
             .map(|(_, id)| *id)
             .collect();
-        assert_eq!(after.len(), 2, "the crashed child must be replaced, not dropped");
-        assert_eq!(after[1], children[1], "the surviving child must be untouched");
+        assert_eq!(
+            after.len(),
+            2,
+            "the crashed child must be replaced, not dropped"
+        );
+        assert_eq!(
+            after[1], children[1],
+            "the surviving child must be untouched"
+        );
         let restarted = after[0];
         assert_ne!(restarted, children[0], "restart must create a fresh actor");
         assert_eq!(
@@ -3448,7 +3503,8 @@ match { a: 2, b: 9 } with {
 
         // The replacement is a real bytecode actor: send it work and let
         // the scheduler run its template behavior.
-        rt.borrow_mut().send_message(restarted, "work", &[Value::int(5)]);
+        rt.borrow_mut()
+            .send_message(restarted, "work", &[Value::int(5)]);
         rt.borrow_mut().run_scheduler();
         assert_eq!(
             rt.borrow().actors[&restarted]
@@ -3571,7 +3627,9 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let light_id = value.as_actor_id().expect("main should return the actor ref");
+        let light_id = value
+            .as_actor_id()
+            .expect("main should return the actor ref");
         rt.borrow_mut().run_scheduler();
 
         let rt_ref = rt.borrow();
@@ -3627,17 +3685,28 @@ match { a: 2, b: 9 } with {
         "#;
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
-        let machine_id = value.as_actor_id().expect("main should return the actor ref");
+        let machine_id = value
+            .as_actor_id()
+            .expect("main should return the actor ref");
         rt.borrow_mut().run_scheduler();
 
         let rt_ref = rt.borrow();
-        assert!(rt_ref.actors.contains_key(&machine_id), "actor should survive self-transitions");
+        assert!(
+            rt_ref.actors.contains_key(&machine_id),
+            "actor should survive self-transitions"
+        );
         let actor = &rt_ref.actors[&machine_id];
         let state_val = actor
             .get_state_field("_sm_state")
             .expect("_sm_state should exist");
-        assert!(state_val.is_ptr() || state_val.is_string(), "_sm_state should be a string-ish value");
-        assert!(!actor.bytecode_offsets.is_empty(), "desugared actor should have bytecode offsets");
+        assert!(
+            state_val.is_ptr() || state_val.is_string(),
+            "_sm_state should be a string-ish value"
+        );
+        assert!(
+            !actor.bytecode_offsets.is_empty(),
+            "desugared actor should have bytecode offsets"
+        );
     }
 
     #[test]
@@ -3849,15 +3918,19 @@ match { a: 2, b: 9 } with {
         let called: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
         let cb = called.clone();
 
-        rt.borrow_mut().install_test_handler("IO.print", move |_regs| {
-            *cb.borrow_mut() = true;
-            Some(Value::unit())
-        });
+        rt.borrow_mut()
+            .install_test_handler("IO.print", move |_regs| {
+                *cb.borrow_mut() = true;
+                Some(Value::unit())
+            });
 
         let source = r#"perform IO.print("hello from test handler")"#;
         let value = run_source_new_with_runtime(source, rt).unwrap();
         assert_eq!(value, Value::unit());
-        assert!(*called.borrow(), "test handler should have intercepted IO.print");
+        assert!(
+            *called.borrow(),
+            "test handler should have intercepted IO.print"
+        );
     }
 
     #[test]
@@ -3870,10 +3943,11 @@ match { a: 2, b: 9 } with {
         let cb = called.clone();
 
         // Handler returns None → real IO.print dispatch fires (println!).
-        rt.borrow_mut().install_test_handler("IO.print", move |_regs| {
-            *cb.borrow_mut() = true;
-            None // fall through to real handler
-        });
+        rt.borrow_mut()
+            .install_test_handler("IO.print", move |_regs| {
+                *cb.borrow_mut() = true;
+                None // fall through to real handler
+            });
 
         let source = r#"perform IO.print("fallthrough test")"#;
         let value = run_source_new_with_runtime(source, rt).unwrap();
@@ -3902,21 +3976,25 @@ match { a: 2, b: 9 } with {
         // Schedule a timer 5 seconds from now.
         let _id = rt.timer_wheel.send_after(
             Duration::from_secs(5),
-            42,  // dummy actor
-            1,   // dummy behavior
+            42, // dummy actor
+            1,  // dummy behavior
             vec![],
         );
 
         // Tick — nothing should fire yet (timer at T+5s, clock at T+0).
         rt.tick_timers();
-        assert!(!rt.timer_wheel.is_empty(),
-            "timer should still be pending at virtual t=0");
+        assert!(
+            !rt.timer_wheel.is_empty(),
+            "timer should still be pending at virtual t=0"
+        );
 
         // Advance 10 seconds — timer at 5s must fire.
         rt.advance_time(Duration::from_secs(10));
         rt.tick_timers();
-        assert!(rt.timer_wheel.is_empty(),
-            "timer should have fired and been removed after advancing 10s");
+        assert!(
+            rt.timer_wheel.is_empty(),
+            "timer should have fired and been removed after advancing 10s"
+        );
 
         rt.remove_virtual_clock();
     }
@@ -3935,7 +4013,10 @@ match { a: 2, b: 9 } with {
 
         rt.advance_time(Duration::from_secs(1));
         let t2 = rt.now();
-        assert!(t2 > t0, "virtual clock should advance when explicitly advanced");
+        assert!(
+            t2 > t0,
+            "virtual clock should advance when explicitly advanced"
+        );
 
         rt.remove_virtual_clock();
     }
@@ -3944,7 +4025,7 @@ match { a: 2, b: 9 } with {
 
     #[test]
     fn test_token_budget_exhausted_rejects_llm_request() {
-        use crate::ai::{LlmErrorKind, MockLlmClient, TokenUsage, LlmResponse, LlmRequest};
+        use crate::ai::{LlmErrorKind, LlmRequest, LlmResponse, MockLlmClient, TokenUsage};
 
         let mut rt = Runtime::new();
 
@@ -3974,7 +4055,7 @@ match { a: 2, b: 9 } with {
 
     #[test]
     fn test_token_budget_deducts_after_successful_call() {
-        use crate::ai::{MockLlmClient, TokenUsage, LlmResponse, LlmRequest};
+        use crate::ai::{LlmRequest, LlmResponse, MockLlmClient, TokenUsage};
 
         let mut rt = Runtime::new();
         let mock = Box::new(MockLlmClient::new(LlmResponse {
@@ -5329,7 +5410,11 @@ match { a: 2, b: 9 } with {
                 send remote a add(42)
         "#;
         let result = check_source(source);
-        assert!(result.is_ok(), "send remote should typecheck: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "send remote should typecheck: {:?}",
+            result.err()
+        );
     }
 
     /// The infix form `actor ! behavior(args)` never sets `remote`, so
@@ -5344,7 +5429,11 @@ match { a: 2, b: 9 } with {
                 a ! add(42)
         "#;
         let result = check_source(source);
-        assert!(result.is_ok(), "infix send should typecheck: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "infix send should typecheck: {:?}",
+            result.err()
+        );
     }
 
     /// Differential test: the legacy compiler and the HIR/MIR pipeline must
@@ -7265,7 +7354,10 @@ match { a: 2, b: 9 } with {
         let original = compile_source_new(source).expect("compile");
         let bytes = original.to_nbc(None).expect("encode");
         let artifact = crate::bytecode::CodeModule::from_nbc(&bytes).expect("decode");
-        assert_eq!(artifact.module, original, "round-trip must preserve the module");
+        assert_eq!(
+            artifact.module, original,
+            "round-trip must preserve the module"
+        );
 
         // Run both and compare observable results.
         let mut vm_orig = VM::new();
@@ -7307,7 +7399,6 @@ match { a: 2, b: 9 } with {
         ));
     }
 
-
     // -----------------------------------------------------------------------
     // Grammar conformance (RFC 0002 Core + Stable)
     // -----------------------------------------------------------------------
@@ -7328,18 +7419,22 @@ match { a: 2, b: 9 } with {
         ];
 
         let negative = vec![
-            "fn main( {",                     // syntax error
-            "let x = ;",                      // missing expr
-            "actor A { fn() {} }",            // actor missing behavior name
-            "type Foo = 1",                   // invalid variant start
-            "receive { case => 1 }",          // missing match arm pattern
+            "fn main( {",            // syntax error
+            "let x = ;",             // missing expr
+            "actor A { fn() {} }",   // actor missing behavior name
+            "type Foo = 1",          // invalid variant start
+            "receive { case => 1 }", // missing match arm pattern
         ];
 
         for src in positive {
             let mut lexer = Lexer::new(src);
-            let tokens = lexer.lex().unwrap_or_else(|_| panic!("Lexer failed on positive case: {src}"));
+            let tokens = lexer
+                .lex()
+                .unwrap_or_else(|_| panic!("Lexer failed on positive case: {src}"));
             let mut parser = Parser::new(tokens);
-            parser.parse_module().unwrap_or_else(|e| panic!("Parser failed on positive case: {src}\nError: {e}"));
+            parser
+                .parse_module()
+                .unwrap_or_else(|e| panic!("Parser failed on positive case: {src}\nError: {e}"));
         }
 
         for src in negative {
@@ -7354,7 +7449,7 @@ match { a: 2, b: 9 } with {
     }
 
     // -----------------------------------------------------------------------
- // Provider effect — the general, non-transient replacement for LLM.ask
+    // Provider effect — the general, non-transient replacement for LLM.ask
     // -----------------------------------------------------------------------
 
     /// `perform Provider.ask("llm", prompt)` must produce the same result as

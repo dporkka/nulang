@@ -152,27 +152,15 @@ impl NodeInfo {
 #[derive(Debug)]
 pub enum ClusterAction {
     /// Send a heartbeat to the specified node.
-    SendHeartbeat {
-        to: NodeId,
-        addr: SocketAddr,
-    },
+    SendHeartbeat { to: NodeId, addr: SocketAddr },
     /// Notify that a node has joined the cluster.
-    NodeJoined {
-        node: NodeId,
-        addr: SocketAddr,
-    },
+    NodeJoined { node: NodeId, addr: SocketAddr },
     /// Notify that a node has been declared failed.
-    NodeFailed {
-        node: NodeId,
-    },
+    NodeFailed { node: NodeId },
     /// Notify that a node has left the cluster.
-    NodeLeft {
-        node: NodeId,
-    },
+    NodeLeft { node: NodeId },
     /// Send gossip to a random subset of nodes.
-    SendGossip {
-        targets: Vec<(NodeId, SocketAddr)>,
-    },
+    SendGossip { targets: Vec<(NodeId, SocketAddr)> },
 }
 
 // ---------------------------------------------------------------------------
@@ -320,10 +308,8 @@ impl ClusterState {
 
         match self.members.get_mut(&from) {
             Some(info) => {
-                let was_suspicious_or_failed = matches!(
-                    info.status,
-                    NodeStatus::Suspicious | NodeStatus::Failed
-                );
+                let was_suspicious_or_failed =
+                    matches!(info.status, NodeStatus::Suspicious | NodeStatus::Failed);
 
                 info.last_heartbeat = now;
                 info.address = addr;
@@ -404,9 +390,7 @@ impl ClusterState {
                         cb(info.node_id);
                     }
 
-                    actions.push(ClusterAction::NodeFailed {
-                        node: info.node_id,
-                    });
+                    actions.push(ClusterAction::NodeFailed { node: info.node_id });
                 }
             }
         }
@@ -470,9 +454,7 @@ impl ClusterState {
     pub fn healthy_members(&self) -> Vec<&NodeInfo> {
         self.members
             .values()
-            .filter(|info| {
-                info.node_id != self.local_node && info.status == NodeStatus::Healthy
-            })
+            .filter(|info| info.node_id != self.local_node && info.status == NodeStatus::Healthy)
             .collect()
     }
 
@@ -588,8 +570,7 @@ impl ClusterState {
                     let mut info = NodeInfo::new(entry.node_id, entry.address);
                     info.status = entry.status;
                     info.last_heartbeat = Instant::now();
-                    info
-                        .metadata
+                    info.metadata
                         .insert("_incarnation".to_string(), entry.incarnation.to_string());
                     self.members.insert(entry.node_id, info);
                     changed = true;
@@ -793,7 +774,9 @@ mod tests {
         );
 
         // Verify that SendHeartbeat action is produced for the peer.
-        let has_heartbeat = actions.iter().any(|a| matches!(a, ClusterAction::SendHeartbeat { to, .. } if *to == peer_id));
+        let has_heartbeat = actions
+            .iter()
+            .any(|a| matches!(a, ClusterAction::SendHeartbeat { to, .. } if *to == peer_id));
         assert!(has_heartbeat, "tick should request heartbeat to peer");
     }
 
@@ -891,10 +874,7 @@ mod tests {
         }];
         cs.merge_membership(gossip_low);
 
-        assert_eq!(
-            cs.get_node(NodeId(77)).unwrap().status,
-            NodeStatus::Healthy
-        );
+        assert_eq!(cs.get_node(NodeId(77)).unwrap().status, NodeStatus::Healthy);
 
         // Now receive gossip with a higher incarnation marking it Failed.
         let gossip_high = vec![NodeGossip {
@@ -905,10 +885,7 @@ mod tests {
         }];
         let changed = cs.merge_membership(gossip_high);
         assert!(changed);
-        assert_eq!(
-            cs.get_node(NodeId(77)).unwrap().status,
-            NodeStatus::Failed
-        );
+        assert_eq!(cs.get_node(NodeId(77)).unwrap().status, NodeStatus::Failed);
     }
 
     // -- 10. Gossip payload size -------------------------------------------
@@ -977,10 +954,7 @@ mod tests {
         }];
         let changed = cs.merge_membership(gossip);
         assert!(changed);
-        assert_eq!(
-            cs.get_node(pid).unwrap().status,
-            NodeStatus::Leaving
-        );
+        assert_eq!(cs.get_node(pid).unwrap().status, NodeStatus::Leaving);
     }
 
     // -- 13. Join cluster via seed -----------------------------------------
@@ -1041,10 +1015,7 @@ mod tests {
         }];
         let changed = cs.merge_membership(gossip);
         assert!(!changed);
-        assert_eq!(
-            cs.get_node(local).unwrap().status,
-            NodeStatus::Healthy
-        );
+        assert_eq!(cs.get_node(local).unwrap().status, NodeStatus::Healthy);
     }
 
     // -- 17. All members includes local ------------------------------------
@@ -1081,10 +1052,7 @@ mod tests {
 
         // Heartbeat should promote back to healthy.
         cs.handle_heartbeat(pid, pa);
-        assert_eq!(
-            cs.get_node(pid).unwrap().status,
-            NodeStatus::Healthy
-        );
+        assert_eq!(cs.get_node(pid).unwrap().status, NodeStatus::Healthy);
     }
 
     // -- 19. Joining status promoted on first heartbeat --------------------
@@ -1118,8 +1086,13 @@ mod tests {
         cs.handle_heartbeat(pid, pa);
 
         let actions = cs.tick();
-        let has_gossip = actions.iter().any(|a| matches!(a, ClusterAction::SendGossip { .. }));
-        assert!(has_gossip, "tick should produce gossip action when peers exist");
+        let has_gossip = actions
+            .iter()
+            .any(|a| matches!(a, ClusterAction::SendGossip { .. }));
+        assert!(
+            has_gossip,
+            "tick should produce gossip action when peers exist"
+        );
     }
 
     // -- 21. Transitive gossip propagation across a three-node chain -------

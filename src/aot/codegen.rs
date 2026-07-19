@@ -74,10 +74,10 @@ fn emit_sext48(builder: &mut FunctionBuilder, raw: Value) -> Value {
     let payload = builder.ins().band(raw, payload_mask);
     let sign_bit = builder.ins().band(raw, sign_bit_mask);
     let zero = builder.ins().iconst(types::I64, 0);
-    let is_neg = builder
+    let is_neg = builder.ins().icmp(IntCC::NotEqual, sign_bit, zero);
+    let sign_ext = builder
         .ins()
-        .icmp(IntCC::NotEqual, sign_bit, zero);
-    let sign_ext = builder.ins().iconst(types::I64, 0xFFFF_0000_0000_0000u64 as i64);
+        .iconst(types::I64, 0xFFFF_0000_0000_0000u64 as i64);
     let extended = builder.ins().bor(payload, sign_ext);
     builder.ins().select(is_neg, extended, payload)
 }
@@ -111,10 +111,7 @@ pub struct AotContext<'a> {
 }
 
 impl<'a> AotContext<'a> {
-    pub fn new(
-        module: &'a mut JITModule,
-        builder_context: &'a mut FunctionBuilderContext,
-    ) -> Self {
+    pub fn new(module: &'a mut JITModule, builder_context: &'a mut FunctionBuilderContext) -> Self {
         let codegen_ctx = module.make_context();
         AotContext {
             module,
@@ -126,7 +123,6 @@ impl<'a> AotContext<'a> {
         }
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // SSA construction helpers
@@ -211,9 +207,9 @@ fn compile_terminator_with_params(
         mir::Terminator::Return(val) => {
             if let Some(id) = val {
                 let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
-                let v = *local_vals
-                    .get(&reg)
-                    .ok_or_else(|| AotCompileError::Internal("return value uninitialized".into()))?;
+                let v = *local_vals.get(&reg).ok_or_else(|| {
+                    AotCompileError::Internal("return value uninitialized".into())
+                })?;
                 builder.ins().return_(&[v]);
             } else {
                 let nil = builder
@@ -247,10 +243,15 @@ fn compile_terminator_with_params(
             let is_true = builder.ins().icmp(IntCC::NotEqual, cond_val, false_val);
             let then_args = block_param_args(block_params, then_, local_vals);
             let else_args = block_param_args(block_params, else_, local_vals);
-            builder.ins().brif(is_true, then_block, &then_args, else_block, &else_args);
+            builder
+                .ins()
+                .brif(is_true, then_block, &then_args, else_block, &else_args);
             Ok(())
         }
-        _ => Err(AotCompileError::Unsupported(format!("terminator {:?}", term))),
+        _ => Err(AotCompileError::Unsupported(format!(
+            "terminator {:?}",
+            term
+        ))),
     }
 }
 
@@ -352,14 +353,30 @@ pub fn compile_mir_function_body(
 
         // Binary helpers: (i64, i64) -> i64
         let bin_helpers: &[&str] = &[
-            "nulang_iadd", "nulang_isub", "nulang_imul", "nulang_idiv", "nulang_imod",
-            "nulang_icmp_eq", "nulang_icmp_lt", "nulang_icmp_gt", "nulang_icmp_le",
+            "nulang_iadd",
+            "nulang_isub",
+            "nulang_imul",
+            "nulang_idiv",
+            "nulang_imod",
+            "nulang_icmp_eq",
+            "nulang_icmp_lt",
+            "nulang_icmp_gt",
+            "nulang_icmp_le",
             "nulang_icmp_ge",
-            "nulang_fadd", "nulang_fsub", "nulang_fmul", "nulang_fdiv",
-            "nulang_fcmp_eq", "nulang_fcmp_lt", "nulang_fcmp_gt",
-            "nulang_and", "nulang_or",
-            "nulang_xor", "nulang_shl", "nulang_shr",
-            "nulang_bitand", "nulang_bitor",
+            "nulang_fadd",
+            "nulang_fsub",
+            "nulang_fmul",
+            "nulang_fdiv",
+            "nulang_fcmp_eq",
+            "nulang_fcmp_lt",
+            "nulang_fcmp_gt",
+            "nulang_and",
+            "nulang_or",
+            "nulang_xor",
+            "nulang_shl",
+            "nulang_shr",
+            "nulang_bitand",
+            "nulang_bitor",
         ];
         for name in bin_helpers {
             let mut h_sig = module.make_signature();
@@ -375,8 +392,13 @@ pub fn compile_mir_function_body(
 
         // Unary helpers: (i64) -> i64
         let unary_helpers: &[&str] = &[
-            "nulang_ineg", "nulang_iinc", "nulang_idec", "nulang_not",
-            "nulang_itof", "nulang_ftoi", "nulang_fneg",
+            "nulang_ineg",
+            "nulang_iinc",
+            "nulang_idec",
+            "nulang_not",
+            "nulang_itof",
+            "nulang_ftoi",
+            "nulang_fneg",
         ];
         for name in unary_helpers {
             let mut h_sig = module.make_signature();
@@ -403,10 +425,20 @@ pub fn compile_mir_function_body(
         for block in &mir_func.blocks {
             for stmt in &block.stmts {
                 match stmt {
-                    mir::Stmt::Assign { op: mir::RValue::Call { func: mir::FuncRef::Index(n), .. }, .. } => {
+                    mir::Stmt::Assign {
+                        op:
+                            mir::RValue::Call {
+                                func: mir::FuncRef::Index(n),
+                                ..
+                            },
+                        ..
+                    } => {
                         register_call_target(*n);
                     }
-                    mir::Stmt::Assign { op: mir::RValue::Closure { func, captures }, .. } if captures.is_empty() => {
+                    mir::Stmt::Assign {
+                        op: mir::RValue::Closure { func, captures },
+                        ..
+                    } if captures.is_empty() => {
                         register_call_target(*func);
                     }
                     _ => {}
@@ -463,7 +495,16 @@ pub fn compile_mir_function_body(
             }
 
             for stmt in &block.stmts {
-                compile_stmt(&mut builder, stmt, &type_meta, &h, &call_targets, &mut closure_targets, &mut local_vals, mode)?;
+                compile_stmt(
+                    &mut builder,
+                    stmt,
+                    &type_meta,
+                    &h,
+                    &call_targets,
+                    &mut closure_targets,
+                    &mut local_vals,
+                    mode,
+                )?;
             }
             compile_terminator_with_params(
                 &mut builder,
@@ -581,12 +622,24 @@ fn compile_stmt(
                     closure_targets.insert(reg, *func);
                 }
             }
-            let val = compile_rvalue(builder, op, type_meta, helpers, call_targets, closure_targets, local_vals, mode)?;
+            let val = compile_rvalue(
+                builder,
+                op,
+                type_meta,
+                helpers,
+                call_targets,
+                closure_targets,
+                local_vals,
+                mode,
+            )?;
             let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
             local_vals.insert(reg, val);
             Ok(())
         }
-        _ => Err(AotCompileError::Unsupported(format!("statement {:?}", stmt))),
+        _ => Err(AotCompileError::Unsupported(format!(
+            "statement {:?}",
+            stmt
+        ))),
     }
 }
 
@@ -614,9 +667,9 @@ fn compile_rvalue(
                 .copied()
                 .ok_or_else(|| AotCompileError::Internal(format!("uninitialized local {}", id.0)))
         }
-        mir::RValue::Binary(op, lhs, rhs) => {
-            compile_binary(builder, *op, *lhs, *rhs, type_meta, helpers, local_vals, mode)
-        }
+        mir::RValue::Binary(op, lhs, rhs) => compile_binary(
+            builder, *op, *lhs, *rhs, type_meta, helpers, local_vals, mode,
+        ),
 
         mir::RValue::Unary(op, operand) => {
             compile_unary(builder, *op, *operand, type_meta, helpers, local_vals, mode)
@@ -624,31 +677,33 @@ fn compile_rvalue(
 
         mir::RValue::Call { func, args } => {
             let callee_ref = match func {
-                mir::FuncRef::Index(n) => {
-                    call_targets.get(n).copied().ok_or_else(|| {
-                        AotCompileError::Internal(format!("call target fn {} not compiled yet", n))
-                    })?
-                }
+                mir::FuncRef::Index(n) => call_targets.get(n).copied().ok_or_else(|| {
+                    AotCompileError::Internal(format!("call target fn {} not compiled yet", n))
+                })?,
                 mir::FuncRef::Local(closure_id) => {
                     let reg = mir::FunctionBuilder::LOCAL_BASE + closure_id.0;
                     let target_idx = closure_targets.get(&reg).copied().ok_or_else(|| {
-                        AotCompileError::Unsupported("indirect call: closure target unknown at compile time".into())
+                        AotCompileError::Unsupported(
+                            "indirect call: closure target unknown at compile time".into(),
+                        )
                     })?;
                     call_targets.get(&target_idx).copied().ok_or_else(|| {
-                        AotCompileError::Internal(format!("call target fn {} not compiled yet", target_idx))
+                        AotCompileError::Internal(format!(
+                            "call target fn {} not compiled yet",
+                            target_idx
+                        ))
                     })?
                 }
             };
-            let arg_vals: Vec<Value> = args
-                .iter()
-                .map(|id| {
-                    let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
-                    local_vals
-                        .get(&reg)
-                        .copied()
-                        .ok_or_else(|| AotCompileError::Internal("call arg uninitialized".into()))
-                })
-                .collect::<AotResult<Vec<_>>>()?;
+            let arg_vals: Vec<Value> =
+                args.iter()
+                    .map(|id| {
+                        let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+                        local_vals.get(&reg).copied().ok_or_else(|| {
+                            AotCompileError::Internal("call arg uninitialized".into())
+                        })
+                    })
+                    .collect::<AotResult<Vec<_>>>()?;
             let call = builder.ins().call(callee_ref, &arg_vals);
             Ok(builder.inst_results(call)[0])
         }
@@ -659,7 +714,9 @@ fn compile_rvalue(
                 let idx = builder.ins().iconst(types::I64, *func as i64);
                 Ok(emit_tag_int(builder, idx))
             } else {
-                Err(AotCompileError::Unsupported("closures with captures".into()))
+                Err(AotCompileError::Unsupported(
+                    "closures with captures".into(),
+                ))
             }
         }
 
@@ -688,12 +745,12 @@ fn compile_const(
         crate::bytecode::Constant::Float(f) => {
             Ok(builder.ins().iconst(types::I64, f.to_bits() as i64))
         }
-        crate::bytecode::Constant::Bool(b) => {
-            Ok(builder.ins().iconst(types::I64, TAG_BOOL_I64 | if *b { 1 } else { 0 }))
-        }
-        crate::bytecode::Constant::Unit => {
-            Ok(builder.ins().iconst(types::I64, 0x7FF9_0000_0000_0000u64 as i64))
-        }
+        crate::bytecode::Constant::Bool(b) => Ok(builder
+            .ins()
+            .iconst(types::I64, TAG_BOOL_I64 | if *b { 1 } else { 0 })),
+        crate::bytecode::Constant::Unit => Ok(builder
+            .ins()
+            .iconst(types::I64, 0x7FF9_0000_0000_0000u64 as i64)),
         _ => Err(AotCompileError::Unsupported(format!("constant {:?}", c))),
     }
 }
@@ -850,7 +907,9 @@ fn compile_binary(
         BinOp::Gt => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
                 if mode == CompileMode::Unboxed {
-                    let cmp = builder.ins().icmp(IntCC::SignedGreaterThan, lhs_val, rhs_val);
+                    let cmp = builder
+                        .ins()
+                        .icmp(IntCC::SignedGreaterThan, lhs_val, rhs_val);
                     Ok(emit_tag_bool(builder, cmp))
                 } else {
                     let l = emit_sext48(builder, lhs_val);
@@ -865,7 +924,9 @@ fn compile_binary(
         BinOp::Le => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
                 if mode == CompileMode::Unboxed {
-                    let cmp = builder.ins().icmp(IntCC::SignedLessThanOrEqual, lhs_val, rhs_val);
+                    let cmp = builder
+                        .ins()
+                        .icmp(IntCC::SignedLessThanOrEqual, lhs_val, rhs_val);
                     Ok(emit_tag_bool(builder, cmp))
                 } else {
                     let l = emit_sext48(builder, lhs_val);
@@ -880,7 +941,9 @@ fn compile_binary(
         BinOp::Ge => {
             if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
                 if mode == CompileMode::Unboxed {
-                    let cmp = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, lhs_val, rhs_val);
+                    let cmp = builder
+                        .ins()
+                        .icmp(IntCC::SignedGreaterThanOrEqual, lhs_val, rhs_val);
                     Ok(emit_tag_bool(builder, cmp))
                 } else {
                     let l = emit_sext48(builder, lhs_val);
@@ -1006,10 +1069,7 @@ mod tests {
         // A function that returns a constant int.
         let mut builder = mir::FunctionBuilder::new("answer", Some(crate::types::Type::int()));
         let tmp = builder.add_temp(crate::types::Type::int());
-        builder.assign(
-            tmp,
-            mir::RValue::Const(crate::bytecode::Constant::Int(42)),
-        );
+        builder.assign(tmp, mir::RValue::Const(crate::bytecode::Constant::Int(42)));
         builder.terminate(mir::Terminator::Return(Some(tmp)));
         let func = builder.build();
 
@@ -1021,15 +1081,11 @@ mod tests {
     #[test]
     fn test_aot_compile_add() {
         // A function that adds two int params.
-        let mut builder =
-            mir::FunctionBuilder::new("add", Some(crate::types::Type::int()));
+        let mut builder = mir::FunctionBuilder::new("add", Some(crate::types::Type::int()));
         let a = builder.add_param("a", crate::types::Type::int());
         let b = builder.add_param("b", crate::types::Type::int());
         let sum = builder.add_temp(crate::types::Type::int());
-        builder.assign(
-            sum,
-            mir::RValue::Binary(crate::ast::BinOp::Add, a, b),
-        );
+        builder.assign(sum, mir::RValue::Binary(crate::ast::BinOp::Add, a, b));
         builder.terminate(mir::Terminator::Return(Some(sum)));
         let func = builder.build();
 

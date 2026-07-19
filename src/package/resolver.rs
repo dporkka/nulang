@@ -145,7 +145,10 @@ pub fn parse_semver(version: &str) -> NuResult<(u64, u64, u64)> {
     let mut next = |what: &str| -> NuResult<u64> {
         match parts.next() {
             Some(part) => part.parse::<u64>().map_err(|_| {
-                NuError::PackageError(format!("invalid semver '{}' in version '{}'", part, version))
+                NuError::PackageError(format!(
+                    "invalid semver '{}' in version '{}'",
+                    part, version
+                ))
             }),
             None if what == "major" => Err(NuError::PackageError(format!(
                 "invalid semver version '{}'",
@@ -378,7 +381,10 @@ impl Resolver {
                 .arg(rev)
                 .output()
                 .map_err(|e| {
-                    NuError::PackageError(format!("failed to run git checkout for '{}': {}", dep_name, e))
+                    NuError::PackageError(format!(
+                        "failed to run git checkout for '{}': {}",
+                        dep_name, e
+                    ))
                 })?;
             if !output.status.success() {
                 return Err(NuError::PackageError(format!(
@@ -390,9 +396,8 @@ impl Resolver {
             }
         }
 
-        std::fs::canonicalize(&dest).map_err(|e| {
-            NuError::PackageError(format!("cannot resolve {}: {}", dest.display(), e))
-        })
+        std::fs::canonicalize(&dest)
+            .map_err(|e| NuError::PackageError(format!("cannot resolve {}: {}", dest.display(), e)))
     }
 }
 
@@ -456,7 +461,12 @@ mod tests {
         let util_dir = dir.join("util");
         let base_dir = dir.join("base");
         write_manifest(&base_dir, "base", "0.1.0", "");
-        write_manifest(&util_dir, "util", "0.1.0", "base = { path = \"../base\" }\n");
+        write_manifest(
+            &util_dir,
+            "util",
+            "0.1.0",
+            "base = { path = \"../base\" }\n",
+        );
         write_manifest(
             &app_dir,
             "app",
@@ -469,7 +479,11 @@ mod tests {
 
         // base is a shared dependency of both app and util and must appear
         // exactly once, before both of its dependents.
-        let order: Vec<&str> = resolution.packages.iter().map(|p| p.name.as_str()).collect();
+        let order: Vec<&str> = resolution
+            .packages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
         assert_eq!(order, vec!["base", "util", "app"]);
         assert_eq!(resolution.root().name, "app");
         assert_eq!(resolution.dependencies().len(), 2);

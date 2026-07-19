@@ -181,11 +181,10 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
     {
         return Ok(vec![]);
     }
-    if t1 == t2 || (t1.is_ground() && t2.is_ground() && t1.to_ntir().hash() == t2.to_ntir().hash()) {
+    if t1 == t2 || (t1.is_ground() && t2.is_ground() && t1.to_ntir().hash() == t2.to_ntir().hash())
+    {
         return Ok(vec![]);
     }
-
-
 
     match (t1, t2) {
         // Identical primitives unify trivially
@@ -594,10 +593,7 @@ fn var_subst(v: TypeVar, t: &Type, span: Span) -> NuResult<Substitution> {
         t => {
             if occurs_in(v, t) {
                 return Err(NuError::TypeError {
-                    msg: format!(
-                        "Occurs check failed: type variable {} occurs in {}",
-                        v, t
-                    ),
+                    msg: format!("Occurs check failed: type variable {} occurs in {}", v, t),
                     span,
                 });
             }
@@ -1035,9 +1031,7 @@ impl TypeChecker {
 
             // Spawn actor
             Expr::Spawn {
-                actor_type,
-                span,
-                ..
+                actor_type, span, ..
             } => self.infer_spawn(ctx, actor_type, *span),
 
             // Send message
@@ -1193,11 +1187,7 @@ impl TypeChecker {
                 body,
                 span,
             } => self.infer_for(ctx, var, iterable, body, *span),
-            Expr::While {
-                cond,
-                body,
-                span,
-            } => self.infer_while(ctx, cond, body, *span),
+            Expr::While { cond, body, span } => self.infer_while(ctx, cond, body, *span),
 
             // Return
             Expr::Return(expr, _span) => {
@@ -2327,11 +2317,11 @@ impl TypeChecker {
         let (s1, cond_ty) = self.infer_expr(ctx, cond)?;
         let s2 = mgu(&cond_ty, &Type::Primitive(PrimitiveType::Bool), span)?;
         let s_combined = compose_subst(&s2, &s1);
-        
+
         // Body can be anything
         let (s3, _body_ty) = self.infer_expr(ctx, body)?;
         let final_subst = compose_subst(&s3, &s_combined);
-        
+
         Ok((final_subst, Type::unit()))
     }
 
@@ -3567,7 +3557,11 @@ mod tests {
         match result.unwrap_err() {
             NuError::TypeError { msg, .. } => {
                 assert!(msg.contains("Unsupported FFI type"));
-                assert!(msg.contains("[Int]"), "Expected [Int] in FFI error, got: {}", msg);
+                assert!(
+                    msg.contains("[Int]"),
+                    "Expected [Int] in FFI error, got: {}",
+                    msg
+                );
             }
             other => panic!("Expected TypeError, got {:?}", other),
         }
@@ -3633,10 +3627,7 @@ mod tests {
         let a = TypeVar(9101);
         let b = TypeVar(9102);
         let c = TypeVar(9103);
-        let s1 = vec![(
-            a,
-            Type::Tuple(vec![Type::Var(b), Type::Var(c)]),
-        )];
+        let s1 = vec![(a, Type::Tuple(vec![Type::Var(b), Type::Var(c)]))];
         let s2 = vec![(a, Type::Tuple(vec![Type::int(), Type::bool()]))];
         let composed = compose_subst(&s2, &s1);
         assert_eq!(apply_subst(&Type::Var(a), &composed), s2[0].1);

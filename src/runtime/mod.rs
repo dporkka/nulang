@@ -3,58 +3,61 @@
 //! Provides: actor lifecycle, scheduler, mailbox, heap, GC, supervision,
 //! distribution.
 
+use crossbeam::channel as crossbeam_chan;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use crossbeam::channel as crossbeam_chan;
 
 mod actor;
-mod scheduler;
-mod mailbox;
-pub mod heap;
 mod gc;
+pub mod heap;
 pub(crate) mod heap_serialize;
+mod mailbox;
+mod scheduler;
 pub use heap_serialize::*;
-mod orca_cycle;
-mod supervisor;
-mod supervisor_registry;
 mod cluster;
-mod network;
-pub mod quic_transport;
 mod distributed;
 mod distributed_context;
+mod network;
+mod orca_cycle;
+pub mod quic_transport;
+mod supervisor;
+mod supervisor_registry;
 use distributed_context::DistributedContext;
 mod crdt;
-mod crdt_reg;
 mod crdt_manager;
-mod timer;
-mod registry;
-mod process_groups;
+mod crdt_reg;
 mod persistence;
+mod process_groups;
+mod registry;
+mod timer;
 
 #[cfg(test)]
 mod tests;
 
 pub use actor::*;
-pub use scheduler::*;
-pub use mailbox::*;
-pub use heap::*;
+pub use cluster::*;
+pub use crdt::*;
+pub use crdt_manager::*;
+pub use crdt_reg::{LWWRegister, MVRegister, RGAElement, RGA};
+pub use distributed::*;
 pub use gc::{ForeignRefOp, GcStats, OrcaCoordinator, OrcaGc, OrcaHeap};
+pub use heap::*;
+pub use mailbox::*;
+pub use network::*;
+pub use orca_cycle::*;
+pub use persistence::*;
+pub use process_groups::*;
+pub use registry::*;
+pub use scheduler::*;
 pub use supervisor::*;
 pub use supervisor_registry::*;
-pub use orca_cycle::*;
-pub use cluster::*;
-pub use distributed::*;
-pub use network::*;
-pub use crdt::*;
-pub use crdt_reg::{LWWRegister, MVRegister, RGA, RGAElement};
-pub use crdt_manager::*;
 pub use timer::*;
-pub use registry::*;
-pub use process_groups::*;
-pub use persistence::*;
 
-use crate::ai::{complete_sync, Debate, LlmClient, LlmError, LlmErrorKind, LlmMessage, LlmRequest, LlmResponse, Pipeline, PipelineStage, SupervisorTeam, TokenBudget};
+use crate::ai::{
+    complete_sync, Debate, LlmClient, LlmError, LlmErrorKind, LlmMessage, LlmRequest, LlmResponse,
+    Pipeline, PipelineStage, TokenBudget,
+};
 use crate::types::ExitReason;
 use crate::vm::Value;
 
@@ -306,14 +309,10 @@ impl Runtime {
                     Err(_) => return,
                 };
                 while let Ok(item) = llm_request_rx.recv() {
-                    let result = std::panic::catch_unwind(
-                        std::panic::AssertUnwindSafe(|| {
-                            tokio_rt.block_on(item.client.complete(item.request))
-                        }),
-                    )
-                    .unwrap_or_else(|_| {
-                        Err(LlmError::from_string("LLM worker thread panicked"))
-                    });
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tokio_rt.block_on(item.client.complete(item.request))
+                    }))
+                    .unwrap_or_else(|_| Err(LlmError::from_string("LLM worker thread panicked")));
                     let _ = llm_tx_worker.send((item.actor_id, result));
                 }
             });
@@ -392,11 +391,7 @@ impl Runtime {
             .and_then(|handler| handler(regs))
     }
 
-
-    pub fn spawn_actor(
-        &mut self,
-        init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
-    ) -> u64 {
+    pub fn spawn_actor(&mut self, init: Box<dyn FnOnce() -> Vec<(String, Value)>>) -> u64 {
         self.spawn_actor_with_models(init, HashMap::new(), false, None)
     }
 
@@ -450,7 +445,11 @@ impl Runtime {
                 let actor = self.actors.get(&id).unwrap();
                 let mut state = Vec::new();
                 for (field_name, value) in &actor.state_data {
-                    let model = actor.state_models.get(field_name).copied().unwrap_or(StateModel::Local);
+                    let model = actor
+                        .state_models
+                        .get(field_name)
+                        .copied()
+                        .unwrap_or(StateModel::Local);
                     if model.is_persistent() {
                         state.push(PersistedValue::from_value(value));
                     }
@@ -519,8 +518,11 @@ impl Runtime {
         // actor's behavior_indices) so that behavior_id_for's module-level
         // fallback indices work correctly.
         let offsets: Vec<usize> = module.behaviors.iter().map(|b| b.code_offset).collect();
-        let compensation_offsets: Vec<Option<usize>> = module.behaviors.iter()
-            .map(|b| b.compensate_offset).collect();
+        let compensation_offsets: Vec<Option<usize>> = module
+            .behaviors
+            .iter()
+            .map(|b| b.compensate_offset)
+            .collect();
         if let Some(actor) = self.actors.get_mut(&id) {
             actor.bytecode_module = Some(module.clone());
             actor.bytecode_offsets = offsets.clone();
@@ -535,7 +537,8 @@ impl Runtime {
                             if name == "retry_config" {
                                 actor.retry_config = serde_json::from_str(json).ok();
                             } else if name == "fallback_config" {
-                                actor.fallback_config = serde_json::from_str(json).unwrap_or_default();
+                                actor.fallback_config =
+                                    serde_json::from_str(json).unwrap_or_default();
                             }
                         }
                     }
@@ -551,12 +554,14 @@ impl Runtime {
                 }
                 // Set backend from actor metadata.
                 actor.backend = match meta.backend {
-                    crate::ast::ActorBackendKind::Native =>
-                        crate::runtime::actor::ActorBackend::Native,
-                    crate::ast::ActorBackendKind::WasmComponent =>
+                    crate::ast::ActorBackendKind::Native => {
+                        crate::runtime::actor::ActorBackend::Native
+                    }
+                    crate::ast::ActorBackendKind::WasmComponent => {
                         crate::runtime::actor::ActorBackend::WasmComponent {
                             component_path: String::new(),
-                        },
+                        }
+                    }
                 };
             }
         }
@@ -630,7 +635,6 @@ impl Runtime {
         self.supervisor_teams.create()
     }
 
-
     pub fn supervisor_worker(
         &mut self,
         id: u64,
@@ -652,15 +656,12 @@ impl Runtime {
         team.run(self, task)
     }
 
-
     /// Create a new debate and return its ID.
     pub fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> u64 {
         let id = self.next_debate_id;
         self.next_debate_id = self.next_debate_id.wrapping_add(1);
-        self.debates.insert(
-            id,
-            Debate::new(topic, rounds.max(1) as usize, threshold),
-        );
+        self.debates
+            .insert(id, Debate::new(topic, rounds.max(1) as usize, threshold));
         id
     }
 
@@ -737,7 +738,9 @@ impl Runtime {
     fn complete_agent_llm_inner(&mut self, actor_id: u64, prompt: &str) -> Option<String> {
         let request = self.build_agent_llm_request(actor_id, prompt)?;
         let module = self.actors.get(&actor_id)?.bytecode_module.clone()?;
-        let response = self.complete_llm_with_tools(request, Vec::new(), &module).ok()?;
+        let response = self
+            .complete_llm_with_tools(request, Vec::new(), &module)
+            .ok()?;
         self.finish_agent_llm(actor_id, prompt, &response)
     }
 
@@ -750,10 +753,8 @@ impl Runtime {
             let actor = self.actors.get(&actor_id)?;
             let module = actor.bytecode_module.clone()?;
             let model = Self::vm_value_to_string(&actor.get_state_field("model")?, Some(&module))?;
-            let system_prompt = Self::vm_value_to_string(
-                &actor.get_state_field("system_prompt")?,
-                Some(&module),
-            )?;
+            let system_prompt =
+                Self::vm_value_to_string(&actor.get_state_field("system_prompt")?, Some(&module))?;
             let memory_json = Self::vm_value_to_string(
                 &actor.get_state_field("episodic_memory")?,
                 Some(&module),
@@ -765,8 +766,8 @@ impl Runtime {
             (model, system_prompt, memory_json, pricing, module)
         };
 
-        let memory: crate::ai::EpisodicMemory =
-            serde_json::from_str(&memory_json).unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
+        let memory: crate::ai::EpisodicMemory = serde_json::from_str(&memory_json)
+            .unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
 
         let mut messages = Vec::new();
         if !system_prompt.is_empty() {
@@ -815,7 +816,13 @@ impl Runtime {
                 &actor.get_state_field("episodic_memory")?,
                 Some(&module),
             )?;
-            (pricing, usage_prompt, usage_completion, usage_cost, memory_json)
+            (
+                pricing,
+                usage_prompt,
+                usage_completion,
+                usage_cost,
+                memory_json,
+            )
         };
         let content = response.content.clone().unwrap_or_default();
 
@@ -825,8 +832,8 @@ impl Runtime {
         let updated_completion = usage_completion.saturating_add(response.usage.completion);
         let updated_cost = usage_cost + new_cost;
 
-        let mut memory: crate::ai::EpisodicMemory =
-            serde_json::from_str(&memory_json).unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
+        let mut memory: crate::ai::EpisodicMemory = serde_json::from_str(&memory_json)
+            .unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
         memory.add_turn("user", prompt);
         memory.add_turn("assistant", &content);
         let updated_memory = serde_json::to_string(&memory).ok()?;
@@ -881,7 +888,6 @@ impl Runtime {
         }
         Self::vm_value_to_string(&value, actor.bytecode_module.as_ref())
     }
-
 
     /// Set a token budget that caps total LLM token consumption.
     ///
@@ -966,7 +972,8 @@ impl Runtime {
         if !response.tool_calls.is_empty() {
             let mut results = Vec::new();
             for call in &response.tool_calls {
-                let result = self.invoke_agent_tool_function(module, &call.name, &call.arguments)?;
+                let result =
+                    self.invoke_agent_tool_function(module, &call.name, &call.arguments)?;
                 results.push((call.name.clone(), result));
             }
 
@@ -1023,17 +1030,17 @@ impl Runtime {
                 metadata.insert("topic".to_string(), topic.to_string());
             }
             let id = self.semantic_memory_store_with_metadata(actor_id, &content, metadata);
-            Ok(format!("stored: {}", self.vm_value_to_string_or_default(actor_id, &id)))
+            Ok(format!(
+                "stored: {}",
+                self.vm_value_to_string_or_default(actor_id, &id)
+            ))
         } else if name == "recall" {
             let query = arguments
                 .get("query")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let top_k = arguments
-                .get("top_k")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1) as usize;
+            let top_k = arguments.get("top_k").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
             let value = self.semantic_memory_recall(actor_id, &query, top_k);
             Ok(self.vm_value_to_string_or_default(actor_id, &value))
         } else {
@@ -1112,10 +1119,7 @@ impl Runtime {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let top_k = arguments
-                    .get("top_k")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1) as usize;
+                let top_k = arguments.get("top_k").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
                 let value = self.procedural_memory_get_examples(actor_id, &task, &query, top_k);
                 Ok(self.vm_value_to_string_or_default(actor_id, &value))
             }
@@ -1174,7 +1178,10 @@ impl Runtime {
         frame.pc = offset;
 
         for (i, (param_name, _)) in properties.iter().enumerate().take(256) {
-            let json_val = arguments.get(param_name).cloned().unwrap_or(serde_json::Value::Null);
+            let json_val = arguments
+                .get(param_name)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
             frame.regs[i] = json_to_vm_value(&mut vm, json_val)?;
         }
 
@@ -1232,10 +1239,12 @@ impl Runtime {
         }
         if is_workflow {
             if event == "ParallelBranchCompleted" && args.len() == 2 {
-                let parallel_step_name =
-                    self.resolve_string_constant(actor_id, &args[0]).unwrap_or_default();
-                let branch_name =
-                    self.resolve_string_constant(actor_id, &args[1]).unwrap_or_default();
+                let parallel_step_name = self
+                    .resolve_string_constant(actor_id, &args[0])
+                    .unwrap_or_default();
+                let branch_name = self
+                    .resolve_string_constant(actor_id, &args[1])
+                    .unwrap_or_default();
                 let _ = self.persistence.append_parallel_branch_completed(
                     actor_id,
                     seq,
@@ -1274,14 +1283,22 @@ impl Runtime {
         let string_id = value.as_string_id()?;
         let actor = self.actors.get(&actor_id)?;
         let module = actor.bytecode_module.as_ref()?;
-        module.constants.get(string_id as usize).and_then(|c| match c {
-            crate::bytecode::Constant::String(s) => Some(s.clone()),
-            _ => None,
-        })
+        module
+            .constants
+            .get(string_id as usize)
+            .and_then(|c| match c {
+                crate::bytecode::Constant::String(s) => Some(s.clone()),
+                _ => None,
+            })
     }
 
     /// Append a `TimerSet` workflow event and checkpoint the actor.
-    pub fn append_timer_set(&mut self, actor_id: u64, name: &str, duration_ms: u64) -> std::io::Result<()> {
+    pub fn append_timer_set(
+        &mut self,
+        actor_id: u64,
+        name: &str,
+        duration_ms: u64,
+    ) -> std::io::Result<()> {
         let seq = self.next_sequence(actor_id);
         self.persistence
             .append_timer_set(actor_id, seq, name.to_string(), duration_ms)?;
@@ -1313,7 +1330,11 @@ impl Runtime {
     }
 
     /// Append a `SagaCompensated` workflow event and checkpoint the actor.
-    pub fn append_saga_compensated(&mut self, actor_id: u64, step_name: &str) -> std::io::Result<()> {
+    pub fn append_saga_compensated(
+        &mut self,
+        actor_id: u64,
+        step_name: &str,
+    ) -> std::io::Result<()> {
         let seq = self.next_sequence(actor_id);
         self.persistence
             .append_saga_compensated(actor_id, seq, step_name.to_string())?;
@@ -1331,7 +1352,11 @@ impl Runtime {
         let should_resume = {
             if let Some(actor) = self.actors.get_mut(&actor_id) {
                 actor.received_signals.push((name.to_string(), payload));
-                actor.waiting_signal.as_ref().map(|s| s == name).unwrap_or(false)
+                actor
+                    .waiting_signal
+                    .as_ref()
+                    .map(|s| s == name)
+                    .unwrap_or(false)
             } else {
                 false
             }
@@ -1415,7 +1440,12 @@ impl Runtime {
                     actor.llm_pending_prompt = None;
                     actor.llm_completed = Some(Ok(response));
                 }
-                if self.actors.get(&actor_id).map(|a| a.suspended_execution.is_some()).unwrap_or(false) {
+                if self
+                    .actors
+                    .get(&actor_id)
+                    .map(|a| a.suspended_execution.is_some())
+                    .unwrap_or(false)
+                {
                     self.resume_suspended_llm_step(actor_id);
                 }
             }
@@ -1428,7 +1458,11 @@ impl Runtime {
     /// Process an LLM error: decide whether to retry, fall back, or fail.
     fn handle_llm_error(&mut self, actor_id: u64, error: LlmError) {
         // Only agent actors have retry/fallback config.
-        let is_agent = self.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false);
+        let is_agent = self
+            .actors
+            .get(&actor_id)
+            .map(|a| a.is_agent)
+            .unwrap_or(false);
         if !is_agent {
             // Non-agent actors: store the error and resume.
             if let Some(actor) = self.actors.get_mut(&actor_id) {
@@ -1452,10 +1486,12 @@ impl Runtime {
             };
             let retry = actor.retry_config.clone();
             let fallback = actor.fallback_config.clone();
-            let attempt_val = actor.get_state_field("llm_attempt")
+            let attempt_val = actor
+                .get_state_field("llm_attempt")
                 .and_then(|v| v.as_int())
                 .unwrap_or(0) as u32;
-            let fallback_step_val = actor.get_state_field("llm_fallback_step")
+            let fallback_step_val = actor
+                .get_state_field("llm_fallback_step")
                 .and_then(|v| v.as_int())
                 .unwrap_or(0) as usize;
             let prompt_val = actor.llm_pending_prompt.clone().unwrap_or_default();
@@ -1472,10 +1508,8 @@ impl Runtime {
                     actor.set_state_field("llm_attempt", crate::vm::Value::int(new_attempt as i64));
                 }
                 let delay_ms = compute_backoff(retry, attempt, actor_id);
-                self.timer_wheel.schedule_llm_retry(
-                    std::time::Duration::from_millis(delay_ms),
-                    actor_id,
-                );
+                self.timer_wheel
+                    .schedule_llm_retry(std::time::Duration::from_millis(delay_ms), actor_id);
                 return;
             }
         }
@@ -1531,7 +1565,9 @@ impl Runtime {
 
     /// Re-dispatch an in-flight LLM request on retry timer fire.
     fn handle_llm_retry_timer(&mut self, actor_id: u64) {
-        let prompt = self.actors.get(&actor_id)
+        let prompt = self
+            .actors
+            .get(&actor_id)
             .and_then(|a| a.llm_pending_prompt.clone())
             .unwrap_or_default();
         // Clear old pending prompt so re-dispatch doesn't duplicate.
@@ -1543,17 +1579,20 @@ impl Runtime {
 
     /// Build and dispatch an LLM request for the actor, marking it in-flight.
     fn redispatch_llm_request(&mut self, actor_id: u64, prompt: &str) {
-        let is_agent = self.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false);
+        let is_agent = self
+            .actors
+            .get(&actor_id)
+            .map(|a| a.is_agent)
+            .unwrap_or(false);
         let request = if is_agent {
             self.build_agent_llm_request(actor_id, prompt)
         } else {
-            let model = self.actors.get(&actor_id)
+            let model = self
+                .actors
+                .get(&actor_id)
                 .and_then(|a| {
                     let module = a.bytecode_module.as_ref()?;
-                    Self::vm_value_to_string(
-                        &a.get_state_field("model")?,
-                        Some(module),
-                    )
+                    Self::vm_value_to_string(&a.get_state_field("model")?, Some(module))
                 })
                 .unwrap_or_default();
             self.build_actor_llm_request(actor_id, &model, prompt)
@@ -1596,14 +1635,23 @@ impl Runtime {
     /// Returns true if the request was dispatched, false if the worker
     /// channel is unavailable (caller should roll back in-flight state).
     fn dispatch_llm_request(&mut self, actor_id: u64, request: LlmRequest, prompt: &str) -> bool {
-        let Some(client) = self.llm_client.clone() else { return false };
-        let Some(tx) = self.llm_request_tx.as_ref() else { return false };
+        let Some(client) = self.llm_client.clone() else {
+            return false;
+        };
+        let Some(tx) = self.llm_request_tx.as_ref() else {
+            return false;
+        };
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.llm_inflight = true;
             actor.llm_pending_prompt = Some(prompt.to_string());
         }
         self.llm_inflight_count += 1;
-        tx.send(LlmWorkItem { actor_id, request, client }).is_ok()
+        tx.send(LlmWorkItem {
+            actor_id,
+            request,
+            client,
+        })
+        .is_ok()
     }
 
     /// Prune an agent's episodic memory to fit within `max_tokens`, using a
@@ -1611,15 +1659,24 @@ impl Runtime {
     /// prompt (which lives in its own state field).
     fn prune_episodic_memory(&mut self, actor_id: u64, max_tokens: usize) {
         let memory_json = {
-            let actor = match self.actors.get(&actor_id) { Some(a) => a, None => return };
-            let module = match actor.bytecode_module.as_ref() { Some(m) => m, None => return };
+            let actor = match self.actors.get(&actor_id) {
+                Some(a) => a,
+                None => return,
+            };
+            let module = match actor.bytecode_module.as_ref() {
+                Some(m) => m,
+                None => return,
+            };
             Self::vm_value_to_string(
-                &actor.get_state_field("episodic_memory").unwrap_or(crate::vm::Value::nil()),
+                &actor
+                    .get_state_field("episodic_memory")
+                    .unwrap_or(crate::vm::Value::nil()),
                 Some(module),
-            ).unwrap_or_default()
+            )
+            .unwrap_or_default()
         };
-        let mut memory: crate::ai::EpisodicMemory =
-            serde_json::from_str(&memory_json).unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
+        let mut memory: crate::ai::EpisodicMemory = serde_json::from_str(&memory_json)
+            .unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
 
         let max_chars = max_tokens.saturating_mul(4);
         let total_chars: usize = memory.turns.iter().map(|t| t.content.len()).sum();
@@ -1665,7 +1722,9 @@ impl Runtime {
             // Re-install callbacks bound to THIS actor: other actors may have
             // run on the shared VM while this one was suspended.
             vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
-            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks { runtime: self_ptr }));
+            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks {
+                runtime: self_ptr,
+            }));
             vm.restore_suspended_state(suspended.vm_state);
             let saved_suspend = (*self_ptr).llm_suspend_enabled;
             (*self_ptr).llm_suspend_enabled = true;
@@ -1709,11 +1768,12 @@ impl Runtime {
                         if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
                             let marker = suspension_marker(actor, signal_name);
                             actor.waiting_signal = marker;
-                            actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
-                                vm_state,
-                                behavior_idx: suspended.behavior_idx,
-                                step_name: suspended.step_name,
-                            });
+                            actor.suspended_execution =
+                                Some(crate::runtime::actor::SuspendedExecution {
+                                    vm_state,
+                                    behavior_idx: suspended.behavior_idx,
+                                    step_name: suspended.step_name,
+                                });
                         }
                         // A chained receive-after suspend arms its timeout
                         // here; a no-op for the other sentinels.
@@ -1822,7 +1882,9 @@ impl Runtime {
             // run on the shared VM while this one was suspended, and a resumed
             // `LLM.ask` must record its in-flight call (and later completion)
             // on this actor — same as resume_suspended_llm_step.
-            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks { runtime: self_ptr }));
+            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks {
+                runtime: self_ptr,
+            }));
             vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
             vm.restore_suspended_state(suspended.vm_state);
             // A signal-resumed step is still scheduler-context execution: a
@@ -1844,7 +1906,9 @@ impl Runtime {
             Ok(_) => {
                 if self.actor_is_workflow(actor_id) {
                     if let Some(actor) = self.actors.get_mut(&actor_id) {
-                        if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
+                        if let Some(n) =
+                            actor.get_state_field("step_index").and_then(|v| v.as_int())
+                        {
                             actor.set_state_field("step_index", Value::int(n + 1));
                         }
                     }
@@ -1884,11 +1948,12 @@ impl Runtime {
                     if let Some(actor) = self.actors.get_mut(&actor_id) {
                         let marker = suspension_marker(actor, signal_name);
                         actor.waiting_signal = marker;
-                        actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
-                            vm_state,
-                            behavior_idx,
-                            step_name,
-                        });
+                        actor.suspended_execution =
+                            Some(crate::runtime::actor::SuspendedExecution {
+                                vm_state,
+                                behavior_idx,
+                                step_name,
+                            });
                     }
                     // A chained receive-after suspend arms its timeout
                     // here; a no-op for the other sentinels.
@@ -2086,7 +2151,8 @@ impl Runtime {
             .map(|e| !e.name.is_empty())
             .unwrap_or(false);
         if is_native {
-            let handler = self.actors.get(&actor_id).unwrap().behavior_table[behavior_idx].handler_fn;
+            let handler =
+                self.actors.get(&actor_id).unwrap().behavior_table[behavior_idx].handler_fn;
             self.current_actor = Some(actor_id);
             if self.actor_is_persistent(actor_id) {
                 let seq = self.next_sequence(actor_id);
@@ -2121,7 +2187,9 @@ impl Runtime {
         let actor = self.actors.get(&target_id)?;
         let suffix = format!(".{}", behavior);
         // Search the per-actor behavior table first (native handlers).
-        if let Some(idx) = actor.behavior_table.iter()
+        if let Some(idx) = actor
+            .behavior_table
+            .iter()
             .position(|entry| entry.name == behavior || entry.name.ends_with(&suffix))
         {
             return Some(idx as u16);
@@ -2130,7 +2198,9 @@ impl Runtime {
         // Returns the GLOBAL index into module.behaviors, which matches
         // what bytecode_offsets expects.
         let module = actor.bytecode_module.as_ref()?;
-        module.behaviors.iter()
+        module
+            .behaviors
+            .iter()
             .position(|b| b.name == behavior || b.name.ends_with(&suffix))
             .map(|idx| idx as u16)
     }
@@ -2144,18 +2214,30 @@ impl Runtime {
         let target_exists = self.actors.contains_key(&target_id);
         if target_exists {
             if let Some(actor) = self.actors.get_mut(&target_id) {
-                actor.flight_recorder.record(self.current_actor.unwrap_or(0), behavior_id, args);
+                actor
+                    .flight_recorder
+                    .record(self.current_actor.unwrap_or(0), behavior_id, args);
             }
             if let Err(_dropped) = self.actors.get_mut(&target_id).unwrap().mailbox.push(msg) {
                 // Mailbox is full (capacity > 0). Route to DLQ with a simple notification.
                 self.route_to_dlq(
-                    &Message { behavior_id, payload: args.to_vec(), sender: self.current_actor.unwrap_or(0), priority: MessagePriority::System },
+                    &Message {
+                        behavior_id,
+                        payload: args.to_vec(),
+                        sender: self.current_actor.unwrap_or(0),
+                        priority: MessagePriority::System,
+                    },
                     "mailbox full",
                 );
             }
         } else {
             self.route_to_dlq(
-                &Message { behavior_id, payload: args.to_vec(), sender: self.current_actor.unwrap_or(0), priority: MessagePriority::System },
+                &Message {
+                    behavior_id,
+                    payload: args.to_vec(),
+                    sender: self.current_actor.unwrap_or(0),
+                    priority: MessagePriority::System,
+                },
                 "target actor not found",
             );
         }
@@ -2174,19 +2256,11 @@ impl Runtime {
                     // with a uniform OrcaHeader layout; the sender holds a
                     // counted reference (a local ref or a receiver hold), so
                     // the heap is live — or retired — and the header valid.
-                    let source_header = unsafe {
-                        crate::runtime::heap::ActorHeap::header_of(ptr)
-                    };
+                    let source_header = unsafe { crate::runtime::heap::ActorHeap::header_of(ptr) };
                     let owner_id = unsafe { (*source_header).actor_id };
 
                     if let Some(owner) = self.actors.get_mut(&owner_id) {
-                        let op = unsafe {
-                            owner.orca_gc.send_ref_to(
-                                &owner.heap,
-                                ptr,
-                                target_id,
-                            )
-                        };
+                        let op = unsafe { owner.orca_gc.send_ref_to(&owner.heap, ptr, target_id) };
                         self.coordinator.submit_op(op);
                     } else {
                         // The owner has exited: its heap is retired (kept
@@ -2208,9 +2282,7 @@ impl Runtime {
                     // The receiving actor is represented by its pinned sentinel;
                     // the edge target_sentinel -> source_object records that the
                     // target actor holds a reference to the source object.
-                    if self.actors.contains_key(&owner_id)
-                        && self.actors.contains_key(&target_id)
-                    {
+                    if self.actors.contains_key(&owner_id) && self.actors.contains_key(&target_id) {
                         if let Some(target_actor) = self.actors.get_mut(&target_id) {
                             if let Some(sentinel) = target_actor.cycle_sentinel() {
                                 self.cycle_detector.register_foreign_ref(
@@ -2757,7 +2829,8 @@ impl Runtime {
                                     .and_then(|actor| self.vm_value_to_string_in_actor(v, actor))
                             })
                             .unwrap_or_default();
-                        let top_k = msg.payload.get(2).and_then(|v| v.as_int()).unwrap_or(1) as usize;
+                        let top_k =
+                            msg.payload.get(2).and_then(|v| v.as_int()).unwrap_or(1) as usize;
                         self.procedural_memory_get_examples(actor_id, &task, &query, top_k);
                     }
                     _ => {}
@@ -2772,7 +2845,10 @@ impl Runtime {
             {
                 let actor = match self.actors.get(&actor_id) {
                     Some(a) => a,
-                    None => { self.current_actor = None; return; }
+                    None => {
+                        self.current_actor = None;
+                        return;
+                    }
                 };
                 if let crate::runtime::actor::ActorBackend::WasmComponent { .. } = &actor.backend {
                     self.current_actor = None;
@@ -2877,7 +2953,10 @@ impl Runtime {
                     }
                 }
             }
-            if processed && self.actor_is_workflow(actor_id) && !self.is_internal_behavior(actor_id, behavior_idx) {
+            if processed
+                && self.actor_is_workflow(actor_id)
+                && !self.is_internal_behavior(actor_id, behavior_idx)
+            {
                 let seq = self.next_sequence(actor_id);
                 let step_name = self.step_name_for(actor_id, behavior_idx);
                 let _ = self.persistence.append_workflow_event(
@@ -2892,7 +2971,9 @@ impl Runtime {
                 // advance it here when the step completes.
                 if self.is_parallel_step(actor_id, behavior_idx) {
                     if let Some(actor) = self.actors.get_mut(&actor_id) {
-                        if let Some(n) = actor.get_state_field("step_index").and_then(|v| v.as_int()) {
+                        if let Some(n) =
+                            actor.get_state_field("step_index").and_then(|v| v.as_int())
+                        {
                             actor.set_state_field("step_index", Value::int(n + 1));
                         }
                     }
@@ -2955,7 +3036,10 @@ impl Runtime {
     }
 
     fn actor_is_agent(&self, actor_id: u64) -> bool {
-        self.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false)
+        self.actors
+            .get(&actor_id)
+            .map(|a| a.is_agent)
+            .unwrap_or(false)
     }
 
     /// Return true if the behavior name is a semantic-memory behavior generated
@@ -3020,7 +3104,11 @@ impl Runtime {
 
     /// Store a fact in an agent's semantic memory and return the document id.
     fn semantic_memory_store(&mut self, actor_id: u64, content: &str) -> crate::vm::Value {
-        self.semantic_memory_store_with_metadata(actor_id, content, std::collections::HashMap::new())
+        self.semantic_memory_store_with_metadata(
+            actor_id,
+            content,
+            std::collections::HashMap::new(),
+        )
     }
 
     /// Store a fact with metadata in an agent's semantic memory and return the document id.
@@ -3052,11 +3140,10 @@ impl Runtime {
         top_k: usize,
     ) -> crate::vm::Value {
         let content = if let Some(actor) = self.actors.get(&actor_id) {
-            self.read_semantic_memory(actor)
-                .and_then(|memory| {
-                    let results = memory.search(query, top_k);
-                    results.first().map(|(doc, _)| doc.content.clone())
-                })
+            self.read_semantic_memory(actor).and_then(|memory| {
+                let results = memory.search(query, top_k);
+                results.first().map(|(doc, _)| doc.content.clone())
+            })
         } else {
             None
         };
@@ -3189,10 +3276,7 @@ impl Runtime {
     fn has_bytecode_handler(&self, actor_id: u64, behavior_idx: usize) -> bool {
         self.actors
             .get(&actor_id)
-            .map(|a| {
-                a.bytecode_module.is_some()
-                    && behavior_idx < a.bytecode_offsets.len()
-            })
+            .map(|a| a.bytecode_module.is_some() && behavior_idx < a.bytecode_offsets.len())
             .unwrap_or(false)
     }
 
@@ -3359,7 +3443,9 @@ impl Runtime {
             let vm = (*self_ptr).vm.as_mut().unwrap();
             // Re-install callbacks bound to THIS actor: other actors may have
             // run on the shared VM while this one was suspended.
-            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks { runtime: self_ptr }));
+            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks {
+                runtime: self_ptr,
+            }));
             vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
             vm.restore_suspended_state(suspended.vm_state);
             // A resumed behavior is still scheduler-context execution: a
@@ -3404,11 +3490,12 @@ impl Runtime {
                     if let Some(vm_state) = vm.take_suspended_state() {
                         let timeout = vm.suspended_receive_timeout.take();
                         if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
-                            actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
-                                vm_state,
-                                behavior_idx: suspended.behavior_idx,
-                                step_name: suspended.step_name,
-                            });
+                            actor.suspended_execution =
+                                Some(crate::runtime::actor::SuspendedExecution {
+                                    vm_state,
+                                    behavior_idx: suspended.behavior_idx,
+                                    step_name: suspended.step_name,
+                                });
                         }
                         (*self_ptr).maybe_schedule_receive_wait(actor_id, timeout);
                     }
@@ -3424,11 +3511,12 @@ impl Runtime {
                         if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
                             let marker = suspension_marker(actor, signal_name);
                             actor.waiting_signal = marker;
-                            actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
-                                vm_state,
-                                behavior_idx: suspended.behavior_idx,
-                                step_name: suspended.step_name,
-                            });
+                            actor.suspended_execution =
+                                Some(crate::runtime::actor::SuspendedExecution {
+                                    vm_state,
+                                    behavior_idx: suspended.behavior_idx,
+                                    step_name: suspended.step_name,
+                                });
                         }
                     }
                 }
@@ -3453,13 +3541,20 @@ impl Runtime {
         let fired = self.timer_wheel.tick(now);
         for (target_actor, message) in fired {
             match message {
-                TimerMessage::SendWithContext { behavior_id, payload, context } => {
+                TimerMessage::SendWithContext {
+                    behavior_id,
+                    payload,
+                    context,
+                } => {
                     if self.actor_is_workflow(target_actor) {
                         let _ = self.append_timer_fired(target_actor, &context);
                     }
                     self.send_message_by_id(target_actor, behavior_id, &payload);
                 }
-                TimerMessage::Send { behavior_id, payload } => {
+                TimerMessage::Send {
+                    behavior_id,
+                    payload,
+                } => {
                     self.send_message_by_id(target_actor, behavior_id, &payload);
                 }
                 TimerMessage::Exit { reason } => {
@@ -3497,7 +3592,11 @@ impl Runtime {
         let seq = self.next_sequence(actor_id);
         let mut state = HashMap::new();
         for (name, value) in &actor.state_data {
-            let model = actor.state_models.get(name).copied().unwrap_or(StateModel::Local);
+            let model = actor
+                .state_models
+                .get(name)
+                .copied()
+                .unwrap_or(StateModel::Local);
             if model == StateModel::Durable || model == StateModel::Crdt {
                 let persisted = if name == "semantic_memory" || name == "procedural_memory" {
                     self.vm_value_to_string_in_actor(value, actor)
@@ -3580,7 +3679,11 @@ impl Runtime {
                 Some(a) => a,
                 None => return Ok(Value::nil()),
             };
-            actor.bytecode_offsets.get(behavior_idx).copied().unwrap_or(0)
+            actor
+                .bytecode_offsets
+                .get(behavior_idx)
+                .copied()
+                .unwrap_or(0)
         };
         let result = self.run_bytecode_at_offset(actor_id, code_offset, args);
         // If the step suspended waiting for a signal or a background LLM
@@ -3611,7 +3714,12 @@ impl Runtime {
                 Some(a) => a,
                 None => return Ok(Value::nil()),
             };
-            match actor.compensation_offsets.get(behavior_idx).copied().flatten() {
+            match actor
+                .compensation_offsets
+                .get(behavior_idx)
+                .copied()
+                .flatten()
+            {
                 Some(offset) => offset,
                 None => return Ok(Value::nil()),
             }
@@ -3641,7 +3749,12 @@ impl Runtime {
             }
             let vm = (*self_ptr).vm.as_mut().unwrap();
 
-            let module_idx = if let Some(idx) = (*self_ptr).actors.get(&actor_id).unwrap().bytecode_module_idx {
+            let module_idx = if let Some(idx) = (*self_ptr)
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .bytecode_module_idx
+            {
                 idx
             } else {
                 let idx = vm.modules.len();
@@ -3653,7 +3766,9 @@ impl Runtime {
             };
 
             vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
-            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks { runtime: self_ptr }));
+            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks {
+                runtime: self_ptr,
+            }));
 
             let mut frame = crate::vm::Frame::new(None, module_idx);
             frame.pc = code_offset;
@@ -3676,11 +3791,12 @@ impl Runtime {
                         if let Some(actor) = self.actors.get_mut(&actor_id) {
                             let marker = suspension_marker(actor, signal_name);
                             actor.waiting_signal = marker;
-                            actor.suspended_execution = Some(crate::runtime::actor::SuspendedExecution {
-                                vm_state,
-                                behavior_idx: 0,
-                                step_name: String::new(),
-                            });
+                            actor.suspended_execution =
+                                Some(crate::runtime::actor::SuspendedExecution {
+                                    vm_state,
+                                    behavior_idx: 0,
+                                    step_name: String::new(),
+                                });
                         }
                         // Arm the receive-after timeout on the first
                         // suspension; a no-op for the other sentinels.
@@ -3841,9 +3957,11 @@ impl Runtime {
         }
         // Parse cached retry/fallback configs from restored state for agents.
         if is_agent {
-            if let Some(module) = actor.bytecode_module.as_ref().or_else(|| {
-                self.recovery_modules.get(&actor_id).map(|(m, _, _)| m)
-            }) {
+            if let Some(module) = actor
+                .bytecode_module
+                .as_ref()
+                .or_else(|| self.recovery_modules.get(&actor_id).map(|(m, _, _)| m))
+            {
                 for (name, c) in module.actor_metadata.iter().flat_map(|m| &m.state_defaults) {
                     if let crate::bytecode::Constant::String(json) = c {
                         if name == "retry_config" {
@@ -3859,14 +3977,23 @@ impl Runtime {
         let events = self.persistence.read_events(actor_id);
         if !events.is_empty() {
             for entry in &events {
-                if let Some(current) = actor.get_state_field(&entry.field_name).and_then(|v| v.as_int()) {
+                if let Some(current) = actor
+                    .get_state_field(&entry.field_name)
+                    .and_then(|v| v.as_int())
+                {
                     actor.set_state_field(&entry.field_name, Value::int(current + 1));
                 } else {
                     actor.set_state_field(&entry.field_name, Value::int(1));
                 }
-                let current_seq = actor.event_sourced_sequences.get(&entry.field_name).copied().unwrap_or(0);
+                let current_seq = actor
+                    .event_sourced_sequences
+                    .get(&entry.field_name)
+                    .copied()
+                    .unwrap_or(0);
                 if entry.sequence > current_seq {
-                    actor.event_sourced_sequences.insert(entry.field_name.clone(), entry.sequence);
+                    actor
+                        .event_sourced_sequences
+                        .insert(entry.field_name.clone(), entry.sequence);
                 }
             }
         }
@@ -3917,9 +4044,7 @@ impl Runtime {
             }
             for event in &all_timer_events {
                 if let WorkflowEvent::TimerSet {
-                    name,
-                    duration_ms,
-                    ..
+                    name, duration_ms, ..
                 } = event
                 {
                     if !fired_timer_names.contains(name) {
@@ -3965,7 +4090,9 @@ impl Runtime {
                 let behavior_idx = entry.behavior_id as usize;
                 let payload: Vec<Value> = entry.payload.iter().map(|p| p.to_value()).collect();
                 if self.has_native_handler(actor_id, behavior_idx) {
-                    let handler = self.actors.get(&actor_id)
+                    let handler = self
+                        .actors
+                        .get(&actor_id)
                         .and_then(|a| a.behavior_table.get(behavior_idx))
                         .map(|b| b.handler_fn)?;
                     if let Some(actor) = self.actors.get_mut(&actor_id) {
@@ -4041,12 +4168,18 @@ impl Runtime {
     // -- Fault Tolerance: Links --
 
     pub fn link_actors(&mut self, a: u64, b: u64) {
-        if a == b { return; }
+        if a == b {
+            return;
+        }
         if let Some(actor_a) = self.actors.get_mut(&a) {
-            if !actor_a.links.contains(&b) { actor_a.links.push(b); }
+            if !actor_a.links.contains(&b) {
+                actor_a.links.push(b);
+            }
         }
         if let Some(actor_b) = self.actors.get_mut(&b) {
-            if !actor_b.links.contains(&a) { actor_b.links.push(a); }
+            if !actor_b.links.contains(&a) {
+                actor_b.links.push(a);
+            }
         }
     }
 
@@ -4062,9 +4195,13 @@ impl Runtime {
     // -- Fault Tolerance: Monitors --
 
     pub fn monitor(&mut self, watcher: u64, target: u64) {
-        if watcher == target { return; }
+        if watcher == target {
+            return;
+        }
         if let Some(actor) = self.actors.get_mut(&target) {
-            if !actor.monitors.contains(&watcher) { actor.monitors.push(watcher); }
+            if !actor.monitors.contains(&watcher) {
+                actor.monitors.push(watcher);
+            }
         } else {
             self.send_down_message(watcher, target, &ExitReason::Error("noproc".to_string()));
         }
@@ -4116,8 +4253,13 @@ impl Runtime {
                     let sup_parent = supervisor.parent;
                     self.shutdown_supervisor(supervisor_id, &supervisor);
                     if let Some(parent_id) = sup_parent {
-                        let escalate_reason = ExitReason::Error("child supervisor shutdown".to_string());
-                        self.handle_supervisor_parent_exit(parent_id, supervisor_id, escalate_reason);
+                        let escalate_reason =
+                            ExitReason::Error("child supervisor shutdown".to_string());
+                        self.handle_supervisor_parent_exit(
+                            parent_id,
+                            supervisor_id,
+                            escalate_reason,
+                        );
                     }
                 }
                 SupervisorAction::Ignore => {
@@ -4172,9 +4314,17 @@ impl Runtime {
 
         let is_abnormal = !matches!(reason, ExitReason::Normal);
         for linked_id in links {
-            if linked_id == actor_id { continue; }
-            let linked_alive = self.actors.get(&linked_id).map(|a| a.state != ActorState::Terminated).unwrap_or(false);
-            if !linked_alive { continue; }
+            if linked_id == actor_id {
+                continue;
+            }
+            let linked_alive = self
+                .actors
+                .get(&linked_id)
+                .map(|a| a.state != ActorState::Terminated)
+                .unwrap_or(false);
+            if !linked_alive {
+                continue;
+            }
 
             if is_abnormal {
                 // Kill is untrappable per spec — force-terminate even trap_exits actors.
@@ -4186,7 +4336,11 @@ impl Runtime {
                     self.handle_actor_exit(linked_id, kill_reason);
                     continue;
                 }
-                let traps = self.actors.get(&linked_id).map(|a| a.trap_exits).unwrap_or(false);
+                let traps = self
+                    .actors
+                    .get(&linked_id)
+                    .map(|a| a.trap_exits)
+                    .unwrap_or(false);
                 if traps {
                     let exit_msg = Message {
                         behavior_id: 0,
@@ -4199,7 +4353,10 @@ impl Runtime {
                     }
                     self.enqueue_actor(linked_id);
                 } else {
-                    let linked_reason = ExitReason::Error(format!("linked actor {} exited with {:?}", actor_id, reason));
+                    let linked_reason = ExitReason::Error(format!(
+                        "linked actor {} exited with {:?}",
+                        actor_id, reason
+                    ));
                     if let Some(actor) = self.actors.get_mut(&linked_id) {
                         actor.state = ActorState::Terminated;
                     }
@@ -4625,11 +4782,7 @@ impl Runtime {
     /// the request's initial state and registers this handler as its sole
     /// behavior under `name`. Unknown names are answered with
     /// `success: false` — no actor is created.
-    pub fn register_spawnable_behavior(
-        &mut self,
-        name: &str,
-        handler: fn(&mut Actor, &[Value]),
-    ) {
+    pub fn register_spawnable_behavior(&mut self, name: &str, handler: fn(&mut Actor, &[Value])) {
         self.spawnable_behaviors.insert(name.to_string(), handler);
     }
 
@@ -4690,14 +4843,24 @@ impl Runtime {
                 return;
             }
         };
-        distributed::send_distributed(self, &mut transport, &cluster, &mut resolver, target, behavior, args);
+        distributed::send_distributed(
+            self,
+            &mut transport,
+            &cluster,
+            &mut resolver,
+            target,
+            behavior,
+            args,
+        );
         self.distributed.transport = Some(transport);
         self.distributed.cluster = Some(cluster);
         self.distributed.resolver = Some(resolver);
     }
 
     pub fn process_network(&mut self) {
-        if !self.distributed.enabled { return; }
+        if !self.distributed.enabled {
+            return;
+        }
         let mut transport = match self.distributed.transport.take() {
             Some(t) => t,
             None => return,
@@ -4737,7 +4900,10 @@ impl Runtime {
                         let local_id = self.distributed.node_id.unwrap_or(NodeId::LOCAL);
                         let packet = Packet::Heartbeat {
                             node_id: local_id,
-                            timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
                         };
                         transport.send(NodeId(to.0), addr, packet);
                     }
@@ -4793,7 +4959,9 @@ impl Runtime {
     /// when deltas are generated, so a lost delta is never re-sent and
     /// these periodic full syncs are the repair mechanism.
     pub fn sync_crdts(&mut self) {
-        if !self.distributed.enabled { return; }
+        if !self.distributed.enabled {
+            return;
+        }
         self.crdt_sync_rounds = self.crdt_sync_rounds.wrapping_add(1);
         if crdt_sync_is_full_round(self.crdt_sync_rounds) {
             self.sync_crdts_full();
@@ -4808,7 +4976,9 @@ impl Runtime {
             Some(m) => m.generate_sync_ops(),
             None => return,
         };
-        if ops.is_empty() { return; }
+        if ops.is_empty() {
+            return;
+        }
         let packet = Packet::CrdtSync { ops };
         if let Some(cluster) = &self.distributed.cluster {
             for member in cluster.healthy_members() {
@@ -4880,11 +5050,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         self.runtime.borrow().current_actor
     }
 
-    fn alloc(
-        &mut self,
-        size: usize,
-        type_tag: crate::runtime::heap::TypeTag,
-    ) -> Option<*mut u8> {
+    fn alloc(&mut self, size: usize, type_tag: crate::runtime::heap::TypeTag) -> Option<*mut u8> {
         let mut rt = self.runtime.borrow_mut();
         if let Some(actor_id) = rt.current_actor {
             if let Some(actor) = rt.actors.get_mut(&actor_id) {
@@ -4904,7 +5070,9 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 // Route through ORCA so objects with outstanding foreign
                 // references are deferred instead of freed out from under
                 // other actors.
-                unsafe { actor.orca_gc.drop_local_ref(&mut actor.heap, ptr); }
+                unsafe {
+                    actor.orca_gc.drop_local_ref(&mut actor.heap, ptr);
+                }
             }
         }
     }
@@ -4916,7 +5084,9 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         let mut rt = self.runtime.borrow_mut();
         if let Some(actor_id) = rt.current_actor {
             if let Some(actor) = rt.actors.get_mut(&actor_id) {
-                unsafe { actor.orca_gc.local_ref(&actor.heap, ptr); }
+                unsafe {
+                    actor.orca_gc.local_ref(&actor.heap, ptr);
+                }
             }
         }
     }
@@ -4958,14 +5128,24 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             .spawn_from_module(module, behavior_idx, init)
     }
 
-    fn send_message(&mut self, target: crate::vm::Value, behavior_id: u16, args: &[crate::vm::Value]) {
+    fn send_message(
+        &mut self,
+        target: crate::vm::Value,
+        behavior_id: u16,
+        args: &[crate::vm::Value],
+    ) {
         if let Some(actor_id) = target.as_actor_id() {
             let mut rt = self.runtime.borrow_mut();
             rt.send_message_by_id(actor_id, behavior_id, args);
         }
     }
 
-    fn ask_actor(&mut self, target: crate::vm::Value, behavior_id: u16, args: &[crate::vm::Value]) -> crate::vm::Value {
+    fn ask_actor(
+        &mut self,
+        target: crate::vm::Value,
+        behavior_id: u16,
+        args: &[crate::vm::Value],
+    ) -> crate::vm::Value {
         if let Some(actor_id) = target.as_actor_id() {
             let mut rt = self.runtime.borrow_mut();
             match rt.ask_actor_sync(actor_id, behavior_id, args) {
@@ -4980,7 +5160,9 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         let rt = self.runtime.borrow();
         if let Some(actor_id) = rt.current_actor {
             if let Some(actor) = rt.actors.get(&actor_id) {
-                return actor.get_state_field(field).unwrap_or(crate::vm::Value::nil());
+                return actor
+                    .get_state_field(field)
+                    .unwrap_or(crate::vm::Value::nil());
             }
         }
         crate::vm::Value::nil()
@@ -5002,7 +5184,11 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         }
     }
 
-    fn perform_effect(&mut self, effect_name: &str, regs: &[crate::vm::Value]) -> Option<crate::vm::Value> {
+    fn perform_effect(
+        &mut self,
+        effect_name: &str,
+        regs: &[crate::vm::Value],
+    ) -> Option<crate::vm::Value> {
         if effect_name != "Timer" {
             return None;
         }
@@ -5115,11 +5301,13 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let prompt = match regs.get(1) {
                 Some(v) => {
                     if let Some(id) = v.as_string_id() {
-                        constants.get(id as usize)
+                        constants
+                            .get(id as usize)
                             .and_then(|c| match c {
                                 crate::bytecode::Constant::String(s) => Some(s.clone()),
                                 _ => None,
-                            }).unwrap_or_default()
+                            })
+                            .unwrap_or_default()
                     } else {
                         v.to_string_repr()
                     }
@@ -5206,7 +5394,12 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
         let mut rt = self.runtime.borrow_mut();
         if let Some(actor_id) = rt.current_actor {
-            if rt.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false) {
+            if rt
+                .actors
+                .get(&actor_id)
+                .map(|a| a.is_agent)
+                .unwrap_or(false)
+            {
                 return rt.complete_agent_llm(actor_id, prompt);
             }
         }
@@ -5239,20 +5432,17 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     }
 
     fn pipeline_run(&mut self, id: i64, input: &str) -> Option<String> {
-        self.runtime.borrow_mut().pipeline_run(id as u64, input).ok()
+        self.runtime
+            .borrow_mut()
+            .pipeline_run(id as u64, input)
+            .ok()
     }
 
     fn supervisor_new(&mut self) -> i64 {
         self.runtime.borrow_mut().supervisor_new() as i64
     }
 
-    fn supervisor_worker(
-        &mut self,
-        id: i64,
-        name: &str,
-        actor_id: u64,
-        description: &str,
-    ) -> i64 {
+    fn supervisor_worker(&mut self, id: i64, name: &str, actor_id: u64, description: &str) -> i64 {
         self.runtime
             .borrow_mut()
             .supervisor_worker(id as u64, name, actor_id, description)
@@ -5261,20 +5451,19 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     }
 
     fn supervisor_run(&mut self, id: i64, task: &str) -> Option<String> {
-        self.runtime.borrow_mut().supervisor_run(id as u64, task).ok()
+        self.runtime
+            .borrow_mut()
+            .supervisor_run(id as u64, task)
+            .ok()
     }
 
     fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> i64 {
-        self.runtime.borrow_mut().debate_new(topic, rounds, threshold) as i64
+        self.runtime
+            .borrow_mut()
+            .debate_new(topic, rounds, threshold) as i64
     }
 
-    fn debate_participant(
-        &mut self,
-        id: i64,
-        name: &str,
-        stance: &str,
-        actor_id: u64,
-    ) -> i64 {
+    fn debate_participant(&mut self, id: i64, name: &str, stance: &str, actor_id: u64) -> i64 {
         self.runtime
             .borrow_mut()
             .debate_participant(id as u64, name, stance, actor_id)
@@ -5292,14 +5481,25 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         let msg = rt.actors.get(&actor_id)?.mailbox.pop()?;
         // ORCA receiver protocol: hold heap pointers carried by the message.
         rt.hold_payload_refs(actor_id, &msg.payload);
-        let val = msg.payload.into_iter().next().unwrap_or(crate::vm::Value::unit());
+        let val = msg
+            .payload
+            .into_iter()
+            .next()
+            .unwrap_or(crate::vm::Value::unit());
         Some((msg.behavior_id, val))
     }
 
-    fn try_receive_match(&mut self, behavior_ids: &[u16]) -> Option<(usize, Vec<crate::vm::Value>)> {
+    fn try_receive_match(
+        &mut self,
+        behavior_ids: &[u16],
+    ) -> Option<(usize, Vec<crate::vm::Value>)> {
         let mut rt = self.runtime.borrow_mut();
         let actor_id = rt.current_actor?;
-        let (pos, payload) = rt.actors.get(&actor_id)?.mailbox.receive_match(behavior_ids)?;
+        let (pos, payload) = rt
+            .actors
+            .get(&actor_id)?
+            .mailbox
+            .receive_match(behavior_ids)?;
         // ORCA receiver protocol: hold heap pointers carried by the message.
         rt.hold_payload_refs(actor_id, &payload);
         Some((pos, payload))
@@ -5347,7 +5547,13 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
     }
 
     fn alloc(&mut self, size: usize, type_tag: crate::runtime::heap::TypeTag) -> Option<*mut u8> {
-        unsafe { (*self.runtime).actors.get_mut(&self.actor_id)?.heap.alloc(size, type_tag) }
+        unsafe {
+            (*self.runtime)
+                .actors
+                .get_mut(&self.actor_id)?
+                .heap
+                .alloc(size, type_tag)
+        }
     }
 
     fn drop_ref(&mut self, ptr: *mut u8) {
@@ -5374,7 +5580,9 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             let _actor = (*self.runtime).actors.get(&self.actor_id)?;
             let header = &*crate::runtime::heap::ActorHeap::header_of(ptr);
             if header.type_tag == crate::runtime::heap::TypeTag::Array {
-                let payload_size = header.size.saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);
+                let payload_size = header
+                    .size
+                    .saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);
                 Some(payload_size / std::mem::size_of::<crate::vm::Value>())
             } else {
                 None
@@ -5395,7 +5603,12 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         unsafe { (*self.runtime).spawn_from_module(module, behavior_idx, init) }
     }
 
-    fn send_message(&mut self, target: crate::vm::Value, behavior_id: u16, args: &[crate::vm::Value]) {
+    fn send_message(
+        &mut self,
+        target: crate::vm::Value,
+        behavior_id: u16,
+        args: &[crate::vm::Value],
+    ) {
         if let Some(target_id) = target.as_actor_id() {
             // SAFETY: as above. `send_message_by_id` is safe mid-behavior:
             // it pushes mail, bumps ORCA foreign counts, and enqueues the
@@ -5408,7 +5621,9 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
     fn get_state_field(&self, field: &str) -> crate::vm::Value {
         unsafe {
             if let Some(actor) = (*self.runtime).actors.get(&self.actor_id) {
-                return actor.get_state_field(field).unwrap_or(crate::vm::Value::nil());
+                return actor
+                    .get_state_field(field)
+                    .unwrap_or(crate::vm::Value::nil());
             }
         }
         crate::vm::Value::nil()
@@ -5445,7 +5660,11 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         // callback while the VM borrow is active.
     }
 
-    fn perform_effect(&mut self, effect_name: &str, regs: &[crate::vm::Value]) -> Option<crate::vm::Value> {
+    fn perform_effect(
+        &mut self,
+        effect_name: &str,
+        regs: &[crate::vm::Value],
+    ) -> Option<crate::vm::Value> {
         unsafe {
             if effect_name != "Timer" {
                 return None;
@@ -5522,7 +5741,9 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                         })
                     });
                     if let Some(callback_name) = callback_name {
-                        let behavior_id = (*self.runtime).behavior_id_for(self.actor_id, &callback_name).unwrap_or(0);
+                        let behavior_id = (*self.runtime)
+                            .behavior_id_for(self.actor_id, &callback_name)
+                            .unwrap_or(0);
                         if behavior_id > 0 {
                             (*self.runtime).timer_wheel.send_after(
                                 std::time::Duration::from_millis(ms as u64),
@@ -5557,11 +5778,13 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 let prompt = match regs.get(1) {
                     Some(v) => {
                         if let Some(id) = v.as_string_id() {
-                            constants.get(id as usize)
+                            constants
+                                .get(id as usize)
                                 .and_then(|c| match c {
                                     crate::bytecode::Constant::String(s) => Some(s.clone()),
                                     _ => None,
-                                }).unwrap_or_default()
+                                })
+                                .unwrap_or_default()
                         } else {
                             v.to_string_repr()
                         }
@@ -5624,16 +5847,19 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
     fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
         unsafe {
             let rt = &mut *self.runtime;
-            if rt.actors.get(&self.actor_id).map(|a| a.is_agent).unwrap_or(false) {
+            if rt
+                .actors
+                .get(&self.actor_id)
+                .map(|a| a.is_agent)
+                .unwrap_or(false)
+            {
                 return rt.complete_agent_llm(self.actor_id, prompt);
             }
             let request = rt.build_actor_llm_request(self.actor_id, model, prompt)?;
-            let module = rt
-                .actors
-                .get(&self.actor_id)?
-                .bytecode_module
-                .clone()?;
-            rt.complete_llm_with_tools(request, Vec::new(), &module).ok()?.content
+            let module = rt.actors.get(&self.actor_id)?.bytecode_module.clone()?;
+            rt.complete_llm_with_tools(request, Vec::new(), &module)
+                .ok()?
+                .content
         }
     }
 
@@ -5661,8 +5887,11 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                         // durable-state write-back must not run on the worker.
                         let prev_current_actor = rt.current_actor;
                         rt.current_actor = Some(actor_id);
-                        let is_agent =
-                            rt.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false);
+                        let is_agent = rt
+                            .actors
+                            .get(&actor_id)
+                            .map(|a| a.is_agent)
+                            .unwrap_or(false);
                         let content = if is_agent {
                             let module = rt
                                 .actors
@@ -5682,9 +5911,10 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                                 .get(&actor_id)
                                 .and_then(|a| a.bytecode_module.clone());
                             match module {
-                                Some(m) => {
-                                    rt.finish_tool_calls(&m, response).ok().and_then(|r| r.content)
-                                }
+                                Some(m) => rt
+                                    .finish_tool_calls(&m, response)
+                                    .ok()
+                                    .and_then(|r| r.content),
                                 None => response.content,
                             }
                         };
@@ -5696,13 +5926,22 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             }
 
             // A call is already in flight (defensive; should not happen).
-            if rt.actors.get(&actor_id).map(|a| a.llm_inflight).unwrap_or(false) {
+            if rt
+                .actors
+                .get(&actor_id)
+                .map(|a| a.llm_inflight)
+                .unwrap_or(false)
+            {
                 return LlmAskResult::Pending;
             }
 
             // Build the request on the scheduler thread, then hand it to a
             // background worker for the HTTP call.
-            let is_agent = rt.actors.get(&actor_id).map(|a| a.is_agent).unwrap_or(false);
+            let is_agent = rt
+                .actors
+                .get(&actor_id)
+                .map(|a| a.is_agent)
+                .unwrap_or(false);
             let request = if is_agent {
                 rt.build_agent_llm_request(actor_id, prompt)
             } else {
@@ -5746,13 +5985,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         unsafe { (*self.runtime).supervisor_new() as i64 }
     }
 
-    fn supervisor_worker(
-        &mut self,
-        id: i64,
-        name: &str,
-        actor_id: u64,
-        description: &str,
-    ) -> i64 {
+    fn supervisor_worker(&mut self, id: i64, name: &str, actor_id: u64, description: &str) -> i64 {
         unsafe {
             (*self.runtime)
                 .supervisor_worker(id as u64, name, actor_id, description)
@@ -5769,13 +6002,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         unsafe { (*self.runtime).debate_new(topic, rounds, threshold) as i64 }
     }
 
-    fn debate_participant(
-        &mut self,
-        id: i64,
-        name: &str,
-        stance: &str,
-        actor_id: u64,
-    ) -> i64 {
+    fn debate_participant(&mut self, id: i64, name: &str, stance: &str, actor_id: u64) -> i64 {
         unsafe {
             (*self.runtime)
                 .debate_participant(id as u64, name, stance, actor_id)
@@ -5794,12 +6021,19 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             let msg = actor.mailbox.pop()?;
             // ORCA receiver protocol: hold heap pointers carried by the message.
             (*self.runtime).hold_payload_refs(self.actor_id, &msg.payload);
-            let val = msg.payload.into_iter().next().unwrap_or(crate::vm::Value::unit());
+            let val = msg
+                .payload
+                .into_iter()
+                .next()
+                .unwrap_or(crate::vm::Value::unit());
             Some((msg.behavior_id, val))
         }
     }
 
-    fn try_receive_match(&mut self, behavior_ids: &[u16]) -> Option<(usize, Vec<crate::vm::Value>)> {
+    fn try_receive_match(
+        &mut self,
+        behavior_ids: &[u16],
+    ) -> Option<(usize, Vec<crate::vm::Value>)> {
         unsafe {
             let actor = (*self.runtime).actors.get(&self.actor_id)?;
             let (pos, payload) = actor.mailbox.receive_match(behavior_ids)?;
@@ -5910,7 +6144,9 @@ impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
             let mut transport = rt.distributed.transport.take();
             let mut resolver = rt.distributed.resolver.take();
             let cluster = rt.distributed.cluster.take();
-            if let (Some(ref mut t), Some(ref c), Some(ref mut r)) = (&mut transport, &cluster, &mut resolver) {
+            if let (Some(ref mut t), Some(ref c), Some(ref mut r)) =
+                (&mut transport, &cluster, &mut resolver)
+            {
                 let target = ActorAddress::remote(NodeId(target_node), target_actor);
                 send_distributed(rt, t, c, r, target, behavior, args);
             }
@@ -5971,7 +6207,11 @@ fn json_to_vm_value(
 /// deterministic thundering-herd on clusters.
 fn compute_backoff(config: &crate::ast::AgentRetryConfig, attempt: u32, actor_id: u64) -> u64 {
     let base_ms = match &config.backoff {
-        crate::ast::AgentBackoff::Exponential { initial_ms, factor, max_ms } => {
+        crate::ast::AgentBackoff::Exponential {
+            initial_ms,
+            factor,
+            max_ms,
+        } => {
             let exp = (*factor).powi(attempt as i32);
             let delay = (*initial_ms as f64 * exp).min(*max_ms as f64);
             delay as u64
@@ -5980,7 +6220,9 @@ fn compute_backoff(config: &crate::ast::AgentRetryConfig, attempt: u32, actor_id
     };
     // ±25% jitter, seeded from actor_id so different actors (or the same
     // actor on different nodes with different ids) get different jitter.
-    let seed = actor_id.wrapping_mul(6364136223846793005).wrapping_add(attempt as u64);
+    let seed = actor_id
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(attempt as u64);
     let r = (seed >> 33) as f64 / (1u64 << 31) as f64; // [0, 1)
     let jittered = base_ms as f64 + (base_ms as f64 * 0.5 * (r - 0.5));
     jittered.max(0.0) as u64

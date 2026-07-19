@@ -14,7 +14,7 @@
 use crate::ai::request::ToolSchema;
 use crate::ai::schema::function_to_tool_schema;
 use crate::ast;
-use crate::ast::{BinOp, Decl, Expr, FunctionAnnotation, Literal, Pattern};
+use crate::ast::{BinOp, Decl, Expr, FunctionAnnotation, Literal};
 use crate::hir;
 use crate::types::{Capability, EffectRow, Span, Type};
 
@@ -451,8 +451,8 @@ fn desugar_agent(
     }
 
     // Serialize fallback config into a durable JSON string.
-    let fallback_config_json = serde_json::to_string(&fallback)
-        .unwrap_or_else(|_| "[]".to_string());
+    let fallback_config_json =
+        serde_json::to_string(&fallback).unwrap_or_else(|_| "[]".to_string());
     state_fields.push((
         "fallback_config".to_string(),
         ast::StateModel::Durable,
@@ -461,8 +461,7 @@ fn desugar_agent(
     ));
 
     // Serialize retry config into a durable JSON string.
-    let retry_config_json = serde_json::to_string(&retry)
-        .unwrap_or_else(|_| "null".to_string());
+    let retry_config_json = serde_json::to_string(&retry).unwrap_or_else(|_| "null".to_string());
     state_fields.push((
         "retry_config".to_string(),
         ast::StateModel::Durable,
@@ -1259,9 +1258,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             let arms_hir: Vec<_> = arms
                 .iter()
                 .map(|(name, patterns, guard, e)| {
-                    let guard_hir = guard
-                        .as_ref()
-                        .map(|g| Box::new(lower_body(g)));
+                    let guard_hir = guard.as_ref().map(|g| Box::new(lower_body(g)));
                     (
                         name.clone(),
                         patterns.clone(),
@@ -1334,7 +1331,11 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, Type::unit())
         }
-        Expr::While { cond, body: b, span } => {
+        Expr::While {
+            cond,
+            body: b,
+            span,
+        } => {
             let cond_body = lower_body(cond);
             let loop_body = lower_body(b);
             let temp = fresh_temp_name();
@@ -1639,6 +1640,7 @@ fn fresh_temp_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Pattern;
 
     #[test]
     fn test_lower_literal() {
@@ -1850,7 +1852,10 @@ mod tests {
             span,
         };
         let after_vars = used(&receive_after);
-        assert!(after_vars.contains("k"), "receive-after ms expr must be free");
+        assert!(
+            after_vars.contains("k"),
+            "receive-after ms expr must be free"
+        );
         assert!(after_vars.contains("t"), "receive-after body must be free");
     }
 
@@ -2085,9 +2090,7 @@ fn free_vars(
                 free_vars(a, bound, acc);
             }
         }
-        Expr::Handle {
-            body, handlers, ..
-        } => {
+        Expr::Handle { body, handlers, .. } => {
             free_vars(body, bound, acc);
             for h in handlers {
                 let mut handler_bound = bound.clone();

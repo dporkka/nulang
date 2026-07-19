@@ -173,7 +173,10 @@ impl Body {
     /// True once an explicit control-transfer terminator has been set;
     /// statements lowered after this point are dead code and are dropped.
     pub fn is_terminated(&self) -> bool {
-        matches!(self.terminator, Terminator::FnReturn(_) | Terminator::Break(None))
+        matches!(
+            self.terminator,
+            Terminator::FnReturn(_) | Terminator::Break(None)
+        )
     }
 }
 

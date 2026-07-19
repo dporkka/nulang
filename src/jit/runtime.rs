@@ -287,11 +287,15 @@ thread_local! {
 }
 
 pub unsafe fn set_jit_callbacks(cb: *mut dyn crate::vm::ActorVmCallbacks) {
-    JIT_CALLBACKS.with(|cell| { *cell.get() = CbPair::from_ptr(cb); });
+    JIT_CALLBACKS.with(|cell| {
+        *cell.get() = CbPair::from_ptr(cb);
+    });
 }
 
 pub fn clear_jit_callbacks() {
-    JIT_CALLBACKS.with(|cell| unsafe { *cell.get() = CbPair::NULL; });
+    JIT_CALLBACKS.with(|cell| unsafe {
+        *cell.get() = CbPair::NULL;
+    });
 }
 
 unsafe fn with_callbacks<R>(f: impl FnOnce(&mut dyn crate::vm::ActorVmCallbacks) -> R) -> R {
@@ -302,51 +306,59 @@ unsafe fn with_callbacks<R>(f: impl FnOnce(&mut dyn crate::vm::ActorVmCallbacks)
     })
 }
 
-
 use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
 
 #[no_mangle]
 pub unsafe extern "C" fn nulang_arr_store(
-    regs: *mut u64, arr_reg: u32, idx_reg: u32, src_reg: u32,
+    regs: *mut u64,
+    arr_reg: u32,
+    idx_reg: u32,
+    src_reg: u32,
 ) {
     let arr_ptr_val = *regs.add(arr_reg as usize);
     let idx_val = *regs.add(idx_reg as usize);
     let val = Value::from_raw(*regs.add(src_reg as usize));
     let arr_ptr = val_ptr(arr_ptr_val);
-    if arr_ptr.is_null() { return; }
+    if arr_ptr.is_null() {
+        return;
+    }
     let idx = as_int_or_zero(idx_val) as usize;
     with_callbacks(|cb| {
         if let Some(len) = cb.array_len(arr_ptr) {
             if idx < len {
-                if let Some(ptr) = val.as_ptr() { cb.retain_ref(ptr); }
+                if let Some(ptr) = val.as_ptr() {
+                    cb.retain_ref(ptr);
+                }
                 let slot = (arr_ptr as *mut Value).add(idx);
                 let old = *slot;
                 *slot = val;
-                if let Some(old_ptr) = old.as_ptr() { cb.drop_ref(old_ptr); }
+                if let Some(old_ptr) = old.as_ptr() {
+                    cb.drop_ref(old_ptr);
+                }
             }
         }
     });
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nulang_arr_len(
-    regs: *mut u64, arr_reg: u32, dst_reg: u32,
-) {
+pub unsafe extern "C" fn nulang_arr_len(regs: *mut u64, arr_reg: u32, dst_reg: u32) {
     let arr_ptr_val = *regs.add(arr_reg as usize);
     let arr_ptr = val_ptr(arr_ptr_val);
     let len = if !arr_ptr.is_null() {
         let header = &*ActorHeap::header_of(arr_ptr);
         if header.type_tag == HeapTypeTag::Array {
             header.size.saturating_sub(ActorHeap::HEADER_SIZE) / std::mem::size_of::<Value>()
-        } else { 0 }
-    } else { 0 };
+        } else {
+            0
+        }
+    } else {
+        0
+    };
     *regs.add(dst_reg as usize) = tag_int(len as i64);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nulang_field_load(
-    regs: *mut u64, obj_reg: u32, idx: u32, dst_reg: u32,
-) {
+pub unsafe extern "C" fn nulang_field_load(regs: *mut u64, obj_reg: u32, idx: u32, dst_reg: u32) {
     let obj_ptr_val = *regs.add(obj_reg as usize);
     let obj_ptr = val_ptr(obj_ptr_val);
     let val = if !obj_ptr.is_null() {
@@ -356,9 +368,15 @@ pub unsafe extern "C" fn nulang_field_load(
             let len = payload_size / std::mem::size_of::<Value>();
             if (idx as usize) < len {
                 *((obj_ptr as *const Value).add(idx as usize))
-            } else { Value::nil() }
-        } else { Value::nil() }
-    } else { Value::nil() };
+            } else {
+                Value::nil()
+            }
+        } else {
+            Value::nil()
+        }
+    } else {
+        Value::nil()
+    };
     *regs.add(dst_reg as usize) = val.as_raw();
 }
 

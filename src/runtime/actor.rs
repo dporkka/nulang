@@ -33,7 +33,9 @@ pub enum ActorBackend {
 }
 
 impl Default for ActorBackend {
-    fn default() -> Self { ActorBackend::Native }
+    fn default() -> Self {
+        ActorBackend::Native
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ActorPriority {
@@ -42,7 +44,6 @@ pub enum ActorPriority {
     Normal,
     Low,
 }
-
 
 // -- Flight recorder (deterministic replay support) ---------------------
 
@@ -164,7 +165,7 @@ pub struct Actor {
     pub state: ActorState,
     pub mailbox: Mailbox,
     pub heap: ActorHeap,
-    pub orca_gc: OrcaGc,                  // ORCA GC engine for this actor
+    pub orca_gc: OrcaGc,                    // ORCA GC engine for this actor
     pub state_data: HashMap<String, Value>, // Named actor state fields
     pub state_models: HashMap<String, StateModel>, // Persistence model per field
     pub event_log: Vec<(String, Vec<Value>)>, // Emitted events for event_sourced actors
@@ -172,8 +173,8 @@ pub struct Actor {
     pub event_sourced_sequences: HashMap<String, u64>,
     /// How many events between compaction snapshots for EventSourced fields (default 100).
     pub event_sourced_compaction_interval: u64,
-    pub persistent: bool,                 // Whether this actor survives restarts
-    pub is_workflow: bool,                // True if generated from a workflow declaration
+    pub persistent: bool,  // Whether this actor survives restarts
+    pub is_workflow: bool, // True if generated from a workflow declaration
     pub behavior_table: Vec<BehaviorEntry>,
     /// Bytecode behavior offsets by behavior_id. Empty entries mean no bytecode
     /// handler for that behavior (native handler or missing).
@@ -187,11 +188,11 @@ pub struct Actor {
     pub bytecode_module: Option<crate::bytecode::CodeModule>,
     /// Index of the loaded bytecode module in the runtime VM.
     pub bytecode_module_idx: Option<usize>,
-    pub parent: Option<u64>,  // Supervisor
-    pub children: Vec<u64>,   // Supervised actors
-    pub monitors: Vec<u64>,   // Actors monitoring this one
-    pub links: Vec<u64>,      // Bidirectional links
-    pub trap_exits: bool,     // If true, exit signals become messages instead of killing this actor
+    pub parent: Option<u64>, // Supervisor
+    pub children: Vec<u64>,  // Supervised actors
+    pub monitors: Vec<u64>,  // Actors monitoring this one
+    pub links: Vec<u64>,     // Bidirectional links
+    pub trap_exits: bool,    // If true, exit signals become messages instead of killing this actor
     /// Scheduling priority, consulted by the scheduler on every enqueue.
     pub priority: ActorPriority,
     pub reduction_count: u32, // Lifetime messages handled (monotonic progress metric)

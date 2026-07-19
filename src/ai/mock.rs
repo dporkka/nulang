@@ -105,9 +105,7 @@ impl MockLlmClient {
     /// Create a mock client that returns each response in order (all Ok).
     /// The final response repeats when the sequence is exhausted.
     pub fn sequence(responses: Vec<LlmResponse>) -> Self {
-        Self::sequence_with_errors(
-            responses.into_iter().map(Ok).collect()
-        )
+        Self::sequence_with_errors(responses.into_iter().map(Ok).collect())
     }
 
     /// Create a mock client that returns each result (Ok or Err) in order.
