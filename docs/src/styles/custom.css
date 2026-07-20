@@ -87,3 +87,58 @@
 .feature-card p {
   @apply text-sm text-gray-400;
 }
+
+/* Hero image sizing and spacing */
+.sl-markdown-content .hero img {
+  width: 6rem;
+  height: 6rem;
+  margin: 0 auto 1.5rem;
+  display: block;
+}
+
+/* Responsive hero tagline */
+.hero__tagline {
+  font-size: clamp(1.1rem, 2.5vw, 1.5rem);
+  line-height: 1.5;
+  max-width: 42rem;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Hero action buttons wrap on small screens */
+.hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+/* Updated feature cards with stronger hover state */
+.feature-grid {
+  @apply grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 my-12;
+}
+
+.feature-card {
+  @apply p-6 rounded-xl border border-gray-800 bg-gray-900/50
+         hover:border-blue-500/50 hover:bg-gray-900 transition-all
+         hover:-translate-y-1;
+}
+
+.feature-card h3 {
+  @apply text-lg font-semibold mb-2 text-blue-300;
+}
+
+/* Footer responsive */
+.footer-links {
+  @apply flex flex-wrap items-center justify-center gap-4 sm:gap-6;
+}
+
+.footer-copy {
+  @apply mt-6 text-xs text-gray-500 text-center;
+}
+
+.footer-copy a {
+  @apply text-gray-400 hover:text-gray-200 transition-colors no-underline;
+}
+

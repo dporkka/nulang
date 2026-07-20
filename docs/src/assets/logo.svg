@@ -1,4 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 32" fill="none">
-  <text x="4" y="25" font-family="serif" font-size="28" font-weight="bold" fill="#6c63ff">ν</text>
-  <text x="28" y="25" font-family="'Inter', sans-serif" font-size="20" font-weight="600" fill="#e4e4e7">Nulang</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="nuGradient" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="100%" stop-color="#1e3a8a" />
+    </linearGradient>
+    <filter id="nuShadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="#1e3a8a" flood-opacity="0.25" />
+    </filter>
+  </defs>
+  <path d="M8 24 V8 H15 V28 Q15 28 19.5 28 Q24 28 24 24 V8"
+        stroke="url(#nuGradient)"
+        stroke-width="4.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        fill="none"
+        filter="url(#nuShadow)" />
 </svg>

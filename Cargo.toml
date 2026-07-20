@@ -5,6 +5,11 @@ edition = "2021"
 authors = ["David Porkka"]
 license = "Apache-2.0"
 description = "Nulang - Distributed Actor-Based Programming Language with AI Agent Support"
+homepage = "https://nulang.org"
+repository = "https://github.com/dporkka/nulang"
+documentation = "https://nulang.org"
+keywords = ["actor", "distributed", "programming-language", "ai", "compiler"]
+categories = ["development-tools", "programming-languages"]
 
 [package.metadata]
 # The Nulang *language* version, distinct from the crate `version` above.

@@ -1,9 +1,20 @@
-# Nulang
-
-> The language for autonomous distributed software systems — AI agents, durable workflows, and resilient services where distribution, durability, and capability security are the default model, built in Rust.
-
-[![Rust](https://img.shields.io/badge/rust-2021%20Edition-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/github/license/dporkka/nulang.svg)](LICENSE)
+<p align="center">
+  <img src="docs/src/assets/logo.svg" width="120" alt="Nulang logo">
+</p>
+<h1 align="center">Nulang</h1>
+<p align="center">
+  The language for autonomous distributed software systems — AI agents, durable workflows, and resilient services.
+</p>
+<p align="center">
+  <a href="https://nulang.org">Website</a> •
+  <a href="https://nulang.cloud">Nulang Cloud</a> •
+  <a href="https://github.com/dporkka/nulang">GitHub</a>
+</p>
+<p align="center">
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-2021%20Edition-orange.svg" alt="Rust 2021"></a>
+  <a href="https://github.com/dporkka/nulang/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License Apache 2.0"></a>
+  <a href="https://github.com/dporkka/nulang/actions"><img src="https://github.com/dporkka/nulang/workflows/CI/badge.svg" alt="CI"></a>
+</p>
 
 ---
 
@@ -645,9 +656,9 @@ This is an active implementation with the following components functional:
 
 ## License
 
-Copyright 2026 © David Porkka
+Nulang is open source and licensed under the Apache License, Version 2.0. See the [LICENSE](https://github.com/dporkka/nulang/blob/main/LICENSE) file for the full license text.
 
-This project is licensed under the Apache License, Version 2.0 - see the [LICENSE](LICENSE) file for details.
+Copyright 2026 © David Porkka
 
 ---
 

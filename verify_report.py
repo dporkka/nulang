@@ -4,7 +4,7 @@ import re
 import sys
 
 def verify():
-    report_path = "codebase_analysis_report.md"
+    report_path = "docs/archive/codebase_analysis_report.md"
     if not os.path.exists(report_path):
         print(f"Error: {report_path} does not exist.")
         return False

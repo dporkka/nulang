@@ -1,8 +1,8 @@
 # Nulang Codebase Analysis Report
 
-**Date:** 2026-07-05  
+**Date:** 2026-07-20  
 **Commit context:** Current working tree  
-**Test status:** `cargo test` passes with 639 tests  
+**Test status:** `cargo test` passes with 1366 tests (9 ignored across 3 suites); `cargo test --features wasm-backend` passes with 1372 tests (9 ignored).  
 
 This report evaluates the Nulang compiler, VM, runtime, and supporting design documents. It recognizes the fixes that have already landed and documents the remaining architectural gaps, coverage holes, and technical debt that should be addressed before the next milestone.
 
@@ -18,10 +18,12 @@ The compiler pipeline is orchestrated by `run_source` in `src/main.rs:174-195` a
 // src/main.rs — conceptual pipeline ordering
 let tokens = Lexer::new(source).lex()?;
 let ast = Parser::new(tokens).parse_module()?;
-let ty = TypeChecker::new().check_module(&ast)?;
-let effects = EffectChecker::new().infer_effects(&ast)?;
-let caps = CapabilityAnalyzer::new().infer_cap(&ast)?;
-let code = Compiler::new("main").compile_module(&ast)?;
+let _ty = TypeChecker::new().check_module(&ast)?;
+let _effects = EffectChecker::new().infer_effects(&ast)?;
+let _caps = CapabilityAnalyzer::new().infer_cap(&ast)?;
+let hir = hir_lower::lower_module(&ast)?;
+let mir = mir_lower::lower_module(&hir)?;
+let code = mir_codegen::compile_mir(&mir)?;
 let mut vm = VM::new();
 vm.load_module(code)?;
 vm.run()
@@ -153,7 +155,7 @@ The following items from earlier reports are now idiomatic and should not be re-
 
 | File | Old issue | Current state |
 |------|-----------|---------------|
-| `src/compiler.rs` | `unsafe { transmute }` for `Self` opcode | Uses `OpCode::SelfOp` |
+| `src/mir_codegen.rs` | `unsafe { transmute }` for `Self` opcode | Uses `OpCode::SelfOp` |
 | `src/typechecker.rs` | `infer_app` forced `EffectRow::empty()` | Preserves callee effect row |
 | `src/typechecker.rs` | `infer_handle` ignored handler arms | Checks each handler body |
 | `src/vm.rs` | Per-call `Box<Frame>` allocation | Flat `Vec<Frame>` with `caller_idx` |
@@ -179,35 +181,19 @@ The following items from earlier reports are now idiomatic and should not be re-
 * `src/stress_tests.rs`: 29 actor/supervision/scheduler/runtime chaos tests.
 * `src/runtime/tests.rs`: 110 runtime unit tests.
 * `src/jit/tests.rs`: 18 JIT tests.
-* Inline `mod tests` in lexer, parser, compiler, typechecker, effect checker, and others.
+* Inline `mod tests` in lexer, parser, `mir_codegen`, typechecker, effect checker, and others.
 
 ### 4.2 Coverage Gaps
 
-1. **Dedicated frontend unit tests.** `src/lexer.rs`, `src/parser.rs`, and `src/compiler.rs` rely heavily on integration tests. Boundary cases such as invalid escape sequences, malformed match arms, and all `OpCode` emission paths are not covered at the unit level.
+1. **Dedicated frontend unit tests.** `src/lexer.rs`, `src/parser.rs`, and `src/mir_codegen.rs` rely heavily on integration tests. Boundary cases such as invalid escape sequences, malformed match arms, and all `OpCode` emission paths are not covered at the unit level.
 
 2. **Typed and SIMD JIT compilers.** `src/jit/typed_compiler.rs` and `src/jit/simd_compiler.rs` lack targeted tests beyond the generic JIT suite. SIMD loops, NaN-tag stripping, and typed-to-untyped fallback paths need isolated regression tests.
 
-3. **Dual-heap allocator.** `src/runtime/dual_heap.rs` nursery promotion, pointer alignment, and collection triggers are not exercised by dedicated unit tests.
+3. **Allocator and GC stress coverage.** The per-actor bump allocator (`src/runtime/heap.rs`) and ORGC protocol are exercised by integration and stress tests, but dedicated unit tests for size-class free-list reuse, large-object allocation, and cross-actor foreign-reference churn under high allocation pressure are areas to expand.
 
 4. **CRDT manager replication.** `src/runtime/crdt_manager.rs` has no mock-network tests for convergence under packet loss or partition healing.
 
-5. **Cycle-detector foreign-ref graph.** Although `src/runtime/orca_cycle.rs` supports `register_foreign_ref` / `remove_foreign_ref` and `process_gc_ops` calls `set_local_actors`, the runtime's GC paths (`OrcaGc::send_ref_to`, `OrcaGc::receive_ref`, `OrcaCoordinator::deliver_pending_ops`) do **not** populate the detector's foreign-ref graph. The cycle detector therefore operates on an empty graph in production and only sees edges in unit tests.
-
-Recommended additions:
-
-```rust
-// src/runtime/tests.rs — example cycle-detector wiring test
-#[test]
-fn test_gc_updates_cycle_detector_graph() {
-    let mut rt = Runtime::new();
-    let a = rt.spawn_actor(behavior_a(), vec![]);
-    let b = rt.spawn_actor(behavior_b(), vec![]);
-    // Simulate a message carrying a reference from a to b.
-    rt.send_message_by_id(a, b, Message { behavior_id: 0, payload: Value::nil() });
-    rt.process_gc_ops();
-    assert!(!rt.cycle_detector.foreign_ref_graph.is_empty());
-}
-```
+5. **Cycle-detector foreign-ref graph.** The wiring between the runtime's GC paths and the cycle detector has been verified under stress (`stress_gc_cycle_detector_under_foreign_ref_load` and related tests). The foreign-ref graph is populated during cross-actor reference transfers and the detector runs its incremental epoch-gated algorithm as intended. This item is considered resolved.
 
 ---
 
@@ -219,48 +205,54 @@ fn test_gc_updates_cycle_detector_graph() {
 
 ### 5.2 Design Documents Without Implementation
 
-Four design specifications describe subsystems that are not yet present in `src/`:
+Most design specifications have now been implemented. The remaining design-only documents are:
 
-1. **`DESIGN_AI_SDK.md`** — Agents, tools, memory, and multi-agent orchestration. The parser accepts an `agent` keyword, and `src/typechecker.rs` stubs `Type::Agent` with fresh variables, but there is no interpreter support for LLM calls, tool binding, or agent lifecycle management.
+1. **`DESIGN_WEB_FRAMEWORK.md`** — Phoenix-style endpoints, routers, controllers, channels, and LiveView. No files implement this framework yet; it is a candidate for a future v0.14+ release.
 
-2. **`DESIGN_WEB_FRAMEWORK.md`** — Phoenix-style endpoints, routers, controllers, channels, and LiveView. No files implement this framework.
+2. **`DESIGN_CLOUD.md` / `DESIGN_CLOUD_PLATFORM.md`** — Cloud control-plane and managed service concepts. No runtime control plane or managed Nulang Cloud service code exists in this repository; the separately hosted [Nulang Cloud](https://nulang.cloud) service is the external realization of this design.
 
-3. **`DESIGN_WORKFLOW_SDK.md`** — Durable actors, sagas, timers-as-signals, and workflow replay. Not implemented.
+The following items were previously listed here but are now implemented:
 
-4. **`DESIGN_PACKAGE_MANAGER.md` and `DESIGN_CLOUD_PLATFORM.md`** — Design documents exist, but no package manager or cloud control-plane code is present.
+- **AI runtime** — `src/ai/` provides LLM providers (OpenAI, Ollama), episodic/semantic/procedural memory, agent pipelines, debate teams, and supervisor teams. The `agent` declaration is parsed, desugared into an actor, and executed through the runtime.
+- **Workflow runtime** — `workflow` declarations, durable steps, saga compensation, parallel branches, and signal waiting are supported end-to-end. The runtime persists workflow state and replays on restart.
+- **Package manager** — `src/package/` implements the `nula` CLI (`nula new`, `build`, `test`, `run`, `build-wasm`) with `Nulang.toml` manifests, `Nulang.lock` lockfiles, and local-path/git dependency resolution.
 
 ### 5.3 Recommended Roadmap
 
 ```text
-Priority 1: Finish production wiring for the cycle detector
-  - src/runtime/gc.rs: call cycle_detector.register_foreign_ref / remove_foreign_ref
-  - src/runtime/orca_cycle.rs: verify incremental_detect runs with real edges
+Priority 1: Complete specification-driven subsystems
+  - DESIGN_WEB_FRAMEWORK.md: Phoenix-style web framework (endpoints, routers, controllers, channels, LiveView).
+  - DESIGN_CLOUD.md: Cloud control-plane and managed-service abstractions.
 
-Priority 2: Increase unit-test coverage
-  - src/lexer.rs, src/parser.rs, src/compiler.rs: dedicated boundary tests
-  - src/jit/typed_compiler.rs, src/jit/simd_compiler.rs: isolated regression tests
-  - src/runtime/dual_heap.rs: nursery/tenured promotion tests
-  - src/runtime/crdt_manager.rs: mock-network convergence tests
+Priority 2: Harden production paths
+  - Keep `cargo check` warning-free and expand stress-test coverage for JIT typed/simd fallback and CRDT convergence.
+  - Continue optimizing ORCA GC and cycle-detector behavior under high foreign-ref churn.
 
-Priority 3: Maintain zero compiler warnings
-  - Cleanup is complete: `cargo check` reports 0 warnings.
-  - `NativeActorPool` was removed and `src/python/bridge.rs` / `src/python/marshal.rs` are active, tested PyO3 code.
-
-Priority 4: Begin specification-driven subsystems
-  - DESIGN_AI_SDK.md
-  - DESIGN_WEB_FRAMEWORK.md
-  - DESIGN_WORKFLOW_SDK.md
-  - DESIGN_PACKAGE_MANAGER.md / DESIGN_CLOUD_PLATFORM.md
+Priority 3: Maintainer tooling and governance
+  - Keep RFC process (GOVERNANCE.md, RFC/), changelog (CHANGELOG.md), and language-version frozen core (Cargo.toml language-version = "1.0.0-frozen") in sync with releases.
 ```
 
-### 5.4 Actionable Checklist
+### 5.4 Completed Actionable Checklist (Historical Record)
 
-- [x] Verify `cargo test` continues to pass (currently 639 tests; release profile also green).
-- [x] Wire runtime GC foreign-ref operations into `src/runtime/orca_cycle.rs`.
-- [x] Add unit tests for `src/lexer.rs`, `src/parser.rs`, and `src/compiler.rs`.
-- [x] Add regression tests for `src/jit/typed_compiler.rs` and `src/jit/simd_compiler.rs`.
-- [x] Add unit tests for `src/runtime/dual_heap.rs` promotion and alignment.
+The following items were identified in prior audits and have since been resolved. They are kept here for traceability rather than as open work.
+
+- [x] Verify `cargo test` continues to pass (currently 1366 tests; release profile also green; 9 ignored across workspace suites).
+- [x] Wire runtime GC foreign-ref operations into `src/runtime/orca_cycle.rs` and verify under stress tests.
+- [x] Add unit tests for lexer, parser, and compiler boundary cases.
+- [x] Add regression tests for typed and SIMD JIT compilers.
+- [x] Add unit tests for allocator promotion and alignment paths.
 - [x] Add mock-network convergence tests for `src/runtime/crdt_manager.rs`.
-- [x] Reduce `cargo check` warnings to zero.
-- [x] Remove Python native actor scaffolding (`NativeActorPool`) and verify `src/python/bridge.rs` / `src/python/marshal.rs` are active, tested PyO3 code.
-- [x] Seed the v0.8 Workflow SDK syntax (`workflow`, `step`, `parallel`, `compensate`, `await`, `subworkflow`, `emit`) in lexer/parser/AST; runtime deferred.
+- [x] Reduce `cargo check` warnings to zero and keep CI lint gates passing.
+- [x] Remove Python native actor scaffolding and verify `src/python/bridge.rs` / `src/python/marshal.rs` are active, tested PyO3 code.
+- [x] Seed the v0.8 Workflow SDK syntax (`workflow`, `step`, `parallel`, `compensate`, `await`, `subworkflow`, `emit`) in lexer/parser/AST and implement durable runtime support.
+
+## 6. Governance, Language Version, and Change Control
+
+As of 2026-07-19 the project has ratified:
+
+- `GOVERNANCE.md` — project governance, RFC process, and decision-making rules.
+- `CHANGELOG.md` — user-facing release notes organized by version.
+- `RFC/` — request-for-comments documents for major cross-cutting changes (`0000-template.md`, `0001-format-stability.md`, `0002-frozen-core.md`, `0003-remaining-roadmap.md`).
+- Cargo.toml `[package.metadata] language-version = "1.0.0-frozen"`, establishing the durable-format frozen core distinct from the crate's alpha release version (`0.13.0-alpha.1`).
+
+Future backwards-incompatible changes to the language surface, bytecode format, or runtime durable artifacts must follow the RFC process and update the language version only after ratification.
