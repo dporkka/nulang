@@ -4,4 +4,18 @@
 # are not called by nulang or by its transitive dependency cranelift-jit,
 # which only uses MmapMut::map_anon. Upgrading memmap2 is blocked on
 # cranelift-jit updating its own memmap2 requirement.
-ignore = ["RUSTSEC-2026-0186"]
+ignore = [
+    "RUSTSEC-2026-0186",
+    # The rustls-webpki advisories below are transitive through libsql
+    # 0.10.0-pre.4 -> hyper-rustls 0.25 -> rustls 0.22.4 -> rustls-webpki 0.102.8.
+    # No patched libsql release is available, and the vulnerable code path
+    # (TLS certificate validation with CRLs / name constraints) is only reachable
+    # when connecting to a remote Turso database. Nulang's LibsqlStore also
+    # supports local SQLite (file and in-memory) which do not exercise this
+    # code path. These are documented known risks until libsql updates its
+    # rustls dependency.
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+]

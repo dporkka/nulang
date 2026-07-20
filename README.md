@@ -14,25 +14,35 @@
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-2021%20Edition-orange.svg" alt="Rust 2021"></a>
   <a href="https://github.com/dporkka/nulang/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License Apache 2.0"></a>
   <a href="https://github.com/dporkka/nulang/actions"><img src="https://github.com/dporkka/nulang/workflows/CI/badge.svg" alt="CI"></a>
+  <a href="https://codecov.io/github/dporkka/nulang"><img src="https://codecov.io/github/dporkka/nulang/graph/badge.svg" alt="Coverage"></a>
 </p>
 
 ---
 
 ## Overview
 
-**Nulang** is the language for autonomous distributed software systems: AI agents, durable workflows, and resilient services where distribution, durability, capability security, and AI-assisted execution are the default model rather than bolted-on abstractions. It is not a general-purpose language competing with Rust or Go — it is purpose-built for software that must keep running across nodes, failures, and restarts without human intervention.
+**Nulang** is the language for building software that keeps running — across failures, restarts, and node boundaries — without constant human intervention.
 
-It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired type system (Hindley-Milner inference, reference capabilities, row-polymorphic algebraic effects), a register-based VM with a Cranelift JIT, per-actor ORCA garbage collection, location-transparent distribution over TCP, CRDTs for shared state, durable workflows with saga compensation, and a first-class AI agent runtime — all in a single Rust implementation.
+If you are building AI agents that need to remember state, durable workflows that must survive crashes, or distributed services that stay available under load, Nulang gives you a single, coherent foundation instead of a pile of bolted-on libraries.
+
+### What you get
+
+- **Fault tolerance by default** — supervision trees, links, and monitors turn crashes into recoverable events, not outages.
+- **Distribution without rewiring** — actors and messages work the same whether they run on one node or a cluster.
+- **Durable execution** — workflows checkpoint state and resume after restarts with saga compensation for failures.
+- **AI-native agents** — first-class `agent` declarations with LLM clients, memory, and multi-agent teams.
+- **Memory safety without runtime pauses** — reference capabilities and per-actor ORCA GC keep you safe while actors stay responsive.
+- **Compile once, run anywhere** — bytecode, native AOT, or WASM backends from the same source.
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
-| **Actor Model** | Lightweight actors with cooperative reduction-bounded scheduling, work-stealing queues, and supervision trees |
+| **Actor Model** | Lightweight actors with cooperative scheduling, work-stealing queues, and supervision trees that isolate and recover from failures |
 | **Algebraic Effects** | First-class effect system with `perform`/`handle`/`resume` semantics |
 | **Capability System** | Fine-grained reference permissions (iso/trn/ref/val/box/tag/lineariso) for memory safety |
-| **AI Agents** | First-class `agent` declarations with LLM clients (OpenAI, Ollama), episodic/semantic/procedural memory, pipelines, debates, and supervisor teams |
-| **Distributed Runtime** | Location-transparent actor messaging across nodes with TCP transport |
+| **AI Agents** | First-class `agent` declarations with LLM clients, memory, and multi-agent teams |
+| **Distributed Runtime** | Location-transparent actor messaging so you can scale from one node to a cluster without rewriting code |
 | **ORCA GC** | Per-actor concurrent garbage collection with cycle detection |
 | **CRDTs** | 8 conflict-free replicated data types for shared distributed state |
 | **Register-Based VM** | High-performance bytecode VM with NaN-tagged value representation |
@@ -48,7 +58,7 @@ It combines the fault-tolerant actor model of Erlang with a Rust/Pony-inspired t
 ### Current Status
 
 Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
-- ✅ All 1329 tests pass with `cargo test` (1336 with `--features wasm-backend`)
+- ✅ All 1362 tests pass with `cargo test` (1368 with `--features wasm-backend`)
 - ✅ Builds with `cargo build`
 - ✅ i64-tagged `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`) — immune to WASM NaN canonicalization
 - ✅ 138-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, FFI, Python, distribution)

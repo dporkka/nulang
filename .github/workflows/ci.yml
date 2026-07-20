@@ -15,6 +15,8 @@ jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +34,18 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Generate coverage report
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
 
       - name: Gate (forbidden patterns + zero warnings)
         run: python3 verify_implementation.py

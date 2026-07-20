@@ -25,7 +25,27 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 
 ## Why Nulang?
 
-Nulang fuses Erlang-style fault tolerance with a modern type system: Hindley-Milner inference, Pony-inspired reference capabilities, and Koka-style row-polymorphic algebraic effects. It compiles to a register-based bytecode VM with Cranelift JIT tiering, WASM, and native AOT backends.
+Building reliable distributed systems today usually means stitching together actors, queues, databases, workflow engines, and observability tools. Nulang integrates those capabilities into the language itself so you can focus on your application logic instead of infrastructure plumbing.
+
+### Build software that heals
+
+Nulang's actor model and supervision trees mean failures are isolated and restarted automatically. A bad message or a crashing service doesn't take down the whole system.
+
+### Distribute without rewriting
+
+Actors communicate through location-transparent messages. Move a service from one node to many, and the code stays the same.
+
+### Ship AI agents with memory
+
+Declare agents as language primitives with built-in LLM integrations, episodic/semantic/procedural memory, pipelines, debates, and supervisor teams.
+
+### Survive restarts
+
+Workflows checkpoint durable state and use saga compensation to roll back safely when a step fails.
+
+### Stay safe and fast
+
+Reference capabilities and per-actor garbage collection give you memory safety without global stop-the-world pauses, while the JIT and native AOT backends keep hot paths fast.
 
 ## Open Source
 

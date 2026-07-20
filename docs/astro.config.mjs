@@ -69,9 +69,9 @@ export default defineConfig({
           ],
         },
       ],
-      social: {
-        github: 'https://github.com/dporkka/nulang',
-      },
+      social: [
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/dporkka/nulang' },
+      ],
       head: [
         {
           tag: 'script',

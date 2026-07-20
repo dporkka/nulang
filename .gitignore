@@ -27,3 +27,6 @@ docs/node_modules/
 
 # Wrangler local state
 .wrangler/
+
+.env
+*.env

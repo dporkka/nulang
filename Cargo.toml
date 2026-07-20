@@ -74,14 +74,16 @@ pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"], optional 
 libsql = { version = "0.10.0-pre.4", optional = true }
 # Native library loading
 libloading = "0.8"
+# Synchronization primitives (parking_lot guards are smaller and never poison)
+parking_lot = "0.12"
 # WASM binary encoding (optional, see [features])
 wasm-encoder = { version = "0.220", optional = true }
 # WASM runtime using Wasmtime (optional, see [features])
 wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow", "component-model"] }
 blake3 = "1.8"
-quinn = "0.10.2"
-rustls = { version = "0.21.12", features = ["quic", "dangerous_configuration"] }
-rcgen = "0.11.3"
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
+rcgen = "0.14"
 multihash = "0.19.1"
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 hex = "0.4.3"
