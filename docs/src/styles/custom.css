@@ -1,49 +1,35 @@
-@tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Restore Starlight heading styles clobbered by Tailwind Preflight.
-   Tailwind's `@tailwind base` emits `h1-h6 { font-size: inherit; font-weight: inherit; }`
-   which overrides Starlight's @layer starlight.core. Re-declare at base layer
-   with Starlight's own semantic --sl-text-h* scale so all page titles render correctly. */
-@layer base {
-  h1 { font-size: var(--sl-text-h1); font-weight: 600; line-height: var(--sl-line-height-headings); }
-  h2 { font-size: var(--sl-text-h2); font-weight: 600; line-height: var(--sl-line-height-headings); }
-  h3 { font-size: var(--sl-text-h3); font-weight: 600; line-height: var(--sl-line-height-headings); }
-  h4 { font-size: var(--sl-text-h4); font-weight: 600; line-height: var(--sl-line-height-headings); }
-  h5 { font-size: var(--sl-text-h5); font-weight: 600; line-height: var(--sl-line-height-headings); }
-  h6 { font-size: var(--sl-text-base); font-weight: 600; line-height: var(--sl-line-height-headings); }
-}
-
-/* ── Dark mode first (Starlight uses [data-theme="dark"]) ── */
+/* ── Dark mode (Starlight uses [data-theme="dark"]) ── */
 :root {
   --sl-color-accent-low: #1e3a8a;
   --sl-color-accent: #3b82f6;
   --sl-color-accent-high: #93c5fd;
   --sl-color-text: #e4e4e7;
   --sl-color-text-accent: #ffffff;
-  --sl-color-bg: #0a0a0f;
-  --sl-color-bg-nav: #0f0f1a;
-  --sl-color-bg-sidebar: #0f0f1a;
+  --sl-color-bg: #09090b;
+  --sl-color-bg-nav: #12121a;
+  --sl-color-bg-sidebar: #12121a;
   --sl-color-hairline: #27272a;
-  --sl-color-bg-inline-code: #1e1e2e;
+  --sl-color-bg-inline-code: #1a1a2e;
 }
 
-/* Light mode overrides */
+/* Light mode */
 :root[data-theme="light"] {
   --sl-color-accent-low: #dbeafe;
-  --sl-color-accent: #3b82f6;
+  --sl-color-accent: #2563eb;
   --sl-color-accent-high: #1e40af;
   --sl-color-text: #18181b;
-  --sl-color-text-accent: #000000;
+  --sl-color-text-accent: #09090b;
   --sl-color-bg: #ffffff;
-  --sl-color-bg-nav: #fafafa;
-  --sl-color-bg-sidebar: #fafafa;
-  --sl-color-hairline: #e4e4e7;
-  --sl-color-bg-inline-code: #f4f4f5;
+  --sl-color-bg-nav: #f8fafc;
+  --sl-color-bg-sidebar: #f8fafc;
+  --sl-color-hairline: #e2e8f0;
+  --sl-color-bg-inline-code: #f1f5f9;
 }
 
-/* ── Branded CTA buttons (used in index.mdx) ── */
+/* ── Branded CTA buttons ── */
 .btn-license,
 .btn-support {
   display: inline-block;
@@ -51,13 +37,15 @@
   border-radius: 0.5rem;
   text-decoration: none;
   font-weight: 600;
+  font-size: 0.9375rem;
   color: #fff;
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition: opacity 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
 }
 .btn-license:hover,
 .btn-support:hover {
   opacity: 0.92;
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35);
 }
 .btn-license {
   background: linear-gradient(135deg, var(--sl-color-accent), var(--sl-color-accent-low));
@@ -66,69 +54,14 @@
   background: var(--sl-color-accent);
 }
 
-
-/* ── Footer ── */
-.site-footer {
-  border-top: 1px solid var(--sl-color-gray-5);
-  padding: 2rem 0;
-  margin-top: 4rem;
-  text-align: center;
-}
-
-.footer-links {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 1rem;
-}
-@media (min-width: 40rem) {
-  .footer-links {
-    gap: 1.5rem;
-  }
-}
-
-.footer-links a {
-  font-size: 0.875rem;
-  color: var(--sl-color-gray-3);
-  text-decoration: none;
-  transition: color 0.2s ease;
-}
-.footer-links a:hover {
-  color: var(--sl-color-gray-1);
-}
-
-.footer-copy {
-  margin-top: 1.5rem;
-  font-size: 0.75rem;
-  color: var(--sl-color-gray-3);
-  text-align: center;
-}
-.footer-copy a {
-  color: var(--sl-color-gray-3);
-  text-decoration: none;
-  transition: color 0.2s ease;
-}
-.footer-copy a:hover {
-  color: var(--sl-color-gray-1);
-}
-
 /* ── Landing Page Hero ── */
-.hero-gradient {
-  background: linear-gradient(135deg, var(--sl-color-accent) 0%, var(--sl-color-accent-high) 100%);
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-/* Apply gradient to the splash hero title */
 .hero h1 {
-  background: linear-gradient(135deg, var(--sl-color-accent) 0%, var(--sl-color-accent-high) 100%);
+  background: linear-gradient(135deg, #60a5fa 0%, #3b82f6 40%, #a78bfa 100%);
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-/* Hero logo sizing — apply to splash template hero (not inside .sl-markdown-content) */
 .hero img {
   width: 8rem;
   height: 8rem;
@@ -143,38 +76,118 @@
   }
 }
 
-/* Scale down hero button icons on small screens */
-@media (max-width: 49.9375rem) {
-  .hero .actions .sl-link-button svg {
-    --sl-icon-size: 1rem !important;
-  }
+.hero .actions .sl-link-button {
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.hero .actions .sl-link-button:hover {
+  transform: translateY(-1px);
 }
 
 /* ── Feature Cards ── */
 .feature-grid {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 1.5rem;
+  gap: 1.25rem;
   margin: 3rem 0;
 }
-@media (min-width: 40rem) { .feature-grid { grid-template-columns: repeat(2, 1fr); } }
-@media (min-width: 64rem) { .feature-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (min-width: 40rem) {
+  .feature-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (min-width: 64rem) {
+  .feature-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
 
 .feature-card {
   padding: 1.5rem;
   border-radius: 0.75rem;
   border: 1px solid var(--sl-color-hairline);
   background: var(--sl-color-bg-inline-code);
-  transition: border-color 0.2s ease, transform 0.2s ease;
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
 }
 .feature-card:hover {
   border-color: var(--sl-color-accent);
   transform: translateY(-0.25rem);
+  box-shadow: 0 8px 25px -8px rgba(59, 130, 246, 0.2);
 }
-.feature-card h3 { font-size: 1.125rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--sl-color-accent-high); }
-.feature-card p { font-size: 0.875rem; color: var(--sl-color-gray-3); }
+.feature-card h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: var(--sl-color-accent-high);
+}
+.feature-card p {
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--sl-color-gray-2);
+}
 
-/* Mobile code-block scroll indicator — subtle right-edge fade */
+/* ── Doc prose improvements ── */
+.sl-markdown-content p {
+  line-height: 1.75;
+}
+.sl-markdown-content a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.sl-markdown-content a:hover {
+  color: var(--sl-color-accent-high);
+}
+
+/* ── Footer ── */
+.site-footer {
+  border-top: 1px solid var(--sl-color-hairline);
+  padding: 2.5rem 0 1.5rem;
+  margin-top: 4rem;
+  text-align: center;
+}
+
+.footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+@media (min-width: 40rem) {
+  .footer-links {
+    gap: 1.5rem;
+  }
+}
+
+.footer-links a {
+  font-size: 0.875rem;
+  color: var(--sl-color-gray-2);
+  text-decoration: none;
+  transition: color 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+.footer-links a:hover {
+  color: var(--sl-color-accent-high);
+}
+
+.footer-copy {
+  font-size: 0.8125rem;
+  color: var(--sl-color-gray-3);
+  text-align: center;
+  line-height: 1.6;
+}
+.footer-copy a {
+  color: var(--sl-color-gray-2);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+.footer-copy a:hover {
+  color: var(--sl-color-accent-high);
+}
+
+/* ── Mobile code-block scroll indicator ── */
 @media (max-width: 49.9375rem) {
   .expressive-code pre {
     mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent 100%);
@@ -182,35 +195,16 @@
   }
 }
 
-/* WCAG 2.2 touch-target minimum (44×44px) on mobile */
+/* ── WCAG touch targets on mobile ── */
 @media (max-width: 49.9375rem) {
-  button[aria-label="Menu"] {
-    /* Restore Starlight's intended button visuals; the unlayered touch-target
-       sizing override can otherwise lose the layered background/color rules. */
-    background-color: var(--sl-color-white);
-    color: var(--sl-color-black);
-    box-shadow: var(--sl-shadow-md);
-  }
-  :root[data-theme="light"] button[aria-label="Menu"] {
-    background-color: var(--sl-color-black);
-    color: var(--sl-color-white);
-  }
-  [aria-expanded="true"] button[aria-label="Menu"] {
-    background-color: var(--sl-color-gray-2);
-    box-shadow: none;
-  }
-  :root[data-theme="light"] [aria-expanded="true"] button[aria-label="Menu"] {
-    background-color: var(--sl-color-gray-5);
+  starlight-menu-button button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 
-  /* The menu toggle icons rely on an ancestor `[aria-expanded]` attribute,
-     but Starlight renders it on the button itself. Show/hide the correct icon. */
-  button[aria-expanded="false"][aria-label="Menu"] .close-menu,
-  button[aria-expanded="true"][aria-label="Menu"] .open-menu {
-    display: none;
-  }
-
-  button[aria-label="Menu"],
   header button[aria-label="Search"],
   header .social-icons a,
   starlight-theme-select,
@@ -223,12 +217,5 @@
   }
   starlight-theme-select {
     display: flex;
-  }
-}
-
-/* Constrain site title link height on mobile */
-@media (max-width: 49.9375rem) {
-  header .site-title {
-    max-height: 2.5rem;
   }
 }

@@ -171,3 +171,9 @@ perform Actor.set_priority(2)  // Low
 ```
 
 Priority affects scheduling order only — message order within a mailbox is always FIFO.
+
+## Next
+
+- [Actor Stdlib Reference](/stdlib/actor/) — full list of Actor.* built-in operations
+- [OTP Stdlib Reference](/stdlib/otp/) — full list of Otp.* supervisor operations
+- [Distribution & Clustering](/actors/distribution/) — run supervised actors across nodes

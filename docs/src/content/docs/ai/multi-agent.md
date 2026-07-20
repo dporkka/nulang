@@ -7,11 +7,11 @@ description: Compose multiple Nulang agents into pipelines, debate teams, and su
 
 Nulang's AI runtime provides three multi-agent patterns that compose agents into structured workflows. Each pattern addresses a different coordination need.
 
-| Pattern | Module | Use case |
-|---------|--------|----------|
-| Pipeline | `src/ai/pipeline.rs` | Sequential processing through stages |
-| Debate | `src/ai/debate.rs` | Pro/con argumentation with synthesis |
-| Supervisor team | `src/ai/supervisor.rs` | Hierarchical agent management with restart strategies |
+| Pattern | Use case |
+|---------|----------|
+| Pipeline | Sequential processing through stages |
+| Debate | Pro/con argumentation with synthesis |
+| Supervisor team | Hierarchical agent management with restart strategies |
 
 ## Pipelines
 
@@ -73,7 +73,7 @@ agent Moderator = {
 }
 ```
 
-The debate runtime (implemented in `src/ai/debate.rs`) runs the pro and con agents in rounds, then feeds their arguments to the moderator for synthesis. Each agent maintains its own memory and position across rounds.
+The debate runtime runs the pro and con agents in rounds, then feeds their arguments to the moderator for synthesis. Each agent maintains its own memory and position across rounds.
 
 ### When to use debates
 
@@ -85,7 +85,7 @@ Supervisor teams apply OTP-style supervision to agents. If an agent fails (LLM t
 
 ### How supervisor teams work
 
-The supervisor team runtime (implemented in `src/ai/supervisor.rs`) wraps agents in a supervision tree. Each agent is a supervised child. When an agent's LLM call fails, the supervisor applies its restart strategy:
+The supervisor team runtime wraps agents in a supervision tree. Each agent is a supervised child. When an agent's LLM call fails, the supervisor applies its restart strategy:
 
 | Strategy | Behavior on failure |
 |----------|-------------------|

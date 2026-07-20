@@ -86,6 +86,13 @@ export default defineConfig({
             { label: 'Signals, Timers & Queries', link: 'workflows/signals-timers/' },
           ],
         },
+        {
+          label: 'Reference',
+          collapsed: true,
+          items: [
+            { label: 'API Reference', link: 'https://github.com/dporkka/nulang/blob/main/docs/api.md' },
+          ],
+        },
       ],
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/dporkka/nulang' },

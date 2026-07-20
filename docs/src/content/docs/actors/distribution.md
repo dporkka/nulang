@@ -136,3 +136,9 @@ actor DurableWorker {
     }
 }
 ```
+
+## Next
+
+- [Actor Model Overview](/actors/overview/) — core actor concepts (spawn, send, receive)
+- [Supervision Trees](/actors/supervision/) — OTP supervisors for fault-tolerant clusters
+- [Standard Library Overview](/stdlib/overview/) — built-in effects and operations

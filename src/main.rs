@@ -381,18 +381,28 @@ fn emit_stdlib_docs(dir: &str) -> Result<(), String> {
     }
 
     for (&effect_name, ops) in &by_effect {
-        // Write per-effect page
+        // Build a per-effect Starlight docs page.
+        // These files are auto-generated — never edit them by hand.
+        // Source of truth: `src/stdlib.rs` (the `StdLib::new()` registry).
         let mut page = String::new();
         page.push_str("---\n");
         page.push_str(&format!("title: \"{} Effect\"\n", effect_name));
         page.push_str(&format!(
-            "description: \"Built-in {} effect operations\"\n",
+            "description: \"Built-in {} effect operations (auto-generated from src/stdlib.rs)\"\n",
             effect_name
         ));
         page.push_str("sidebar:\n");
         page.push_str(&format!("  label: \"{}\"\n", effect_name));
+        page.push_str("editUrl: false\n");
         page.push_str("---\n\n");
+        page.push_str("> **This page is auto-generated from `src/stdlib.rs`.**\n");
+        page.push_str("> Do not edit it by hand — your changes will be overwritten on the next CI run.\n");
+        page.push_str("> To add or update a built-in operation, edit the `StdLib::new()` registry in `src/stdlib.rs`.\n\n");
         page.push_str(&format!("# {} Effect\n\n", effect_name));
+        page.push_str(&format!(
+            "The `{}` effect provides the following built-in operations, wired into the VM and runtime.\n\n",
+            effect_name
+        ));
         page.push_str("| Operation | Signature | Description |\n");
         page.push_str("|-----------|-----------|-------------|\n");
         for op in ops {
@@ -418,7 +428,6 @@ fn emit_stdlib_docs(dir: &str) -> Result<(), String> {
         file.write_all(page.as_bytes())
             .map_err(|e| format!("Cannot write '{}': {}", filename.display(), e))?;
     }
-
     Ok(())
 }
 
