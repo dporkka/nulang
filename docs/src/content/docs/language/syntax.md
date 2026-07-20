@@ -110,6 +110,82 @@ let first = nums[0]   // Index access
 let len = length(nums) // Built-in length
 ```
 
+## Pipe Operator
+
+The `|>` operator pipes a value left-to-right into a function:
+
+```nulang
+let inc = fn(x) { x + 1 } in
+let dbl = fn(x) { x * 2 } in
+1 |> inc |> dbl   // 4
+```
+
+`x |> f` is equivalent to `f(x)`. Chaining `a |> f |> g |> h` applies `f`, then `g`, then `h` in order.
+
+## Send Operators
+
+There are two syntaxes for sending a message to an actor:
+
+```nulang
+// Keyword form
+send counter inc()
+
+// Operator form (equivalent)
+counter ! inc()
+```
+
+Both parse to the same AST. The `!` form is more concise; the `send` form is more readable for complex arguments:
+
+```nulang
+w ! watch(v)
+send counter inc_by(5)
+send counter get(self)
+```
+
+## Ask Operator
+
+`ask` is a synchronous request/reply call to an agent or actor behavior. The caller blocks until the target responds:
+
+```nulang
+let a = spawn Assistant {} in
+ask a ask("What is an actor model?")
+```
+
+See [AI Agents](/ai/overview/) for agent declarations and tool binding.
+
+## Ternary Expressions
+
+`if` can be used inline with the `then` keyword:
+
+```nulang
+let fib = fn(n) {
+    if n <= 1 then n else fib(n - 1) + fib(n - 2)
+} in fib(10)
+```
+
+`if cond then a else b` returns `a` when `cond` is truthy, `b` otherwise. The block form (`if cond { a } else { b }`) is equivalent.
+
+## Effect Annotations
+
+Function signatures declare their effects with `!` or `throws` followed by an effect row:
+
+```nulang
+// Pure function — no effects
+fn add(x: Int, y: Int) -> Int = x + y
+
+// Effectful — performs IO
+fn greet(): ! IO Unit {
+    perform IO.print("Hello")
+}
+
+// throws is an alias for !
+fn log(msg: String): throws IO Unit {
+    perform IO.print(msg)
+}
+```
+
+See [Algebraic Effects](/language/effects/) for the full effect system.
+
 ## Comments
 
 ```nulang

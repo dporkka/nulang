@@ -21,8 +21,6 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
-
 ## Why Nulang?
 
 Building reliable distributed systems today usually means stitching together actors, queues, databases, workflow engines, and observability tools. Nulang integrates those capabilities into the language itself so you can focus on your application logic instead of infrastructure plumbing.
@@ -55,26 +53,32 @@ Nulang is open source and licensed under the Apache 2.0 license. The source code
   View Apache 2.0 License
 </a>
 
-<CardGrid stagger>
-  <Card title="Distributed Actors" icon="setting">
-    Location-transparent actors with BEAM/OTP primitives — spawn, link, monitor, supervise. Automatic clustering with gossip membership and CRDT state replication.
-  </Card>
-  <Card title="Algebraic Effects" icon="puzzle">
-    Koka-inspired row-polymorphic effects with compile-time checking. Handle, perform, resume — algebraic effect handlers compose freely without monad transformers.
-  </Card>
-  <Card title="Row-Polymorphic Types" icon="document">
-    Full Hindley-Milner type inference with row polymorphism for both records and effects. Pony-inspired reference capabilities (iso, trn, ref, val, box, tag) enforced at compile time.
-  </Card>
-  <Card title="BEAM/OTP Primitives" icon="star">
-    Supervision trees (one_for_one, one_for_all, rest_for_one, simple_one_for_one), process groups, named registration, and exit trapping — battle-tested fault tolerance patterns.
-  </Card>
-  <Card title="WASM Backend" icon="add-reaction">
-    Compile to WebAssembly with full MIR→WASM translation. Run in Wasmtime with 4GiB guard pages, SIMD support, and AOT compilation for near-native performance.
-  </Card>
-  <Card title="AI Runtime" icon="information">
-    Built-in LLM integration with provider-agnostic API (OpenAI, Ollama). Agent pipelines, debate teams, supervisor hierarchies, and episodic/semantic/procedural memory.
-  </Card>
-</CardGrid>
+<div class="feature-grid">
+  <div class="feature-card">
+    <h3>Distributed Actors</h3>
+    <p>Location-transparent actors with BEAM/OTP primitives — spawn, link, monitor, supervise. Automatic clustering with gossip membership and CRDT state replication.</p>
+  </div>
+  <div class="feature-card">
+    <h3>Algebraic Effects</h3>
+    <p>Koka-inspired row-polymorphic effects with compile-time checking. Handle, perform, resume — algebraic effect handlers compose freely without monad transformers.</p>
+  </div>
+  <div class="feature-card">
+    <h3>Row-Polymorphic Types</h3>
+    <p>Full Hindley-Milner type inference with row polymorphism for both records and effects. Pony-inspired reference capabilities (iso, trn, ref, val, box, tag) enforced at compile time.</p>
+  </div>
+  <div class="feature-card">
+    <h3>BEAM/OTP Primitives</h3>
+    <p>Supervision trees (one_for_one, one_for_all, rest_for_one, simple_one_for_one), process groups, named registration, and exit trapping — battle-tested fault tolerance patterns.</p>
+  </div>
+  <div class="feature-card">
+    <h3>WASM Backend</h3>
+    <p>Compile to WebAssembly with full MIR→WASM translation. Run in Wasmtime with 4GiB guard pages, SIMD support, and AOT compilation for near-native performance.</p>
+  </div>
+  <div class="feature-card">
+    <h3>AI Runtime</h3>
+    <p>Built-in LLM integration with provider-agnostic API (OpenAI, Ollama). Agent pipelines, debate teams, supervisor hierarchies, and episodic/semantic/procedural memory.</p>
+  </div>
+</div>
 
 ## Quick Example
 

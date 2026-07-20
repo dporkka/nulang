@@ -380,23 +380,7 @@ fn emit_stdlib_docs(dir: &str) -> Result<(), String> {
         by_effect.entry(op.effect).or_default().push(op);
     }
 
-    let mut index_content = String::from(
-        "---\ntitle: Standard Library\ndescription: Built-in effects and operations\n---\n\n",
-    );
-    index_content.push_str("# Standard Library\n\n");
-    index_content.push_str("Auto-generated reference for built-in effect operations.\n\n");
-    index_content.push_str("| Effect | Operations |\n");
-    index_content.push_str("|--------|------------|\n");
-
     for (&effect_name, ops) in &by_effect {
-        let op_list: Vec<String> = ops.iter().map(|o| format!("`{}`", o.op)).collect();
-        let link = format!(
-            "[{0}](/stdlib/{1}/)",
-            effect_name,
-            effect_name.to_lowercase()
-        );
-        index_content.push_str(&format!("| {} | {} |\n", link, op_list.join(", ")));
-
         // Write per-effect page
         let mut page = String::new();
         page.push_str("---\n");
@@ -405,6 +389,8 @@ fn emit_stdlib_docs(dir: &str) -> Result<(), String> {
             "description: \"Built-in {} effect operations\"\n",
             effect_name
         ));
+        page.push_str("sidebar:\n");
+        page.push_str(&format!("  label: \"{}\"\n", effect_name));
         page.push_str("---\n\n");
         page.push_str(&format!("# {} Effect\n\n", effect_name));
         page.push_str("| Operation | Signature | Description |\n");
@@ -432,14 +418,6 @@ fn emit_stdlib_docs(dir: &str) -> Result<(), String> {
         file.write_all(page.as_bytes())
             .map_err(|e| format!("Cannot write '{}': {}", filename.display(), e))?;
     }
-
-    // Write overall index
-    index_content.push_str("\n_Generated from `src/stdlib.rs` built-in registry._\n");
-    let index_path = out_dir.join("index.md");
-    let mut file = fs::File::create(&index_path)
-        .map_err(|e| format!("Cannot create '{}': {}", index_path.display(), e))?;
-    file.write_all(index_content.as_bytes())
-        .map_err(|e| format!("Cannot write '{}': {}", index_path.display(), e))?;
 
     Ok(())
 }

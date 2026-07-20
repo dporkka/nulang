@@ -17,9 +17,9 @@
 
 /* ── Dark mode first (Starlight uses [data-theme="dark"]) ── */
 :root {
-  --sl-color-accent-low: #1a1a2e;
-  --sl-color-accent: #6c63ff;
-  --sl-color-accent-high: #b4adff;
+  --sl-color-accent-low: #1e3a8a;
+  --sl-color-accent: #3b82f6;
+  --sl-color-accent-high: #93c5fd;
   --sl-color-text: #e4e4e7;
   --sl-color-text-accent: #ffffff;
   --sl-color-bg: #0a0a0f;
@@ -31,9 +31,9 @@
 
 /* Light mode overrides */
 :root[data-theme="light"] {
-  --sl-color-accent-low: #e8e6ff;
-  --sl-color-accent: #6c63ff;
-  --sl-color-accent-high: #3d3599;
+  --sl-color-accent-low: #dbeafe;
+  --sl-color-accent: #3b82f6;
+  --sl-color-accent-high: #1e40af;
   --sl-color-text: #18181b;
   --sl-color-text-accent: #000000;
   --sl-color-bg: #ffffff;
@@ -66,47 +66,6 @@
   background: var(--sl-color-accent);
 }
 
-/* ── Code Block Component (custom CodeBlock.astro) ── */
-.code-block-wrapper {
-  border-radius: 0.5rem;
-  border: 1px solid var(--sl-color-gray-5);
-  overflow: hidden;
-  margin: 1.5rem 0;
-}
-
-.code-block-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.5rem 1rem;
-  background: var(--sl-color-gray-7);
-  border-bottom: 1px solid var(--sl-color-gray-5);
-}
-
-.code-block-filename {
-  font-size: 0.75rem;
-  color: var(--sl-color-gray-3);
-  font-family: var(--sl-font-mono), ui-monospace, monospace;
-}
-
-.copy-button {
-  font-size: 0.75rem;
-  padding: 0.25rem 0.5rem;
-  border-radius: 0.25rem;
-  background: var(--sl-color-gray-5);
-  color: var(--sl-color-gray-2);
-  cursor: pointer;
-  border: none;
-  transition: background-color 0.2s ease, color 0.2s ease;
-}
-.copy-button:hover {
-  background: var(--sl-color-gray-6);
-  color: var(--sl-color-white);
-}
-.copy-button.copied {
-  background: var(--sl-color-green, #16a34a);
-  color: var(--sl-color-white);
-}
 
 /* ── Footer ── */
 .site-footer {
@@ -156,7 +115,14 @@
 
 /* ── Landing Page Hero ── */
 .hero-gradient {
-  background: linear-gradient(135deg, var(--sl-color-accent-low) 0%, var(--sl-color-accent) 50%, var(--sl-color-accent-high) 100%);
+  background: linear-gradient(135deg, var(--sl-color-accent) 0%, var(--sl-color-accent-high) 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+/* Apply gradient to the splash hero title */
+.hero h1 {
+  background: linear-gradient(135deg, var(--sl-color-accent) 0%, var(--sl-color-accent-high) 100%);
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -191,41 +157,22 @@
   gap: 1.5rem;
   margin: 3rem 0;
 }
-@media (min-width: 40rem) {
-  .feature-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-@media (min-width: 64rem) {
-  .feature-grid {
-    grid-template-columns: repeat(3, 1fr);
-  }
-}
+@media (min-width: 40rem) { .feature-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 64rem) { .feature-grid { grid-template-columns: repeat(3, 1fr); } }
 
 .feature-card {
   padding: 1.5rem;
   border-radius: 0.75rem;
-  border: 1px solid var(--sl-color-gray-5);
-  background: var(--sl-color-gray-7);
-  transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+  border: 1px solid var(--sl-color-hairline);
+  background: var(--sl-color-bg-inline-code);
+  transition: border-color 0.2s ease, transform 0.2s ease;
 }
 .feature-card:hover {
   border-color: var(--sl-color-accent);
-  background: var(--sl-color-gray-6);
   transform: translateY(-0.25rem);
 }
-
-.feature-card h3 {
-  font-size: 1.125rem;
-  font-weight: 600;
-  margin-bottom: 0.5rem;
-  color: var(--sl-color-accent-high);
-}
-
-.feature-card p {
-  font-size: 0.875rem;
-  color: var(--sl-color-gray-3);
-}
+.feature-card h3 { font-size: 1.125rem; font-weight: 600; margin-bottom: 0.5rem; color: var(--sl-color-accent-high); }
+.feature-card p { font-size: 0.875rem; color: var(--sl-color-gray-3); }
 
 /* Mobile code-block scroll indicator — subtle right-edge fade */
 @media (max-width: 49.9375rem) {

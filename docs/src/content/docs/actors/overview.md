@@ -46,6 +46,20 @@ let counter = spawn Counter {} in {
 
 The expression after `in` runs in the spawner's context and can reference the new actor.
 
+### Spawn with Link or Monitor
+
+`spawn link` and `spawn monitor` create an actor and immediately link or monitor it to the spawner:
+
+```nulang
+// Link: abnormal exits propagate to the spawner
+let worker = spawn link Worker {} in { worker }
+
+// Monitor: spawner receives a DOWN message when worker exits
+let worker = spawn monitor Worker {} in { worker }
+```
+
+These are parser desugars — `spawn link Actor {..} in {..}` is equivalent to `spawn Actor {..} in { perform Actor.link(actor); .. }`, and likewise for `monitor`. See [Supervision Trees](/actors/supervision/) for link/monitor semantics and exit trapping.
+
 ## Sending Messages
 
 `send` delivers a message to an actor's mailbox asynchronously:
@@ -98,6 +112,18 @@ receive {
     perform IO.print("Timed out after 5 seconds")
 }
 ```
+
+#### How timed receive works
+
+When no matching message is in the mailbox and the timeout is positive, the actor suspends. The runtime:
+
+1. **Suspends** the actor, capturing its execution state (frames, PC, registers).
+2. **Arms a one-shot timer** for the timeout duration.
+3. **Resumes** the actor when either a matching message arrives or the timer fires.
+
+If the timer fires first, the `after` body runs. If a matching message arrives first, the matching arm runs and the timer is cancelled. The actor stays suspended and re-suspends if a non-matching message arrives (it is requeued, not consumed).
+
+Suspension only happens inside an actor context with the runtime enabled. Outside an actor (e.g. in a standalone `--eval` script), `receive` with `after` resolves synchronously — it returns immediately when no match is found rather than suspending.
 
 ## Actor Lifecycle
 
