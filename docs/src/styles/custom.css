@@ -2,6 +2,19 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Restore Starlight heading styles clobbered by Tailwind Preflight.
+   Tailwind's `@tailwind base` emits `h1-h6 { font-size: inherit; font-weight: inherit; }`
+   which overrides Starlight's @layer starlight.core. Re-declare at base layer
+   with Starlight's own semantic --sl-text-h* scale so all page titles render correctly. */
+@layer base {
+  h1 { font-size: var(--sl-text-h1); font-weight: 600; line-height: var(--sl-line-height-headings); }
+  h2 { font-size: var(--sl-text-h2); font-weight: 600; line-height: var(--sl-line-height-headings); }
+  h3 { font-size: var(--sl-text-h3); font-weight: 600; line-height: var(--sl-line-height-headings); }
+  h4 { font-size: var(--sl-text-h4); font-weight: 600; line-height: var(--sl-line-height-headings); }
+  h5 { font-size: var(--sl-text-h5); font-weight: 600; line-height: var(--sl-line-height-headings); }
+  h6 { font-size: var(--sl-text-base); font-weight: 600; line-height: var(--sl-line-height-headings); }
+}
+
 /* ── Dark mode first (Starlight uses [data-theme="dark"]) ── */
 :root {
   --sl-color-accent-low: #1a1a2e;
@@ -30,115 +43,245 @@
   --sl-color-bg-inline-code: #f4f4f5;
 }
 
-/* ── Code Block Component ── */
+/* ── Branded CTA buttons (used in index.mdx) ── */
+.btn-license,
+.btn-support {
+  display: inline-block;
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.5rem;
+  text-decoration: none;
+  font-weight: 600;
+  color: #fff;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.btn-license:hover,
+.btn-support:hover {
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+.btn-license {
+  background: linear-gradient(135deg, var(--sl-color-accent), var(--sl-color-accent-low));
+}
+.btn-support {
+  background: var(--sl-color-accent);
+}
+
+/* ── Code Block Component (custom CodeBlock.astro) ── */
 .code-block-wrapper {
-  @apply rounded-lg border border-gray-700 overflow-hidden my-6;
+  border-radius: 0.5rem;
+  border: 1px solid var(--sl-color-gray-5);
+  overflow: hidden;
+  margin: 1.5rem 0;
 }
 
 .code-block-header {
-  @apply flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1rem;
+  background: var(--sl-color-gray-7);
+  border-bottom: 1px solid var(--sl-color-gray-5);
 }
 
 .code-block-filename {
-  @apply text-xs text-gray-400 font-mono;
+  font-size: 0.75rem;
+  color: var(--sl-color-gray-3);
+  font-family: var(--sl-font-mono), ui-monospace, monospace;
 }
 
 .copy-button {
-  @apply text-xs px-2 py-1 rounded bg-gray-700 text-gray-300
-         hover:bg-gray-600 hover:text-white transition-colors
-         cursor-pointer border-none;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  background: var(--sl-color-gray-5);
+  color: var(--sl-color-gray-2);
+  cursor: pointer;
+  border: none;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.copy-button:hover {
+  background: var(--sl-color-gray-6);
+  color: var(--sl-color-white);
+}
+.copy-button.copied {
+  background: var(--sl-color-green, #16a34a);
+  color: var(--sl-color-white);
 }
 
 /* ── Footer ── */
 .site-footer {
-  @apply border-t border-gray-800 py-8 mt-16 text-center;
+  border-top: 1px solid var(--sl-color-gray-5);
+  padding: 2rem 0;
+  margin-top: 4rem;
+  text-align: center;
 }
 
 .footer-links {
-  @apply flex items-center justify-center gap-6 flex-wrap;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+}
+@media (min-width: 40rem) {
+  .footer-links {
+    gap: 1.5rem;
+  }
 }
 
 .footer-links a {
-  @apply text-sm text-gray-400 hover:text-gray-200 transition-colors no-underline;
+  font-size: 0.875rem;
+  color: var(--sl-color-gray-3);
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+.footer-links a:hover {
+  color: var(--sl-color-gray-1);
+}
+
+.footer-copy {
+  margin-top: 1.5rem;
+  font-size: 0.75rem;
+  color: var(--sl-color-gray-3);
+  text-align: center;
+}
+.footer-copy a {
+  color: var(--sl-color-gray-3);
+  text-decoration: none;
+  transition: color 0.2s ease;
+}
+.footer-copy a:hover {
+  color: var(--sl-color-gray-1);
 }
 
 /* ── Landing Page Hero ── */
 .hero-gradient {
-  background: linear-gradient(135deg, #1a1a2e 0%, #6c63ff 50%, #b4adff 100%);
+  background: linear-gradient(135deg, var(--sl-color-accent-low) 0%, var(--sl-color-accent) 50%, var(--sl-color-accent-high) 100%);
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-/* ── Feature Cards ── */
-.feature-grid {
-  @apply grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 my-12;
-}
-
-.feature-card {
-  @apply p-6 rounded-lg border border-gray-800 bg-gray-900/50
-         hover:border-gray-700 hover:bg-gray-900 transition-all;
-}
-
-.feature-card h3 {
-  @apply text-lg font-semibold mb-2;
-}
-
-.feature-card p {
-  @apply text-sm text-gray-400;
-}
-
-/* Hero image sizing and spacing */
-.sl-markdown-content .hero img {
-  width: 6rem;
-  height: 6rem;
+/* Hero logo sizing — apply to splash template hero (not inside .sl-markdown-content) */
+.hero img {
+  width: 8rem;
+  height: 8rem;
   margin: 0 auto 1.5rem;
   display: block;
 }
-
-/* Responsive hero tagline */
-.hero__tagline {
-  font-size: clamp(1.1rem, 2.5vw, 1.5rem);
-  line-height: 1.5;
-  max-width: 42rem;
-  margin-left: auto;
-  margin-right: auto;
+@media (min-width: 50rem) {
+  .hero img {
+    width: 12rem;
+    height: 12rem;
+    margin: 0;
+  }
 }
 
-/* Hero action buttons wrap on small screens */
-.hero__actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.75rem;
-  margin-top: 2rem;
+/* Scale down hero button icons on small screens */
+@media (max-width: 49.9375rem) {
+  .hero .actions .sl-link-button svg {
+    --sl-icon-size: 1rem !important;
+  }
 }
 
-/* Updated feature cards with stronger hover state */
+/* ── Feature Cards ── */
 .feature-grid {
-  @apply grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 my-12;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+  margin: 3rem 0;
+}
+@media (min-width: 40rem) {
+  .feature-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (min-width: 64rem) {
+  .feature-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
 }
 
 .feature-card {
-  @apply p-6 rounded-xl border border-gray-800 bg-gray-900/50
-         hover:border-blue-500/50 hover:bg-gray-900 transition-all
-         hover:-translate-y-1;
+  padding: 1.5rem;
+  border-radius: 0.75rem;
+  border: 1px solid var(--sl-color-gray-5);
+  background: var(--sl-color-gray-7);
+  transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
+}
+.feature-card:hover {
+  border-color: var(--sl-color-accent);
+  background: var(--sl-color-gray-6);
+  transform: translateY(-0.25rem);
 }
 
 .feature-card h3 {
-  @apply text-lg font-semibold mb-2 text-blue-300;
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: var(--sl-color-accent-high);
 }
 
-/* Footer responsive */
-.footer-links {
-  @apply flex flex-wrap items-center justify-center gap-4 sm:gap-6;
+.feature-card p {
+  font-size: 0.875rem;
+  color: var(--sl-color-gray-3);
 }
 
-.footer-copy {
-  @apply mt-6 text-xs text-gray-500 text-center;
+/* Mobile code-block scroll indicator — subtle right-edge fade */
+@media (max-width: 49.9375rem) {
+  .expressive-code pre {
+    mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent 100%);
+  }
 }
 
-.footer-copy a {
-  @apply text-gray-400 hover:text-gray-200 transition-colors no-underline;
+/* WCAG 2.2 touch-target minimum (44×44px) on mobile */
+@media (max-width: 49.9375rem) {
+  button[aria-label="Menu"] {
+    /* Restore Starlight's intended button visuals; the unlayered touch-target
+       sizing override can otherwise lose the layered background/color rules. */
+    background-color: var(--sl-color-white);
+    color: var(--sl-color-black);
+    box-shadow: var(--sl-shadow-md);
+  }
+  :root[data-theme="light"] button[aria-label="Menu"] {
+    background-color: var(--sl-color-black);
+    color: var(--sl-color-white);
+  }
+  [aria-expanded="true"] button[aria-label="Menu"] {
+    background-color: var(--sl-color-gray-2);
+    box-shadow: none;
+  }
+  :root[data-theme="light"] [aria-expanded="true"] button[aria-label="Menu"] {
+    background-color: var(--sl-color-gray-5);
+  }
+
+  /* The menu toggle icons rely on an ancestor `[aria-expanded]` attribute,
+     but Starlight renders it on the button itself. Show/hide the correct icon. */
+  button[aria-expanded="false"][aria-label="Menu"] .close-menu,
+  button[aria-expanded="true"][aria-label="Menu"] .open-menu {
+    display: none;
+  }
+
+  button[aria-label="Menu"],
+  header button[aria-label="Search"],
+  header .social-icons a,
+  starlight-theme-select,
+  starlight-theme-select select {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  starlight-theme-select {
+    display: flex;
+  }
 }
 
+/* Constrain site title link height on mobile */
+@media (max-width: 49.9375rem) {
+  header .site-title {
+    max-height: 2.5rem;
+  }
+}

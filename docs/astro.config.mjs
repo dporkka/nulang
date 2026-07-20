@@ -19,6 +19,7 @@ export default defineConfig({
       customCss: ['./src/styles/custom.css'],
       components: {
         Footer: './src/components/Footer.astro',
+        Header: './src/components/Header.astro',
       },
       editLink: {
         baseUrl: 'https://github.com/dporkka/nulang/edit/main/docs/',
@@ -71,15 +72,6 @@ export default defineConfig({
       ],
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/dporkka/nulang' },
-      ],
-      head: [
-        {
-          tag: 'script',
-          attrs: {
-            src: 'https://js.stripe.com/v3/buy-button.js',
-            async: true,
-          },
-        },
       ],
     }),
     tailwindcss(),
