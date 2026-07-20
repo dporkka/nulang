@@ -4,11 +4,11 @@ on:
   push:
     branches: [main]
     paths:
-      # Trigger when compiler or stdlib source changes.
-      # The actual repo has source in src/, not compiler/.
+      # Trigger when compiler / stdlib source or docs content change.
       - 'src/**'
       - 'examples/**'
       - 'scripts/**'
+      - 'docs/**'
       - '.github/workflows/docs-sync.yml'
 
 jobs:
