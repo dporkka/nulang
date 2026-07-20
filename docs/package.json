@@ -1,1 +1,21 @@
-{"name":"nulang-docs","version":"0.1.0","description":"Nulang language documentation site","type":"module","scripts":{"dev":"astro dev","start":"astro dev","build":"astro build","preview":"astro preview"},"dependencies":{"@astrojs/starlight":"^0.41.3","@astrojs/tailwind":"^6.0.2","astro":"^7.1.2","sharp":"^0.35.3","tailwindcss":"^3.4.17","@tailwindcss/typography":"^0.5.20"}}
+{
+  "name": "nulang-docs",
+  "version": "0.1.0",
+  "description": "Nulang language documentation site",
+  "type": "module",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.41.3",
+    "@astrojs/tailwind": "^6.0.2",
+    "astro": "^7.1.2",
+    "sharp": "^0.35.3",
+    "tailwindcss": "^3.4.17",
+    "@tailwindcss/typography": "^0.5.20"
+  }
+}

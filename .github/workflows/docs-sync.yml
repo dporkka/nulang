@@ -29,6 +29,9 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Enable corepack
+        run: corepack enable
+
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y python3-dev
 
@@ -56,8 +59,8 @@ jobs:
       - name: Build Astro site
         run: |
           cd docs
-          npm install
-          npm run build
+          pnpm install
+          pnpm run build
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3

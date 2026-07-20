@@ -11,7 +11,7 @@ compatibility_date = "2026-07-19"
 
 # Cloudflare Pages build configuration:
 #   Framework preset: Astro
-#   Build command:     cd docs && npm install && npm run build
+#   Build command:     cd docs && pnpm install && pnpm run build
 #   Output directory:  docs/dist
 #   Build watch paths: docs/**
 #   Custom domain:     nulang.org
