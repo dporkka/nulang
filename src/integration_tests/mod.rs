@@ -398,21 +398,21 @@ mod tests {
 
     #[test]
     fn test_example_fibonacci_runs() {
-        let source = include_str!("../examples/fibonacci.nula");
+        let source = include_str!("../../examples/fibonacci.nula");
         let (value, _ty) = run_source(source).unwrap();
         assert_eq!(value.as_int(), Some(55), "fib(10) = 55");
     }
 
     #[test]
     fn test_example_effects_runs() {
-        let source = include_str!("../examples/effects.nula");
+        let source = include_str!("../../examples/effects.nula");
         let (value, _ty) = run_source(source).unwrap();
         assert_eq!(value.as_int(), Some(42), "handler should resume with 42");
     }
 
     #[test]
     fn test_example_counter_actor_runs() {
-        let source = include_str!("../examples/counter_actor.nula");
+        let source = include_str!("../../examples/counter_actor.nula");
         let (value, _ty) = run_source(source).unwrap();
         assert!(
             value.as_actor_id().is_some(),
@@ -3367,7 +3367,7 @@ match { a: 2, b: 9 } with {
     #[test]
     fn test_example_link_monitor_runs() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let source = include_str!("../examples/link_monitor.nula");
+        let source = include_str!("../../examples/link_monitor.nula");
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
         assert_eq!(value.as_int(), Some(0), "main should return 0");
 
@@ -3557,7 +3557,7 @@ match { a: 2, b: 9 } with {
     #[test]
     fn test_example_worker_pool_runs() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let source = include_str!("../examples/worker_pool.nula");
+        let source = include_str!("../../examples/worker_pool.nula");
         let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
         assert_eq!(value.as_int(), Some(0), "main should return 0");
 
