@@ -27,7 +27,7 @@ language-version = "1.0.0-frozen"
 # `--no-default-features --features <subset>` for a leaner binary, e.g.
 # `cargo build --no-default-features --features sqlite` skips PyO3 and the
 # LSP server entirely.
-default = ["python", "sqlite", "lsp"]
+default = ["python", "sqlite", "lsp", "ai-runtime"]
 # Python interop (native-actor `perform Python.call(...)`). Fully isolated
 # to src/python/ — nothing else in the crate depends on it.
 python = ["dep:pyo3"]
@@ -37,6 +37,11 @@ sqlite = ["dep:libsql"]
 lsp = ["dep:tower-lsp"]
 wasm-backend = ["dep:wasm-encoder", "dep:wasmtime"]
 wit-bindgen = []
+# AI runtime (LLM providers, agents, memory, pipelines, debates, supervisor
+# teams). This is an Experimental-tier feature that will eventually move to
+# the Cloud SDK (`nlc.ai`). Disable for a leaner build without provider
+# integrations or async-trait machinery.
+ai-runtime = ["dep:reqwest", "dep:async-trait"]
 
 [dependencies]
 # Memory & concurrency
@@ -64,9 +69,10 @@ cranelift-frontend = "0.132"
 tower-lsp = { version = "0.20", optional = true }
 tokio = { version = "1.37.0", features = ["full", "macros", "net", "rt-multi-thread", "time"] }
 
-# HTTP client for AI provider integrations
-reqwest = { version = "0.12", features = ["json"] }
-async-trait = "0.1"
+# HTTP client + async trait glue for AI provider integrations (optional;
+# enabled by the `ai-runtime` feature).
+reqwest = { version = "0.12", features = ["json"], optional = true }
+async-trait = { version = "0.1", optional = true }
 
 # Python interop (optional, see [features])
 pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"], optional = true }

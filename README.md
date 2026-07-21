@@ -3,7 +3,7 @@
 </p>
 <h1 align="center">Nulang</h1>
 <p align="center">
-  The language for autonomous distributed software systems — AI agents, durable workflows, and resilient services.
+  A durable computation language for long-lived, distributed, stateful software entities.
 </p>
 <p align="center">
   <a href="https://nulang.org">Website</a> •
@@ -23,14 +23,14 @@
 
 **Nulang** is the language for building software that keeps running — across failures, restarts, and node boundaries — without constant human intervention.
 
-If you are building AI agents that need to remember state, durable workflows that must survive crashes, or distributed services that stay available under load, Nulang gives you a single, coherent foundation instead of a pile of bolted-on libraries.
+If you are building AI agents that must remember state, durable workflows that survive crashes, distributed services that stay available under load, or any long-lived software entity that must outlast a single process, Nulang gives you a single, coherent foundation instead of a pile of bolted-on libraries.
 
 ### What you get
 
 - **Fault tolerance by default** — supervision trees, links, and monitors turn crashes into recoverable events, not outages.
 - **Distribution without rewiring** — actors and messages work the same whether they run on one node or a cluster.
-- **Durable execution** — workflows checkpoint state and resume after restarts with saga compensation for failures.
-- **AI-native agents** — first-class `agent` declarations with LLM clients, memory, and multi-agent teams.
+- **Durable execution** — actors, workflows, and entities checkpoint state and resume after restarts with saga compensation for failures.
+- **Composable capabilities** — AI, storage, networking, and external services are expressed through the same effect system and live in libraries, not the language core.
 - **Memory safety without runtime pauses** — reference capabilities and per-actor ORCA GC keep you safe while actors stay responsive.
 - **Compile once, run anywhere** — bytecode, native AOT, or WASM backends from the same source.
 
@@ -41,7 +41,7 @@ If you are building AI agents that need to remember state, durable workflows tha
 | **Actor Model** | Lightweight actors with cooperative scheduling, work-stealing queues, and supervision trees that isolate and recover from failures |
 | **Algebraic Effects** | First-class effect system with `perform`/`handle`/`resume` semantics |
 | **Capability System** | Fine-grained reference permissions (iso/trn/ref/val/box/tag/lineariso) for memory safety |
-| **AI Agents** | First-class `agent` declarations with LLM clients, memory, and multi-agent teams |
+| **AI & External Capabilities** | LLMs, vector search, and external services composed through effects and Cloud SDK libraries, not language primitives |
 | **Distributed Runtime** | Location-transparent actor messaging so you can scale from one node to a cluster without rewriting code |
 | **ORCA GC** | Per-actor concurrent garbage collection with cycle detection |
 | **CRDTs** | 8 conflict-free replicated data types for shared distributed state |
@@ -202,7 +202,27 @@ handle perform Math.getAnswer() {
 }
 ```
 
-### AI Agents
+### Entities
+
+An `entity` is a durable-first actor: it is persistent by default and its state defaults to `event_sourced`. This is the recommended surface for long-lived domain objects.
+
+```nulang
+entity BankAccount {
+    state balance = 0             // event_sourced by default
+    state local scratch = 0       // ephemeral, explicitly marked
+
+    behavior deposit(amount) { self.balance = self.balance + amount }
+    behavior withdraw(amount) { self.balance = self.balance - amount }
+    behavior get_balance() { self.balance }
+}
+
+let account = spawn BankAccount {} as "savings:alice"
+ask account deposit(100)
+```
+
+### AI Agents (Cloud SDK)
+
+AI agents are ordinary actors that use effects from the Cloud SDK. In the current alpha this syntax is still language-level; the goal is to express the same idea with an `nlc.ai` library import instead of a dedicated `agent` keyword:
 
 ```nulang
 agent Assistant = {

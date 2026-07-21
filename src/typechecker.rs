@@ -990,7 +990,6 @@ impl TypeChecker {
                 else_branch,
                 span,
             } => self.infer_if(ctx, cond, then_branch, else_branch.as_ref(), *span),
-
             // Binary operators: type-specific rules
             Expr::Binary {
                 op,

@@ -484,15 +484,15 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
 
     // 4. Effect check. Two passes over module functions: first register a
     // name -> EffectRow map (declared rows where present, fixpoint-inferred
-    // otherwise) so call sites propagate callee effects, then enforce
+    // otherwise) so that call sites propagate callee effects, then enforce
     // declared rows. Bodies without a declared row are inference-only.
     // Nested `module {}` decls are flattened first (mirroring the
     // typechecker's flatten_decls).
     let flat_decls = nulang::effect_checker::flatten_decls(&ast.decls);
     let mut effect_checker = EffectChecker::new();
-    effect_checker.register_function_rows(&flat_decls)?;
-    for decl in &flat_decls {
-        effect_checker.check_decl(decl)?;
+    effect_checker.check_module(&ast.decls)?;
+    for msg in &effect_checker.diagnostics {
+        eprintln!("{}", msg);
     }
 
     // 5. Capability analysis over the same body set.

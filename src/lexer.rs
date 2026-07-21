@@ -30,6 +30,7 @@ pub enum TokenKind {
     With,
     Case,
     Actor,
+    Entity,
     Behavior,
     State,
     StateMachine,
@@ -43,6 +44,7 @@ pub enum TokenKind {
     Durable,
     EventSourced,
     Crdt,
+    Until,
     Emit,
     Workflow,
     Step,
@@ -169,6 +171,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::With => write!(f, "with"),
             TokenKind::Case => write!(f, "case"),
             TokenKind::Actor => write!(f, "actor"),
+            TokenKind::Entity => write!(f, "entity"),
             TokenKind::Behavior => write!(f, "behavior"),
             TokenKind::State => write!(f, "state"),
             TokenKind::StateMachine => write!(f, "statemachine"),
@@ -181,6 +184,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Local => write!(f, "local"),
             TokenKind::Durable => write!(f, "durable"),
             TokenKind::EventSourced => write!(f, "eventsourced"),
+            TokenKind::Until => write!(f, "until"),
             TokenKind::Crdt => write!(f, "crdt"),
             TokenKind::Emit => write!(f, "emit"),
             TokenKind::Workflow => write!(f, "workflow"),
@@ -907,6 +911,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "case" => Some(TokenKind::Case),
         "as" => Some(TokenKind::As),
         "actor" => Some(TokenKind::Actor),
+        "entity" => Some(TokenKind::Entity),
         "behavior" => Some(TokenKind::Behavior),
         "state" => Some(TokenKind::State),
         "state_machine" => Some(TokenKind::StateMachine),
@@ -915,6 +920,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "durable" => Some(TokenKind::Durable),
         "event_sourced" => Some(TokenKind::EventSourced),
         "crdt" => Some(TokenKind::Crdt),
+        "until" => Some(TokenKind::Until),
         "emit" => Some(TokenKind::Emit),
         "workflow" => Some(TokenKind::Workflow),
         "step" => Some(TokenKind::Step),
@@ -1103,6 +1109,20 @@ mod tests {
                 TokenKind::DotDot,
                 TokenKind::Colon,
                 TokenKind::DoubleColon,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_entity_keyword() {
+        let kinds = lex("entity actor persistent");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Entity,
+                TokenKind::Actor,
+                TokenKind::Persistent,
                 TokenKind::Eof,
             ]
         );

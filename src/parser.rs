@@ -151,7 +151,7 @@ impl Parser {
         self.skip_newlines();
         match self.peek_kind().clone() {
             TokenKind::Fn => self.parse_function(public, annotations),
-            TokenKind::Actor | TokenKind::Persistent => {
+            TokenKind::Actor | TokenKind::Persistent | TokenKind::Entity => {
                 let backend = annotations.iter().find_map(|a| match a {
                     crate::ast::FunctionAnnotation::Backend { kind } => Some(*kind),
                     _ => None,
@@ -340,7 +340,14 @@ impl Parser {
     fn parse_actor(&mut self, backend: Option<crate::ast::ActorBackendKind>) -> NuResult<Decl> {
         let span = self.current_span();
         let persistent = self.consume_if(&TokenKind::Persistent);
-        self.expect(TokenKind::Actor)?;
+        let is_entity = self.consume_if(&TokenKind::Entity);
+        let persistent = persistent || is_entity;
+        if !is_entity {
+            self.expect(TokenKind::Actor)?;
+        }
+        let default_model = if is_entity { StateModel::EventSourced } else { StateModel::Local };
+        // For `persistent actor` without explicit model, keep the existing Local default
+        // so existing behavior is unchanged; `entity` is the durable-first form.
         let name = self.expect_ident("actor name")?;
         let type_params = self.parse_type_params()?;
         self.expect(TokenKind::LBrace)?;
@@ -357,7 +364,7 @@ impl Parser {
             match self.peek_kind().clone() {
                 TokenKind::State => {
                     self.advance(); // 'state'
-                    let model = self.parse_state_model();
+                    let model = self.parse_state_model(default_model);
                     let field_name = self.expect_ident("state field name")?;
                     let ty = if self.consume_if(&TokenKind::Colon) {
                         self.parse_type()?
@@ -1083,7 +1090,7 @@ impl Parser {
         Ok(Decl::Database { name, tables, span })
     }
 
-    fn parse_state_model(&mut self) -> StateModel {
+    fn parse_state_model(&mut self, default_model: StateModel) -> StateModel {
         match self.peek_kind() {
             TokenKind::Local => {
                 self.advance();
@@ -1101,7 +1108,7 @@ impl Parser {
                 self.advance();
                 StateModel::Crdt
             }
-            _ => StateModel::Local,
+            _ => default_model,
         }
     }
 
@@ -3531,6 +3538,45 @@ mod tests {
                 assert_eq!(path, "Foo");
             }
             _ => panic!("Expected import declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entity_decl() {
+        let source = r#"entity Counter {
+            state count = 0
+            state local cache: Int = 0
+            behavior get() { self.count }
+        }"#;
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex().unwrap();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module().unwrap();
+        assert_eq!(ast.decls.len(), 1);
+        match &ast.decls[0] {
+            Decl::Actor {
+                name,
+                persistent,
+                state_fields,
+                ..
+            } => {
+                assert_eq!(name, "Counter");
+                assert!(*persistent, "entity should be persistent by default");
+                assert_eq!(state_fields.len(), 2);
+                assert_eq!(state_fields[0].0, "count");
+                assert_eq!(
+                    state_fields[0].1,
+                    StateModel::EventSourced,
+                    "entity state defaults to event_sourced"
+                );
+                assert_eq!(state_fields[1].0, "cache");
+                assert_eq!(
+                    state_fields[1].1,
+                    StateModel::Local,
+                    "explicit local annotation overrides default"
+                );
+            }
+            _ => panic!("Expected Actor decl from entity desugaring"),
         }
     }
 

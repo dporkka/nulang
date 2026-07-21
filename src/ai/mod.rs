@@ -3,12 +3,24 @@
 //! This module exposes provider-agnostic request/response types, an async
 //! client trait, a synchronous wrapper, and concrete provider implementations.
 
+#[cfg(feature = "ai-runtime")]
+pub mod client;
+#[cfg(not(feature = "ai-runtime"))]
+#[path = "client_stub.rs"]
 pub mod client;
 pub mod debate;
 pub mod memory;
+#[cfg(feature = "ai-runtime")]
+pub mod mock;
+#[cfg(not(feature = "ai-runtime"))]
+#[path = "mock_stub.rs"]
 pub mod mock;
 pub mod pipeline;
 pub mod procedural_memory;
+#[cfg(feature = "ai-runtime")]
+pub mod providers;
+#[cfg(not(feature = "ai-runtime"))]
+#[path = "providers_stub.rs"]
 pub mod providers;
 pub mod request;
 pub mod response;

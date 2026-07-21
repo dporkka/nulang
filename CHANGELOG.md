@@ -59,6 +59,16 @@ in this version; they are recorded here to establish their tier.
 - CRDT operations and merge semantics (`src/runtime/crdt.rs`,
   `src/runtime/crdt_reg.rs`).
 
+### Deprecated at 1.0.0-frozen — 2026-07-21
+
+- **RFC 0004 — Deprecate `agent`, `workflow`, and `database` language
+  declarations.** These declarations are reclassified as Experimental and
+  will be removed in a future major language version. They should be replaced
+  by ordinary `actor` declarations that import Cloud SDK packages
+  (`nlc.ai`, `nlc.workflow`, `nlc.storage`). The declarations remain
+  functional during the deprecation cycle (≥2 major versions) and now emit
+  compiler warnings. See `RFC/0004-deprecate-agent-workflow-database.md`.
+
 ## Experimental tier
 
 *No stability promise. May change or be removed in any release. Behind a
@@ -72,11 +82,13 @@ feature flag or explicitly marked experimental.*
 - `sqlite` feature: libsql/Turso persistence. Behind `--features sqlite`.
 - `lsp` feature: the tower-lsp language server (`src/lsp/`). Behind
   `--features lsp`.
-- The AI runtime (`src/ai/`): LLM providers, pipelines, debates, supervisor
-  teams, the `LlmAsk` opcode, and the `LLM` effect. **Deprecated since
-  1.0.0-frozen:** `Effect::LLM` and `OpCode::LlmAsk` are deprecated in
-  favor of `perform Provider.ask("llm", prompt)`, which references an
-  eternal "provider" abstraction rather than a transient technology. The
+- `ai-runtime` feature: the AI runtime (`src/ai/`) — LLM providers,
+  pipelines, debates, supervisor teams, the `LlmAsk` opcode, and the `LLM`
+  effect. Behind `--features ai-runtime` (enabled by default; omit it for a
+  leaner build). **Deprecated since 1.0.0-frozen:** `Effect::LLM` and
+  `OpCode::LlmAsk` are deprecated in favor of
+  `perform Provider.ask("llm", prompt)`, which references an eternal
+  "provider" abstraction rather than a transient technology. The
   `LLM`/`LlmAsk` surface remains functional for the deprecation cycle (≥2
   major versions) and will be removed in 3.0 (RFC 0003, item 5 breaking
   phase). New code should use `Provider.ask`. The `Provider` effect is

@@ -10,7 +10,7 @@ This document defines the Nulang programming language, version 2.0. It is intend
 
 Nulang 2.0 represents a significant architectural evolution from the 1.x series. Where the earlier specification treated AI agents, distributed computing, and persistence as separate subsystems accessed through domain-specific keywords (`agent`, `cluster`, `store`), version 2.0 unifies these concerns under a single, coherent abstraction: the actor. In Nulang 2.0, all concurrent and distributed computation is expressed through actors. AI capabilities are granted to actors through the capability system, not through a separate agent DSL. Durability is a property of actors, not a separate storage layer. Distribution is an emergent property of the actor runtime, not a bolt-on framework.
 
-This unification yields a language with fewer primitives and greater compositional power. A programmer learns one abstraction—the actor with behaviors, state, and effects—and applies it uniformly from a single-threaded script to a globally distributed, AI-augmented workflow.
+This unification yields a language with fewer primitives and greater compositional power. A programmer learns one abstraction—the actor with behaviors, state, and effects—and applies it uniformly from a single-threaded script to a globally distributed, durable workflow. AI agents are one composition of these primitives; they are not a separate language surface.
 
 The specification is organized into five conceptual layers:
 
@@ -43,7 +43,7 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - Hindley-Milner type inference (Algorithm W) over tuples, records, variants, arrays, function types carrying effect rows and capabilities, and `&cap T` reference types.
 - Algebraic effects: `perform Effect.op(args)`, `handle body { | Effect.op(x) => value }`, closed and open effect rows written `{IO, FS}` and `{IO, | row}`, enforced `!` annotations on `fn` and `behavior` bodies, and runtime handlers with resume semantics.
 - Reference capabilities `iso`, `trn`, `ref`, `val`, `box`, `tag`, plus `lineariso` with exactly-once consumption tracking. Capabilities are checked at compile time and erased at runtime. Sendability (`lineariso`, `iso`, `val`, `tag`) is enforced for message arguments.
-- Actors: `spawn Actor { field = value }`, `send actor behavior(args)` and `actor ! behavior(args)`, `ask actor behavior(args)`, `receive { | Behavior(x) => expr }`, `self.field` state access, and the four state models (`local`, `durable`, `event_sourced`, `crdt`).
+- Actors and entities: `actor`, `persistent actor`, and `entity` (desugars to `persistent actor` with `event_sourced` as the default state model); `spawn Actor { field = value }`, `spawn Actor {} as "name"` for stable identity, `send actor behavior(args)` and `actor ! behavior(args)`, `ask actor behavior(args)`, `receive { | Behavior(x) => expr }`, `self.field` state access, and the four state models (`local`, `durable`, `event_sourced`, `crdt`).
 - Persistence for `persistent actor`s: durable snapshot/journal recovery and event-sourced replay, backed by in-memory, JSON-file, and SQLite stores.
 - Workflows: `workflow Name { step name { body } compensate { expr } ... }` with `parallel { ... }` step groups, saga compensation in reverse order, `perform Signal.wait("name")`, and `perform Timer.sleep("name", ms)`, all durable across restarts.
 - The AI runtime: `agent` declarations with model, system prompt, tools, episodic/semantic/procedural memory, and pricing; the `perform LLM.ask(prompt)` effect; agent behaviors (`ask`, `usage`, `store_fact`, `recall`); tool schemas generated from `@tool` functions and executed when the model issues tool calls; and the `Pipeline`, `Supervisor`, and `Debate` orchestration builtins.
@@ -200,15 +200,15 @@ connection; packets themselves carry the existing `[len u32][magic "NUL0"]
 
 ## 1.1 What is Nulang?
 
-Nulang is a general-purpose, statically typed programming language designed for building distributed, concurrent, durable, and AI-augmented applications. It compiles to WebAssembly and runs on a purpose-built actor runtime that provides persistence, clustering, and AI integration as first-class language features.
+Nulang is a durable computation language for long-lived, distributed, stateful software entities. It compiles to WebAssembly and runs on a purpose-built actor runtime that provides persistence, clustering, and effect-composed capabilities as first-class language features. AI agents, workflows, databases, and autonomous organizations are important applications of these primitives, not part of the language kernel.
 
-Nulang occupies a distinctive position in the language design space. Like Erlang and Elixir, it is built on the actor model of concurrency, where independent computational entities communicate exclusively through asynchronous message passing. Like Rust, it employs a sophisticated type system with affine reference capabilities to guarantee memory safety and data-race freedom at compile time. Like Koka and Eff, it uses algebraic effects as the primary mechanism for defining, composing, and handling computational effects such as IO, exceptions, state mutation, and—uniquely—AI model inference. Like modern workflow orchestration systems, it provides durable execution semantics where long-running processes survive crashes and restarts automatically.
+Nulang occupies a distinctive position in the language design space. Like Erlang and Elixir, it is built on the actor model of concurrency, where independent computational entities communicate exclusively through asynchronous message passing. Like Rust, it employs a sophisticated type system with affine reference capabilities to guarantee memory safety and data-race freedom at compile time. Like Koka and Eff, it uses algebraic effects as the primary mechanism for defining, composing, and handling computational effects such as IO, exceptions, state mutation, storage, messaging, and time. AI model inference is one application of this mechanism, implemented through Cloud SDK libraries rather than as a language primitive. Like modern workflow orchestration systems, it provides durable execution semantics where long-running processes survive crashes and restarts automatically.
 
 The synthesis of these features produces a language with four defining characteristics:
 
 **Concurrency without locks.** Nulang actors do not share mutable memory. All communication is asynchronous and message-based, eliminating data races by construction. The type system enforces that mutable references cannot escape an actor's boundary.
 
-**Effects as a unifying abstraction.** All side effects in Nulang—reading a file, making an HTTP request, querying a database, calling an LLM—are expressed through a single mechanism: algebraic effects. An effect is declared, performed, and handled within a well-typed framework that makes effectful dependencies explicit in function signatures.
+**Effects as a unifying abstraction.** All side effects in Nulang—reading a file, making an HTTP request, querying a database, invoking an AI model, or sending a message—are expressed through a single mechanism: algebraic effects. An effect is declared, performed, and handled within a well-typed framework that makes effectful dependencies explicit in function signatures.
 
 **Capability-based security.** Every reference in Nulang carries a capability that governs how it may be read, written, and shared. These capabilities form a lattice of authority that propagates through the program automatically. Combined with effect declarations, they provide a comprehensive security model: a function's type signature reveals exactly what it can do and what data it can access.
 
@@ -255,7 +255,7 @@ Nulang's design is guided by five principles that influence every aspect of the 
 
 **Uniformity across scales.** The same actor abstraction works for a single-process application and a globally distributed cluster. A `persistent` actor on one node uses the same syntax and semantics as a `persistent` actor replicated across a hundred nodes. An effect performed in a unit test can be handled by a pure mock, while the same effect in production is handled by a system call. This uniformity reduces the conceptual surface area programmers must learn and enables code reuse across deployment scenarios.
 
-**Language-integrated AI.** Access to large language models is not provided through external SDKs or API wrappers. It is a first-class language feature, expressed through the algebraic effect system and governed by the capability security model. A function that calls an LLM declares this in its effect row. An actor that uses AI must hold the `llm` capability. This integration enables static reasoning about AI usage, structured output through types, and seamless composition of LLM calls with other effects.
+**Composable capabilities.** External capabilities—whether an LLM, a vector index, a billing meter, or a remote API—are accessed through the algebraic effect system and governed by the capability security model. A function that invokes an external capability declares the corresponding effect in its type signature. An actor that uses AI does so by importing a Cloud SDK library (for example, `nlc.ai`) and holding any required capability. This composability keeps the language kernel small while allowing powerful, statically traceable integrations to evolve as libraries.
 
 ## 1.3 The Actor as Universal Abstraction
 
@@ -469,7 +469,7 @@ fn factorial(n: Int) -> Int {
 The following identifiers are reserved as keywords in Nulang and may not be used as ordinary identifiers:
 
 ```
-agent        and          ask          actor
+agent        and          ask          actor        entity
 await        behavior     box          break
 case         compensate   crdt         durable
 effect       else         emit         exit
@@ -493,6 +493,7 @@ Keywords are case-sensitive and must be written in lowercase.
 Notes on the inventory:
 
 - `true`, `false`, `nil`, and `unit` are literal keywords, and `and`, `or`, `not` are keyword spellings of the `&&`, `||`, `!` operators.
+- `entity` is a reserved keyword accepted by the grammar; it desugars to `persistent actor` with `event_sourced` as the default state model (see Chapter 8).
 - `await`, `exit`, `link`, `loop`, `monitor`, `node`, `priv`, `subworkflow`, and `where` are reserved but not yet accepted by the grammar (see Implementation Status). `case` is accepted only as an optional prefix on match arms.
 - The capability words `iso`, `trn`, `ref`, `val`, `box`, `tag` are keywords usable anywhere a capability is parsed. `lineariso` is **not** a keyword; it is recognized as a contextual identifier in capability position.
 - `cap` (in the `expr :cap iso` annotation) and `to` (in `migrate a to node`) are contextual identifiers, not keywords.
@@ -1884,6 +1885,23 @@ persistent actor Account {
   ...
 }
 ```
+
+## 8.2a Entity Declaration
+
+An `entity` is a durable-first actor. It is equivalent to `persistent actor` with `event_sourced` as the default state model, and is the recommended surface for long-lived domain objects. State fields without an explicit model default to `event_sourced`; `local`, `durable`, and `crdt` may still be used explicitly.
+
+```nulang
+entity BankAccount {
+  state balance: Int = 0          // event_sourced by default
+  state local scratch: Int = 0  // ephemeral, explicitly marked
+
+  behavior deposit(amount: Int) {
+    self.balance = self.balance + amount
+  }
+}
+```
+
+`entity` desugars to `persistent actor` during parsing. The runtime treats an entity exactly like a persistent actor whose event-sourced fields are recovered from the event journal on restart. See Chapter 9 for persistence details and RFC 0005 for the full entity design.
 
 ## 8.3 State Declarations
 

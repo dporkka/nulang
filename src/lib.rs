@@ -32,7 +32,6 @@ pub mod wasm_component_runtime;
 #[cfg(feature = "wasm-backend")]
 pub mod wasm_runtime;
 pub mod wasm_types;
-
 pub mod ai;
 pub mod ffi;
 pub mod jit;

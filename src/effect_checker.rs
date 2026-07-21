@@ -989,11 +989,30 @@ impl EffectChecker {
     /// on every body (pass 2).
     pub fn check_module(&mut self, decls: &[Decl]) -> NuResult<()> {
         let flat = flatten_decls(decls);
+        for decl in &flat {
+            self.emit_deprecation_warning(decl);
+        }
         self.register_function_rows(&flat)?;
         for decl in &flat {
             self.check_decl(decl)?;
         }
         Ok(())
+    }
+
+    /// Emit a deprecation warning for a single declaration if it uses language
+    /// surface scheduled for removal. See RFC 0004.
+    fn emit_deprecation_warning(&mut self, decl: &Decl) {
+        let (kind, name, span) = match decl {
+            Decl::Agent { name, span, .. } => ("agent", name.as_str(), *span),
+            Decl::Workflow { name, span, .. } => ("workflow", name.as_str(), *span),
+            Decl::Database { name, span, .. } => ("database", name.as_str(), *span),
+            _ => return,
+        };
+        self.diagnostics.push(format!(
+            "warning: `{}` declaration '{}' is deprecated and will be removed in a future language version (RFC 0004). Use an `actor` with the relevant Cloud SDK library instead (e.g., `nlc.ai`, `nlc.workflow`, `nlc.storage`).",
+            kind, name
+        ));
+        let _ = span; // span reserved for future line/column diagnostics
     }
 }
 
@@ -3068,5 +3087,52 @@ mod tests {
         let mut checker = EffectChecker::new();
         let result = checker.check_module(&ast.decls);
         assert!(result.is_ok(), "expected success, got {:?}", result.err());
+    }
+
+    #[test]
+    fn test_deprecation_warning_for_agent_declaration() {
+        let ast = parse_module(
+            r#"
+            agent Assistant = {
+                model: "gpt-4o",
+                system_prompt: "You are helpful.",
+                memory: { max_turns: 10 }
+            }
+            "#,
+        );
+        let mut checker = EffectChecker::new();
+        assert!(checker.check_module(&ast.decls).is_ok());
+        assert_eq!(checker.diagnostics.len(), 1);
+        assert!(checker.diagnostics[0].contains("`agent` declaration 'Assistant' is deprecated"));
+    }
+
+    #[test]
+    fn test_deprecation_warning_for_workflow_declaration() {
+        let ast = parse_module(
+            r#"
+            workflow W {
+                step a { 1 }
+            }
+            "#,
+        );
+        let mut checker = EffectChecker::new();
+        assert!(checker.check_module(&ast.decls).is_ok());
+        assert_eq!(checker.diagnostics.len(), 1);
+        assert!(checker.diagnostics[0].contains("`workflow` declaration 'W' is deprecated"));
+    }
+
+    #[test]
+    fn test_no_deprecation_warning_for_actor_declaration() {
+        let ast = parse_module(
+            r#"
+            actor Counter {
+                state count = 0
+                behavior get() { self.count }
+            }
+            "#,
+        );
+        let mut checker = EffectChecker::new();
+        assert!(checker.check_module(&ast.decls).is_ok());
+        assert!(checker.diagnostics.is_empty());
     }
 }
