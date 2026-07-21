@@ -58,7 +58,7 @@ use crate::ai::{
     complete_sync, Debate, LlmClient, LlmError, LlmErrorKind, LlmMessage, LlmRequest, LlmResponse,
     Pipeline, PipelineStage, TokenBudget,
 };
-use crate::types::ExitReason;
+use crate::types::{ExitReason, VmSuspension};
 use crate::vm::Value;
 
 // ---------------------------------------------------------------------------
@@ -92,13 +92,6 @@ fn timer_fired_handler(actor: &mut Actor, _args: &[Value]) {
 /// step ids so internal runtime behaviors (e.g. `__timer_fired`) can live at
 /// higher indices without colliding.
 fn bytecode_step_placeholder(_actor: &mut Actor, _args: &[Value]) {}
-
-/// True for the sentinel VM errors that indicate a behavior suspended
-/// (waiting on a workflow signal, a background LLM call, or a timed
-/// selective receive) rather than failed.
-fn is_suspend_error(msg: &str) -> bool {
-    msg == "SignalWait:suspend" || msg == "LlmAsk:suspend" || msg == "ReceiveWait:suspend"
-}
 
 /// Persisted `waiting_signal` marker for a workflow step suspended on a
 /// background LLM call.  A signal wait stores the awaited signal's name so
@@ -1758,7 +1751,7 @@ impl Runtime {
                         (*self_ptr).checkpoint_actor(actor_id);
                     }
                 }
-                Err(crate::types::NuError::VMError(ref msg)) if is_suspend_error(msg) => {
+                Err(crate::types::NuError::Suspended(_)) => {
                     // Suspended again (e.g. a chained `perform LLM.ask` or a
                     // signal wait): re-capture the VM state so the next
                     // completion or signal can resume it.
@@ -1923,7 +1916,7 @@ impl Runtime {
                     self.checkpoint_actor(actor_id);
                 }
             }
-            Err(crate::types::NuError::VMError(ref msg)) if is_suspend_error(msg) => {
+            Err(crate::types::NuError::Suspended(_)) => {
                 // Suspended again — waiting for another signal OR on a
                 // background LLM call (`perform LLM.ask` after the wait).
                 // Re-capture the VM state so the next matching signal or the
@@ -2932,7 +2925,7 @@ impl Runtime {
                         self.checkpoint_actor(actor_id);
                         processed = true;
                     }
-                    Err(crate::types::NuError::VMError(ref msg)) if is_suspend_error(msg) => {
+                    Err(crate::types::NuError::Suspended(_)) => {
                         // The step yielded waiting for a signal or a
                         // background LLM call. Do not mark it completed, do
                         // not run compensations, and do not checkpoint the
@@ -3481,7 +3474,7 @@ impl Runtime {
                         (*self_ptr).checkpoint_actor(actor_id);
                     }
                 }
-                Err(crate::types::NuError::VMError(ref msg)) if msg == "ReceiveWait:suspend" => {
+                Err(crate::types::NuError::Suspended(VmSuspension::ReceiveWait)) => {
                     // Re-suspended on the same wait (the waking message did
                     // not match): keep the original timer and re-capture the
                     // VM state so the next message or the timeout can resume
@@ -3500,7 +3493,7 @@ impl Runtime {
                         (*self_ptr).maybe_schedule_receive_wait(actor_id, timeout);
                     }
                 }
-                Err(crate::types::NuError::VMError(ref msg)) if is_suspend_error(msg) => {
+                Err(crate::types::NuError::Suspended(_)) => {
                     // Suspended on something else (a signal wait or a
                     // background LLM call) past the receive: the wait is
                     // over. Re-capture so the matching signal or pumped
@@ -3689,14 +3682,12 @@ impl Runtime {
         // If the step suspended waiting for a signal or a background LLM
         // call, record which behavior and step name it was executing so
         // recovery/resumption can continue.
-        if let Err(crate::types::NuError::VMError(ref msg)) = result {
-            if is_suspend_error(msg) {
-                let step_name = self.step_name_for(actor_id, behavior_idx);
-                if let Some(actor) = self.actors.get_mut(&actor_id) {
-                    if let Some(ref mut suspended) = actor.suspended_execution {
-                        suspended.behavior_idx = behavior_idx;
-                        suspended.step_name = step_name;
-                    }
+        if let Err(crate::types::NuError::Suspended(_)) = result {
+            let step_name = self.step_name_for(actor_id, behavior_idx);
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                if let Some(ref mut suspended) = actor.suspended_execution {
+                    suspended.behavior_idx = behavior_idx;
+                    suspended.step_name = step_name;
                 }
             }
         }
@@ -3783,25 +3774,23 @@ impl Runtime {
             // LLM call, or a timed selective receive. Doing this here avoids
             // aliasing the Runtime through the callback while the VM borrow
             // is active.
-            if let Err(crate::types::NuError::VMError(ref msg)) = result {
-                if is_suspend_error(msg) {
-                    if let Some(vm_state) = vm.take_suspended_state() {
-                        let signal_name = vm.suspended_signal_name.take();
-                        let receive_timeout = vm.suspended_receive_timeout.take();
-                        if let Some(actor) = self.actors.get_mut(&actor_id) {
-                            let marker = suspension_marker(actor, signal_name);
-                            actor.waiting_signal = marker;
-                            actor.suspended_execution =
-                                Some(crate::runtime::actor::SuspendedExecution {
-                                    vm_state,
-                                    behavior_idx: 0,
-                                    step_name: String::new(),
-                                });
-                        }
-                        // Arm the receive-after timeout on the first
-                        // suspension; a no-op for the other sentinels.
-                        self.maybe_schedule_receive_wait(actor_id, receive_timeout);
+            if let Err(crate::types::NuError::Suspended(_)) = result {
+                if let Some(vm_state) = vm.take_suspended_state() {
+                    let signal_name = vm.suspended_signal_name.take();
+                    let receive_timeout = vm.suspended_receive_timeout.take();
+                    if let Some(actor) = self.actors.get_mut(&actor_id) {
+                        let marker = suspension_marker(actor, signal_name);
+                        actor.waiting_signal = marker;
+                        actor.suspended_execution =
+                            Some(crate::runtime::actor::SuspendedExecution {
+                                vm_state,
+                                behavior_idx: 0,
+                                step_name: String::new(),
+                            });
                     }
+                    // Arm the receive-after timeout on the first
+                    // suspension; a no-op for the other sentinels.
+                    self.maybe_schedule_receive_wait(actor_id, receive_timeout);
                 }
             }
             // End the VM-execution window only after the suspend-state

@@ -30,7 +30,7 @@ use crate::bytecode::{CodeModule, Constant, OpCode};
 use crate::ffi::{call_native, CType, Signature, FFI_REGISTRY};
 use crate::jit::{self, JitSession, TieredAction};
 use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
-use crate::types::{NuError, NuResult, Span};
+use crate::types::{NuError, NuResult, Span, VmSuspension};
 
 // ---------------------------------------------------------------------------
 // Distributed runtime callbacks for VM opcode integration.
@@ -1601,6 +1601,63 @@ impl VM {
         })
     }
 
+
+    /// Attempt JIT execution for the current PC.
+    ///
+    /// Returns `true` if the JIT executed a compiled region and advanced the
+    /// PC — the caller should return `Ok(())` immediately.
+    fn try_jit_execute(&mut self, frame_idx: usize) -> bool {
+        let module_idx = self.frames[frame_idx].module_idx;
+        let pc = self.frames[frame_idx].pc;
+        let module = match self.modules.get(module_idx) {
+            Some(m) => m,
+            None => return false,
+        };
+        let constants = self
+            .jit_constants
+            .get(module_idx)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let jit = match &mut self.jit_session {
+            Some(j) => j,
+            None => return false,
+        };
+
+        // Check cheap: already compiled, or newly hot?
+        // Short-circuit: record_and_check_hot is only called when not
+        // already compiled, preserving the original two-branch logic.
+        if !jit.is_compiled(module_idx, pc) && !jit.record_and_check_hot(module_idx, pc) {
+            return false;
+        }
+
+        // Snapshot registers into a flat array for the JIT ABI.
+        let mut regs: [u64; 256] = [0; 256];
+        for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
+            regs[i] = r.to_bits();
+        }
+        unsafe {
+            crate::jit::runtime::set_jit_callbacks(
+                self.actor_callbacks.as_mut() as *mut dyn ActorVmCallbacks,
+            );
+        }
+        let action =
+            jit::tiered_execute_step_typed(jit, module_idx, pc, module, &mut regs, constants);
+        crate::jit::runtime::clear_jit_callbacks();
+
+        if action != TieredAction::Interpret {
+            for (i, bits) in regs.iter().enumerate() {
+                self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
+            }
+            let region_len = jit
+                .compiled_region_len(module_idx, pc)
+                .expect("JIT-ran region must be recorded as compiled");
+            self.frames[frame_idx].pc += region_len;
+            return true;
+        }
+        // JIT fell back to interpretation — continue in the interpreter.
+        false
+    }
+
     /// Execute a single bytecode instruction.
     pub fn step(&mut self) -> NuResult<()> {
         // Step limit: configurable via env var NULANG_STEP_LIMIT.
@@ -1620,68 +1677,8 @@ impl VM {
             .ok_or_else(|| NuError::VMError("No current frame".to_string()))?;
 
         // Try JIT execution for hot bytecode regions before interpreting.
-        if let Some(module) = self.modules.get(self.frames[frame_idx].module_idx) {
-            let pc = self.frames[frame_idx].pc;
-            let module_idx = self.frames[frame_idx].module_idx;
-            let constants = self
-                .jit_constants
-                .get(module_idx)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
-            if let Some(jit) = &mut self.jit_session {
-                // Check cheap: already compiled or newly hot?
-                // Only snapshot registers when JIT will actually execute.
-                if jit.is_compiled(module_idx, pc) {
-                    let mut regs: [u64; 256] = [0; 256];
-                    for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
-                        regs[i] = r.to_bits();
-                    }
-                    unsafe {
-                        crate::jit::runtime::set_jit_callbacks(
-                            self.actor_callbacks.as_mut() as *mut dyn ActorVmCallbacks
-                        );
-                    }
-                    let action = jit::tiered_execute_step_typed(
-                        jit, module_idx, pc, module, &mut regs, constants,
-                    );
-                    crate::jit::runtime::clear_jit_callbacks();
-                    if action != TieredAction::Interpret {
-                        for (i, bits) in regs.iter().enumerate() {
-                            self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
-                        }
-                        let region_len = jit
-                            .compiled_region_len(module_idx, pc)
-                            .expect("JIT-ran region must be recorded as compiled");
-                        self.frames[frame_idx].pc += region_len;
-                        return Ok(());
-                    }
-                } else if jit.record_and_check_hot(module_idx, pc) {
-                    let mut regs: [u64; 256] = [0; 256];
-                    for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
-                        regs[i] = r.to_bits();
-                    }
-                    unsafe {
-                        crate::jit::runtime::set_jit_callbacks(
-                            self.actor_callbacks.as_mut() as *mut dyn ActorVmCallbacks
-                        );
-                    }
-                    let action = jit::tiered_execute_step_typed(
-                        jit, module_idx, pc, module, &mut regs, constants,
-                    );
-                    crate::jit::runtime::clear_jit_callbacks();
-                    if action != TieredAction::Interpret {
-                        for (i, bits) in regs.iter().enumerate() {
-                            self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
-                        }
-                        let region_len = jit
-                            .compiled_region_len(module_idx, pc)
-                            .expect("JIT-ran region must be recorded as compiled");
-                        self.frames[frame_idx].pc += region_len;
-                        return Ok(());
-                    }
-                }
-                // else: cold, not compiled — fall through to interpreter.
-            }
+        if self.try_jit_execute(frame_idx) {
+            return Ok(());
         }
 
         // Fetch instruction
@@ -1995,7 +1992,7 @@ impl VM {
                         // resumption re-executes it and can write the result into
                         // the destination register once the signal is received.
                         self.frames[frame_idx].pc -= 1;
-                        return Err(NuError::VMError("SignalWait:suspend".into()));
+                        return Err(NuError::Suspended(VmSuspension::SignalWait));
                     }
                 }
             }
@@ -3137,7 +3134,7 @@ impl VM {
                         // into the prompt register once the background call
                         // completes (same pattern as SignalWait).
                         self.frames[frame_idx].pc -= 1;
-                        return Err(NuError::VMError("LlmAsk:suspend".into()));
+                        return Err(NuError::Suspended(VmSuspension::LlmAsk));
                     }
                 }
             }
@@ -3331,7 +3328,7 @@ impl VM {
                             // the fired timeout (same pattern as SignalWait).
                             self.suspended_receive_timeout = Some(timeout_ms);
                             self.frames[frame_idx].pc -= 1;
-                            return Err(NuError::VMError("ReceiveWait:suspend".into()));
+                            return Err(NuError::Suspended(VmSuspension::ReceiveWait));
                         }
                         self.actor_callbacks.reset_receive_match();
                         self.frames[frame_idx].regs[dst] = Value::int(ids.len() as i64);

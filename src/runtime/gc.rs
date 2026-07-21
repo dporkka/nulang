@@ -247,6 +247,10 @@ impl OrcaGc {
         // correct the actor_id (the heap may not know it yet in tests) and
         // set the real type tag (alloc_payload uses TypeTag::Raw as a
         // placeholder).
+        // SAFETY: payload_ptr just allocated by heap.alloc_payload above;
+        // header_ptr points to the valid OrcaHeader immediately before the
+        // payload (repr(C) layout). Single-threaded runtime guarantees no
+        // concurrent writes to this header.
         unsafe {
             let header = &mut *heap.header_ptr(payload_ptr);
             header.actor_id = self.actor_id;

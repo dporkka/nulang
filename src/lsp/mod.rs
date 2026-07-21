@@ -1273,10 +1273,9 @@ fn nu_error_to_diagnostic(err: NuError) -> Diagnostic {
         | NuError::CapError { msg, span }
         | NuError::FFIError { msg, span }
         | NuError::NotYetImplemented { feature: msg, span } => (msg, span.line(), span.column()),
-        NuError::RuntimeError(msg)
-        | NuError::VMError(msg)
-        | NuError::PythonError(msg)
-        | NuError::PackageError(msg) => (msg, 1, 1),
+        NuError::RuntimeError(msg) | NuError::VMError(msg) => (msg, 1, 1),
+        NuError::Suspended(kind) => (format!("VM suspended: {}", kind), 1, 1),
+        NuError::PythonError(msg) | NuError::PackageError(msg) => (msg, 1, 1),
     };
 
     // Lines/columns in the Span are 1-based; LSP uses 0-based.

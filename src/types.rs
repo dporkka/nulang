@@ -898,8 +898,36 @@ pub enum NuError {
     },
     RuntimeError(String),
     VMError(String),
+    /// The VM suspended a behavior (waiting for a signal, LLM completion, or
+    /// selective receive). Not a failure — the runtime captures the suspension
+    /// state and resumes the behavior later.
+    Suspended(VmSuspension),
     PythonError(String),  // Python interop error
     PackageError(String), // `nula` package manager error (manifest/lockfile/resolution)
+}
+
+/// Reason the VM suspended execution of a behavior.
+///
+/// Carried by [`NuError::Suspended`]; the runtime inspects this to decide
+/// what to wait for before resuming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VmSuspension {
+    /// `perform Signal.wait(name)` — awaiting a workflow signal.
+    SignalWait,
+    /// `perform LLM.ask(...)` — awaiting an LLM completion.
+    LlmAsk,
+    /// `receive { ... } after ms => ...` — awaiting a matching message or timeout.
+    ReceiveWait,
+}
+
+impl std::fmt::Display for VmSuspension {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VmSuspension::SignalWait => write!(f, "SignalWait"),
+            VmSuspension::LlmAsk => write!(f, "LlmAsk"),
+            VmSuspension::ReceiveWait => write!(f, "ReceiveWait"),
+        }
+    }
 }
 
 impl std::fmt::Display for NuError {
@@ -958,6 +986,7 @@ impl std::fmt::Display for NuError {
             }
             NuError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
             NuError::VMError(msg) => write!(f, "VM error: {}", msg),
+            NuError::Suspended(kind) => write!(f, "VM suspended: {}", kind),
             NuError::PythonError(msg) => write!(f, "Python error: {}", msg),
             NuError::PackageError(msg) => write!(f, "Package error: {}", msg),
         }

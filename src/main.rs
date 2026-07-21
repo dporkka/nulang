@@ -396,7 +396,9 @@ fn emit_stdlib_docs(dir: &str) -> Result<(), String> {
         page.push_str("editUrl: false\n");
         page.push_str("---\n\n");
         page.push_str("> **This page is auto-generated from `src/stdlib.rs`.**\n");
-        page.push_str("> Do not edit it by hand — your changes will be overwritten on the next CI run.\n");
+        page.push_str(
+            "> Do not edit it by hand — your changes will be overwritten on the next CI run.\n",
+        );
         page.push_str("> To add or update a built-in operation, edit the `StdLib::new()` registry in `src/stdlib.rs`.\n\n");
         page.push_str(&format!("# {} Effect\n\n", effect_name));
         page.push_str(&format!(
@@ -448,6 +450,7 @@ fn exit_code(err: &NuError) -> i32 {
         NuError::NotYetImplemented { .. } => 8,
         NuError::RuntimeError(_) => 9,
         NuError::VMError(_) => 10,
+        NuError::Suspended(_) => 0, // Not an error — runtime handles suspensions
         NuError::PythonError(_) => 11,
         NuError::PackageError(_) => 12,
     }
