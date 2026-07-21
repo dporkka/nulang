@@ -26,7 +26,7 @@
 
 use std::ffi::{c_char, CStr, CString};
 
-use crate::bytecode::{CodeModule, Constant, OpCode};
+use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::ffi::{call_native, CType, Signature, FFI_REGISTRY};
 use crate::jit::{self, JitSession, TieredAction};
 use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
@@ -1659,6 +1659,137 @@ impl VM {
     }
 
     /// Execute a single bytecode instruction.
+    fn step_perform(&mut self, instr: Instruction, frame_idx: usize, module_idx: usize) -> NuResult<()> {
+                let eff_name_idx = instr.imm16();
+                let dst_reg = instr.op3;
+                let qualified_name = self.module_const_string(module_idx, eff_name_idx as usize);
+                // The MIR pipeline encodes the performed operation as
+                // "Effect.op" (e.g. "IO.print"); hand-built modules may
+                // carry a bare name with no operation.
+                let (effect_name, op_name) = match qualified_name.split_once('.') {
+                    Some((effect, op)) => (effect.to_string(), Some(op.to_string())),
+                    None => (qualified_name.clone(), None),
+                };
+                // Fast path: no user handlers installed — skip the
+                // rposition walk and dispatch directly to the built-in
+                // effect callback.  This is the common case for Actor.* builtins in
+                // actor bytecode (no user handler, empty handler_stack).
+                if self.handler_stack.is_empty() {
+                    let result = match self.modules.get(module_idx) {
+                        Some(module) => self.actor_callbacks.perform_builtin_effect_in_module(
+                            &effect_name,
+                            op_name.as_deref(),
+                            module,
+                            &self.frames[frame_idx].regs,
+                        ),
+                        None => self.actor_callbacks.perform_builtin_effect(
+                            &effect_name,
+                            op_name.as_deref(),
+                            &[],
+                            &self.frames[frame_idx].regs,
+                        ),
+                    };
+                    if let Some(result) = result {
+                        self.frames[frame_idx].regs[dst_reg as usize] = result;
+                    } else {
+                        return Err(NuError::EffectError {
+                            msg: format!("Unhandled effect: '{}'", qualified_name),
+                            span: Span::default(),
+                        });
+                    }
+                    // PC already advanced by the main loop (line 1516);
+                    // fall through to the next instruction.
+                    return Ok(());
+                }
+                // A binding matches when it names the exact "Effect.op"
+                // pair. Bindings that carry a bare effect name (no '.')
+                // predate op-qualified dispatch and match any op of that
+                // effect, preserving legacy modules.
+                let matches_binding = |b: &crate::bytecode::HandlerBinding| {
+                    b.effect_name == qualified_name
+                        || (!b.effect_name.contains('.') && b.effect_name == effect_name)
+                };
+
+                let handler_idx = self.handler_stack.iter().rposition(|hf| {
+                    if let Some(module) = self.modules.get(hf.module_idx) {
+                        if let Some(ht) = module.handler_tables.get(hf.handler_table_idx) {
+                            ht.bindings.iter().any(|b| matches_binding(b))
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                });
+
+                let target_offset = if let Some(handler_stack_idx) = handler_idx {
+                    let (handler_offset, result_reg) = {
+                        let hf = &self.handler_stack[handler_stack_idx];
+                        let module = self.modules.get(hf.module_idx).unwrap();
+                        let ht = module.handler_tables.get(hf.handler_table_idx).unwrap();
+                        let binding = ht.bindings.iter().find(|b| matches_binding(*b)).unwrap();
+                        (binding.handler_offset, binding.result_reg)
+                    };
+                    self.handler_stack[handler_stack_idx].resume_dst = result_reg;
+                    Some(handler_offset)
+                } else {
+                    self.handler_stack.last().and_then(|hf| {
+                        self.modules
+                            .get(hf.module_idx)
+                            .and_then(|m| m.handler_tables.get(hf.handler_table_idx))
+                            .and_then(|ht| ht.fallback_offset)
+                    })
+                };
+
+                if let Some(handler_stack_idx) = handler_idx {
+                    let cont = Continuation::capture(self, dst_reg).ok_or_else(|| {
+                        NuError::VMError("Cannot capture continuation: no current frame".into())
+                    })?;
+                    self.handler_stack[handler_stack_idx].captured_continuation = Some(cont);
+                } else if target_offset.is_some() {
+                    let hf_idx = self.handler_stack.len().saturating_sub(1);
+                    let cont = Continuation::capture(self, dst_reg).ok_or_else(|| {
+                        NuError::VMError(
+                            "Cannot capture continuation for fallback: no current frame".into(),
+                        )
+                    })?;
+                    self.handler_stack[hf_idx].captured_continuation = Some(cont);
+                } else {
+                    // No handler and no fallback: give the runtime callback a
+                    // chance to handle built-in effects (e.g. Timer.sleep in
+                    // workflow steps, IO.print in standalone scripts). Args
+                    // are in r0..rn; string-id args resolve against the
+                    // performing module's constant pool.
+                    let result = match self.modules.get(module_idx) {
+                        Some(module) => self.actor_callbacks.perform_builtin_effect_in_module(
+                            &effect_name,
+                            op_name.as_deref(),
+                            module,
+                            &self.frames[frame_idx].regs,
+                        ),
+                        None => self.actor_callbacks.perform_builtin_effect(
+                            &effect_name,
+                            op_name.as_deref(),
+                            &[],
+                            &self.frames[frame_idx].regs,
+                        ),
+                    };
+                    if let Some(result) = result {
+                        self.frames[frame_idx].regs[dst_reg as usize] = result;
+                    } else {
+                        return Err(NuError::EffectError {
+                            msg: format!("Unhandled effect: '{}'", qualified_name),
+                            span: Span::default(),
+                        });
+                    }
+                }
+
+                if let Some(offset) = target_offset {
+                    self.frames[frame_idx].pc = offset;
+                }
+                Ok(())
+    }
+
     pub fn step(&mut self) -> NuResult<()> {
         // Step limit: configurable via env var NULANG_STEP_LIMIT.
         // Default 10M steps — long-running actors (servers, processors) may need more.
