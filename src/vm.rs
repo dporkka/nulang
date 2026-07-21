@@ -1659,6 +1659,109 @@ impl VM {
     }
 
     /// Execute a single bytecode instruction.
+
+    /// Execute the FFICall opcode — foreign function interface dispatch.
+    fn step_fficall(&mut self, instr: Instruction, frame_idx: usize, module_idx: usize) -> NuResult<()> {
+                let func_idx = instr.imm16() as usize;
+                let dst = instr.op3;
+                let (def, module_idx) = self
+                    .modules
+                    .get(module_idx)
+                    .and_then(|m| {
+                        m.foreign_functions
+                            .get(func_idx)
+                            .map(|d| (d.clone(), module_idx))
+                    })
+                    .ok_or_else(|| {
+                        NuError::VMError(format!("Foreign function {} not found", func_idx))
+                    })?;
+
+                // FFI sandbox: deny calls to libraries not in the allow-list.
+                if self.ffi_sandbox && !self.ffi_allowlist.contains(&def.library) {
+                    return Err(NuError::VMError(format!(
+                        "FFI sandbox blocked call to '{}' from library '{}': library not in allow-list",
+                        def.symbol, def.library
+                    )));
+                }
+
+                let params: Vec<CType> = def
+                    .params
+                    .iter()
+                    .map(|p| crate::ffi::marshal::ffi_type_to_ctype(p))
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| {
+                        NuError::VMError(format!(
+                            "Unsupported FFI parameter type in {}",
+                            def.symbol
+                        ))
+                    })?;
+                let ret = crate::ffi::marshal::ffi_type_to_ctype(&def.ret).ok_or_else(|| {
+                    NuError::VMError(format!("Unsupported FFI return type in {:?}", def.ret))
+                })?;
+                let signature = Signature::new(params.clone(), ret);
+
+                // Build argument values. For CStr parameters we copy Nulang
+                // string values into temporary CString buffers whose pointers
+                // remain valid for the duration of the native call.
+                let mut cstrings: Vec<CString> = Vec::new();
+                let mut args: Vec<Value> = Vec::with_capacity(def.params.len());
+                for (i, param_ctype) in params.iter().enumerate() {
+                    let src = self.frames[frame_idx].regs[i];
+                    if *param_ctype == CType::CStr {
+                        let bytes =
+                            unsafe { self.value_to_bytes(module_idx, src) }.ok_or_else(|| {
+                                NuError::VMError(format!(
+                                    "FFI argument {} for {} is not a string",
+                                    i, def.symbol
+                                ))
+                            })?;
+                        let cstring = CString::new(bytes).map_err(|e| {
+                            NuError::VMError(format!(
+                                "FFI argument {} contains null byte: {}",
+                                i, e
+                            ))
+                        })?;
+                        args.push(Value::ptr(cstring.as_ptr() as *mut u8));
+                        cstrings.push(cstring);
+                    } else {
+                        args.push(src);
+                    }
+                }
+
+                let func = {
+                    // SAFETY: caller ensures the named library is a valid shared
+                    // library. Do not hold the lock across the native call.
+                    let registry = FFI_REGISTRY.get_or_init(|| {
+                        std::sync::Mutex::new(crate::ffi::native::FfiRegistry::new())
+                    });
+                    let mut reg = registry.lock().map_err(|e| {
+                        NuError::VMError(format!("FFI registry lock failed: {}", e))
+                    })?;
+                    // SAFETY: resolve_or_load opens the library if needed.
+                    unsafe { reg.resolve_or_load(&def.library, &def.symbol, signature) }.map_err(
+                        |e| {
+                            NuError::VMError(format!(
+                                "FFI resolve/load failed for {}: {}",
+                                def.symbol, e
+                            ))
+                        },
+                    )?
+                };
+
+                // SAFETY: func.ptr points to a function whose ABI matches signature.
+                let mut result = unsafe { call_native(&func, &args) }.map_err(|e| {
+                    NuError::VMError(format!("FFI call {} failed: {}", def.symbol, e))
+                })?;
+
+                // C string returns are temporary; copy them into the actor heap
+                // and free the temporary CString from cstr_to_value.
+                if ret == CType::CStr {
+                    result = self.copy_cstr_return(result)?;
+                }
+
+                self.frames[frame_idx].regs[dst as usize] = result;
+                Ok(())
+    }
     fn step_perform(&mut self, instr: Instruction, frame_idx: usize, module_idx: usize) -> NuResult<()> {
                 let eff_name_idx = instr.imm16();
                 let dst_reg = instr.op3;
@@ -1915,105 +2018,7 @@ impl VM {
                 return Ok(());
             }
             OpCode::FFICall => {
-                let func_idx = instr.imm16() as usize;
-                let dst = instr.op3;
-                let (def, module_idx) = self
-                    .modules
-                    .get(module_idx)
-                    .and_then(|m| {
-                        m.foreign_functions
-                            .get(func_idx)
-                            .map(|d| (d.clone(), module_idx))
-                    })
-                    .ok_or_else(|| {
-                        NuError::VMError(format!("Foreign function {} not found", func_idx))
-                    })?;
-
-                // FFI sandbox: deny calls to libraries not in the allow-list.
-                if self.ffi_sandbox && !self.ffi_allowlist.contains(&def.library) {
-                    return Err(NuError::VMError(format!(
-                        "FFI sandbox blocked call to '{}' from library '{}': library not in allow-list",
-                        def.symbol, def.library
-                    )));
-                }
-
-                let params: Vec<CType> = def
-                    .params
-                    .iter()
-                    .map(|p| crate::ffi::marshal::ffi_type_to_ctype(p))
-                    .collect::<Option<_>>()
-                    .ok_or_else(|| {
-                        NuError::VMError(format!(
-                            "Unsupported FFI parameter type in {}",
-                            def.symbol
-                        ))
-                    })?;
-                let ret = crate::ffi::marshal::ffi_type_to_ctype(&def.ret).ok_or_else(|| {
-                    NuError::VMError(format!("Unsupported FFI return type in {:?}", def.ret))
-                })?;
-                let signature = Signature::new(params.clone(), ret);
-
-                // Build argument values. For CStr parameters we copy Nulang
-                // string values into temporary CString buffers whose pointers
-                // remain valid for the duration of the native call.
-                let mut cstrings: Vec<CString> = Vec::new();
-                let mut args: Vec<Value> = Vec::with_capacity(def.params.len());
-                for (i, param_ctype) in params.iter().enumerate() {
-                    let src = self.frames[frame_idx].regs[i];
-                    if *param_ctype == CType::CStr {
-                        let bytes =
-                            unsafe { self.value_to_bytes(module_idx, src) }.ok_or_else(|| {
-                                NuError::VMError(format!(
-                                    "FFI argument {} for {} is not a string",
-                                    i, def.symbol
-                                ))
-                            })?;
-                        let cstring = CString::new(bytes).map_err(|e| {
-                            NuError::VMError(format!(
-                                "FFI argument {} contains null byte: {}",
-                                i, e
-                            ))
-                        })?;
-                        args.push(Value::ptr(cstring.as_ptr() as *mut u8));
-                        cstrings.push(cstring);
-                    } else {
-                        args.push(src);
-                    }
-                }
-
-                let func = {
-                    // SAFETY: caller ensures the named library is a valid shared
-                    // library. Do not hold the lock across the native call.
-                    let registry = FFI_REGISTRY.get_or_init(|| {
-                        std::sync::Mutex::new(crate::ffi::native::FfiRegistry::new())
-                    });
-                    let mut reg = registry.lock().map_err(|e| {
-                        NuError::VMError(format!("FFI registry lock failed: {}", e))
-                    })?;
-                    // SAFETY: resolve_or_load opens the library if needed.
-                    unsafe { reg.resolve_or_load(&def.library, &def.symbol, signature) }.map_err(
-                        |e| {
-                            NuError::VMError(format!(
-                                "FFI resolve/load failed for {}: {}",
-                                def.symbol, e
-                            ))
-                        },
-                    )?
-                };
-
-                // SAFETY: func.ptr points to a function whose ABI matches signature.
-                let mut result = unsafe { call_native(&func, &args) }.map_err(|e| {
-                    NuError::VMError(format!("FFI call {} failed: {}", def.symbol, e))
-                })?;
-
-                // C string returns are temporary; copy them into the actor heap
-                // and free the temporary CString from cstr_to_value.
-                if ret == CType::CStr {
-                    result = self.copy_cstr_return(result)?;
-                }
-
-                self.frames[frame_idx].regs[dst as usize] = result;
-                return Ok(());
+                self.step_fficall(instr, frame_idx, module_idx)?;
             }
             OpCode::Panic => {
                 let pc = self.frames[frame_idx].pc.saturating_sub(1);
