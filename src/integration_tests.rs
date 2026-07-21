@@ -4068,7 +4068,7 @@ match { a: 2, b: 9 } with {
         rt.set_llm_client(mock);
 
         rt.set_token_budget(500);
-        assert_eq!(rt.token_budget.as_ref().unwrap().remaining(), 500);
+        assert_eq!(rt.llm.token_budget.as_ref().unwrap().remaining(), 500);
 
         let request = LlmRequest {
             model: "test".to_string(),
@@ -4080,7 +4080,7 @@ match { a: 2, b: 9 } with {
         };
         let result = rt.complete_llm_request(request, vec![]);
         assert!(result.is_ok());
-        assert_eq!(rt.token_budget.as_ref().unwrap().remaining(), 400);
+        assert_eq!(rt.llm.token_budget.as_ref().unwrap().remaining(), 400);
     }
 
     // -- Flight recorder ------------------------------------------------

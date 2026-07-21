@@ -3,7 +3,6 @@
 //! Provides: actor lifecycle, scheduler, mailbox, heap, GC, supervision,
 //! distribution.
 
-use crossbeam::channel as crossbeam_chan;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -31,6 +30,7 @@ mod persistence;
 mod process_groups;
 mod registry;
 mod timer;
+mod llm;
 
 #[cfg(test)]
 mod tests;
@@ -150,16 +150,6 @@ fn actor_exit_reason(value: Option<&Value>, constants: &[crate::bytecode::Consta
 // Runtime
 // ---------------------------------------------------------------------------
 
-/// Work item sent to the persistent LLM worker thread.
-struct LlmWorkItem {
-    actor_id: u64,
-    request: LlmRequest,
-    client: Arc<dyn LlmClient>,
-}
-
-// Safety: LlmWorkItem is Send because all fields are Send.
-unsafe impl Send for LlmWorkItem {}
-
 pub struct Runtime {
     pub actors: HashMap<u64, Actor>,
     pub supervisors: HashMap<u64, Supervisor>,
@@ -193,9 +183,9 @@ pub struct Runtime {
     // Virtual clock for deterministic testing (v0.14). When set, all timer
     // expiry and deadline calculations use this clock instead of wall time.
     pub virtual_clock: Option<VirtualClock>,
-    // Token budget for LLM calls (v0.14). When set, the runtime rejects
-    // LLM requests that would exceed the configured token limit.
-    pub token_budget: Option<std::sync::Arc<TokenBudget>>,
+    // LLM subsystem (v0.9 AI Runtime): client, worker thread, token budget,
+    // completion channel, and non-blocking suspension state.
+    pub llm: llm::LlmState,
 
     // Actor name registry (v0.7)
     pub registry: ActorRegistry,
@@ -208,23 +198,6 @@ pub struct Runtime {
 
     // VM used to execute bytecode behavior handlers.
     vm: Option<crate::vm::VM>,
-
-    // LLM client for the v0.9 AI Runtime. Shared (Arc) so background worker
-    // threads can perform non-blocking `perform LLM.ask` calls.
-    llm_client: Option<Arc<dyn LlmClient>>,
-
-    // Channel receiving results from the persistent LLM worker thread,
-    // plus the number of calls currently in flight. Drained by run_scheduler.
-    llm_rx: std::sync::mpsc::Receiver<(u64, Result<LlmResponse, LlmError>)>,
-    llm_inflight_count: usize,
-    // Channel to dispatch work to the persistent LLM worker thread.
-    llm_request_tx: Option<crossbeam_chan::Sender<LlmWorkItem>>,
-
-    // True while executing a scheduler-driven bytecode behavior, enabling
-    // non-blocking suspension on `perform LLM.ask`. Nested synchronous entry
-    // points (ask_actor_sync: pipelines, supervisors, debates, `Ask`) force
-    // it back to false so they keep blocking behavior.
-    llm_suspend_enabled: bool,
 
     // Depth of in-flight calls on the shared runtime VM
     // (`run_bytecode_at_offset`, `resume_suspended_*`). While > 0 a
@@ -284,32 +257,6 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new() -> Self {
-        let (llm_tx, llm_rx) = std::sync::mpsc::channel();
-        let llm_tx_worker = llm_tx.clone();
-        let (llm_request_tx, llm_request_rx) = crossbeam_chan::unbounded::<LlmWorkItem>();
-
-        // Spawn a persistent LLM worker thread that owns its own tokio
-        // runtime. All LLM requests (initial + retries) are dispatched
-        // through this channel instead of spawning a new OS thread per call.
-        let _worker = std::thread::Builder::new()
-            .name("nulang-llm".to_string())
-            .spawn(move || {
-                let tokio_rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(_) => return,
-                };
-                while let Ok(item) = llm_request_rx.recv() {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        tokio_rt.block_on(item.client.complete(item.request))
-                    }))
-                    .unwrap_or_else(|_| Err(LlmError::from_string("LLM worker thread panicked")));
-                    let _ = llm_tx_worker.send((item.actor_id, result));
-                }
-            });
-
         Runtime {
             actors: HashMap::new(),
             supervisors: HashMap::new(),
@@ -318,27 +265,19 @@ impl Runtime {
             next_reductions: 1000,
             coordinator: OrcaCoordinator::new(),
             cycle_detector: CycleDetector::new(),
+            vm_execution_depth: 0,
             retired_heaps: Vec::new(),
-
             distributed: DistributedContext::new(),
             acked_packets: HashSet::new(),
-
             crdt_manager: None,
             virtual_clock: None,
-            token_budget: None,
             crdt_sync_rounds: 0,
-
             timer_wheel: TimerWheel::new(),
             registry: ActorRegistry::new(),
             process_groups: ProcessGroups::new(),
             persistence: Box::new(MemoryStore::new()),
             vm: None,
-            llm_client: None,
-            llm_rx,
-            llm_inflight_count: 0,
-            llm_request_tx: Some(llm_request_tx),
-            llm_suspend_enabled: false,
-            vm_execution_depth: 0,
+            llm: llm::LlmState::new(),
             pending_receive_wakes: Vec::new(),
             draining_receive_wakes: false,
             idle_callback: None,
@@ -583,7 +522,7 @@ impl Runtime {
 
     /// Install an LLM client for `perform LLM.ask(...)` calls.
     pub fn set_llm_client(&mut self, client: Box<dyn LlmClient>) {
-        self.llm_client = Some(Arc::from(client));
+        self.llm.client = Some(Arc::from(client));
     }
 
     /// Create a new empty pipeline and return its ID.
@@ -889,12 +828,12 @@ impl Runtime {
     /// successful response based on the actual token count returned
     /// by the provider.
     pub fn set_token_budget(&mut self, limit: u64) {
-        self.token_budget = Some(std::sync::Arc::new(TokenBudget::new(limit)));
+        self.llm.token_budget = Some(std::sync::Arc::new(TokenBudget::new(limit)));
     }
 
     /// Remove any configured token budget.
     pub fn clear_token_budget(&mut self) {
-        self.token_budget = None;
+        self.llm.token_budget = None;
     }
     /// Execute a chat-completion request using the configured LLM client.
     ///
@@ -906,7 +845,7 @@ impl Runtime {
         memory: Vec<LlmMessage>,
     ) -> Result<LlmResponse, LlmError> {
         // Check token budget before calling the provider.
-        if let Some(ref budget) = self.token_budget {
+        if let Some(ref budget) = self.llm.token_budget {
             if budget.is_exhausted() {
                 return Err(LlmError::new(
                     LlmErrorKind::BudgetExceeded,
@@ -916,12 +855,12 @@ impl Runtime {
         }
         request.memory = memory;
         let client = self
-            .llm_client
+            .llm.client
             .as_ref()
             .ok_or_else(|| LlmError::from_string("No LLM client configured"))?;
         let response = complete_sync(client.as_ref(), request)?;
         // Charge the budget for actual tokens consumed.
-        if let Some(ref budget) = self.token_budget {
+        if let Some(ref budget) = self.llm.token_budget {
             budget.charge(response.usage.total as u64);
         }
         Ok(response)
@@ -1416,7 +1355,7 @@ impl Runtime {
     /// Drain completed background LLM calls and resume the suspended actors
     /// waiting for them.
     fn poll_llm_completions(&mut self) {
-        while let Ok((actor_id, result)) = self.llm_rx.try_recv() {
+        while let Ok((actor_id, result)) = self.llm.rx.try_recv() {
             self.store_llm_completion(actor_id, result);
         }
     }
@@ -1425,7 +1364,7 @@ impl Runtime {
     /// actor's suspended behavior, if any. Errors trigger the retry/fallback
     /// pipeline when the actor has a configured agent retry or fallback.
     fn store_llm_completion(&mut self, actor_id: u64, result: Result<LlmResponse, LlmError>) {
-        self.llm_inflight_count = self.llm_inflight_count.saturating_sub(1);
+        self.llm.inflight_count = self.llm.inflight_count.saturating_sub(1);
         match result {
             Ok(response) => {
                 if let Some(actor) = self.actors.get_mut(&actor_id) {
@@ -1628,18 +1567,18 @@ impl Runtime {
     /// Returns true if the request was dispatched, false if the worker
     /// channel is unavailable (caller should roll back in-flight state).
     fn dispatch_llm_request(&mut self, actor_id: u64, request: LlmRequest, prompt: &str) -> bool {
-        let Some(client) = self.llm_client.clone() else {
+        let Some(client) = self.llm.client.clone() else {
             return false;
         };
-        let Some(tx) = self.llm_request_tx.as_ref() else {
+        let Some(tx) = self.llm.request_tx.as_ref() else {
             return false;
         };
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.llm_inflight = true;
             actor.llm_pending_prompt = Some(prompt.to_string());
         }
-        self.llm_inflight_count += 1;
-        tx.send(LlmWorkItem {
+        self.llm.inflight_count += 1;
+        tx.send(llm::LlmWorkItem {
             actor_id,
             request,
             client,
@@ -1719,11 +1658,11 @@ impl Runtime {
                 runtime: self_ptr,
             }));
             vm.restore_suspended_state(suspended.vm_state);
-            let saved_suspend = (*self_ptr).llm_suspend_enabled;
-            (*self_ptr).llm_suspend_enabled = true;
+            let saved_suspend = (*self_ptr).llm.suspend_enabled;
+            (*self_ptr).llm.suspend_enabled = true;
             (*self_ptr).vm_exec_begin();
             let result = vm.resume();
-            (*self_ptr).llm_suspend_enabled = saved_suspend;
+            (*self_ptr).llm.suspend_enabled = saved_suspend;
             match result {
                 Ok(_) => {
                     // The suspended step ran to completion. For workflow
@@ -1883,11 +1822,11 @@ impl Runtime {
             // A signal-resumed step is still scheduler-context execution: a
             // `perform LLM.ask` after the wait must suspend (non-blocking)
             // instead of blocking the caller thread on the HTTP call.
-            let saved_suspend = (*self_ptr).llm_suspend_enabled;
-            (*self_ptr).llm_suspend_enabled = true;
+            let saved_suspend = (*self_ptr).llm.suspend_enabled;
+            (*self_ptr).llm.suspend_enabled = true;
             (*self_ptr).vm_exec_begin();
             let result = vm.resume();
-            (*self_ptr).llm_suspend_enabled = saved_suspend;
+            (*self_ptr).llm.suspend_enabled = saved_suspend;
             result
         };
 
@@ -1987,10 +1926,10 @@ impl Runtime {
         // Synchronous asks (pipelines, supervisors, debates, nested `Ask`)
         // always block on LLM calls; only scheduler-driven behaviors
         // suspend. Force suspension off for the whole body.
-        let saved_suspend = self.llm_suspend_enabled;
-        self.llm_suspend_enabled = false;
+        let saved_suspend = self.llm.suspend_enabled;
+        self.llm.suspend_enabled = false;
         let result = self.ask_actor_sync_inner(actor_id, behavior_id, args);
-        self.llm_suspend_enabled = saved_suspend;
+        self.llm.suspend_enabled = saved_suspend;
         result
     }
 
@@ -2459,7 +2398,7 @@ impl Runtime {
             let actor_id = match self.scheduler.dequeue() {
                 Some(actor_id) => actor_id,
                 None => {
-                    if self.llm_inflight_count == 0 && self.timer_wheel.is_empty() {
+                    if self.llm.inflight_count == 0 && self.timer_wheel.is_empty() {
                         if let Some(ref mut cb) = self.idle_callback {
                             cb();
                         }
@@ -2477,7 +2416,7 @@ impl Runtime {
                             .min(std::time::Duration::from_millis(10)),
                         None => std::time::Duration::from_millis(10),
                     };
-                    match self.llm_rx.recv_timeout(wait) {
+                    match self.llm.rx.recv_timeout(wait) {
                         Ok((actor_id, result)) => {
                             self.store_llm_completion(actor_id, result);
                         }
@@ -2916,10 +2855,10 @@ impl Runtime {
                 // Enable non-blocking LLM suspension for this
                 // scheduler-driven behavior invocation. Nested synchronous
                 // entry points (ask_actor_sync) force it back off.
-                let saved_suspend = self.llm_suspend_enabled;
-                self.llm_suspend_enabled = true;
+                let saved_suspend = self.llm.suspend_enabled;
+                self.llm.suspend_enabled = true;
                 let result = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
-                self.llm_suspend_enabled = saved_suspend;
+                self.llm.suspend_enabled = saved_suspend;
                 match result {
                     Ok(_) => {
                         self.checkpoint_actor(actor_id);
@@ -3443,11 +3382,11 @@ impl Runtime {
             vm.restore_suspended_state(suspended.vm_state);
             // A resumed behavior is still scheduler-context execution: a
             // `perform LLM.ask` after the wait must suspend (non-blocking).
-            let saved_suspend = (*self_ptr).llm_suspend_enabled;
-            (*self_ptr).llm_suspend_enabled = true;
+            let saved_suspend = (*self_ptr).llm.suspend_enabled;
+            (*self_ptr).llm.suspend_enabled = true;
             (*self_ptr).vm_exec_begin();
             let result = vm.resume();
-            (*self_ptr).llm_suspend_enabled = saved_suspend;
+            (*self_ptr).llm.suspend_enabled = saved_suspend;
             match result {
                 Ok(_) => {
                     // The wait resolved (match or timeout) and the behavior
@@ -5305,7 +5244,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             };
             if provider == "llm" {
                 let mut rt = self.runtime.borrow_mut();
-                if rt.llm_client.is_none() {
+                if rt.llm.client.is_none() {
                     return Some(crate::vm::Value::nil());
                 }
                 let request = crate::ai::LlmRequest {
@@ -5860,7 +5799,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
 
             // Nested synchronous paths (pipelines, ask_actor_sync) keep the
             // blocking behavior.
-            if !rt.llm_suspend_enabled {
+            if !rt.llm.suspend_enabled {
                 return LlmAskResult::Ready(self.complete_llm(model, prompt));
             }
 
@@ -5942,7 +5881,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             };
             if !(*rt).dispatch_llm_request(actor_id, request, prompt) {
                 // Dispatch failed: fall back to a nil response.
-                rt.llm_inflight_count = rt.llm_inflight_count.saturating_sub(1);
+                rt.llm.inflight_count = rt.llm.inflight_count.saturating_sub(1);
                 if let Some(actor) = rt.actors.get_mut(&actor_id) {
                     actor.llm_inflight = false;
                     actor.llm_pending_prompt = None;
@@ -6049,7 +5988,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             // receive). Synchronous entry points (ask_actor_sync: pipelines,
             // supervisors, debates, `Ask`) never suspend — same gating as
             // the non-blocking LLM path.
-            if timeout_ms <= 0 || !rt.llm_suspend_enabled {
+            if timeout_ms <= 0 || !rt.llm.suspend_enabled {
                 return false;
             }
             true
