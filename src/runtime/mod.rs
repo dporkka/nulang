@@ -31,6 +31,15 @@ mod process_groups;
 mod registry;
 mod timer;
 mod llm;
+mod ai_registry;
+mod workflow;
+mod exit;
+mod distribution;
+mod spawn;
+
+
+
+
 
 #[cfg(test)]
 mod tests;
@@ -55,8 +64,8 @@ pub use supervisor_registry::*;
 pub use timer::*;
 
 use crate::ai::{
-    complete_sync, Debate, LlmClient, LlmError, LlmErrorKind, LlmMessage, LlmRequest, LlmResponse,
-    Pipeline, PipelineStage, TokenBudget,
+    complete_sync, LlmClient, LlmError, LlmErrorKind, LlmMessage, LlmRequest, LlmResponse,
+    TokenBudget,
 };
 use crate::types::{ExitReason, VmSuspension};
 use crate::vm::Value;
@@ -176,7 +185,7 @@ pub struct Runtime {
 
     // Number of `sync_crdts` calls made; delta-state syncs run on most
     // rounds, with a full-state repair sync every CRDT_FULL_SYNC_INTERVAL.
-    crdt_sync_rounds: u64,
+    pub(crate) crdt_sync_rounds: u64,
 
     // Timer wheel (v0.7)
     pub timer_wheel: TimerWheel,
@@ -222,18 +231,13 @@ pub struct Runtime {
     // Bytecode modules for actors that may need to be recovered after a
     // runtime restart.  Maps actor_id -> (bytecode_module, behavior_offsets,
     // compensation_offsets).
-    recovery_modules: HashMap<u64, (crate::bytecode::CodeModule, Vec<usize>, Vec<Option<usize>>)>,
-
-    // Pipelines (v0.9 AI Runtime)
-    pub next_pipeline_id: u64,
-    pub pipelines: HashMap<u64, Pipeline>,
+    pub(crate) recovery_modules: HashMap<u64, (crate::bytecode::CodeModule, Vec<usize>, Vec<Option<usize>>)>,
+    // Pipelines and debates (v0.9 AI Runtime) — extracted into a registry so
+    // the god-object shrinks and the subsystems can evolve independently.
+    pub ai: ai_registry::AiRuntimeRegistry,
     // Supervisor teams (v0.9 AI Runtime) — extracted into a registry so the
     // god-object shrinks and the subsystem can evolve independently.
     pub supervisor_teams: SupervisorTeamRegistry,
-
-    // Debates (v0.9 AI Runtime)
-    pub next_debate_id: u64,
-    pub debates: HashMap<u64, Debate>,
 
     // Remote spawn support (v0.5+): behaviors a remote node may spawn here
     // by name (see `register_spawnable_behavior`), plus the results of
@@ -282,15 +286,12 @@ impl Runtime {
             draining_receive_wakes: false,
             idle_callback: None,
             recovery_modules: HashMap::new(),
-            next_pipeline_id: 1,
-            pipelines: HashMap::new(),
+            ai: ai_registry::AiRuntimeRegistry::new(),
             supervisor_teams: SupervisorTeamRegistry::new(),
-            test_handlers: HashMap::new(),
-            next_debate_id: 1,
-            debates: HashMap::new(),
             spawnable_behaviors: HashMap::new(),
             pending_spawn_responses: HashMap::new(),
             dlq_actor_id: None,
+            test_handlers: HashMap::new(),
         }
     }
 
@@ -324,7 +325,7 @@ impl Runtime {
     }
 
     pub fn spawn_actor(&mut self, init: Box<dyn FnOnce() -> Vec<(String, Value)>>) -> u64 {
-        self.spawn_actor_with_models(init, HashMap::new(), false, None)
+        spawn::spawn_actor_with_models(self, init, HashMap::new(), false, None)
     }
 
     pub fn spawn_persistent_actor(
@@ -332,7 +333,7 @@ impl Runtime {
         init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
         state_models: HashMap<String, StateModel>,
     ) -> u64 {
-        self.spawn_actor_with_models(init, state_models, true, None)
+        spawn::spawn_actor_with_models(self, init, state_models, true, None)
     }
 
     /// Spawn a durable workflow actor.  Workflows are always persistent and
@@ -343,64 +344,9 @@ impl Runtime {
         init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
         state_models: HashMap<String, StateModel>,
     ) -> u64 {
-        let id = self.spawn_actor_with_models(init, state_models, true, Some(name));
-        id
+        spawn::spawn_actor_with_models(self, init, state_models, true, Some(name))
     }
 
-    fn spawn_actor_with_models(
-        &mut self,
-        init: Box<dyn FnOnce() -> Vec<(String, Value)>>,
-        state_models: HashMap<String, StateModel>,
-        persistent: bool,
-        workflow: Option<&str>,
-    ) -> u64 {
-        let id = fresh_actor_id();
-        let mut actor = Actor::new(id, format!("actor_{}", id), 0);
-        let state_fields = init();
-        for (name, value) in state_fields {
-            actor.set_state_field(name, value);
-        }
-        actor.state_models = state_models;
-        actor.persistent = persistent;
-        let workflow_name = workflow.map(|n| n.to_string());
-        if let Some(name) = workflow {
-            actor.is_workflow = true;
-            actor.name = name.to_string();
-            actor.register_behavior("__timer_fired", timer_fired_handler);
-        }
-        actor.state = ActorState::Running;
-        self.actors.insert(id, actor);
-        if workflow.is_some() {
-            // Seed the workflow event journal with a WorkflowStarted event.
-            let seq = self.next_sequence(id);
-            let state = {
-                let actor = self.actors.get(&id).unwrap();
-                let mut state = Vec::new();
-                for (field_name, value) in &actor.state_data {
-                    let model = actor
-                        .state_models
-                        .get(field_name)
-                        .copied()
-                        .unwrap_or(StateModel::Local);
-                    if model.is_persistent() {
-                        state.push(PersistedValue::from_value(value));
-                    }
-                }
-                state
-            };
-            let _ = self.persistence.append_workflow_event(
-                id,
-                WorkflowEvent::WorkflowStarted {
-                    sequence: seq,
-                    name: workflow_name.as_ref().unwrap().clone(),
-                    state,
-                },
-            );
-            self.checkpoint_actor(id);
-        }
-        self.enqueue_actor(id);
-        id
-    }
 
     /// Spawn an actor for `module`'s behavior `behavior_idx`, seeded with
     /// the `init` state fields, and wire up its bytecode handlers. Shared
@@ -414,95 +360,7 @@ impl Runtime {
         behavior_idx: usize,
         init: Vec<(String, Value)>,
     ) -> Value {
-        let meta = module
-            .actor_metadata
-            .iter()
-            .find(|m| m.behavior_indices.contains(&behavior_idx));
-        let id = if let Some(meta) = meta {
-            let state_models: HashMap<String, crate::runtime::persistence::StateModel> = meta
-                .state_models
-                .iter()
-                .map(|(name, model)| (name.clone(), map_ast_state_model(*model)))
-                .collect();
-            let defaults = meta.state_defaults.clone();
-            self.spawn_actor_with_models(
-                Box::new(move || {
-                    let mut fields: Vec<(String, Value)> = defaults
-                        .iter()
-                        .map(|(name, c)| (name.clone(), crate::vm::constant_to_value(c)))
-                        .collect();
-                    fields.extend(init);
-                    fields
-                }),
-                state_models,
-                meta.persistent,
-                if meta.is_workflow {
-                    Some(meta.name.as_str())
-                } else {
-                    None
-                },
-            )
-        } else {
-            self.spawn_actor(Box::new(move || init))
-        };
-        // Record bytecode behavior offsets so the runtime can execute bytecode
-        // handlers. Populate ALL module-level behavior offsets (not just this
-        // actor's behavior_indices) so that behavior_id_for's module-level
-        // fallback indices work correctly.
-        let offsets: Vec<usize> = module.behaviors.iter().map(|b| b.code_offset).collect();
-        let compensation_offsets: Vec<Option<usize>> = module
-            .behaviors
-            .iter()
-            .map(|b| b.compensate_offset)
-            .collect();
-        if let Some(actor) = self.actors.get_mut(&id) {
-            actor.bytecode_module = Some(module.clone());
-            actor.bytecode_offsets = offsets.clone();
-            actor.compensation_offsets = compensation_offsets.clone();
-            if let Some(meta) = meta {
-                if meta.is_agent {
-                    actor.is_agent = true;
-                    // Cache parsed retry/fallback configs from actor metadata
-                    // so they don't need to be re-parsed on every LLM error.
-                    for (name, c) in &meta.state_defaults {
-                        if let crate::bytecode::Constant::String(json) = c {
-                            if name == "retry_config" {
-                                actor.retry_config = serde_json::from_str(json).ok();
-                            } else if name == "fallback_config" {
-                                actor.fallback_config =
-                                    serde_json::from_str(json).unwrap_or_default();
-                            }
-                        }
-                    }
-                }
-                // `constant_to_value` turns Constant::String into nil. Rehydrate
-                // string defaults by allocating them on the actor heap so state
-                // fields like `model` and `system_prompt` are readable strings.
-                for (name, c) in &meta.state_defaults {
-                    if let crate::bytecode::Constant::String(s) = c {
-                        let ptr = actor.allocate_string(s);
-                        actor.set_state_field(name, ptr);
-                    }
-                }
-                // Set backend from actor metadata.
-                actor.backend = match meta.backend {
-                    crate::ast::ActorBackendKind::Native => {
-                        crate::runtime::actor::ActorBackend::Native
-                    }
-                    crate::ast::ActorBackendKind::WasmComponent => {
-                        crate::runtime::actor::ActorBackend::WasmComponent {
-                            component_path: String::new(),
-                        }
-                    }
-                };
-            }
-        }
-        if meta.map(|m| m.is_workflow).unwrap_or(false) {
-            self.layout_workflow_behavior_table(id);
-        }
-        // Keep a copy for recovery after a runtime restart.
-        self.register_recovery_module(id, module.clone(), offsets, compensation_offsets);
-        Value::actor_ref(id)
+        spawn::spawn_from_module(self, module, behavior_idx, init)
     }
 
     /// Register bytecode metadata so that a persistent actor can be recovered
@@ -516,8 +374,7 @@ impl Runtime {
         offsets: Vec<usize>,
         compensation_offsets: Vec<Option<usize>>,
     ) {
-        self.recovery_modules
-            .insert(actor_id, (module, offsets, compensation_offsets));
+        spawn::register_recovery_module(self, actor_id, module, offsets, compensation_offsets)
     }
 
     /// Install an LLM client for `perform LLM.ask(...)` calls.
@@ -527,12 +384,8 @@ impl Runtime {
 
     /// Create a new empty pipeline and return its ID.
     pub fn pipeline_new(&mut self) -> u64 {
-        let id = self.next_pipeline_id;
-        self.next_pipeline_id = self.next_pipeline_id.wrapping_add(1);
-        self.pipelines.insert(id, Pipeline::new());
-        id
+        self.ai.create_pipeline()
     }
-
     /// Add a stage to an existing pipeline. Returns the same pipeline ID on
     /// success so fluent construction can continue.
     pub fn pipeline_stage(
@@ -542,21 +395,12 @@ impl Runtime {
         agent_id: u64,
         template: &str,
     ) -> Result<u64, String> {
-        let pipeline = self
-            .pipelines
-            .get_mut(&id)
-            .ok_or_else(|| format!("Pipeline {} not found", id))?;
-        pipeline.stages.push(PipelineStage {
-            name: name.to_string(),
-            agent_id,
-            prompt_template: template.to_string(),
-        });
-        Ok(id)
+        self.ai.add_pipeline_stage(id, name, agent_id, template)
     }
-
     /// Run a pipeline, returning the output of the final stage.
     pub fn pipeline_run(&mut self, id: u64, input: &str) -> Result<String, String> {
         let pipeline = self
+            .ai
             .pipelines
             .get(&id)
             .cloned()
@@ -590,13 +434,8 @@ impl Runtime {
 
     /// Create a new debate and return its ID.
     pub fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> u64 {
-        let id = self.next_debate_id;
-        self.next_debate_id = self.next_debate_id.wrapping_add(1);
-        self.debates
-            .insert(id, Debate::new(topic, rounds.max(1) as usize, threshold));
-        id
+        self.ai.create_debate(topic, rounds, threshold)
     }
-
     /// Add a participant to an existing debate. Returns the same debate ID on
     /// success so fluent construction can continue.
     pub fn debate_participant(
@@ -606,17 +445,12 @@ impl Runtime {
         stance: &str,
         agent_id: u64,
     ) -> Result<u64, String> {
-        let debate = self
-            .debates
-            .get_mut(&id)
-            .ok_or_else(|| format!("Debate {} not found", id))?;
-        *debate = debate.clone().participant(name, stance, agent_id);
-        Ok(id)
+        self.ai.add_debate_participant(id, name, stance, agent_id)
     }
-
     /// Run a debate and return the moderator's synthesis.
     pub fn debate_run(&mut self, id: u64) -> Result<String, String> {
         let debate = self
+            .ai
             .debates
             .get(&id)
             .cloned()
@@ -1124,104 +958,9 @@ impl Runtime {
         Ok(vm.value_to_string(module_idx, result))
     }
 
-    /// Record an emitted event on an actor.  For the event-sourced MVP, each
-    /// event also increments every `event_sourced` integer counter by one.
-    /// For workflow actors the event is also appended to the durable workflow
-    /// journal and a checkpoint is forced.
+    /// Record an emitted event on an actor. Delegates to the workflow subsystem.
     pub fn emit_event(&mut self, actor_id: u64, event: &str, args: &[crate::vm::Value]) {
-        let is_workflow = self
-            .actors
-            .get(&actor_id)
-            .map(|a| a.is_workflow)
-            .unwrap_or(false);
-        let seq = self.next_sequence(actor_id);
-        if let Some(actor) = self.actors.get_mut(&actor_id) {
-            actor.event_log.push((event.to_string(), args.to_vec()));
-            let event_sourced_names: Vec<String> = actor
-                .state_models
-                .iter()
-                .filter(|(_, model)| **model == StateModel::EventSourced)
-                .map(|(name, _)| name.clone())
-                .collect();
-            for name in &event_sourced_names {
-                if let Some(n) = actor.get_state_field(name).and_then(|v| v.as_int()) {
-                    actor.set_state_field(name, crate::vm::Value::int(n + 1));
-                }
-            }
-            // Persist events for EventSourced fields (non-workflow actors).
-            if !is_workflow && !event_sourced_names.is_empty() {
-                let persisted_args: Vec<PersistedValue> =
-                    args.iter().map(PersistedValue::from_value).collect();
-                for name in &event_sourced_names {
-                    let entry = EventEntry {
-                        sequence: seq,
-                        field_name: name.clone(),
-                        event_name: event.to_string(),
-                        args: persisted_args.clone(),
-                    };
-                    let _ = self.persistence.append_event(actor_id, entry);
-                }
-                if let Some(actor) = self.actors.get_mut(&actor_id) {
-                    for name in &event_sourced_names {
-                        actor.event_sourced_sequences.insert(name.clone(), seq);
-                    }
-                    actor.sequence = seq;
-                }
-            }
-        }
-        if is_workflow {
-            if event == "ParallelBranchCompleted" && args.len() == 2 {
-                let parallel_step_name = self
-                    .resolve_string_constant(actor_id, &args[0])
-                    .unwrap_or_default();
-                let branch_name = self
-                    .resolve_string_constant(actor_id, &args[1])
-                    .unwrap_or_default();
-                let _ = self.persistence.append_parallel_branch_completed(
-                    actor_id,
-                    seq,
-                    parallel_step_name,
-                    branch_name,
-                );
-                // Persist the progress counter so the snapshot captures which
-                // branches have already completed.
-                if let Some(actor) = self.actors.get_mut(&actor_id) {
-                    let current = actor
-                        .get_state_field("parallel_progress")
-                        .and_then(|v| v.as_int())
-                        .unwrap_or(0);
-                    actor.set_state_field("parallel_progress", Value::int(current + 1));
-                }
-            } else {
-                let payload: Vec<PersistedValue> =
-                    args.iter().map(PersistedValue::from_value).collect();
-                let _ = self.persistence.append_workflow_event(
-                    actor_id,
-                    WorkflowEvent::Custom {
-                        sequence: seq,
-                        name: event.to_string(),
-                        args: payload,
-                    },
-                );
-            }
-            self.checkpoint_actor(actor_id);
-        }
-    }
-
-    /// Resolve a string-id value to the original string using the actor's
-    /// bytecode module constant pool.  Used when persisting emitted events
-    /// that carry string metadata (e.g. `ParallelBranchCompleted`).
-    fn resolve_string_constant(&self, actor_id: u64, value: &crate::vm::Value) -> Option<String> {
-        let string_id = value.as_string_id()?;
-        let actor = self.actors.get(&actor_id)?;
-        let module = actor.bytecode_module.as_ref()?;
-        module
-            .constants
-            .get(string_id as usize)
-            .and_then(|c| match c {
-                crate::bytecode::Constant::String(s) => Some(s.clone()),
-                _ => None,
-            })
+        workflow::emit_event(self, actor_id, event, args)
     }
 
     /// Append a `TimerSet` workflow event and checkpoint the actor.
@@ -1231,20 +970,12 @@ impl Runtime {
         name: &str,
         duration_ms: u64,
     ) -> std::io::Result<()> {
-        let seq = self.next_sequence(actor_id);
-        self.persistence
-            .append_timer_set(actor_id, seq, name.to_string(), duration_ms)?;
-        self.checkpoint_actor(actor_id);
-        Ok(())
+        workflow::append_timer_set(self, actor_id, name, duration_ms)
     }
 
     /// Append a `TimerFired` workflow event and checkpoint the actor.
     pub fn append_timer_fired(&mut self, actor_id: u64, name: &str) -> std::io::Result<()> {
-        let seq = self.next_sequence(actor_id);
-        self.persistence
-            .append_timer_fired(actor_id, seq, name.to_string())?;
-        self.checkpoint_actor(actor_id);
-        Ok(())
+        workflow::append_timer_fired(self, actor_id, name)
     }
 
     /// Append a `SignalReceived` workflow event and checkpoint the actor.
@@ -1254,11 +985,7 @@ impl Runtime {
         name: &str,
         payload: Option<String>,
     ) -> std::io::Result<()> {
-        let seq = self.next_sequence(actor_id);
-        self.persistence
-            .append_signal_received(actor_id, seq, name.to_string(), payload)?;
-        self.checkpoint_actor(actor_id);
-        Ok(())
+        workflow::append_signal_received(self, actor_id, name, payload)
     }
 
     /// Append a `SagaCompensated` workflow event and checkpoint the actor.
@@ -1267,36 +994,16 @@ impl Runtime {
         actor_id: u64,
         step_name: &str,
     ) -> std::io::Result<()> {
-        let seq = self.next_sequence(actor_id);
-        self.persistence
-            .append_saga_compensated(actor_id, seq, step_name.to_string())?;
-        self.checkpoint_actor(actor_id);
-        Ok(())
+        workflow::append_saga_compensated(self, actor_id, step_name)
     }
 
     /// Send a named signal to a workflow actor.
     ///
     /// The signal is appended to the durable workflow journal and, if the actor
     /// is currently suspended waiting for this signal, its execution is resumed.
+    /// Deliver a signal to a workflow actor. Delegates to workflow subsystem.
     pub fn signal_workflow(&mut self, actor_id: u64, name: &str, payload: Option<String>) {
-        let _ = self.append_signal_received(actor_id, name, payload.clone());
-
-        let should_resume = {
-            if let Some(actor) = self.actors.get_mut(&actor_id) {
-                actor.received_signals.push((name.to_string(), payload));
-                actor
-                    .waiting_signal
-                    .as_ref()
-                    .map(|s| s == name)
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        };
-
-        if should_resume {
-            self.resume_suspended_workflow_step(actor_id);
-        }
+        workflow::signal_workflow(self, actor_id, name, payload)
     }
 
     /// Register a read-only query handler on a workflow actor.
@@ -1306,12 +1013,9 @@ impl Runtime {
     /// current state.  Registration is a no-op for missing or non-workflow
     /// actors: queries are a workflow-only concept.  Handlers are not
     /// journaled, so they must be re-registered after a node restart.
+    /// Register a read-only query handler on a workflow actor.
     pub fn register_workflow_query(&mut self, actor_id: u64, name: &str, handler: Value) {
-        if let Some(actor) = self.actors.get_mut(&actor_id) {
-            if actor.is_workflow {
-                actor.query_handlers.insert(name.to_string(), handler);
-            }
-        }
+        workflow::register_workflow_query(self, actor_id, name, handler)
     }
 
     /// Invoke a registered query handler on a workflow actor and return its
@@ -1326,30 +1030,9 @@ impl Runtime {
     /// running behavior cannot disturb that behavior's frames; handlers
     /// must therefore be immediate (non-capturing) functions, since closure
     /// environments live on the VM that created them.
+    /// Invoke a registered query handler on a workflow actor. Delegates to workflow subsystem.
     pub fn query_workflow(&mut self, actor_id: u64, name: &str) -> Option<Value> {
-        let (handler, module) = {
-            let actor = self.actors.get(&actor_id)?;
-            if !actor.is_workflow {
-                return None;
-            }
-            let handler = *actor.query_handlers.get(name)?;
-            (handler, actor.bytecode_module.clone()?)
-        };
-
-        let self_ptr: *mut Runtime = self;
-        let mut vm = crate::vm::VM::new();
-        vm.load_module(module);
-        let offset = vm.function_offset_for_value(0, handler).ok()?;
-        // SAFETY: `self` outlives the scratch VM; the callbacks only touch
-        // the runtime while the VM runs inside this call.  The scratch VM
-        // is separate from `self.vm`, so no runtime field is aliased by a
-        // live borrow while the raw pointer is in use.
-        vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
-        vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks { runtime: self_ptr }));
-        let mut frame = crate::vm::Frame::new(None, 0);
-        frame.pc = offset;
-        vm.set_current_frame(frame);
-        vm.run_from(0, offset).ok()
+        workflow::query_workflow(self, actor_id, name)
     }
 
     /// Drain completed background LLM calls and resume the suspended actors
@@ -1748,7 +1431,7 @@ impl Runtime {
     /// scheduler enqueue paths go through here so a priority set via
     /// `perform Actor.set_priority` takes effect on the next (re)queue;
     /// unknown actors (e.g. already exited) enqueue at the Normal default.
-    fn enqueue_actor(&self, actor_id: u64) {
+    pub(crate) fn enqueue_actor(&self, actor_id: u64) {
         let priority = self
             .actors
             .get(&actor_id)
@@ -1789,7 +1472,7 @@ impl Runtime {
     }
 
     /// Resume a workflow actor that is suspended waiting for a signal.
-    fn resume_suspended_workflow_step(&mut self, actor_id: u64) {
+    pub(crate) fn resume_suspended_workflow_step(&mut self, actor_id: u64) {
         let suspended = match self.actors.get_mut(&actor_id) {
             Some(actor) => actor.suspended_execution.take(),
             None => return,
@@ -2503,7 +2186,7 @@ impl Runtime {
     /// through the owner's `OrcaGc` (which may free the object); for an
     /// exited owner the decrement is applied directly against its retired
     /// heap.  Idempotent: the hold list is drained on the first call.
-    fn release_held_foreign_refs(&mut self, actor_id: u64) {
+    pub(crate) fn release_held_foreign_refs(&mut self, actor_id: u64) {
         let holds = match self.actors.get_mut(&actor_id) {
             Some(actor) => actor.orca_gc.take_held_refs(),
             None => return,
@@ -2546,7 +2229,7 @@ impl Runtime {
     /// objects.  A heap with outstanding foreign refs is moved into
     /// `retired_heaps` instead of being dropped, so in-flight ops and
     /// receiver holds held elsewhere never dangle.
-    fn remove_actor_reaping(&mut self, actor_id: u64) {
+    pub(crate) fn remove_actor_reaping(&mut self, actor_id: u64) {
         self.release_held_foreign_refs(actor_id);
         if let Some(mut actor) = self.actors.remove(&actor_id) {
             if Self::heap_has_outstanding_foreign_refs(&actor.heap) {
@@ -2961,10 +2644,7 @@ impl Runtime {
     }
 
     fn actor_is_workflow(&self, actor_id: u64) -> bool {
-        self.actors
-            .get(&actor_id)
-            .map(|a| a.is_workflow)
-            .unwrap_or(false)
+        workflow::actor_is_workflow(self, actor_id)
     }
 
     fn actor_is_agent(&self, actor_id: u64) -> bool {
@@ -3213,7 +2893,7 @@ impl Runtime {
     }
 
     fn next_sequence(&self, actor_id: u64) -> u64 {
-        self.persistence.latest_sequence(actor_id) + 1
+        workflow::next_sequence(self, actor_id)
     }
 
     /// Schedule a durable timer for a workflow actor.
@@ -3222,15 +2902,12 @@ impl Runtime {
     /// timer wheel. When the timer fires the runtime will append a
     /// `TimerFired` event and deliver a `__timer_fired` message to the actor.
     pub fn schedule_workflow_timer(&mut self, actor_id: u64, name: &str, duration_ms: u64) {
-        if self.actor_is_workflow(actor_id) {
-            let _ = self.append_timer_set(actor_id, name, duration_ms);
-        }
-        self.rearm_timer(actor_id, name, duration_ms);
+        workflow::schedule_workflow_timer(self, actor_id, name, duration_ms)
     }
 
     /// Re-arm a timer from the durable journal without appending a new event.
     /// Used during recovery to restore timers that have not yet fired.
-    fn rearm_timer(&mut self, actor_id: u64, name: &str, duration_ms: u64) {
+    pub(crate) fn rearm_timer(&mut self, actor_id: u64, name: &str, duration_ms: u64) {
         let behavior_id = self.behavior_id_for(actor_id, "__timer_fired").unwrap_or(0);
         self.timer_wheel.send_after_with_context(
             std::time::Duration::from_millis(duration_ms),
@@ -3509,48 +3186,7 @@ impl Runtime {
     /// The snapshot is skipped entirely when no fields have changed since
     /// the last checkpoint (dirty-bit optimization).
     pub fn checkpoint_actor(&mut self, actor_id: u64) {
-        let actor = match self.actors.get(&actor_id) {
-            Some(a) => a,
-            None => return,
-        };
-        if !actor.persistent {
-            return;
-        }
-        // Always run the full snapshot.  `dirty_fields` tracking is
-        // retained for future incremental-diff support (e.g. LSM-tree
-        // delta encoding) but does not gate the snapshot today — skipping
-        // would leave the snapshot sequence behind the journal/event log
-        // and cause incorrect replay on recovery.
-        let seq = self.next_sequence(actor_id);
-        let mut state = HashMap::new();
-        for (name, value) in &actor.state_data {
-            let model = actor
-                .state_models
-                .get(name)
-                .copied()
-                .unwrap_or(StateModel::Local);
-            if model == StateModel::Durable || model == StateModel::Crdt {
-                let persisted = if name == "semantic_memory" || name == "procedural_memory" {
-                    self.vm_value_to_string_in_actor(value, actor)
-                        .map(PersistedValue::String)
-                        .unwrap_or_else(|| PersistedValue::from_value(value))
-                } else {
-                    PersistedValue::from_value(value)
-                };
-                state.insert(name.clone(), persisted);
-            }
-        }
-        let snapshot = ActorSnapshot {
-            actor_id,
-            sequence: seq,
-            state,
-            waiting_signal: actor.waiting_signal.clone(),
-        };
-        let _ = self.persistence.save_snapshot(snapshot);
-        if let Some(actor) = self.actors.get_mut(&actor_id) {
-            actor.sequence = seq;
-            actor.dirty_fields.clear();
-        }
+        workflow::checkpoint_actor(self, actor_id)
     }
 
     /// Persist only the suspension marker of a persistent actor whose
@@ -3578,25 +3214,8 @@ impl Runtime {
     /// Lay out a workflow actor's native behavior table so that bytecode step
     /// ids (0..n-1) do not collide with internal runtime behaviors such as
     /// `__timer_fired`.
-    fn layout_workflow_behavior_table(&mut self, actor_id: u64) {
-        if let Some(actor) = self.actors.get_mut(&actor_id) {
-            if !actor.is_workflow {
-                return;
-            }
-            let step_count = actor.bytecode_offsets.len();
-            // Strip any previously registered runtime placeholders/internal
-            // behaviors; we'll rebuild them below.
-            actor
-                .behavior_table
-                .retain(|e| !e.name.is_empty() && e.name != "__timer_fired");
-            for _ in 0..step_count {
-                actor.behavior_table.push(BehaviorEntry {
-                    name: String::new(),
-                    handler_fn: bytecode_step_placeholder,
-                });
-            }
-            actor.register_behavior("__timer_fired", timer_fired_handler);
-        }
+    pub(crate) fn layout_workflow_behavior_table(&mut self, actor_id: u64) {
+        spawn::layout_workflow_behavior_table(self, actor_id)
     }
 
     /// Execute a bytecode behavior for an actor.
@@ -4144,64 +3763,15 @@ impl Runtime {
     // -- Fault Tolerance: Actor Exit --
 
     pub fn exit_actor(&mut self, actor_id: u64, reason: ExitReason) {
-        if let Some(actor) = self.actors.get_mut(&actor_id) {
-            actor.state = ActorState::Terminated;
-        }
-        let reason_clone = reason.clone();
-        self.handle_actor_exit(actor_id, reason_clone);
+        exit::exit_actor(self, actor_id, reason)
     }
 
     pub fn kill_actor(&mut self, actor_id: u64) {
-        self.exit_actor(actor_id, ExitReason::Kill);
+        exit::kill_actor(self, actor_id)
     }
 
     pub fn handle_actor_exit(&mut self, actor_id: u64, reason: ExitReason) {
-        let parent = match self.actors.get(&actor_id) {
-            Some(a) => a.parent,
-            None => return,
-        };
-
-        // Run the exit protocol (holds, registry, process groups, monitor
-        // DOWN, link propagation) and reap the actor.  If it is supervised,
-        // the restart paths below rebuild a replacement; the removal there
-        // is idempotent.
-        self.reap_living_actor(actor_id, reason.clone());
-
-        if let Some(supervisor_id) = parent {
-            let mut supervisor = match self.supervisors.remove(&supervisor_id) {
-                Some(s) => s,
-                None => return,
-            };
-            let action = supervisor.handle_exit(actor_id, reason.clone(), self);
-            match action {
-                SupervisorAction::Restarted(_new_id) => {
-                    self.supervisors.insert(supervisor_id, supervisor);
-                }
-                SupervisorAction::Shutdown => {
-                    let sup_parent = supervisor.parent;
-                    self.shutdown_supervisor(supervisor_id, &supervisor);
-                    if let Some(parent_id) = sup_parent {
-                        let escalate_reason =
-                            ExitReason::Error("child supervisor shutdown".to_string());
-                        self.handle_supervisor_parent_exit(
-                            parent_id,
-                            supervisor_id,
-                            escalate_reason,
-                        );
-                    }
-                }
-                SupervisorAction::Ignore => {
-                    self.supervisors.insert(supervisor_id, supervisor);
-                }
-                SupervisorAction::Escalate => {
-                    self.supervisors.insert(supervisor_id, supervisor);
-                    if let Some(parent_id) = parent {
-                        let escalate_reason = reason.clone();
-                        self.handle_supervisor_parent_exit(parent_id, actor_id, escalate_reason);
-                    }
-                }
-            }
-        }
+        exit::handle_actor_exit(self, actor_id, reason)
     }
 
     /// Exit-protocol cleanup for an actor being removed: mark it terminated,
@@ -4216,111 +3786,9 @@ impl Runtime {
     /// dispatch to the actor's supervisor — supervision is handled by the
     /// callers, which is why this is not simply `handle_actor_exit`.
     fn reap_living_actor(&mut self, actor_id: u64, reason: ExitReason) {
-        let (monitors, links) = {
-            let actor = match self.actors.get(&actor_id) {
-                Some(a) => a,
-                None => return,
-            };
-            (actor.monitors.clone(), actor.links.clone())
-        };
-        if let Some(actor) = self.actors.get_mut(&actor_id) {
-            actor.state = ActorState::Terminated;
-        }
-
-        // Release this actor's receiver-side ORCA holds up front: whichever
-        // removal path runs, objects it received from other actors must be
-        // released exactly once.  The call is idempotent (the hold list
-        // drains on first use).
-        self.release_held_foreign_refs(actor_id);
-
-        self.registry.unregister_by_actor(actor_id);
-        self.process_groups.leave_all(actor_id);
-
-        for watcher_id in monitors {
-            self.send_down_message(watcher_id, actor_id, &reason);
-        }
-
-        let is_abnormal = !matches!(reason, ExitReason::Normal);
-        for linked_id in links {
-            if linked_id == actor_id {
-                continue;
-            }
-            let linked_alive = self
-                .actors
-                .get(&linked_id)
-                .map(|a| a.state != ActorState::Terminated)
-                .unwrap_or(false);
-            if !linked_alive {
-                continue;
-            }
-
-            if is_abnormal {
-                // Kill is untrappable per spec — force-terminate even trap_exits actors.
-                if matches!(reason, ExitReason::Kill) {
-                    let kill_reason = ExitReason::Killed;
-                    if let Some(actor) = self.actors.get_mut(&linked_id) {
-                        actor.state = ActorState::Terminated;
-                    }
-                    self.handle_actor_exit(linked_id, kill_reason);
-                    continue;
-                }
-                let traps = self
-                    .actors
-                    .get(&linked_id)
-                    .map(|a| a.trap_exits)
-                    .unwrap_or(false);
-                if traps {
-                    let exit_msg = Message {
-                        behavior_id: 0,
-                        payload: vec![Value::int(actor_id as i64), Value::int(linked_id as i64)],
-                        sender: actor_id,
-                        priority: MessagePriority::System,
-                    };
-                    if let Some(actor) = self.actors.get_mut(&linked_id) {
-                        let _ = actor.mailbox.push(exit_msg);
-                    }
-                    self.enqueue_actor(linked_id);
-                } else {
-                    let linked_reason = ExitReason::Error(format!(
-                        "linked actor {} exited with {:?}",
-                        actor_id, reason
-                    ));
-                    if let Some(actor) = self.actors.get_mut(&linked_id) {
-                        actor.state = ActorState::Terminated;
-                    }
-                    self.handle_actor_exit(linked_id, linked_reason);
-                }
-            }
-        }
-
-        self.remove_actor_reaping(actor_id);
+        exit::reap_living_actor(self, actor_id, reason)
     }
 
-    fn handle_supervisor_parent_exit(
-        &mut self,
-        parent_id: u64,
-        child_supervisor_id: u64,
-        reason: ExitReason,
-    ) {
-        let mut parent_sup = match self.supervisors.remove(&parent_id) {
-            Some(s) => s,
-            None => return,
-        };
-        let parent_action = parent_sup.handle_exit(child_supervisor_id, reason, self);
-        match parent_action {
-            SupervisorAction::Shutdown => {
-                let grandparent = parent_sup.parent;
-                self.shutdown_supervisor(parent_id, &parent_sup);
-                if let Some(gp_id) = grandparent {
-                    let gp_reason = ExitReason::Error("supervisor shutdown cascaded".to_string());
-                    self.handle_supervisor_parent_exit(gp_id, parent_id, gp_reason);
-                }
-            }
-            _ => {
-                self.supervisors.insert(parent_id, parent_sup);
-            }
-        }
-    }
 
     // -- Builtin Actor Effects (Actor.*) --
 
@@ -4630,29 +4098,7 @@ impl Runtime {
     // -- Internal Helpers --
 
     fn send_down_message(&mut self, watcher_id: u64, target_id: u64, reason: &ExitReason) {
-        let reason_str = reason.tag();
-        let down_msg = Message {
-            behavior_id: 0,
-            payload: vec![
-                Value::int(target_id as i64),
-                Value::int(watcher_id as i64),
-                Value::int(match reason {
-                    ExitReason::Normal => 0,
-                    ExitReason::Error(_) => 1,
-                    ExitReason::Kill => 2,
-                    ExitReason::Killed => 3,
-                    ExitReason::Shutdown(_) => 4,
-                    ExitReason::Custom(_) => 5,
-                }),
-            ],
-            sender: target_id,
-            priority: MessagePriority::System,
-        };
-        if let Some(watcher) = self.actors.get_mut(&watcher_id) {
-            let _ = watcher.mailbox.push(down_msg);
-            let _ = reason_str;
-        }
-        self.enqueue_actor(watcher_id);
+        exit::send_down_message(self, watcher_id, target_id, reason)
     }
 
     /// Shut a supervisor down, removing its children and the supervisor
@@ -4661,43 +4107,15 @@ impl Runtime {
     ///
     /// The `supervisor` value is passed in because callers remove it from
     /// `self.supervisors` before deciding to shut it down — looking it up in
-    /// the map here would find nothing and leak the children.
-    fn shutdown_supervisor(&mut self, supervisor_id: u64, supervisor: &Supervisor) {
-        let child_ids: Vec<u64> = supervisor.children.iter().map(|(_, id)| *id).collect();
-        let reason = ExitReason::Error("supervisor shutdown".to_string());
-        for child_id in child_ids {
-            // Children are still living: remove them through the full exit
-            // protocol so names/groups are cleaned up and watchers notified.
-            self.reap_living_actor(child_id, reason.clone());
-        }
-        self.reap_living_actor(supervisor_id, reason);
-        self.supervisors.remove(&supervisor_id);
-    }
 
     // -- Distributed Actor System --
 
     pub fn enable_distribution(&mut self, bind_addr: std::net::SocketAddr) -> std::io::Result<()> {
-        let transport = Box::new(crate::runtime::network::TcpTransport::bind(bind_addr)?);
-        // Advertise the actual listen address (not `bind_addr`, which may
-        // carry port 0) so peers can reach us at the address the cluster
-        // records for this node.
-        let listen_addr = transport.listen_addr();
-        let node_id = NodeId(transport.node_id().0);
-        let cluster = ClusterState::new(node_id, listen_addr);
-        let resolver = AddressResolver::new(node_id);
-        self.distributed.transport = Some(transport);
-        self.distributed.cluster = Some(cluster);
-        self.distributed.resolver = Some(resolver);
-        self.distributed.node_id = Some(node_id);
-        self.distributed.enabled = true;
-        self.crdt_manager = Some(CrdtManager::new(node_id.0));
-        Ok(())
+        distribution::enable_distribution(self, bind_addr)
     }
 
     pub fn join_cluster(&mut self, seed_addr: std::net::SocketAddr) {
-        if let Some(cluster) = &mut self.distributed.cluster {
-            cluster.join_cluster(seed_addr);
-        }
+        distribution::join_cluster(self, seed_addr)
     }
 
     /// Register a behavior that remote nodes are allowed to spawn on this
@@ -4708,10 +4126,8 @@ impl Runtime {
     /// make a peer run arbitrary code it never offered. When a spawn
     /// request for `name` arrives, the runtime spawns a fresh actor with
     /// the request's initial state and registers this handler as its sole
-    /// behavior under `name`. Unknown names are answered with
-    /// `success: false` — no actor is created.
     pub fn register_spawnable_behavior(&mut self, name: &str, handler: fn(&mut Actor, &[Value])) {
-        self.spawnable_behaviors.insert(name.to_string(), handler);
+        distribution::register_spawnable_behavior(self, name, handler)
     }
 
     /// Take the result of a previously issued remote spawn request.
@@ -4722,13 +4138,13 @@ impl Runtime {
     /// or `Some(None)` if the remote node rejected the request (unknown
     /// behavior name).
     pub fn take_spawn_response(&mut self, request_id: u64) -> Option<Option<u64>> {
-        self.pending_spawn_responses.remove(&request_id)
+        distribution::take_spawn_response(self, request_id)
     }
 
     /// Check whether a packet with the given sequence number has been
     /// acknowledged by the receiver.
     pub fn is_acked(&self, seq: u64) -> bool {
-        self.acked_packets.contains(&seq)
+        distribution::is_acked(self, seq)
     }
 
     /// Drain and return all acknowledged packet sequence numbers.
@@ -4736,143 +4152,15 @@ impl Runtime {
     /// Callers should drain periodically to avoid unbounded growth of the
     /// acked-packets set.
     pub fn drain_acked(&mut self) -> HashSet<u64> {
-        std::mem::take(&mut self.acked_packets)
+        distribution::drain_acked(self)
     }
 
     pub fn send_distributed(&mut self, target: ActorAddress, behavior: &str, args: &[Value]) {
-        if !self.distributed.enabled {
-            let actor_id = match target {
-                ActorAddress::Local { actor_id } => actor_id,
-                ActorAddress::Remote { actor_id, .. } => actor_id,
-            };
-            self.send_message(actor_id, behavior, args);
-            return;
-        }
-        if let ActorAddress::Local { actor_id } = target {
-            self.send_message(actor_id, behavior, args);
-            return;
-        }
-        let mut transport = match self.distributed.transport.take() {
-            Some(t) => t,
-            None => return,
-        };
-        let cluster = match self.distributed.cluster.take() {
-            Some(c) => c,
-            None => {
-                self.distributed.transport = Some(transport);
-                return;
-            }
-        };
-        let mut resolver = match self.distributed.resolver.take() {
-            Some(r) => r,
-            None => {
-                self.distributed.transport = Some(transport);
-                self.distributed.cluster = Some(cluster);
-                return;
-            }
-        };
-        distributed::send_distributed(
-            self,
-            &mut transport,
-            &cluster,
-            &mut resolver,
-            target,
-            behavior,
-            args,
-        );
-        self.distributed.transport = Some(transport);
-        self.distributed.cluster = Some(cluster);
-        self.distributed.resolver = Some(resolver);
+        distribution::send_distributed(self, target, behavior, args)
     }
 
     pub fn process_network(&mut self) {
-        if !self.distributed.enabled {
-            return;
-        }
-        let mut transport = match self.distributed.transport.take() {
-            Some(t) => t,
-            None => return,
-        };
-        let mut cluster = match self.distributed.cluster.take() {
-            Some(c) => c,
-            None => {
-                self.distributed.transport = Some(transport);
-                return;
-            }
-        };
-        let mut resolver = match self.distributed.resolver.take() {
-            Some(r) => r,
-            None => {
-                self.distributed.transport = Some(transport);
-                self.distributed.cluster = Some(cluster);
-                return;
-            }
-        };
-        distributed::process_network_packets(self, &mut transport, &mut cluster, &mut resolver);
-        self.distributed.transport = Some(transport);
-        self.distributed.cluster = Some(cluster);
-        self.distributed.resolver = Some(resolver);
-        let actions = {
-            if let Some(cluster) = self.distributed.cluster.as_mut() {
-                cluster.tick()
-            } else {
-                Vec::new()
-            }
-        };
-        for action in actions {
-            match action {
-                ClusterAction::SendHeartbeat { to, addr } => {
-                    if let Some(transport) = &mut self.distributed.transport {
-                        // The heartbeat must identify the SENDER (us) —
-                        // the receiver uses it for membership discovery.
-                        let local_id = self.distributed.node_id.unwrap_or(NodeId::LOCAL);
-                        let packet = Packet::Heartbeat {
-                            node_id: local_id,
-                            timestamp: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
-                        };
-                        transport.send(NodeId(to.0), addr, packet);
-                    }
-                }
-                ClusterAction::NodeJoined { node, addr } => {
-                    if let Some(transport) = &mut self.distributed.transport {
-                        let net_node_id = NodeId(node.0);
-                        let _ = transport.connect(net_node_id, addr);
-                    }
-                }
-                ClusterAction::NodeFailed { node } => {
-                    if let Some(transport) = &mut self.distributed.transport {
-                        let net_node_id = NodeId(node.0);
-                        transport.disconnect(net_node_id);
-                    }
-                }
-                ClusterAction::NodeLeft { node } => {
-                    if let Some(transport) = &mut self.distributed.transport {
-                        let net_node_id = NodeId(node.0);
-                        transport.disconnect(net_node_id);
-                    }
-                }
-                ClusterAction::SendGossip { targets } => {
-                    // Relay our membership view to the gossip targets. This
-                    // is what makes membership transitive: a node forwards
-                    // what it learned from others, so a chain of pairwise
-                    // seeds converges without a full mesh of join requests.
-                    if let (Some(transport), Some(cluster)) =
-                        (&mut self.distributed.transport, &self.distributed.cluster)
-                    {
-                        let members = cluster.gossip_payload(GOSSIP_PAYLOAD_MAX_ENTRIES);
-                        if !members.is_empty() {
-                            let packet = Packet::Gossip { members };
-                            for (to, addr) in targets {
-                                transport.send(NodeId(to.0), addr, packet.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        distribution::process_network(self)
     }
 
     // -- CRDT Synchronization (v0.6) --
@@ -4887,19 +4175,11 @@ impl Runtime {
     /// when deltas are generated, so a lost delta is never re-sent and
     /// these periodic full syncs are the repair mechanism.
     pub fn sync_crdts(&mut self) {
-        if !self.distributed.enabled {
-            return;
-        }
-        self.crdt_sync_rounds = self.crdt_sync_rounds.wrapping_add(1);
-        if crdt_sync_is_full_round(self.crdt_sync_rounds) {
-            self.sync_crdts_full();
-        } else {
-            sync_crdts_delta(self);
-        }
+        distribution::sync_crdts(self)
     }
 
     /// Full-state CRDT sync: ship every entry to all healthy members.
-    fn sync_crdts_full(&mut self) {
+    pub(crate) fn sync_crdts_full(&mut self) {
         let ops = match &mut self.crdt_manager {
             Some(m) => m.generate_sync_ops(),
             None => return,
@@ -4924,9 +4204,6 @@ impl Runtime {
 const CRDT_FULL_SYNC_INTERVAL: u64 = 16;
 
 /// True when the given 1-based sync round should ship full state.
-fn crdt_sync_is_full_round(round: u64) -> bool {
-    round % CRDT_FULL_SYNC_INTERVAL == 1
-}
 
 // ---------------------------------------------------------------------------
 // CycleRuntime implementation

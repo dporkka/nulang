@@ -2862,16 +2862,16 @@ fn test_pipeline_runtime_api() {
 
     // Create a pipeline through the runtime API.
     let id = rt.pipeline_new();
-    assert!(rt.pipelines.contains_key(&id));
+    assert!(rt.ai.pipelines.contains_key(&id));
 
     // Add a stage.
     let result = rt.pipeline_stage(id, "summarize", 42, "Summarize: {input}");
     assert_eq!(result, Ok(id));
-    assert_eq!(rt.pipelines[&id].stages.len(), 1);
-    assert_eq!(rt.pipelines[&id].stages[0].name, "summarize");
-    assert_eq!(rt.pipelines[&id].stages[0].agent_id, 42);
+    assert_eq!(rt.ai.pipelines[&id].stages.len(), 1);
+    assert_eq!(rt.ai.pipelines[&id].stages[0].name, "summarize");
+    assert_eq!(rt.ai.pipelines[&id].stages[0].agent_id, 42);
     assert_eq!(
-        rt.pipelines[&id].stages[0].prompt_template,
+        rt.ai.pipelines[&id].stages[0].prompt_template,
         "Summarize: {input}"
     );
 
@@ -2883,7 +2883,7 @@ fn test_pipeline_runtime_api() {
             Ok(format!("agent {} got {}", agent_id, prompt))
         }
     }
-    let pipeline = rt.pipelines[&id].clone();
+    let pipeline = rt.ai.pipelines[&id].clone();
     let output = pipeline.run(&mut MockRuntime, "hello world").unwrap();
     assert_eq!(output, "agent 42 got Summarize: hello world");
 }
@@ -3317,18 +3317,18 @@ fn test_remote_spawn_request_delivery() {
 /// other rounds ship deltas.
 #[test]
 fn test_crdt_sync_round_schedule() {
-    assert!(crdt_sync_is_full_round(1), "first sync must be full");
+    assert!(crate::runtime::distribution::crdt_sync_is_full_round(1), "first sync must be full");
     for round in 2..=CRDT_FULL_SYNC_INTERVAL {
         assert!(
-            !crdt_sync_is_full_round(round),
+            !crate::runtime::distribution::crdt_sync_is_full_round(round),
             "round {round} should ship deltas"
         );
     }
     assert!(
-        crdt_sync_is_full_round(CRDT_FULL_SYNC_INTERVAL + 1),
+        crate::runtime::distribution::crdt_sync_is_full_round(CRDT_FULL_SYNC_INTERVAL + 1),
         "round after the interval must be a full repair sync"
     );
-    assert!(!crdt_sync_is_full_round(CRDT_FULL_SYNC_INTERVAL + 2));
+    assert!(!crate::runtime::distribution::crdt_sync_is_full_round(CRDT_FULL_SYNC_INTERVAL + 2));
 }
 
 /// `sync_crdts` is a no-op that does not count rounds when distribution

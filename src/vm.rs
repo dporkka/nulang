@@ -1893,6 +1893,519 @@ impl VM {
                 Ok(())
     }
 
+    fn step_capstore(&mut self, instr: Instruction, frame_idx: usize) -> NuResult<()> {
+                let closure_reg = instr.op1 as usize;
+                let slot = instr.op2 as usize;
+                let src = self.frames[frame_idx].regs[instr.op3 as usize];
+                let val = self.frames[frame_idx].regs[closure_reg];
+                if (val.raw & TAG_MASK) != TAG_CLOSURE {
+                    return Err(NuError::VMError(format!(
+                        "CapStore target is not a closure: {}",
+                        val.to_string_repr()
+                    )));
+                }
+                let payload = val.raw & PAYLOAD_MASK;
+                let env_idx = if payload & CLOSURE_ENV_FLAG != 0 {
+                    (payload & CLOSURE_ENV_IDX_MASK) as usize
+                } else {
+                    if self.closure_envs.len() >= self.max_closure_envs {
+                        return Err(NuError::VMError(format!(
+                            "closure capture environments exceeded the {} limit; this process has been running long enough to accumulate unreclaimed closure envs (see VM::closure_envs)",
+                            self.max_closure_envs
+                        )));
+                    }
+                    let idx = self.closure_envs.len();
+                    self.closure_envs.push(ClosureEnv {
+                        func_idx: payload as usize,
+                        captures: Vec::new(),
+                    });
+                    self.frames[frame_idx].regs[closure_reg] = Value {
+                        raw: TAG_CLOSURE | CLOSURE_ENV_FLAG | (idx as u64 & CLOSURE_ENV_IDX_MASK),
+                    };
+                    idx
+                };
+                if let Some(ptr) = src.as_ptr() {
+                    self.actor_callbacks.retain_ref(ptr);
+                }
+                let env = &mut self.closure_envs[env_idx];
+                if env.captures.len() <= slot {
+                    env.captures.resize(slot + 1, Value::nil());
+                }
+                env.captures[slot] = src;
+                Ok(())
+    }
+    fn step_receive(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let dst = instr.op1;
+        let value = self
+            .actor_callbacks
+            .try_receive()
+            .map(|(_bid, v)| v)
+            .unwrap_or(Value::nil());
+        self.frames[frame_idx].regs[dst as usize] = value;
+        Ok(())
+    }
+
+    fn step_receive_match(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+        let const_idx = instr.imm16() as usize;
+        let dst = instr.op3 as usize;
+        let spec = self.module_const_string(module_idx, const_idx);
+        let (max_params, ids) = parse_receive_spec(&spec);
+        match self.actor_callbacks.try_receive_match(&ids) {
+            Some((arm_idx, payload)) => {
+                self.frames[frame_idx].regs[dst] = Value::int(arm_idx as i64);
+                for i in 0..max_params {
+                    let r = dst + 1 + i;
+                    if r >= 256 {
+                        break;
+                    }
+                    self.frames[frame_idx].regs[r] =
+                        payload.get(i).copied().unwrap_or(Value::nil());
+                }
+            }
+            None => {
+                self.actor_callbacks.reset_receive_match();
+                self.frames[frame_idx].regs[dst] = Value::int(ids.len() as i64);
+            }
+        }
+        Ok(())
+    }
+
+    fn step_receive_wait(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+        let const_idx = instr.imm16() as usize;
+        let dst = instr.op3 as usize;
+        let spec = self.module_const_string(module_idx, const_idx);
+        let (max_params, ids) = parse_receive_spec(&spec);
+        match self.actor_callbacks.try_receive_match(&ids) {
+            Some((arm_idx, payload)) => {
+                self.actor_callbacks.receive_wait_matched();
+                self.frames[frame_idx].regs[dst] = Value::int(arm_idx as i64);
+                for i in 0..max_params {
+                    let r = dst + 1 + i;
+                    if r >= 256 {
+                        break;
+                    }
+                    self.frames[frame_idx].regs[r] =
+                        payload.get(i).copied().unwrap_or(Value::nil());
+                }
+            }
+            None => {
+                let timeout_ms = self.frames[frame_idx].regs[0].as_int().unwrap_or(0);
+                if self.actor_callbacks.receive_wait_suspend(timeout_ms) {
+                    self.suspended_receive_timeout = Some(timeout_ms);
+                    self.frames[frame_idx].pc -= 1;
+                    return Err(NuError::Suspended(VmSuspension::ReceiveWait));
+                }
+                self.actor_callbacks.reset_receive_match();
+                self.frames[frame_idx].regs[dst] = Value::int(ids.len() as i64);
+            }
+        }
+        Ok(())
+    }
+
+    fn step_receive_commit(&mut self) {
+        self.actor_callbacks.commit_receive_match();
+    }
+
+    fn step_llm_ask(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+        let model_idx = instr.imm16() as usize;
+        let prompt_reg = instr.op3 as usize;
+        let model = self.module_const_string(module_idx, model_idx);
+        let prompt_value = self.frames[frame_idx].regs[prompt_reg];
+        let prompt = self.value_to_string(module_idx, prompt_value);
+        match self.actor_callbacks.llm_ask(&model, &prompt) {
+            LlmAskResult::Ready(result) => {
+                let value = match result {
+                    Some(ref content) => {
+                        self.add_runtime_string(module_idx, content.clone())
+                    }
+                    None => Value::nil(),
+                };
+                self.frames[frame_idx].regs[prompt_reg] = value;
+            }
+            LlmAskResult::Pending => {
+                self.frames[frame_idx].pc -= 1;
+                return Err(NuError::Suspended(VmSuspension::LlmAsk));
+            }
+        }
+        Ok(())
+    }
+    #[inline(never)]
+    fn step_arrstore(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let arr_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
+            .as_ptr()
+            .unwrap_or(std::ptr::null_mut());
+        let idx = self.frames[frame_idx].regs[instr.op2 as usize]
+            .as_int()
+            .unwrap_or(0) as usize;
+        let val = self.frames[frame_idx].regs[instr.op3 as usize];
+        if !arr_ptr.is_null() {
+            if let Some(len) = self.actor_callbacks.array_len(arr_ptr) {
+                if idx < len {
+                    if let Some(ptr) = val.as_ptr() {
+                        self.actor_callbacks.retain_ref(ptr);
+                    }
+                    unsafe {
+                        let slot = (arr_ptr as *mut Value).add(idx);
+                        let old = *slot;
+                        *slot = val;
+                        if let Some(old_ptr) = old.as_ptr() {
+                            self.actor_callbacks.drop_ref(old_ptr);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_recs(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let rec_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
+            .as_ptr()
+            .unwrap_or(std::ptr::null_mut());
+        let field_id = instr.op2 as usize;
+        let val = self.frames[frame_idx].regs[instr.op3 as usize];
+        if !rec_ptr.is_null() {
+            unsafe {
+                let header = &*ActorHeap::header_of(rec_ptr);
+                if header.type_tag == HeapTypeTag::Record {
+                    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                    let len = payload_size / std::mem::size_of::<Value>();
+                    if field_id < len {
+                        if let Some(ptr) = val.as_ptr() {
+                            self.actor_callbacks.retain_ref(ptr);
+                        }
+                        let slot = (rec_ptr as *mut Value).add(field_id);
+                        let old = *slot;
+                        *slot = val;
+                        if let Some(old_ptr) = old.as_ptr() {
+                            self.actor_callbacks.drop_ref(old_ptr);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_fields(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let tup_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
+            .as_ptr()
+            .unwrap_or(std::ptr::null_mut());
+        let idx = instr.op2 as usize;
+        let val = self.frames[frame_idx].regs[instr.op3 as usize];
+        if !tup_ptr.is_null() {
+            unsafe {
+                let header = &*ActorHeap::header_of(tup_ptr);
+                if header.type_tag == HeapTypeTag::Tuple {
+                    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                    let len = payload_size / std::mem::size_of::<Value>();
+                    if idx < len {
+                        if let Some(ptr) = val.as_ptr() {
+                            self.actor_callbacks.retain_ref(ptr);
+                        }
+                        let slot = (tup_ptr as *mut Value).add(idx);
+                        let old = *slot;
+                        *slot = val;
+                        if let Some(old_ptr) = old.as_ptr() {
+                            self.actor_callbacks.drop_ref(old_ptr);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    #[inline(never)]
+    fn step_arrload(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let arr_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
+            .as_ptr()
+            .unwrap_or(std::ptr::null_mut());
+        let idx = self.frames[frame_idx].regs[instr.op2 as usize]
+            .as_int()
+            .unwrap_or(0) as usize;
+        let val = if !arr_ptr.is_null() {
+            if let Some(len) = self.actor_callbacks.array_len(arr_ptr) {
+                if idx < len {
+                    unsafe { *((arr_ptr as *const Value).add(idx)) }
+                } else {
+                    Value::nil()
+                }
+            } else {
+                Value::nil()
+            }
+        } else {
+            Value::nil()
+        };
+        self.frames[frame_idx].regs[instr.op3 as usize] = val;
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_recl(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let rec_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
+            .as_ptr()
+            .unwrap_or(std::ptr::null_mut());
+        let field_id = instr.op2 as usize;
+        let val = if !rec_ptr.is_null() {
+            unsafe {
+                let header = &*ActorHeap::header_of(rec_ptr);
+                if header.type_tag == HeapTypeTag::Record {
+                    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                    let len = payload_size / std::mem::size_of::<Value>();
+                    if field_id < len {
+                        *((rec_ptr as *const Value).add(field_id))
+                    } else {
+                        Value::nil()
+                    }
+                } else {
+                    Value::nil()
+                }
+            }
+        } else {
+            Value::nil()
+        };
+        self.frames[frame_idx].regs[instr.op3 as usize] = val;
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_fieldl(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let tup_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
+            .as_ptr()
+            .unwrap_or(std::ptr::null_mut());
+        let idx = instr.op2 as usize;
+        let val = if !tup_ptr.is_null() {
+            unsafe {
+                let header = &*ActorHeap::header_of(tup_ptr);
+                if header.type_tag == HeapTypeTag::Tuple {
+                    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                    let len = payload_size / std::mem::size_of::<Value>();
+                    if idx < len {
+                        *((tup_ptr as *const Value).add(idx))
+                    } else {
+                        Value::nil()
+                    }
+                } else {
+                    Value::nil()
+                }
+            }
+        } else {
+            Value::nil()
+        };
+        self.frames[frame_idx].regs[instr.op3 as usize] = val;
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_call(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+        let func_val = self.frames[frame_idx].regs[instr.op1 as usize];
+        let argc = instr.op2;
+        let dst = instr.op3;
+        let (func_idx, closure_env) = self.resolve_function(func_val, module_idx)?;
+        let code_offset = self
+            .modules
+            .get(module_idx)
+            .and_then(|m| m.function_table.get(func_idx))
+            .copied()
+            .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
+        let mut new_frame = Frame::new(Some(frame_idx), module_idx);
+        new_frame.pc = code_offset;
+        for i in 0..(argc as usize).min(256) {
+            new_frame.regs[i] = self.frames[frame_idx].regs[i];
+        }
+        new_frame.return_dst = dst;
+        new_frame.closure_env = closure_env;
+        self.frames.push(new_frame);
+        self.current_frame_idx = Some(self.frames.len() - 1);
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_spawn(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+        let behavior_idx = instr.imm16() as usize;
+        let init: Vec<(String, Value)> = self
+            .modules
+            .get(module_idx)
+            .and_then(|m| {
+                m.actor_metadata
+                    .iter()
+                    .find(|meta| meta.behavior_indices.contains(&behavior_idx))
+            })
+            .map(|meta| {
+                meta.state_defaults
+                    .iter()
+                    .map(|(name, c)| (name.clone(), constant_to_value(c)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let result = if let Some(module) = self.modules.get(module_idx) {
+            self.actor_callbacks.spawn_actor(module, behavior_idx, init)
+        } else {
+            Value::actor_ref(0)
+        };
+        self.frames[frame_idx].regs[instr.op3 as usize] = result;
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_rsend(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+        let target_reg = instr.op1 as usize;
+        let behavior_idx = instr.imm16() as usize;
+        let target_val = self.frames[frame_idx].regs[target_reg];
+        let target_id = target_val.as_actor_id().unwrap_or(0);
+        let node_id = self.node_id;
+        let (param_count, _behavior_id) = self
+            .modules
+            .get(module_idx)
+            .and_then(|m| m.behaviors.get(behavior_idx))
+            .map(|b| (b.param_count, behavior_idx as u16))
+            .unwrap_or((0, 0));
+        let args: Vec<Value> = (0..param_count as usize)
+            .map(|i| self.frames[frame_idx].regs[i])
+            .collect();
+        if let Some(cb) = &mut self.distributed_callbacks {
+            let behavior_name = self
+                .modules
+                .get(module_idx)
+                .and_then(|m| m.behaviors.get(behavior_idx))
+                .map(|b| b.name.clone())
+                .unwrap_or_default();
+            cb.remote_send(target_id, node_id, &behavior_name, &args);
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_capload(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let slot = instr.op1 as usize;
+        let dst = instr.op2 as usize;
+        let env_val = self.frames[frame_idx].closure_env.ok_or_else(|| {
+            NuError::VMError("CapLoad outside a closure call".to_string())
+        })?;
+        let payload = env_val.raw & PAYLOAD_MASK;
+        if payload & CLOSURE_ENV_FLAG == 0 {
+            return Err(NuError::VMError(
+                "CapLoad in a closure without captures".to_string(),
+            ));
+        }
+        let env_idx = (payload & CLOSURE_ENV_IDX_MASK) as usize;
+        let value = self
+            .closure_envs
+            .get(env_idx)
+            .and_then(|env| env.captures.get(slot))
+            .copied()
+            .ok_or_else(|| {
+                NuError::VMError(format!("CapLoad of missing capture slot {}", slot))
+            })?;
+        self.frames[frame_idx].regs[dst] = value;
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_sconcat(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+        let s1 = resolve_value_string(
+            &self.modules[module_idx].constants,
+            self.frames[frame_idx].regs[instr.op1 as usize],
+        );
+        let s2 = resolve_value_string(
+            &self.modules[module_idx].constants,
+            self.frames[frame_idx].regs[instr.op2 as usize],
+        );
+        let result = format!("{}{}", s1, s2);
+        let bytes = result.into_bytes();
+        self.frames[frame_idx].regs[instr.op3 as usize] = if let Some(ptr) = self
+            .actor_callbacks
+            .alloc(bytes.len() + 1, HeapTypeTag::String)
+        {
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                *ptr.add(bytes.len()) = 0;
+            }
+            Value::ptr(ptr)
+        } else {
+            Value::nil()
+        };
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_sread(&mut self, frame_idx: usize, _module_idx: usize, instr: Instruction) -> NuResult<()> {
+        let mut input = String::new();
+        self.frames[frame_idx].regs[instr.op1 as usize] =
+            if std::io::stdin().read_line(&mut input).is_ok() {
+                let bytes = input.into_bytes();
+                if let Some(ptr) = self
+                    .actor_callbacks
+                    .alloc(bytes.len() + 1, HeapTypeTag::String)
+                {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                    }
+                    Value::ptr(ptr)
+                } else {
+                    Value::nil()
+                }
+            } else {
+                Value::nil()
+            };
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_idiv(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let a = self.frames[frame_idx].regs[instr.op1 as usize];
+        let b = self.frames[frame_idx].regs[instr.op2 as usize];
+        if a.is_float() && b.is_float() {
+            let af = a.as_float().unwrap();
+            let bf = b.as_float().unwrap();
+            self.frames[frame_idx].regs[instr.op3 as usize] = if bf != 0.0 {
+                Value::float(af / bf)
+            } else {
+                Value::nil()
+            };
+        } else {
+            let ai = a.as_int().unwrap_or(0);
+            let bi = b.as_int().unwrap_or(1);
+            self.frames[frame_idx].regs[instr.op3 as usize] = if bi != 0 {
+                Value::int(ai / bi)
+            } else {
+                Value::nil()
+            };
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_imod(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let a = self.frames[frame_idx].regs[instr.op1 as usize];
+        let b = self.frames[frame_idx].regs[instr.op2 as usize];
+        if a.is_float() && b.is_float() {
+            let af = a.as_float().unwrap();
+            let bf = b.as_float().unwrap();
+            self.frames[frame_idx].regs[instr.op3 as usize] = if bf != 0.0 {
+                Value::float(af % bf)
+            } else {
+                Value::nil()
+            };
+        } else {
+            let ai = a.as_int().unwrap_or(0);
+            let bi = b.as_int().unwrap_or(1);
+            self.frames[frame_idx].regs[instr.op3 as usize] = if bi != 0 {
+                Value::int(ai % bi)
+            } else {
+                Value::nil()
+            };
+        }
+        Ok(())
+    }
+
+
+
+
+
     pub fn step(&mut self) -> NuResult<()> {
         // Step limit: configurable via env var NULANG_STEP_LIMIT.
         // Default 10M steps — long-running actors (servers, processors) may need more.
@@ -1932,25 +2445,7 @@ impl VM {
         match instr.opcode {
             // -- Frame-manipulating opcodes --
             OpCode::Call => {
-                let func_val = self.frames[frame_idx].regs[instr.op1 as usize];
-                let argc = instr.op2;
-                let dst = instr.op3;
-                let (func_idx, closure_env) = self.resolve_function(func_val, module_idx)?;
-                let code_offset = self
-                    .modules
-                    .get(module_idx)
-                    .and_then(|m| m.function_table.get(func_idx))
-                    .copied()
-                    .ok_or_else(|| NuError::VMError(format!("Function {} not found", func_idx)))?;
-                let mut new_frame = Frame::new(Some(frame_idx), module_idx);
-                new_frame.pc = code_offset;
-                for i in 0..(argc as usize).min(256) {
-                    new_frame.regs[i] = self.frames[frame_idx].regs[i];
-                }
-                new_frame.return_dst = dst;
-                new_frame.closure_env = closure_env;
-                self.frames.push(new_frame);
-                self.current_frame_idx = Some(self.frames.len() - 1);
+                self.step_call(frame_idx, module_idx, instr)?;
                 return Ok(());
             }
             OpCode::TailCall => {
@@ -2031,28 +2526,7 @@ impl VM {
 
             // -- Actor opcodes --
             OpCode::Spawn => {
-                let behavior_idx = instr.imm16() as usize;
-                let init: Vec<(String, Value)> = self
-                    .modules
-                    .get(module_idx)
-                    .and_then(|m| {
-                        m.actor_metadata
-                            .iter()
-                            .find(|meta| meta.behavior_indices.contains(&behavior_idx))
-                    })
-                    .map(|meta| {
-                        meta.state_defaults
-                            .iter()
-                            .map(|(name, c)| (name.clone(), constant_to_value(c)))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let result = if let Some(module) = self.modules.get(module_idx) {
-                    self.actor_callbacks.spawn_actor(module, behavior_idx, init)
-                } else {
-                    Value::actor_ref(0)
-                };
-                self.frames[frame_idx].regs[instr.op3 as usize] = result;
+                self.step_spawn(frame_idx, module_idx, instr)?;
                 return Ok(());
             }
             OpCode::Send => {
@@ -2133,31 +2607,7 @@ impl VM {
                 }
             }
             OpCode::RSend => {
-                let target_reg = instr.op1 as usize;
-                let behavior_idx = instr.imm16() as usize;
-                let target_val = self.frames[frame_idx].regs[target_reg];
-                let target_id = target_val.as_actor_id().unwrap_or(0);
-                let node_id = self.node_id; // local node (callbacks can override)
-                let (param_count, _behavior_id) = self
-                    .modules
-                    .get(module_idx)
-                    .and_then(|m| m.behaviors.get(behavior_idx))
-                    .map(|b| (b.param_count, behavior_idx as u16))
-                    .unwrap_or((0, 0));
-                // Arguments are in r0..r(param_count-1)
-                let args: Vec<Value> = (0..param_count as usize)
-                    .map(|i| self.frames[frame_idx].regs[i])
-                    .collect();
-                if let Some(cb) = &mut self.distributed_callbacks {
-                    // Resolve the behavior name from the module constant pool.
-                    let behavior_name = self
-                        .modules
-                        .get(module_idx)
-                        .and_then(|m| m.behaviors.get(behavior_idx))
-                        .map(|b| b.name.clone())
-                        .unwrap_or_default();
-                    cb.remote_send(target_id, node_id, &behavior_name, &args);
-                }
+                self.step_rsend(frame_idx, module_idx, instr)?;
             }
             OpCode::RSpawn => {
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::actor_ref(0);
@@ -2197,84 +2647,10 @@ impl VM {
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::closure(func_idx);
             }
             OpCode::CapStore => {
-                // op1 = register holding the closure, op2 = capture slot,
-                // op3 = source register. The first store upgrades the closure
-                // from the immediate form (payload = function index) to the
-                // env-carrying form (payload = env index).
-                let closure_reg = instr.op1 as usize;
-                let slot = instr.op2 as usize;
-                let src = self.frames[frame_idx].regs[instr.op3 as usize];
-                let val = self.frames[frame_idx].regs[closure_reg];
-                if (val.raw & TAG_MASK) != TAG_CLOSURE {
-                    return Err(NuError::VMError(format!(
-                        "CapStore target is not a closure: {}",
-                        val.to_string_repr()
-                    )));
-                }
-                let payload = val.raw & PAYLOAD_MASK;
-                let env_idx = if payload & CLOSURE_ENV_FLAG != 0 {
-                    (payload & CLOSURE_ENV_IDX_MASK) as usize
-                } else {
-                    if self.closure_envs.len() >= self.max_closure_envs {
-                        // See the KNOWN LIMITATION on `closure_envs`: entries
-                        // are never reclaimed, so a long-running process that
-                        // keeps creating capturing closures accumulates them
-                        // without bound. Rather than let that run into an
-                        // uncontrolled OOM kill, fail cleanly once retained
-                        // envs cross a generous but finite ceiling — an
-                        // honest, catchable resource-exhaustion error instead
-                        // of silent unbounded growth.
-                        return Err(NuError::VMError(format!(
-                            "closure capture environments exceeded the {} limit; this process has been running long enough to accumulate unreclaimed closure envs (see VM::closure_envs)",
-                            self.max_closure_envs
-                        )));
-                    }
-                    let idx = self.closure_envs.len();
-                    self.closure_envs.push(ClosureEnv {
-                        func_idx: payload as usize,
-                        captures: Vec::new(),
-                    });
-                    self.frames[frame_idx].regs[closure_reg] = Value {
-                        raw: TAG_CLOSURE | CLOSURE_ENV_FLAG | (idx as u64 & CLOSURE_ENV_IDX_MASK),
-                    };
-                    idx
-                };
-                // If the captured value is a heap pointer, take out an extra
-                // local reference so a `Drop` of the original binding cannot
-                // free the object while this closure still holds it.
-                if let Some(ptr) = src.as_ptr() {
-                    self.actor_callbacks.retain_ref(ptr);
-                }
-                let env = &mut self.closure_envs[env_idx];
-                if env.captures.len() <= slot {
-                    env.captures.resize(slot + 1, Value::nil());
-                }
-                env.captures[slot] = src;
+                self.step_capstore(instr, frame_idx)?;
             }
             OpCode::CapLoad => {
-                // op1 = capture slot, op2 = destination register. Reads from
-                // the closure environment of the currently executing frame.
-                let slot = instr.op1 as usize;
-                let dst = instr.op2 as usize;
-                let env_val = self.frames[frame_idx].closure_env.ok_or_else(|| {
-                    NuError::VMError("CapLoad outside a closure call".to_string())
-                })?;
-                let payload = env_val.raw & PAYLOAD_MASK;
-                if payload & CLOSURE_ENV_FLAG == 0 {
-                    return Err(NuError::VMError(
-                        "CapLoad in a closure without captures".to_string(),
-                    ));
-                }
-                let env_idx = (payload & CLOSURE_ENV_IDX_MASK) as usize;
-                let value = self
-                    .closure_envs
-                    .get(env_idx)
-                    .and_then(|env| env.captures.get(slot))
-                    .copied()
-                    .ok_or_else(|| {
-                        NuError::VMError(format!("CapLoad of missing capture slot {}", slot))
-                    })?;
-                self.frames[frame_idx].regs[dst] = value;
+                self.step_capload(frame_idx, instr)?;
             }
             OpCode::FreeVar => {
                 // Nothing emits FreeVar; keep it a no-op.
@@ -2320,46 +2696,10 @@ impl VM {
                 }
             }
             OpCode::IDiv => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
-                if a.is_float() && b.is_float() {
-                    let af = a.as_float().unwrap();
-                    let bf = b.as_float().unwrap();
-                    self.frames[frame_idx].regs[instr.op3 as usize] = if bf != 0.0 {
-                        Value::float(af / bf)
-                    } else {
-                        Value::nil()
-                    };
-                } else {
-                    let ai = a.as_int().unwrap_or(0);
-                    let bi = b.as_int().unwrap_or(1);
-                    self.frames[frame_idx].regs[instr.op3 as usize] = if bi != 0 {
-                        Value::int(ai / bi)
-                    } else {
-                        Value::nil()
-                    };
-                }
+                self.step_idiv(frame_idx, instr)?;
             }
             OpCode::IMod => {
-                let a = self.frames[frame_idx].regs[instr.op1 as usize];
-                let b = self.frames[frame_idx].regs[instr.op2 as usize];
-                if a.is_float() && b.is_float() {
-                    let af = a.as_float().unwrap();
-                    let bf = b.as_float().unwrap();
-                    self.frames[frame_idx].regs[instr.op3 as usize] = if bf != 0.0 {
-                        Value::float(af % bf)
-                    } else {
-                        Value::nil()
-                    };
-                } else {
-                    let ai = a.as_int().unwrap_or(0);
-                    let bi = b.as_int().unwrap_or(1);
-                    self.frames[frame_idx].regs[instr.op3 as usize] = if bi != 0 {
-                        Value::int(ai % bi)
-                    } else {
-                        Value::nil()
-                    };
-                }
+                self.step_imod(frame_idx, instr)?;
             }
             OpCode::Xor => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize]
@@ -2603,60 +2943,10 @@ impl VM {
                     };
             }
             OpCode::ArrLoad => {
-                let arr_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_ptr()
-                    .unwrap_or(std::ptr::null_mut());
-                let idx = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_int()
-                    .unwrap_or(0) as usize;
-                let val = if !arr_ptr.is_null() {
-                    if let Some(len) = self.actor_callbacks.array_len(arr_ptr) {
-                        if idx < len {
-                            unsafe { *((arr_ptr as *const Value).add(idx)) }
-                        } else {
-                            Value::nil()
-                        }
-                    } else {
-                        Value::nil()
-                    }
-                } else {
-                    Value::nil()
-                };
-                self.frames[frame_idx].regs[instr.op3 as usize] = val;
+                self.step_arrload(frame_idx, instr)?;
             }
             OpCode::ArrStore => {
-                let arr_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_ptr()
-                    .unwrap_or(std::ptr::null_mut());
-                let idx = self.frames[frame_idx].regs[instr.op2 as usize]
-                    .as_int()
-                    .unwrap_or(0) as usize;
-                let val = self.frames[frame_idx].regs[instr.op3 as usize];
-                if !arr_ptr.is_null() {
-                    if let Some(len) = self.actor_callbacks.array_len(arr_ptr) {
-                        if idx < len {
-                            // Mirrors CapStore: a heap pointer stored into a
-                            // live container needs its own local reference,
-                            // so a later `Drop` of the value's original
-                            // binding can't free it out from under this array.
-                            if let Some(ptr) = val.as_ptr() {
-                                self.actor_callbacks.retain_ref(ptr);
-                            }
-                            unsafe {
-                                let slot = (arr_ptr as *mut Value).add(idx);
-                                let old = *slot;
-                                *slot = val;
-                                // Release the overwritten slot's old value:
-                                // the barrier retain that stored it is now
-                                // obsolete. Retain-before-release keeps
-                                // storing the same pointer twice a no-op.
-                                if let Some(old_ptr) = old.as_ptr() {
-                                    self.actor_callbacks.drop_ref(old_ptr);
-                                }
-                            }
-                        }
-                    }
-                }
+                self.step_arrstore(frame_idx, instr)?;
             }
             OpCode::ArrLen => {
                 let arr_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
@@ -2691,60 +2981,10 @@ impl VM {
                 };
             }
             OpCode::RecS => {
-                let rec_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_ptr()
-                    .unwrap_or(std::ptr::null_mut());
-                let field_id = instr.op2 as usize;
-                let val = self.frames[frame_idx].regs[instr.op3 as usize];
-                if !rec_ptr.is_null() {
-                    unsafe {
-                        let header = &*ActorHeap::header_of(rec_ptr);
-                        if header.type_tag == HeapTypeTag::Record {
-                            let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
-                            let len = payload_size / std::mem::size_of::<Value>();
-                            if field_id < len {
-                                // Mirrors CapStore/ArrStore: retain a heap
-                                // pointer stored into a live record.
-                                if let Some(ptr) = val.as_ptr() {
-                                    self.actor_callbacks.retain_ref(ptr);
-                                }
-                                let slot = (rec_ptr as *mut Value).add(field_id);
-                                let old = *slot;
-                                *slot = val;
-                                // Release the overwritten slot's old value
-                                // (see ArrStore).
-                                if let Some(old_ptr) = old.as_ptr() {
-                                    self.actor_callbacks.drop_ref(old_ptr);
-                                }
-                            }
-                        }
-                    }
-                }
+                self.step_recs(frame_idx, instr)?;
             }
             OpCode::RecL => {
-                let rec_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_ptr()
-                    .unwrap_or(std::ptr::null_mut());
-                let field_id = instr.op2 as usize;
-                let val = if !rec_ptr.is_null() {
-                    unsafe {
-                        let header = &*ActorHeap::header_of(rec_ptr);
-                        if header.type_tag == HeapTypeTag::Record {
-                            let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
-                            let len = payload_size / std::mem::size_of::<Value>();
-                            if field_id < len {
-                                *((rec_ptr as *const Value).add(field_id))
-                            } else {
-                                Value::nil()
-                            }
-                        } else {
-                            Value::nil()
-                        }
-                    }
-                } else {
-                    Value::nil()
-                };
-                self.frames[frame_idx].regs[instr.op3 as usize] = val;
+                self.step_recl(frame_idx, instr)?;
             }
 
             // -- Tuples (heap-backed fixed-size arrays) --
@@ -2765,62 +3005,10 @@ impl VM {
                     };
             }
             OpCode::FieldS => {
-                let tup_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_ptr()
-                    .unwrap_or(std::ptr::null_mut());
-                let idx = instr.op2 as usize;
-                let val = self.frames[frame_idx].regs[instr.op3 as usize];
-                if !tup_ptr.is_null() {
-                    unsafe {
-                        let header = &*ActorHeap::header_of(tup_ptr);
-                        if header.type_tag == HeapTypeTag::Tuple {
-                            let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
-                            let len = payload_size / std::mem::size_of::<Value>();
-                            if idx < len {
-                                // Match RecS/ArrStore: the slot owns a
-                                // counted reference to the stored pointer.
-                                // This barrier is mandatory — free_object
-                                // releases slot references when the tuple is
-                                // reclaimed, so an uncounted store would
-                                // decrement a child that was never retained.
-                                if let Some(ptr) = val.as_ptr() {
-                                    self.actor_callbacks.retain_ref(ptr);
-                                }
-                                let slot = (tup_ptr as *mut Value).add(idx);
-                                let old = *slot;
-                                *slot = val;
-                                if let Some(old_ptr) = old.as_ptr() {
-                                    self.actor_callbacks.drop_ref(old_ptr);
-                                }
-                            }
-                        }
-                    }
-                }
+                self.step_fields(frame_idx, instr)?;
             }
             OpCode::FieldL => {
-                let tup_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
-                    .as_ptr()
-                    .unwrap_or(std::ptr::null_mut());
-                let idx = instr.op2 as usize;
-                let val = if !tup_ptr.is_null() {
-                    unsafe {
-                        let header = &*ActorHeap::header_of(tup_ptr);
-                        if header.type_tag == HeapTypeTag::Tuple {
-                            let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
-                            let len = payload_size / std::mem::size_of::<Value>();
-                            if idx < len {
-                                *((tup_ptr as *const Value).add(idx))
-                            } else {
-                                Value::nil()
-                            }
-                        } else {
-                            Value::nil()
-                        }
-                    }
-                } else {
-                    Value::nil()
-                };
-                self.frames[frame_idx].regs[instr.op3 as usize] = val;
+                self.step_fieldl(frame_idx, instr)?;
             }
 
             // -- Boolean logic --
@@ -2923,133 +3111,7 @@ impl VM {
                 ));
             }
             OpCode::Perform => {
-                let eff_name_idx = instr.imm16();
-                let dst_reg = instr.op3;
-                let qualified_name = self.module_const_string(module_idx, eff_name_idx as usize);
-                // The MIR pipeline encodes the performed operation as
-                // "Effect.op" (e.g. "IO.print"); hand-built modules may
-                // carry a bare name with no operation.
-                let (effect_name, op_name) = match qualified_name.split_once('.') {
-                    Some((effect, op)) => (effect.to_string(), Some(op.to_string())),
-                    None => (qualified_name.clone(), None),
-                };
-                // Fast path: no user handlers installed — skip the
-                // rposition walk and dispatch directly to the built-in
-                // effect callback.  This is the common case for Actor.* builtins in
-                // actor bytecode (no user handler, empty handler_stack).
-                if self.handler_stack.is_empty() {
-                    let result = match self.modules.get(module_idx) {
-                        Some(module) => self.actor_callbacks.perform_builtin_effect_in_module(
-                            &effect_name,
-                            op_name.as_deref(),
-                            module,
-                            &self.frames[frame_idx].regs,
-                        ),
-                        None => self.actor_callbacks.perform_builtin_effect(
-                            &effect_name,
-                            op_name.as_deref(),
-                            &[],
-                            &self.frames[frame_idx].regs,
-                        ),
-                    };
-                    if let Some(result) = result {
-                        self.frames[frame_idx].regs[dst_reg as usize] = result;
-                    } else {
-                        return Err(NuError::EffectError {
-                            msg: format!("Unhandled effect: '{}'", qualified_name),
-                            span: Span::default(),
-                        });
-                    }
-                    // PC already advanced by the main loop (line 1516);
-                    // fall through to the next instruction.
-                    return Ok(());
-                }
-                // A binding matches when it names the exact "Effect.op"
-                // pair. Bindings that carry a bare effect name (no '.')
-                // predate op-qualified dispatch and match any op of that
-                // effect, preserving legacy modules.
-                let matches_binding = |b: &crate::bytecode::HandlerBinding| {
-                    b.effect_name == qualified_name
-                        || (!b.effect_name.contains('.') && b.effect_name == effect_name)
-                };
-
-                let handler_idx = self.handler_stack.iter().rposition(|hf| {
-                    if let Some(module) = self.modules.get(hf.module_idx) {
-                        if let Some(ht) = module.handler_tables.get(hf.handler_table_idx) {
-                            ht.bindings.iter().any(|b| matches_binding(b))
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                });
-
-                let target_offset = if let Some(handler_stack_idx) = handler_idx {
-                    let (handler_offset, result_reg) = {
-                        let hf = &self.handler_stack[handler_stack_idx];
-                        let module = self.modules.get(hf.module_idx).unwrap();
-                        let ht = module.handler_tables.get(hf.handler_table_idx).unwrap();
-                        let binding = ht.bindings.iter().find(|b| matches_binding(*b)).unwrap();
-                        (binding.handler_offset, binding.result_reg)
-                    };
-                    self.handler_stack[handler_stack_idx].resume_dst = result_reg;
-                    Some(handler_offset)
-                } else {
-                    self.handler_stack.last().and_then(|hf| {
-                        self.modules
-                            .get(hf.module_idx)
-                            .and_then(|m| m.handler_tables.get(hf.handler_table_idx))
-                            .and_then(|ht| ht.fallback_offset)
-                    })
-                };
-
-                if let Some(handler_stack_idx) = handler_idx {
-                    let cont = Continuation::capture(self, dst_reg).ok_or_else(|| {
-                        NuError::VMError("Cannot capture continuation: no current frame".into())
-                    })?;
-                    self.handler_stack[handler_stack_idx].captured_continuation = Some(cont);
-                } else if target_offset.is_some() {
-                    let hf_idx = self.handler_stack.len().saturating_sub(1);
-                    let cont = Continuation::capture(self, dst_reg).ok_or_else(|| {
-                        NuError::VMError(
-                            "Cannot capture continuation for fallback: no current frame".into(),
-                        )
-                    })?;
-                    self.handler_stack[hf_idx].captured_continuation = Some(cont);
-                } else {
-                    // No handler and no fallback: give the runtime callback a
-                    // chance to handle built-in effects (e.g. Timer.sleep in
-                    // workflow steps, IO.print in standalone scripts). Args
-                    // are in r0..rn; string-id args resolve against the
-                    // performing module's constant pool.
-                    let result = match self.modules.get(module_idx) {
-                        Some(module) => self.actor_callbacks.perform_builtin_effect_in_module(
-                            &effect_name,
-                            op_name.as_deref(),
-                            module,
-                            &self.frames[frame_idx].regs,
-                        ),
-                        None => self.actor_callbacks.perform_builtin_effect(
-                            &effect_name,
-                            op_name.as_deref(),
-                            &[],
-                            &self.frames[frame_idx].regs,
-                        ),
-                    };
-                    if let Some(result) = result {
-                        self.frames[frame_idx].regs[dst_reg as usize] = result;
-                    } else {
-                        return Err(NuError::EffectError {
-                            msg: format!("Unhandled effect: '{}'", qualified_name),
-                            span: Span::default(),
-                        });
-                    }
-                }
-
-                if let Some(offset) = target_offset {
-                    self.frames[frame_idx].pc = offset;
-                }
+                self.step_perform(instr, frame_idx, module_idx)?;
             }
             OpCode::Resume => {
                 let val = self.frames[frame_idx].regs[instr.op1 as usize];
@@ -3139,30 +3201,7 @@ impl VM {
             }
 
             OpCode::SConcat => {
-                let s1 = resolve_value_string(
-                    &self.modules[module_idx].constants,
-                    self.frames[frame_idx].regs[instr.op1 as usize],
-                );
-                let s2 = resolve_value_string(
-                    &self.modules[module_idx].constants,
-                    self.frames[frame_idx].regs[instr.op2 as usize],
-                );
-                let result = format!("{}{}", s1, s2);
-                let bytes = result.into_bytes();
-                // Allocate len+1 so the null terminator doesn't land in
-                // another allocation's header — the reader scans for \0.
-                self.frames[frame_idx].regs[instr.op3 as usize] = if let Some(ptr) = self
-                    .actor_callbacks
-                    .alloc(bytes.len() + 1, HeapTypeTag::String)
-                {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
-                        *ptr.add(bytes.len()) = 0;
-                    }
-                    Value::ptr(ptr)
-                } else {
-                    Value::nil()
-                };
+                self.step_sconcat(frame_idx, module_idx, instr)?;
             }
             OpCode::SPrint => {
                 print!(
@@ -3171,25 +3210,7 @@ impl VM {
                 );
             }
             OpCode::SRead => {
-                let mut input = String::new();
-                self.frames[frame_idx].regs[instr.op1 as usize] =
-                    if std::io::stdin().read_line(&mut input).is_ok() {
-                        let bytes = input.into_bytes();
-                        if let Some(ptr) = self
-                            .actor_callbacks
-                            .alloc(bytes.len() + 1, HeapTypeTag::String)
-                        {
-                            unsafe {
-                                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
-                                *ptr.add(bytes.len()) = 0;
-                            }
-                            Value::ptr(ptr)
-                        } else {
-                            Value::nil()
-                        }
-                    } else {
-                        Value::nil()
-                    };
+                self.step_sread(frame_idx, module_idx, instr)?;
             }
             OpCode::FOpen => {
                 self.frames[frame_idx].regs[instr.op2 as usize] = Value::nil();
@@ -3249,30 +3270,7 @@ impl VM {
 
             // -- LLM effect (v0.9 AI Runtime) --
             OpCode::LlmAsk => {
-                let model_idx = instr.imm16() as usize;
-                let prompt_reg = instr.op3 as usize;
-                let model = self.module_const_string(module_idx, model_idx);
-                let prompt_value = self.frames[frame_idx].regs[prompt_reg];
-                let prompt = self.value_to_string(module_idx, prompt_value);
-                match self.actor_callbacks.llm_ask(&model, &prompt) {
-                    LlmAskResult::Ready(result) => {
-                        let value = match result {
-                            Some(ref content) => {
-                                self.add_runtime_string(module_idx, content.clone())
-                            }
-                            None => Value::nil(),
-                        };
-                        self.frames[frame_idx].regs[prompt_reg] = value;
-                    }
-                    LlmAskResult::Pending => {
-                        // Leave the PC pointing at the LlmAsk instruction so
-                        // resumption re-executes it and writes the response
-                        // into the prompt register once the background call
-                        // completes (same pattern as SignalWait).
-                        self.frames[frame_idx].pc -= 1;
-                        return Err(NuError::Suspended(VmSuspension::LlmAsk));
-                    }
-                }
+                self.step_llm_ask(frame_idx, module_idx, instr)?;
             }
 
             // -- Pipeline (v0.9 AI Runtime) --
@@ -3387,13 +3385,7 @@ impl VM {
             // callback. If a message is available, stores its first argument;
             // otherwise stores nil.
             OpCode::Receive => {
-                let dst = instr.op1;
-                let value = self
-                    .actor_callbacks
-                    .try_receive()
-                    .map(|(_bid, v)| v)
-                    .unwrap_or(Value::nil());
-                self.frames[frame_idx].regs[dst as usize] = value;
+                self.step_receive(frame_idx, instr)?;
             }
 
             // -- Selective receive (arm dispatch) --
@@ -3405,27 +3397,7 @@ impl VM {
             // sentinel arm count and MIR-generated code falls through to the
             // legacy `Receive` fallback block.
             OpCode::ReceiveMatch => {
-                let const_idx = instr.imm16() as usize;
-                let dst = instr.op3 as usize;
-                let spec = self.module_const_string(module_idx, const_idx);
-                let (max_params, ids) = parse_receive_spec(&spec);
-                match self.actor_callbacks.try_receive_match(&ids) {
-                    Some((arm_idx, payload)) => {
-                        self.frames[frame_idx].regs[dst] = Value::int(arm_idx as i64);
-                        for i in 0..max_params {
-                            let r = dst + 1 + i;
-                            if r >= 256 {
-                                break;
-                            }
-                            self.frames[frame_idx].regs[r] =
-                                payload.get(i).copied().unwrap_or(Value::nil());
-                        }
-                    }
-                    None => {
-                        self.actor_callbacks.reset_receive_match();
-                        self.frames[frame_idx].regs[dst] = Value::int(ids.len() as i64);
-                    }
-                }
+                self.step_receive_match(frame_idx, module_idx, instr)?;
             }
 
             // -- Timed selective receive (receive-after) --
@@ -3438,38 +3410,7 @@ impl VM {
             // actor context, or an already-fired timeout). See the
             // ReceiveWait contract in bytecode.rs.
             OpCode::ReceiveWait => {
-                let const_idx = instr.imm16() as usize;
-                let dst = instr.op3 as usize;
-                let spec = self.module_const_string(module_idx, const_idx);
-                let (max_params, ids) = parse_receive_spec(&spec);
-                match self.actor_callbacks.try_receive_match(&ids) {
-                    Some((arm_idx, payload)) => {
-                        self.actor_callbacks.receive_wait_matched();
-                        self.frames[frame_idx].regs[dst] = Value::int(arm_idx as i64);
-                        for i in 0..max_params {
-                            let r = dst + 1 + i;
-                            if r >= 256 {
-                                break;
-                            }
-                            self.frames[frame_idx].regs[r] =
-                                payload.get(i).copied().unwrap_or(Value::nil());
-                        }
-                    }
-                    None => {
-                        let timeout_ms = self.frames[frame_idx].regs[0].as_int().unwrap_or(0);
-                        if self.actor_callbacks.receive_wait_suspend(timeout_ms) {
-                            // Leave the PC pointing at the ReceiveWait
-                            // instruction so resumption re-executes it and
-                            // either finds a matching message or observes
-                            // the fired timeout (same pattern as SignalWait).
-                            self.suspended_receive_timeout = Some(timeout_ms);
-                            self.frames[frame_idx].pc -= 1;
-                            return Err(NuError::Suspended(VmSuspension::ReceiveWait));
-                        }
-                        self.actor_callbacks.reset_receive_match();
-                        self.frames[frame_idx].regs[dst] = Value::int(ids.len() as i64);
-                    }
-                }
+                self.step_receive_wait(frame_idx, module_idx, instr)?;
             }
 
             // -- Commit a selective receive --
@@ -3478,7 +3419,7 @@ impl VM {
             // check succeeds, before binding pattern variables and entering
             // the arm body.
             OpCode::ReceiveCommit => {
-                self.actor_callbacks.commit_receive_match();
+                self.step_receive_commit();
             }
 
             // All other opcodes are not yet implemented in the interpreter.
