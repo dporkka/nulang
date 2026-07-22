@@ -120,11 +120,11 @@ impl WasmRuntime {
         })
     }
 
-    /// Execute the module's `nulang_init` function.
-    pub fn run(&mut self) -> NuResult<()> {
+    /// Execute the module's `nulang_init` function, returning the tagged result.
+    pub fn run(&mut self) -> NuResult<crate::vm::Value> {
         self.init_func
             .call(&mut self.store, ())
-            .map(|_val| ())
+            .map(|raw| crate::vm::Value::from_raw(raw as u64))
             .map_err(map_wasmtime_err)
     }
 }

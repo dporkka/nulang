@@ -569,3 +569,44 @@ pub enum TieredAction {
     /// (Unused while the SIMD path is gated off; kept for API stability.)
     CompiledSimdAndRan,
 }
+
+// ---------------------------------------------------------------------------
+// JitBackend trait impl — adapts the Cranelift JIT to the backend trait
+// ---------------------------------------------------------------------------
+
+impl crate::backends::JitBackend for JitSession {
+    fn compile_and_cache(
+        &mut self,
+        _module: &crate::bytecode::CodeModule,
+        start_pc: usize,
+        instrs: &[crate::bytecode::Instruction],
+    ) -> Option<crate::backends::CompiledRegion> {
+        // Find the compilable region length.
+        let region_len = find_compilable_region(start_pc, instrs);
+        if region_len == 0 {
+            return None;
+        }
+        // Use module_idx 0 — the trait is not yet wired to callers that
+        // track per-module indices. When callers update, the index will
+        // flow through the trait method signature.
+        let module_idx = 0usize;
+        // Safety: the JIT module is initialized and single-threaded.
+        let ptr = unsafe { self.compile_region(module_idx, start_pc, region_len, instrs)? };
+        Some(crate::backends::CompiledRegion {
+            fn_ptr: ptr as usize,
+            instr_count: region_len,
+        })
+    }
+
+    fn compiled_count(&self) -> usize {
+        self.compiled_count()
+    }
+
+    fn typed_compiled_count(&self) -> usize {
+        self.typed_compiled_count()
+    }
+
+    fn reset_hot_counters(&mut self) {
+        self.reset_hot_counters()
+    }
+}

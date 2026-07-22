@@ -54,13 +54,12 @@ impl<T: crate::runtime::PersistenceStore> StorageBackend for T {}
 /// The trait is intentionally minimal: the VM calls `compile_and_cache` when
 /// a PC's hot counter exceeds the threshold; the backend returns a function
 /// pointer the VM can call, or `None` if the region is not compilable.
-pub trait JitBackend: Send {
+pub trait JitBackend {
     /// Compile a bytecode region into a native function, if possible.
     ///
     /// `module` is the module containing the region. `instrs` is the
     /// instruction slice for the region (a contiguous run starting at
-    /// `start_pc`). `regs` is a snapshot of the register state at the
-    /// region entry.
+    /// `start_pc`).
     ///
     /// Returns a function pointer that the VM calls with
     /// `extern "C" fn(*mut u64 regs, *const u64 constants)`, or `None` if
@@ -72,6 +71,15 @@ pub trait JitBackend: Send {
         start_pc: usize,
         instrs: &[crate::bytecode::Instruction],
     ) -> Option<CompiledRegion>;
+
+    /// Number of bytecode regions compiled (scalar path).
+    fn compiled_count(&self) -> usize;
+
+    /// Number of bytecode regions compiled with type metadata (typed path).
+    fn typed_compiled_count(&self) -> usize;
+
+    /// Reset hot counters so re-executing a region re-triggers compilation.
+    fn reset_hot_counters(&mut self);
 }
 
 /// A compiled JIT region: a function pointer the VM can call.

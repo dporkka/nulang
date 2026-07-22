@@ -744,3 +744,19 @@ mod tests {
         assert_eq!(&wasm[0..4], b"\0asm");
     }
 }
+
+// ---------------------------------------------------------------------------
+// WasmBackend trait impl — adapts the WASM compiler to the backend trait
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "wasm-backend")]
+impl crate::backends::WasmBackend for WasmBackend {
+    fn compile(&mut self, module: &crate::mir::Module, name: &str) -> crate::types::NuResult<Vec<u8>> {
+        self.compile(module, name)
+    }
+
+    fn run(&mut self, wasm: &[u8]) -> crate::types::NuResult<crate::vm::Value> {
+        let mut runtime = crate::wasm_runtime::WasmRuntime::new(wasm, None)?;
+        runtime.run()
+    }
+}

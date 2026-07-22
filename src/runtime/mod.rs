@@ -5,7 +5,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 mod actor;
 mod gc;
@@ -36,6 +35,7 @@ mod workflow;
 mod exit;
 mod distribution;
 mod spawn;
+mod agent;
 
 
 
@@ -65,7 +65,6 @@ pub use timer::*;
 
 use crate::ai::{
     complete_sync, LlmClient, LlmError, LlmErrorKind, LlmMessage, LlmRequest, LlmResponse,
-    TokenBudget,
 };
 use crate::types::{ExitReason, VmSuspension};
 use crate::vm::Value;
@@ -377,14 +376,15 @@ impl Runtime {
         spawn::register_recovery_module(self, actor_id, module, offsets, compensation_offsets)
     }
 
+
     /// Install an LLM client for `perform LLM.ask(...)` calls.
     pub fn set_llm_client(&mut self, client: Box<dyn LlmClient>) {
-        self.llm.client = Some(Arc::from(client));
+        agent::set_llm_client(self, client)
     }
 
     /// Create a new empty pipeline and return its ID.
     pub fn pipeline_new(&mut self) -> u64 {
-        self.ai.create_pipeline()
+        agent::pipeline_new(self)
     }
     /// Add a stage to an existing pipeline. Returns the same pipeline ID on
     /// success so fluent construction can continue.
@@ -395,20 +395,14 @@ impl Runtime {
         agent_id: u64,
         template: &str,
     ) -> Result<u64, String> {
-        self.ai.add_pipeline_stage(id, name, agent_id, template)
+        agent::pipeline_stage(self, id, name, agent_id, template)
     }
     /// Run a pipeline, returning the output of the final stage.
     pub fn pipeline_run(&mut self, id: u64, input: &str) -> Result<String, String> {
-        let pipeline = self
-            .ai
-            .pipelines
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| format!("Pipeline {} not found", id))?;
-        pipeline.run(self, input)
+        agent::pipeline_run(self, id, input)
     }
     pub fn supervisor_new(&mut self) -> u64 {
-        self.supervisor_teams.create()
+        agent::supervisor_new(self)
     }
 
     pub fn supervisor_worker(
@@ -418,23 +412,16 @@ impl Runtime {
         agent_id: u64,
         description: &str,
     ) -> Result<u64, String> {
-        self.supervisor_teams
-            .add_worker(id, name, agent_id, description)
+        agent::supervisor_worker(self, id, name, agent_id, description)
     }
 
     pub fn supervisor_run(&mut self, id: u64, task: &str) -> Result<String, String> {
-        let team = self
-            .supervisor_teams
-            .teams
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| format!("Supervisor team {} not found", id))?;
-        team.run(self, task)
+        agent::supervisor_run(self, id, task)
     }
 
     /// Create a new debate and return its ID.
     pub fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> u64 {
-        self.ai.create_debate(topic, rounds, threshold)
+        agent::debate_new(self, topic, rounds, threshold)
     }
     /// Add a participant to an existing debate. Returns the same debate ID on
     /// success so fluent construction can continue.
@@ -445,17 +432,11 @@ impl Runtime {
         stance: &str,
         agent_id: u64,
     ) -> Result<u64, String> {
-        self.ai.add_debate_participant(id, name, stance, agent_id)
+        agent::debate_participant(self, id, name, stance, agent_id)
     }
     /// Run a debate and return the moderator's synthesis.
     pub fn debate_run(&mut self, id: u64) -> Result<String, String> {
-        let debate = self
-            .ai
-            .debates
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| format!("Debate {} not found", id))?;
-        debate.run(self)
+        agent::debate_run(self, id)
     }
 
     /// Convert a VM value to a Rust string using the actor's bytecode module
@@ -465,26 +446,7 @@ impl Runtime {
         value: &crate::vm::Value,
         module: Option<&crate::bytecode::CodeModule>,
     ) -> Option<String> {
-        if let Some(id) = value.as_string_id() {
-            module
-                .and_then(|m| m.constants.get(id as usize))
-                .and_then(|c| match c {
-                    crate::bytecode::Constant::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-        } else if let Some(ptr) = value.as_ptr() {
-            if ptr.is_null() {
-                Some(String::new())
-            } else {
-                Some(unsafe {
-                    std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char)
-                        .to_string_lossy()
-                        .into_owned()
-                })
-            }
-        } else {
-            None
-        }
+        agent::vm_value_to_string(value, module)
     }
 
     /// Execute an LLM request for an agent actor, reading the agent's model,
@@ -492,128 +454,7 @@ impl Runtime {
     /// updated with the user prompt and assistant response before being saved
     /// back to state.
     pub fn complete_agent_llm(&mut self, actor_id: u64, prompt: &str) -> Option<String> {
-        let prev_current_actor = self.current_actor;
-        self.current_actor = Some(actor_id);
-
-        let result = self.complete_agent_llm_inner(actor_id, prompt);
-
-        self.current_actor = prev_current_actor;
-        result
-    }
-
-    fn complete_agent_llm_inner(&mut self, actor_id: u64, prompt: &str) -> Option<String> {
-        let request = self.build_agent_llm_request(actor_id, prompt)?;
-        let module = self.actors.get(&actor_id)?.bytecode_module.clone()?;
-        let response = self
-            .complete_llm_with_tools(request, Vec::new(), &module)
-            .ok()?;
-        self.finish_agent_llm(actor_id, prompt, &response)
-    }
-
-    /// Build the LLM request for an agent actor from its durable state
-    /// (model, system prompt, episodic memory, pricing) without issuing any
-    /// network call. Pure read/build: safe to run before handing the request
-    /// to a background worker thread.
-    fn build_agent_llm_request(&self, actor_id: u64, prompt: &str) -> Option<LlmRequest> {
-        let (model, system_prompt, memory_json, pricing, module) = {
-            let actor = self.actors.get(&actor_id)?;
-            let module = actor.bytecode_module.clone()?;
-            let model = Self::vm_value_to_string(&actor.get_state_field("model")?, Some(&module))?;
-            let system_prompt =
-                Self::vm_value_to_string(&actor.get_state_field("system_prompt")?, Some(&module))?;
-            let memory_json = Self::vm_value_to_string(
-                &actor.get_state_field("episodic_memory")?,
-                Some(&module),
-            )?;
-            let pricing = crate::ai::ModelPricing {
-                input_cost_per_1k: actor.get_state_field("pricing_input")?.as_float()?,
-                output_cost_per_1k: actor.get_state_field("pricing_output")?.as_float()?,
-            };
-            (model, system_prompt, memory_json, pricing, module)
-        };
-
-        let memory: crate::ai::EpisodicMemory = serde_json::from_str(&memory_json)
-            .unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
-
-        let mut messages = Vec::new();
-        if !system_prompt.is_empty() {
-            messages.push(crate::ai::LlmMessage {
-                role: "system".to_string(),
-                content: system_prompt,
-            });
-        }
-        messages.extend(memory.to_messages());
-        messages.push(crate::ai::LlmMessage {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-        });
-
-        Some(LlmRequest {
-            model,
-            messages,
-            tools: module.tools.clone(),
-            memory: Vec::new(),
-            pricing: Some(pricing),
-            response_format: None,
-        })
-    }
-
-    /// Finish an agent LLM call on the scheduler thread: accumulate token
-    /// usage and cost, append the exchange to episodic memory, and write the
-    /// durable state back. Returns the response content. Episodic memory is
-    /// re-read fresh here (never reuse the build-time snapshot).
-    fn finish_agent_llm(
-        &mut self,
-        actor_id: u64,
-        prompt: &str,
-        response: &LlmResponse,
-    ) -> Option<String> {
-        let (pricing, usage_prompt, usage_completion, usage_cost, memory_json) = {
-            let actor = self.actors.get(&actor_id)?;
-            let module = actor.bytecode_module.clone()?;
-            let pricing = crate::ai::ModelPricing {
-                input_cost_per_1k: actor.get_state_field("pricing_input")?.as_float()?,
-                output_cost_per_1k: actor.get_state_field("pricing_output")?.as_float()?,
-            };
-            let usage_prompt = actor.get_state_field("usage_prompt")?.as_int()? as u32;
-            let usage_completion = actor.get_state_field("usage_completion")?.as_int()? as u32;
-            let usage_cost = actor.get_state_field("usage_cost")?.as_float()?;
-            let memory_json = Self::vm_value_to_string(
-                &actor.get_state_field("episodic_memory")?,
-                Some(&module),
-            )?;
-            (
-                pricing,
-                usage_prompt,
-                usage_completion,
-                usage_cost,
-                memory_json,
-            )
-        };
-        let content = response.content.clone().unwrap_or_default();
-
-        // Accumulate token usage and cost into durable state.
-        let new_cost = crate::ai::estimated_cost(&response.usage, &pricing);
-        let updated_prompt = usage_prompt.saturating_add(response.usage.prompt);
-        let updated_completion = usage_completion.saturating_add(response.usage.completion);
-        let updated_cost = usage_cost + new_cost;
-
-        let mut memory: crate::ai::EpisodicMemory = serde_json::from_str(&memory_json)
-            .unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
-        memory.add_turn("user", prompt);
-        memory.add_turn("assistant", &content);
-        let updated_memory = serde_json::to_string(&memory).ok()?;
-
-        let actor = self.actors.get_mut(&actor_id)?;
-        let ptr = actor.allocate_string(&updated_memory);
-        actor.set_state_field("episodic_memory", ptr);
-        actor.set_state_field("usage_prompt", crate::vm::Value::int(updated_prompt as i64));
-        actor.set_state_field(
-            "usage_completion",
-            crate::vm::Value::int(updated_completion as i64),
-        );
-        actor.set_state_field("usage_cost", crate::vm::Value::float(updated_cost));
-        Some(content)
+        agent::complete_agent_llm(self, actor_id, prompt)
     }
 
     /// Build a bare LLM request for a non-agent actor bytecode behavior,
@@ -626,18 +467,7 @@ impl Runtime {
         model: &str,
         prompt: &str,
     ) -> Option<LlmRequest> {
-        let module = self.actors.get(&actor_id)?.bytecode_module.clone()?;
-        Some(LlmRequest {
-            model: model.to_string(),
-            messages: vec![LlmMessage {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-            }],
-            tools: module.tools.clone(),
-            memory: Vec::new(),
-            pricing: None,
-            response_format: None,
-        })
+        agent::build_actor_llm_request(self, actor_id, model, prompt)
     }
 
     /// Read an actor's state field as a plain string, resolving string-id
@@ -645,14 +475,7 @@ impl Runtime {
     /// are read directly). Useful for tests and tooling that inspect actor
     /// state produced by bytecode behaviors.
     pub fn actor_state_string(&self, actor_id: u64, field: &str) -> Option<String> {
-        let actor = self.actors.get(&actor_id)?;
-        let value = actor.get_state_field(field)?;
-        if value.as_string_id().is_some() {
-            let vm = self.vm.as_ref()?;
-            let module_idx = actor.bytecode_module_idx?;
-            return Some(vm.value_to_string(module_idx, value));
-        }
-        Self::vm_value_to_string(&value, actor.bytecode_module.as_ref())
+        agent::actor_state_string(self, actor_id, field)
     }
 
     /// Set a token budget that caps total LLM token consumption.
@@ -662,12 +485,12 @@ impl Runtime {
     /// successful response based on the actual token count returned
     /// by the provider.
     pub fn set_token_budget(&mut self, limit: u64) {
-        self.llm.token_budget = Some(std::sync::Arc::new(TokenBudget::new(limit)));
+        agent::set_token_budget(self, limit)
     }
 
     /// Remove any configured token budget.
     pub fn clear_token_budget(&mut self) {
-        self.llm.token_budget = None;
+        agent::clear_token_budget(self)
     }
     /// Execute a chat-completion request using the configured LLM client.
     ///
@@ -1200,7 +1023,7 @@ impl Runtime {
             .map(|a| a.is_agent)
             .unwrap_or(false);
         let request = if is_agent {
-            self.build_agent_llm_request(actor_id, prompt)
+            agent::build_agent_llm_request(self, actor_id, prompt)
         } else {
             let model = self
                 .actors
@@ -5107,7 +4930,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                                 None => Ok(response),
                             };
                             match processed {
-                                Ok(resp) => rt.finish_agent_llm(actor_id, prompt, &resp),
+                                Ok(resp) => agent::finish_agent_llm(rt, actor_id, prompt, &resp),
                                 Err(_) => None,
                             }
                         } else {
@@ -5148,7 +4971,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 .map(|a| a.is_agent)
                 .unwrap_or(false);
             let request = if is_agent {
-                rt.build_agent_llm_request(actor_id, prompt)
+                agent::build_agent_llm_request(rt, actor_id, prompt)
             } else {
                 rt.build_actor_llm_request(actor_id, model, prompt)
             };
