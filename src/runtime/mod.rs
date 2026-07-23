@@ -4267,9 +4267,8 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let result = match rt.persistence.query(&sql, &params) {
                 Ok(rows) => {
                     let json = serde_json::to_string(&rows).unwrap_or_default();
-                    let bytes = json.into_bytes();
-                    if let Some(ref mut vm) = rt.vm {
-                        vm.add_runtime_string(0, String::from_utf8_lossy(&bytes).into_owned())
+                    if let Some(vm) = &mut rt.vm {
+                        vm.allocate_string(&json)
                     } else {
                         crate::vm::Value::nil()
                     }
@@ -4362,7 +4361,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 return Some(match result {
                     Ok(resp) => match resp.content {
                         Some(c) => match &mut rt.vm {
-                            Some(vm) => vm.add_runtime_string(0, c),
+                            Some(vm) => vm.allocate_string(&c),
                             None => crate::vm::Value::nil(),
                         },
                         None => crate::vm::Value::nil(),
@@ -4735,8 +4734,8 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 return match (*self.runtime).persistence.query(&sql, &params) {
                     Ok(rows) => {
                         let json = serde_json::to_string(&rows).unwrap_or_default();
-                        if let Some(ref mut vm) = (*self.runtime).vm {
-                            Some(vm.add_runtime_string(0, json))
+                        if let Some(vm) = &mut (*self.runtime).vm {
+                            Some(vm.allocate_string(&json))
                         } else {
                             Some(crate::vm::Value::nil())
                         }
@@ -4818,7 +4817,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     let rt = &mut *self.runtime;
                     return Some(match content {
                         Some(c) => match &mut rt.vm {
-                            Some(vm) => vm.add_runtime_string(0, c),
+                            Some(vm) => vm.allocate_string(&c),
                             None => crate::vm::Value::nil(),
                         },
                         None => crate::vm::Value::nil(),
