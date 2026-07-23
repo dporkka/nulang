@@ -1,0 +1,86 @@
+---
+---
+
+<svg viewBox="0 0 400 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Distributed actors communicating across nodes">
+  <rect class="dist-node" x="15" y="40" width="110" height="160" rx="8" />
+  <text x="70" y="58" class="dist-node-label">Node 1</text>
+  <rect class="dist-node" x="145" y="40" width="110" height="160" rx="8" />
+  <text x="200" y="58" class="dist-node-label">Node 2</text>
+  <rect class="dist-node" x="275" y="40" width="110" height="160" rx="8" />
+  <text x="330" y="58" class="dist-node-label">Node 3</text>
+
+  <circle class="dist-actor" cx="50" cy="110" r="8" />
+  <circle class="dist-actor" cx="90" cy="170" r="8" />
+  <circle class="dist-actor" cx="180" cy="110" r="8" />
+  <circle class="dist-actor" cx="220" cy="170" r="8" />
+  <circle class="dist-actor" cx="310" cy="110" r="8" />
+  <circle class="dist-actor" cx="350" cy="170" r="8" />
+
+  <path class="dist-msg-path" d="M 50 110 Q 115 80 180 110" />
+  <path class="dist-msg-path" d="M 90 170 Q 155 140 220 170" />
+  <path class="dist-msg-path" d="M 180 110 Q 245 80 310 110" />
+  <path class="dist-msg-path" d="M 220 170 Q 285 140 350 170" />
+  <path class="dist-msg-path" d="M 50 110 Q 200 50 350 170" />
+  <path class="dist-msg-path" d="M 310 110 Q 200 230 90 170" />
+</svg>
+
+<style is:global>
+  .dist-node { fill: var(--sl-color-bg-inline-code); stroke: var(--sl-color-hairline); stroke-width: 1; }
+  .dist-node-label { font-size: 11px; text-anchor: middle; fill: var(--sl-color-gray-2); font-weight: 600; }
+  .dist-actor { fill: var(--sl-color-accent); }
+  .dist-msg { fill: var(--sl-color-accent-high); }
+  .dist-msg-path { stroke: none; fill: none; }
+</style>
+
+<script>
+  function initDistributionDemo() {
+    const paths = document.querySelectorAll('.dist-msg-path');
+    if (paths.length === 0) return;
+
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion) return;
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+
+    function spawnMessage() {
+      const path = paths[Math.floor(Math.random() * paths.length)];
+      const svg = path.ownerSVGElement;
+      if (!svg) return;
+
+      const circle = document.createElementNS(svgNS, 'circle');
+      circle.setAttribute('r', '4');
+      circle.setAttribute('class', 'dist-msg');
+      svg.appendChild(circle);
+
+      const len = path.getTotalLength();
+      const duration = 1500;
+      const start = performance.now();
+
+      function animate(now: number) {
+        const elapsed = now - start;
+        const progress = Math.min(elapsed / duration, 1);
+        const point = path.getPointAtLength(len * progress);
+        circle.setAttribute('cx', String(point.x));
+        circle.setAttribute('cy', String(point.y));
+
+        circle.setAttribute('opacity', String(progress < 0.1 ? progress / 0.1 : progress > 0.9 ? (1 - progress) / 0.1 : 1));
+
+        if (progress < 1) {
+          requestAnimationFrame(animate);
+        } else {
+          circle.remove();
+        }
+      }
+
+      requestAnimationFrame(animate);
+    }
+
+    setInterval(spawnMessage, 800);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initDistributionDemo);
+  } else {
+    initDistributionDemo();
+  }
+</script>

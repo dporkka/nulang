@@ -130,12 +130,29 @@
 }
 
 .feature-card {
+  position: relative;
   padding: 1.5rem;
+  padding-top: 1.75rem;
   border-radius: 0.75rem;
   border: 1px solid var(--sl-color-hairline);
   background: var(--sl-color-bg-inline-code);
   transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
   animation: card-enter 0.5s ease-out both;
+  overflow: hidden;
+}
+.feature-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--sl-color-accent), var(--sl-color-accent-high), transparent);
+  opacity: 0.6;
+  transition: opacity 0.2s ease;
+}
+.feature-card:hover::before {
+  opacity: 1;
 }
 
 .feature-card:nth-child(1) { animation-delay: 0.05s; }
@@ -284,21 +301,71 @@
   }
 }
 
+/* ── Hero background canvas ── */
+.hero { position: relative; overflow: hidden; }
+.hero > *:not(.hero-bg-canvas) { position: relative; z-index: 1; }
+.hero-bg-canvas { position: absolute; inset: 0; z-index: 0; pointer-events: none; opacity: 0.7; }
+
+/* ── Benefit rows (2-column text + animation) ── */
+.benefit-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3rem;
+  align-items: center;
+  margin: 4rem 0;
+}
+.benefit-row-reverse .benefit-text { order: 2; }
+.benefit-row-reverse .benefit-demo { order: 1; }
+.benefit-demo {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.benefit-demo svg {
+  width: 100%;
+  max-width: 400px;
+  height: auto;
+}
+.benefit-text h3 {
+  color: var(--sl-color-accent-high);
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+.benefit-text p {
+  font-size: 1rem;
+  line-height: 1.7;
+  color: var(--sl-color-gray-2);
+}
+@media (max-width: 50rem) {
+  .benefit-row {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+  .benefit-row-reverse .benefit-text,
+  .benefit-row-reverse .benefit-demo { order: 0; }
+}
+
+/* ── Benefit callout (text-only benefit) ── */
+.benefit-callout {
+  margin: 4rem 0;
+  padding: 2rem;
+  border-radius: 0.75rem;
+  background: var(--sl-color-bg-inline-code);
+  border: 1px solid var(--sl-color-hairline);
+  border-left: 3px solid var(--sl-color-accent);
+}
+.benefit-callout h3 {
+  color: var(--sl-color-accent-high);
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
 /* ── Accessibility: respect reduced motion ── */
 @media (prefers-reduced-motion: reduce) {
-  .hero img,
-  .feature-card {
-    animation: none;
-  }
-  .hero h1 {
-    animation: none;
-  }
-  .hero .tagline,
-  .hero .actions {
-    animation: none;
-    opacity: 1;
-    transform: none;
-  }
+  .hero img, .feature-card, .hero h1 { animation: none; }
+  .hero .tagline, .hero .actions { animation: none; opacity: 1; transform: none; }
+  .hero-bg-canvas { display: none; }
+  .benefit-demo svg { opacity: 0.85; }
 }
 
 /* ── Section heading subtle underline ── */

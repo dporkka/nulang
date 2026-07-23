@@ -1,0 +1,124 @@
+---
+---
+
+<svg viewBox="0 0 400 180" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="AI agent pipeline with memory stages">
+  <path class="pipe-arrow" d="M 68 90 L 78 90" />
+  <path class="pipe-arrow" d="M 146 90 L 156 90" />
+  <path class="pipe-arrow" d="M 224 90 L 234 90" />
+  <path class="pipe-arrow" d="M 302 90 L 312 90" />
+
+  <rect class="pipe-stage" data-stage="0" x="10" y="65" width="58" height="50" rx="8" />
+  <text x="39" y="90" class="pipe-label">Input</text>
+
+  <rect class="pipe-stage" data-stage="1" x="88" y="65" width="58" height="50" rx="8" />
+  <text x="117" y="90" class="pipe-label">LLM</text>
+
+  <rect class="pipe-stage" data-stage="2" x="166" y="65" width="58" height="50" rx="8" />
+  <text x="195" y="90" class="pipe-label">Memory</text>
+
+  <rect class="pipe-stage" data-stage="3" x="244" y="65" width="58" height="50" rx="8" />
+  <text x="273" y="90" class="pipe-label">Debate</text>
+
+  <rect class="pipe-stage" data-stage="4" x="322" y="65" width="58" height="50" rx="8" />
+  <text x="351" y="90" class="pipe-label">Output</text>
+
+  <text x="195" y="130" class="pipe-sublabel" data-sub="0">episodic</text>
+  <text x="195" y="145" class="pipe-sublabel" data-sub="1">semantic</text>
+  <text x="195" y="160" class="pipe-sublabel" data-sub="2">procedural</text>
+</svg>
+
+<style is:global>
+  .pipe-stage { fill: var(--sl-color-bg-inline-code); stroke: var(--sl-color-hairline); stroke-width: 1; transition: stroke 0.2s, fill 0.2s, stroke-width 0.2s; }
+  .pipe-stage.active { stroke: var(--sl-color-accent); stroke-width: 2; fill: var(--sl-color-accent-low); }
+  .pipe-label { font-size: 11px; text-anchor: middle; dominant-baseline: central; fill: var(--sl-color-gray-2); pointer-events: none; }
+  .pipe-sublabel { font-size: 8px; text-anchor: middle; fill: var(--sl-color-gray-3); opacity: 0.6; transition: opacity 0.2s, fill 0.2s; pointer-events: none; }
+  .pipe-sublabel.active { opacity: 1; fill: var(--sl-color-accent); }
+  .pipe-arrow { stroke: var(--sl-color-gray-4); stroke-width: 1.5; fill: none; }
+  .pipe-particle { fill: var(--sl-color-accent-high); }
+</style>
+
+<script>
+  function initAIPipeline() {
+    const stages = document.querySelectorAll('.pipe-stage');
+    const sublabels = document.querySelectorAll('.pipe-sublabel');
+    if (stages.length === 0) return;
+
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion) return;
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const stageCenters = [
+      { x: 39, y: 90 },
+      { x: 117, y: 90 },
+      { x: 195, y: 90 },
+      { x: 273, y: 90 },
+      { x: 351, y: 90 },
+    ];
+
+    const svg = stages[0].ownerSVGElement;
+
+    function spawnParticle() {
+      if (!svg) return;
+      const circle = document.createElementNS(svgNS, 'circle');
+      circle.setAttribute('r', '5');
+      circle.setAttribute('class', 'pipe-particle');
+      circle.setAttribute('cx', String(stageCenters[0].x));
+      circle.setAttribute('cy', String(stageCenters[0].y));
+      svg.appendChild(circle);
+
+      const legDuration = 500;
+      const totalLegs = stageCenters.length - 1;
+      const startTime = performance.now();
+      let currentLeg = 0;
+      let legStart = startTime;
+
+      stages[0].classList.add('active');
+      setTimeout(() => stages[0].classList.remove('active'), 300);
+
+      function animate(now: number) {
+        const legElapsed = now - legStart;
+        const legProgress = Math.min(legElapsed / legDuration, 1);
+
+        if (currentLeg < totalLegs) {
+          const from = stageCenters[currentLeg];
+          const to = stageCenters[currentLeg + 1];
+          const x = from.x + (to.x - from.x) * legProgress;
+          const y = from.y + (to.y - from.y) * legProgress;
+          circle.setAttribute('cx', String(x));
+          circle.setAttribute('cy', String(y));
+
+          if (legProgress >= 1) {
+            currentLeg++;
+            legStart = now;
+            if (currentLeg < stageCenters.length) {
+              stages[currentLeg].classList.add('active');
+              setTimeout(() => stages[currentLeg].classList.remove('active'), 300);
+
+              if (currentLeg === 2) {
+                sublabels.forEach((sub, idx) => {
+                  setTimeout(() => {
+                    sub.classList.add('active');
+                    setTimeout(() => sub.classList.remove('active'), 200);
+                  }, idx * 100);
+                });
+              }
+            }
+          }
+          requestAnimationFrame(animate);
+        } else {
+          circle.remove();
+        }
+      }
+
+      requestAnimationFrame(animate);
+    }
+
+    setInterval(spawnParticle, 2500);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initAIPipeline);
+  } else {
+    initAIPipeline();
+  }
+</script>

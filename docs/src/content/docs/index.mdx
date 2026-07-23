@@ -21,29 +21,85 @@ hero:
       variant: minimal
 ---
 
+import HeroBackground from '../../components/animations/HeroBackground.astro';
+import SupervisionTree from '../../components/animations/SupervisionTree.astro';
+import DistributionDemo from '../../components/animations/DistributionDemo.astro';
+import AIPipeline from '../../components/animations/AIPipeline.astro';
+import GcDemo from '../../components/animations/GcDemo.astro';
+
+<HeroBackground />
+
 ## Why Nulang?
 
 Building reliable distributed systems today usually means stitching together actors, queues, databases, workflow engines, and observability tools. Nulang integrates those capabilities into the language itself so you can focus on your application logic instead of infrastructure plumbing.
+
+<div class="benefit-row">
+  <div class="benefit-text">
 
 ### Build software that heals
 
 Nulang's actor model and supervision trees mean failures are isolated and restarted automatically. A bad message or a crashing service doesn't take down the whole system.
 
+  </div>
+  <div class="benefit-demo">
+
+<SupervisionTree />
+
+  </div>
+</div>
+
+<div class="benefit-row benefit-row-reverse">
+  <div class="benefit-text">
+
 ### Distribute without rewriting
 
 Actors communicate through location-transparent messages. Move a service from one node to many, and the code stays the same.
+
+  </div>
+  <div class="benefit-demo">
+
+<DistributionDemo />
+
+  </div>
+</div>
+
+<div class="benefit-row">
+  <div class="benefit-text">
 
 ### Ship AI agents with memory
 
 Declare agents as language primitives with built-in LLM integrations, episodic/semantic/procedural memory, pipelines, debates, and supervisor teams.
 
+  </div>
+  <div class="benefit-demo">
+
+<AIPipeline />
+
+  </div>
+</div>
+
+<div class="benefit-callout">
+
 ### Survive restarts
 
 Workflows checkpoint durable state and use saga compensation to roll back safely when a step fails.
 
+</div>
+
+<div class="benefit-row benefit-row-reverse">
+  <div class="benefit-text">
+
 ### Stay safe and fast
 
 Reference capabilities and per-actor garbage collection give you memory safety without global stop-the-world pauses, while the JIT and native AOT backends keep hot paths fast.
+
+  </div>
+  <div class="benefit-demo">
+
+<GcDemo />
+
+  </div>
+</div>
 
 ## Open Source
 

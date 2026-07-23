@@ -1,0 +1,87 @@
+---
+---
+
+<svg viewBox="0 0 400 250" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Per-actor garbage collection without stop-the-world pauses">
+  <rect class="gc-heap" x="30" y="30" width="60" height="180" rx="4" />
+  <rect class="gc-heap" x="120" y="30" width="60" height="180" rx="4" />
+  <rect class="gc-heap" x="210" y="30" width="60" height="180" rx="4" />
+  <rect class="gc-heap" x="300" y="30" width="60" height="180" rx="4" />
+
+  <rect class="gc-fill" data-id="0" x="32" y="210" width="56" height="0" rx="2" />
+  <rect class="gc-fill" data-id="1" x="122" y="210" width="56" height="0" rx="2" />
+  <rect class="gc-fill" data-id="2" x="212" y="210" width="56" height="0" rx="2" />
+  <rect class="gc-fill" data-id="3" x="302" y="210" width="56" height="0" rx="2" />
+
+  <text x="60" y="230" class="gc-label">Actor 1</text>
+  <text x="150" y="230" class="gc-label">Actor 2</text>
+  <text x="240" y="230" class="gc-label">Actor 3</text>
+  <text x="330" y="230" class="gc-label">Actor 4</text>
+
+  <rect class="gc-badge" x="120" y="242" width="160" height="20" rx="8" />
+  <text x="200" y="252" class="gc-badge-text">✓ No stop-the-world pauses</text>
+</svg>
+
+<style is:global>
+  .gc-heap { fill: none; stroke: var(--sl-color-hairline); stroke-width: 1; }
+  .gc-fill { fill: var(--sl-color-accent); opacity: 0.6; transition: fill 0.3s, opacity 0.3s; }
+  .gc-fill.collecting { fill: #eab308; opacity: 1; }
+  .gc-label { font-size: 10px; text-anchor: middle; fill: var(--sl-color-gray-2); }
+  .gc-badge { fill: #22c55e22; stroke: #22c55e; stroke-width: 1; }
+  .gc-badge-text { font-size: 11px; text-anchor: middle; dominant-baseline: central; fill: #22c55e; font-weight: 600; }
+</style>
+
+<script>
+  function initGcDemo() {
+    const fills = document.querySelectorAll('.gc-fill');
+    if (fills.length === 0) return;
+
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    const heaps = Array.from(fills, (el) => ({
+      el,
+      fill: reducedMotion ? 0.3 + Math.random() * 0.3 : Math.random() * 0.2,
+      rate: 0.003 + Math.random() * 0.005,
+      collecting: false,
+    }));
+
+    const maxFill = 176;
+
+    function updateBar(heap: { el: Element; fill: number; rate: number; collecting: boolean }) {
+      const height = heap.fill * maxFill;
+      heap.el.setAttribute('height', String(height));
+      heap.el.setAttribute('y', String(210 - height));
+    }
+
+    if (reducedMotion) {
+      heaps.forEach(updateBar);
+      return;
+    }
+
+    function loop() {
+      for (const heap of heaps) {
+        if (!heap.collecting) {
+          heap.fill += heap.rate;
+          if (heap.fill > 0.85) {
+            heap.collecting = true;
+            heap.el.classList.add('collecting');
+            setTimeout(() => {
+              heap.fill = 0.15;
+              heap.el.classList.remove('collecting');
+              heap.collecting = false;
+            }, 400);
+          }
+        }
+        updateBar(heap);
+      }
+      requestAnimationFrame(loop);
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initGcDemo);
+  } else {
+    initGcDemo();
+  }
+</script>
