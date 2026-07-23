@@ -777,22 +777,38 @@ thread_local! {
 }
 
 /// Maps byte offsets to line:column positions for error reporting.
+///
+/// Retains the full source text so that error formatters can produce
+/// source-code excerpts without re-reading from disk.
 #[derive(Debug, Clone)]
 pub struct SourceMap {
     /// Byte offset of the start of each line.  line_starts[0] is always 0.
     line_starts: Vec<u32>,
+    /// The full source text (retained for source excerpts in error messages).
+    source: String,
+    /// Optional file path (e.g. "main.nula"); used in `--> file:line:col`.
+    file_path: Option<String>,
 }
 
 impl SourceMap {
     /// Build a source map from source text.  Line endings are `\n` only.
     pub fn new(source: &str) -> Self {
+        Self::with_file(source, None)
+    }
+
+    /// Build a source map with an optional file path for richer diagnostics.
+    pub fn with_file(source: &str, file_path: Option<&str>) -> Self {
         let mut line_starts = vec![0u32];
         for (i, &b) in source.as_bytes().iter().enumerate() {
             if b == b'\n' {
                 line_starts.push(i as u32 + 1);
             }
         }
-        SourceMap { line_starts }
+        SourceMap {
+            line_starts,
+            source: source.to_string(),
+            file_path: file_path.map(|s| s.to_string()),
+        }
     }
 
     /// Resolve a byte offset to (1-indexed line, 1-indexed column).
@@ -805,12 +821,52 @@ impl SourceMap {
         let col = offset.saturating_sub(self.line_starts[idx]) + 1;
         (line, col as usize)
     }
-}
 
+    /// Return the 1-indexed source line (without trailing newline), if in range.
+    pub fn source_line(&self, line: usize) -> Option<&str> {
+        if line == 0 || line > self.line_starts.len() {
+            return None;
+        }
+        let start = self.line_starts[line - 1] as usize;
+        let end = if line < self.line_starts.len() {
+            // End before the next line's start, skipping the `\n`.
+            (self.line_starts[line] as usize).saturating_sub(1)
+        } else {
+            self.source.len()
+        };
+        if start <= end && start <= self.source.len() {
+            Some(&self.source[start..end.min(self.source.len())])
+        } else {
+            None
+        }
+    }
+
+    /// Return a slice of source text from `offset` for `len` bytes.
+    pub fn source_slice(&self, offset: u32, len: u32) -> Option<&str> {
+        let start = offset as usize;
+        let end = (start + len as usize).min(self.source.len());
+        if start < self.source.len() {
+            Some(&self.source[start..end])
+        } else {
+            None
+        }
+    }
+
+    /// Return the optional file path stored in this map.
+    pub fn file_path(&self) -> Option<&str> {
+        self.file_path.as_deref()
+    }
+}
 /// Install a SourceMap for the current thread, consuming the source string
 /// to build line-start offsets.  Call before any Span display.
 pub fn set_source_map(source: &str) {
-    let sm = SourceMap::new(source);
+    set_source_map_with_file(source, None);
+}
+
+/// Install a SourceMap with an optional file path (e.g. "main.nula").
+/// Call before any Span display for richer diagnostics.
+pub fn set_source_map_with_file(source: &str, file: Option<&str>) {
+    let sm = SourceMap::with_file(source, file);
     SOURCE_MAP.with(|slot| {
         *slot.borrow_mut() = Some(sm);
     });
@@ -855,6 +911,25 @@ impl Span {
                 .as_ref()
                 .map(|sm| sm.line_col(self.start).1)
                 .unwrap_or(0)
+        })
+    }
+
+    /// The source line containing this span's start, if a SourceMap is set.
+    pub fn source_line(&self) -> Option<String> {
+        SOURCE_MAP.with(|slot| {
+            slot.borrow().as_ref().and_then(|sm| {
+                let (line, _) = sm.line_col(self.start);
+                sm.source_line(line).map(|s| s.to_string())
+            })
+        })
+    }
+
+    /// The file path stored in the SourceMap, if any.
+    pub fn file(&self) -> Option<String> {
+        SOURCE_MAP.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .and_then(|sm| sm.file_path().map(|s| s.to_string()))
         })
     }
 }
@@ -933,10 +1008,10 @@ impl std::fmt::Display for VmSuspension {
 impl std::fmt::Display for NuError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NuError::LexError { msg, span } => {
+            NuError::LexError { msg, span, .. } => {
                 write!(f, "Lex error at {}:{}: {}", span.line(), span.column(), msg)
             }
-            NuError::ParseError { msg, span } => {
+            NuError::ParseError { msg, span, .. } => {
                 write!(
                     f,
                     "Parse error at {}:{}: {}",
@@ -945,7 +1020,7 @@ impl std::fmt::Display for NuError {
                     msg
                 )
             }
-            NuError::TypeError { msg, span } => {
+            NuError::TypeError { msg, span, .. } => {
                 write!(
                     f,
                     "Type error at {}:{}: {}",
@@ -954,7 +1029,7 @@ impl std::fmt::Display for NuError {
                     msg
                 )
             }
-            NuError::EffectError { msg, span } => {
+            NuError::EffectError { msg, span, .. } => {
                 write!(
                     f,
                     "Effect error at {}:{}: {}",
@@ -963,7 +1038,7 @@ impl std::fmt::Display for NuError {
                     msg
                 )
             }
-            NuError::CapError { msg, span } => {
+            NuError::CapError { msg, span, .. } => {
                 write!(
                     f,
                     "Capability error at {}:{}: {}",
@@ -972,10 +1047,10 @@ impl std::fmt::Display for NuError {
                     msg
                 )
             }
-            NuError::FFIError { msg, span } => {
+            NuError::FFIError { msg, span, .. } => {
                 write!(f, "FFI error at {}:{}: {}", span.line(), span.column(), msg)
             }
-            NuError::NotYetImplemented { feature, span } => {
+            NuError::NotYetImplemented { feature, span, .. } => {
                 write!(
                     f,
                     "Not yet implemented at {}:{}: {}",
@@ -989,6 +1064,182 @@ impl std::fmt::Display for NuError {
             NuError::Suspended(kind) => write!(f, "VM suspended: {}", kind),
             NuError::PythonError(msg) => write!(f, "Python error: {}", msg),
             NuError::PackageError(msg) => write!(f, "Package error: {}", msg),
+        }
+    }
+}
+
+impl NuError {
+    /// Produce a colorized, multi-line error message with source excerpts and
+    /// carets. Uses ANSI escape codes; callers should gate on `is_terminal()`
+    /// if they support plain-text fallback.
+    pub fn format_rich(&self) -> String {
+        // ANSI helpers
+        const RED: &str = "\x1b[1;31m";
+        const CYAN: &str = "\x1b[36m";
+        const BLUE: &str = "\x1b[34m";
+        const BOLD: &str = "\x1b[1m";
+        const RESET: &str = "\x1b[0m";
+        const DIM: &str = "\x1b[2m";
+
+        let mut out = String::new();
+
+        /// Push a spanned error header + source excerpt + caret into `out`.
+        fn push_span_error(
+            out: &mut String,
+            kind: &str,
+            msg: &str,
+            span: &Span,
+            suggestion: Option<&str>,
+        ) {
+            let line = span.line();
+            let col = span.column();
+            let file = span.file().unwrap_or_default();
+
+            // Header
+            write_header(out, kind, line, col, &file);
+
+            // Source excerpt
+            if let Some(src_line) = span.source_line() {
+                // Ensure col is 1-indexed within the line
+                let col_idx = col.saturating_sub(1).min(src_line.len());
+                let span_len = (span.end.saturating_sub(span.start) as usize)
+                    .max(1)
+                    .min(src_line.len().saturating_sub(col_idx));
+
+                // Line number gutter
+                let line_label = format!("{line}");
+                out.push_str(&format!("{DIM}{line_label:>4} {BLUE}|{RESET} "));
+                // The source line up to the error
+                out.push_str(&src_line[..col_idx]);
+                // The error span
+                out.push_str(RED);
+                let end = (col_idx + span_len).min(src_line.len());
+                out.push_str(&src_line[col_idx..end]);
+                out.push_str(RESET);
+                // Rest of line
+                out.push_str(&src_line[end..]);
+                out.push('\n');
+
+                // Caret line
+                let padding = format!("{:>4} {BLUE}|{RESET} ", "");
+                out.push_str(&padding);
+                // Space up to the error column
+                for _ in 0..col_idx {
+                    out.push(' ');
+                }
+                out.push_str(RED);
+                for _ in 0..span_len {
+                    out.push('^');
+                }
+                out.push(' ');
+                out.push_str(msg);
+                out.push_str(RESET);
+                out.push('\n');
+            }
+
+            // Suggestion
+            if let Some(s) = suggestion {
+                out.push_str(&format!("{BLUE}help:{RESET} {s}\n"));
+            }
+        }
+
+        fn write_header(out: &mut String, kind: &str, line: usize, col: usize, file: &str) {
+            out.push_str(&format!("{RED}error{RESET}{BOLD}: {kind}{RESET}\n"));
+            if file.is_empty() {
+                out.push_str(&format!("  {BLUE}--> {RESET}{line}:{col}\n"));
+            } else {
+                out.push_str(&format!("  {BLUE}--> {RESET}{file}:{line}:{col}\n"));
+            }
+            out.push_str(&format!(" {DIM}{line:>4} {CYAN}|{RESET}\n"));
+        }
+
+        fn push_plain_error(out: &mut String, kind: &str, msg: &str) {
+            out.push_str(&format!(
+                "{RED}error{RESET}{BOLD}: {kind}{RESET}\n  {msg}\n  {DIM}(no source location available){RESET}\n"
+            ));
+        }
+
+        match self {
+            NuError::LexError { msg, span } => {
+                push_span_error(&mut out, "Lex error", msg, span, self.suggestion());
+            }
+            NuError::ParseError { msg, span } => {
+                push_span_error(&mut out, "Parse error", msg, span, self.suggestion());
+            }
+            NuError::TypeError { msg, span } => {
+                push_span_error(&mut out, "Type error", msg, span, self.suggestion());
+            }
+            NuError::EffectError { msg, span } => {
+                push_span_error(&mut out, "Effect error", msg, span, self.suggestion());
+            }
+            NuError::CapError { msg, span } => {
+                push_span_error(&mut out, "Capability error", msg, span, self.suggestion());
+            }
+            NuError::FFIError { msg, span } => {
+                push_span_error(&mut out, "FFI error", msg, span, self.suggestion());
+            }
+            NuError::NotYetImplemented { feature, span } => {
+                push_span_error(&mut out, "Not yet implemented", feature, span, self.suggestion());
+            }
+            NuError::RuntimeError(msg) => {
+                push_plain_error(&mut out, "Runtime error", msg);
+            }
+            NuError::VMError(msg) => {
+                push_plain_error(&mut out, "VM error", msg);
+            }
+            NuError::Suspended(kind) => {
+                out.push_str(&format!(
+                    "{BLUE}info{RESET}{BOLD}: VM suspended ({kind}){RESET}\n"
+                ));
+            }
+            NuError::PythonError(msg) => {
+                push_plain_error(&mut out, "Python error", msg);
+            }
+            NuError::PackageError(msg) => {
+                push_plain_error(&mut out, "Package error", msg);
+            }
+        }
+        out
+    }
+
+    /// Return a computed suggestion based on the error kind and message.
+    pub fn suggestion(&self) -> Option<&str> {
+        match self {
+            NuError::ParseError { msg, .. } => {
+                if msg.starts_with("Expected 'fn'") {
+                    Some("did you mean `fn`?")
+                } else if msg.contains("unclosed") || msg.starts_with("Expected '}'") {
+                    Some("unclosed delimiter?")
+                } else if msg.contains("Expected ')'") {
+                    Some("unclosed parenthesis?")
+                } else {
+                    None
+                }
+            }
+            NuError::TypeError { msg, .. } => {
+                if msg.contains("Cannot unify") && msg.contains("record") {
+                    Some("check that all required fields are present")
+                } else if msg.contains("Cannot unify") {
+                    Some("the expression's type does not match the expected type")
+                } else {
+                    None
+                }
+            }
+            NuError::EffectError { msg, .. } => {
+                if msg.contains("not a subset of allowed effects") {
+                    Some("add the missing effect to the enclosing function's effect annotation, or use a handler")
+                } else {
+                    None
+                }
+            }
+            NuError::CapError { msg, .. } => {
+                if msg.contains("cannot be sent") {
+                    Some("only `val` and `tag` capabilities are sendable between actors")
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 }

@@ -82,6 +82,7 @@ impl Parser {
 
     // === Entry Points ===
 
+    #[tracing::instrument(level = "debug", skip(self))]
     pub fn parse_module(&mut self) -> NuResult<AstModule> {
         let mut decls = Vec::new();
         self.skip_newlines();

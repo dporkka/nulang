@@ -15,7 +15,7 @@ use crate::types::{Capability, NuError, NuResult, Span, Type, TypeContext};
 use crate::vm::{Value, VM};
 use rustyline::error::ReadlineError;
 use rustyline::{history::DefaultHistory, Editor, Result as RlResult};
-
+use std::io::IsTerminal;
 /// REPL state that persists across evaluations.
 pub struct Repl {
     vm: VM,
@@ -38,83 +38,31 @@ impl ReplHelper {
     fn new() -> Self {
         ReplHelper {
             keywords: vec![
-                "fn",
-                "let",
-                "rec",
-                "in",
-                "if",
-                "then",
-                "else",
-                "match",
-                "with",
-                "actor",
-                "behavior",
-                "state",
-                "spawn",
-                "send",
-                "ask",
-                "receive",
-                "perform",
-                "handle",
-                "resume",
-                "effect",
-                "workflow",
-                "step",
-                "parallel",
-                "compensate",
-                "statemachine",
-                "event",
-                "on_entry",
-                "on_exit",
-                "persistent",
-                "local",
-                "durable",
-                "eventsourced",
-                "crdt",
-                "module",
-                "import",
-                "pub",
-                "type",
-                "alias",
-                "extern",
-                "iso",
-                "trn",
-                "ref",
-                "val",
-                "box",
-                "tag",
-                "lineariso",
-                "linear",
-                "true",
-                "false",
-                "nil",
-                "unit",
-                "for",
-                "loop",
-                "break",
-                "return",
-                "node",
-                "link",
-                "monitor",
-                "exit",
-                "agent",
-                "database",
-                "IO",
-                "Net",
-                "FS",
-                "Rand",
-                "Time",
-                "Spawn",
-                "Send",
-                "LLM",
-                ":help",
-                ":quit",
-                ":type",
-                ":ast",
-                ":bytecode",
-                ":clear",
-                ":reset",
-                ":version",
+                // Keywords
+                "fn", "let", "rec", "in", "if", "then", "else", "match", "with",
+                "actor", "behavior", "state", "spawn", "send", "ask", "receive",
+                "perform", "handle", "resume", "effect", "workflow", "step",
+                "parallel", "compensate", "statemachine", "event", "on_entry",
+                "on_exit", "persistent", "local", "durable", "eventsourced",
+                "crdt", "module", "import", "pub", "type", "alias", "extern",
+                "iso", "trn", "ref", "val", "box", "tag", "lineariso", "linear",
+                "true", "false", "nil", "unit", "for", "loop", "break", "return",
+                "node", "link", "monitor", "exit", "agent", "database",
+                // Types
+                "Int", "Float", "String", "Bool", "Unit", "Nil",
+                // Built-in effects
+                "IO.print", "IO.read", "IO.flush",
+                "Timer.sleep", "Timer.now",
+                "Signal.wait", "Signal.notify",
+                "LLM.ask", "LLM.complete",
+                "Net.connect", "Net.listen",
+                "Actor.spawn", "Actor.send", "Actor.link", "Actor.monitor",
+                "Actor.trap_exit", "Actor.exit", "Actor.register", "Actor.unregister",
+                "Actor.whereis", "Actor.set_priority", "Actor.stats",
+                "Workflow.query", "Workflow.respond",
+                // REPL commands
+                ":help", ":quit", ":type", ":ast", ":bytecode", ":clear",
+                ":reset", ":version", ":stats",
             ]
             .into_iter()
             .map(|s| s.to_string())
@@ -125,7 +73,111 @@ impl ReplHelper {
 
 impl rustyline::Helper for ReplHelper {}
 
-impl rustyline::highlight::Highlighter for ReplHelper {}
+impl rustyline::highlight::Highlighter for ReplHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
+        // Respect NO_COLOR
+        if std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty()) {
+            return std::borrow::Cow::Borrowed(line);
+        }
+
+        let mut lexer = crate::lexer::Lexer::new(line);
+        let tokens = match lexer.lex() {
+            Ok(ts) => ts,
+            Err(_) => return std::borrow::Cow::Borrowed(line),
+        };
+
+        let mut result = String::with_capacity(line.len() + 64);
+        let mut last_end = 0usize;
+
+        for token in &tokens {
+            let start = token.span.start as usize;
+            let end = token.span.end as usize;
+
+            // Copy unhighlighted text before this token
+            if start > last_end {
+                result.push_str(&line[last_end..start]);
+            }
+
+            let color = color_for_token(&token.kind);
+            let text = &line[start..end];
+            if color.is_empty() {
+                result.push_str(text);
+            } else {
+                result.push_str(color);
+                result.push_str(text);
+                result.push_str("\x1b[0m");
+            }
+            last_end = end;
+        }
+        // Copy remaining unhighlighted text
+        if last_end < line.len() {
+            result.push_str(&line[last_end..]);
+        }
+
+        std::borrow::Cow::Owned(result)
+    }
+
+    fn highlight_char(&self, line: &str, pos: usize, _kind: rustyline::highlight::CmdKind) -> bool {
+        // Bracket matching: indicate if char at pos has a matching partner
+        if pos >= line.len() {
+            return false;
+        }
+        let ch = line.as_bytes()[pos] as char;
+        if !matches!(ch, '(' | ')' | '{' | '}' | '[' | ']') {
+            return false;
+        }
+        // Check if brackets are balanced (the char at pos has a match)
+        let mut stack: Vec<char> = Vec::new();
+        for (_i, c) in line.char_indices() {
+            match c {
+                '(' | '{' | '[' => stack.push(c),
+                ')' | '}' | ']' => {
+                    if let Some(&open) = stack.last() {
+                        let expected = match open {
+                            '(' => ')',
+                            '{' => '}',
+                            '[' => ']',
+                            _ => unreachable!(),
+                        };
+                        if c == expected {
+                            stack.pop();
+                        } else {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        stack.is_empty()
+    }
+}
+
+/// Map a lexer token kind to an ANSI color string (empty for no color).
+fn color_for_token(kind: &crate::lexer::TokenKind) -> &'static str {
+    use crate::lexer::TokenKind::*;
+    match kind {
+        // Keywords — bright yellow
+        Fn | Let | Rec | In | If | Then | Else | Match | With | Case | Actor | Entity
+        | Behavior | State | StateMachine | SelfKw | Spawn | Send | Remote | Ask
+        | Persistent | Local | Durable | EventSourced | Crdt | Until | Emit
+        | Workflow | Step | Parallel | Compensate | Await | Subworkflow | Agent
+        | Database | Receive | Effect | Perform | Handle | Resume | Extern | Module
+        | Import | Pub | Priv | Where | Migrate | Node | Monitor | Link | Exit | For
+        | While | Loop | Break | Return | Type | Alias | Iso | Trn | Ref | Val | Box
+        | Tag | True | False | Unit | Tool | Initial | Throws | As => "\x1b[1;33m",
+        // String literals — green
+        StringLit(_) => "\x1b[32m",
+        // Numeric literals — magenta
+        IntLit(_) | FloatLit(_) => "\x1b[35m",
+        // Comments — dim
+        Comment(_) | DocComment(_) => "\x1b[2m",
+        // Delimiters and everything else — no color
+        _ => "",
+    }
+}
 
 impl rustyline::hint::Hinter for ReplHelper {
     type Hint = String;
@@ -260,6 +312,10 @@ impl Repl {
                     "version" | "ver" => {
                         println!("nulang v{}", env!("CARGO_PKG_VERSION"));
                     }
+                    "stats" => {
+                        println!("Runtime stats not available in REPL mode.");
+                        println!("(use a .nula file with actors and --verbose for runtime stats)");
+                    }
                     unknown => {
                         println!("Unknown command: :{}. Type :help for help.", unknown);
                     }
@@ -293,6 +349,7 @@ impl Repl {
 
     /// Evaluate a source string, showing value and type.
     fn evaluate(&mut self, source: &str) -> NuResult<()> {
+        crate::types::set_source_map_with_file(source, Some("<repl>"));
         // Parse
         let ast = parse_source(source)?;
         self.last_ast = Some(ast.clone());
@@ -463,11 +520,16 @@ impl Repl {
         println!("  :bytecode, :bc   Show bytecode for the last expression");
         println!("  :clear           Clear the screen");
         println!("  :reset           Reset the environment");
+        println!("  :stats           Show runtime stats (--verbose mode only)");
         println!("  :version, :ver   Print version and exit (repl keeps running)");
     }
 
     fn print_error(&self, err: &NuError) {
-        eprintln!("Error: {}", err);
+        if std::io::stderr().is_terminal() {
+            eprint!("{}", err.format_rich());
+        } else {
+            eprintln!("Error: {}", err);
+        }
     }
 
     /// Execute source code without running the interactive loop.

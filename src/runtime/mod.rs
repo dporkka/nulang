@@ -6,6 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use tracing::warn;
+
 mod actor;
 mod gc;
 pub mod heap;
@@ -1893,6 +1895,25 @@ impl Runtime {
             .unwrap_or(0)
     }
 
+    /// Number of living actors currently registered.
+    pub fn actor_count(&self) -> usize {
+        self.actors.len()
+    }
+
+    /// Snapshot of (actor_id, mailbox_depth) for each living actor.
+    pub fn mailbox_depths(&self) -> Vec<(u64, usize)> {
+        self.actors
+            .iter()
+            .map(|(id, actor)| (*id, actor.mailbox.len()))
+            .collect()
+    }
+
+    /// Total tasks dequeued by all scheduler workers (lifetime counter).
+    pub fn scheduler_processed_count(&self) -> usize {
+        self.scheduler.processed_count()
+    }
+
+    #[tracing::instrument(level = "trace", skip(self))]
     pub fn run_scheduler(&mut self) {
         // How often (in scheduler ticks) deferred local decrements are
         // retried while actors are still running.
@@ -2761,7 +2782,7 @@ impl Runtime {
     pub fn advance_time(&mut self, duration: std::time::Duration) {
         match &mut self.virtual_clock {
             Some(vc) => vc.advance(duration),
-            None => eprintln!("advance_time called without a virtual clock installed; ignoring"),
+            None => warn!("advance_time called without a virtual clock installed; ignoring"),
         }
     }
 

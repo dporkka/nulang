@@ -1417,6 +1417,7 @@ impl VM {
     /// Run the loaded program starting from the entry point of the last module.
     ///
     /// Returns the value in register 0 of the final frame, or unit if no frame.
+    #[tracing::instrument(level = "trace", skip(self))]
     pub fn run(&mut self) -> NuResult<Value> {
         let module_idx = self.modules.len().saturating_sub(1);
         let entry_point = self

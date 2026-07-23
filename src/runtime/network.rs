@@ -47,6 +47,8 @@ use super::MessagePriority;
 use super::NodeId;
 use crate::vm::Value;
 
+use tracing::warn;
+
 // ---------------------------------------------------------------------------
 // TransportAddr — network address for TCP or Unix domain sockets
 // ---------------------------------------------------------------------------
@@ -1170,7 +1172,7 @@ impl TcpTransport {
         // id is only meaningful paired with the packet's string table.
         // Drop the packet loudly instead of silently mangling it.
         if !packet_payload_wire_safe(&packet) {
-            eprintln!(
+            warn!(
                 "nulang-net: dropping packet to node {:?} (addr {}): payload value cannot cross the wire (heap pointer, nil, or string without content)",
                 to_node, to_addr
             );
@@ -1186,7 +1188,7 @@ impl TcpTransport {
         // thread has shut down and the packet cannot be delivered — log it
         // rather than dropping silently.
         if self.outgoing_tx.send(outgoing).is_err() {
-            eprintln!(
+            warn!(
                 "nulang-net: dropping packet to node {:?} (addr {}): sender thread shut down",
                 to_node, to_addr
             );
@@ -1492,11 +1494,10 @@ fn sender_thread(
                 outgoing.to_node,
                 outgoing.to_addr,
             ) {
-                eprintln!(
+                warn!(
                     "[nulang-net] Failed to connect to {:?} at {}: {}",
                     outgoing.to_node, outgoing.to_addr, e
                 );
-                continue;
             }
         }
 
@@ -1518,7 +1519,7 @@ fn sender_thread(
         };
 
         if let Err(e) = result {
-            eprintln!(
+            warn!(
                 "[nulang-net] Send to {:?} failed: {}; removing connection",
                 outgoing.to_node, e
             );

@@ -32,10 +32,23 @@ use nulang::stdlib::StdLib;
 use nulang::typechecker::TypeChecker;
 use nulang::types::{NuError, NuResult, Type};
 use nulang::vm::VM;
+use std::io::IsTerminal;
 use std::path::PathBuf;
-
+use tracing::instrument;
 #[tokio::main]
 async fn main() {
+    // Initialize structured tracing (RUST_LOG env var controls verbosity).
+    // Default level: warn (silent for normal runs). Users opt in with
+    // RUST_LOG=nulang=debug or RUST_LOG=info.
+    {
+        use tracing_subscriber::{fmt, EnvFilter};
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+        fmt().with_env_filter(env_filter)
+            .with_target(false)
+            .init();
+    }
+
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() <= 1 {
@@ -48,7 +61,7 @@ async fn main() {
     // `nulang nula <cmd>` dispatches to the package manager.
     if args[1] == "nula" {
         if let Err(e) = nulang::package::commands::run(&args[2..]) {
-            print_error(&e);
+            print_error(&e, true);
             std::process::exit(exit_code(&e));
         }
         return;
@@ -128,6 +141,23 @@ async fn main() {
                 }
             }
             "-v" | "--verbose" => opts.verbose = true,
+            "--color" => {
+                if i + 1 < args.len() {
+                    let val = args[i + 1].clone();
+                    if val != "auto" && val != "always" && val != "never" {
+                        eprintln!(
+                            "Error: --color must be 'auto', 'always', or 'never', got '{}'",
+                            val
+                        );
+                        std::process::exit(1);
+                    }
+                    opts.color = val;
+                    i += 1;
+                } else {
+                    eprintln!("Error: --color requires an argument (auto|always|never)");
+                    std::process::exit(1);
+                }
+            }
             "--emit-nbc" => opts.emit_nbc = true,
             "--verify" => {
                 if i + 1 < args.len() {
@@ -152,6 +182,9 @@ async fn main() {
         i += 1;
     }
 
+    // Resolve color mode once after all args are parsed.
+    let use_color = color_enabled(&opts);
+
     if opts.doc {
         let root = match std::env::current_dir() {
             Ok(dir) => dir,
@@ -163,7 +196,7 @@ async fn main() {
         match nulang::docgen::write_project_docs(&root) {
             Ok(path) => println!("Wrote {}", path.display()),
             Err(e) => {
-                print_error(&e);
+                print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
             }
         }
@@ -199,7 +232,6 @@ async fn main() {
         repl.run();
         return;
     }
-
     if let Some(code) = opts.eval_code {
         if opts.emit_nbc {
             let out = opts
@@ -207,13 +239,13 @@ async fn main() {
                 .clone()
                 .unwrap_or_else(|| "out.nbc".to_string());
             if let Err(e) = compile_source_to_nbc(&code, &out) {
-                print_error(&e);
+                print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
             }
             return;
         }
-        if let Err(e) = run_source(&code, opts.verbose, &opts.backend, opts.out_file.as_deref()) {
-            print_error(&e);
+        if let Err(e) = run_source(&code, None, opts.verbose, &opts.backend, opts.out_file.as_deref()) {
+            print_error(&e, use_color);
             std::process::exit(exit_code(&e));
         }
         return;
@@ -227,8 +259,8 @@ async fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) = check_source(&source, opts.verbose) {
-            print_error(&e);
+        if let Err(e) = check_source(&source, Some(&path), opts.verbose) {
+            print_error(&e, use_color);
             std::process::exit(exit_code(&e));
         }
         println!("Type check passed.");
@@ -244,7 +276,7 @@ async fn main() {
         // in 2026 runs on any conforming runtime in 2126.
         if path.ends_with(".nbc") {
             if let Err(e) = run_nbc_file(path, opts.verify_source.as_deref()) {
-                print_error(&e);
+                print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
             }
             return;
@@ -269,7 +301,7 @@ async fn main() {
                 }
             });
             if let Err(e) = compile_source_to_nbc(&source, &out) {
-                print_error(&e);
+                print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
             }
             return;
@@ -277,11 +309,12 @@ async fn main() {
 
         if let Err(e) = run_source(
             &source,
+            Some(path),
             opts.verbose,
             &opts.backend,
             opts.out_file.as_deref(),
         ) {
-            print_error(&e);
+            print_error(&e, use_color);
             std::process::exit(exit_code(&e));
         }
         return;
@@ -308,6 +341,8 @@ struct Options {
     verify_source: Option<String>,
     /// Output directory for --emit-stdlib-docs.
     emit_stdlib_docs: Option<String>,
+    /// Color mode: "auto" (default), "always", or "never".
+    color: String,
 }
 
 impl Default for Options {
@@ -324,6 +359,7 @@ impl Default for Options {
             emit_nbc: false,
             verify_source: None,
             emit_stdlib_docs: None,
+            color: "auto".to_string(),
         }
     }
 }
@@ -361,6 +397,7 @@ fn print_help() {
     println!("  nula <cmd>       Package manager (new, build, test, run)");
     println!("  --version, -V    Print version and exit");
     println!("  -v, --verbose    Show bytecode and AST");
+    println!("  --color auto|always|never  Colorize error output (default: auto)");
     println!("  -h, --help       Show this help message");
 }
 
@@ -433,8 +470,21 @@ fn emit_stdlib_docs(dir: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn print_error(err: &NuError) {
-    eprintln!("Error: {}", err);
+fn print_error(err: &NuError, use_color: bool) {
+    if use_color {
+        eprint!("{}", err.format_rich());
+    } else {
+        eprintln!("Error: {}", err);
+    }
+}
+
+/// Resolve the `--color` flag against `is_terminal`.
+fn color_enabled(opts: &Options) -> bool {
+    match opts.color.as_str() {
+        "always" => true,
+        "never" => false,
+        _ => std::io::stderr().is_terminal(),
+    }
 }
 
 /// Map each error kind to a distinct exit code so tooling can
@@ -458,9 +508,12 @@ fn exit_code(err: &NuError) -> i32 {
 
 /// Shared frontend: lex -> parse -> typecheck -> effect check -> capability
 /// analysis. Returns the parsed module ready for compilation.
-fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule> {
-    // 1. Lex
+///
+/// `file_path` is an optional display name for diagnostics (e.g. "main.nula").
+#[instrument(level = "debug", skip(source))]
+fn run_frontend(source: &str, file_path: Option<&str>, verbose: bool) -> NuResult<nulang::ast::AstModule> {
     let mut lexer = Lexer::new(source);
+    nulang::types::set_source_map_with_file(source, file_path);
     let tokens = lexer.lex()?;
 
     // 2. Parse
@@ -552,8 +605,8 @@ fn run_frontend(source: &str, verbose: bool) -> NuResult<nulang::ast::AstModule>
 }
 
 #[allow(unused_variables)]
-fn run_source(source: &str, verbose: bool, backend: &str, out_file: Option<&str>) -> NuResult<()> {
-    let ast = run_frontend(source, verbose)?;
+fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &str, out_file: Option<&str>) -> NuResult<()> {
+    let ast = run_frontend(source, file_path, verbose)?;
 
     match backend {
         #[cfg(feature = "wasm-backend")]
@@ -656,7 +709,32 @@ fn run_source(source: &str, verbose: bool, backend: &str, out_file: Option<&str>
                 )
             });
             let value = if has_actors {
-                let (value, _runtime) = run_with_runtime(m)?;
+                let (value, runtime) = run_with_runtime(m)?;
+                if verbose {
+                    let rt = runtime.borrow();
+                    let s = rt.scheduler_stats();
+                    let g = rt.gc_stats();
+                    eprintln!(
+                        "[runtime] scheduler: {} total tasks ({} local, {} global, {} stolen, {} empty)",
+                        s.total_tasks_processed,
+                        s.tasks_from_local_queue,
+                        s.tasks_from_global_queue,
+                        s.tasks_from_steal,
+                        s.empty_polls
+                    );
+                    eprintln!(
+                        "[runtime] gc: {} allocs, {} frees, {} bytes alloc, {} freed, {} cycles detected",
+                        g.objects_allocated,
+                        g.objects_freed,
+                        g.bytes_allocated,
+                        g.bytes_freed,
+                        g.cycles_detected
+                    );
+                    eprintln!(
+                        "[runtime] actors: {} live",
+                        rt.actor_count()
+                    );
+                }
                 value
             } else {
                 let mut vm = VM::new();
@@ -707,8 +785,8 @@ fn run_with_runtime(
     Ok((value, runtime))
 }
 
-fn check_source(source: &str, verbose: bool) -> NuResult<()> {
-    run_frontend(source, verbose)?;
+fn check_source(source: &str, file_path: Option<&str>, verbose: bool) -> NuResult<()> {
+    run_frontend(source, file_path, verbose)?;
 
     if verbose {
         println!("Effect check passed.");
@@ -737,7 +815,7 @@ fn compile_with_new_pipeline(
 /// `--verify` run can confirm the artifact came from this exact source
 /// (supply-chain integrity). Does not execute the module.
 fn compile_source_to_nbc(source: &str, out_path: &str) -> NuResult<()> {
-    let ast = run_frontend(source, false)?;
+    let ast = run_frontend(source, None, false)?;
     let m = compile_with_new_pipeline(&ast, "main")?;
     let source_hash = blake3::hash(source.as_bytes());
     let bytes = m
@@ -928,7 +1006,7 @@ mod tests {
                 c
             }
         "#;
-        let ast = run_frontend(source, false).expect("frontend should accept the actor program");
+        let ast = run_frontend(source, None, false).expect("frontend should accept the actor program");
         let module = compile_with_new_pipeline(&ast, "test").expect("actor program should compile");
         let (_value, runtime) = run_with_runtime(module).expect("actor program should run");
         let rt = runtime.borrow();

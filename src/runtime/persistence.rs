@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use crate::vm::Value;
 
+use tracing::warn;
+
 /// How a state field is persisted / replicated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StateModel {
@@ -488,7 +490,7 @@ impl PersistenceStore for JsonFileStore {
                 // A present-but-unparseable snapshot means corruption (e.g. an
                 // older non-atomic write); log it instead of silently resetting
                 // the actor's durable state on recovery.
-                eprintln!(
+                warn!(
                     "nulang-persist: failed to parse snapshot for actor {} at {}: {}",
                     actor_id,
                     path.display(),

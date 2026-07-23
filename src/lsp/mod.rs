@@ -62,6 +62,7 @@ pub struct NulangLanguageServer {
 struct DocumentState {
     version: i32,
     source: String,
+    type_map: Option<HashMap<usize, String>>,
 }
 
 impl NulangLanguageServer {
@@ -173,18 +174,20 @@ impl LanguageServer for NulangLanguageServer {
         let version = params.text_document.version;
         let source = params.text_document.text.clone();
 
+        let (diagnostics, type_map) = Self::compute_diagnostics(&source);
+
         {
             let mut docs = self.documents.lock().unwrap();
             docs.insert(
-                params.text_document.uri,
+                uri.clone(),
                 DocumentState {
                     version,
                     source: source.clone(),
+                    type_map: Some(type_map),
                 },
             );
         }
 
-        let diagnostics = Self::compute_diagnostics(&source);
         self.client
             .publish_diagnostics(uri, diagnostics, Some(version))
             .await;
@@ -200,15 +203,17 @@ impl LanguageServer for NulangLanguageServer {
             .map(|c| c.text)
             .unwrap_or_default();
 
+        let (diagnostics, type_map) = Self::compute_diagnostics(&source);
+
         {
             let mut docs = self.documents.lock().unwrap();
             if let Some(doc) = docs.get_mut(&uri) {
                 doc.version = version;
                 doc.source = source.clone();
+                doc.type_map = Some(type_map);
             }
         }
 
-        let diagnostics = Self::compute_diagnostics(&source);
         self.client
             .publish_diagnostics(uri, diagnostics, Some(version))
             .await;
@@ -238,8 +243,6 @@ impl LanguageServer for NulangLanguageServer {
             Some(doc) => doc.source.clone(),
             None => return Ok(None),
         };
-        drop(docs);
-
         let engine = CompletionEngine::new(&source);
         let items = engine.complete(params.text_document_position.position);
         Ok(Some(CompletionResponse::Array(items)))
@@ -247,11 +250,33 @@ impl LanguageServer for NulangLanguageServer {
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let docs = self.documents.lock().unwrap();
-        let source = match docs.get(&params.text_document_position_params.text_document.uri) {
-            Some(doc) => doc.source.clone(),
+        let doc = match docs.get(&params.text_document_position_params.text_document.uri) {
+            Some(d) => d,
             None => return Ok(None),
         };
+        let source = doc.source.clone();
+        let type_map = doc.type_map.clone();
         drop(docs);
+
+        // Check type_map first for inferred/explicit types
+        if let Some(ref map) = type_map {
+            if let Some(offset) =
+                Self::position_to_byte_offset(&source, &params.text_document_position_params.position)
+            {
+                if let Some(type_str) = Self::find_type_at_offset(map, offset) {
+                    return Ok(Some(Hover {
+                        contents: HoverContents::Scalar(MarkedString::LanguageString(
+                            LanguageString {
+                                language: "nulang".to_string(),
+                                value: type_str.clone(),
+                            },
+                        )),
+                        range: None,
+                    }));
+                }
+            }
+        }
+
         Ok(self.hover_at(&source, params.text_document_position_params.position))
     }
 
@@ -1182,8 +1207,7 @@ impl NulangLanguageServer {
             Some(actions)
         }
     }
-
-    fn compute_diagnostics(source: &str) -> Vec<Diagnostic> {
+    fn compute_diagnostics(source: &str) -> (Vec<Diagnostic>, HashMap<usize, String>) {
         let mut diagnostics = Vec::new();
 
         // Lex
@@ -1191,7 +1215,7 @@ impl NulangLanguageServer {
             Ok(t) => t,
             Err(e) => {
                 diagnostics.push(nu_error_to_diagnostic(e));
-                return diagnostics;
+                return (diagnostics, HashMap::new());
             }
         };
 
@@ -1200,14 +1224,14 @@ impl NulangLanguageServer {
             Ok(a) => a,
             Err(e) => {
                 diagnostics.push(nu_error_to_diagnostic(e));
-                return diagnostics;
+                return (diagnostics, HashMap::new());
             }
         };
 
         // Type check
         if let Err(e) = TypeChecker::new().check_module(&ast) {
             diagnostics.push(nu_error_to_diagnostic(e));
-            return diagnostics;
+            return (diagnostics, HashMap::new());
         }
 
         // Effect check: same two-pass driver as the CLI frontend
@@ -1259,7 +1283,305 @@ impl NulangLanguageServer {
             });
         }
 
-        diagnostics
+        let type_map = Self::extract_type_map(source, &ast);
+        (diagnostics, type_map)
+    }
+
+    /// Walk the AST and extract type information for `let` bindings.
+    fn extract_type_map(
+        source: &str,
+        ast: &crate::ast::AstModule,
+    ) -> HashMap<usize, String> {
+        let mut map = HashMap::new();
+        for decl in crate::effect_checker::flatten_decls(&ast.decls) {
+            Self::extract_decl_types(decl, source, &mut map);
+        }
+        map
+    }
+
+    fn extract_decl_types(
+        decl: &crate::ast::Decl,
+        source: &str,
+        map: &mut HashMap<usize, String>,
+    ) {
+        use crate::ast::Decl;
+        match decl {
+            Decl::Function { body, .. } => {
+                Self::extract_expr_types(body, source, map);
+            }
+            Decl::Actor {
+                behaviors,
+                init,
+                initializer,
+                ..
+            } => {
+                for b in behaviors {
+                    Self::extract_expr_types(&b.body, source, map);
+                }
+                for (_, e) in init {
+                    Self::extract_expr_types(e, source, map);
+                }
+                if let Some((_, _, body)) = initializer {
+                    Self::extract_expr_types(body, source, map);
+                }
+            }
+            Decl::StateMachine {
+                entry_hooks,
+                exit_hooks,
+                ..
+            } => {
+                for (_, body) in entry_hooks {
+                    Self::extract_expr_types(body, source, map);
+                }
+                for (_, body) in exit_hooks {
+                    Self::extract_expr_types(body, source, map);
+                }
+            }
+            Decl::Workflow { items, compensate, .. } => {
+                for item in items {
+                    match item {
+                        crate::ast::WorkflowItem::Step(s) => {
+                            Self::extract_expr_types(&s.body, source, map);
+                            if let Some(ref c) = s.compensate {
+                                Self::extract_expr_types(c, source, map);
+                            }
+                        }
+                        crate::ast::WorkflowItem::Parallel(steps) => {
+                            for s in steps {
+                                Self::extract_expr_types(&s.body, source, map);
+                                if let Some(ref c) = s.compensate {
+                                    Self::extract_expr_types(c, source, map);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(ref c) = compensate {
+                    Self::extract_expr_types(c, source, map);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn extract_expr_types(
+        expr: &crate::ast::Expr,
+        source: &str,
+        map: &mut HashMap<usize, String>,
+    ) {
+        use crate::ast::Expr;
+        match expr {
+            Expr::Let {
+                name,
+                ty,
+                value,
+                body,
+                span,
+            } => {
+                if let Some(ref t) = ty {
+                    if let Some(pos) = Self::find_ident_position(source, span.start as usize, name)
+                    {
+                        map.insert(pos, t.to_string());
+                    }
+                }
+                Self::extract_expr_types(value, source, map);
+                Self::extract_expr_types(body, source, map);
+            }
+            Expr::LetRec { value, body, .. } => {
+                Self::extract_expr_types(value, source, map);
+                Self::extract_expr_types(body, source, map);
+            }
+            Expr::Block { exprs, .. } => {
+                for e in exprs {
+                    Self::extract_expr_types(e, source, map);
+                }
+            }
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::extract_expr_types(cond, source, map);
+                Self::extract_expr_types(then_branch, source, map);
+                if let Some(e) = else_branch {
+                    Self::extract_expr_types(e, source, map);
+                }
+            }
+            Expr::Match { scrutinee, arms, .. } => {
+                Self::extract_expr_types(scrutinee, source, map);
+                for (_, guard, body) in arms {
+                    if let Some(g) = guard {
+                        Self::extract_expr_types(&g, source, map);
+                    }
+                    Self::extract_expr_types(body, source, map);
+                }
+            }
+            Expr::Lambda { body, .. } => {
+                Self::extract_expr_types(body, source, map);
+            }
+            Expr::App { func, args, .. } => {
+                Self::extract_expr_types(func, source, map);
+                for a in args {
+                    Self::extract_expr_types(a, source, map);
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::extract_expr_types(left, source, map);
+                Self::extract_expr_types(right, source, map);
+            }
+            Expr::Unary { expr, .. } => {
+                Self::extract_expr_types(expr, source, map);
+            }
+            Expr::Tuple(exprs, _)
+            | Expr::Array(exprs, _) => {
+                for e in exprs {
+                    Self::extract_expr_types(e, source, map);
+                }
+            }
+            Expr::Record(fields, _) => {
+                for (_, e) in fields {
+                    Self::extract_expr_types(e, source, map);
+                }
+            }
+            Expr::FieldAccess { expr, .. } => {
+                Self::extract_expr_types(expr, source, map);
+            }
+            Expr::Index { arr, idx, .. } => {
+                Self::extract_expr_types(arr, source, map);
+                Self::extract_expr_types(idx, source, map);
+            }
+            Expr::Assign { target, value, .. } => {
+                Self::extract_expr_types(target, source, map);
+                Self::extract_expr_types(value, source, map);
+            }
+            Expr::Spawn {
+                actor_type,
+                init,
+                positional_args,
+                ..
+            } => {
+                Self::extract_expr_types(actor_type, source, map);
+                for (_, e) in init {
+                    Self::extract_expr_types(e, source, map);
+                }
+                if let Some(ref args) = positional_args {
+                    for a in args {
+                        Self::extract_expr_types(a, source, map);
+                    }
+                }
+            }
+            Expr::Send { actor, args, .. }
+            | Expr::Ask { actor, args, .. } => {
+                Self::extract_expr_types(actor, source, map);
+                for a in args {
+                    Self::extract_expr_types(a, source, map);
+                }
+            }
+            Expr::Receive { arms, after, .. } => {
+                for (_, _, _, body) in arms {
+                    Self::extract_expr_types(body, source, map);
+                }
+                if let Some((ref timeout, ref body)) = after {
+                    Self::extract_expr_types(timeout, source, map);
+                    Self::extract_expr_types(body, source, map);
+                }
+            }
+            Expr::Emit { args, .. }
+            | Expr::Perform { args, .. } => {
+                for a in args {
+                    Self::extract_expr_types(a, source, map);
+                }
+            }
+            Expr::Handle { body, handlers, .. } => {
+                Self::extract_expr_types(body, source, map);
+                for h in handlers {
+                    Self::extract_expr_types(&h.body, source, map);
+                }
+            }
+            Expr::Migrate { actor, node, .. } => {
+                Self::extract_expr_types(actor, source, map);
+                Self::extract_expr_types(node, source, map);
+            }
+            Expr::CapAnnotate { expr, .. }
+            | Expr::TypeAnnotate { expr, .. } => {
+                Self::extract_expr_types(expr, source, map);
+            }
+            Expr::For {
+                iterable, body, ..
+            }
+            | Expr::While {
+                cond: iterable,
+                body,
+                ..
+            } => {
+                Self::extract_expr_types(iterable, source, map);
+                Self::extract_expr_types(body, source, map);
+            }
+            Expr::Return(opt_expr, _)
+            | Expr::Break(opt_expr, _) => {
+                if let Some(ref e) = opt_expr {
+                    Self::extract_expr_types(e, source, map);
+                }
+            }
+            Expr::Pipe { left, right, .. } => {
+                Self::extract_expr_types(left, source, map);
+                Self::extract_expr_types(right, source, map);
+            }
+            // Leaf nodes: no sub-expressions to walk
+            Expr::Literal(..)
+            | Expr::Var(..)
+            | Expr::SelfRef(..) => {}
+        }
+    }
+    /// Find the byte offset of an identifier within the source, searching
+    /// backwards from `near_offset`. Used to locate the position of a
+    /// `let`-bound variable name (which appears before the `:` or `=` token
+    /// whose span marks `near_offset`).
+    fn find_ident_position(source: &str, near_offset: usize, name: &str) -> Option<usize> {
+        let search_start = near_offset.saturating_sub(50);
+        let search_end = source.len().min(near_offset + name.len());
+        let search_region = &source[search_start..search_end];
+        // Find the name in the search region, ensuring it's a whole identifier.
+        // Collect into a Vec so we can pick the last (nearest to near_offset).
+        let matches: Vec<usize> = search_region
+            .match_indices(name)
+            .filter(|&(pos, _)| {
+                let abs_pos = search_start + pos;
+                let before = if abs_pos > 0 {
+                    source.as_bytes().get(abs_pos - 1).map_or(false, |&b| {
+                        !b.is_ascii_alphanumeric() && b != b'_'
+                    })
+                } else {
+                    true
+                };
+                let after = source
+                    .as_bytes()
+                    .get(abs_pos + name.len())
+                    .map_or(true, |&b| !b.is_ascii_alphanumeric() && b != b'_');
+                before && after
+            })
+            .map(|(pos, _)| search_start + pos)
+            .collect();
+        matches.into_iter().next_back()
+    }
+
+    /// Convert an LSP Position to a byte offset within the source.
+    fn position_to_byte_offset(source: &str, position: &Position) -> Option<usize> {
+        let line = position.line as usize;
+        let lines: Vec<&str> = source.lines().collect();
+        let target_line = lines.get(line)?;
+        let col_byte = utf16_col_to_byte(target_line, position.character as usize);
+        let prev_bytes: usize = lines.iter().take(line).map(|l| l.len() + 1).sum();
+        Some(prev_bytes + col_byte)
+    }
+
+    /// Find the nearest type entry at or before the given byte offset.
+    fn find_type_at_offset(map: &HashMap<usize, String>, offset: usize) -> Option<&String> {
+        map.iter()
+            .filter(|(&k, _)| k <= offset)
+            .max_by_key(|(&k, _)| k)
+            .map(|(_, v)| v)
     }
 }
 
@@ -1954,7 +2276,7 @@ mod lsp_tests {
     fn test_diagnostics_pure_fn_calling_io_fn() {
         let source = "fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }\n\
                       fn pure() -> Unit ! {} { do_io() }";
-        let diagnostics = NulangLanguageServer::compute_diagnostics(source);
+        let (diagnostics, _) = NulangLanguageServer::compute_diagnostics(source);
         assert!(
             diagnostics.iter().any(|d| {
                 d.severity == Some(DiagnosticSeverity::ERROR) && d.message.contains("IO")
@@ -1970,7 +2292,7 @@ mod lsp_tests {
     #[test]
     fn test_diagnostics_module_nested_effect_violation() {
         let source = "module M { fn pure() -> Unit ! {} { perform IO.print(\"x\") } }";
-        let diagnostics = NulangLanguageServer::compute_diagnostics(source);
+        let (diagnostics, _) = NulangLanguageServer::compute_diagnostics(source);
         assert!(
             diagnostics.iter().any(|d| {
                 d.severity == Some(DiagnosticSeverity::ERROR) && d.message.contains("IO")
@@ -1988,11 +2310,31 @@ mod lsp_tests {
                       fn also_pure() -> Unit ! {} { pure() }\n\
                       fn do_io() -> Unit ! {IO} { perform IO.print(\"x\") }\n\
                       fn caller() -> Unit ! {IO} { do_io() }";
-        let diagnostics = NulangLanguageServer::compute_diagnostics(source);
+        let (diagnostics, _) = NulangLanguageServer::compute_diagnostics(source);
         assert!(
             diagnostics.is_empty(),
             "well-formed effectful/pure functions must be diagnostic-free, got: {:?}",
             diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_hover_shows_type_for_let_binding() {
+        // Create a minimal NulangLanguageServer to test hover_at with type info
+        let source = "fn main() { let x: Int = 42; x }";
+        // compute_diagnostics now returns (diagnostics, type_map)
+        let (_diagnostics, type_map) = NulangLanguageServer::compute_diagnostics(source);
+        assert!(!type_map.is_empty(), "type_map should contain an entry for 'x'");
+        // The entry for x should show "Int"
+        let has_int = type_map.values().any(|v| v == "Int");
+        assert!(has_int, "type_map should contain 'Int' for x: {:?}", type_map);
+    }
+
+    #[test]
+    fn test_hover_type_map_for_multiple_bindings() {
+        let source = "fn main() { let x: Int = 42; let y: String = \"hi\"; x }";
+        let (_diagnostics, type_map) = NulangLanguageServer::compute_diagnostics(source);
+        assert!(type_map.values().any(|v| v == "Int"), "should have Int type");
+        assert!(type_map.values().any(|v| v == "String"), "should have String type");
     }
 }

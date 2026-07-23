@@ -62,10 +62,12 @@ serde_json = "1.0"
 toml = "1"
 # Fast hashing for compiler-internal maps (already a transitive dep via cranelift)
 rustc-hash = "2"
+# Tracing/logging framework for structured diagnostics (zero-cost when off)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # REPL line editing, history, and completion
 rustyline = { version = "15", default-features = false, features = ["with-file-history"] }
-
 # Cranelift JIT backend
 cranelift = "0.132"
 cranelift-jit = "0.132"

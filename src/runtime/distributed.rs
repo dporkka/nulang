@@ -48,6 +48,8 @@ use super::{ClusterState, NodeId, NodeStatus};
 use crate::runtime::Runtime;
 use crate::vm::Value;
 
+use tracing::warn;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -725,7 +727,7 @@ pub fn send_distributed(
             let (payload, string_table) = match resolve_wire_strings(runtime, args) {
                 Some(resolved) => resolved,
                 None => {
-                    eprintln!(
+                    warn!(
                         "nulang-net: dropping message to actor {} on node {:?}: string payload cannot be resolved to content (no sender module context)",
                         actor_id, node_id
                     );
@@ -755,7 +757,7 @@ pub fn send_distributed(
                 // The node resolved as remote but is no longer in the
                 // membership table (it left between resolve and send). Log
                 // the drop rather than losing the message silently.
-                eprintln!(
+                warn!(
                     "nulang-net: dropping message to actor {} on node {:?}: node missing from cluster membership",
                     actor_id, node_id
                 );
@@ -764,7 +766,7 @@ pub fn send_distributed(
             }
         }
         ResolveResult::Unresolvable { reason } => {
-            eprintln!("nulang-net: dropping message to {:?}: {}", target, reason);
+            warn!("nulang-net: dropping message to {:?}: {}", target, reason);
             let sender = runtime.current_actor.unwrap_or(0);
             notify_delivery_failed(runtime, sender, &reason);
         }
@@ -1005,7 +1007,7 @@ pub fn process_network_packets(
                             msg.behavior_id,
                             &sender_hash,
                         ) {
-                            eprintln!(
+                            warn!(
                                 "nulang-net: dropping message to actor {}: behavior '{}' content hash mismatch (possible version skew)",
                                 target_actor, behavior_name
                             );
@@ -1026,7 +1028,7 @@ pub fn process_network_packets(
                     // dangling pool ids.
                     if !intern_wire_strings(runtime, target_actor, &mut msg.payload, &string_table)
                     {
-                        eprintln!(
+                        warn!(
                             "nulang-net: dropping message to actor {}: string payload cannot be interned (target actor missing or has no module pool)",
                             target_actor
                         );
@@ -1035,7 +1037,6 @@ pub fn process_network_packets(
                             msg.sender,
                             "string intern failed on receiver",
                         );
-                        continue;
                     }
                     if let Some(actor) = runtime.actors.get_mut(&target_actor) {
                         let _ = actor.mailbox.push(msg);

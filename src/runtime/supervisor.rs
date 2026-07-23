@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use super::*;
 use crate::types::ExitReason;
 
+use tracing::warn;
+
 // ---------------------------------------------------------------------------
 // Supervisor Action
 // ---------------------------------------------------------------------------
@@ -305,7 +307,7 @@ impl Supervisor {
         let template = match &spec.restart {
             Some(t) => t,
             None => {
-                eprintln!(
+                warn!(
                     "supervisor '{}': child '{}' has no restart template; \
                      refusing to restart it as a bare actor",
                     self.name, spec.id
@@ -439,7 +441,7 @@ impl Supervisor {
                 // No template: drop the child so the caller escalates
                 // instead of supervising a dead entry (same posture as
                 // rebuild_child's missing RestartTemplate).
-                eprintln!(
+                warn!(
                     "supervisor '{}': child '{}' cannot restart without a child template",
                     self.name, spec.id
                 );
@@ -551,7 +553,7 @@ impl Supervisor {
         let template = match &self.template {
             Some(t) => t.clone(),
             None => {
-                eprintln!(
+                warn!(
                     "supervisor '{}': start_child without a child template; \
                      set one via Otp.set_template first",
                     self.name
