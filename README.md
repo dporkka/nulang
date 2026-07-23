@@ -58,7 +58,7 @@ If you are building AI agents that must remember state, durable workflows that s
 ### Current Status
 
 Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
-- ✅ All 1362 tests pass with `cargo test` (1368 with `--features wasm-backend`)
+- ✅ All 1392 tests pass with `cargo test` (1424 with `--features wasm-backend`)
 - ✅ Builds with `cargo build`
 - ✅ i64-tagged `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`) — immune to WASM NaN canonicalization
 - ✅ 138-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, FFI, Python, distribution)
@@ -378,7 +378,7 @@ let dbl = fn(x) { x * 2 } in
 | `main` | CLI entry point (run, repl, eval, check, lsp, backend selection) | ~695 |
 | `integration_tests` / `stress_tests` / `runtime/tests` | End-to-end pipeline, chaos, and runtime test suites | ~12,050 |
 
-**Total: ~88,100 lines of Rust across 85 source files with 1329 tests.**
+**Total: ~88,100 lines of Rust across 85 source files with 1392 tests.**
 
 ---
 

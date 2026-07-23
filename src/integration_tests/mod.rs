@@ -7497,4 +7497,98 @@ match { a: 2, b: 9 } with {
             "expected unhandled-effect error, got: {msg}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // WASM backend integration tests (requires wasm-backend feature)
+    #[cfg(feature = "wasm-backend")]
+    mod wasm_backend {
+        use crate::mir_wasm::WasmBackend;
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::typechecker::TypeChecker;
+        use crate::types::NuResult;
+
+        fn compile_source_to_wasm(source: &str) -> NuResult<Vec<u8>> {
+            let tokens = Lexer::new(source).lex()?;
+            let ast = Parser::new(tokens).parse_module()?;
+            let mut tc = TypeChecker::new();
+            tc.check_module(&ast)?;
+            let hir = crate::hir_lower::lower_module(&ast);
+            let mir = crate::mir_lower::lower_module(&hir)?;
+            let mut backend = WasmBackend::new();
+            backend.compile(&mir, "test")
+        }
+
+        #[test]
+        fn test_wasm_compile_literal_int() {
+            let wasm = compile_source_to_wasm("42").expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_addition() {
+            let wasm = compile_source_to_wasm("1 + 2").expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_bool() {
+            let wasm = compile_source_to_wasm("true").expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_let_binding() {
+            let wasm = compile_source_to_wasm("let x = 10; x").expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_arithmetic_mul() {
+            let wasm = compile_source_to_wasm("4 * 5").expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_comparison() {
+            let wasm = compile_source_to_wasm("1 == 1").expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_float() {
+            let wasm = compile_source_to_wasm("3.14").expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_if_expr() {
+            let wasm = compile_source_to_wasm("if true { 1 } else { 2 }").expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_block() {
+            let wasm = compile_source_to_wasm("{ 1; 2; 3 }").expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_string() {
+            let wasm = compile_source_to_wasm(r#""hello""#).expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_io_print() {
+            let wasm = compile_source_to_wasm(r#"perform IO.print("hi")"#).expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+
+        #[test]
+        fn test_wasm_compile_sub() {
+            let wasm = compile_source_to_wasm("10 - 3").expect("compile");
+            assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+    }
 }

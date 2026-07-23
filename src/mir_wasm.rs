@@ -743,6 +743,54 @@ mod tests {
         let wasm = compile_source(r#"perform IO.print("hello")"#).expect("compile");
         assert_eq!(&wasm[0..4], b"\0asm");
     }
+
+    #[test]
+    fn test_compile_float() {
+        let wasm = compile_source("3.14").expect("compile float");
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_compile_comparison_eq() {
+        let wasm = compile_source("1 == 1").expect("compile comparison");
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_compile_if_expr() {
+        let wasm = compile_source("if true { 1 } else { 2 }").expect("compile if");
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_compile_let_binding() {
+        let wasm = compile_source("let x = 42; x").expect("compile let");
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_compile_block() {
+        let wasm = compile_source("{ 1; 2; 3 }").expect("compile block");
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_compile_string() {
+        let wasm = compile_source(r#""hello world""#).expect("compile string");
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_compile_arithmetic_sub() {
+        let wasm = compile_source("10 - 3").expect("compile sub");
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[test]
+    fn test_compile_arithmetic_mul() {
+        let wasm = compile_source("4 * 5").expect("compile mul");
+        assert_eq!(&wasm[0..4], b"\0asm");
+    }
 }
 
 // ---------------------------------------------------------------------------

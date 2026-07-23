@@ -1054,33 +1054,26 @@ mod tests {
 
     #[test]
     fn test_aot_compile_empty_function() {
-        // A function with no params that returns nil.
         let mut builder = mir::FunctionBuilder::new("empty", None);
         builder.terminate(mir::Terminator::Return(None));
         let func = builder.build();
-
-        // Verify type metadata is populated (should be empty for empty function).
         assert!(func.type_metadata.is_empty());
         assert_eq!(func.name, "empty");
     }
 
     #[test]
     fn test_aot_compile_int_return() {
-        // A function that returns a constant int.
         let mut builder = mir::FunctionBuilder::new("answer", Some(crate::types::Type::int()));
         let tmp = builder.add_temp(crate::types::Type::int());
         builder.assign(tmp, mir::RValue::Const(crate::bytecode::Constant::Int(42)));
         builder.terminate(mir::Terminator::Return(Some(tmp)));
         let func = builder.build();
-
-        // Verify type metadata captured the int type.
         let reg = mir::FunctionBuilder::LOCAL_BASE as usize + tmp.0 as usize;
         assert_eq!(func.type_metadata.get_type(reg), KnownType::Int);
     }
 
     #[test]
     fn test_aot_compile_add() {
-        // A function that adds two int params.
         let mut builder = mir::FunctionBuilder::new("add", Some(crate::types::Type::int()));
         let a = builder.add_param("a", crate::types::Type::int());
         let b = builder.add_param("b", crate::types::Type::int());
@@ -1088,13 +1081,55 @@ mod tests {
         builder.assign(sum, mir::RValue::Binary(crate::ast::BinOp::Add, a, b));
         builder.terminate(mir::Terminator::Return(Some(sum)));
         let func = builder.build();
-
-        // Verify params and result have Int type metadata.
         let reg_a = mir::FunctionBuilder::LOCAL_BASE as usize + a.0 as usize;
         let reg_b = mir::FunctionBuilder::LOCAL_BASE as usize + b.0 as usize;
         let reg_sum = mir::FunctionBuilder::LOCAL_BASE as usize + sum.0 as usize;
         assert_eq!(func.type_metadata.get_type(reg_a), KnownType::Int);
         assert_eq!(func.type_metadata.get_type(reg_b), KnownType::Int);
         assert_eq!(func.type_metadata.get_type(reg_sum), KnownType::Int);
+    }
+
+    #[test]
+    fn test_is_all_int_true() {
+        let mut builder = mir::FunctionBuilder::new("all_int", Some(crate::types::Type::int()));
+        builder.add_param("a", crate::types::Type::int());
+        builder.add_param("b", crate::types::Type::int());
+        let tmp = builder.add_temp(crate::types::Type::int());
+        builder.assign(tmp, mir::RValue::Const(crate::bytecode::Constant::Int(7)));
+        builder.terminate(mir::Terminator::Return(Some(tmp)));
+        let func = builder.build();
+        assert!(is_all_int(&func));
+    }
+
+    #[test]
+    fn test_is_all_int_false_with_bool_param() {
+        let mut builder = mir::FunctionBuilder::new("mixed", Some(crate::types::Type::int()));
+        builder.add_param("x", crate::types::Type::int());
+        builder.add_param("y", crate::types::Type::bool());
+        let tmp = builder.add_temp(crate::types::Type::int());
+        builder.assign(tmp, mir::RValue::Const(crate::bytecode::Constant::Int(1)));
+        builder.terminate(mir::Terminator::Return(Some(tmp)));
+        let func = builder.build();
+        assert!(!is_all_int(&func));
+    }
+    #[test]
+    fn test_is_all_int_false_with_void_return() {
+        // void return is actually fine - is_all_int checks params only for non-Int,
+        // and accepts None return. This tests a void function with non-Int param.
+        let mut builder = mir::FunctionBuilder::new("void", None);
+        builder.add_param("x", crate::types::Type::bool());
+        builder.terminate(mir::Terminator::Return(None));
+        let func = builder.build();
+        assert!(!is_all_int(&func));
+    }
+
+    #[test]
+    fn test_is_all_int_empty() {
+        let mut builder = mir::FunctionBuilder::new("empty_int", Some(crate::types::Type::int()));
+        let tmp = builder.add_temp(crate::types::Type::int());
+        builder.assign(tmp, mir::RValue::Const(crate::bytecode::Constant::Int(0)));
+        builder.terminate(mir::Terminator::Return(Some(tmp)));
+        let func = builder.build();
+        assert!(is_all_int(&func));
     }
 }

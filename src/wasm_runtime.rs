@@ -46,11 +46,12 @@ pub fn default_wasm_config() -> Config {
 
 // ── Host state ───────────────────────────────────────────────────────
 
-/// Minimal host state stored in the `Store`, accessible via `Caller::data_mut()`.
 #[derive(Default)]
 struct HostState {
     /// Next allocation offset in WASM linear memory (bump allocator).
     alloc_offset: u32,
+    /// Reference to the linear memory, stored for access from host functions.
+    memory: Option<Memory>,
 }
 
 // ── WASM Runtime ─────────────────────────────────────────────────────
@@ -95,6 +96,7 @@ impl WasmRuntime {
         // Provide memory: 1-page (64KB) linear memory.
         let mem_type = MemoryType::new(1, None);
         let memory = Memory::new(&mut store, mem_type).map_err(map_wasmtime_err)?;
+        store.data_mut().memory = Some(memory.clone());
         linker
             .define(&mut store, "env", "memory", memory)
             .map_err(map_wasmtime_err)?;
@@ -103,8 +105,8 @@ impl WasmRuntime {
             .instantiate(&mut store, &module)
             .map_err(map_wasmtime_err)?;
 
-        // Initialize bump allocator offset to after the data segment.
-        if let Some(exported_mem) = instance.get_memory(&mut store, "memory") {
+        // Initialize bump allocator offset to after data segments.
+        if let Some(ref exported_mem) = store.data().memory {
             let data_end = exported_mem.data_size(&store);
             store.data_mut().alloc_offset = data_end as u32;
         }
@@ -186,12 +188,13 @@ fn host_dispatch(_caller: Caller<'_, HostState>, _a: i32, _b: i32, _c: i32, _d: 
     // No-op for now.
 }
 
-/// Helper: retrieve `env.memory` from a caller context.
+/// Helper: retrieve linear memory from the HostState.
 fn get_memory(caller: &mut Caller<'_, HostState>) -> Result<Memory, Error> {
     caller
-        .get_export("memory")
-        .and_then(|e| e.into_memory())
-        .ok_or_else(|| Error::msg("env.memory not found in store"))
+        .data()
+        .memory
+        .clone()
+        .ok_or_else(|| Error::msg("env.memory not initialized"))
 }
 
 // ── Error mapping ────────────────────────────────────────────────────
@@ -293,5 +296,63 @@ mod tests {
         let config = default_wasm_config();
         let engine = Engine::new(&config).unwrap();
         assert!(Module::new(&engine, &wasm).is_ok());
+    }
+
+    #[test]
+    fn test_wasm_config_reservation_sizes() {
+        let config = default_wasm_config();
+        let engine = Engine::new(&config).unwrap();
+        // Verify default config settings don't conflict.
+        let module = Module::new(&engine, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+        assert!(module.is_ok());
+    }
+
+    #[test]
+    fn test_aot_compile_rejects_missing_file() {
+        let result = aot_compile("/nonexistent/path.wasm", "/tmp/out.cwasm");
+        assert!(result.is_err(), "compiling a missing file should fail");
+    }
+
+    #[test]
+    fn test_error_mapping() {
+        let err = map_wasmtime_err("test error");
+        assert!(err.to_string().contains("wasmtime"));
+        assert!(err.to_string().contains("test error"));
+    }
+
+    #[test]
+    fn test_wasm_runtime_rejects_invalid_module() {
+        let config = default_wasm_config();
+        let engine = Engine::new(&config).unwrap();
+        let invalid_wasm = vec![0x00, 0x00, 0x00, 0x00];
+        let result = Module::new(&engine, &invalid_wasm);
+        assert!(result.is_err(), "invalid WASM should fail to parse");
+    }
+
+    #[test]
+    fn test_wasm_runtime_rejects_empty_bytes() {
+        let config = default_wasm_config();
+        let engine = Engine::new(&config).unwrap();
+        let result = Module::new(&engine, &[] as &[u8]);
+        assert!(result.is_err(), "empty bytes should fail to parse");
+    }
+
+    #[test]
+    fn test_host_read_returns_nil() {
+        let wasm = br#"(module
+            (import "env" "memory" (memory 1))
+            (import "env" "nulang_alloc" (func $alloc (param i32) (result i32)))
+            (import "env" "nulang_dispatch" (func $dispatch (param i32 i32 i32 i32)))
+            (import "env" "log" (func $log (param i32 i32) (result i64)))
+            (import "env" "io_print" (func $print (param i32 i32) (result i64)))
+            (import "env" "io_read" (func $read (result i64)))
+            (func $start (result i64)
+                call $read
+            )
+            (export "nulang_init" (func $start))
+        )"#;
+        let mut runtime = WasmRuntime::new(wasm, None).unwrap();
+        let result = runtime.run().unwrap();
+        assert!(result.is_nil(), "io_read stub should return nil");
     }
 }

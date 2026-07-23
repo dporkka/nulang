@@ -1025,4 +1025,55 @@ mod tests {
         assert!(!is_opcode_compilable(OpCode::Send));
         assert!(!is_opcode_compilable(OpCode::FFICall));
     }
+
+    #[test]
+    fn test_is_opcode_compilable_float_ops() {
+        assert!(is_opcode_compilable(OpCode::FAdd));
+        assert!(is_opcode_compilable(OpCode::FSub));
+        assert!(is_opcode_compilable(OpCode::FMul));
+        assert!(is_opcode_compilable(OpCode::FDiv));
+        assert!(is_opcode_compilable(OpCode::FCmpEq));
+        assert!(is_opcode_compilable(OpCode::FCmpLt));
+        assert!(is_opcode_compilable(OpCode::FCmpGt));
+    }
+
+    #[test]
+    fn test_is_opcode_compilable_conversion() {
+        assert!(is_opcode_compilable(OpCode::IToF));
+        assert!(is_opcode_compilable(OpCode::FToI));
+        assert!(is_opcode_compilable(OpCode::INeg));
+        assert!(is_opcode_compilable(OpCode::IInc));
+        assert!(is_opcode_compilable(OpCode::IDec));
+    }
+
+    #[test]
+    fn test_is_opcode_compilable_logical() {
+        assert!(is_opcode_compilable(OpCode::Not));
+        assert!(is_opcode_compilable(OpCode::And));
+        assert!(is_opcode_compilable(OpCode::Or));
+        assert!(is_opcode_compilable(OpCode::DbgPrint));
+    }
+
+    #[test]
+    fn test_is_opcode_compilable_compare() {
+        assert!(is_opcode_compilable(OpCode::ICmpEq));
+        assert!(is_opcode_compilable(OpCode::ICmpLt));
+        assert!(is_opcode_compilable(OpCode::ICmpGt));
+        assert!(is_opcode_compilable(OpCode::ICmpLe));
+        assert!(is_opcode_compilable(OpCode::ICmpGe));
+    }
+
+    #[test]
+    fn test_is_opcode_compilable_special() {
+        assert!(is_opcode_compilable(OpCode::Nop));
+        assert!(is_opcode_compilable(OpCode::Halt));
+        assert!(is_opcode_compilable(OpCode::Const0));
+        assert!(is_opcode_compilable(OpCode::ConstU));
+    }
+
+    #[test]
+    fn test_is_opcode_compilable_swap_dup() {
+        assert!(is_opcode_compilable(OpCode::Swap));
+        assert!(is_opcode_compilable(OpCode::Dup));
+    }
 }

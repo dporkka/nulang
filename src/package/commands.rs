@@ -211,7 +211,6 @@ mod tests {
         assert_eq!(manifest.package.entry, DEFAULT_ENTRY);
         assert!(dir.join(DEFAULT_ENTRY).exists());
 
-        // The scaffolded package resolves with zero dependencies.
         let resolution = resolve(&dir, &manifest).expect("scaffold should resolve");
         assert_eq!(resolution.root().name, "my-app");
         assert!(resolution.to_lockfile().package.is_empty());
@@ -225,5 +224,22 @@ mod tests {
         assert!(matches!(err, NuError::PackageError(_)));
         let err = cmd_new(None).expect_err("missing name is rejected");
         assert!(matches!(err, NuError::PackageError(_)));
+    }
+
+    #[test]
+    fn test_print_usage_does_not_panic() {
+        print_usage();
+    }
+
+    #[test]
+    fn test_nulang_exe_rejects_invalid_args() {
+        let result = nulang_exe(&["--nonexistent-flag"]);
+        assert!(result.is_err(), "unknown flags should fail");
+    }
+
+    #[test]
+    fn test_cmd_test_fails_in_non_package_dir() {
+        let result = cmd_test();
+        assert!(result.is_err(), "test outside package should fail");
     }
 }
