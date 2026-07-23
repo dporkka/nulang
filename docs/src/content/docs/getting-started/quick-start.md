@@ -42,8 +42,8 @@ type Person = { name: String, age: Int }
 
 fn describe(p: Person) -> String {
     match p {
-        { name, age } if age < 18 => name + " is young",
-        { name, age } => name + " is " + Int.to_string(age)
+        { name: n, age: a } if a < 18 => n + " is young",
+        { name: n, age: a } => n + " is " + perform Int.to_string(a)
     }
 }
 
@@ -87,7 +87,7 @@ spawn Main {} in {}
 
 ```nulang
 effect Logger {
-    op log(msg: String) -> Unit
+    log: (String) -> Unit
 }
 
 fn greet_with_log(name: String) {
@@ -96,9 +96,8 @@ fn greet_with_log(name: String) {
 }
 
 handle greet_with_log("World") {
-    | Logger.log(msg) => {
-        perform IO.print("[LOG] " + msg);
-        resume(())
+    | Logger.log(msg) resume => {
+        perform IO.print("[LOG] " + msg)
     }
 }
 ```

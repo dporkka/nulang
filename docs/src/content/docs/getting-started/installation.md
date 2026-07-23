@@ -40,6 +40,7 @@ cargo build --release --all-features
 | `python` | On | PyO3 Python interop |
 | `sqlite` | On | libsql/Turso persistence |
 | `lsp` | On | tower-lsp language server |
+| `ai-runtime` | On | AI runtime — LLM providers, pipelines, debates, supervisor teams |
 | `wasm-backend` | Off | WASM compiler + Wasmtime runtime |
 
 ## Verifying the Build
@@ -52,7 +53,7 @@ cargo test
 cargo run -- --repl
 
 # Run a Nulang program
-cargo run -- examples/hello.nula
+cargo run -- examples/fibonacci.nula
 ```
 
 ## System-Specific Notes

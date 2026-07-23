@@ -26,7 +26,7 @@ fn compose[A, B, C](f: B -> C, g: A -> B) -> A -> C {
 
 | Type | Description | Example |
 |------|-------------|---------|
-| `Int` | 48-bit signed integer (NaN-tagged) | `42` |
+| `Int` | 48-bit signed integer (i64-tagged value representation) | `42` |
 | `Float` | 64-bit IEEE 754 float | `3.14` |
 | `Bool` | Boolean | `true`, `false` |
 | `String` | UTF-8 string | `"hello"` |
@@ -36,24 +36,26 @@ fn compose[A, B, C](f: B -> C, g: A -> B) -> A -> C {
 
 ## Row-Polymorphic Records
 
-Records are structurally typed with row polymorphism. An open record carries a row tail variable encoded as `..`:
+Records are structurally typed with row polymorphism. When a function parameter has **no type annotation**, the record row stays open and accepts any record with the needed fields:
 
 ```nulang
-// This function accepts ANY record with 'x' and 'y' fields of type Int
-fn distance(point: { x: Int, y: Int }) -> Float {
-    sqrt(to_float(point.x * point.x + point.y * point.y))
+// Inferred parameter — accepts ANY record with 'x' and 'y' fields
+fn distance(point) {
+    to_float(point.x * point.x + point.y * point.y)
 }
 
 // Works with extra fields
 let p3d = { x: 1, y: 2, z: 3 }
-distance(p3d)  // OK
+perform IO.print(perform Int.to_string(distance(p3d)))  // OK — extra fields are fine
 ```
 
-Closed record annotations require exact field counts:
+An explicit annotation creates a **closed** record that requires an exact field count:
 
 ```nulang
 fn origin(): { x: Int, y: Int } = { x: 0, y: 0 }
 ```
+
+Closed record annotations reject records with extra or missing fields. Use inferred parameters when you want row polymorphism.
 
 ## Reference Capabilities
 
@@ -72,11 +74,9 @@ Inspired by Pony, Nulang uses reference capabilities for data-race freedom:
 Capabilities are **compile-time only** and erased at runtime. There are no runtime capability checks.
 
 ```nulang
-// iso reference: can be sent between actors
-let data: &iso { x: Int } = { x: 42 }
-
-// val reference: immutable and shareable
-let shared: &val String = "hello"
+// val reference: immutable and shareable (can be sent between actors)
+let shared = "hello" :cap val
+perform IO.print(shared)
 ```
 
 ## Algebraic Data Types
@@ -100,7 +100,7 @@ Every function carries an effect row. Pure functions have an empty effect row. E
 fn add(x: Int, y: Int) -> Int = x + y
 
 // Effectful: performs IO
-fn greet(): {IO} Unit {
+fn greet() -> Unit ! {IO} {
     perform IO.print("Hello")
 }
 ```

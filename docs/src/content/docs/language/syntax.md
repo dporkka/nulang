@@ -68,16 +68,18 @@ match value {
 
 ## Records
 
-Records are row-polymorphic — a function can accept any record with the fields it needs:
+Records are row-polymorphic — a function can accept any record with the fields it needs. When the parameter type is inferred (no annotation), the row stays open and extra fields are fine:
 
 ```nulang
-fn full_name(r: { first: String, last: String }) -> String {
+fn full_name(r) {
     r.first + " " + r.last
 }
 
 let person = { first: "Alice", last: "Smith", age: 30 }
-full_name(person)  // "Alice Smith" — extra fields are fine
+perform IO.print(full_name(person))  // "Alice Smith" — extra fields are fine
 ```
+
+An explicit annotation like `fn f(r: { first: String, last: String })` creates a **closed** record that rejects extra fields. Use inferred parameters for row-polymorphic functions.
 
 Records are structurally typed and created with `{ field: value, ... }` syntax.
 
@@ -97,7 +99,7 @@ Construct and match:
 let ok = Ok(42)
 
 match ok {
-    Ok(v) => "Got " + Int.to_string(v),
+    Ok(v) => "Got " + perform Int.to_string(v),
     Err(e) => "Error: " + e
 }
 ```
@@ -173,13 +175,13 @@ Function signatures declare their effects with `!` or `throws` followed by an ef
 // Pure function — no effects
 fn add(x: Int, y: Int) -> Int = x + y
 
-// Effectful — performs IO
-fn greet(): ! IO Unit {
+// Effectful — performs IO (effect row after return type)
+fn greet() -> Unit ! {IO} {
     perform IO.print("Hello")
 }
 
 // throws is an alias for !
-fn log(msg: String): throws IO Unit {
+fn log(msg: String) -> Unit throws {IO} {
     perform IO.print(msg)
 }
 ```

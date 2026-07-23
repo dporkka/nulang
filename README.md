@@ -67,6 +67,8 @@ Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM 
 - ✅ ORCA-style per-actor GC with cycle detection
 - ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams
 - ✅ Durable workflow runtime: `workflow` declarations with steps, timers, signals, saga compensation
+- ✅ Format stability: frozen `.nbc` bytecode artifacts, NUL0 wire protocol versioning, language version `1.0.0-frozen` (RFC 0001/0002)
+- ✅ `entity` declarations: durable-first actors (event-sourced by default) for long-lived domain objects
 
 ---
 
@@ -88,7 +90,7 @@ cargo build --release
 
 ### Feature flags
 
-Three optional subsystems are on by default so a plain `cargo build` behaves
+Four optional subsystems are on by default so a plain `cargo build` behaves
 as before this flag set existed. Build without them for a leaner binary and
 fewer system dependencies:
 
@@ -97,6 +99,7 @@ fewer system dependencies:
 | `python` | PyO3 Python interop (`src/python/`) | No — on by default |
 | `sqlite` | libsql/Turso persistence (`persistence.rs`) | No — on by default |
 | `lsp` | tower-lsp language server (`src/lsp/`) | No — on by default |
+| `ai-runtime` | AI runtime — LLM providers, pipelines, debates, supervisor teams (`src/ai/`) | No — on by default |
 | `wasm-backend` | WASM compiler (`mir_wasm.rs`) + Wasmtime runtime (`wasm_runtime.rs`), `--backend wasm\|wasm-run\|wasm-aot` | Yes — requires `wasmtime` CLI for AOT |
 
 ```bash
@@ -326,59 +329,60 @@ let dbl = fn(x) { x * 2 } in
 
 | Module | Description | Lines |
 |--------|-------------|-------|
-| `lexer` | Hand-written state machine, indentation-based tokenization | ~1,300 |
-| `parser` | Recursive descent with Pratt precedence climbing | ~4,385 |
-| `ast` | Abstract syntax tree definitions (30+ expression types) | ~940 |
-| `types` | Type system, capability lattice, effect rows, error types | ~975 |
-| `typechecker` | Hindley-Milner Algorithm W with full inference | ~3,890 |
-| `effect_checker` | Algebraic effect row checking + capability analysis | ~3,035 |
-| `hir` / `hir_lower` | High-level IR and AST → HIR lowering | ~2,700 |
-| `mir` / `mir_lower` | Mid-level IR and HIR → MIR lowering | ~3,550 |
-| `mir_codegen` | MIR-to-bytecode compilation with register allocation | ~2,250 |
-| `bytecode` | 138 opcodes, 32-bit fixed-width instructions | ~1,050 |
-| `value_layout` | Canonical NaN-boxing tag/mask constants (single source of truth) | ~300 |
-| `vm` | Register-based virtual machine, effect handlers, JIT tiering hook | ~4,670 |
-| `aot/mod` + `aot/codegen` | AOT native compiler: MIR → Cranelift object code | ~1,270 |
+| `lexer` | Hand-written state machine, indentation-based tokenization | ~1,320 |
+| `parser` | Recursive descent with Pratt precedence climbing | ~4,540 |
+| `ast` | Abstract syntax tree definitions (30+ expression types) | ~950 |
+| `types` | Type system, capability lattice, effect rows, error types | ~1,150 |
+| `typechecker` | Hindley-Milner Algorithm W with full inference | ~3,880 |
+| `effect_checker` | Algebraic effect row checking + capability analysis | ~3,140 |
+| `hir` / `hir_lower` | High-level IR and AST → HIR lowering | ~2,730 |
+| `mir` / `mir_lower` | Mid-level IR and HIR → MIR lowering | ~3,660 |
+| `mir_codegen` | MIR-to-bytecode compilation with register allocation | ~2,290 |
+| `bytecode` | 138 opcodes, 32-bit fixed-width instructions | ~1,060 |
+| `value_layout` | Canonical i64-tagged tag/mask constants (single source of truth) | ~300 |
+| `vm` | Register-based virtual machine, effect handlers, JIT tiering hook | ~5,640 |
+| `aot/mod` + `aot/codegen` | AOT native compiler: MIR → Cranelift object code | ~1,410 |
 | `type_metadata` | Type metadata for typed JIT and AOT compilation | ~125 |
 | `wasm_types` | WASM component model type definitions | ~100 |
-| `wasm_component_runtime` | WASM component runtime (WIP) | ~335 |
-| `mir_wasm` | MIR → WASM compiler via wasm-encoder (wasm-backend feature) | ~690 |
-| `wasm_runtime` | Wasmtime host runtime for WASM modules | ~290 |
-| `jit/mod` | JIT session manager, tiered execution, hot-counter tracking | ~570 |
-| `jit/compiler` | Bytecode → Cranelift IR (50 opcodes) | ~1,005 |
-| `jit/typed_compiler` | Type-directed JIT: direct CLIF when operand types are known | ~2,105 |
-| `jit/simd_analyzer` / `jit/simd_compiler` | Vectorizable-loop detection + SIMD CLIF emission | ~3,185 |
-| `jit/runtime` | NaN-tag-aware runtime helpers for JIT (31 extern C functions) | ~375 |
-| `runtime/mod` | Runtime coordinator: actors, scheduling, GC, supervision, distribution | ~5,870 |
+| `wasm_component_runtime` | WASM component runtime (WIP) | ~95 |
+| `mir_wasm` | MIR → WASM compiler via wasm-encoder (wasm-backend feature) | ~810 |
+| `wasm_runtime` | Wasmtime host runtime for WASM modules | ~360 |
+| `jit/mod` | JIT session manager, tiered execution, hot-counter tracking | ~610 |
+| `jit/compiler` | Bytecode → Cranelift IR (50 opcodes) | ~1,080 |
+| `jit/typed_compiler` | Type-directed JIT: direct CLIF when operand types are known | ~2,110 |
+| `jit/simd_analyzer` / `jit/simd_compiler` | Vectorizable-loop detection + SIMD CLIF emission | ~3,190 |
+| `jit/runtime` | NaN-tag-aware runtime helpers for JIT (31 extern C functions) | ~395 |
+| `runtime/mod` | Runtime coordinator: actors, scheduling, GC, supervision, distribution | ~5,260 |
 | `runtime/actor` | Actor struct, lifecycle, state management | ~520 |
 | `runtime/scheduler` | Work-stealing queues + reduction-bounded cooperative scheduler | ~570 |
-| `runtime/mailbox` | Unbounded lock-free MPSC via crossbeam SegQueue | ~355 |
+| `runtime/mailbox` | Unbounded lock-free MPSC via crossbeam SegQueue | ~450 |
 | `runtime/timer` | Hierarchical timer wheel for send_after, exit_after, kill_after | ~505 |
 | `runtime/registry` | Local actor name registry (register/whereis/registered) | ~210 |
 | `runtime/process_groups` | Decentralized actor group membership (Erlang pg) | ~285 |
-| `runtime/heap` | Per-actor bump allocator with ORCA object headers | ~1,670 |
-| `runtime/gc` | ORCA reference counting (3-count protocol) | ~1,420 |
+| `runtime/heap` | Per-actor bump allocator with ORCA object headers | ~1,690 |
+| `runtime/gc` | ORCA reference counting (3-count protocol) | ~1,430 |
 | `runtime/orca_cycle` | Intra-node cycle detector with weighted heuristic | ~1,680 |
-| `runtime/supervisor` | Erlang/OTP-style supervision strategies | ~745 |
-| `runtime/network` | TCP transport, NUL0 wire protocol | ~2,250 |
-| `runtime/cluster` | Gossip-based cluster membership + failure detection | ~1,235 |
-| `runtime/distributed` | Location-transparent actor addressing | ~1,940 |
+| `runtime/supervisor` | Erlang/OTP-style supervision strategies | ~750 |
+| `runtime/network` | TCP transport, NUL0 wire protocol | ~2,360 |
+| `runtime/cluster` | Gossip-based cluster membership + failure detection | ~1,210 |
+| `runtime/distributed` | Location-transparent actor addressing | ~2,060 |
 | `runtime/crdt` | CRDT trait + GCounter, PNCounter, GSet, ORSet, AWORSet | ~1,365 |
 | `runtime/crdt_reg` | LWWRegister, MVRegister, RGA sequence CRDT | ~875 |
 | `runtime/crdt_manager` | CRDT factory, sync ops, inter-node merge | ~1,160 |
-| `runtime/persistence` | Snapshot/journal stores (MemoryStore, JsonFileStore, LibsqlStore) | ~1,190 |
+| `runtime/persistence` | Snapshot/journal stores (MemoryStore, JsonFileStore, LibsqlStore) | ~1,290 |
 | `python/bridge` + `python/marshal` | PyO3 interpreter bridge + Value↔Python marshalling | ~1,290 |
 | `ffi` | C-compatible FFI layer, native-library registry, embedder C API | ~1,440 |
-| `ai` | LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams | ~2,590 |
-| `lsp` | tower-lsp language server (12 features incl. hover, inlay hints, completion) | ~1,935 |
-| `package` | Nula package manager (manifest, lockfile, resolver, commands) | ~1,120 |
-| `docgen` | Documentation generator: .nula doc comments → docs/api.md | ~420 |
-| `stdlib` | Standard-library inventory documenting built-in effects and functions | ~470 |
-| `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~720 |
-| `main` | CLI entry point (run, repl, eval, check, lsp, backend selection) | ~695 |
-| `integration_tests` / `stress_tests` / `runtime/tests` | End-to-end pipeline, chaos, and runtime test suites | ~12,050 |
+| `ai` | LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams | ~3,250 |
+| `lsp` | tower-lsp language server (12 features incl. hover, inlay hints, completion) | ~2,000 |
+| `package` | Nula package manager (manifest, lockfile, resolver, commands) | ~1,240 |
+| `format` | Frozen artifact formats (`.nbc` bytecode, NUL0 wire protocol) + migration registry | ~590 |
+| `docgen` | Documentation generator: .nula doc comments → docs/api.md | ~430 |
+| `stdlib` | Standard-library inventory documenting built-in effects and functions | ~480 |
+| `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~800 |
+| `main` | CLI entry point (run, repl, eval, check, lsp, backend selection) | ~940 |
+| `integration_tests` / `stress_tests` / `runtime/tests` / `jit/tests` | End-to-end pipeline, chaos, runtime, and JIT test suites | ~13,600 |
 
-**Total: ~88,100 lines of Rust across 85 source files with 1392 tests.**
+**Total: ~93,900 lines of Rust across 104 source files with 1392 tests (1424 with `--features wasm-backend`).**
 
 ---
 
@@ -618,12 +622,12 @@ This is an active implementation with the following components functional:
 - [x] WASM Compiler (MIR → WASM via wasm-encoder)
 - [x] VM (register-based execution, arithmetic, comparisons, control flow)
 - [x] REPL (parse-typecheck-compile-execute cycle with introspection)
-- [x] Integration tests (227 end-to-end pipeline tests)
+- [x] Integration tests (264 end-to-end pipeline tests)
 - [x] Actor runtime (spawn, send, links, monitors, selective receive)
 - [x] Work-stealing scheduler (cooperative, reduction quotas)
 - [x] ORCA garbage collector (per-actor heap, 3-count protocol, cycle detection)
 - [x] Supervision trees (OneForOne, OneForAll, RestForOne restart strategies)
-- [x] Fault tolerance tests (27 supervisor/exit/link/monitor tests)
+- [x] Fault tolerance tests (supervision, exit, link, monitor, trap_exit across runtime + integration suites)
 - [x] Distributed runtime (TCP transport, cluster membership, location-transparent messaging)
 - [x] CRDT subsystem (8 types: counters, sets, registers, sequences)
 - [x] CRDT manager (factory, sync, inter-node merge)
@@ -642,7 +646,10 @@ This is an active implementation with the following components functional:
 - [x] ~~Escape analysis~~ **REVERTED** (audit: no benefit without nursery)
 - [x] Python interop — Native Actor pattern (isolated OS threads, marshal-only boundary)
 - [x] Stress test suite (30 chaos tests: supervision, scheduler fairness, GC, persistence, CRDTs, JIT fallback)
-- [x] AI SDK design document (agent DSL, tool binding, memory, multi-agent)
+- [x] AI runtime (`agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams)
+- [x] Durable workflow runtime (`workflow` declarations with steps, timers, signals, saga compensation)
+- [x] Format stability layer (frozen `.nbc` bytecode artifacts, NUL0 wire protocol versioning, migration registry — RFC 0001/0002)
+- [x] `entity` declarations (durable-first actors, event-sourced by default)
 - [x] Web Framework design document (endpoints, controllers, channels, LiveView)
 - [x] Package Manager (manifest, resolver, local registry, workspace, `nula` commands)
 - [x] Cloud Platform design document (global deploy, auto-scaling, persistence)
@@ -665,6 +672,7 @@ This is an active implementation with the following components functional:
 | v0.14 | Native AOT backend + WASM compilation and execution backends + Package Manager | Completed |
 | — | Durable workflow runtime (steps, timers, signals, saga compensation) | Completed |
 | — | AI runtime (`agent` keyword, LLM providers, memory, pipeline/debate/supervisor patterns) | Completed |
+| — | Format stability (frozen `.nbc` artifacts, NUL0 wire protocol, language version `1.0.0-frozen` — RFC 0001/0002) | Completed |
 | v1.0 | Production release — requires: chaos test suite passing ✅, scheduler profiled ✅, cycle detector intra-node only ✅ | Planned |
 
 ---
@@ -678,8 +686,13 @@ This is an active implementation with the following components functional:
 
 ## Documentation
 
-- **[SPEC2.md](SPEC2.md)** — Language specification covering syntax, semantics, type system, runtime, and standard library
+- **[nulang.org](https://nulang.org)** — Online documentation site (getting started, language reference, actor guide, stdlib, AI agents)
+- **[SPEC2.md](SPEC2.md)** — Language specification covering syntax, semantics, type system, runtime, standard library, and format stability contract
+- **[CHANGELOG.md](CHANGELOG.md)** — Changelog organized by stability tier (Frozen / Stable / Experimental), tracking the language version
+- **[GOVERNANCE.md](GOVERNANCE.md)** — Stability tiers and RFC process
+- **[RFC/](RFC/)** — Nulang RFC proposals (format stability, frozen core, deprecation cycles, roadmap items)
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — Implementation architecture notes
+- **[docs/](docs/)** — Astro/Starlight documentation website source (deploys to nulang.org)
 - **[docs/archive/](docs/archive/)** — Historical specs, roadmaps, design documents, and review reports
 
 ---

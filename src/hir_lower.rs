@@ -1102,7 +1102,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         } => {
             let l = lower_expr(left, body);
             let r = lower_expr(right, body);
-            let ty = binary_type(op);
+            let ty = binary_type(op, &l, &r);
             let temp = fresh_temp_name();
             body.push(hir::Stmt::Let {
                 name: temp.clone(),
@@ -1483,7 +1483,7 @@ fn literal_type(lit: &Literal) -> Type {
     }
 }
 
-fn binary_type(op: &ast::BinOp) -> Type {
+fn binary_type(op: &ast::BinOp, l: &hir::Operand, r: &hir::Operand) -> Type {
     use crate::ast::BinOp;
     use crate::types::PrimitiveType;
     match op {
@@ -1495,6 +1495,19 @@ fn binary_type(op: &ast::BinOp) -> Type {
         | BinOp::Ge
         | BinOp::And
         | BinOp::Or => Type::Primitive(PrimitiveType::Bool),
+        BinOp::Add => {
+            // String concatenation: if either operand is a string, the
+            // result is String. The typechecker guarantees both sides are
+            // the same type, so checking one is sufficient — but we check
+            // both to be robust against HIR-level type gaps (e.g. `perform`
+            // expressions that are lowered with Type::unit() before their
+            // real type is known).
+            if l.ty() == Type::string() || r.ty() == Type::string() {
+                Type::string()
+            } else {
+                Type::Primitive(PrimitiveType::Int)
+            }
+        }
         _ => Type::Primitive(PrimitiveType::Int),
     }
 }
