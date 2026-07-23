@@ -249,7 +249,7 @@ mod tests {
     #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_http_provider_is_object_safe() {
-        fn accepts_http(h: &dyn HttpProvider) {
+        fn accepts_http(_h: &dyn HttpProvider) {
             // Verify trait object usage compiles (no runtime needed for type-check).
         }
         let provider = ReqwestHttpProvider::new();

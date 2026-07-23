@@ -4659,7 +4659,7 @@ mod vm_tests {
                     f
                 );
             }
-            Err(crate::types::NuError::VMError { msg: msg, span: _ })
+            Err(crate::types::NuError::VMError { msg, span: _ })
                 if msg.contains("open") || msg.contains("load failed") =>
             {
                 eprintln!("warning: could not open libm.so.6, skipping test: {}", msg);
@@ -4715,7 +4715,7 @@ mod vm_tests {
                     f
                 );
             }
-            Err(crate::types::NuError::VMError { msg: msg, span: _ })
+            Err(crate::types::NuError::VMError { msg, span: _ })
                 if msg.contains("open") || msg.contains("load failed") =>
             {
                 eprintln!(

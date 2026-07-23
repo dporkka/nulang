@@ -135,6 +135,7 @@ mod tests {
     use super::*;
     use crate::ai::{DebateRuntime, PipelineRuntime};
 
+    #[allow(dead_code)]
     struct MockRuntime;
 
     impl PipelineRuntime for MockRuntime {
