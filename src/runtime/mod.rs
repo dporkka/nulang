@@ -4331,6 +4331,19 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 None => crate::vm::Value::nil(),
             });
         }
+
+        if effect_name == "String" && op_name == Some("length") {
+            let s = crate::vm::resolve_value_string(constants, *regs.first().unwrap_or(&crate::vm::Value::nil()));
+            return Some(crate::vm::Value::int(s.len() as i64));
+        }
+        if effect_name == "String" && op_name == Some("charAt") {
+            let s = crate::vm::resolve_value_string(constants, *regs.first().unwrap_or(&crate::vm::Value::nil()));
+            let idx = regs.get(1).and_then(|v| v.as_int()).unwrap_or(-1);
+            if idx < 0 || idx as usize >= s.len() {
+                return Some(crate::vm::Value::int(-1));
+            }
+            return Some(crate::vm::Value::int(s.as_bytes()[idx as usize] as i64));
+        }
         if effect_name == "Provider" && op_name == Some("ask") {
             // General runtime-registered provider dispatch. The first arg is
             // the provider name (string); the second is the prompt/request
@@ -4803,6 +4816,19 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     return Some(vm.allocate_string(&s));
                 }
                 return Some(crate::vm::Value::nil());
+            }
+
+            if effect_name == "String" && op_name == Some("length") {
+                let s = crate::vm::resolve_value_string(constants, *regs.first().unwrap_or(&crate::vm::Value::nil()));
+                return Some(crate::vm::Value::int(s.len() as i64));
+            }
+            if effect_name == "String" && op_name == Some("charAt") {
+                let s = crate::vm::resolve_value_string(constants, *regs.first().unwrap_or(&crate::vm::Value::nil()));
+                let idx = regs.get(1).and_then(|v| v.as_int()).unwrap_or(-1);
+                if idx < 0 || idx as usize >= s.len() {
+                    return Some(crate::vm::Value::int(-1));
+                }
+                return Some(crate::vm::Value::int(s.as_bytes()[idx as usize] as i64));
             }
             if effect_name == "Provider" && op_name == Some("ask") {
                 // General runtime-registered provider dispatch (actor path).

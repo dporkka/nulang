@@ -2079,6 +2079,21 @@ match { a: 2, b: 9 } with {
         assert_string(r#""count: " + perform Int.to_string(42)"#, "count: 42");
     }
 
+    /// String.length and String.charAt via perform.
+    #[test]
+    fn test_string_length_and_char_at() {
+        assert_int(r#"perform String.length("hello")"#, 5);
+        assert_int(r#"perform String.length("")"#, 0);
+        assert_int(r#"perform String.charAt("abc", 0)"#, 'a' as i64);
+        assert_int(r#"perform String.charAt("abc", 1)"#, 'b' as i64);
+        assert_int(r#"perform String.charAt("abc", 2)"#, 'c' as i64);
+        // Out of bounds returns -1
+        assert_int(r#"perform String.charAt("abc", 3)"#, -1);
+        assert_int(r#"perform String.charAt("abc", -1)"#, -1);
+        // Works with concatenated strings
+        assert_int(r#"perform String.length("hello " + "world")"#, 11);
+    }
+
     #[test]
     fn test_workflow_lowers_to_persistent_actor() {
         let source = "workflow PurchaseOrder { step validate { 1 } }";

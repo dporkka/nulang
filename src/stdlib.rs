@@ -110,6 +110,23 @@ impl StdLib {
                     implemented_in: ImplSite::RuntimeHost,
                     description: "Convert an integer to its string representation.",
                 },
+
+                BuiltinOp {
+                    name: "String.length",
+                    effect: "String",
+                    op: "length",
+                    signature: "length(s: String) -> Int",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Return the length of the string in bytes.",
+                },
+                BuiltinOp {
+                    name: "String.charAt",
+                    effect: "String",
+                    op: "charAt",
+                    signature: "charAt(s: String, index: Int) -> Int",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Return the byte at the given index in the string, or -1 if out of bounds.",
+                },
                 BuiltinOp {
                     name: "Timer.sleep",
                     effect: "Timer",

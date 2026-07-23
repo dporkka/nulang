@@ -496,6 +496,19 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 None => return Some(Value::nil()),
             }
         }
+
+        if effect_name == "String" && op_name == Some("length") {
+            let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
+            return Some(Value::int(s.len() as i64));
+        }
+        if effect_name == "String" && op_name == Some("charAt") {
+            let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
+            let idx = regs.get(1).and_then(|v| v.as_int()).unwrap_or(-1);
+            if idx < 0 || idx as usize >= s.len() {
+                return Some(Value::int(-1));
+            }
+            return Some(Value::int(s.as_bytes()[idx as usize] as i64));
+        }
         if effect_name != "IO" {
             return None;
         }
