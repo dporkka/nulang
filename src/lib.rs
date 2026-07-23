@@ -3,6 +3,7 @@ pub mod format;
 
 pub mod aot;
 pub mod ast;
+pub mod cranelift_utils;
 pub mod bytecode;
 pub mod docgen;
 pub mod effect_checker;

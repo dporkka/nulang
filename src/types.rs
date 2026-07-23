@@ -209,7 +209,7 @@ impl Capability {
 // ---------------------------------------------------------------------------
 
 /// A built-in or user-defined effect.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Effect {
     IO,
     Net,

@@ -36,25 +36,14 @@ use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::jit::compiler::{emit_arr_load, CompileError};
 
 // ---------------------------------------------------------------------------
-// NaN-tag constants (from src/value_layout.rs)
+// NaN-tag constants and CLIF helpers — single source in `cranelift_utils`
 // ---------------------------------------------------------------------------
 
-use crate::value_layout::{PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT, TAG_NIL};
-
-const TAG_INT_I64: i64 = TAG_INT as i64;
-const TAG_BOOL_I64: i64 = TAG_BOOL as i64;
-const TAG_NIL_I64: i64 = TAG_NIL as i64;
-const PAYLOAD_MASK_I64: i64 = PAYLOAD_MASK as i64;
-const SIGN_BIT_I64: i64 = SIGN_BIT as i64;
-const SIGN_EXTEND: i64 = 0xFFFF_0000_0000_0000u64 as i64;
-
-// ---------------------------------------------------------------------------
-// TypeMetadata & KnownType — re-exported from the shared `type_metadata` module
-// ---------------------------------------------------------------------------
-
+use crate::cranelift_utils::{
+    emit_sext48, emit_tag_bool, emit_tag_int, PAYLOAD_MASK_I64,
+    TAG_BOOL_I64, TAG_INT_I64, TAG_NIL_I64,
+};
 pub use crate::type_metadata::{KnownType, TypeMetadata};
-
-// ---------------------------------------------------------------------------
 // Bytecode-level type inference
 // ---------------------------------------------------------------------------
 
@@ -364,10 +353,34 @@ pub(crate) fn store_reg(builder: &mut FunctionBuilder, regs_ptr: Value, idx: usi
     builder.ins().store(MemFlags::new(), val, addr, 0);
 }
 
+fn make_bin_sig<M: Module>(module: &M) -> Signature {
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I64));
+    sig
+}
+
+fn make_unary_sig<M: Module>(module: &M) -> Signature {
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64));
+    sig.returns.push(AbiParam::new(types::I64));
+    sig
+}
+
+/// Bitcast an i64 (raw float bits) to f64 for direct float operations.
+fn emit_bitcast_i64_to_f64(builder: &mut FunctionBuilder, bits: Value) -> Value {
+    builder.ins().bitcast(types::F64, MemFlags::new(), bits)
+}
+
+/// Bitcast an f64 back to i64 for storage in registers.
+fn emit_bitcast_f64_to_i64(builder: &mut FunctionBuilder, val: Value) -> Value {
+    builder.ins().bitcast(types::I64, MemFlags::new(), val)
+}
+
 /// Emit a constant integer load into a register (NaN-tagged).
-fn emit_const(
+pub(crate) fn emit_const(
     builder: &mut FunctionBuilder,
-    _helpers: &HashMap<&str, FuncRef>,
     regs_ptr: Value,
     dst: usize,
     value: i64,
@@ -385,140 +398,28 @@ fn emit_const(
 
 /// Register all runtime helper functions with the JIT module.
 /// Returns a map from helper name → FuncRef.
+/// Single source of truth: `RuntimeHelper::ALL` from `helpers.rs`.
 fn register_runtime_helpers<M: Module>(
     module: &mut M,
     builder: &mut FunctionBuilder,
 ) -> HashMap<&'static str, FuncRef> {
+    use crate::jit::helpers::{HelperSig, RuntimeHelper};
     let mut helpers = HashMap::new();
 
-    let bin_helpers: &[&str] = &[
-        "nulang_iadd",
-        "nulang_isub",
-        "nulang_imul",
-        "nulang_idiv",
-        "nulang_imod",
-        "nulang_icmp_eq",
-        "nulang_icmp_lt",
-        "nulang_icmp_gt",
-        "nulang_icmp_le",
-        "nulang_icmp_ge",
-        "nulang_fadd",
-        "nulang_fsub",
-        "nulang_fmul",
-        "nulang_fdiv",
-        "nulang_fcmp_eq",
-        "nulang_fcmp_lt",
-        "nulang_fcmp_gt",
-        "nulang_and",
-        "nulang_or",
-    ];
-
-    for name in bin_helpers {
+    for (helper, name) in RuntimeHelper::ALL {
+        let sig = match helper.sig() {
+            HelperSig::Bin => make_bin_sig(module),
+            HelperSig::Unary => make_unary_sig(module),
+            _ => continue, // reg3/reg4 not used by typed_compiler
+        };
         let func_id = module
-            .declare_function(name, Linkage::Import, &make_bin_sig(module))
-            .expect("failed to declare runtime helper");
-        let func_ref = module.declare_func_in_func(func_id, builder.func);
-        helpers.insert(*name, func_ref);
-    }
-
-    let unary_helpers: &[&str] = &[
-        "nulang_ineg",
-        "nulang_iinc",
-        "nulang_idec",
-        "nulang_not",
-        "nulang_itof",
-        "nulang_ftoi",
-    ];
-
-    for name in unary_helpers {
-        let func_id = module
-            .declare_function(name, Linkage::Import, &make_unary_sig(module))
+            .declare_function(name, Linkage::Import, &sig)
             .expect("failed to declare runtime helper");
         let func_ref = module.declare_func_in_func(func_id, builder.func);
         helpers.insert(*name, func_ref);
     }
 
     helpers
-}
-
-fn make_bin_sig<M: Module>(module: &M) -> Signature {
-    let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(types::I64));
-    sig.params.push(AbiParam::new(types::I64));
-    sig.returns.push(AbiParam::new(types::I64));
-    sig
-}
-
-fn make_unary_sig<M: Module>(module: &M) -> Signature {
-    let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(types::I64));
-    sig.returns.push(AbiParam::new(types::I64));
-    sig
-}
-
-// ---------------------------------------------------------------------------
-// NaN-tag Inline CLIF Emission
-// ---------------------------------------------------------------------------
-
-/// Extract the 48-bit payload from a NaN-tagged integer value.
-///
-/// Emits: `band(raw, 0x0000FFFFFFFFFFFF)` — zeroes out the upper 16 tag bits.
-pub(crate) fn emit_extract_payload(builder: &mut FunctionBuilder, raw: Value) -> Value {
-    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK_I64);
-    builder.ins().band(raw, mask)
-}
-
-/// Inline sign-extend of a 48-bit payload to a full i64.
-///
-/// Emits the equivalent of the runtime `sext48` function directly in CLIF:
-/// ```clif
-/// payload   = band(raw, 0x0000FFFFFFFFFFFF)
-/// sign_bit  = band(raw, 0x0000800000000000)
-/// is_neg    = icmp ne, sign_bit, 0
-/// extended  = bor(payload, 0xFFFF000000000000)
-/// result    = select is_neg, extended, payload
-/// ```
-///
-/// This is a key optimization: instead of a runtime helper call, the sign
-/// extension happens inline with ~5 CLIF instructions.
-pub(crate) fn emit_sext48(builder: &mut FunctionBuilder, raw: Value) -> Value {
-    let payload = emit_extract_payload(builder, raw);
-    let sign_mask = builder.ins().iconst(types::I64, SIGN_BIT_I64);
-    let sign_bit = builder.ins().band(raw, sign_mask);
-    let zero = builder.ins().iconst(types::I64, 0);
-    let is_negative = builder.ins().icmp(IntCC::NotEqual, sign_bit, zero);
-    let sign_extend_const = builder.ins().iconst(types::I64, SIGN_EXTEND);
-    let extended = builder.ins().bor(payload, sign_extend_const);
-    builder.ins().select(is_negative, extended, payload)
-}
-
-/// Re-tag an i64 value into a NaN-tagged integer.
-///
-/// Emits: `bor(TAG_INT_I64, band(value, PAYLOAD_MASK_I64))`
-fn emit_tag_int(builder: &mut FunctionBuilder, value: Value) -> Value {
-    let tag = builder.ins().iconst(types::I64, TAG_INT_I64);
-    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK_I64);
-    let masked = builder.ins().band(value, mask);
-    builder.ins().bor(tag, masked)
-}
-
-/// Bitcast an i64 (raw float bits) to f64 for direct float operations.
-fn emit_bitcast_i64_to_f64(builder: &mut FunctionBuilder, bits: Value) -> Value {
-    builder.ins().bitcast(types::F64, MemFlags::new(), bits)
-}
-
-/// Bitcast an f64 back to i64 for storage in registers.
-fn emit_bitcast_f64_to_i64(builder: &mut FunctionBuilder, val: Value) -> Value {
-    builder.ins().bitcast(types::I64, MemFlags::new(), val)
-}
-
-/// Tag a boolean comparison result (i8 from icmp/fcmp) as a NaN-tagged Bool value.
-///
-/// Emits: `select cond, TAG_BOOL_I64|TRUE, TAG_BOOL_I64|FALSE`
-fn emit_tag_bool(builder: &mut FunctionBuilder, cond: Value) -> Value {
-    let true_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 1);
-    let false_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 0);
-    builder.ins().select(cond, true_val, false_val)
 }
 
 // ---------------------------------------------------------------------------
@@ -993,16 +894,16 @@ pub fn compile_bytecode_region_typed(
                 builder.ins().jump(return_block, &[]);
             }
             OpCode::Const0 => {
-                emit_const(&mut builder, &helpers, regs_ptr, instr.op1 as usize, 0);
+                emit_const(&mut builder, regs_ptr, instr.op1 as usize, 0);
             }
             OpCode::Const1 => {
-                emit_const(&mut builder, &helpers, regs_ptr, instr.op1 as usize, 1);
+                emit_const(&mut builder, regs_ptr, instr.op1 as usize, 1);
             }
             OpCode::Const2 => {
-                emit_const(&mut builder, &helpers, regs_ptr, instr.op1 as usize, 2);
+                emit_const(&mut builder, regs_ptr, instr.op1 as usize, 2);
             }
             OpCode::ConstM1 => {
-                emit_const(&mut builder, &helpers, regs_ptr, instr.op1 as usize, -1);
+                emit_const(&mut builder, regs_ptr, instr.op1 as usize, -1);
             }
             OpCode::ConstU => {
                 let idx = instr.imm16() as usize;

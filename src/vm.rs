@@ -414,18 +414,26 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
     }
 
     fn drop_ref(&mut self, ptr: *mut u8) {
+        // SAFETY: `ptr` is a valid heap pointer previously allocated by this
+        // actor's heap. The caller (VM ArrStore/FieldS write barrier) guarantees
+        // ptr is non-null and points to an OrcaHeader-managed allocation.
         unsafe {
             self.gc.drop_local_ref(&mut self.heap, ptr);
         }
     }
 
     fn retain_ref(&mut self, ptr: *mut u8) {
+        // SAFETY: `ptr` is a valid, non-null heap pointer to an
+        // OrcaHeader-managed object. The GC only reads the header.
         unsafe {
             self.gc.local_ref(&self.heap, ptr);
         }
     }
 
     fn array_len(&self, ptr: *mut u8) -> Option<usize> {
+        // SAFETY: `ptr` is a valid heap pointer from a prior Array allocation.
+        // `ActorHeap::header_of` computes the OrcaHeader immediately preceding
+        // the payload — this is sound when ptr was returned by heap.alloc().
         unsafe {
             let header = &*ActorHeap::header_of(ptr);
             if header.type_tag == HeapTypeTag::Array {
@@ -1635,6 +1643,10 @@ impl VM {
         for (i, r) in self.frames[frame_idx].regs.iter().enumerate() {
             regs[i] = r.to_bits();
         }
+        // SAFETY: The `&mut dyn ActorVmCallbacks` reference is valid for the
+        // duration of this function call. `set_jit_callbacks` stores it in a
+        // thread-local; `with_callbacks` restores `&mut` provenance before use.
+        // The VM is single-threaded, so no concurrent access.
         unsafe {
             crate::jit::runtime::set_jit_callbacks(
                 self.actor_callbacks.as_mut() as *mut dyn ActorVmCallbacks,
@@ -2044,6 +2056,12 @@ impl VM {
                     if let Some(ptr) = val.as_ptr() {
                         self.actor_callbacks.retain_ref(ptr);
                     }
+                    // SAFETY: The bounds check above (idx < len) guarantees
+                    // `idx` is within the allocated array. `arr_ptr` is a valid
+                    // ActorHeap pointer from a prior ArrLoad/Alloc. The
+                    // read-modify-write of the slot (old → drop_ref, new →
+                    // retain_ref) follows the standard ArrStore write-barrier
+                    // contract.
                     unsafe {
                         let slot = (arr_ptr as *mut Value).add(idx);
                         let old = *slot;
@@ -2417,7 +2435,6 @@ impl VM {
                 self.step_count
             )));
         }
-        let _debug = self.step_count <= 50;
 
         let frame_idx = self
             .current_frame_idx
@@ -2653,7 +2670,7 @@ impl VM {
                 self.step_capload(frame_idx, instr)?;
             }
             OpCode::FreeVar => {
-                // Nothing emits FreeVar; keep it a no-op.
+                // Reserved opcode; never emitted. No-op.
             }
 
             // -- Arithmetic --

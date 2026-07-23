@@ -207,71 +207,7 @@ impl AotModule {
 }
 
 /// Register all runtime helper symbols with the JIT builder.
+/// Single source of truth: `src/jit/helpers.rs` `define_helpers!` macro.
 fn register_runtime_helpers(builder: &mut JITBuilder) {
-    let helpers: &[(&str, *const u8)] = &[
-        ("nulang_iadd", crate::jit::runtime::nulang_iadd as *const u8),
-        ("nulang_isub", crate::jit::runtime::nulang_isub as *const u8),
-        ("nulang_imul", crate::jit::runtime::nulang_imul as *const u8),
-        ("nulang_idiv", crate::jit::runtime::nulang_idiv as *const u8),
-        ("nulang_imod", crate::jit::runtime::nulang_imod as *const u8),
-        (
-            "nulang_icmp_eq",
-            crate::jit::runtime::nulang_icmp_eq as *const u8,
-        ),
-        (
-            "nulang_icmp_lt",
-            crate::jit::runtime::nulang_icmp_lt as *const u8,
-        ),
-        (
-            "nulang_icmp_gt",
-            crate::jit::runtime::nulang_icmp_gt as *const u8,
-        ),
-        (
-            "nulang_icmp_le",
-            crate::jit::runtime::nulang_icmp_le as *const u8,
-        ),
-        (
-            "nulang_icmp_ge",
-            crate::jit::runtime::nulang_icmp_ge as *const u8,
-        ),
-        ("nulang_fadd", crate::jit::runtime::nulang_fadd as *const u8),
-        ("nulang_fsub", crate::jit::runtime::nulang_fsub as *const u8),
-        ("nulang_fmul", crate::jit::runtime::nulang_fmul as *const u8),
-        ("nulang_fdiv", crate::jit::runtime::nulang_fdiv as *const u8),
-        (
-            "nulang_fcmp_eq",
-            crate::jit::runtime::nulang_fcmp_eq as *const u8,
-        ),
-        (
-            "nulang_fcmp_lt",
-            crate::jit::runtime::nulang_fcmp_lt as *const u8,
-        ),
-        (
-            "nulang_fcmp_gt",
-            crate::jit::runtime::nulang_fcmp_gt as *const u8,
-        ),
-        ("nulang_ineg", crate::jit::runtime::nulang_ineg as *const u8),
-        ("nulang_iinc", crate::jit::runtime::nulang_iinc as *const u8),
-        ("nulang_idec", crate::jit::runtime::nulang_idec as *const u8),
-        ("nulang_not", crate::jit::runtime::nulang_not as *const u8),
-        ("nulang_and", crate::jit::runtime::nulang_and as *const u8),
-        ("nulang_or", crate::jit::runtime::nulang_or as *const u8),
-        ("nulang_itof", crate::jit::runtime::nulang_itof as *const u8),
-        ("nulang_ftoi", crate::jit::runtime::nulang_ftoi as *const u8),
-        ("nulang_xor", crate::jit::runtime::nulang_xor as *const u8),
-        ("nulang_shl", crate::jit::runtime::nulang_shl as *const u8),
-        ("nulang_shr", crate::jit::runtime::nulang_shr as *const u8),
-        (
-            "nulang_bitand",
-            crate::jit::runtime::nulang_bitand as *const u8,
-        ),
-        (
-            "nulang_bitor",
-            crate::jit::runtime::nulang_bitor as *const u8,
-        ),
-        ("nulang_fneg", crate::jit::runtime::nulang_fneg as *const u8),
-    ];
-    for (name, ptr) in helpers {
-        builder.symbol(*name, *ptr);
-    }
+    crate::jit::helpers::register_with_builder(builder);
 }

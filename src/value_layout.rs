@@ -142,19 +142,15 @@ pub fn tag_closure(payload: u64) -> u64 {
 // Float detection
 // ---------------------------------------------------------------------------
 
-/// True when `raw` represents a real IEEE-754 float (any bit pattern whose
-/// upper 16 bits do not match a known type tag).
+/// True when `raw` represents a real IEEE-754 float (any bit pattern that is
+/// not a NaN).
 ///
-/// Since all tags occupy the quiet-NaN range (0x7FF6–0x7FFE), this is
-/// equivalent to checking `!f64::from_bits(raw).is_nan()`, but expressed
-/// in terms of the tag mask for clarity.
+/// All tagged values (0x7FF6–0x7FFE) occupy the quiet-NaN range, so this check
+/// is equivalent to `!f64::from_bits(raw).is_nan()`. The VM interpreter
+/// (`Value::as_float`) and JIT runtime helpers use the same semantics.
 #[inline]
 pub fn is_float_raw(raw: u64) -> bool {
-    let tag = raw >> TAG_SHIFT;
-    // Tags 0x7FF6 (Python), 0x7FF7 (Closure), 0x7FF8–0x7FFE (Nil, Unit,
-    // Bool, Int, Ptr, Actor, String) are all in the quiet-NaN range.
-    // Real floats cannot have these upper 16 bits — they are not NaN.
-    !(0x7FF6..=0x7FFE).contains(&tag)
+    !f64::from_bits(raw).is_nan()
 }
 
 // ---------------------------------------------------------------------------
@@ -272,8 +268,8 @@ mod tests {
         assert!(!is_float_raw(TAG_NIL));
         assert!(!is_float_raw(TAG_PTR | 0x1000));
         assert!(!is_float_raw(TAG_CLOSURE | 0x10));
-        // NaN values with different upper bits (not a known tag) ARE floats.
-        assert!(is_float_raw(0x7FF5_0000_0000_0000)); // NaN, not a tag
+        // NaN values (even with upper bits outside the known tag range) are NOT floats.
+        assert!(!is_float_raw(0x7FF5_0000_0000_0000)); // NaN, not a tag, still NaN
     }
 
     #[test]

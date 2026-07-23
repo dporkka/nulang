@@ -9,7 +9,10 @@
 use crate::ast::*;
 use crate::types::*;
 
-use std::collections::{HashMap, HashSet};
+// Fast hashing for compiler-internal maps (keys are not attacker-controlled).
+type FxHashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+type FxHashSet<T> = std::collections::HashSet<T, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+
 
 // ---------------------------------------------------------------------------
 // Effect Row Operations
@@ -405,7 +408,7 @@ pub struct EffectChecker {
     /// [`EffectChecker::register_function_rows`] before bodies are checked,
     /// so that a direct call site (`Expr::App` on a `Var`) propagates the
     /// callee's declared or inferred row (SPEC2 §4.9).
-    fn_rows: HashMap<String, EffectRow>,
+    fn_rows: FxHashMap<String, EffectRow>,
     /// Names currently bound by local constructs (let bindings, lambda
     /// parameters, pattern variables, ...). A locally-bound name shadows a
     /// same-named module function, so calls through it are not charged the
@@ -418,7 +421,7 @@ impl EffectChecker {
     pub fn new() -> Self {
         EffectChecker {
             diagnostics: Vec::new(),
-            fn_rows: HashMap::new(),
+            fn_rows: FxHashMap::default(),
             shadowed: Vec::new(),
         }
     }
@@ -1112,7 +1115,7 @@ impl CapabilityAnalyzer {
     /// linear-consumption set, so consumption state never leaks between
     /// top-level calls (the frontend reuses one analyzer across declarations).
     pub fn infer_cap(&mut self, ctx: &CapContext, expr: &Expr) -> NuResult<Capability> {
-        let mut consumed = HashSet::new();
+        let mut consumed = FxHashSet::default();
         self.infer_cap_tracked(ctx, expr, &mut consumed)
     }
 
@@ -1126,7 +1129,7 @@ impl CapabilityAnalyzer {
         &mut self,
         name: &str,
         span: Span,
-        consumed: &mut HashSet<String>,
+        consumed: &mut FxHashSet<String>,
     ) -> NuResult<()> {
         // Record the span for LSP visualization regardless of error.
         self.consumed_spans.push(span);
@@ -1158,7 +1161,7 @@ impl CapabilityAnalyzer {
         &mut self,
         ctx: &CapContext,
         expr: &Expr,
-        consumed: &mut HashSet<String>,
+        consumed: &mut FxHashSet<String>,
     ) -> NuResult<Capability> {
         match expr {
             // Literals are immutable values.
@@ -1298,7 +1301,7 @@ impl CapabilityAnalyzer {
                 // consumed after the match only if every arm consumes it.
                 let base = consumed.clone();
                 let mut cap = Capability::Tag;
-                let mut merged: Option<HashSet<String>> = None;
+                let mut merged: Option<FxHashSet<String>> = None;
                 for (pat, guard, arm_expr) in arms {
                     *consumed = base.clone();
                     let mut arm_ctx = ctx.clone();
@@ -1503,7 +1506,7 @@ impl CapabilityAnalyzer {
                 // every arm consumes the binding.
                 let base = consumed.clone();
                 let mut cap = Capability::Tag;
-                let mut merged: Option<HashSet<String>> = None;
+                let mut merged: Option<FxHashSet<String>> = None;
                 for (_, patterns, guard, body_expr) in arms {
                     *consumed = base.clone();
                     let mut arm_ctx = ctx.clone();

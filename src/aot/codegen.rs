@@ -25,14 +25,10 @@ use std::collections::{HashMap, HashSet};
 use crate::mir;
 use crate::type_metadata::{KnownType, TypeMetadata};
 
-// Reuse NaN-tag constants from the JIT shared helpers.
-use crate::value_layout::{PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT, TAG_NIL};
-
-const TAG_INT_I64: i64 = TAG_INT as i64;
-const TAG_BOOL_I64: i64 = TAG_BOOL as i64;
-const TAG_NIL_I64: i64 = TAG_NIL as i64;
-const PAYLOAD_MASK_I64: i64 = PAYLOAD_MASK as i64;
-const SIGN_BIT_I64: i64 = SIGN_BIT as i64;
+// Reuse NaN-tag constants and CLIF helpers from `cranelift_utils`.
+use crate::cranelift_utils::{
+    emit_sext48, emit_tag_bool, emit_tag_int, TAG_BOOL_I64, TAG_NIL_I64,
+};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -63,33 +59,7 @@ impl std::error::Error for AotCompileError {}
 
 pub type AotResult<T> = Result<T, AotCompileError>;
 
-// ---------------------------------------------------------------------------
-// CLIF helpers (adapted from jit/typed_compiler.rs)
-// ---------------------------------------------------------------------------
-
-/// Sign-extend a 48-bit payload to a full i64.
-fn emit_sext48(builder: &mut FunctionBuilder, raw: Value) -> Value {
-    let payload_mask = builder.ins().iconst(types::I64, PAYLOAD_MASK_I64);
-    let sign_bit_mask = builder.ins().iconst(types::I64, SIGN_BIT_I64);
-    let payload = builder.ins().band(raw, payload_mask);
-    let sign_bit = builder.ins().band(raw, sign_bit_mask);
-    let zero = builder.ins().iconst(types::I64, 0);
-    let is_neg = builder.ins().icmp(IntCC::NotEqual, sign_bit, zero);
-    let sign_ext = builder
-        .ins()
-        .iconst(types::I64, 0xFFFF_0000_0000_0000u64 as i64);
-    let extended = builder.ins().bor(payload, sign_ext);
-    builder.ins().select(is_neg, extended, payload)
-}
-
-/// Re-tag an i64 value into a NaN-tagged integer.
-fn emit_tag_int(builder: &mut FunctionBuilder, value: Value) -> Value {
-    let tag = builder.ins().iconst(types::I64, TAG_INT_I64);
-    let mask = builder.ins().iconst(types::I64, PAYLOAD_MASK_I64);
-    let masked = builder.ins().band(value, mask);
-    builder.ins().bor(tag, masked)
-}
-
+// CLIF helpers imported from `cranelift_utils` (above).
 // ---------------------------------------------------------------------------
 // Compilation context
 // ---------------------------------------------------------------------------
@@ -1017,17 +987,6 @@ fn compile_unary(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Emit a tagged boolean value from an i8 comparison result.
-fn emit_tag_bool(builder: &mut FunctionBuilder, cond: Value) -> Value {
-    let tag = builder.ins().iconst(types::I64, TAG_BOOL_I64);
-    let true_val = builder.ins().iconst(types::I64, TAG_BOOL_I64 | 1);
-    let val = builder.ins().select(cond, true_val, tag);
-    val
-}
 
 /// Call a runtime helper function by name.
 fn call_helper(

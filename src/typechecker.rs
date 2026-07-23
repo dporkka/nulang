@@ -28,6 +28,10 @@ use std::collections::HashSet;
 /// A substitution maps type variables to types.
 /// Ordered list: earlier substitutions take precedence.
 pub type Substitution = Vec<(TypeVar, Type)>;
+// Fast hashing for compiler-internal maps (keys are not attacker-controlled).
+type FxHashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+type FxHashSet<T> = std::collections::HashSet<T, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+
 
 /// Apply a substitution to a type, replacing any type variables that appear
 /// in the substitution with their mapped types.
@@ -2081,7 +2085,7 @@ impl TypeChecker {
             Pattern::Record(pats) => match scrut_ty {
                 Type::Record(fields) => {
                     let mut new_ctx = ctx.clone();
-                    let field_map: std::collections::HashMap<String, Type> =
+                    let field_map: FxHashMap<String, Type> =
                         fields.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
                     for (field_name, pat) in pats {
                         if let Some(ty) = field_map.get(field_name) {
@@ -2390,9 +2394,9 @@ impl TypeChecker {
     /// same cell be used at incompatible types (e.g.
     /// `let r = &[] in { r = [1]; (*r)[0] == "s" }`).
     fn do_generalize(&self, ctx: &TypeContext, ty: &Type) -> Type {
-        let ty_fv: HashSet<TypeVar> = ty.free_vars().into_iter().collect();
+        let ty_fv: FxHashSet<TypeVar> = ty.free_vars().into_iter().collect();
         let ctx_fv = self.get_ctx_free_vars(ctx);
-        let ref_fv: HashSet<TypeVar> = ty.ref_free_vars().into_iter().collect();
+        let ref_fv: FxHashSet<TypeVar> = ty.ref_free_vars().into_iter().collect();
         let gen_vars: Vec<TypeVar> = ty_fv
             .difference(&ctx_fv)
             .copied()
@@ -2410,7 +2414,7 @@ impl TypeChecker {
     }
 
     /// Get free type variables from the context.
-    fn get_ctx_free_vars(&self, ctx: &TypeContext) -> HashSet<TypeVar> {
+    fn get_ctx_free_vars(&self, ctx: &TypeContext) -> FxHashSet<TypeVar> {
         ctx.free_vars().into_iter().collect()
     }
 }
@@ -2911,7 +2915,7 @@ mod tests {
             Type::Record(fields) => {
                 assert_eq!(fields.len(), 2);
                 // Fields may be in any order
-                let field_map: std::collections::HashMap<String, Type> =
+                let field_map: FxHashMap<String, Type> =
                     fields.into_iter().collect();
                 assert_eq!(field_map.get("x"), Some(&Type::int()));
                 assert_eq!(field_map.get("y"), Some(&Type::bool()));

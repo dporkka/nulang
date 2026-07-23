@@ -546,23 +546,21 @@ fn read_header(bytes: &[u8], offset: &mut usize) -> Result<(u32, u32, u32, u32, 
     }
     *offset += 4;
 
-    let version = u32::from_be_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+    let version = read_u32(bytes, offset)?;
     if version != VERSION {
         return Err(format!("unsupported version: {}", version));
     }
-    *offset += 4;
 
-    let flags = u32::from_be_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
-    *offset += 4;
+    let flags = read_u32(bytes, offset)?;
 
     // Skip module_hash (32 bytes).
     *offset += 32;
 
-    let num_objects = read_u32(bytes, offset);
-    let num_strings = read_u32(bytes, offset);
-    let num_closures = read_u32(bytes, offset);
-    let num_frames = read_u32(bytes, offset);
-    let num_handlers = read_u32(bytes, offset);
+    let num_objects = read_u32(bytes, offset)?;
+    let num_strings = read_u32(bytes, offset)?;
+    let num_closures = read_u32(bytes, offset)?;
+    let num_frames = read_u32(bytes, offset)?;
+    let num_handlers = read_u32(bytes, offset)?;
 
     Ok((
         flags,
@@ -574,10 +572,31 @@ fn read_header(bytes: &[u8], offset: &mut usize) -> Result<(u32, u32, u32, u32, 
     ))
 }
 
-fn read_u32(bytes: &[u8], offset: &mut usize) -> u32 {
-    let v = u32::from_be_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+fn read_u32(bytes: &[u8], offset: &mut usize) -> Result<u32, String> {
+    if *offset + 4 > bytes.len() {
+        return Err("truncated u32 field".into());
+    }
+    let v = u32::from_be_bytes(bytes[*offset..*offset + 4].try_into().map_err(|_| "u32 conversion failed".to_string())?);
     *offset += 4;
-    v
+    Ok(v)
+}
+
+fn read_u16(bytes: &[u8], offset: &mut usize) -> Result<u16, String> {
+    if *offset + 2 > bytes.len() {
+        return Err("truncated u16 field".into());
+    }
+    let v = u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().map_err(|_| "u16 conversion failed".to_string())?);
+    *offset += 2;
+    Ok(v)
+}
+
+fn read_u64_le(bytes: &[u8], offset: &mut usize) -> Result<u64, String> {
+    if *offset + 8 > bytes.len() {
+        return Err("truncated u64 field".into());
+    }
+    let v = u64::from_le_bytes(bytes[*offset..*offset + 8].try_into().map_err(|_| "u64 conversion failed".to_string())?);
+    *offset += 8;
+    Ok(v)
 }
 
 fn read_string_table(bytes: &[u8], offset: &mut usize, count: u32) -> Result<Vec<String>, String> {
@@ -586,8 +605,8 @@ fn read_string_table(bytes: &[u8], offset: &mut usize, count: u32) -> Result<Vec
         if *offset + 2 > bytes.len() {
             return Err("truncated string table entry".into());
         }
-        let len = u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().unwrap()) as usize;
-        *offset += 2;
+        let len = read_u16(bytes, offset)? as usize;
+
         if *offset + len > bytes.len() {
             return Err("truncated string data".into());
         }
@@ -619,7 +638,7 @@ fn read_objects(
         }
         let type_tag_byte = bytes[*offset];
         *offset += 1;
-        let payload_size = read_u32(bytes, offset);
+        let payload_size = read_u32(bytes, offset)?;
         let payload_offset = *offset;
 
         let tag = TypeTag::from_u8(type_tag_byte)
@@ -655,7 +674,7 @@ fn read_objects(
                 for si in 0..slot_count {
                     let src_start = *payload_offset + si * 8;
                     let raw =
-                        u64::from_le_bytes(bytes[src_start..src_start + 8].try_into().unwrap());
+                        u64::from_le_bytes(bytes[src_start..src_start + 8].try_into().map_err(|_| "u64 conversion failed".to_string())?);
                     dst_slots[si] = deserialize_one_value(raw, string_table, &obj_table, vm);
                 }
             }
@@ -718,17 +737,17 @@ fn read_closures(
         if *offset + 6 > bytes.len() {
             return Err("truncated closure entry".into());
         }
-        let func_idx = read_u32(bytes, offset);
+        let func_idx = read_u32(bytes, offset)?;
         let num_capts =
-            u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().unwrap()) as usize;
-        *offset += 2;
+            read_u16(bytes, offset)? as usize;
+
         let mut captures = Vec::with_capacity(num_capts);
         for _ in 0..num_capts {
             if *offset + 8 > bytes.len() {
                 return Err("truncated closure capture".into());
             }
-            let raw = u64::from_le_bytes(bytes[*offset..*offset + 8].try_into().unwrap());
-            *offset += 8;
+            let raw = read_u64_le(bytes, offset)?;
+
             captures.push(deserialize_one_value(raw, string_table, obj_table, vm));
         }
         closures.push((func_idx, captures));
@@ -750,13 +769,13 @@ fn read_frames(
         if *offset + 15 > bytes.len() {
             return Err("truncated frame header".into());
         }
-        let pc = read_u32(bytes, offset) as usize;
+        let pc = read_u32(bytes, offset)? as usize;
         let module_idx =
-            u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().unwrap()) as usize;
-        *offset += 2;
+            read_u16(bytes, offset)? as usize;
+
         let return_dst = bytes[*offset];
         *offset += 1;
-        let caller_idx_raw = i32::from_be_bytes(bytes[*offset..*offset + 4].try_into().unwrap());
+        let caller_idx_raw = i32::from_be_bytes(bytes[*offset..*offset + 4].try_into().map_err(|_| "i32 conversion failed".to_string())?);
         *offset += 4;
         let has_closure = bytes[*offset];
         *offset += 1;
@@ -765,7 +784,7 @@ fn read_frames(
             if *offset + 4 > bytes.len() {
                 return Err("truncated closure env index".into());
             }
-            let ce_idx = read_u32(bytes, offset) as usize;
+            let ce_idx = read_u32(bytes, offset)? as usize;
             if ce_idx < closure_envs.len() {
                 // Reconstruct the closure Value pointing to the env.
                 // We'll store it as a TAG_CLOSURE with the env flag.
@@ -788,8 +807,8 @@ fn read_frames(
             Some(caller_idx_raw as usize)
         };
 
-        let num_regs = u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().unwrap()) as usize;
-        *offset += 2;
+        let num_regs = read_u16(bytes, offset)? as usize;
+
 
         // Read register indices.
         let mut reg_indices = Vec::with_capacity(num_regs);
@@ -798,8 +817,8 @@ fn read_frames(
                 return Err("truncated reg index".into());
             }
             reg_indices
-                .push(u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().unwrap()) as usize);
-            *offset += 2;
+                .push(read_u16(bytes, offset)? as usize);
+
         }
 
         // Read register values.
@@ -808,8 +827,8 @@ fn read_frames(
             if *offset + 8 > bytes.len() {
                 return Err("truncated reg value".into());
             }
-            let raw = u64::from_le_bytes(bytes[*offset..*offset + 8].try_into().unwrap());
-            *offset += 8;
+            let raw = read_u64_le(bytes, offset)?;
+
             reg_values.push(deserialize_one_value(raw, string_table, obj_table, vm));
         }
 
@@ -837,11 +856,11 @@ fn read_handlers(
         if *offset + 11 > bytes.len() {
             return Err("truncated handler entry".into());
         }
-        let handler_table_idx = read_u32(bytes, offset) as usize;
+        let handler_table_idx = read_u32(bytes, offset)? as usize;
         let module_idx =
-            u16::from_be_bytes(bytes[*offset..*offset + 2].try_into().unwrap()) as usize;
-        *offset += 2;
-        let resume_pc = read_u32(bytes, offset) as usize;
+            read_u16(bytes, offset)? as usize;
+
+        let resume_pc = read_u32(bytes, offset)? as usize;
         let resume_dst = bytes[*offset];
         *offset += 1;
 

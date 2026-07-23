@@ -466,7 +466,7 @@ impl Parser {
                     self.skip_newlines_semicolons();
                 }
                 TokenKind::Ident(item) => {
-                    let tok = self.advance();
+                    let tok = self.advance_token();
                     match item.as_str() {
                         "event" => {
                             let event_name = self.expect_ident("event name")?;
@@ -2315,7 +2315,21 @@ impl Parser {
         }
     }
 
-    fn advance(&mut self) -> Token {
+    /// Return the current token's kind and advance. The hot path — clones only
+    /// the `TokenKind` enum, not the full `Token` with `Span`.
+    fn advance(&mut self) -> TokenKind {
+        if self.pos < self.tokens.len() {
+            let kind = self.tokens[self.pos].kind.clone();
+            self.pos += 1;
+            kind
+        } else {
+            TokenKind::Eof
+        }
+    }
+
+    /// Return the full current token (with span) and advance. Only used where
+    /// the caller needs the span (e.g. error messages).
+    fn advance_token(&mut self) -> Token {
         if self.pos < self.tokens.len() {
             let tok = self.tokens[self.pos].clone();
             self.pos += 1;
@@ -2344,7 +2358,7 @@ impl Parser {
     fn expect(&mut self, kind: TokenKind) -> NuResult<Token> {
         let current_kind = self.peek_kind();
         if current_kind == &kind {
-            Ok(self.advance())
+            Ok(self.advance_token())
         } else {
             Err(NuError::ParseError {
                 msg: format!("Expected {}", kind),

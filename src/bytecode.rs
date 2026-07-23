@@ -83,7 +83,7 @@ pub enum OpCode {
     Closure = 0x60,     // Create closure (func_idx, env_count, dst)
     CapLoad = 0x61,     // Load from capture (closure_reg, idx, dst)
     CapStore = 0x62,    // Store to capture
-    FreeVar = 0x63,     // Free variable capture declaration
+    FreeVar = 0x63,     // Reserved — was free variable capture; never emitted
     ClosureCall = 0x64, // Call closure (closure_reg, argc, dst)
 
     // == Memory & Objects (0x70-0x7F) ==

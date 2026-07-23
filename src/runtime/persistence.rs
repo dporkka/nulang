@@ -686,9 +686,13 @@ impl LibsqlStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
+    /// Acquire the database connection lock.
+    fn conn(&self) -> std::sync::MutexGuard<'_, libsql::Connection> {
+        self.conn.lock().unwrap()
+    }
 
     fn ensure_tables(&self) -> io::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS snapshots (
@@ -747,7 +751,7 @@ impl LibsqlStore {
 
     /// Execute a SQL query and return rows as a Vec of JSON strings.
     pub fn query(&self, sql: &str, params: &[Value]) -> io::Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             let param_values: Vec<String> = params
                 .iter()
@@ -810,7 +814,7 @@ impl PersistenceStore for LibsqlStore {
     fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
         let state_json = serde_json::to_string(&snapshot.state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             conn.execute(
                 "INSERT INTO snapshots (actor_id, sequence, state, waiting_signal) VALUES (?1, ?2, ?3, ?4)
@@ -821,7 +825,7 @@ impl PersistenceStore for LibsqlStore {
     }
 
     fn load_snapshot(&self, actor_id: u64) -> Option<ActorSnapshot> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             let mut rows = conn
                 .query(
@@ -847,7 +851,7 @@ impl PersistenceStore for LibsqlStore {
     fn append_journal(&mut self, actor_id: u64, entry: JournalEntry) -> io::Result<()> {
         let payload_json = serde_json::to_string(&entry.payload)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             conn.execute(
                 "INSERT INTO journal (actor_id, sequence, behavior_id, payload) VALUES (?1, ?2, ?3, ?4)",
@@ -857,7 +861,7 @@ impl PersistenceStore for LibsqlStore {
     }
 
     fn read_journal(&self, actor_id: u64) -> Vec<JournalEntry> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             let mut rows = match conn
                 .query(
@@ -908,7 +912,7 @@ impl PersistenceStore for LibsqlStore {
     fn append_workflow_event(&mut self, actor_id: u64, event: WorkflowEvent) -> io::Result<()> {
         let event_json = serde_json::to_string(&event)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             conn.execute(
                 "INSERT INTO workflow_events (actor_id, sequence, event) VALUES (?1, ?2, ?3)",
@@ -921,7 +925,7 @@ impl PersistenceStore for LibsqlStore {
     }
 
     fn read_workflow_events(&self, actor_id: u64) -> Vec<WorkflowEvent> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             let mut rows = match conn
                 .query(
@@ -957,7 +961,7 @@ impl PersistenceStore for LibsqlStore {
     fn append_event(&mut self, actor_id: u64, entry: EventEntry) -> io::Result<()> {
         let args_json = serde_json::to_string(&entry.args)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             conn.execute(
                 "INSERT INTO events (actor_id, sequence, field_name, event_name, args) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -967,7 +971,7 @@ impl PersistenceStore for LibsqlStore {
     }
 
     fn read_events(&self, actor_id: u64) -> Vec<EventEntry> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             let mut rows = match conn
                 .query(
@@ -1020,7 +1024,7 @@ impl PersistenceStore for LibsqlStore {
     }
 
     fn latest_sequence(&self, actor_id: u64) -> u64 {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             let snapshot_seq: Option<i64> = async {
                 let mut rows = conn.query(
@@ -1062,7 +1066,7 @@ impl PersistenceStore for LibsqlStore {
     }
 
     fn clear(&mut self, actor_id: u64) -> io::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn();
         self.rt.block_on(async {
             conn.execute(
                 "DELETE FROM snapshots WHERE actor_id = ?1",

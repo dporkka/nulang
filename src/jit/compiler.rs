@@ -100,7 +100,7 @@ pub fn is_opcode_compilable(op: OpCode) -> bool {
 // Signature Helpers
 // ---------------------------------------------------------------------------
 
-fn make_bin_sig<M: Module>(module: &M) -> Signature {
+pub(crate) fn make_bin_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I64));
@@ -108,14 +108,14 @@ fn make_bin_sig<M: Module>(module: &M) -> Signature {
     sig
 }
 
-fn make_unary_sig<M: Module>(module: &M) -> Signature {
+pub(crate) fn make_unary_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     sig.returns.push(AbiParam::new(types::I64));
     sig
 }
 
-fn make_void_reg3_sig<M: Module>(module: &M) -> Signature {
+pub(crate) fn make_void_reg3_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I32));
@@ -123,7 +123,7 @@ fn make_void_reg3_sig<M: Module>(module: &M) -> Signature {
     sig
 }
 
-fn make_void_reg4_sig<M: Module>(module: &M) -> Signature {
+pub(crate) fn make_void_reg4_sig<M: Module>(module: &M) -> Signature {
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I32));
@@ -136,125 +136,14 @@ fn make_void_reg4_sig<M: Module>(module: &M) -> Signature {
 // Runtime Helper Registration
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RuntimeHelper {
-    IAdd,
-    ISub,
-    IMul,
-    IDiv,
-    IMod,
-    Xor,
-    Shl,
-    Shr,
-    BitAnd,
-    BitOr,
-    ICmpEq,
-    ICmpLt,
-    ICmpGt,
-    ICmpLe,
-    ICmpGe,
-    FAdd,
-    FSub,
-    FMul,
-    FDiv,
-    FNeg,
-    FCmpEq,
-    FCmpLt,
-    FCmpGt,
-    And,
-    Or,
-    INeg,
-    IInc,
-    IDec,
-    Not,
-    IToF,
-    FToI,
-    ArrStore,
-    ArrLen,
-    FieldL,
-}
+// Re-export from the single source of truth.
+pub use crate::jit::helpers::RuntimeHelper;
 
 fn register_runtime_helpers<M: Module>(
     module: &mut M,
     builder: &mut FunctionBuilder,
 ) -> Result<HashMap<RuntimeHelper, FuncRef>, CompileError> {
-    let mut helpers = HashMap::new();
-
-    let bin_helpers: &[(RuntimeHelper, &str)] = &[
-        (RuntimeHelper::IAdd, "nulang_iadd"),
-        (RuntimeHelper::ISub, "nulang_isub"),
-        (RuntimeHelper::IMul, "nulang_imul"),
-        (RuntimeHelper::IDiv, "nulang_idiv"),
-        (RuntimeHelper::IMod, "nulang_imod"),
-        (RuntimeHelper::Xor, "nulang_xor"),
-        (RuntimeHelper::Shl, "nulang_shl"),
-        (RuntimeHelper::Shr, "nulang_shr"),
-        (RuntimeHelper::BitAnd, "nulang_bitand"),
-        (RuntimeHelper::BitOr, "nulang_bitor"),
-        (RuntimeHelper::ICmpEq, "nulang_icmp_eq"),
-        (RuntimeHelper::ICmpLt, "nulang_icmp_lt"),
-        (RuntimeHelper::ICmpGt, "nulang_icmp_gt"),
-        (RuntimeHelper::ICmpLe, "nulang_icmp_le"),
-        (RuntimeHelper::ICmpGe, "nulang_icmp_ge"),
-        (RuntimeHelper::FAdd, "nulang_fadd"),
-        (RuntimeHelper::FSub, "nulang_fsub"),
-        (RuntimeHelper::FMul, "nulang_fmul"),
-        (RuntimeHelper::FDiv, "nulang_fdiv"),
-        (RuntimeHelper::FCmpEq, "nulang_fcmp_eq"),
-        (RuntimeHelper::FCmpLt, "nulang_fcmp_lt"),
-        (RuntimeHelper::FCmpGt, "nulang_fcmp_gt"),
-        (RuntimeHelper::And, "nulang_and"),
-        (RuntimeHelper::Or, "nulang_or"),
-    ];
-
-    for (helper, name) in bin_helpers {
-        let func_id = module
-            .declare_function(name, Linkage::Import, &make_bin_sig(module))
-            .map_err(|e| CompileError::Internal(format!("declare {}: {}", name, e)))?;
-        let func_ref = module.declare_func_in_func(func_id, builder.func);
-        helpers.insert(*helper, func_ref);
-    }
-
-    let unary_helpers: &[(RuntimeHelper, &str)] = &[
-        (RuntimeHelper::INeg, "nulang_ineg"),
-        (RuntimeHelper::IInc, "nulang_iinc"),
-        (RuntimeHelper::IDec, "nulang_idec"),
-        (RuntimeHelper::Not, "nulang_not"),
-        (RuntimeHelper::IToF, "nulang_itof"),
-        (RuntimeHelper::FToI, "nulang_ftoi"),
-        (RuntimeHelper::FNeg, "nulang_fneg"),
-    ];
-
-    for (helper, name) in unary_helpers {
-        let func_id = module
-            .declare_function(name, Linkage::Import, &make_unary_sig(module))
-            .map_err(|e| CompileError::Internal(format!("declare {}: {}", name, e)))?;
-        let func_ref = module.declare_func_in_func(func_id, builder.func);
-        helpers.insert(*helper, func_ref);
-    }
-
-    let reg4_helpers: &[(RuntimeHelper, &str)] = &[
-        (RuntimeHelper::ArrStore, "nulang_arr_store"),
-        (RuntimeHelper::FieldL, "nulang_field_load"),
-    ];
-    for (helper, name) in reg4_helpers {
-        let func_id = module
-            .declare_function(name, Linkage::Import, &make_void_reg4_sig(module))
-            .map_err(|e| CompileError::Internal(format!("declare {}: {}", name, e)))?;
-        let func_ref = module.declare_func_in_func(func_id, builder.func);
-        helpers.insert(*helper, func_ref);
-    }
-
-    let reg3_helpers: &[(RuntimeHelper, &str)] = &[(RuntimeHelper::ArrLen, "nulang_arr_len")];
-    for (helper, name) in reg3_helpers {
-        let func_id = module
-            .declare_function(name, Linkage::Import, &make_void_reg3_sig(module))
-            .map_err(|e| CompileError::Internal(format!("declare {}: {}", name, e)))?;
-        let func_ref = module.declare_func_in_func(func_id, builder.func);
-        helpers.insert(*helper, func_ref);
-    }
-
-    Ok(helpers)
+    crate::jit::helpers::register_with_module(module, builder)
 }
 
 // ---------------------------------------------------------------------------
@@ -777,38 +666,10 @@ pub fn compile_bytecode_region(
 }
 
 // ---------------------------------------------------------------------------
-// CLIF Generation Helpers
+// CLIF Generation Helpers — shared with typed_compiler.rs
 // ---------------------------------------------------------------------------
 
-fn load_reg(builder: &mut FunctionBuilder, regs_ptr: Value, idx: usize) -> Value {
-    let offset = (idx * 8) as i32;
-    let addr = if offset == 0 {
-        regs_ptr
-    } else {
-        let off = builder.ins().iconst(types::I64, offset as i64);
-        builder.ins().iadd(regs_ptr, off)
-    };
-    builder.ins().load(types::I64, MemFlags::new(), addr, 0)
-}
-
-fn store_reg(builder: &mut FunctionBuilder, regs_ptr: Value, idx: usize, val: Value) {
-    let offset = (idx * 8) as i32;
-    let addr = if offset == 0 {
-        regs_ptr
-    } else {
-        let off = builder.ins().iconst(types::I64, offset as i64);
-        builder.ins().iadd(regs_ptr, off)
-    };
-    builder.ins().store(MemFlags::new(), val, addr, 0);
-}
-
-fn emit_const(builder: &mut FunctionBuilder, regs_ptr: Value, dst: usize, value: i64) {
-    let tag = builder.ins().iconst(types::I64, TAG_INT as i64);
-    let masked = value & (PAYLOAD_MASK as i64);
-    let val_part = builder.ins().iconst(types::I64, masked);
-    let tagged = builder.ins().bor(tag, val_part);
-    store_reg(builder, regs_ptr, dst, tagged);
-}
+use crate::jit::typed_compiler::{emit_const, load_reg, store_reg};
 
 pub(crate) fn emit_arr_load(
     builder: &mut FunctionBuilder,

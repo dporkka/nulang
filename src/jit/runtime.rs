@@ -269,10 +269,17 @@ struct CbPair(usize, usize);
 impl CbPair {
     const NULL: Self = CbPair(0, 0);
 
+    /// # Safety
+    /// Transmutes `*mut dyn ActorVmCallbacks` (a fat pointer: data ptr +
+    /// vtable ptr) to `(usize, usize)`. Relies on the de-facto fat pointer
+    /// layout used by all Tier-1 Rust targets (x86_64, aarch64).
     fn from_ptr(ptr: *mut dyn crate::vm::ActorVmCallbacks) -> Self {
         unsafe { std::mem::transmute(ptr) }
     }
 
+    /// # Safety
+    /// Reconstructs the fat pointer. The caller must ensure the original
+    /// `&mut dyn ActorVmCallbacks` is alive and `&mut` provenance restored.
     fn to_ptr(self) -> *mut dyn crate::vm::ActorVmCallbacks {
         unsafe { std::mem::transmute(self) }
     }
@@ -308,6 +315,9 @@ unsafe fn with_callbacks<R>(f: impl FnOnce(&mut dyn crate::vm::ActorVmCallbacks)
 
 use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
 
+/// # Safety
+/// `regs` must point to a valid `[u64; 256]` array. Called only from
+/// JIT-compiled code that follows the `regs_ptr` ABI contract.
 #[no_mangle]
 pub unsafe extern "C" fn nulang_arr_store(
     regs: *mut u64,
@@ -340,6 +350,8 @@ pub unsafe extern "C" fn nulang_arr_store(
     });
 }
 
+/// # Safety
+/// `regs` must point to a valid `[u64; 256]` array.
 #[no_mangle]
 pub unsafe extern "C" fn nulang_arr_len(regs: *mut u64, arr_reg: u32, dst_reg: u32) {
     let arr_ptr_val = *regs.add(arr_reg as usize);
@@ -357,6 +369,8 @@ pub unsafe extern "C" fn nulang_arr_len(regs: *mut u64, arr_reg: u32, dst_reg: u
     *regs.add(dst_reg as usize) = tag_int(len as i64);
 }
 
+/// # Safety
+/// `regs` must point to a valid `[u64; 256]` array.
 #[no_mangle]
 pub unsafe extern "C" fn nulang_field_load(regs: *mut u64, obj_reg: u32, idx: u32, dst_reg: u32) {
     let obj_ptr_val = *regs.add(obj_reg as usize);

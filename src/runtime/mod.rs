@@ -18,6 +18,7 @@ mod distributed;
 mod distributed_context;
 mod network;
 mod orca_cycle;
+#[cfg(feature = "quic-experimental")]
 pub mod quic_transport;
 mod supervisor;
 mod supervisor_registry;
@@ -1649,14 +1650,11 @@ impl Runtime {
             sender: self.current_actor.unwrap_or(0),
             priority: MessagePriority::Normal,
         };
-        let target_exists = self.actors.contains_key(&target_id);
-        if target_exists {
-            if let Some(actor) = self.actors.get_mut(&target_id) {
-                actor
-                    .flight_recorder
-                    .record(self.current_actor.unwrap_or(0), behavior_id, args);
-            }
-            if let Err(_dropped) = self.actors.get_mut(&target_id).unwrap().mailbox.push(msg) {
+        if let Some(actor) = self.actors.get_mut(&target_id) {
+            actor
+                .flight_recorder
+                .record(self.current_actor.unwrap_or(0), behavior_id, args);
+            if let Err(_dropped) = actor.mailbox.push(msg) {
                 // Mailbox is full (capacity > 0). Route to DLQ with a simple notification.
                 self.route_to_dlq(
                     &Message {
@@ -2763,7 +2761,7 @@ impl Runtime {
     pub fn advance_time(&mut self, duration: std::time::Duration) {
         match &mut self.virtual_clock {
             Some(vc) => vc.advance(duration),
-            None => panic!("advance_time called without a virtual clock installed"),
+            None => eprintln!("advance_time called without a virtual clock installed; ignoring"),
         }
     }
 

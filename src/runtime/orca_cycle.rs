@@ -552,7 +552,10 @@ impl CycleDetector {
             self.scan_cursor = 0;
         }
 
-        let keys = self.scan_keys.as_ref().unwrap();
+        let keys = match self.scan_keys.as_ref() {
+            Some(k) => k,
+            None => return,
+        };
         let end = (self.scan_cursor + self.scan_batch_size).min(keys.len());
 
         for &key in &keys[self.scan_cursor..end] {

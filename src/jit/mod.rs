@@ -29,6 +29,7 @@
 //! branches.
 
 mod compiler;
+pub mod helpers;
 pub mod runtime;
 pub mod simd_analyzer;
 pub mod simd_compiler;
@@ -101,73 +102,8 @@ impl JitSession {
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
         // Register NaN-tag-aware runtime helpers so compiled code can call them.
-        // Each helper is defined in `runtime.rs` with `#[no_mangle]` and `extern "C"`.
-        let helpers: &[(&str, *const u8)] = &[
-            ("nulang_iadd", crate::jit::runtime::nulang_iadd as *const u8),
-            ("nulang_isub", crate::jit::runtime::nulang_isub as *const u8),
-            ("nulang_imul", crate::jit::runtime::nulang_imul as *const u8),
-            ("nulang_idiv", crate::jit::runtime::nulang_idiv as *const u8),
-            ("nulang_imod", crate::jit::runtime::nulang_imod as *const u8),
-            (
-                "nulang_icmp_eq",
-                crate::jit::runtime::nulang_icmp_eq as *const u8,
-            ),
-            (
-                "nulang_icmp_lt",
-                crate::jit::runtime::nulang_icmp_lt as *const u8,
-            ),
-            (
-                "nulang_icmp_gt",
-                crate::jit::runtime::nulang_icmp_gt as *const u8,
-            ),
-            (
-                "nulang_icmp_le",
-                crate::jit::runtime::nulang_icmp_le as *const u8,
-            ),
-            (
-                "nulang_icmp_ge",
-                crate::jit::runtime::nulang_icmp_ge as *const u8,
-            ),
-            ("nulang_fadd", crate::jit::runtime::nulang_fadd as *const u8),
-            ("nulang_fsub", crate::jit::runtime::nulang_fsub as *const u8),
-            ("nulang_fmul", crate::jit::runtime::nulang_fmul as *const u8),
-            ("nulang_fdiv", crate::jit::runtime::nulang_fdiv as *const u8),
-            (
-                "nulang_fcmp_eq",
-                crate::jit::runtime::nulang_fcmp_eq as *const u8,
-            ),
-            (
-                "nulang_fcmp_lt",
-                crate::jit::runtime::nulang_fcmp_lt as *const u8,
-            ),
-            (
-                "nulang_fcmp_gt",
-                crate::jit::runtime::nulang_fcmp_gt as *const u8,
-            ),
-            ("nulang_ineg", crate::jit::runtime::nulang_ineg as *const u8),
-            ("nulang_iinc", crate::jit::runtime::nulang_iinc as *const u8),
-            ("nulang_idec", crate::jit::runtime::nulang_idec as *const u8),
-            ("nulang_not", crate::jit::runtime::nulang_not as *const u8),
-            ("nulang_and", crate::jit::runtime::nulang_and as *const u8),
-            ("nulang_or", crate::jit::runtime::nulang_or as *const u8),
-            ("nulang_itof", crate::jit::runtime::nulang_itof as *const u8),
-            ("nulang_ftoi", crate::jit::runtime::nulang_ftoi as *const u8),
-            ("nulang_xor", crate::jit::runtime::nulang_xor as *const u8),
-            ("nulang_shl", crate::jit::runtime::nulang_shl as *const u8),
-            ("nulang_shr", crate::jit::runtime::nulang_shr as *const u8),
-            (
-                "nulang_bitand",
-                crate::jit::runtime::nulang_bitand as *const u8,
-            ),
-            (
-                "nulang_bitor",
-                crate::jit::runtime::nulang_bitor as *const u8,
-            ),
-            ("nulang_fneg", crate::jit::runtime::nulang_fneg as *const u8),
-        ];
-        for (name, ptr) in helpers {
-            builder.symbol(*name, *ptr);
-        }
+        // Single source of truth: src/jit/helpers.rs define_helpers! macro.
+        crate::jit::helpers::register_with_builder(&mut builder);
 
         let module = JITModule::new(builder);
         let ctx = module.make_context();
@@ -312,10 +248,14 @@ impl JitSession {
     }
 
     /// Get the compiled function pointer for `(module_idx, offset)` (if compiled).
-    pub fn get_compiled(&self, module_idx: usize, offset: usize) -> Option<JitFunctionPtr> {
+    ///
+    /// # Safety
+    /// The returned function pointer is valid only while this `JitSession` is
+    /// alive and the original bytecode has not been modified.
+    pub unsafe fn get_compiled(&self, module_idx: usize, offset: usize) -> Option<JitFunctionPtr> {
         self.compiled
             .get(&(module_idx, offset))
-            .map(|&(ptr, _)| unsafe { std::mem::transmute(ptr) })
+            .map(|&(ptr, _)| std::mem::transmute(ptr))
     }
 
     /// Number of bytecode instructions covered by the compiled region at
@@ -333,8 +273,8 @@ impl JitSession {
         self.compiled.len()
     }
 
+
     /// Compile a SIMD-vectorizable bytecode region.
-    ///
     /// First analyzes the region for vectorizable array loop patterns. If found,
     /// emits SIMD CLIF (I64x2/F64x2/I32x4/F32x4), falling back to the
     /// type-directed scalar compiler if SIMD emission fails. Returns `None`
@@ -441,7 +381,7 @@ pub fn tiered_execute_step(
     _type_metadata: Option<&crate::jit::typed_compiler::TypeMetadata>,
 ) -> TieredAction {
     // Check if already compiled
-    if let Some(func) = jit.get_compiled(module_idx, pc) {
+    if let Some(func) = unsafe { jit.get_compiled(module_idx, pc) } {
         // Execute JIT-compiled code
         func(regs.as_mut_ptr(), constants.as_ptr());
         return TieredAction::RanJit;
@@ -488,7 +428,7 @@ pub fn tiered_execute_step_typed(
     let instructions = &module.instructions;
 
     // Check if already compiled
-    if let Some(func) = jit.get_compiled(module_idx, pc) {
+    if let Some(func) = unsafe { jit.get_compiled(module_idx, pc) } {
         // Execute JIT-compiled code
         func(regs.as_mut_ptr(), constants.as_ptr());
         return TieredAction::RanJit;
