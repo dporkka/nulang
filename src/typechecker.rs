@@ -850,9 +850,10 @@ impl TypeChecker {
             Decl::Actor {
                 name,
                 behaviors,
+                events,
                 span,
                 ..
-            } => self.infer_actor_decl(ctx, name, behaviors, *span),
+            } => self.infer_actor_decl(ctx, name, behaviors, events, *span),
             Decl::StateMachine {
                 name,
                 states,
@@ -1082,9 +1083,38 @@ impl TypeChecker {
                 args,
                 span,
             } => self.infer_perform(ctx, effect, args, *span),
-
-            // Emit event
-            Expr::Emit { args, .. } => {
+            // Emit event — check against entity's declared events if in an entity context
+            Expr::Emit { event, args, span } => {
+                // Validate against entity event declarations if available
+                if let Some(ref entity_events) = ctx.entity_events {
+                    let declared = entity_events.iter().find(|(name, _)| name == event);
+                    match declared {
+                        None => {
+                            let available: Vec<_> = entity_events.iter().map(|(n, _)| n.as_str()).collect();
+                            return Err(NuError::TypeError {
+                                msg: format!(
+                                    "Unknown event '{}'. Available events: {}",
+                                    event,
+                                    if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+                                ),
+                                span: *span,
+                            });
+                        }
+                        Some((_, params)) => {
+                            if args.len() != params.len() {
+                                return Err(NuError::TypeError {
+                                    msg: format!(
+                                        "Event '{}' expects {} argument(s), got {}",
+                                        event,
+                                        params.len(),
+                                        args.len()
+                                    ),
+                                    span: *span,
+                                });
+                            }
+                        }
+                    }
+                }
                 let mut subst = Vec::new();
                 for arg in args {
                     let ctx_sub = apply_subst_to_ctx(ctx, &subst);
@@ -2133,7 +2163,6 @@ impl TypeChecker {
         }
     }
 
-    /// Infer the type of a block expression.
     fn infer_block(
         &mut self,
         ctx: &TypeContext,
@@ -2161,9 +2190,10 @@ impl TypeChecker {
         ctx: &TypeContext,
         _name: &str,
         behaviors: &[Behavior],
+        events: &[crate::ast::EventDecl],
         _span: Span,
     ) -> NuResult<(Substitution, Type)> {
-        // Check each behavior
+        // Check each behavior, with event declarations in scope for emit checking
         for behavior in behaviors {
             let mut behavior_ctx = ctx.clone();
             let mut param_types = vec![];
@@ -2175,8 +2205,14 @@ impl TypeChecker {
                 behavior_ctx.bind(param_name.clone(), pty.clone(), behavior.cap);
                 param_types.push(pty);
             }
+            if !events.is_empty() {
+                let ctx_events: Vec<(String, Vec<(String, Type)>)> = events
+                    .iter()
+                    .map(|e| (e.name.clone(), e.params.clone()))
+                    .collect();
+                behavior_ctx.set_entity_events(ctx_events);
+            }
             let (_s, _body_ty) = self.infer_expr(&behavior_ctx, &behavior.body)?;
-            // We could store behavior types here
         }
 
         let actor_ty = Type::Actor {
@@ -3880,5 +3916,58 @@ mod tests {
             "#,
         );
         assert!(result.is_ok(), "expected success, got {:?}", result.err());
+    }
+
+    #[test]
+    fn test_emit_unknown_event_in_entity_is_error() {
+        // `emit UnknownEvent` inside an entity that only declares KnownEvent
+        // must produce a TypeError.
+        let result = check_src(
+            r#"
+            entity E {
+                state x: Int = 0
+                events
+                    | KnownEvent(n: Int)
+                behavior go() { emit UnknownEvent(1) }
+            }
+            "#,
+        );
+        assert!(result.is_err(), "unknown event must be a type error");
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("UnknownEvent"), "error must name the bad event: {}", err);
+        assert!(err.contains("KnownEvent"), "error must list available events: {}", err);
+    }
+
+    #[test]
+    fn test_emit_known_event_in_entity_passes() {
+        // `emit KnownEvent` inside an entity that declares it must pass.
+        let result = check_src(
+            r#"
+            entity E {
+                state x: Int = 0
+                events
+                    | KnownEvent(n: Int)
+                behavior go() { emit KnownEvent(42) }
+            }
+            "#,
+        );
+        assert!(result.is_ok(), "known event must pass: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_emit_wrong_arg_count_is_error() {
+        let result = check_src(
+            r#"
+            entity E {
+                state x: Int = 0
+                events
+                    | Ev(a: Int, b: Int)
+                behavior go() { emit Ev(1) }
+            }
+            "#,
+        );
+        assert!(result.is_err(), "wrong arg count must be a type error");
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("expects 2 argument"), "error must mention arg count: {}", err);
     }
 }

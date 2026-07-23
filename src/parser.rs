@@ -356,7 +356,8 @@ impl Parser {
         let mut state_fields = Vec::new();
         let mut behaviors = Vec::new();
         let mut initializer: Option<(String, Vec<(String, Option<Type>)>, Expr)> = None;
-        self.skip_newlines();
+        let mut events: Vec<crate::ast::EventDecl> = Vec::new();
+        let mut apply_handlers: Vec<crate::ast::ApplyHandler> = Vec::new();
         while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
             self.skip_newlines();
             if self.match_token(&TokenKind::RBrace) {
@@ -397,10 +398,32 @@ impl Parser {
                     let body = self.parse_expr()?;
                     initializer = Some((init_name, params, body));
                 }
+                // `events` is a contextual keyword inside actor/entity body
+                TokenKind::Ident(ref s) if s == "events" => {
+                    self.advance(); // consume 'events'
+                    if !events.is_empty() {
+                        return Err(NuError::ParseError {
+                            msg: "Duplicate 'events' block in actor".to_string(),
+                            span: self.current_span(),
+                        });
+                    }
+                    events = self.parse_events_body()?;
+                }
+                // `apply` is a contextual keyword inside actor/entity body
+                TokenKind::Ident(ref s) if s == "apply" => {
+                    self.advance(); // consume 'apply'
+                    if !apply_handlers.is_empty() {
+                        return Err(NuError::ParseError {
+                            msg: "Duplicate 'apply' block in actor".to_string(),
+                            span: self.current_span(),
+                        });
+                    }
+                    apply_handlers = self.parse_apply_body()?;
+                }
                 _ => {
                     return Err(NuError::ParseError {
                         msg: format!(
-                            "Expected 'state', 'behavior', or 'initial' in actor body, got {}",
+                            "Expected 'state', 'behavior', 'initial', 'events', or 'apply' in actor body, got {}",
                             self.peek_kind()
                         ),
                         span: self.current_span(),
@@ -420,8 +443,109 @@ impl Parser {
             init: vec![],
             backend,
             initializer,
+            events,
+            apply_handlers,
             span,
         })
+    }
+
+    /// Parse an `events` block inside an entity/actor declaration:
+    ///
+    /// ```text
+    ///     | EventName(param: Type, ...)
+    ///     | EventName(param: Type, ...)
+    /// ```
+    fn parse_events_body(&mut self) -> NuResult<Vec<crate::ast::EventDecl>> {
+        self.skip_newlines();
+        let mut decls = Vec::new();
+        while self.consume_if(&TokenKind::Pipe) {
+            let span = self.current_span();
+            let name = self.expect_ident("event name")?;
+            let params = if self.consume_if(&TokenKind::LParen) {
+                let p = self.parse_event_params()?;
+                self.expect(TokenKind::RParen)?;
+                p
+            } else {
+                vec![]
+            };
+            decls.push(crate::ast::EventDecl { name, params, span });
+            self.skip_newlines();
+        }
+        if decls.is_empty() {
+            return Err(NuError::ParseError {
+                msg: "Expected at least one event declaration after 'events'".to_string(),
+                span: self.current_span(),
+            });
+        }
+        Ok(decls)
+    }
+
+    /// Parse an `apply` block inside an entity/actor declaration:
+    ///
+    /// ```text
+    /// apply
+    ///     | EventName(param, ...) => body
+    ///     | EventName(param, ...) => body
+    /// ```
+    fn parse_apply_body(&mut self) -> NuResult<Vec<crate::ast::ApplyHandler>> {
+        self.skip_newlines();
+        let mut handlers = Vec::new();
+        while self.consume_if(&TokenKind::Pipe) {
+            let span = self.current_span();
+            let event = self.expect_ident("event name")?;
+            let params = if self.consume_if(&TokenKind::LParen) {
+                let p = self.parse_apply_params()?;
+                self.expect(TokenKind::RParen)?;
+                p
+            } else {
+                vec![]
+            };
+            self.expect(TokenKind::FatArrow)?;
+            let body = self.parse_expr()?;
+            handlers.push(crate::ast::ApplyHandler { event, params, body, span });
+            self.skip_newlines();
+        }
+        if handlers.is_empty() {
+            return Err(NuError::ParseError {
+                msg: "Expected at least one apply handler after 'apply'".to_string(),
+                span: self.current_span(),
+            });
+        }
+        Ok(handlers)
+    }
+
+    /// Parse event parameters: `name: Type, name: Type, ...`
+    fn parse_event_params(&mut self) -> NuResult<Vec<(String, Type)>> {
+        let mut params = Vec::new();
+        if self.peek_kind() == &TokenKind::RParen {
+            return Ok(params);
+        }
+        loop {
+            let name = self.expect_ident("parameter name")?;
+            self.expect(TokenKind::Colon)?;
+            let ty = self.parse_type()?;
+            params.push((name, ty));
+            if !self.consume_if(&TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(params)
+    }
+
+    /// Parse apply handler parameters: just names, no types: `name, name, ...`
+    fn parse_apply_params(&mut self) -> NuResult<Vec<String>> {
+        let mut params = Vec::new();
+        if self.peek_kind() == &TokenKind::RParen {
+            return Ok(params);
+        }
+        loop {
+            let name = self.expect_ident("parameter name")?;
+            params.push(name);
+            if !self.consume_if(&TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(params)
     }
 
     /// Parse a `state_machine` declaration (BEAM_PRIMITIVES §4.2 gen_statem
@@ -1640,7 +1764,38 @@ impl Parser {
                     | TokenKind::NilLit
                     | TokenKind::UnitLit => self.parse_literal(),
 
-                    // Identifiers
+                    // `after` as a standalone temporal expression:
+                    // `after ms => body` desugars to `receive {} after ms => body`.
+                    // `after` is a contextual keyword — special only in expression
+                    // prefix position; it remains a usable identifier when not
+                    // followed by `expr => body`.
+                    TokenKind::Ident(name) if name == "after" => {
+                        let saved = self.pos;
+                        self.advance(); // consume 'after'
+                        // Peek: is the next token expression-like?
+                        // `after => ...` is invalid (missing timeout), so don't try.
+                        let looks_like_after = self.peek_kind() != &TokenKind::FatArrow
+                            && self.peek_kind() != &TokenKind::Eof
+                            && self.is_expr_start();
+                        if looks_like_after {
+                            if let Ok(timeout) = self.parse_expr() {
+                                if self.consume_if(&TokenKind::FatArrow) {
+                                    let body = self.parse_expr()?;
+                                    let after_span = Span::new(span.start, self.current_span().end);
+                                    return Ok(Expr::Receive {
+                                        arms: vec![],
+                                        after: Some((Box::new(timeout), Box::new(body))),
+                                        span: after_span,
+                                    });
+                                }
+                            }
+                        }
+                        // Not a valid `after expr => body` — restore cursor to
+                        // just after `after` so the caller's Pratt loop can
+                        // handle `after(args)`, `after.field`, etc.
+                        self.pos = saved + 1;
+                        Ok(Expr::Var("after".to_string(), span))
+                    }
                     TokenKind::Ident(name) => {
                         let name = name.clone();
                         self.advance();
@@ -3596,6 +3751,84 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_entity_with_events_block() {
+        let source = r#"entity BankAccount {
+            state balance: Int = 0
+            events
+                | Deposited(amount: Int)
+                | Withdrawn(amount: Int)
+            behavior deposit(amount: Int) { self.balance = self.balance + amount }
+        }"#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Actor {
+                name, events, ..
+            } => {
+                assert_eq!(name, "BankAccount");
+                assert_eq!(events.len(), 2);
+                assert_eq!(events[0].name, "Deposited");
+                assert_eq!(events[0].params.len(), 1);
+                assert_eq!(events[0].params[0].0, "amount");
+                assert!(matches!(events[0].params[0].1, Type::Primitive(PrimitiveType::Int)));
+                assert_eq!(events[1].name, "Withdrawn");
+                assert_eq!(events[1].params.len(), 1);
+                assert_eq!(events[1].params[0].0, "amount");
+            }
+            _ => panic!("Expected Actor decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entity_with_apply_block() {
+        let source = r#"entity Counter {
+            state count: Int = 0
+            events
+                | Incremented(by: Int)
+            apply
+                | Incremented(by) => self.count = self.count + by
+            behavior inc(by: Int) { self.count = self.count + by }
+        }"#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Actor {
+                name,
+                ref events,
+                ref apply_handlers,
+                ..
+            } => {
+                assert_eq!(name, "Counter");
+                assert_eq!(events.len(), 1);
+                assert_eq!(apply_handlers.len(), 1);
+                assert_eq!(apply_handlers[0].event, "Incremented");
+                assert_eq!(apply_handlers[0].params, vec!["by"]);
+            }
+            _ => panic!("Expected Actor decl"),
+        }
+    }
+
+    #[test]
+    fn test_parse_entity_events_without_params() {
+        let source = r#"entity Ticker {
+            state last: Int = 0
+            events
+                | Tick
+                | Tock
+            behavior tick() { self.last = 1 }
+        }"#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Actor { events, .. } => {
+                assert_eq!(events.len(), 2);
+                assert_eq!(events[0].name, "Tick");
+                assert!(events[0].params.is_empty());
+                assert_eq!(events[1].name, "Tock");
+                assert!(events[1].params.is_empty());
+            }
+            _ => panic!("Expected Actor decl"),
+        }
+    }
+
+    #[test]
     fn test_parse_actor_decl() {
         let source = r#"actor Counter {
             state count = 0
@@ -3939,6 +4172,55 @@ mod tests {
         );
         let module = parse("workflow W { step after { 1 } }").unwrap();
         assert_eq!(module.decls.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_standalone_after_desugars_to_receive() {
+        // `after ms => body` must desugar to `receive {} after ms => body`.
+        let expr = parse_expr("after 5000 => 42").unwrap();
+        match expr {
+            Expr::Receive { arms, after, .. } => {
+                assert!(arms.is_empty(), "standalone after must have empty arms");
+                let (ms, body) = after.expect("after clause");
+                assert!(matches!(ms.as_ref(), Expr::Literal(Literal::Int(5000), _)));
+                assert!(matches!(body.as_ref(), Expr::Literal(Literal::Int(42), _)));
+            }
+            _ => panic!("Expected Receive from standalone after, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_standalone_after_with_block_body() {
+        let expr = parse_expr("after 100 => { perform IO.print(\"done\") }").unwrap();
+        match expr {
+            Expr::Receive { arms, after, .. } => {
+                assert!(arms.is_empty());
+                let (ms, body) = after.expect("after clause");
+                assert!(matches!(ms.as_ref(), Expr::Literal(Literal::Int(100), _)));
+                assert!(matches!(body.as_ref(), Expr::Block { .. }));
+            }
+            _ => panic!("Expected Receive, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_after_still_usable_as_variable_in_expr_position() {
+        // `after` as a standalone identifier reference must still work.
+        let expr = parse_expr("after").unwrap();
+        assert!(
+            matches!(expr, Expr::Var(ref name, _) if name == "after"),
+            "bare `after` must parse as a variable, got {:?}", expr
+        );
+    }
+
+    #[test]
+    fn test_after_still_usable_as_function_call() {
+        // `after(x)` must parse as a function call, not as temporal sugar.
+        let expr = parse_expr("after(1)").unwrap();
+        assert!(
+            matches!(expr, Expr::App { ref func, .. } if matches!(func.as_ref(), Expr::Var(ref name, _) if name == "after")),
+            "`after(1)` must parse as function call, got {:?}", expr
+        );
     }
 
     #[test]

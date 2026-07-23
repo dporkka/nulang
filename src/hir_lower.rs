@@ -114,6 +114,8 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             state_fields,
             behaviors,
             init,
+            events,
+            apply_handlers,
             span,
             ..
         } => hir::Decl::Actor(hir::ActorDef {
@@ -137,6 +139,8 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
                     (n.clone(), op)
                 })
                 .collect(),
+            events: events.clone(),
+            apply_handlers: apply_handlers.clone(),
             is_workflow: false,
             is_agent: false,
             tools: Vec::new(),
@@ -611,6 +615,8 @@ fn desugar_agent(
         state_fields,
         behaviors,
         init: Vec::new(),
+        events: Vec::new(),
+        apply_handlers: Vec::new(),
         is_workflow: false,
         is_agent: true,
         tools: resolved_tools,
@@ -771,6 +777,8 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
         state_fields,
         behaviors,
         init: Vec::new(),
+        events: Vec::new(),
+        apply_handlers: Vec::new(),
         is_workflow: true,
         is_agent: false,
         tools: Vec::new(),

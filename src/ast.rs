@@ -432,6 +432,10 @@ pub enum Decl {
         backend: Option<ActorBackendKind>,
         /// Optional initializer block: `initial name(params) { body }`.
         initializer: Option<(String, Vec<(String, Option<Type>)>, Expr)>,
+        /// Typed event declarations from an `events` block (entity only).
+        events: Vec<EventDecl>,
+        /// Apply handlers from an `apply` block (entity only).
+        apply_handlers: Vec<ApplyHandler>,
         span: Span,
     },
     /// State machine declaration (BEAM_PRIMITIVES §4.2 gen_statem adaptation):
@@ -527,6 +531,39 @@ pub enum Decl {
         tables: Vec<DatabaseTable>,
         span: Span,
     },
+}
+
+// ---------------------------------------------------------------------------
+// Entity event and apply declarations
+// ---------------------------------------------------------------------------
+
+/// A typed event declaration inside an `entity`'s `events` block.
+///
+/// ```nulang
+/// events
+///     | Deposited(amount: Int)
+///     | Withdrawn(amount: Int)
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventDecl {
+    pub name: String,
+    pub params: Vec<(String, Type)>,
+    pub span: Span,
+}
+
+/// An apply handler inside an `entity`'s `apply` block.
+///
+/// ```nulang
+/// apply
+///     | Deposited(amount) => self.balance = self.balance + amount
+///     | Withdrawn(amount) => self.balance = self.balance - amount
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApplyHandler {
+    pub event: String,
+    pub params: Vec<String>,
+    pub body: Expr,
+    pub span: Span,
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +723,8 @@ pub fn desugar_state_machine(
         init: vec![],
         backend: None,
         initializer: None,
+        events: vec![],
+        apply_handlers: vec![],
         span,
     }
 }

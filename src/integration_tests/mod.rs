@@ -5249,6 +5249,44 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// Standalone `after ms => expr` (not inside a `receive` block) must
+    /// desugar to `receive {} after ms => expr` and work identically: with
+    /// `after 0` it runs the body immediately without suspending.
+    #[test]
+    fn test_standalone_after_zero_runs_body() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Sleeper {
+                state woken = false
+                behavior nap() {
+                    self.woken = after 0 => true
+                }
+            }
+            let s = spawn Sleeper {} in {
+                send s nap()
+                s
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("woken").and_then(|v| v.as_bool()),
+            Some(true),
+            "standalone after 0 must run the body immediately"
+        );
+        assert!(
+            actor.suspended_execution.is_none(),
+            "standalone after 0 must not suspend"
+        );
+    }
+
     /// Literal pattern in selective receive: `receive { | Msg(42) => ... }`
     /// only matches when the payload equals the literal.
     #[test]
@@ -7589,6 +7627,39 @@ match { a: 2, b: 9 } with {
         fn test_wasm_compile_sub() {
             let wasm = compile_source_to_wasm("10 - 3").expect("compile");
             assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
+        }
+    }
+
+    /// Entity declarations (with events and apply blocks) must pass through
+    /// the full pipeline: lex → parse → typecheck → compile.
+    mod entity_tests {
+        use super::*;
+
+        #[test]
+        fn test_entity_with_events_compiles() {
+            let source = "entity Counter { state count: Int = 0 events | Incremented(by: Int) | Decremented(by: Int) behavior inc(by: Int) { self.count = self.count + by } }";
+            let result = run_source_new(source);
+            assert!(result.is_ok(),
+                "entity with events must parse and typecheck without error: {:?}",
+                result.err());
+        }
+
+        #[test]
+        fn test_entity_with_apply_block_compiles() {
+            let source = "entity Counter { state count: Int = 0 events | Incremented(by: Int) apply | Incremented(by) => self.count = self.count + by behavior inc(by: Int) { self.count = self.count + by } }";
+            let result = run_source_new(source);
+            assert!(result.is_ok(),
+                "entity with apply must parse and typecheck without error: {:?}",
+                result.err());
+        }
+
+        #[test]
+        fn test_entity_events_and_apply_as_identifiers() {
+            // `events` and `apply` are contextual keywords — they remain
+            // usable as field/variable names outside actor bodies.
+            let source = "fn main() { let events = [1, 2, 3]; let apply = fn(x) x + 1; apply(events[0]) }";
+            let result = run_source_new(source);
+            assert!(result.is_ok(), "`events` and `apply` as identifiers must work: {:?}", result.err());
         }
     }
 }

@@ -719,6 +719,10 @@ impl Type {
 #[derive(Debug, Clone, Default)]
 pub struct TypeContext {
     bindings: HashMap<String, (Type, Capability)>,
+    /// Event declarations from the enclosing entity (if any). Used by the
+    /// typechecker to validate `emit EventName(args)` calls. Stored as
+    /// `(event_name, [(param_name, param_type)])`.
+    pub entity_events: Option<Vec<(String, Vec<(String, Type)>)>>,
 }
 
 impl TypeContext {
@@ -742,6 +746,11 @@ impl TypeContext {
         let mut ctx = self.clone();
         ctx.bind(name, ty, cap);
         ctx
+    }
+
+    /// Set the entity event declarations for emit validation.
+    pub fn set_entity_events(&mut self, events: Vec<(String, Vec<(String, Type)>)>) {
+        self.entity_events = Some(events);
     }
 
     /// Iterate over all bindings as `(name, (type, capability))` pairs.
