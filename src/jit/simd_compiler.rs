@@ -1142,7 +1142,7 @@ mod simd_compiler_tests {
 
     /// Helper: Build a JIT session for testing.
     fn make_jit() -> JitSession {
-        JitSession::new()
+        JitSession::new().unwrap()
     }
 
     /// Helper: Create an I64 element-wise binop SIMD region.
@@ -1431,7 +1431,7 @@ mod simd_compiler_tests {
         );
         assert!(ptr.is_ok(), "SIMD ISub should compile: {:?}", ptr.err());
 
-        let mut jit2 = JitSession::new();
+        let mut jit2 = JitSession::new().unwrap();
         let mul_region = SimdRegion {
             start_offset: 0,
             num_instrs: 4,

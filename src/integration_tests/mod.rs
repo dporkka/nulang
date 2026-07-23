@@ -1925,7 +1925,7 @@ match { a: 2, b: 9 } with {
         let source = format!("handle 0 {{ | E.op({}) => p0 }}", params);
         let result = run_source(&source);
         assert!(
-            matches!(result, Err(NuError::VMError(_))),
+            matches!(result, Err(NuError::VMError { .. })),
             "a 17-parameter handler binding should be a compile error, got {:?}",
             result
         );

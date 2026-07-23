@@ -5,20 +5,27 @@
 //!   nulang --repl
 //!   nulang --eval <CODE>
 //!   nulang --check <FILE>
-//!   nulang --lsp       Start LSP server
-//!   nulang --doc       Generate docs/api.md for the current project
+//!   nulang --lsp
+//!   nulang nula <new|build|build-wasm|test|run>
+//!   nulang --doc
 //!
 //! Options:
-//!   -r, --repl       Start interactive REPL
-//!   -e, --eval       Evaluate a code string
-//!   -c, --check      Type-check a file (don't run)
-//!   --doc            Generate Markdown API docs (docs/api.md)
-//!   --lsp            Start Language Server (stdio)
-//!   --version, -V    Print version and exit
-//!   -v, --verbose    Show bytecode and AST
-//!   nulang --emit-nbc <FILE>   Compile to a .nbc bytecode artifact (don't run)
-//!   nulang <FILE>.nbc          Run a pre-compiled .nbc artifact directly
-//!   nulang --verify <SRC> <FILE>.nbc   Verify source hash, then run
+//!   -r, --repl               Start interactive REPL
+//!   -e, --eval <CODE>        Evaluate a code string
+//!   -c, --check <FILE>       Type-check a file (don't run)
+//!   --doc                    Generate Markdown API docs (docs/api.md)
+//!   --emit-stdlib-docs <dir> Generate per-effect stdlib docs into <dir>
+//!   --lsp                    Start Language Server (stdio)
+//!   --backend <b>            Backend: bytecode (default) | native | wasm*
+//!   --out <file>             Output file (WASM backends / --emit-nbc)
+//!   --emit-nbc               Compile <FILE> to a .nbc artifact; don't run
+//!   <FILE>.nbc               Run a pre-compiled .nbc artifact directly
+//!   --verify <src>           Verify .nbc source hash against <src>
+//!   nula <cmd>               Package manager (new, build, build-wasm, test, run)
+//!   --version, -V            Print version and exit
+//!   -v, --verbose            Show bytecode and AST
+//!   --color auto|always|never  Colorize error output (default: auto)
+//!   -h, --help               Show this help message
 use mimalloc::MiMalloc;
 
 #[global_allocator]
@@ -30,7 +37,7 @@ use nulang::parser::Parser;
 use nulang::repl::Repl;
 use nulang::stdlib::StdLib;
 use nulang::typechecker::TypeChecker;
-use nulang::types::{NuError, NuResult, Type};
+use nulang::types::{NuError, NuResult, Span, Type};
 use nulang::vm::VM;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -95,6 +102,8 @@ async fn main() {
             }
             "--version" | "-V" => {
                 println!("nulang v{}", env!("CARGO_PKG_VERSION"));
+                println!("  commit: {}", option_env!("GIT_COMMIT_HASH").unwrap_or("unknown"));
+                println!("  build:  {}", option_env!("BUILD_DATE").unwrap_or("unknown"));
                 return;
             }
             "--lsp" => opts.lsp = true,
@@ -173,7 +182,22 @@ async fn main() {
                 return;
             }
             arg if arg.starts_with('-') => {
-                eprintln!("Error: Unknown option: {}", arg);
+                let known: &[&str] = &[
+                    "--repl", "--eval", "--check", "--lsp", "--doc",
+                    "--backend", "--out", "--emit-nbc", "--verify",
+                    "--version", "--verbose", "--color", "--help",
+                    "--emit-stdlib-docs",
+                    "-r", "-e", "-c", "-V", "-v", "-h",
+                ];
+                let suggestion = known
+                    .iter()
+                    .min_by_key(|k| levenshtein_distance(arg, k))
+                    .filter(|k| levenshtein_distance(arg, k) <= 3);
+                eprint!("Error: Unknown option: {}", arg);
+                if let Some(sug) = suggestion {
+                    eprint!(". Did you mean '{}'?", sug);
+                }
+                eprintln!();
                 eprintln!("Run with --help for usage information.");
                 std::process::exit(1);
             }
@@ -498,11 +522,11 @@ fn exit_code(err: &NuError) -> i32 {
         NuError::CapError { .. } => 6,
         NuError::FFIError { .. } => 7,
         NuError::NotYetImplemented { .. } => 8,
-        NuError::RuntimeError(_) => 9,
-        NuError::VMError(_) => 10,
+        NuError::RuntimeError { .. } => 9,
+        NuError::VMError { .. } => 10,
         NuError::Suspended(_) => 0, // Not an error — runtime handles suspensions
-        NuError::PythonError(_) => 11,
-        NuError::PackageError(_) => 12,
+        NuError::PythonError { .. } => 11,
+        NuError::PackageError { .. } => 12,
     }
 }
 
@@ -620,7 +644,7 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
             }
             std::fs::write(wasm_file, &wasm_bytes).map_err(|e| {
-                nulang::types::NuError::VMError(format!("failed to write {}: {}", wasm_file, e))
+                nulang::types::NuError::VMError { msg: format!("failed to write {}: {}", wasm_file, e), span: Span::default() }
             })?;
             println!("Wrote {} ({} bytes)", wasm_file, wasm_bytes.len());
             return Ok(());
@@ -636,7 +660,7 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
             }
             std::fs::write(wasm_file, &wasm_bytes).map_err(|e| {
-                nulang::types::NuError::VMError(format!("failed to write {}: {}", wasm_file, e))
+                nulang::types::NuError::VMError { msg: format!("failed to write {}: {}", wasm_file, e), span: Span::default() }
             })?;
             let mut runtime = nulang::wasm_runtime::WasmRuntime::new(&wasm_bytes, None)?;
             runtime.run()?;
@@ -659,7 +683,7 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
             }
             std::fs::write(&wasm_file, &wasm_bytes).map_err(|e| {
-                nulang::types::NuError::VMError(format!("failed to write {}: {}", wasm_file, e))
+                nulang::types::NuError::VMError { msg: format!("failed to write {}: {}", wasm_file, e), span: Span::default() }
             })?;
             println!("Wrote {} ({} bytes)", wasm_file, wasm_bytes.len());
             nulang::wasm_runtime::aot_compile(&wasm_file, &cwasm_file)?;
@@ -668,9 +692,9 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
         }
         #[cfg(not(feature = "wasm-backend"))]
         "wasm" | "wasm-run" | "wasm-aot" => {
-            return Err(nulang::types::NuError::VMError(
+            return Err(nulang::types::NuError::VMError { msg: 
                 "wasm backend not compiled in (enable 'wasm-backend' feature)".into(),
-            ));
+                span: Span::default() });
         }
         "native" => {
             let hir = nulang::hir_lower::lower_module(&ast);
@@ -748,7 +772,7 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
             Ok(())
         }
         _ => {
-            return Err(nulang::types::NuError::VMError(format!(
+            return Err(nulang::types::NuError::VMError { msg: format!(
                 "unknown backend '{}' (expected bytecode | native{})",
                 backend,
                 if cfg!(feature = "wasm-backend") {
@@ -756,7 +780,7 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
                 } else {
                     ""
                 }
-            )));
+            ), span: Span::default() });
         }
     }
 }
@@ -820,9 +844,9 @@ fn compile_source_to_nbc(source: &str, out_path: &str) -> NuResult<()> {
     let source_hash = blake3::hash(source.as_bytes());
     let bytes = m
         .to_nbc(Some(*source_hash.as_bytes()))
-        .map_err(|e| nulang::types::NuError::VMError(e.to_string()))?;
+        .map_err(|e| nulang::types::NuError::VMError { msg: e.to_string(), span: Span::default() })?;
     std::fs::write(out_path, &bytes)
-        .map_err(|e| nulang::types::NuError::VMError(format!("failed to write {out_path}: {e}")))?;
+        .map_err(|e| nulang::types::NuError::VMError { msg: format!("failed to write {out_path}: {e}"), span: Span::default() })?;
     println!(
         "Wrote {out_path} ({} bytes, .nbc format v{}, language v{})",
         bytes.len(),
@@ -837,29 +861,29 @@ fn compile_source_to_nbc(source: &str, out_path: &str) -> NuResult<()> {
 /// no compiler invocation, no source parse — just `from_nbc` + `VM::run`.
 fn run_nbc_file(path: &str, verify_source: Option<&str>) -> NuResult<()> {
     let bytes = std::fs::read(path).map_err(|e| {
-        nulang::types::NuError::VMError(format!("cannot read .nbc file '{path}': {e}"))
+        nulang::types::NuError::VMError { msg: format!("cannot read .nbc file '{path}': {e}"), span: Span::default() }
     })?;
     let artifact = nulang::bytecode::CodeModule::from_nbc(&bytes)
-        .map_err(|e| nulang::types::NuError::VMError(e.to_string()))?;
+        .map_err(|e| nulang::types::NuError::VMError { msg: e.to_string(), span: Span::default() })?;
 
     if let Some(src_path) = verify_source {
         let source = std::fs::read_to_string(src_path).map_err(|e| {
-            nulang::types::NuError::VMError(format!("cannot read source '{src_path}': {e}"))
+            nulang::types::NuError::VMError { msg: format!("cannot read source '{src_path}': {e}"), span: Span::default() }
         })?;
         let computed = blake3::hash(source.as_bytes());
         match artifact.source_hash {
             Some(h) if h == *computed.as_bytes() => { /* verified */ }
             Some(h) => {
-                return Err(nulang::types::NuError::VMError(format!(
+                return Err(nulang::types::NuError::VMError { msg: format!(
                     "source hash mismatch: artifact recorded {} but source {src_path} hashes to {}",
                     hex::encode(h),
                     hex::encode(computed.as_bytes()),
-                )));
+                ), span: Span::default() });
             }
             None => {
-                return Err(nulang::types::NuError::VMError(
+                return Err(nulang::types::NuError::VMError { msg: 
                     "artifact carries no source hash; cannot verify".into(),
-                ));
+                    span: Span::default() });
             }
         }
     }
@@ -984,6 +1008,25 @@ fn disassemble(module: &nulang::bytecode::CodeModule) -> String {
         }
     }
     output
+}
+
+/// Simple Levenshtein distance for CLI flag suggestions.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let n = a.len();
+    let m = b.len();
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut curr = vec![0usize; m + 1];
+    for i in 1..=n {
+        curr[0] = i;
+        for j in 1..=m {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[m]
 }
 
 #[cfg(test)]

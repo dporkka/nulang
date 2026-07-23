@@ -28,13 +28,16 @@ pub struct QuicTransport {
 
 impl QuicTransport {
     pub fn bind(addr: SocketAddr) -> std::io::Result<Self> {
-        let tokio_rt = Arc::new(Runtime::new().unwrap());
+        let tokio_rt = Arc::new(Runtime::new().map_err(|e| {
+            std::io::Error::other(format!("QUIC tokio runtime: {}", e))
+        })?);
 
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
+            .map_err(|e| std::io::Error::other(format!("QUIC cert generation: {}", e)))?;
         let cert_der = cert.cert.der().clone();
         let priv_key = cert.signing_key.serialize_der();
-        let priv_key = PrivateKeyDer::try_from(priv_key).unwrap();
-        let cert_chain = vec![cert_der];
+        let priv_key = PrivateKeyDer::try_from(priv_key)
+            .map_err(|e| std::io::Error::other(format!("QUIC private key: {}", e)))?;
 
         let server_config = ServerConfig::with_single_cert(cert_chain, priv_key)
             .map_err(|e| std::io::Error::other(e.to_string()))?;

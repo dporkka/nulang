@@ -21,7 +21,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{NuError, NuResult};
+use crate::types::{NuError, NuResult, Span};
 
 /// Lockfile name, written next to the root package's manifest.
 pub const LOCKFILE_FILE: &str = "Nulang.lock";
@@ -64,18 +64,18 @@ impl Lockfile {
     /// Serialize to TOML text.
     pub fn to_toml(&self) -> NuResult<String> {
         toml::to_string_pretty(self)
-            .map_err(|e| NuError::PackageError(format!("cannot serialize lockfile: {}", e)))
+            .map_err(|e| NuError::PackageError { msg: format!("cannot serialize lockfile: {}", e), span: Span::default() })
     }
 
     /// Parse lockfile TOML text.
     pub fn parse(source: &str) -> NuResult<Lockfile> {
         let lockfile: Lockfile = toml::from_str(source)
-            .map_err(|e| NuError::PackageError(format!("invalid {}: {}", LOCKFILE_FILE, e)))?;
+            .map_err(|e| NuError::PackageError { msg: format!("invalid {}: {}", LOCKFILE_FILE, e), span: Span::default() })?;
         if lockfile.version != LOCKFILE_VERSION {
-            return Err(NuError::PackageError(format!(
+            return Err(NuError::PackageError { msg: format!(
                 "unsupported {} version {} (expected {})",
                 LOCKFILE_FILE, lockfile.version, LOCKFILE_VERSION
-            )));
+            ), span: Span::default() });
         }
         Ok(lockfile)
     }
@@ -84,14 +84,14 @@ impl Lockfile {
     pub fn save(&self, dir: &Path) -> NuResult<()> {
         let path = dir.join(LOCKFILE_FILE);
         std::fs::write(&path, self.to_toml()?)
-            .map_err(|e| NuError::PackageError(format!("cannot write {}: {}", path.display(), e)))
+            .map_err(|e| NuError::PackageError { msg: format!("cannot write {}: {}", path.display(), e), span: Span::default() })
     }
 
     /// Read the lockfile from `dir`.
     pub fn load(dir: &Path) -> NuResult<Lockfile> {
         let path = dir.join(LOCKFILE_FILE);
         let source = std::fs::read_to_string(&path)
-            .map_err(|e| NuError::PackageError(format!("cannot read {}: {}", path.display(), e)))?;
+            .map_err(|e| NuError::PackageError { msg: format!("cannot read {}: {}", path.display(), e), span: Span::default() })?;
         Self::parse(&source)
     }
 }
@@ -149,7 +149,7 @@ mod tests {
         let source = "version = 99\n";
         let err = Lockfile::parse(source).expect_err("future versions must be rejected");
         match err {
-            NuError::PackageError(msg) => assert!(msg.contains("version 99")),
+            NuError::PackageError { msg, .. } => assert!(msg.contains("version 99")),
             other => panic!("expected PackageError, got {:?}", other),
         }
     }

@@ -10,7 +10,7 @@ use std::process::Command;
 
 use crate::package::manifest::{Manifest, MANIFEST_FILE};
 use crate::package::resolver::resolve;
-use crate::types::{NuError, NuResult};
+use crate::types::{NuError, NuResult, Span};
 
 /// Dispatch a `nula` invocation (`args` excludes the leading `nula`).
 pub fn run(args: &[String]) -> NuResult<()> {
@@ -24,10 +24,10 @@ pub fn run(args: &[String]) -> NuResult<()> {
             print_usage();
             Ok(())
         }
-        Some(other) => Err(NuError::PackageError(format!(
+        Some(other) => Err(NuError::PackageError { msg: format!(
             "unknown nula subcommand '{}' (expected new, build, build-wasm, test, or run)",
             other
-        ))),
+        ), span: Span::default() }),
         None => {
             print_usage();
             Ok(())
@@ -50,23 +50,23 @@ fn print_usage() {
 /// `nula new <name>`: scaffold a package directory.
 fn cmd_new(name: Option<&str>) -> NuResult<()> {
     let name =
-        name.ok_or_else(|| NuError::PackageError("nula new requires a package name".to_string()))?;
+        name.ok_or_else(|| NuError::PackageError { msg: "nula new requires a package name".to_string(), span: Span::default() })?;
     if name.is_empty()
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err(NuError::PackageError(format!(
+        return Err(NuError::PackageError { msg: format!(
             "invalid package name '{}' (use letters, digits, '-' or '_')",
             name
-        )));
+        ), span: Span::default() });
     }
     let dir = PathBuf::from(name);
     if dir.exists() {
-        return Err(NuError::PackageError(format!(
+        return Err(NuError::PackageError { msg: format!(
             "directory '{}' already exists",
             name
-        )));
+        ), span: Span::default() });
     }
     scaffold_package(&dir, name)?;
     println!("Created package '{}'", name);
@@ -77,7 +77,7 @@ fn cmd_new(name: Option<&str>) -> NuResult<()> {
 fn scaffold_package(dir: &Path, name: &str) -> NuResult<()> {
     let src_dir = dir.join("src");
     std::fs::create_dir_all(&src_dir).map_err(|e| {
-        NuError::PackageError(format!("cannot create {}: {}", src_dir.display(), e))
+        NuError::PackageError { msg: format!("cannot create {}: {}", src_dir.display(), e), span: Span::default() }
     })?;
     std::fs::write(
         dir.join(MANIFEST_FILE),
@@ -86,12 +86,12 @@ fn scaffold_package(dir: &Path, name: &str) -> NuResult<()> {
             name
         ),
     )
-    .map_err(|e| NuError::PackageError(format!("cannot write {}: {}", MANIFEST_FILE, e)))?;
+    .map_err(|e| NuError::PackageError { msg: format!("cannot write {}: {}", MANIFEST_FILE, e), span: Span::default() })?;
     std::fs::write(
         src_dir.join("main.nula"),
         "// Run with: nulang nula run\n\nperform IO.print(\"Hello from Nulang!\")\n",
     )
-    .map_err(|e| NuError::PackageError(format!("cannot write main.nula: {}", e)))?;
+    .map_err(|e| NuError::PackageError { msg: format!("cannot write main.nula: {}", e), span: Span::default() })?;
     Ok(())
 }
 
@@ -99,16 +99,16 @@ fn scaffold_package(dir: &Path, name: &str) -> NuResult<()> {
 /// return the entry point path.
 fn prepare_package() -> NuResult<PathBuf> {
     let root = std::env::current_dir()
-        .map_err(|e| NuError::PackageError(format!("cannot read current directory: {}", e)))?;
+        .map_err(|e| NuError::PackageError { msg: format!("cannot read current directory: {}", e), span: Span::default() })?;
     let manifest = Manifest::load(&root)?;
     let resolution = resolve(&root, &manifest)?;
     resolution.to_lockfile().save(&root)?;
     let entry = root.join(&manifest.package.entry);
     if !entry.exists() {
-        return Err(NuError::PackageError(format!(
+        return Err(NuError::PackageError { msg: format!(
             "entry point {} not found",
             entry.display()
-        )));
+        ), span: Span::default() });
     }
     Ok(entry)
 }
@@ -116,17 +116,17 @@ fn prepare_package() -> NuResult<PathBuf> {
 /// Run the current `nulang` executable with `args`, inheriting stdio.
 fn nulang_exe(args: &[&str]) -> NuResult<()> {
     let exe = std::env::current_exe()
-        .map_err(|e| NuError::PackageError(format!("cannot locate nulang executable: {}", e)))?;
+        .map_err(|e| NuError::PackageError { msg: format!("cannot locate nulang executable: {}", e), span: Span::default() })?;
     let status = Command::new(exe)
         .args(args)
         .status()
-        .map_err(|e| NuError::PackageError(format!("failed to run nulang: {}", e)))?;
+        .map_err(|e| NuError::PackageError { msg: format!("failed to run nulang: {}", e), span: Span::default() })?;
     if !status.success() {
-        return Err(NuError::PackageError(format!(
+        return Err(NuError::PackageError { msg: format!(
             "nulang {} failed with status {}",
             args.join(" "),
             status
-        )));
+        ), span: Span::default() });
     }
     Ok(())
 }
@@ -159,7 +159,7 @@ fn cmd_run() -> NuResult<()> {
 fn cmd_test() -> NuResult<()> {
     let _entry = prepare_package()?;
     let tests_dir = std::env::current_dir()
-        .map_err(|e| NuError::PackageError(format!("cannot read current directory: {}", e)))?
+        .map_err(|e| NuError::PackageError { msg: format!("cannot read current directory: {}", e), span: Span::default() })?
         .join("tests");
     let mut test_files: Vec<PathBuf> = match std::fs::read_dir(&tests_dir) {
         Ok(entries) => entries
@@ -189,7 +189,7 @@ fn cmd_test() -> NuResult<()> {
     }
     println!("{} passed, {} failed", test_files.len() - failed, failed);
     if failed > 0 {
-        return Err(NuError::PackageError(format!("{} test(s) failed", failed)));
+        return Err(NuError::PackageError { msg: format!("{} test(s) failed", failed), span: Span::default() });
     }
     Ok(())
 }
@@ -221,9 +221,9 @@ mod tests {
     #[test]
     fn test_cmd_new_rejects_invalid_name() {
         let err = cmd_new(Some("../escape")).expect_err("path-like names are rejected");
-        assert!(matches!(err, NuError::PackageError(_)));
+        assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
         let err = cmd_new(None).expect_err("missing name is rejected");
-        assert!(matches!(err, NuError::PackageError(_)));
+        assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
     }
 
     #[test]

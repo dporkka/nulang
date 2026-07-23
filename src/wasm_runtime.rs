@@ -20,6 +20,7 @@
 //! - `env.io_print(i32,i32) -> i64` — print to stdout
 //! - `env.io_read() -> i64` — read stdin (stub: returns nil)
 
+use crate::types::Span;
 use crate::types::{NuError, NuResult};
 use crate::value_layout;
 use wasmtime::*;
@@ -200,7 +201,7 @@ fn get_memory(caller: &mut Caller<'_, HostState>) -> Result<Memory, Error> {
 // ── Error mapping ────────────────────────────────────────────────────
 
 fn map_wasmtime_err(e: impl std::fmt::Display) -> NuError {
-    NuError::VMError(format!("wasmtime: {}", e))
+    NuError::VMError { msg: format!("wasmtime: {}", e), span: Span::default() }
 }
 
 // ── AOT compilation ──────────────────────────────────────────────────
@@ -210,13 +211,13 @@ pub fn aot_compile(wasm_path: &str, cwasm_path: &str) -> NuResult<()> {
     let output = std::process::Command::new("wasmtime")
         .args(["compile", wasm_path, "-o", cwasm_path])
         .output()
-        .map_err(|e| NuError::VMError(format!("wasmtime compile not found: {}", e)))?;
+        .map_err(|e| NuError::VMError { msg: format!("wasmtime compile not found: {}", e), span: Span::default() })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NuError::VMError(format!(
+        return Err(NuError::VMError { msg: format!(
             "wasmtime compile failed: {}",
             stderr.trim()
-        )));
+        ), span: Span::default() });
     }
     Ok(())
 }

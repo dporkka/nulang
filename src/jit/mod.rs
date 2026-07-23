@@ -88,16 +88,26 @@ pub struct JitSession {
 
 impl JitSession {
     /// Create a new JIT session with the native target ISA.
-    pub fn new() -> Self {
+    /// Returns `None` if the host platform is not supported or ISA finalization
+    /// fails, printing a warning to stderr.
+    pub fn new() -> Option<Self> {
         let mut flag_builder = settings::builder();
         // Enable baseline SIMD support (SSE2 on x86_64, NEON on aarch64)
         let _ = flag_builder.set("enable_simd", "true");
-        let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
-            panic!("host machine is not supported: {}", msg);
-        });
-        let isa = isa_builder
-            .finish(settings::Flags::new(flag_builder))
-            .expect("failed to finalize Cranelift ISA");
+        let isa_builder = match cranelift_native::builder() {
+            Ok(b) => b,
+            Err(msg) => {
+                eprintln!("JIT: host machine is not supported: {} — JIT disabled", msg);
+                return None;
+            }
+        };
+        let isa = match isa_builder.finish(settings::Flags::new(flag_builder)) {
+            Ok(isa) => isa,
+            Err(e) => {
+                eprintln!("JIT: failed to finalize Cranelift ISA: {} — JIT disabled", e);
+                return None;
+            }
+        };
 
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
@@ -108,14 +118,14 @@ impl JitSession {
         let module = JITModule::new(builder);
         let ctx = module.make_context();
 
-        JitSession {
+        Some(JitSession {
             module,
             compiled: HashMap::new(),
             hot_counters: HashMap::new(),
             typed_regions: std::collections::HashSet::new(),
             builder_context: FunctionBuilderContext::new(),
             ctx,
-        }
+        })
     }
 
     /// Record one interpreted execution of the region at
@@ -345,7 +355,7 @@ impl JitSession {
 
 impl Default for JitSession {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("JIT must be available for Default::default()")
     }
 }
 

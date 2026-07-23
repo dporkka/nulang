@@ -1538,7 +1538,7 @@ mod typed_tests {
 
     /// Helper: Build a JIT session.
     fn make_jit() -> JitSession {
-        JitSession::new()
+        JitSession::new().unwrap()
     }
 
     // ------------------------------------------------------------------

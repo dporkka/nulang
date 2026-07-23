@@ -18,7 +18,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::types::{NuError, NuResult};
+use crate::types::{NuError, NuResult, Span};
 
 /// Manifest file name, expected at the root of every package.
 pub const MANIFEST_FILE: &str = "Nulang.toml";
@@ -75,14 +75,14 @@ impl Manifest {
     /// Parse a manifest from its TOML text.
     pub fn parse(source: &str) -> NuResult<Manifest> {
         toml::from_str(source)
-            .map_err(|e| NuError::PackageError(format!("invalid {}: {}", MANIFEST_FILE, e)))
+            .map_err(|e| NuError::PackageError { msg: format!("invalid {}: {}", MANIFEST_FILE, e), span: Span::default() })
     }
 
     /// Load and parse the manifest in `dir`.
     pub fn load(dir: &Path) -> NuResult<Manifest> {
         let path = dir.join(MANIFEST_FILE);
         let source = std::fs::read_to_string(&path)
-            .map_err(|e| NuError::PackageError(format!("cannot read {}: {}", path.display(), e)))?;
+            .map_err(|e| NuError::PackageError { msg: format!("cannot read {}: {}", path.display(), e), span: Span::default() })?;
         Self::parse(&source)
     }
 }
@@ -159,7 +159,7 @@ mod tests {
         "#;
         let err = Manifest::parse(source).expect_err("name is required");
         match err {
-            NuError::PackageError(msg) => assert!(msg.contains(MANIFEST_FILE)),
+            NuError::PackageError { msg, .. } => assert!(msg.contains(MANIFEST_FILE)),
             other => panic!("expected PackageError, got {:?}", other),
         }
     }
@@ -167,6 +167,6 @@ mod tests {
     #[test]
     fn test_manifest_parse_invalid_toml_fails() {
         let err = Manifest::parse("not [valid toml").expect_err("garbage should not parse");
-        assert!(matches!(err, NuError::PackageError(_)));
+        assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
     }
 }

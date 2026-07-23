@@ -228,11 +228,17 @@ impl Repl {
 
     /// Run the interactive REPL loop.
     pub fn run(&mut self) {
-        println!("Nulang v0.1.0 \u{2014} Actor-Based Distributed Language");
+        println!("Nulang v{} \u{2014} Actor-Based Distributed Language", env!("CARGO_PKG_VERSION"));
         println!("Type :help for commands, :quit to exit\n");
 
-        let mut editor =
-            Editor::<ReplHelper, DefaultHistory>::new().expect("Failed to create REPL editor");
+        let mut editor = match Editor::<ReplHelper, DefaultHistory>::new() {
+            Ok(ed) => ed,
+            Err(e) => {
+                eprintln!("Warning: Could not initialize line editor ({}). Falling back to basic input.", e);
+                run_basic_repl();
+                return;
+            }
+        };
         editor.set_helper(Some(ReplHelper::new()));
         let history_path = std::env::var("HOME")
             .map(|h| format!("{}/.nulang_history", h))
@@ -599,6 +605,14 @@ impl Default for Repl {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Fallback REPL when rustyline can't initialize (no TTY, pipe, CI, etc.).
+fn run_basic_repl() {
+    println!("Nulang v{} \u{2014} Actor-Based Distributed Language", env!("CARGO_PKG_VERSION"));
+    println!("Line editing is not available in this environment.");
+    println!("Use `nulang --eval '<code>'` to evaluate expressions, or `nulang <file.nula>` to run a file.");
+    println!("Run `nulang --help` for all options.");
 }
 
 // ---------------------------------------------------------------------------

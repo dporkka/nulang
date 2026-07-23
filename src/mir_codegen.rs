@@ -34,15 +34,12 @@ const MAX_STAGED_ARGS: usize = 16;
 const SCRATCH0: u8 = 0;
 const SCRATCH1: u8 = 1;
 
-fn not_yet_implemented(feature: &str) -> NuError {
-    NuError::NotYetImplemented {
-        feature: feature.to_string(),
-        span: Span::default(),
-    }
+fn not_yet_implemented(feature: &str, span: Span) -> NuError {
+    NuError::NotYetImplemented { feature: feature.to_string(), span }
 }
 
-fn compile_err(msg: impl Into<String>) -> NuError {
-    NuError::VMError(msg.into())
+fn compile_err(msg: impl Into<String>, span: Span) -> NuError {
+    NuError::VMError { msg: msg.into(), span }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,13 +117,13 @@ impl MirCodegen {
                     compile_err(format!(
                         "unsupported parameter type in extern function {}",
                         ff.symbol
-                    ))
+                    ), Span::default())
                 })?;
             let ret = crate::ffi::marshal::nulang_type_to_ffi_type(&ff.ret).ok_or_else(|| {
                 compile_err(format!(
                     "unsupported return type in extern function {}",
                     ff.symbol
-                ))
+                ), Span::default())
             })?;
             self.module.foreign_functions.push(ForeignFunctionDef {
                 library: ff.library.clone(),
@@ -206,12 +203,12 @@ impl MirCodegen {
                 .behaviors
                 .get(*comp_idx)
                 .map(|b| b.code_offset)
-                .ok_or_else(|| compile_err("internal: compensation behavior index out of range"))?;
+                .ok_or_else(|| compile_err("internal: compensation behavior index out of range", Span::default()))?;
             let entry = self
                 .module
                 .behaviors
                 .get_mut(*behavior_idx)
-                .ok_or_else(|| compile_err("internal: compensated behavior index out of range"))?;
+                .ok_or_else(|| compile_err("internal: compensated behavior index out of range", Span::default()))?;
             entry.compensate_offset = Some(comp_offset);
         }
         // Parallel-branch metadata: copy branch names onto the matching
@@ -222,7 +219,7 @@ impl MirCodegen {
                 .behaviors
                 .get_mut(*behavior_idx)
                 .ok_or_else(|| {
-                    compile_err("internal: parallel-branch behavior index out of range")
+                    compile_err("internal: parallel-branch behavior index out of range", Span::default())
                 })?;
             entry.parallel_branches = Some(branches.clone());
         }
@@ -270,7 +267,7 @@ impl MirCodegen {
                 "function '{}' needs {} locals, exceeding the MIR register allocator's capacity",
                 func.name,
                 func.locals.len()
-            )));
+            ), Span::default()));
         }
 
         if func.params.len() > MAX_STAGED_ARGS {
@@ -284,7 +281,7 @@ impl MirCodegen {
                 func.name,
                 func.params.len(),
                 MAX_STAGED_ARGS
-            )));
+            ), Span::default()));
         }
 
         // Type-directed opcode selection: the VM's integer handlers coerce
@@ -323,7 +320,7 @@ impl MirCodegen {
                         func.name,
                         binding.params.len(),
                         MAX_STAGED_ARGS
-                    )));
+                    ), Span::default()));
                 }
                 handler_prologues.insert(binding.body, binding.params.clone());
             }
@@ -372,7 +369,7 @@ impl MirCodegen {
             let target_offset = block_offsets
                 .get(&patch.target_block)
                 .copied()
-                .ok_or_else(|| compile_err("internal: jump to unknown MIR block"))?;
+                .ok_or_else(|| compile_err("internal: jump to unknown MIR block", Span::default()))?;
             let diff = target_offset as i64 - patch.instr_idx as i64;
             let instr = &mut self.module.instructions[patch.instr_idx];
             match patch.kind {
@@ -395,7 +392,7 @@ impl MirCodegen {
                 let rel = block_offsets
                     .get(&b.body)
                     .copied()
-                    .ok_or_else(|| compile_err("internal: handler body block missing"))?;
+                    .ok_or_else(|| compile_err("internal: handler body block missing", Span::default()))?;
                 let result_reg = func
                     .blocks
                     .get(b.body.0 as usize)
@@ -416,7 +413,7 @@ impl MirCodegen {
                 fallback_offset: None,
             });
             if global_idx > u8::MAX as usize {
-                return Err(compile_err("too many effect handler tables in module"));
+                return Err(compile_err("too many effect handler tables in module", Span::default()));
             }
             self.module.instructions[instr_idx].op1 = global_idx as u8;
         }
@@ -460,7 +457,7 @@ impl MirCodegen {
                 if *table >= func.handler_tables.len() {
                     return Err(compile_err(
                         "internal: EnterHandle references unknown table",
-                    ));
+                        Span::default()));
                 }
                 let instr_idx = self.module.instructions.len();
                 self.emit(Instruction::new1(OpCode::Handle, 0));
@@ -499,7 +496,7 @@ impl MirCodegen {
                 "call/effect with {} arguments exceeds the MIR staging limit of {}",
                 args.len(),
                 MAX_STAGED_ARGS
-            )));
+            ), Span::default()));
         }
         for (i, a) in args.iter().enumerate() {
             let src = reg_of(*a);
@@ -1051,7 +1048,7 @@ impl MirCodegen {
                 return Err(compile_err(format!(
                     "internal: unterminated MIR block in function '{}'",
                     func_name
-                )));
+                ), Span::default()));
             }
         }
         Ok(())
@@ -1070,7 +1067,7 @@ impl MirCodegen {
                 "module has more than {} distinct record/tuple field names (limit for the current u8 field-id encoding); '{}' has no id left to assign",
                 u8::MAX as usize + 1,
                 name
-            )));
+            ), Span::default()));
         }
         let id = self.next_field_id;
         self.next_field_id = self.next_field_id.saturating_add(1);
@@ -1134,7 +1131,7 @@ fn binary_opcode(op: &crate::ast::BinOp, is_float: bool) -> NuResult<OpCode> {
         // caller (there are no FCmpLe/FCmpGe opcodes).
         (BinOp::Le, true) | (BinOp::Ge, true) => Err(compile_err(
             "internal: float Le/Ge must be expanded by the caller",
-        )),
+            Span::default())),
         (BinOp::And, _) => Ok(OpCode::And),
         (BinOp::Or, _) => Ok(OpCode::Or),
         (BinOp::BitAnd, _) => Ok(OpCode::BitAnd),
@@ -1142,7 +1139,7 @@ fn binary_opcode(op: &crate::ast::BinOp, is_float: bool) -> NuResult<OpCode> {
         (BinOp::BitXor, _) => Ok(OpCode::Xor),
         (BinOp::Shl, _) => Ok(OpCode::Shl),
         (BinOp::Shr, _) => Ok(OpCode::Shr),
-        (other, _) => Err(not_yet_implemented(&format!("binary operator {:?}", other))),
+        (other, _) => Err(not_yet_implemented(&format!("binary operator {:?}", other), Span::default())),
     }
 }
 
@@ -1834,7 +1831,7 @@ mod tests {
         let source = format!("fn f({}) -> Int {{ a0 }}\n0", params);
         let result = compile_mir_source(&source);
         assert!(
-            matches!(result, Err(NuError::VMError(_))),
+            matches!(result, Err(NuError::VMError { .. })),
             "a 17-parameter function should be an honest compile error, got {:?}",
             result
         );
@@ -1954,7 +1951,7 @@ mod tests {
         let source = format!("handle 0 {{ | E.op({}) => p0 }}", params);
         let result = compile_mir_source(&source);
         assert!(
-            matches!(result, Err(NuError::VMError(_))),
+            matches!(result, Err(NuError::VMError { .. })),
             "a 17-parameter handler binding should be an honest compile error, got {:?}",
             result
         );

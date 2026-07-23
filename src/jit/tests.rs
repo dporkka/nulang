@@ -4,12 +4,12 @@ use super::*;
 use crate::bytecode::*;
 
 fn make_jit() -> JitSession {
-    JitSession::new()
+    JitSession::new().expect("JIT must be available on test host")
 }
 
 #[test]
 fn test_jit_session_creation() {
-    let jit = JitSession::new();
+    let jit = JitSession::new().expect("JIT must be available");
     assert_eq!(jit.compiled_count(), 0);
 }
 
@@ -330,7 +330,7 @@ fn test_tiered_action_has_simd_variant() {
 
 #[test]
 fn test_jit_session_simd_enabled() {
-    let jit = JitSession::new();
+    let jit = JitSession::new().expect("JIT must be available");
     // Session created successfully with SIMD enabled in ISA flags
     assert_eq!(jit.compiled_count(), 0);
 }

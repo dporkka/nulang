@@ -497,7 +497,8 @@ fn unify_open_records(
                     return Ok(subst);
                 }
                 return Err(NuError::TypeError {
-                    msg: "Cannot unify records: same row variable with different fields"
+                    msg: "Incompatible record types: both sides require additional fields \
+                          that cannot be reconciled"
                         .to_string(),
                     span,
                 });
@@ -544,7 +545,7 @@ fn unify_open_records(
         // Row tails are always fresh type variables by construction; a
         // residual non-variable tail cannot absorb fields.
         _ => Err(NuError::TypeError {
-            msg: "Cannot unify records with incompatible row tails".to_string(),
+            msg: "Incompatible record types: the rows cannot be unified".to_string(),
             span,
         }),
     }
@@ -597,7 +598,13 @@ fn var_subst(v: TypeVar, t: &Type, span: Span) -> NuResult<Substitution> {
         t => {
             if occurs_in(v, t) {
                 return Err(NuError::TypeError {
-                    msg: format!("Occurs check failed: type variable {} occurs in {}", v, t),
+                    msg: format!(
+                        "Infinite type: this expression's type references itself. \
+                         This often happens with self-referential definitions \
+                         (e.g., a record that contains itself, or `let f = f`). \
+                         (Type variable {} occurs in {})",
+                        v, t
+                    ),
                     span,
                 });
             }

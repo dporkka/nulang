@@ -25,6 +25,7 @@
 //!   `runtime/mod.rs`, reached through both runtime host callback impls;
 //!   the standalone VM answers them with a nil no-op.
 
+use crate::types::Span;
 use crate::types::{NuError, NuResult};
 
 // ---------------------------------------------------------------------------
@@ -279,7 +280,7 @@ impl StdLib {
     /// descriptive error naming the unknown operation.
     pub fn require(&self, name: &str) -> NuResult<&BuiltinOp> {
         self.lookup(name)
-            .ok_or_else(|| NuError::RuntimeError(format!("unknown built-in operation '{}'", name)))
+            .ok_or_else(|| NuError::RuntimeError { msg: format!("unknown built-in operation '{}'", name), span: Span::default() })
     }
 
     /// Distinct effect names covered by the registry, in first-seen order.

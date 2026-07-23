@@ -980,14 +980,26 @@ pub enum NuError {
         feature: String,
         span: Span,
     },
-    RuntimeError(String),
-    VMError(String),
+    RuntimeError {
+        msg: String,
+        span: Span,
+    },
+    VMError {
+        msg: String,
+        span: Span,
+    },
     /// The VM suspended a behavior (waiting for a signal, LLM completion, or
     /// selective receive). Not a failure — the runtime captures the suspension
     /// state and resumes the behavior later.
     Suspended(VmSuspension),
-    PythonError(String),  // Python interop error
-    PackageError(String), // `nula` package manager error (manifest/lockfile/resolution)
+    PythonError {
+        msg: String,
+        span: Span,
+    },
+    PackageError {
+        msg: String,
+        span: Span,
+    },
 }
 
 /// Reason the VM suspended execution of a behavior.
@@ -1068,11 +1080,19 @@ impl std::fmt::Display for NuError {
                     feature
                 )
             }
-            NuError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
-            NuError::VMError(msg) => write!(f, "VM error: {}", msg),
+            NuError::RuntimeError { msg, span } => {
+                write!(f, "Runtime error at {}:{}: {}", span.line(), span.column(), msg)
+            }
+            NuError::VMError { msg, span } => {
+                write!(f, "VM error at {}:{}: {}", span.line(), span.column(), msg)
+            }
             NuError::Suspended(kind) => write!(f, "VM suspended: {}", kind),
-            NuError::PythonError(msg) => write!(f, "Python error: {}", msg),
-            NuError::PackageError(msg) => write!(f, "Package error: {}", msg),
+            NuError::PythonError { msg, span } => {
+                write!(f, "Python error at {}:{}: {}", span.line(), span.column(), msg)
+            }
+            NuError::PackageError { msg, span } => {
+                write!(f, "Package error at {}:{}: {}", span.line(), span.column(), msg)
+            }
         }
     }
 }
@@ -1190,22 +1210,22 @@ impl NuError {
             NuError::NotYetImplemented { feature, span } => {
                 push_span_error(&mut out, "Not yet implemented", feature, span, self.suggestion());
             }
-            NuError::RuntimeError(msg) => {
-                push_plain_error(&mut out, "Runtime error", msg);
+            NuError::RuntimeError { msg, span } => {
+                push_span_error(&mut out, "Runtime error", msg, span, self.suggestion());
             }
-            NuError::VMError(msg) => {
-                push_plain_error(&mut out, "VM error", msg);
+            NuError::VMError { msg, span } => {
+                push_span_error(&mut out, "VM error", msg, span, self.suggestion());
             }
             NuError::Suspended(kind) => {
                 out.push_str(&format!(
                     "{BLUE}info{RESET}{BOLD}: VM suspended ({kind}){RESET}\n"
                 ));
             }
-            NuError::PythonError(msg) => {
-                push_plain_error(&mut out, "Python error", msg);
+            NuError::PythonError { msg, span } => {
+                push_span_error(&mut out, "Python error", msg, span, self.suggestion());
             }
-            NuError::PackageError(msg) => {
-                push_plain_error(&mut out, "Package error", msg);
+            NuError::PackageError { msg, span } => {
+                push_span_error(&mut out, "Package error", msg, span, self.suggestion());
             }
         }
         out
@@ -1221,15 +1241,31 @@ impl NuError {
                     Some("unclosed delimiter?")
                 } else if msg.contains("Expected ')'") {
                     Some("unclosed parenthesis?")
+                } else if msg.contains("Expected '('") {
+                    Some("missing opening parenthesis?")
                 } else {
                     None
                 }
             }
             NuError::TypeError { msg, .. } => {
-                if msg.contains("Cannot unify") && msg.contains("record") {
-                    Some("check that all required fields are present")
+                if msg.contains("Unbound variable") {
+                    Some("did you forget to define this variable, or is there a typo?")
+                } else if msg.contains("Cannot unify") && msg.contains("record") {
+                    Some("check that all required fields are present and have the correct types")
+                } else if msg.contains("Cannot unify Int") && msg.contains("Float") {
+                    Some("try converting with .to_float() or .to_int()")
+                } else if msg.contains("Cannot unify") && msg.contains("function") {
+                    Some("check that the argument types and return type match the function signature")
                 } else if msg.contains("Cannot unify") {
                     Some("the expression's type does not match the expected type")
+                } else if msg.contains("Infinite type") {
+                    Some("this usually means a value is defined in terms of itself; try restructuring")
+                } else if msg.contains("Field") && msg.contains("not found") {
+                    Some("check the field name spelling and that the record has this field")
+                } else if msg.contains("Unsupported FFI type") {
+                    Some("only Int, Float, Bool, String, and Unit are supported in FFI declarations")
+                } else if msg.contains("Match expression with no arms") {
+                    Some("add at least one pattern match arm")
                 } else {
                     None
                 }
@@ -1244,6 +1280,8 @@ impl NuError {
             NuError::CapError { msg, .. } => {
                 if msg.contains("cannot be sent") {
                     Some("only `val` and `tag` capabilities are sendable between actors")
+                } else if msg.contains("linear") && msg.contains("consumed") {
+                    Some("linear values can only be used once; use `.clone()` to make a copy, or restructure to avoid the second use")
                 } else {
                     None
                 }
