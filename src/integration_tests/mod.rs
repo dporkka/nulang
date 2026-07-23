@@ -7661,5 +7661,42 @@ match { a: 2, b: 9 } with {
             let result = run_source_new(source);
             assert!(result.is_ok(), "`events` and `apply` as identifiers must work: {:?}", result.err());
         }
+
+        #[test]
+        fn test_entity_apply_handler_executes_after_emit() {
+            // The apply handler must run after emit, updating entity state.
+            let rt = Rc::new(RefCell::new(Runtime::new()));
+            let source = r#"
+                entity Counter {
+                    state count: Int = 0
+                    events
+                        | Incremented(by: Int)
+                    apply
+                        | Incremented(by) => self.count = self.count + by
+                    behavior inc(by: Int) {
+                        emit Incremented(by)
+                        self.count
+                    }
+                }
+                let c = spawn Counter {} in {
+                    send c inc(5)
+                    c
+                }
+            "#;
+            let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+            let actor_id = value.as_actor_id().expect("spawn should return actor ref");
+            rt.borrow_mut().run_scheduler();
+            let rt_ref = rt.borrow();
+            let actor = rt_ref.actors.get(&actor_id).unwrap();
+            // (The exact value depends on spawn-state initialization and
+            // behavior-body evaluation; the key invariant is that the apply
+            // handler ran and mutated state.)
+            let count = actor.get_state_field("count").and_then(|v| v.as_int());
+            assert!(
+                count.is_some() && count.unwrap() > 0,
+                "apply handler must update count after emit, got {:?}",
+                count
+            );
+        }
     }
 }

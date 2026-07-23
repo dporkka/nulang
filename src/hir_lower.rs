@@ -130,7 +130,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
                     (n.clone(), *m, t.clone(), op)
                 })
                 .collect(),
-            behaviors: behaviors.iter().map(lower_behavior).collect(),
+            behaviors: behaviors.iter().map(|b| lower_behavior(b, apply_handlers)).collect(),
             init: init
                 .iter()
                 .map(|(n, e)| {
@@ -284,7 +284,17 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
     }
 }
 
-fn lower_behavior(b: &ast::Behavior) -> hir::BehaviorDef {
+fn lower_behavior(b: &ast::Behavior, apply_handlers: &[ast::ApplyHandler]) -> hir::BehaviorDef {
+    // Set thread-local apply handlers so lower_expr can inject apply code after emit
+    if !apply_handlers.is_empty() {
+        CURRENT_APPLY_HANDLERS.with(|cell| {
+            *cell.borrow_mut() = Some(apply_handlers.to_vec());
+        });
+    }
+    let body = lower_body(&b.body);
+    CURRENT_APPLY_HANDLERS.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
     hir::BehaviorDef {
         name: b.name.clone(),
         params: b
@@ -295,7 +305,7 @@ fn lower_behavior(b: &ast::Behavior) -> hir::BehaviorDef {
         ret: Type::unit(),
         effect: b.effect.clone().unwrap_or_else(EffectRow::empty),
         cap: b.cap,
-        body: lower_body(&b.body),
+        body,
         compensate: None,
         parallel_branches: None,
         span: b.span,
@@ -553,8 +563,8 @@ fn desugar_agent(
     };
 
     let mut behaviors = vec![
-        lower_behavior(&ask_behavior),
-        lower_behavior(&usage_behavior),
+        lower_behavior(&ask_behavior, &[]),
+        lower_behavior(&usage_behavior, &[]),
     ];
 
     if semantic_memory_dimensions.is_some() {
@@ -562,12 +572,12 @@ fn desugar_agent(
             "store_fact",
             vec![("content", str_ty.clone())],
             span,
-        )));
+        ), &[]));
         behaviors.push(lower_behavior(&placeholder_behavior(
             "recall",
             vec![("query", str_ty.clone()), ("top_k", int_ty.clone())],
             span,
-        )));
+        ), &[]));
     }
     if procedural_memory_namespace.is_some() {
         behaviors.push(lower_behavior(&placeholder_behavior(
@@ -578,12 +588,12 @@ fn desugar_agent(
                 ("output_template", str_ty.clone()),
             ],
             span,
-        )));
+        ), &[]));
         behaviors.push(lower_behavior(&placeholder_behavior(
             "get_pattern",
             vec![("key", str_ty.clone())],
             span,
-        )));
+        ), &[]));
         behaviors.push(lower_behavior(&placeholder_behavior(
             "add_example",
             vec![
@@ -592,7 +602,7 @@ fn desugar_agent(
                 ("output", str_ty.clone()),
             ],
             span,
-        )));
+        ), &[]));
         behaviors.push(lower_behavior(&placeholder_behavior(
             "get_examples",
             vec![
@@ -601,7 +611,7 @@ fn desugar_agent(
                 ("top_k", int_ty.clone()),
             ],
             span,
-        )));
+        ), &[]));
     }
 
     // Already serialized above for state fields; reuse for ActorDef metadata.
@@ -763,7 +773,7 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
                 effect: None,
                 cap: Capability::Ref,
                 span: s.span,
-            });
+            }, &[]);
             def.compensate = s.compensate.as_ref().map(lower_body);
             def.parallel_branches = parallel_branch_names.get(&i).cloned();
             def
@@ -1313,8 +1323,43 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             let aops: Vec<_> = args.iter().map(|a| lower_expr(a, body)).collect();
             body.push(hir::Stmt::Emit {
                 event: event.clone(),
-                args: aops,
+                args: aops.clone(),
                 span: *span,
+            });
+            // Inject apply handler code after emit if we're inside an entity
+            // that has matching apply handlers.
+            CURRENT_APPLY_HANDLERS.with(|cell| {
+                if let Some(ref handlers) = *cell.borrow() {
+                    for handler in handlers {
+                        if handler.event == *event {
+                            // Lower the apply handler body with params bound to emit args
+                            let mut handler_body = hir::Body::new();
+                            // Create temp bindings: handler.params[i] = aops[i]
+                            for (pi, param_name) in handler.params.iter().enumerate() {
+                                let arg_op = if pi < aops.len() {
+                                    aops[pi].clone()
+                                } else {
+                                    hir::Operand::Unit
+                                };
+                                handler_body.push(hir::Stmt::Let {
+                                    name: param_name.clone(),
+                                    ty: Type::unit(),
+                                    value: hir::RValue::Use(arg_op),
+                                    span: handler.span,
+                                });
+                            }
+                            // Lower the apply handler body expression
+                            let result_op = lower_expr(&handler.body, &mut handler_body);
+                            if !handler_body.is_terminated() {
+                                handler_body.set_terminator(hir::Terminator::Yield(result_op));
+                            }
+                            // Merge handler body statements into the main body
+                            for stmt in handler_body.stmts {
+                                body.push(stmt);
+                            }
+                        }
+                    }
+                }
             });
             hir::Operand::Unit
         }
@@ -1656,6 +1701,15 @@ static TEMP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32
 fn fresh_temp_name() -> String {
     let n = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!("__tmp{}", n)
+}
+
+/// Thread-local apply handlers for the entity currently being lowered.
+/// Set by `lower_behavior` before lowering each behavior body,
+/// cleared afterwards. `lower_expr` checks this to inject apply handler
+/// code after each `emit` site.
+use std::cell::RefCell;
+thread_local! {
+    static CURRENT_APPLY_HANDLERS: RefCell<Option<Vec<ast::ApplyHandler>>> = RefCell::new(None);
 }
 
 #[cfg(test)]
