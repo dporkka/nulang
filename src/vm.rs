@@ -384,7 +384,7 @@ impl StandaloneVmCallbacks {
 ///
 /// String-id values index the constant pool; pointer values are read as
 /// null-terminated UTF-8; everything else falls back to `to_string_repr`.
-fn resolve_value_string(constants: &[Constant], value: Value) -> String {
+pub(crate) fn resolve_value_string(constants: &[Constant], value: Value) -> String {
     if let Some(id) = value.as_string_id() {
         match constants.get(id as usize) {
             Some(Constant::String(s)) => s.clone(),

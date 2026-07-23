@@ -4309,7 +4309,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let s = format!("{}", n);
             let mut rt = self.runtime.borrow_mut();
             return Some(match &mut rt.vm {
-                Some(vm) => vm.add_runtime_string(0, s),
+                Some(vm) => vm.allocate_string(&s),
                 None => crate::vm::Value::nil(),
             });
         }
@@ -4379,13 +4379,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         }
         if effect_name == "IO" {
             if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {
-                let msg = match first.as_string_id() {
-                    Some(id) => match constants.get(id as usize) {
-                        Some(crate::bytecode::Constant::String(s)) => s.clone(),
-                        _ => first.to_string_repr(),
-                    },
-                    None => first.to_string_repr(),
-                };
+                let msg = crate::vm::resolve_value_string(constants, *first);
                 println!("{}", msg);
                 return Some(crate::vm::Value::unit());
             }
@@ -4787,8 +4781,8 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             if effect_name == "Int" && op_name == Some("to_string") {
                 let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
                 let s = format!("{}", n);
-                if let Some(ref mut vm) = (*self.runtime).vm {
-                    return Some(vm.add_runtime_string(0, s));
+                if let Some(vm) = &mut (*self.runtime).vm {
+                    return Some(vm.allocate_string(&s));
                 }
                 return Some(crate::vm::Value::nil());
             }
@@ -4834,13 +4828,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             }
             if effect_name == "IO" {
                 if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {
-                    let msg = match first.as_string_id() {
-                        Some(id) => match constants.get(id as usize) {
-                            Some(crate::bytecode::Constant::String(s)) => s.clone(),
-                            _ => first.to_string_repr(),
-                        },
-                        None => first.to_string_repr(),
-                    };
+                    let msg = crate::vm::resolve_value_string(constants, *first);
                     println!("{}", msg);
                     return Some(crate::vm::Value::unit());
                 }

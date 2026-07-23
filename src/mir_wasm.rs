@@ -82,21 +82,19 @@ impl WasmBackend {
                 page_size_log2: None,
             },
         );
-        imports.import("env", "nulang_alloc", EntityType::Function(TY_VOID_TO_I64)); // FIXME: wrong type idx
+        imports.import("env", "nulang_alloc", EntityType::Function(TY_VOID_TO_I64)); // placeholder type — rebuilt in rebuild_imports()
         imports.import(
             "env",
             "nulang_dispatch",
             EntityType::Function(TY_VOID_TO_I64),
-        ); // FIXME
+        ); // placeholder type — rebuilt in rebuild_imports()
         imports.import("env", "log", EntityType::Function(TY_I32I32_TO_I64));
         imports.import("env", "io_print", EntityType::Function(TY_I32I32_TO_I64));
         imports.import("env", "io_read", EntityType::Function(TY_VOID_TO_I64));
 
-        // Fix up import type indices — imports reference the type section,
-        // not the import index. The alloc/dispatch type refs need to point
-        // at actual function types.  We'll fix these via import encoding
-        // by re-building imports after types are finalized.
-        // For now, the constructor builds with placeholder type refs.
+        // Placeholder import type indices are fixed up in `rebuild_imports()`
+        // after the type section is finalized, so the constructor uses
+        // provisional types here.
 
         WasmBackend {
             types,

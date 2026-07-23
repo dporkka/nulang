@@ -108,9 +108,10 @@ match ok {
 
 ```nulang
 let nums = [1, 2, 3, 4, 5]
-let first = nums[0]   // Index access
-let len = length(nums) // Built-in length
+let first = nums[0]   // Index access (out-of-bounds returns nil)
 ```
+
+Array length is accessible via `for` loops (which iterate over the full array). A user-facing `Array.length` built-in is planned.
 
 ## Pipe Operator
 
