@@ -28,7 +28,8 @@ use std::ffi::{c_char, CStr, CString};
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::ffi::{call_native, CType, Signature, FFI_REGISTRY};
-use crate::jit::{self, JitSession, TieredAction};
+use crate::backends::{JitBackend, TieredAction};
+use crate::jit::JitSession;
 use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
 use crate::types::{NuError, NuResult, Span, VmSuspension};
 
@@ -986,7 +987,7 @@ pub struct VM {
     /// Step counter (for debugging / limits).
     step_count: usize,
     /// Optional JIT session for tiered compilation.
-    jit_session: Option<JitSession>,
+    jit_session: Option<Box<dyn JitBackend>>,
     /// Per-module constant pools converted to raw bits for the JIT.
     jit_constants: Vec<Vec<u64>>,
     /// Local node ID reported by the `NodeId` opcode.
@@ -1080,7 +1081,7 @@ impl VM {
             current_frame_idx: None,
             handler_stack: Vec::new(),
             step_count: 0,
-            jit_session: JitSession::new(),
+            jit_session: JitSession::new().map(|j| Box::new(j) as Box<dyn JitBackend>),
             jit_constants: Vec::new(),
             node_id: 0,
             pending_migrations: Vec::new(),
@@ -1470,7 +1471,7 @@ impl VM {
 
             match self.step() {
                 Ok(()) => {}
-                Err(NuError::VMError { msg: msg, span: _ }) if msg == "Halt" => {
+                Err(NuError::VMError { msg, span: _ }) if msg == "Halt" => {
                     return Ok(self
                         .current_frame_idx
                         .and_then(|i| self.frames.get(i))
@@ -1534,7 +1535,7 @@ impl VM {
 
             match self.step() {
                 Ok(()) => {}
-                Err(NuError::VMError { msg: msg, span: _ }) if msg == "Halt" => {
+                Err(NuError::VMError { msg, span: _ }) if msg == "Halt" => {
                     return Ok(self
                         .current_frame_idx
                         .and_then(|i| self.frames.get(i))
@@ -1585,7 +1586,7 @@ impl VM {
 
             match self.step() {
                 Ok(()) => {}
-                Err(NuError::VMError { msg: msg, span: _ }) if msg == "Halt" => {
+                Err(NuError::VMError { msg, span: _ }) if msg == "Halt" => {
                     return Ok(self
                         .current_frame_idx
                         .and_then(|i| self.frames.get(i))
@@ -1628,7 +1629,7 @@ impl VM {
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
         let jit = match &mut self.jit_session {
-            Some(j) => j,
+            Some(j) => j.as_mut(),
             None => return false,
         };
 
@@ -1654,7 +1655,7 @@ impl VM {
             );
         }
         let action =
-            jit::tiered_execute_step_typed(jit, module_idx, pc, module, &mut regs, constants);
+            jit.tiered_execute_step_typed(module_idx, pc, module, &mut regs, constants);
         crate::jit::runtime::clear_jit_callbacks();
 
         if action != TieredAction::Interpret {
@@ -5049,6 +5050,70 @@ mod vm_tests {
         assert!(compiled > 0, "loop body must have been JIT-compiled");
     }
 
+
+    /// Verify that a hot integer-arithmetic loop compiles through the
+    /// type-directed (guard-stripped) path and produces the same result as
+    /// the interpreter.
+    #[test]
+    fn test_jit_typed_tiering_integer_loop() {
+        let mut module = CodeModule::new("test_jit_typed_int_loop");
+        // r0 = sum, r1 = i, r2 = limit, r3 = one
+        module.emit(Instruction::new1(OpCode::Const0, 0)); // 0: sum = 0
+        module.emit(Instruction::new1(OpCode::Const0, 1)); // 1: i = 0
+        let c10 = module.add_constant(Constant::Int(10));
+        module.emit(Instruction::new3(
+            OpCode::ConstU,
+            ((c10 >> 8) & 0xFF) as u8,
+            (c10 & 0xFF) as u8,
+            2,
+        )); // 2: limit = 10
+        module.emit(Instruction::new1(OpCode::Const1, 3)); // 3: one = 1
+
+        let loop_start = module.current_offset();
+        module.emit(Instruction::new3(OpCode::ICmpLt, 1, 2, 4)); // 4: cond = i < limit
+        let jmpf_idx = module.current_offset();
+        module.emit(Instruction::new2(OpCode::JmpF, 4, 0)); // 5 (patched): exit if !cond
+        module.emit(Instruction::new3(OpCode::IAdd, 0, 1, 0)); // 6: sum += i
+        module.emit(Instruction::new3(OpCode::IAdd, 1, 3, 1)); // 7: i += 1
+        let jmp_back = module.current_offset();
+        let back = loop_start as i64 - jmp_back as i64;
+        module.emit(Instruction::new3(
+            OpCode::Jmp,
+            ((back as i16 >> 8) & 0xFF) as u8,
+            (back as i16 & 0xFF) as u8,
+            0,
+        )); // 8: goto loop_start
+        let after = module.current_offset();
+        if let Some(instr) = module.instructions.get_mut(jmpf_idx) {
+            let fwd = after as i64 - jmpf_idx as i64;
+            instr.op2 = ((fwd as i16 >> 8) & 0xFF) as u8;
+            instr.op3 = (fwd as i16 & 0xFF) as u8;
+        }
+        module.emit(Instruction::new0(OpCode::Halt)); // 9
+        module.entry_point = Some(0);
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+
+        // Cold run: pure interpreter.
+        let cold = vm.run_from(0, 0).unwrap();
+        assert_eq!(cold.as_int(), Some(45), "sum 0..10 = 45");
+
+        // Heat to trigger tiered compilation.
+        for _ in 0..2000 {
+            let _ = vm.run_from(0, 0);
+        }
+        let hot = vm.run_from(0, 0).unwrap();
+        assert_eq!(hot.as_int(), Some(45), "typed JIT must match interpreter");
+
+        // Verify at least one region was compiled.
+        let compiled = vm
+            .jit_session
+            .as_ref()
+            .map(|j| j.compiled_count())
+            .unwrap_or(0);
+        assert!(compiled > 0, "integer loop must be JIT-compiled");
+    }
     /// Regression: resuming from a handler that is NOT the top of the
     /// handler stack must work. `Perform` captures the continuation into
     /// the innermost *matching* handler frame (rposition), but `Resume`

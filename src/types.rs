@@ -1182,12 +1182,6 @@ impl NuError {
             out.push_str(&format!(" {DIM}{line:>4} {CYAN}|{RESET}\n"));
         }
 
-        fn push_plain_error(out: &mut String, kind: &str, msg: &str) {
-            out.push_str(&format!(
-                "{RED}error{RESET}{BOLD}: {kind}{RESET}\n  {msg}\n  {DIM}(no source location available){RESET}\n"
-            ));
-        }
-
         match self {
             NuError::LexError { msg, span } => {
                 push_span_error(&mut out, "Lex error", msg, span, self.suggestion());

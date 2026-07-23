@@ -292,8 +292,8 @@ impl JitSession {
     ///
     /// Currently **not wired into tiering**: `simd_analyzer` finds no
     /// trip-count hints in production and the emitter is unsound as-is (no
-    /// register write-back, baked trip count), so `tiered_execute_step*`
-    /// compile through the scalar/typed paths until SIMD is reworked.
+    /// register write-back, baked trip count), so the scalar/typed
+    /// compilation paths are used until SIMD is reworked.
     ///
     /// # Safety
     /// Same safety requirements as `compile_region`.
@@ -376,101 +376,6 @@ pub type JitFunctionPtr = extern "C" fn(*mut u64, *const u64);
 // Tiered Execution
 // ---------------------------------------------------------------------------
 
-/// Execute a bytecode instruction, recording it for hotness tracking.
-///
-/// This should be called from the interpreter loop before each instruction.
-/// When a region becomes hot, the caller should JIT compile it and switch
-/// to native execution.
-pub fn tiered_execute_step(
-    jit: &mut JitSession,
-    module_idx: usize,
-    pc: usize,
-    instructions: &[crate::bytecode::Instruction],
-    regs: &mut [u64; 256],
-    constants: &[u64],
-    _type_metadata: Option<&crate::jit::typed_compiler::TypeMetadata>,
-) -> TieredAction {
-    // Check if already compiled
-    if let Some(func) = unsafe { jit.get_compiled(module_idx, pc) } {
-        // Execute JIT-compiled code
-        func(regs.as_mut_ptr(), constants.as_ptr());
-        return TieredAction::RanJit;
-    }
-
-    // Record execution for hotness
-    if jit.record_and_check_hot(module_idx, pc) {
-        // Try to compile from PC to the end of the function or a unsupported opcode
-        let region_len = find_compilable_region(pc, instructions);
-        if region_len >= 3 {
-            // NOTE: the SIMD path (`compile_region_simd`) is intentionally
-            // not wired into tiering: `simd_analyzer` finds no trip-count
-            // hints in production, and the SIMD emitter is unsound as-is
-            // (no register write-back, baked trip count). Hot regions
-            // compile with the scalar compiler until SIMD is reworked.
-            if let Some(func) =
-                unsafe { jit.compile_region(module_idx, pc, region_len, instructions) }
-            {
-                func(regs.as_mut_ptr(), constants.as_ptr());
-                return TieredAction::RanJit;
-            }
-        }
-    }
-
-    TieredAction::Interpret
-}
-
-/// Execute a bytecode instruction with type-directed tiered compilation.
-///
-/// Identical to [`tiered_execute_step`], except that when a region becomes
-/// hot the register types at `pc` are inferred from the module's bytecode
-/// (`typed_compiler::infer_reg_types`) and handed to the scalar compiler, so
-/// hot numeric regions are compiled with NaN-tag guards stripped. Regions
-/// whose types cannot be proven compile exactly as before. This is the entry
-/// point used by the VM's interpreter loop.
-pub fn tiered_execute_step_typed(
-    jit: &mut JitSession,
-    module_idx: usize,
-    pc: usize,
-    module: &crate::bytecode::CodeModule,
-    regs: &mut [u64; 256],
-    constants: &[u64],
-) -> TieredAction {
-    let instructions = &module.instructions;
-
-    // Check if already compiled
-    if let Some(func) = unsafe { jit.get_compiled(module_idx, pc) } {
-        // Execute JIT-compiled code
-        func(regs.as_mut_ptr(), constants.as_ptr());
-        return TieredAction::RanJit;
-    }
-
-    // Record execution for hotness
-    if jit.record_and_check_hot(module_idx, pc) {
-        // Try to compile from PC to the end of the function or a unsupported opcode
-        let region_len = find_compilable_region(pc, instructions);
-        if region_len >= 3 {
-            // Infer register types at pc; empty metadata keeps the
-            // untyped scalar behavior for the compile path.
-            let meta = typed_compiler::infer_reg_types(module, pc);
-            let meta_ref = if meta.reg_types.is_empty() {
-                None
-            } else {
-                Some(&meta)
-            };
-            // The SIMD path is intentionally gated off (see
-            // `tiered_execute_step`): compile with the type-directed scalar
-            // compiler so hot regions always tier up.
-            if let Some(func) = unsafe {
-                jit.compile_region_typed(module_idx, pc, region_len, instructions, meta_ref)
-            } {
-                func(regs.as_mut_ptr(), constants.as_ptr());
-                return TieredAction::RanJit;
-            }
-        }
-    }
-
-    TieredAction::Interpret
-}
 
 /// Find a contiguous region of compilable instructions starting at `offset`.
 /// Returns the number of instructions in the region.
@@ -508,55 +413,76 @@ pub(crate) fn find_compilable_region(
     len
 }
 
-/// Action taken by the tiered execution system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TieredAction {
-    /// The instruction should be interpreted (not hot enough or unsupported).
-    Interpret,
-    /// JIT-compiled code was executed.
-    RanJit,
-    /// The region was SIMD-vectorized, compiled, and executed.
-    /// (Unused while the SIMD path is gated off; kept for API stability.)
-    CompiledSimdAndRan,
-}
+// TieredAction is defined in `crate::backends` so the VM can reference it
+// without importing the JIT module. Re-export for backward compatibility.
+pub use crate::backends::TieredAction;
 
 // ---------------------------------------------------------------------------
 // JitBackend trait impl — adapts the Cranelift JIT to the backend trait
 // ---------------------------------------------------------------------------
 
 impl crate::backends::JitBackend for JitSession {
-    fn compile_and_cache(
-        &mut self,
-        _module: &crate::bytecode::CodeModule,
-        start_pc: usize,
-        instrs: &[crate::bytecode::Instruction],
-    ) -> Option<crate::backends::CompiledRegion> {
-        // Find the compilable region length.
-        let region_len = find_compilable_region(start_pc, instrs);
-        if region_len == 0 {
-            return None;
-        }
-        // Use module_idx 0 — the trait is not yet wired to callers that
-        // track per-module indices. When callers update, the index will
-        // flow through the trait method signature.
-        let module_idx = 0usize;
-        // Safety: the JIT module is initialized and single-threaded.
-        let ptr = unsafe { self.compile_region(module_idx, start_pc, region_len, instrs)? };
-        Some(crate::backends::CompiledRegion {
-            fn_ptr: ptr as usize,
-            instr_count: region_len,
-        })
+    fn is_compiled(&self, module_idx: usize, pc: usize) -> bool {
+        self.compiled.contains_key(&(module_idx, pc))
+    }
+
+    fn record_and_check_hot(&mut self, module_idx: usize, pc: usize) -> bool {
+        let count = self.hot_counters.entry((module_idx, pc)).or_insert(0);
+        *count += 1;
+        *count >= HOT_THRESHOLD
+    }
+
+    fn compiled_region_len(&self, module_idx: usize, pc: usize) -> Option<usize> {
+        self.compiled.get(&(module_idx, pc)).map(|&(_, len)| len)
     }
 
     fn compiled_count(&self) -> usize {
-        self.compiled_count()
+        self.compiled.len()
     }
 
     fn typed_compiled_count(&self) -> usize {
-        self.typed_compiled_count()
+        self.typed_regions.len()
     }
 
     fn reset_hot_counters(&mut self) {
-        self.reset_hot_counters()
+        self.hot_counters.clear();
+    }
+
+    fn tiered_execute_step_typed(
+        &mut self,
+        module_idx: usize,
+        pc: usize,
+        module: &crate::bytecode::CodeModule,
+        regs: &mut [u64; 256],
+        constants: &[u64],
+    ) -> crate::backends::TieredAction {
+        let instructions = &module.instructions;
+
+        // Check if already compiled
+        if let Some(func) = unsafe { self.get_compiled(module_idx, pc) } {
+            func(regs.as_mut_ptr(), constants.as_ptr());
+            return crate::backends::TieredAction::RanJit;
+        }
+
+        // Record execution for hotness
+        if self.record_and_check_hot(module_idx, pc) {
+            let region_len = find_compilable_region(pc, instructions);
+            if region_len >= 3 {
+                let meta = typed_compiler::infer_reg_types(module, pc);
+                let meta_ref = if meta.reg_types.is_empty() {
+                    None
+                } else {
+                    Some(&meta)
+                };
+                if let Some(func) = unsafe {
+                    self.compile_region_typed(module_idx, pc, region_len, instructions, meta_ref)
+                } {
+                    func(regs.as_mut_ptr(), constants.as_ptr());
+                    return crate::backends::TieredAction::RanJit;
+                }
+            }
+        }
+
+        crate::backends::TieredAction::Interpret
     }
 }

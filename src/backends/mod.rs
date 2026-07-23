@@ -46,51 +46,51 @@ impl<T: crate::runtime::PersistenceStore> StorageBackend for T {}
 // JIT backend — the interface for register-VM JIT compilers
 // ---------------------------------------------------------------------------
 
+/// Action taken by the tiered execution system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TieredAction {
+    /// The JIT could not run; fall back to the interpreter.
+    Interpret,
+    /// JIT-compiled code was executed; advance the PC.
+    RanJit,
+    /// The region was SIMD-vectorized, compiled, and executed.
+    /// (Unused while the SIMD path is gated off; kept for API stability.)
+    CompiledSimdAndRan,
+}
+
 /// A JIT backend compiles hot bytecode regions into native code for faster
 /// execution. The default implementation uses Cranelift (`src/jit/`). A future
 /// runtime could implement this trait with LLVM, GCC JIT, or whatever
 /// codegen exists in 2125.
-///
-/// The trait is intentionally minimal: the VM calls `compile_and_cache` when
-/// a PC's hot counter exceeds the threshold; the backend returns a function
-/// pointer the VM can call, or `None` if the region is not compilable.
 pub trait JitBackend {
-    /// Compile a bytecode region into a native function, if possible.
-    ///
-    /// `module` is the module containing the region. `instrs` is the
-    /// instruction slice for the region (a contiguous run starting at
-    /// `start_pc`).
-    ///
-    /// Returns a function pointer that the VM calls with
-    /// `extern "C" fn(*mut u64 regs, *const u64 constants)`, or `None` if
-    /// the region contains unsupported opcodes or the backend is not
-    /// available.
-    fn compile_and_cache(
-        &mut self,
-        module: &CodeModule,
-        start_pc: usize,
-        instrs: &[crate::bytecode::Instruction],
-    ) -> Option<CompiledRegion>;
+    /// Whether a region at `(module_idx, pc)` has already been compiled.
+    fn is_compiled(&self, module_idx: usize, pc: usize) -> bool;
 
-    /// Number of bytecode regions compiled (scalar path).
+    /// Record one interpretation and return `true` when the region is hot.
+    fn record_and_check_hot(&mut self, module_idx: usize, pc: usize) -> bool;
+
+    /// Number of bytecode instructions in the compiled region at `(module_idx, pc)`.
+    fn compiled_region_len(&self, module_idx: usize, pc: usize) -> Option<usize>;
+
+    /// Number of regions compiled (scalar path).
     fn compiled_count(&self) -> usize;
 
-    /// Number of bytecode regions compiled with type metadata (typed path).
+    /// Number of regions compiled through the type-directed path.
     fn typed_compiled_count(&self) -> usize;
 
-    /// Reset hot counters so re-executing a region re-triggers compilation.
+    /// Reset hot counters.
     fn reset_hot_counters(&mut self);
-}
 
-/// A compiled JIT region: a function pointer the VM can call.
-pub struct CompiledRegion {
-    /// The native function pointer. ABI:
-    /// `extern "C" fn(regs: *mut u64, constants: *const u64) -> u64`
-    /// Returns the value of the destination register after the region,
-    /// or a sentinel for control-flow transfers (jump/ret).
-    pub fn_ptr: usize,
-    /// The number of instructions in the compiled region.
-    pub instr_count: usize,
+    /// Execute one tiered step: if the region at `pc` is compiled, run it;
+    /// if hot, compile then run; otherwise record and return `Interpret`.
+    fn tiered_execute_step_typed(
+        &mut self,
+        module_idx: usize,
+        pc: usize,
+        module: &CodeModule,
+        regs: &mut [u64; 256],
+        constants: &[u64],
+    ) -> TieredAction;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +108,104 @@ pub trait WasmBackend: Send {
 
     /// Run a compiled WASM module. Returns the tagged program result.
     fn run(&mut self, wasm: &[u8]) -> NuResult<Value>;
+}
+
+// ---------------------------------------------------------------------------
+// Default WASM backend impl — delegates to mir_wasm + wasm_runtime
+// ---------------------------------------------------------------------------
+
+/// The default WASM backend: compiles via `mir_wasm::WasmBackend`,
+/// runs via `wasm_runtime::WasmRuntime`.
+#[cfg(feature = "wasm-backend")]
+pub struct DefaultWasmBackend;
+
+#[cfg(feature = "wasm-backend")]
+impl WasmBackend for DefaultWasmBackend {
+    fn compile(&mut self, module: &MirModule, name: &str) -> NuResult<Vec<u8>> {
+        crate::mir_wasm::WasmBackend::new().compile(module, name)
+    }
+
+    fn run(&mut self, wasm: &[u8]) -> NuResult<Value> {
+        crate::wasm_runtime::WasmRuntime::new(wasm, None)?.run()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP provider — the interface for outbound HTTP requests
+// ---------------------------------------------------------------------------
+
+/// An HTTP provider makes outbound HTTP requests. The default implementation
+/// uses `reqwest`. A future runtime could implement this with hyper, curl,
+/// or whatever HTTP client exists in 2125.
+pub trait HttpProvider: Send + Sync {
+    /// Perform a synchronous POST with a JSON body and return the response body.
+    fn post_json(&self, url: &str, body: &str) -> Result<String, String>;
+
+    /// Perform a synchronous GET and return the response body.
+    fn get(&self, url: &str) -> Result<String, String>;
+}
+
+/// Default HTTP provider backed by `reqwest` (requires `ai-runtime` feature).
+#[cfg(feature = "ai-runtime")]
+#[derive(Debug, Clone)]
+pub struct ReqwestHttpProvider {
+    client: reqwest::Client,
+}
+
+#[cfg(feature = "ai-runtime")]
+impl ReqwestHttpProvider {
+    /// Create a new reqwest-backed HTTP provider with a default timeout.
+    pub fn new() -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        ReqwestHttpProvider { client }
+    }
+}
+
+#[cfg(feature = "ai-runtime")]
+impl Default for ReqwestHttpProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "ai-runtime")]
+impl HttpProvider for ReqwestHttpProvider {
+    fn post_json(&self, url: &str, body: &str) -> Result<String, String> {
+        let client = self.client.clone();
+        tokio::runtime::Handle::try_current()
+            .map_err(|_| "no Tokio runtime available".to_string())?
+            .block_on(async {
+                client
+                    .post(url)
+                    .header("Content-Type", "application/json")
+                    .body(body.to_string())
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .text()
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+    }
+
+    fn get(&self, url: &str) -> Result<String, String> {
+        let client = self.client.clone();
+        tokio::runtime::Handle::try_current()
+            .map_err(|_| "no Tokio runtime available".to_string())?
+            .block_on(async {
+                client
+                    .get(url)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .text()
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +230,6 @@ mod tests {
     #[test]
     fn test_storage_backend_is_persistence_store() {
         // StorageBackend is auto-implemented for any PersistenceStore.
-        // This test verifies the blanket impl compiles and type-checks.
         fn accepts_storage<S: StorageBackend>(_s: &S) {}
         fn accepts_persistence<P: crate::runtime::PersistenceStore>(p: &P) {
             accepts_storage(p);
@@ -143,13 +240,19 @@ mod tests {
 
     #[test]
     fn test_transport_is_network_transport() {
-        // Transport is auto-implemented for any NetworkTransport.
-        // We can't construct a TcpTransport without binding a port, but the
-        // blanket impl compiles — this test verifies the type-level wiring.
         fn check_blanket<T: crate::runtime::NetworkTransport>() {
-            // If this compiles, Transport is implemented for T.
             fn _assert_trait_object(_: &dyn Transport) {}
         }
         check_blanket::<crate::runtime::TcpTransport>();
+    }
+
+    #[cfg(feature = "ai-runtime")]
+    #[test]
+    fn test_http_provider_is_object_safe() {
+        fn accepts_http(h: &dyn HttpProvider) {
+            // Verify trait object usage compiles (no runtime needed for type-check).
+        }
+        let provider = ReqwestHttpProvider::new();
+        accepts_http(&provider);
     }
 }

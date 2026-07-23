@@ -638,7 +638,7 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
             let wasm_file = out_file.unwrap_or("out.wasm");
             let hir = nulang::hir_lower::lower_module(&ast);
             let mir = nulang::mir_lower::lower_module(&hir)?;
-            let mut wasm_backend = nulang::mir_wasm::WasmBackend::new();
+            use nulang::backends::WasmBackend; let mut wasm_backend = nulang::backends::DefaultWasmBackend;
             let wasm_bytes = wasm_backend.compile(&mir, "main")?;
             if verbose {
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
@@ -654,7 +654,8 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
             let wasm_file = out_file.unwrap_or("out.wasm");
             let hir = nulang::hir_lower::lower_module(&ast);
             let mir = nulang::mir_lower::lower_module(&hir)?;
-            let mut wasm_backend = nulang::mir_wasm::WasmBackend::new();
+            use nulang::backends::WasmBackend;
+            let mut wasm_backend = nulang::backends::DefaultWasmBackend;
             let wasm_bytes = wasm_backend.compile(&mir, "main")?;
             if verbose {
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
@@ -662,8 +663,7 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
             std::fs::write(wasm_file, &wasm_bytes).map_err(|e| {
                 nulang::types::NuError::VMError { msg: format!("failed to write {}: {}", wasm_file, e), span: Span::default() }
             })?;
-            let mut runtime = nulang::wasm_runtime::WasmRuntime::new(&wasm_bytes, None)?;
-            runtime.run()?;
+            wasm_backend.run(&wasm_bytes)?;
             return Ok(());
         }
         #[cfg(feature = "wasm-backend")]
@@ -677,7 +677,7 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
             };
             let hir = nulang::hir_lower::lower_module(&ast);
             let mir = nulang::mir_lower::lower_module(&hir)?;
-            let mut wasm_backend = nulang::mir_wasm::WasmBackend::new();
+            use nulang::backends::WasmBackend; let mut wasm_backend = nulang::backends::DefaultWasmBackend;
             let wasm_bytes = wasm_backend.compile(&mir, "main")?;
             if verbose {
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
