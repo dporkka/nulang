@@ -39,11 +39,11 @@ This document is the design target for Nulang 2.0. The implementation in this re
 **Implemented and verified against the source tree:**
 
 - The core expression language: literals (`Int`, `Float`, `String`, `Bool`, `Unit`, `Nil`), `let` / `let rec` bindings with `in`, `fn` lambdas, tuples, records, arrays, `if`/`then`/`else`, `match` (wildcard, variable, literal, tuple, record, variant, and `@` alias patterns), blocks, the pipe operator `|>`, and the operator set of Chapter 2.
-- Top-level declarations: `fn` (with `[T]` type parameters, `->` return types, `!` effect rows, `: cap` capability annotations, and `@tool` annotations), `type` (alias, record, and variant forms), `effect`, `actor` / `persistent actor`, `agent`, `workflow`, `module`, `import`, and `extern` FFI blocks.
+- Top-level declarations: `fn` (with `[T]` type parameters, `->` return types, `!` effect rows, `: cap` capability annotations, and `@tool` annotations), `type` (alias, record, and variant forms), `effect`, `actor` / `persistent actor`, `entity`, `organization`, `agent`, `workflow`, `module`, `import`, and `extern` FFI blocks.
 - Hindley-Milner type inference (Algorithm W) over tuples, records, variants, arrays, function types carrying effect rows and capabilities, and `&cap T` reference types.
 - Algebraic effects: `perform Effect.op(args)`, `handle body { | Effect.op(x) => value }`, closed and open effect rows written `{IO, FS}` and `{IO, | row}`, enforced `!` annotations on `fn` and `behavior` bodies, and runtime handlers with resume semantics.
 - Reference capabilities `iso`, `trn`, `ref`, `val`, `box`, `tag`, plus `lineariso` with exactly-once consumption tracking. Capabilities are checked at compile time and erased at runtime. Sendability (`lineariso`, `iso`, `val`, `tag`) is enforced for message arguments.
-- Actors and entities: `actor`, `persistent actor`, and `entity` (desugars to `persistent actor` with `event_sourced` as the default state model); `spawn Actor { field = value }`, `spawn Actor {} as "name"` for stable identity, `send actor behavior(args)` and `actor ! behavior(args)`, `ask actor behavior(args)`, `receive { | Behavior(x) => expr }`, `self.field` state access, and the four state models (`local`, `durable`, `event_sourced`, `crdt`).
+- Actors and entities: `actor`, `persistent actor`, `organization` (desugars to `entity`), and `entity` (desugars to `persistent actor` with `event_sourced` as the default state model); `spawn Actor { field = value }`, `spawn Actor {} as "name"` for stable identity, `send actor behavior(args)` and `actor ! behavior(args)`, `ask actor behavior(args)`, `receive { | Behavior(x) => expr }`, `self.field` state access, and the four state models (`local`, `durable`, `event_sourced`, `crdt`).
 - Persistence for `persistent actor`s: durable snapshot/journal recovery and event-sourced replay, backed by in-memory, JSON-file, and SQLite stores.
 - Workflows: `workflow Name { step name { body } compensate { expr } ... }` with `parallel { ... }` step groups, saga compensation in reverse order, `perform Signal.wait("name")`, and `perform Timer.sleep("name", ms)`, all durable across restarts.
 - The AI runtime: `agent` declarations with model, system prompt, tools, episodic/semantic/procedural memory, and pricing; the `perform LLM.ask(prompt)` effect; agent behaviors (`ask`, `usage`, `store_fact`, `recall`); tool schemas generated from `@tool` functions and executed when the model issues tool calls; and the `Pipeline`, `Supervisor`, and `Debate` orchestration builtins.
@@ -237,9 +237,9 @@ written in Core and targets the `.nbc` format (RFC 0001). Stage 1 compiles
 Core programs; Stage 2 compiles itself. The Rust implementation remains the
 fast path; the bootstrap compiler is the longevity path.
 
-**Note:** Core currently lacks `String.charAt` and `String.length`
-primitives, which blocks the bootstrap compiler's lexer from iterating
-source characters. These are a planned Stable-tier addition tracked in
+**Note:** Core gained `String.charAt` and `String.length` (2026-07-23)
+primitives via `perform String.length(s)` and `perform String.charAt(s, i)`, which unblocked the bootstrap compiler's lexer from iterating
+source characters. See
 `bootstrap/README.md`.
 
 
