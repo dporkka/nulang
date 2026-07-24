@@ -602,6 +602,7 @@ mod tests {
             version: 1,
             migrations: vec![],
             is_workflow: false,
+            is_organization: false,
             is_agent: false,
             tools: vec![],
             semantic_memory_dimensions: None,
