@@ -43,14 +43,21 @@ nulang bootstrap/compiler_core.nula
 ## Stage 4 blocker: MIR register limit
 
 Adding lambda/closure support to the Pratt parser requires ~261 local
-variables, exceeding the MIR register allocator's capacity of 237
-(`FUNC_VALUE_REG = 254`, `LOCAL_BASE = 16` in `src/mir_codegen.rs`).
+variables, exceeding the MIR register allocator's capacity.
+
+MIR register spilling (`SpillLoad`/`SpillStore` opcodes 0xF5/0xF6) was
+added (2026-07-23), allowing functions to exceed the 239-register limit.
+However, the post-processing spill rewrite has a capacity of 17 spilled
+locals (~256 total MIR locals) due to register wrapping ambiguity;
+functions exceeding this get a clear error instead of silent corruption.
+
+The bootstrap parser's ~261 locals is just above this limit.
 
 Workarounds:
 - Reduce local count: inline helper functions, merge branches
 - Split parser across multiple top-level functions (requires forward
   references or mutual recursion — not currently supported in Core)
-- Increase `FUNC_VALUE_REG` or expand the register file in the VM
+- Implement full inline spilling (removes the 17-slot capacity limit)
 
 ## What remains
 
