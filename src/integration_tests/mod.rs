@@ -889,7 +889,7 @@ mod tests {
             .iter()
             .find(|l| l.name.as_deref() == Some(name))
             .unwrap_or_else(|| panic!("local '{}' not found in {:?}", name, main.locals));
-        let reg = (16 + local.id.0) as u8;
+        let reg = (crate::mir_codegen::LOCAL_BASE + local.id.0) as u8;
         let module = crate::mir_codegen::compile_mir(&mir, "test").unwrap();
         (module, reg)
     }
@@ -7724,5 +7724,47 @@ match { a: 2, b: 9 } with {
             let result = run_source_new(source);
             assert!(result.is_ok(),
                 "organization should compile: {:?}", result.err());
+        }
+
+        // -- break-with-value (MIR pipeline) --
+
+        #[test]
+        fn test_while_break_with_value_returns_break_value() {
+            let source = r#"while true { break 99 }"#;
+            let result = run_source_new(source).unwrap();
+            assert_eq!(result.as_int(), Some(99),
+                "while break-with-value should return break value, got {:?}", result);
+        }
+
+        #[test]
+        fn test_while_break_without_value_returns_unit() {
+            let source = r#"while true { break }"#;
+            let result = run_source_new(source).unwrap();
+            assert!(result.is_unit(),
+                "while break without value should return unit, got {:?}", result);
+        }
+
+        #[test]
+        fn test_while_conditional_break_with_value() {
+            let source = r#"while true { if true { break 42 } else { 0 } }"#;
+            let result = run_source_new(source).unwrap();
+            assert_eq!(result.as_int(), Some(42),
+                "conditional break-with-value should return 42, got {:?}", result);
+        }
+
+        #[test]
+        fn test_for_break_with_value_returns_break_value() {
+            let source = r#"for i in [1] { break 99 }"#;
+            let result = run_source_new(source).unwrap();
+            assert_eq!(result.as_int(), Some(99),
+                "for break-with-value should return break value, got {:?}", result);
+        }
+
+        #[test]
+        fn test_for_break_without_value_returns_unit() {
+            let source = r#"for i in [1] { break }"#;
+            let result = run_source_new(source).unwrap();
+            assert!(result.is_unit(),
+                "for break without value should return unit, got {:?}", result);
         }
 }

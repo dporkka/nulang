@@ -9,10 +9,11 @@
 //!   - records use module-wide field ids (`RecMk`/`RecS`/`RecL`);
 //!   - effect handlers use `Handle`/`Unwind`/`Resume` with handler tables.
 //!
-//! Register scheme: r0..r15 are a scratch/staging zone (call and effect
-//! arguments, transient values); each MIR local gets the fixed register
-//! `LOCAL_BASE + local_id`. A function whose locals exceed the register file
-//! fails to compile with an honest error.
+//! Register scheme: r0..r11 are a scratch/staging zone (call and effect
+//! arguments, transient values); r12..r14 are spill scratch registers;
+//! each MIR local gets the fixed register `LOCAL_BASE + local_id`.
+//! A function whose locals exceed the register file spills excess
+//! locals into the frame's spill vector via SpillLoad/SpillStore.
 //!
 //! Intra-actor reclamation: `compile_function` runs a conservative
 //! liveness-based analysis (`plan_drops`) that emits `OpCode::Drop` when a
@@ -27,12 +28,16 @@ use crate::bytecode::{
 use crate::mir;
 use crate::types::{NuError, NuResult, PrimitiveType, Span, Type};
 use std::collections::{HashMap, HashSet};
-
-const FUNC_VALUE_REG: u8 = 254; // bootstrap Stage 4 (lambda) needs ~261 locals; bumping this down helps
-const LOCAL_BASE: u32 = 16;
-const MAX_STAGED_ARGS: usize = 16;
+const FUNC_VALUE_REG: u8 = 254;
+/// First general-purpose local register. r0..(LOCAL_BASE-1) is the call/effect staging zone,
+/// r12..r14 are spill scratch registers, and rLOCAL_BASE..253 hold MIR locals that are not spilled.
+pub const LOCAL_BASE: u32 = 15;
+const MAX_STAGED_ARGS: usize = 12;
 const SCRATCH0: u8 = 0;
 const SCRATCH1: u8 = 1;
+const SPILL_TEMP: u8 = 12;
+const SPILL_TEMP2: u8 = 13;
+const SPILL_TEMP3: u8 = 14;
 
 fn not_yet_implemented(feature: &str, span: Span) -> NuError {
     NuError::NotYetImplemented { feature: feature.to_string(), span }
@@ -259,20 +264,22 @@ impl MirCodegen {
         let mut saved_instructions = Vec::new();
         std::mem::swap(&mut saved_instructions, &mut self.module.instructions);
         let function_start = saved_instructions.len();
-
-        if LOCAL_BASE as usize + func.locals.len() > FUNC_VALUE_REG as usize - 1 {
-            // Restore before erroring so the codegen stays usable.
-            self.module.instructions = saved_instructions;
-            return Err(compile_err(format!(
-                "function '{}' needs {} locals, exceeding the MIR register allocator's capacity",
-                func.name,
-                func.locals.len()
-            ), Span::default()));
+        // Build the spill map: locals whose register would overflow the
+        // physical register file get a slot in the frame's spill vector.
+        // is_spilled_local uses the local id directly (not the wrapped
+        // reg_of) to avoid false negatives from u8 wrapping.
+        let spilled_threshold = FUNC_VALUE_REG as u32 - LOCAL_BASE;
+        let mut spill_map: HashMap<u32, u16> = HashMap::new();
+        let mut next_spill_slot: u16 = 0;
+        for i in 0..func.locals.len() as u32 {
+            if i >= spilled_threshold {
+                spill_map.insert(i, next_spill_slot);
+                next_spill_slot += 1;
+            }
         }
-
         if func.params.len() > MAX_STAGED_ARGS {
             // Mirrors stage_args's call-site limit: the prologue below reads
-            // incoming arguments from r0..r15 (the same staging zone callers
+            // incoming arguments from r0..r11 (the same staging zone callers
             // stage into), so a param count above that would alias into
             // LOCAL_BASE-mapped registers instead of erroring cleanly.
             self.module.instructions = saved_instructions;
@@ -289,8 +296,7 @@ impl MirCodegen {
         // emitted as their F* variants.
         self.float_locals = float_locals(func);
 
-        // Prologue: move incoming arguments from r0..rN to their fixed local
-        // registers, then load closure captures.
+        // Prologue: move incoming arguments into their local registers.
         for (i, param) in func.params.iter().enumerate() {
             let dst = reg_of(*param);
             let src = i as u8;
@@ -309,7 +315,7 @@ impl MirCodegen {
         for table in &func.handler_tables {
             for binding in &table.bindings {
                 if binding.params.len() > MAX_STAGED_ARGS {
-                    // The VM delivers effect arguments in r0..r15; beyond
+                    // The VM delivers effect arguments in r0..r11; beyond
                     // that the prologue moves below would alias into
                     // LOCAL_BASE-mapped locals — the same corruption the
                     // function-parameter check above rejects.
@@ -362,6 +368,13 @@ impl MirCodegen {
                 }
             }
             self.compile_terminator(&block.terminator, &func.name, &block_offsets, &mut patches)?;
+        }
+
+        // Post-process: if any locals were spilled, rewrite instructions
+        // to use SpillLoad/SpillStore through scratch registers.
+        if !spill_map.is_empty() {
+            self.module.instructions =
+                spill_rewrite_instructions(&self.module.instructions, &spill_map);
         }
 
         // Patch forward jumps now that all block offsets are known.
@@ -1102,6 +1115,188 @@ impl MirCodegen {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Register spilling helpers
+// ---------------------------------------------------------------------------
+// Functions with more locals than fit in the register file (rLOCAL_BASE..253)
+// spill excess locals into the frame's spilled: Vec<Value>.  The spill
+// rewriting pass below replaces direct register references with SpillLoad/
+// SpillStore sequences through r12..r14 (SPILL_TEMP / SPILL_TEMP2 / SPILL_TEMP3).
+
+
+fn emit_spill_load(slot: u16, dst: u8) -> Instruction {
+    Instruction::new3(OpCode::SpillLoad, (slot >> 8) as u8, (slot & 0xFF) as u8, dst)
+}
+
+fn emit_spill_store(src: u8, slot: u16) -> Instruction {
+    Instruction::new3(OpCode::SpillStore, src, (slot >> 8) as u8, (slot & 0xFF) as u8)
+}
+
+/// Post-processing pass: rewrite instructions that reference spilled
+/// locals into SpillLoad/SpillStore sequences using scratch registers.
+///
+/// Operand semantics (default for most opcodes):
+///   op1 = write(dst), op2 = read, op3 = read
+///
+/// Exceptions handled:
+///   Move: op1 = src(read), op2 = dst(write)
+///   Call: op1 = func(read), op3 = dst(write)  (op2 = argc, not a register)
+///   CapLoad: op1 = cap_idx(not a register), op2 = dst(write)
+///
+/// Skipped entirely (not spilled-aware):
+///   Jmp, JmpT, JmpF, Switch, Ret, RetVal, Resume,
+///   SpillLoad, SpillStore, Handle, Perform, Send, Ask, Spawn, Const*
+fn spill_rewrite_instructions(
+    instructions: &[Instruction],
+    spill_map: &HashMap<u32, u16>,
+) -> Vec<Instruction> {
+    let mut out = Vec::with_capacity(instructions.len() * 3 / 2);
+
+    for instr in instructions {
+        let op = instr.opcode;
+
+        // Skip control flow and special opcodes whose operands
+        // are not general-purpose registers.
+        if matches!(
+            op,
+            OpCode::Jmp
+                | OpCode::JmpT
+                | OpCode::JmpF
+                | OpCode::Switch
+                | OpCode::Ret
+                | OpCode::RetVal
+                | OpCode::Resume
+                | OpCode::SpillLoad
+                | OpCode::SpillStore
+                | OpCode::Handle
+                | OpCode::Perform
+                | OpCode::Send
+                | OpCode::Ask
+                | OpCode::Spawn
+                | OpCode::Const0
+                | OpCode::Const1
+                | OpCode::Const2
+                | OpCode::ConstM1
+                | OpCode::ConstU
+                | OpCode::ConstL
+        ) {
+            out.push(*instr);
+            continue;
+        }
+
+        // Move: op1 = src(read), op2 = dst(write), op3 = unused
+        if op == OpCode::Move {
+            let mut new_instr = *instr;
+            let src_reg = instr.op1;
+            let dst_reg = instr.op2;
+
+            // Check if a spilled local maps to src_reg or dst_reg by
+            // reverse-lookup in the spill map.  Since reg_of wraps for
+            // spilled locals, we match any register that appears in the
+            // normal (non-spilled) range only — spilled locals are >= 254
+            // which wraps, so we check the local-id → register mapping.
+            // Actually, we reverse the computation: local_id → slot.
+            // The register in the instruction may have wrapped, so we
+            // can't reliably map back to a local_id.  Instead, we rely
+            // on the fact that all locals mapped to the core range r15..r253
+            // are NOT spilled, and every other register value is impossible.
+            //
+            // Pragmatic approach: scan spill_map entries and check if
+            // reg_of(local_id) (wrapping) matches the instruction operand.
+            // This is O(spilled_locals) per instruction — fine for our scale.
+
+            let src_spilled = find_spill_slot_for_reg(spill_map, src_reg);
+            let dst_spilled = find_spill_slot_for_reg(spill_map, dst_reg);
+
+            // Load spilled source into SPILL_TEMP before the Move.
+            if let Some(slot) = src_spilled {
+                out.push(emit_spill_load(slot, SPILL_TEMP));
+                new_instr.op1 = SPILL_TEMP;
+            }
+
+            // Store destination into spill slot after the Move.
+            if let Some(slot) = dst_spilled {
+                new_instr.op2 = SPILL_TEMP2;
+                out.push(new_instr);
+                out.push(emit_spill_store(SPILL_TEMP2, slot));
+            } else {
+                out.push(new_instr);
+            }
+            continue;
+        }
+
+        // Call: op1 = func(read), op2 = argc, op3 = dst(write)
+        // Only handle the destination spill at op3.
+        if op == OpCode::Call {
+            let dst_reg = instr.op3;
+            if let Some(slot) = find_spill_slot_for_reg(spill_map, dst_reg) {
+                let mut new_instr = *instr;
+                new_instr.op3 = SPILL_TEMP;
+                out.push(new_instr);
+                out.push(emit_spill_store(SPILL_TEMP, slot));
+            } else {
+                out.push(*instr);
+            }
+            continue;
+        }
+
+        // CapLoad: op1 = cap_idx (not a register), op2 = dst(write)
+        if op == OpCode::CapLoad {
+            let dst_reg = instr.op2;
+            if let Some(slot) = find_spill_slot_for_reg(spill_map, dst_reg) {
+                let mut new_instr = *instr;
+                new_instr.op2 = SPILL_TEMP2;
+                out.push(new_instr);
+                out.push(emit_spill_store(SPILL_TEMP2, slot));
+            } else {
+                out.push(*instr);
+            }
+            continue;
+        }
+
+        // Default case: op1 = write, op2 = read, op3 = read
+        {
+            let mut new_instr = *instr;
+
+            // op2 (read): emit SpillLoad before, replace with SPILL_TEMP2
+            if let Some(slot) = find_spill_slot_for_reg(spill_map, instr.op2) {
+                out.push(emit_spill_load(slot, SPILL_TEMP2));
+                new_instr.op2 = SPILL_TEMP2;
+            }
+
+            // op3 (read): emit SpillLoad before, replace with SPILL_TEMP3
+            if let Some(slot) = find_spill_slot_for_reg(spill_map, instr.op3) {
+                out.push(emit_spill_load(slot, SPILL_TEMP3));
+                new_instr.op3 = SPILL_TEMP3;
+            }
+
+            // op1 (write): replace with SPILL_TEMP, emit SpillStore after
+            if let Some(slot) = find_spill_slot_for_reg(spill_map, instr.op1) {
+                new_instr.op1 = SPILL_TEMP;
+                out.push(new_instr);
+                out.push(emit_spill_store(SPILL_TEMP, slot));
+            } else {
+                out.push(new_instr);
+            }
+        }
+    }
+
+    out
+}
+
+/// Given a register value (possibly wrapping for spilled locals), return the
+/// spill slot if this register corresponds to a spilled local.
+fn find_spill_slot_for_reg(spill_map: &HashMap<u32, u16>, reg: u8) -> Option<u16> {
+    for (&local_id, &slot) in spill_map {
+        // reg_of wraps: (LOCAL_BASE + local_id) as u8
+        let mapped = (LOCAL_BASE + local_id) as u8;
+        if mapped == reg {
+            return Some(slot);
+        }
+    }
+    None
+}
+
 fn reg_of(id: mir::LocalId) -> u8 {
     (LOCAL_BASE + id.0) as u8
 }
@@ -1817,14 +2012,14 @@ mod tests {
 
     #[test]
     fn test_mir_codegen_over_limit_params_is_honest_error_not_corruption() {
-        // A function with more than MAX_STAGED_ARGS (16) parameters used to
+        // A function with more than MAX_STAGED_ARGS (12) parameters used to
         // compile "successfully" with a prologue that reads incoming
         // arguments from registers overlapping LOCAL_BASE-mapped locals —
         // corrupt bytecode nothing could ever validly call (every call site
-        // is bounded by the same 16-arg staging limit), but a compile error
+        // is bounded by the same 12-arg staging limit), but a compile error
         // is the honest outcome, matching this pipeline's "no silent
         // misbehavior" guarantee.
-        let params = (0..17)
+        let params = (0..13)
             .map(|i| format!("a{}: Int", i))
             .collect::<Vec<_>>()
             .join(", ");
@@ -1832,7 +2027,7 @@ mod tests {
         let result = compile_mir_source(&source);
         assert!(
             matches!(result, Err(NuError::VMError { .. })),
-            "a 17-parameter function should be an honest compile error, got {:?}",
+            "a 13-parameter function should be an honest compile error, got {:?}",
             result
         );
     }
@@ -1939,12 +2134,12 @@ mod tests {
 
     #[test]
     fn test_mir_codegen_over_limit_handler_params_is_honest_error() {
-        // A handler binding with more than MAX_STAGED_ARGS (16) parameters
-        // used to compile a prologue moving r16.. into LOCAL_BASE-mapped
+        // A handler binding with more than MAX_STAGED_ARGS (12) parameters
+        // used to compile a prologue moving r12.. into LOCAL_BASE-mapped
         // registers, silently aliasing the enclosing function's locals —
-        // the VM only ever stages effect arguments in r0..r15. Like the
-        // 17-parameter function check, this must be a compile error.
-        let params = (0..17)
+        // the VM only ever stages effect arguments in r0..r11. Like the
+        // 13-parameter function check, this must be a compile error.
+        let params = (0..13)
             .map(|i| format!("p{}", i))
             .collect::<Vec<_>>()
             .join(", ");
@@ -1952,18 +2147,18 @@ mod tests {
         let result = compile_mir_source(&source);
         assert!(
             matches!(result, Err(NuError::VMError { .. })),
-            "a 17-parameter handler binding should be an honest compile error, got {:?}",
+            "a 13-parameter handler binding should be an honest compile error, got {:?}",
             result
         );
-        // A 16-parameter binding stays legal.
-        let params = (0..16)
+        // A 12-parameter binding stays legal.
+        let params = (0..12)
             .map(|i| format!("p{}", i))
             .collect::<Vec<_>>()
             .join(", ");
         let source = format!("handle 0 {{ | E.op({}) => p0 }}", params);
         assert!(
             compile_mir_source(&source).is_ok(),
-            "a 16-parameter handler binding should compile"
+            "a 12-parameter handler binding should compile"
         );
     }
 

@@ -858,9 +858,10 @@ impl TypeChecker {
                 name,
                 behaviors,
                 events,
+                migrations,
                 span,
                 ..
-            } => self.infer_actor_decl(ctx, name, behaviors, events, *span),
+            } => self.infer_actor_decl(ctx, name, behaviors, events, migrations, *span),
             Decl::StateMachine {
                 name,
                 states,
@@ -2191,13 +2192,13 @@ impl TypeChecker {
         Ok((subst.clone(), apply_subst(&last_ty, &subst)))
     }
 
-    /// Infer actor declaration.
     fn infer_actor_decl(
         &mut self,
         ctx: &TypeContext,
         _name: &str,
         behaviors: &[Behavior],
         events: &[crate::ast::EventDecl],
+        migrations: &[crate::ast::MigrationDecl],
         _span: Span,
     ) -> NuResult<(Substitution, Type)> {
         // Check each behavior, with event declarations in scope for emit checking
@@ -2220,6 +2221,16 @@ impl TypeChecker {
                 behavior_ctx.set_entity_events(ctx_events);
             }
             let (_s, _body_ty) = self.infer_expr(&behavior_ctx, &behavior.body)?;
+        }
+
+        // Typecheck migration contracts: state_body and event_migration handlers
+        for migration in migrations {
+            if let Some(ref state_body) = migration.state_body {
+                let _ = self.infer_expr(ctx, state_body)?;
+            }
+            for (_ev_name, _ev_params, ev_body) in &migration.event_migrations {
+                let _ = self.infer_expr(ctx, ev_body)?;
+            }
         }
 
         let actor_ty = Type::Actor {

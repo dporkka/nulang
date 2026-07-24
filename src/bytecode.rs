@@ -220,7 +220,15 @@ pub enum OpCode {
     DbgStack = 0xF2, // Debug print call stack
     MetaType = 0xF3, // Get type of value at runtime
     MetaCap = 0xF4,  // Get capability of reference at runtime
-}
+
+    // == Spill (0xF5-0xF6) — register spilling for large functions ==
+    /// Load a spilled local from the frame's spill vector into a register.
+    /// op1:op2 = spill index (u16 big-endian), op3 = destination register.
+    SpillLoad = 0xF5,
+    /// Store a register into the frame's spill vector.
+    /// op1 = source register, op2:op3 = spill index (u16 big-endian).
+    SpillStore = 0xF6,
+ }
 
 impl OpCode {
     pub fn from_u8(v: u8) -> Option<Self> {
@@ -365,7 +373,9 @@ impl OpCode {
             0xF2 => Some(DbgStack),
             0xF3 => Some(MetaType),
             0xF4 => Some(MetaCap),
-            _ => None,
+            0xF5 => Some(SpillLoad),
+            0xF6 => Some(SpillStore),
+             _ => None,
         }
     }
 
@@ -771,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_opcode_from_u8_all() {
-        // Known opcodes exist in 0x00..=0xF4; gaps return None.
+        // Known opcodes exist in 0x00..=0xF6; gaps return None.
         // Build a set of all known byte values for verification.
         let known: Vec<u8> = (0x00..=0x08)
             .chain(0x10..=0x15)
@@ -789,10 +799,10 @@ mod tests {
             .chain(0xC0..=0xC5)
             .chain(0xD0..=0xD5)
             .chain(0xE0..=0xE7)
-            .chain(0xF0..=0xF4)
+            .chain(0xF0..=0xF6)
             .collect();
 
-        for byte in 0..=0xF4u8 {
+        for byte in 0..=0xF6u8 {
             let result = OpCode::from_u8(byte);
             if known.contains(&byte) {
                 assert!(result.is_some(), "expected Some(OpCode) for 0x{byte:02X}");
@@ -812,7 +822,7 @@ mod tests {
 
     #[test]
     fn test_opcode_from_u8_invalid() {
-        for byte in 0xF5..=0xFFu8 {
+        for byte in 0xF7..=0xFFu8 {
             assert_eq!(
                 OpCode::from_u8(byte),
                 None,

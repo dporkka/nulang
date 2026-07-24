@@ -59,22 +59,33 @@ in this version; they are recorded here to establish their tier.
 - CRDT operations and merge semantics (`src/runtime/crdt.rs`,
   `src/runtime/crdt_reg.rs`).
 
-### Added since 1.0.0-frozen — 2026-07-23 (partial; typechecking + runtime TBD)
+### Added since 1.0.0-frozen — 2026-07-23
 
 - **RFC 0005/0007 — `entity` keyword and event sourcing.** `entity` desugars
   to `persistent actor` with `event_sourced` default state model. `events`
   and `apply` blocks for typed event declarations and automatic state
   mutation. `emit EventName(args)` type-checked against entity event
-  declarations. `after ms => expr` standalone sugar.
-- **RFC 0008 — Migration contracts (parser).** `version: N` and
+  declarations. `after ms => expr` standalone sugar. Entity events validated
+  at compile time; unknown events produce type errors.
+- **RFC 0008 — Migration contracts.** `version: N` and
   `migration from N to M { ... }` blocks parsed inside entity declarations.
-  AST/HIR/bytecode metadata wired through pipeline.
-- **RFC 0009 — Organization primitives (parser).** `organization` keyword
+  AST/HIR/bytecode metadata wired through pipeline. Migration state bodies
+  and event-migration handlers are now type-checked.
+- **RFC 0009 — Organization primitives.** `organization` keyword
   parsed and desugared to `entity` with durable defaults. `is_organization`
   flag tracked through AST → HIR → bytecode.
 - **RFC 0003 Item 6 — Backend trait boundary.** `JitBackend`, `WasmBackend`,
   `CryptoProvider`, `ForeignInterop`, `HttpProvider` traits defined in
   `src/backends/mod.rs`. JIT and WASM wired behind traits.
+- **MIR register spilling.** Functions with more locals than fit in the
+  register file (238 usable registers) now spill excess locals into a
+  frame-local `Vec<Value>` via `SpillLoad`/`SpillStore` opcodes (0xF5/0xF6).
+  This unblocks the self-hosting bootstrap compiler (RFC 0003 Item 3) which
+  needs ~261 locals for lambda support.
+- **Formal semantics: capability lattice proofs.** All five lattice theorems
+  in `spec/formal/capabilities.lean` proved via exhaustive case analysis:
+  `join_assoc`, `join_comm`, `join_idem`, `cap_sendable`, `discharge_sendable`.
+  The core HM soundness theorems (`types.lean`) remain open.
 
 ## Experimental tier
 

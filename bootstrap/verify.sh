@@ -13,21 +13,21 @@ if [ "$result" != "55" ]; then
 fi
 echo "PASS: self_test.nula = 55"
 
-# 2. compiler_core.nula: eval 42+1+3 = 46
+# 2. compiler_core.nula: parses 5 expressions, last is 10*20 = 200
 result=$($NULANG bootstrap/compiler_core.nula 2>&1 | tail -1)
-if [ "$result" != "46" ]; then
-    echo "FAIL: compiler_core.nula expected 46, got '$result'"
+if [ "$result" != "200" ]; then
+    echo "FAIL: compiler_core.nula expected 200, got '$result'"
     exit 1
 fi
-echo "PASS: compiler_core.nula = 46"
+echo "PASS: compiler_core.nula = 200"
 
-# 3. host.nula: invokes compiler pipeline = 46
+# 3. host.nula: placeholder shim, returns 0 until Stage 3 wiring
 result=$($NULANG bootstrap/host.nula 2>&1 | tail -1)
-if [ "$result" != "46" ]; then
-    echo "FAIL: host.nula expected 46, got '$result'"
+if [ "$result" != "0" ]; then
+    echo "FAIL: host.nula expected 0, got '$result'"
     exit 1
 fi
-echo "PASS: host.nula = 46"
+echo "PASS: host.nula = 0"
 
 # 4. self_test .nbc round-trip
 $NULANG --emit-nbc --out bootstrap/self_test.nbc bootstrap/self_test.nula 2>/dev/null

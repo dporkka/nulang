@@ -814,10 +814,14 @@ fn parse_receive_spec(spec: &str) -> (usize, Vec<u16>) {
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
-/// Activation frame: 256 registers + metadata.
+/// Activation frame: 256 registers + spill slots + metadata.
 pub struct Frame {
-    /// 256 general-purpose registers.
+    /// 256 general-purpose registers (r0..r255).
     pub regs: [Value; 256],
+    /// Spill slots for functions whose local count exceeds the register file.
+    /// Indexed by spill slot index (u16). Empty for functions that fit entirely
+    /// in registers.
+    pub spilled: Vec<Value>,
     /// Program counter (bytecode index).
     pub pc: usize,
     /// Module index in VM.modules.
@@ -836,6 +840,7 @@ impl Frame {
     pub fn new(caller_idx: Option<usize>, module_idx: usize) -> Self {
         Frame {
             regs: [Value::nil(); 256],
+            spilled: Vec::new(),
             pc: 0,
             module_idx,
             return_dst: 0,
@@ -961,6 +966,7 @@ impl Continuation {
 fn clone_frame(frame: &Frame) -> Frame {
     Frame {
         regs: frame.regs,
+        spilled: frame.spilled.clone(),
         pc: frame.pc,
         module_idx: frame.module_idx,
         return_dst: frame.return_dst,
@@ -2989,7 +2995,7 @@ impl VM {
                 } else {
                     0
                 };
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(len);
+                self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(len);
             }
 
             // -- Records (flat array indexed by module field id) --
@@ -3300,7 +3306,27 @@ impl VM {
                 self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(0);
             }
 
-            // -- LLM effect (v0.9 AI Runtime) --
+            // -- Register spilling for large functions --
+            OpCode::SpillLoad => {
+                let spill_idx = ((instr.op1 as u16) << 8) | (instr.op2 as u16);
+                let dst = instr.op3 as usize;
+                let val = self.frames[frame_idx]
+                    .spilled
+                    .get(spill_idx as usize)
+                    .copied()
+                    .unwrap_or(Value::nil());
+                self.frames[frame_idx].regs[dst] = val;
+            }
+            OpCode::SpillStore => {
+                let spill_idx = ((instr.op2 as u16) << 8) | (instr.op3 as u16);
+                let src = instr.op1 as usize;
+                let val = self.frames[frame_idx].regs[src];
+                let spilled = &mut self.frames[frame_idx].spilled;
+                if spill_idx as usize >= spilled.len() {
+                    spilled.resize(spill_idx as usize + 1, Value::nil());
+                }
+                spilled[spill_idx as usize] = val;
+            }
             OpCode::LlmAsk => {
                 self.step_llm_ask(frame_idx, module_idx, instr)?;
             }

@@ -170,9 +170,7 @@ def discharge_linear (a : Cap) : Cap :=
 -/
 theorem join_assoc : ∀ (a b c : Cap), join (join a b) c = join a (join b c) := by
   intro a b c
-  -- Case analysis on the 8³ = 512 combinations; can be discharged with
-  -- `dec_trivial` once `Cap` is made `Decidable`.
-  sorry
+  cases a <;> cases b <;> cases c <;> rfl
 
 /--
   **Theorem 2:** `join` is commutative:
@@ -180,7 +178,7 @@ theorem join_assoc : ∀ (a b c : Cap), join (join a b) c = join a (join b c) :=
 -/
 theorem join_comm : ∀ (a b : Cap), join a b = join b a := by
   intro a b
-  sorry
+  cases a <;> cases b <;> rfl
 
 /--
   **Theorem 3:** `join` is idempotent:
@@ -188,7 +186,7 @@ theorem join_comm : ∀ (a b : Cap), join a b = join b a := by
 -/
 theorem join_idem : ∀ a : Cap, join a a = a := by
   intro a
-  sorry
+  cases a <;> rfl
 
 /--
   **Theorem: Sendable Capabilities are Safe for Actor Boundaries**
@@ -212,7 +210,7 @@ theorem join_idem : ∀ a : Cap, join a a = a := by
 -/
 theorem cap_sendable : ∀ (cap : Cap), is_sendable cap = true → (le cap .Val = true ∨ cap = .Tag) := by
   intro cap h
-  sorry
+  cases cap <;> simp [is_sendable] at h
 
 /--
   **Theorem: Discharging linear tracking preserves sendability.**
@@ -220,7 +218,7 @@ theorem cap_sendable : ∀ (cap : Cap), is_sendable cap = true → (le cap .Val 
 -/
 theorem discharge_sendable : ∀ (cap : Cap), is_sendable cap → is_sendable (discharge_linear cap) := by
   intro cap h
-  sorry
+  cases cap <;> simp [is_sendable, discharge_linear] at *
 
 end Cap
 

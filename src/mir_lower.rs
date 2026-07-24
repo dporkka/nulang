@@ -428,6 +428,7 @@ struct FnLowerer<'c> {
     b: mir::FunctionBuilder,
     scopes: Vec<Vec<(String, mir::LocalId)>>,
     loop_exits: Vec<mir::BlockId>,
+    loop_results: Vec<mir::LocalId>,
     /// Number of `handle` bodies currently being lowered. Each one pushed a
     /// handler frame at runtime, so an explicit `return` emitted while this
     /// is > 0 must unwind that many frames first (the VM does not unwind
@@ -442,6 +443,7 @@ impl<'c> FnLowerer<'c> {
             b: mir::FunctionBuilder::new(name, ret),
             scopes: vec![Vec::new()],
             loop_exits: Vec::new(),
+            loop_results: Vec::new(),
             handle_depth: 0,
         }
     }
@@ -505,7 +507,7 @@ impl<'c> FnLowerer<'c> {
                 let id = self.unit_temp();
                 self.b.terminate(mir::Terminator::Return(Some(id)));
             }
-            hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
+            hir::Terminator::Break(_) => {
                 return Err(compile_err("break outside of a loop", Span::default()));
             }
         }
@@ -521,6 +523,7 @@ impl<'c> FnLowerer<'c> {
         dst: mir::LocalId,
         join: mir::BlockId,
     ) -> NuResult<()> {
+        use crate::bytecode::Constant;
         for stmt in &body.stmts {
             self.lower_stmt(stmt)?;
         }
@@ -540,13 +543,26 @@ impl<'c> FnLowerer<'c> {
                 };
                 self.emit_return(id);
             }
-            hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
+            hir::Terminator::Break(op) => {
                 let exit = self
                     .loop_exits
                     .last()
                     .copied()
                     .ok_or_else(|| compile_err("break outside of a loop", Span::default()))?;
-                // TODO: handle break-with-value by storing value before jump
+                let result = self
+                    .loop_results
+                    .last()
+                    .copied()
+                    .ok_or_else(|| compile_err("break outside of a loop", Span::default()))?;
+                match op {
+                    Some(op) => {
+                        let val = self.lower_operand(op)?;
+                        self.b.assign(result, mir::RValue::Load(val));
+                    }
+                    None => {
+                        self.b.assign(result, mir::RValue::Const(Constant::Unit));
+                    }
+                }
                 self.b.terminate(mir::Terminator::Jump(exit));
             }
         }
@@ -1838,6 +1854,9 @@ impl<'c> FnLowerer<'c> {
         let body_bb = self.b.create_block();
         let exit = self.b.create_block();
 
+        let loop_result = self.b.add_temp(Type::unit());
+        self.b.assign(loop_result, mir::RValue::Const(Constant::Int(0)));
+
         self.b.terminate(mir::Terminator::Jump(head));
 
         self.b.switch_to(head);
@@ -1857,13 +1876,13 @@ impl<'c> FnLowerer<'c> {
         self.push_scope();
         self.bind(var, elem);
         self.loop_exits.push(exit);
+        self.loop_results.push(loop_result);
         for stmt in &body.stmts {
             self.lower_stmt(stmt)?;
         }
         if !self.b.is_terminated() {
             match &body.terminator {
                 hir::Terminator::Yield(_) => {
-                    // Loop body value is discarded; increment and loop.
                     self.b
                         .assign(idx, mir::RValue::Binary(crate::ast::BinOp::Add, idx, one));
                     self.b.terminate(mir::Terminator::Jump(head));
@@ -1875,18 +1894,26 @@ impl<'c> FnLowerer<'c> {
                     };
                     self.emit_return(id);
                 }
-                hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
+                hir::Terminator::Break(op) => {
+                    match op {
+                        Some(op) => {
+                            let val = self.lower_operand(op)?;
+                            self.b.assign(loop_result, mir::RValue::Load(val));
+                        }
+                        None => {
+                            self.b.assign(loop_result, mir::RValue::Const(Constant::Unit));
+                        }
+                    }
                     self.b.terminate(mir::Terminator::Jump(exit));
                 }
             }
         }
         self.loop_exits.pop();
+        self.loop_results.pop();
         self.pop_scope();
 
         self.b.switch_to(exit);
-        // The stable compiler evaluates `for` to integer 0; mirror it so the
-        // pipelines stay observationally identical.
-        self.b.assign(dst, mir::RValue::Const(Constant::Int(0)));
+        self.b.assign(dst, mir::RValue::Load(loop_result));
         Ok(())
     }
 
@@ -1901,6 +1928,9 @@ impl<'c> FnLowerer<'c> {
         let body_bb = self.b.create_block();
         let exit = self.b.create_block();
 
+        let loop_result = self.b.add_temp(Type::unit());
+        self.b.assign(loop_result, mir::RValue::Const(Constant::Int(0)));
+
         self.b.terminate(mir::Terminator::Jump(head));
 
         self.b.switch_to(head);
@@ -1911,10 +1941,7 @@ impl<'c> FnLowerer<'c> {
         let c = match &cond.terminator {
             hir::Terminator::Yield(op) => self.lower_operand(op)?,
             hir::Terminator::FnReturn(_)
-            | hir::Terminator::Break(None)
-            | hir::Terminator::Break(Some(_)) => {
-                // If cond unconditionally returns/breaks, the branch doesn't matter
-                // But we must provide a dummy local for the branch.
+            | hir::Terminator::Break(_) => {
                 let dummy = self.b.add_temp(Type::bool());
                 self.b
                     .assign(dummy, mir::RValue::Const(Constant::Bool(false)));
@@ -1933,6 +1960,7 @@ impl<'c> FnLowerer<'c> {
         self.b.switch_to(body_bb);
         self.push_scope();
         self.loop_exits.push(exit);
+        self.loop_results.push(loop_result);
         for stmt in &body.stmts {
             self.lower_stmt(stmt)?;
         }
@@ -1948,16 +1976,26 @@ impl<'c> FnLowerer<'c> {
                     };
                     self.emit_return(id);
                 }
-                hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
+                hir::Terminator::Break(op) => {
+                    match op {
+                        Some(op) => {
+                            let val = self.lower_operand(op)?;
+                            self.b.assign(loop_result, mir::RValue::Load(val));
+                        }
+                        None => {
+                            self.b.assign(loop_result, mir::RValue::Const(Constant::Unit));
+                        }
+                    }
                     self.b.terminate(mir::Terminator::Jump(exit));
                 }
             }
         }
         self.loop_exits.pop();
+        self.loop_results.pop();
         self.pop_scope();
 
         self.b.switch_to(exit);
-        self.b.assign(dst, mir::RValue::Const(Constant::Int(0)));
+        self.b.assign(dst, mir::RValue::Load(loop_result));
         Ok(())
     }
 
@@ -1996,7 +2034,7 @@ impl<'c> FnLowerer<'c> {
                     };
                     self.emit_return(id);
                 }
-                hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
+                hir::Terminator::Break(_) => {
                     return Err(compile_err("break out of an effect handler body", Span::default()));
                 }
             }
@@ -2046,7 +2084,7 @@ impl<'c> FnLowerer<'c> {
                         };
                         self.emit_return(id);
                     }
-                    hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {
+                    hir::Terminator::Break(_) => {
                         return Err(compile_err("break out of an effect handler", Span::default()));
                     }
                 }
@@ -2370,7 +2408,7 @@ fn walk_hir_body(body: &hir::Body, acc: &mut HashSet<String>) {
                 walk_hir_operand(op, acc);
             }
         }
-        hir::Terminator::Break(None) | hir::Terminator::Break(Some(_)) => {}
+        hir::Terminator::Break(_) => {}
     }
 }
 

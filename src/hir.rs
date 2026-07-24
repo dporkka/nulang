@@ -184,7 +184,7 @@ impl Body {
     pub fn is_terminated(&self) -> bool {
         matches!(
             self.terminator,
-            Terminator::FnReturn(_) | Terminator::Break(None)
+            Terminator::FnReturn(_) | Terminator::Break(_)
         )
     }
 }
