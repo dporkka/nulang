@@ -10,7 +10,8 @@
 //!   - effect handlers use `Handle`/`Unwind`/`Resume` with handler tables.
 //!
 //! Register scheme: r0..r11 are a scratch/staging zone (call and effect
-//! arguments, transient values); r12..r14 are spill scratch registers;
+//! arguments, transient values); r12..r14 are spill scratch registers
+//! (used round-robin by local_reg to avoid clobbering);
 //! each MIR local gets the fixed register `LOCAL_BASE + local_id`.
 //! A function whose locals exceed the register file spills excess
 //! locals into the frame's spill vector via SpillLoad/SpillStore.
@@ -83,6 +84,10 @@ pub struct MirCodegen {
     /// Built at the start of compile_function.  SpillLoad/SpillStore are
     /// emitted inline during codegen via local_reg / local_dst / spill_write_done.
     spill_map: FxHashMap<u32, u16>,
+    /// Round-robin counter for spilled-read temp register selection.
+    /// Cycles through SPILL_TEMP (12), SPILL_TEMP2 (13), SPILL_TEMP3 (14)
+    /// so that consecutive spilled reads don't clobber each other.
+    spill_read_cycle: u8,
 }
 
 impl MirCodegen {
@@ -94,6 +99,7 @@ impl MirCodegen {
             state_field_constants: FxHashMap::default(),
             float_locals: Vec::new(),
             spill_map: FxHashMap::default(),
+            spill_read_cycle: 0,
         }
     }
 
@@ -117,12 +123,16 @@ impl MirCodegen {
     }
 
     /// Read a local: emits SpillLoad if spilled, returns the register.
+    /// Uses a round-robin temp register (r12/r13/r14) to avoid clobbering
+    /// when multiple spilled locals are read for the same instruction.
     fn local_reg(&mut self, id: mir::LocalId) -> u8 {
         if let Some(&slot) = self.spill_map.get(&id.0) {
+            let temp = SPILL_TEMP + (self.spill_read_cycle % 3);
+            self.spill_read_cycle = self.spill_read_cycle.wrapping_add(1);
             self.emit(Instruction::new3(
-                OpCode::SpillLoad, (slot >> 8) as u8, (slot & 0xFF) as u8, SPILL_TEMP2,
+                OpCode::SpillLoad, (slot >> 8) as u8, (slot & 0xFF) as u8, temp,
             ));
-            SPILL_TEMP2
+            temp
         } else {
             (LOCAL_BASE + id.0) as u8
         }
@@ -359,6 +369,7 @@ impl MirCodegen {
         // float operands to 0, so float arithmetic/comparisons must be
         // emitted as their F* variants.
         self.float_locals = float_locals(func);
+        self.spill_read_cycle = 0;
 
         // Prologue: move incoming arguments into their local registers.
         for (i, param) in func.params.iter().enumerate() {
