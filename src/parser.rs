@@ -5026,4 +5026,3 @@ mod tests {
         }
     }
 }
-// vim: set noet:
