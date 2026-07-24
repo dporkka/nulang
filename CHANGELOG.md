@@ -59,15 +59,22 @@ in this version; they are recorded here to establish their tier.
 - CRDT operations and merge semantics (`src/runtime/crdt.rs`,
   `src/runtime/crdt_reg.rs`).
 
-### Deprecated at 1.0.0-frozen — 2026-07-21
+### Added since 1.0.0-frozen — 2026-07-23
 
-- **RFC 0004 — Deprecate `agent`, `workflow`, and `database` language
-  declarations.** These declarations are reclassified as Experimental and
-  will be removed in a future major language version. They should be replaced
-  by ordinary `actor` declarations that import Cloud SDK packages
-  (`nlc.ai`, `nlc.workflow`, `nlc.storage`). The declarations remain
-  functional during the deprecation cycle (≥2 major versions) and now emit
-  compiler warnings. See `RFC/0004-deprecate-agent-workflow-database.md`.
+- **RFC 0005/0007 — `entity` keyword and event sourcing.** `entity` desugars
+  to `persistent actor` with `event_sourced` default state model. `events`
+  and `apply` blocks for typed event declarations and automatic state
+  mutation. `emit EventName(args)` type-checked against entity event
+  declarations. `after ms => expr` standalone sugar.
+- **RFC 0008 — Migration contracts (parser).** `version: N` and
+  `migration from N to M { ... }` blocks parsed inside entity declarations.
+  AST/HIR/bytecode metadata wired through pipeline.
+- **RFC 0009 — Organization primitives (parser).** `organization` keyword
+  parsed and desugared to `entity` with durable defaults. `is_organization`
+  flag tracked through AST → HIR → bytecode.
+- **RFC 0003 Item 6 — Backend trait boundary.** `JitBackend`, `WasmBackend`,
+  `CryptoProvider`, `ForeignInterop`, `HttpProvider` traits defined in
+  `src/backends/mod.rs`. JIT and WASM wired behind traits.
 
 ## Experimental tier
 
