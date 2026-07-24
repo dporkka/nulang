@@ -1,7 +1,7 @@
 # Nulang Self-Hosting Bootstrap
 
-> **Status:** Stage 1 scaffold — Core compiler skeleton exists; full
-> self-hosting is a multi-session follow-up.
+> **Status:** Stage 3 — identifiers, let bindings, variable references working.
+> Stage 4 (lambdas/closures) blocked by MIR register limit (see below).
 > **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
 > that targets the `.nbc` format (RFC 0001).
 
@@ -9,55 +9,52 @@
 
 ```
 source.nula
-  → compiler_core.nula   (lexer + parser + typechecker + codegen in Core)
+  → compiler_core.nula   (lexer + parser + evaluator in Core)
   → source.nbc            (frozen bytecode artifact)
-  → VM::run(nbc)          (output = same as Rust-cih compiler)
+  → VM::run(nbc)
 ```
-
-Stage 1: `compiler_core.nula` compiles a trivial Core subset (Int literals
-and binary `+`).  The Rust compiler is the host; `host.nula` is the
-thin shim that will eventually chain: bootstrap compiler → `.nbc` → run.
-
-Stage 2: `compiler_core.nula` compiles itself (full Core).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `host.nula` | Host shim — invokes bootstrap compiler under Rust compiler |
-| `compiler_core.nula` | Minimal lexer + parser + emitter in Nulang Core |
-| `self_test.nula` | Core program that the bootstrap compiler must compile correctly |
+| `host.nula` | Host shim |
+| `compiler_core.nula` | Lexer + Pratt parser + evaluator in Nulang Core |
+| `self_test.nula` | Core conformance target (fib(10) = 55) |
 
-## Running (today)
+## Running
 
 ```bash
-# Run the bootstrap compiler (hosted by Rust) on a Core program:
-nulang bootstrap/host.nula -- bootstrap/self_test.nula
-
-# Emit .nbc and verify round-trip:
-nulang --emit-nbc --out bootstrap/self_test.nbc bootstrap/self_test.nula
-nulang bootstrap/self_test.nbc
+nulang bootstrap/compiler_core.nula
+# Expected: 42, 7, 9, 43, 200
 ```
 
+## What's implemented (Stage 3 — 2026-07-23)
 
-## What's implemented (Stage 2 — 2026-07-23)
+- **Lexer:** character-at-a-time scanning via `perform String.charAt` /
+  `String.length`. Recognises integers, identifiers, `let`, `in`, `fn`,
+  `+`, `-`, `*`, `/`, `(`, `)`, whitespace.
+- **Parser:** single-function Pratt parser (no forward references needed).
+  Correct operator precedence and left-associativity.
+- **Let bindings:** `let x = 42 in x + 1` → 43. 2-slot environment (e0, e1).
+- **Variable references:** identifier hashing (hash*5, seed 0). "let"=3321.
+- **Return-value encoding:** `(val << 32) | pos` packs value + position.
 
-- **Lexer:** character-at-a-time scanning over source strings via
-  `perform String.charAt` and `perform String.length` (added 2026-07-23).
-  Recognises integers, `+`, `-`, `*`, `/`, `(`, `)`, and whitespace.
-- **Parser:** recursive-descent with left-associative binary operators
-  at correct precedence (term/factor/atom).  No token buffer — the
-  parser reads characters directly from the source string.
-- **Evaluator:** computes integer arithmetic expressions with correct
-  precedence and associativity, including parenthesised subexpressions.
-- **Return-value encoding:** `(val << 32) | pos` — packs both the
-  computed value and the updated source position into a single Int,
-  working around the absence of tuple returns in Core.
+## Stage 4 blocker: MIR register limit
 
-## What remains (Stage 3+)
+Adding lambda/closure support to the Pratt parser requires ~261 local
+variables, exceeding the MIR register allocator's capacity of 237
+(`FUNC_VALUE_REG = 254`, `LOCAL_BASE = 16` in `src/mir_codegen.rs`).
 
-- Multi-character lexer (identifiers, keywords, multi-char operators)
-- Pratt parser for full Core expressions (variables, lets, lambdas)
+Workarounds:
+- Reduce local count: inline helper functions, merge branches
+- Split parser across multiple top-level functions (requires forward
+  references or mutual recursion — not currently supported in Core)
+- Increase `FUNC_VALUE_REG` or expand the register file in the VM
+
+## What remains
+
+- Lambda/closure support (Stage 4)
 - HM type inference
 - MIR lowering → `.nbc` codec
 - Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
