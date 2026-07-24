@@ -471,6 +471,7 @@ impl Parser {
             events,
             apply_handlers,
             migrations,
+            is_organization: is_org,
             span,
         })
     }

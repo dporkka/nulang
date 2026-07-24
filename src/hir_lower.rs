@@ -118,6 +118,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             apply_handlers,
             version,
             migrations,
+            is_organization,
             span,
             ..
         } => hir::Decl::Actor(hir::ActorDef {
@@ -146,7 +147,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             version: *version,
             migrations: migrations.clone(),
             is_workflow: false,
-            is_organization: false,
+            is_organization: *is_organization,
             is_agent: false,
             tools: Vec::new(),
             semantic_memory_dimensions: None,

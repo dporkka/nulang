@@ -441,6 +441,7 @@ pub enum Decl {
         apply_handlers: Vec<ApplyHandler>,
         /// Migration contracts from a `migration` block (entity only, RFC 0008).
         migrations: Vec<MigrationDecl>,
+        is_organization: bool,
         span: Span,
     },
     /// State machine declaration (BEAM_PRIMITIVES §4.2 gen_statem adaptation):
@@ -755,6 +756,7 @@ pub fn desugar_state_machine(
         apply_handlers: vec![],
         version: 1,
         migrations: vec![],
+        is_organization: false,
         span,
     }
 }
