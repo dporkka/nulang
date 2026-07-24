@@ -152,7 +152,7 @@ impl Parser {
         self.skip_newlines();
         match self.peek_kind().clone() {
             TokenKind::Fn => self.parse_function(public, annotations),
-            TokenKind::Actor | TokenKind::Persistent | TokenKind::Entity => {
+            TokenKind::Actor | TokenKind::Persistent | TokenKind::Entity | TokenKind::Organization => {
                 let backend = annotations.iter().find_map(|a| match a {
                     crate::ast::FunctionAnnotation::Backend { kind } => Some(*kind),
                     _ => None,
@@ -342,11 +342,12 @@ impl Parser {
         let span = self.current_span();
         let persistent = self.consume_if(&TokenKind::Persistent);
         let is_entity = self.consume_if(&TokenKind::Entity);
-        let persistent = persistent || is_entity;
-        if !is_entity {
+        let is_org = self.consume_if(&TokenKind::Organization);
+        let persistent = persistent || is_entity || is_org;
+        if !is_entity && !is_org {
             self.expect(TokenKind::Actor)?;
         }
-        let default_model = if is_entity { StateModel::EventSourced } else { StateModel::Local };
+        let default_model = if is_entity || is_org { StateModel::EventSourced } else { StateModel::Local };
         // For `persistent actor` without explicit model, keep the existing Local default
         // so existing behavior is unchanged; `entity` is the durable-first form.
         let name = self.expect_ident("actor name")?;
