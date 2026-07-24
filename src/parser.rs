@@ -4936,6 +4936,37 @@ mod tests {
             }
         "#;
         let err = parse(source).unwrap_err();
+
+    #[test]
+    fn test_parse_entity_with_migration_block() {
+        let source = r#"entity BankAccount {
+            version: 3
+            state balance: Int = 0
+            events
+                | Deposited(amount: Int)
+            migration from 1 to 2 {
+                state => { 0 }
+                events {
+                    | Deposited(amount) => { 1 }
+                }
+            }
+            behavior get() { self.balance }
+        }"#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Actor { name, version, migrations, .. } => {
+                assert_eq!(name, "BankAccount");
+                assert_eq!(*version, 3);
+                assert_eq!(migrations.len(), 1);
+                assert_eq!(migrations[0].from_version, 1);
+                assert_eq!(migrations[0].to_version, 2);
+                assert!(migrations[0].state_body.is_some());
+                assert_eq!(migrations[0].event_migrations.len(), 1);
+                assert_eq!(migrations[0].event_migrations[0].0, "Deposited");
+            }
+            _ => panic!("Expected Actor decl"),
+        }
+    }
         match err {
             NuError::ParseError { msg, .. } => {
                 assert!(
