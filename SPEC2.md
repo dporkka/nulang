@@ -469,7 +469,7 @@ fn factorial(n: Int) -> Int {
 The following identifiers are reserved as keywords in Nulang and may not be used as ordinary identifiers:
 
 ```
-agent        and          ask          actor        entity
+agent        and          ask          actor        entity       organization
 await        behavior     box          break
 case         compensate   crdt         durable
 effect       else         emit         exit
@@ -496,6 +496,7 @@ Notes on the inventory:
 - `entity` is a reserved keyword accepted by the grammar; it desugars to `persistent actor` with `event_sourced` as the default state model (see Chapter 8).
 - `await`, `exit`, `link`, `loop`, `monitor`, `node`, `priv`, `subworkflow`, and `where` are reserved but not yet accepted by the grammar (see Implementation Status). `case` is accepted only as an optional prefix on match arms.
 - The capability words `iso`, `trn`, `ref`, `val`, `box`, `tag` are keywords usable anywhere a capability is parsed. `lineariso` is **not** a keyword; it is recognized as a contextual identifier in capability position.
+- `organization` is a reserved keyword accepted by the grammar; it desugars to `entity` with the same durable-first defaults (RFC 0009).
 - `cap` (in the `expr :cap iso` annotation) and `to` (in `migrate a to node`) are contextual identifiers, not keywords.
 - There is no `capability`, `var`, `consume`, `recover`, `enum`, `event`, `from`, `as`, or `config` keyword. Constructs earlier drafts associated with those words are either expressed differently (Chapters 5 and 7) or **Planned**.
 
