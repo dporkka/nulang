@@ -1,13 +1,7 @@
-// bootstrap/compiler_core.nula — Stage 3: identifiers, let bindings, variables
-// in Nulang Core, using String.length / String.charAt built-in effects.
-//
-// Returns (value << 32) | pos.
-//
-// RFC 0002 Core surface: fn, let, if/else, Int, Bool, recursion,
-//   IO.print, perform String.length, perform String.charAt.
-//
-// NOTE: Core Int is 16-bit signed (-32768..32767).  Hash uses seed 0,
-// multiplier 5 to stay in range.  "let" hashes to 3321.
+// bootstrap/compiler_core.nula — Stage 5: closures with env capture
+// Return: (value << 16) | pos.  Entry: (hash << 32) + value.
+// Closure encoding (32-bit): flag(bit30) | (ph<<23) | (bs<<16) | (cap_h<<8) | cap_v
+// flag = 1 << 30 = 1073741824. Position is clean source pos.
 
 fn is_digit(c: Int) -> Bool { c >= 48 and c <= 57 }
 fn is_alpha(c: Int) -> Bool { (c >= 65 and c <= 90) or (c >= 97 and c <= 122) }
@@ -21,22 +15,22 @@ fn skip_ws(src: String, pos: Int, len: Int) -> Int {
 }
 
 fn read_int(src: String, pos: Int, len: Int, acc: Int) -> Int {
-    if pos >= len then (acc << 32) + pos
+    if pos >= len then (acc << 16) + pos
     else {
         let c = perform String.charAt(src, pos);
         if is_digit(c) then read_int(src, pos + 1, len, acc * 10 + (c - 48))
-        else (acc << 32) + pos
+        else (acc << 16) + pos
     }
 }
 
 fn read_ident(src: String, pos: Int, len: Int, h: Int) -> Int {
-    if pos >= len then (h << 32) + pos
+    if pos >= len then (h << 16) + pos
     else {
         let c = perform String.charAt(src, pos);
         if is_alphanum(c) then {
             let nh = h * 5 + c;
             read_ident(src, pos + 1, len, nh)
-        } else (h << 32) + pos
+        } else (h << 16) + pos
     }
 }
 
@@ -66,40 +60,39 @@ fn prec_of(c: Int) -> Int {
     else 0
 }
 
-// "let" with seed=0, mult=5: 0*5+108=108; 108*5+101=641; 641*5+116=3321
 fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: Int, e1: Int, elen: Int) -> Int {
     let pair = if left == 0 then {
         let p = skip_ws(src, pos, len);
-        if p >= len then (0 << 32) + p
+        if p >= len then (0 << 16) + p
         else {
             let c = perform String.charAt(src, p);
             if is_digit(c) then read_int(src, p, len, 0)
             else if c == 40 then {
                 let inner = parse_pratt(src, p + 1, len, 0, 0, e0, e1, elen);
-                let v = inner >> 32;
-                let q = inner & 0xFFFFFFFF;
+                let v = inner >> 16;
+                let q = inner & 0xFFFF;
                 let q2 = skip_ws(src, q, len);
                 if q2 < len then {
                     let c2 = perform String.charAt(src, q2);
-                    if c2 == 41 then (v << 32) + (q2 + 1)
-                    else (v << 32) + q2
-                } else (v << 32) + q2
+                    if c2 == 41 then (v << 16) + (q2 + 1)
+                    else (v << 16) + q2
+                } else (v << 16) + q2
             } else if is_alpha(c) then {
                 let ident = read_ident(src, p, len, 0);
-                let h = ident >> 32;
-                let q = ident & 0xFFFFFFFF;
+                let h = ident >> 16;
+                let q = ident & 0xFFFF;
                 if h == 3321 then {
                     let q2 = skip_ws(src, q, len);
                     let var_id = read_ident(src, q2, len, 0);
-                    let vh = var_id >> 32;
-                    let q3 = var_id & 0xFFFFFFFF;
+                    let vh = var_id >> 16;
+                    let q3 = var_id & 0xFFFF;
                     let q4 = skip_ws(src, q3, len);
                     if q4 < len then {
                         let c3 = perform String.charAt(src, q4);
                         if c3 == 61 then {
                             let bound = parse_pratt(src, q4 + 1, len, 0, 0, e0, e1, elen);
-                            let bv = bound >> 32;
-                            let bp = bound & 0xFFFFFFFF;
+                            let bv = bound >> 16;
+                            let bp = bound & 0xFFFF;
                             let bp2 = skip_ws(src, bp, len);
                             if bp2 + 1 < len then {
                                 let ci = perform String.charAt(src, bp2);
@@ -111,44 +104,113 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                                     } else {
                                         parse_pratt(src, bp2 + 2, len, 0, 0, e0, entry, 2)
                                     }
-                                } else (bv << 32) + bp2
-                            } else (bv << 32) + bp2
+                                } else (bv << 16) + bp2
+                            } else (bv << 16) + bp2
                         } else {
                             let v = env_lookup(e0, e1, elen, h);
-                            (v << 32) + q
+                            (v << 16) + q
                         }
                     } else {
                         let v = env_lookup(e0, e1, elen, h);
-                        (v << 32) + q
+                        (v << 16) + q
                     }
+                } else if h == 620 then {
+                    let q2 = skip_ws(src, q, len);
+                    if q2 < len then {
+                        let c1 = perform String.charAt(src, q2);
+                        if c1 == 40 then {
+                            let q3 = skip_ws(src, q2 + 1, len);
+                            let param_id = read_ident(src, q3, len, 0);
+                            let ph = param_id >> 16;
+                            let q4 = param_id & 0xFFFF;
+                            let q5 = skip_ws(src, q4, len);
+                            if q5 < len then {
+                                let c2 = perform String.charAt(src, q5);
+                                if c2 == 41 then {
+                                    let q6 = skip_ws(src, q5 + 1, len);
+                                    if q6 + 1 < len then {
+                                        let c3 = perform String.charAt(src, q6);
+                                        let c4 = perform String.charAt(src, q6 + 1);
+                                        if c3 == 61 and c4 == 62 then {
+                                            let body_start = q6 + 2;
+                                            let body_parsed = parse_pratt(src, body_start, len, 0, 0, e0, e1, elen);
+                                            let body_end = body_parsed & 0xFFFF;
+                                            let flag = 1 << 30;
+                                            let enc = flag + (ph << 23) + (((body_start & 0x7F) << 16));
+                                            let cap_data = if elen > 0 then {
+                                                let cap_e = if elen >= 2 then e1 else e0;
+                                                let cap_h = (cap_e >> 32) & 0xFF;
+                                                let cap_v = cap_e & 0xFFFF;
+                                                (cap_h << 16) + cap_v
+                                            } else { 0 };
+                                            let cap_h = cap_data >> 16;
+                                            let cap_v = cap_data & 0xFFFF;
+                                            let enc2 = enc + (cap_h << 8) + (cap_v & 0xFF);
+                                            (enc2 << 16) + body_end
+                                        } else (0 << 16) + p
+                                    } else (0 << 16) + p
+                                } else (0 << 16) + p
+                            } else (0 << 16) + p
+                        } else (0 << 16) + p
+                    } else (0 << 16) + p
                 } else {
                     let v = env_lookup(e0, e1, elen, h);
-                    (v << 32) + q
+                    (v << 16) + q
                 }
-            } else (0 << 32) + p
+            } else (0 << 16) + p
         }
-    } else (left << 32) + pos;
+    } else (left << 16) + pos;
 
-    let lv = pair >> 32;
-    let lp = pair & 0xFFFFFFFF;
+    let lv = pair >> 16;
+    let lp = pair & 0xFFFF;
+    let flag = 1 << 30;
 
     let p = skip_ws(src, lp, len);
     if p >= len then pair
     else {
         let c = perform String.charAt(src, p);
-        let prec = prec_of(c);
-        if prec == 0 or prec < min_prec then pair
-        else {
-            let rhs = parse_pratt(src, p + 1, len, 0, prec, e0, e1, elen);
-            let rv = rhs >> 32;
-            let rp = rhs & 0xFFFFFFFF;
-            let result = if c == 43 then lv + rv
-            else if c == 45 then lv - rv
-            else if c == 42 then lv * rv
-            else if c == 47 then {
-                if rv == 0 then lv else lv / rv
-            } else lv;
-            parse_pratt(src, rp, len, result, min_prec, e0, e1, elen)
+        if c == 40 then {
+            let arg = parse_pratt(src, p + 1, len, 0, 0, e0, e1, elen);
+            let av = arg >> 16;
+            let ap = arg & 0xFFFF;
+            let ap2 = skip_ws(src, ap, len);
+            if ap2 < len then {
+                let c2 = perform String.charAt(src, ap2);
+                if c2 == 41 then {
+                    let result = if lv >= flag then {
+                        let ph = (lv >> 23) & 0x7F;
+                        let bs = (lv >> 16) & 0x7F;
+                        let cap_h = (lv >> 8) & 0xFF;
+                        let cap_v = lv & 0xFF;
+                        let entry_param = (ph << 32) + av;
+                        if cap_h == 0 then {
+                            parse_pratt(src, bs, len, 0, 0, entry_param, 0, 1)
+                        } else {
+                            let entry_cap = (cap_h << 32) + cap_v;
+                            parse_pratt(src, bs, len, 0, 0, entry_cap, entry_param, 2)
+                        }
+                    } else {
+                        (lv << 16) + ap2
+                    };
+                    let rv = result >> 16;
+                    parse_pratt(src, ap2 + 1, len, rv, min_prec, e0, e1, elen)
+                } else pair
+            } else pair
+        } else {
+            let prec = prec_of(c);
+            if prec == 0 or prec < min_prec then pair
+            else {
+                let rhs = parse_pratt(src, p + 1, len, 0, prec, e0, e1, elen);
+                let rv = rhs >> 16;
+                let rp = rhs & 0xFFFF;
+                let result = if c == 43 then lv + rv
+                else if c == 45 then lv - rv
+                else if c == 42 then lv * rv
+                else if c == 47 then {
+                    if rv == 0 then lv else lv / rv
+                } else lv;
+                parse_pratt(src, rp, len, result, min_prec, e0, e1, elen)
+            }
         }
     }
 }
@@ -156,7 +218,7 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
 fn parse(src: String) -> Int {
     let len = perform String.length(src);
     let result = parse_pratt(src, 0, len, 0, 0, 0, 0, 0);
-    result >> 32
+    result >> 16
 }
 
 fn main() {
@@ -165,4 +227,9 @@ fn main() {
     perform IO.print(parse("(1 + 2) * 3"))
     perform IO.print(parse("let x = 42 in x + 1"))
     perform IO.print(parse("let x = 10 in let y = 20 in x * y"))
+    perform IO.print(parse("(fn(x) => x + 1)(5)"))
+    perform IO.print(parse("(fn(x) => x * x)(6)"))
+    perform IO.print(parse("let f = fn(x) => x + 1 in f(10)"))
+    perform IO.print(parse("let a = 3 in (fn(x) => a + x)(5)"))
+    perform IO.print(parse("let add = fn(a) => fn(b) => a + b in add(3)(4)"))
 }
