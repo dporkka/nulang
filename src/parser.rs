@@ -597,40 +597,44 @@ impl Parser {
             if self.match_token(&TokenKind::RBrace) {
                 break;
             }
-            let ident = self.expect_ident("'state' or 'events'")?;
-            if ident == "state" {
+            // `state` is a keyword, not an identifier — handle both cases
+            let is_state = self.consume_if(&TokenKind::State);
+            if is_state {
                 self.expect(TokenKind::FatArrow)?;
                 state_body = Some(self.parse_expr()?);
-            } else if ident == "events" {
-                self.expect(TokenKind::LBrace)?;
-                self.skip_newlines();
-                while self.consume_if(&TokenKind::Pipe) {
-                    let ev_name = self.expect_ident("event name")?;
-                    let ev_params: Vec<String> = if self.consume_if(&TokenKind::LParen) {
-                        let mut p = Vec::new();
-                        while !self.match_token(&TokenKind::RParen) && !self.is_at_end() {
-                            p.push(self.expect_ident("parameter name")?);
-                            self.consume_if(&TokenKind::Comma);
-                        }
-                        self.expect(TokenKind::RParen)?;
-                        p
-                    } else {
-                        vec![]
-                    };
-                    self.expect(TokenKind::FatArrow)?;
-                    let ev_body = self.parse_expr()?;
-                    event_migrations.push((ev_name, ev_params, ev_body));
-                    self.skip_newlines();
-                }
-                self.expect(TokenKind::RBrace)?;
             } else {
-                return Err(NuError::ParseError {
-                    msg: format!(
-                        "Expected 'state' or 'events' in migration body, got '{}'",
-                        ident
-                    ),
-                    span: self.current_span(),
-                });
+                let ident = self.expect_ident("'state' or 'events'")?;
+                if ident == "events" {
+                    self.expect(TokenKind::LBrace)?;
+                    self.skip_newlines();
+                    while self.consume_if(&TokenKind::Pipe) {
+                        let ev_name = self.expect_ident("event name")?;
+                        let ev_params: Vec<String> = if self.consume_if(&TokenKind::LParen) {
+                            let mut p = Vec::new();
+                            while !self.match_token(&TokenKind::RParen) && !self.is_at_end() {
+                                p.push(self.expect_ident("parameter name")?);
+                                self.consume_if(&TokenKind::Comma);
+                            }
+                            self.expect(TokenKind::RParen)?;
+                            p
+                        } else {
+                            vec![]
+                        };
+                        self.expect(TokenKind::FatArrow)?;
+                        let ev_body = self.parse_expr()?;
+                        event_migrations.push((ev_name, ev_params, ev_body));
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                } else {
+                    return Err(NuError::ParseError {
+                        msg: format!(
+                            "Expected 'state' or 'events' in migration body, got '{}'",
+                            ident
+                        ),
+                        span: self.current_span(),
+                    });
+                }
             }
             self.skip_newlines();
         }
