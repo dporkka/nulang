@@ -1,7 +1,6 @@
 # Nulang Self-Hosting Bootstrap
 
-> **Status:** Stage 3 — identifiers, let bindings, variable references working.
-> Stage 4 (lambdas/closures) blocked by MIR register limit (see below).
+> **Status:** Stage 3 working. Stage 4 (lambdas) unblocked — compiler bug fixed.
 > **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
 > that targets the `.nbc` format (RFC 0001).
 
@@ -44,20 +43,21 @@ nulang bootstrap/compiler_core.nula
 
 Inline register spilling (commit 06b03c6) removed the capacity limit.
 
-## Stage 4 blocker: compiler bug with large spilled functions
+## Spill temp clobbering bug (fixed 2026-07-24)
 
-Lambda support requires adding ~40 lines to `parse_pratt`, which creates
-enough spilled locals (~88) to trigger a correctness bug in the inline
-spilling compiler (spill_bug_repro3.nula, 2026-07-24).  Functions with
->~50 spilled locals inside nested if/else branches produce wrong
-arithmetic results (e.g. `1 + 2 * 3` returns 1 instead of 7).
+A correctness bug where `local_reg()` always used the same temp register
+(r13) for spilled reads was fixed in commit db22c67. Round-robin temp
+allocation (r12/r13/r14) prevents clobbering when instructions read
+multiple spilled locals. The repro at bootstrap/spill_bug_repro.nula
+now produces correct results.
 
-Minimal reproduction at `/tmp/spill_bug_repro3.nula` (bisected threshold
-at n=24 dummies per branch, ~54 spills).  Linear functions with the same
-local count work correctly — the bug is specific to branched code.
+## What remains
 
-Once this compiler bug is fixed, Stage 4 can proceed.
-
+- Lambda/closure support (Stage 4) — `fn` parsing and function-application
+  evaluation in the Pratt parser (closure encoding design needed)
+- HM type inference
+- MIR lowering → `.nbc` codec
+- Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
 ## What remains
 
 - Lambda/closure support (Stage 4)
