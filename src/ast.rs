@@ -432,10 +432,15 @@ pub enum Decl {
         backend: Option<ActorBackendKind>,
         /// Optional initializer block: `initial name(params) { body }`.
         initializer: Option<(String, Vec<(String, Option<Type>)>, Expr)>,
+        /// Entity schema version (defaults to 1).  Used by migration contracts
+        /// (RFC 0008) to track schema evolution.
+        version: u32,
         /// Typed event declarations from an `events` block (entity only).
         events: Vec<EventDecl>,
         /// Apply handlers from an `apply` block (entity only).
         apply_handlers: Vec<ApplyHandler>,
+        /// Migration contracts from a `migration` block (entity only, RFC 0008).
+        migrations: Vec<MigrationDecl>,
         span: Span,
     },
     /// State machine declaration (BEAM_PRIMITIVES §4.2 gen_statem adaptation):
@@ -563,6 +568,29 @@ pub struct ApplyHandler {
     pub event: String,
     pub params: Vec<String>,
     pub body: Expr,
+    pub span: Span,
+}
+
+/// A migration contract inside an `entity`'s `migration` block.
+///
+/// ```nulang
+/// migration from 1 to 2 {
+///     state => { self.currency = "USD" }
+///     events {
+///         | Deposited(amount) => emit Deposited(amount)
+///         | other => other
+///     }
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct MigrationDecl {
+    pub from_version: u32,
+    pub to_version: u32,
+    /// State migration: an expression that updates `self`.
+    pub state_body: Option<Expr>,
+    /// Event migrations: `(event_name, params, body)` — if `event_name` is
+    /// `"other"`, it's a catch-all for unlisted events.
+    pub event_migrations: Vec<(String, Vec<String>, Expr)>,
     pub span: Span,
 }
 
@@ -725,6 +753,8 @@ pub fn desugar_state_machine(
         initializer: None,
         events: vec![],
         apply_handlers: vec![],
+        version: 1,
+        migrations: vec![],
         span,
     }
 }

@@ -356,8 +356,10 @@ impl Parser {
         let mut state_fields = Vec::new();
         let mut behaviors = Vec::new();
         let mut initializer: Option<(String, Vec<(String, Option<Type>)>, Expr)> = None;
+        let mut version: u32 = 1;
         let mut events: Vec<crate::ast::EventDecl> = Vec::new();
         let mut apply_handlers: Vec<crate::ast::ApplyHandler> = Vec::new();
+        let mut migrations: Vec<crate::ast::MigrationDecl> = Vec::new();
         while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
             self.skip_newlines();
             if self.match_token(&TokenKind::RBrace) {
@@ -398,6 +400,22 @@ impl Parser {
                     let body = self.parse_expr()?;
                     initializer = Some((init_name, params, body));
                 }
+                // `version` is a contextual keyword inside entity body
+                TokenKind::Ident(ref s) if s == "version" => {
+                    self.advance(); // consume 'version'
+                    self.expect(TokenKind::Colon)?;
+                    let v = self.parse_expr()?;
+                    let v_lit = match &v {
+                        Expr::Literal(Literal::Int(n), _) => *n as u32,
+                        _ => {
+                            return Err(NuError::ParseError {
+                                msg: "Expected integer literal for version".to_string(),
+                                span: self.current_span(),
+                            });
+                        }
+                    };
+                    version = v_lit;
+                }
                 // `events` is a contextual keyword inside actor/entity body
                 TokenKind::Ident(ref s) if s == "events" => {
                     self.advance(); // consume 'events'
@@ -420,10 +438,15 @@ impl Parser {
                     }
                     apply_handlers = self.parse_apply_body()?;
                 }
+                // `migration` is a contextual keyword inside entity body (RFC 0008)
+                TokenKind::Ident(ref s) if s == "migration" => {
+                    self.advance(); // consume 'migration'
+                    migrations.push(self.parse_migration_body()?);
+                }
                 _ => {
                     return Err(NuError::ParseError {
                         msg: format!(
-                            "Expected 'state', 'behavior', 'initial', 'events', or 'apply' in actor body, got {}",
+                            "Expected 'state', 'behavior', 'initial', 'version', 'events', 'apply', or 'migration' in actor body, got {}",
                             self.peek_kind()
                         ),
                         span: self.current_span(),
@@ -443,8 +466,10 @@ impl Parser {
             init: vec![],
             backend,
             initializer,
+            version,
             events,
             apply_handlers,
+            migrations,
             span,
         })
     }
@@ -512,6 +537,112 @@ impl Parser {
             });
         }
         Ok(handlers)
+    }
+
+    /// Parse a `migration` block inside an entity declaration (RFC 0008):
+    ///
+    /// ```text
+    /// migration from <version> to <version> {
+    ///     state => { body }
+    ///     events {
+    ///         | EventName(params) => body
+    ///         | other => body
+    ///     }
+    /// }
+    /// ```
+    fn parse_migration_body(&mut self) -> NuResult<crate::ast::MigrationDecl> {
+        let span = self.current_span();
+        let from_name = self.expect_ident("'from' keyword")?;
+        if from_name != "from" {
+            return Err(NuError::ParseError {
+                msg: format!("Expected 'from', got '{}'", from_name),
+                span: self.current_span(),
+            });
+        }
+        let from_v = self.parse_expr()?;
+        let from_version = match &from_v {
+            Expr::Literal(Literal::Int(n), _) => *n as u32,
+            _ => {
+                return Err(NuError::ParseError {
+                    msg: "Expected integer literal for migration 'from' version".to_string(),
+                    span: self.current_span(),
+                });
+            }
+        };
+        let to_name = self.expect_ident("'to' keyword")?;
+        if to_name != "to" {
+            return Err(NuError::ParseError {
+                msg: format!("Expected 'to', got '{}'", to_name),
+                span: self.current_span(),
+            });
+        }
+        let to_v = self.parse_expr()?;
+        let to_version = match &to_v {
+            Expr::Literal(Literal::Int(n), _) => *n as u32,
+            _ => {
+                return Err(NuError::ParseError {
+                    msg: "Expected integer literal for migration 'to' version".to_string(),
+                    span: self.current_span(),
+                });
+            }
+        };
+        self.expect(TokenKind::LBrace)?;
+        self.skip_newlines();
+
+        let mut state_body: Option<Expr> = None;
+        let mut event_migrations: Vec<(String, Vec<String>, Expr)> = Vec::new();
+
+        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.match_token(&TokenKind::RBrace) {
+                break;
+            }
+            let ident = self.expect_ident("'state' or 'events'")?;
+            if ident == "state" {
+                self.expect(TokenKind::FatArrow)?;
+                state_body = Some(self.parse_expr()?);
+            } else if ident == "events" {
+                self.expect(TokenKind::LBrace)?;
+                self.skip_newlines();
+                while self.consume_if(&TokenKind::Pipe) {
+                    let ev_name = self.expect_ident("event name")?;
+                    let ev_params: Vec<String> = if self.consume_if(&TokenKind::LParen) {
+                        let mut p = Vec::new();
+                        while !self.match_token(&TokenKind::RParen) && !self.is_at_end() {
+                            p.push(self.expect_ident("parameter name")?);
+                            self.consume_if(&TokenKind::Comma);
+                        }
+                        self.expect(TokenKind::RParen)?;
+                        p
+                    } else {
+                        vec![]
+                    };
+                    self.expect(TokenKind::FatArrow)?;
+                    let ev_body = self.parse_expr()?;
+                    event_migrations.push((ev_name, ev_params, ev_body));
+                    self.skip_newlines();
+                }
+                self.expect(TokenKind::RBrace)?;
+            } else {
+                return Err(NuError::ParseError {
+                    msg: format!(
+                        "Expected 'state' or 'events' in migration body, got '{}'",
+                        ident
+                    ),
+                    span: self.current_span(),
+                });
+            }
+            self.skip_newlines();
+        }
+        self.expect(TokenKind::RBrace)?;
+
+        Ok(crate::ast::MigrationDecl {
+            from_version,
+            to_version,
+            state_body,
+            event_migrations,
+            span,
+        })
     }
 
     /// Parse event parameters: `name: Type, name: Type, ...`
