@@ -7714,4 +7714,15 @@ match { a: 2, b: 9 } with {
             );
         }
     }
+
+        #[test]
+        fn test_organization_compiles_as_persistent_actor() {
+            let source = r#"organization Team {
+                state members: Int = 0
+                behavior count() { self.members }
+            }"#;
+            let result = run_source_new(source);
+            assert!(result.is_ok(),
+                "organization should compile: {:?}", result.err());
+        }
 }
