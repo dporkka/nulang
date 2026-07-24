@@ -28,7 +28,7 @@ use crate::mir;
 use crate::types::{NuError, NuResult, PrimitiveType, Span, Type};
 use std::collections::{HashMap, HashSet};
 
-const FUNC_VALUE_REG: u8 = 254;
+const FUNC_VALUE_REG: u8 = 254; // bootstrap Stage 4 (lambda) needs ~261 locals; bumping this down helps
 const LOCAL_BASE: u32 = 16;
 const MAX_STAGED_ARGS: usize = 16;
 const SCRATCH0: u8 = 0;
