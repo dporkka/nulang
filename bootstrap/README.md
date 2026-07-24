@@ -42,21 +42,21 @@ nulang bootstrap/compiler_core.nula
 
 ## Register limit status (resolved 2026-07-24)
 
-Inline register spilling (commit 06b03c6) replaced the post-processing
-spill rewrite with SpillLoad/SpillStore emission during codegen.  There
-is no longer any capacity limit on spilled locals — functions of any
-size compile correctly, limited only by the compiler frontend's stack
-size (roughly 370 MIR locals with the default 8 MB stack).
+Inline register spilling (commit 06b03c6) removed the capacity limit.
 
-The bootstrap parser's ~261 locals is now well within the supported range.
+## Stage 4 blocker: compiler bug with large spilled functions
 
-## What remains
+Lambda support requires adding ~40 lines to `parse_pratt`, which creates
+enough spilled locals (~88) to trigger a correctness bug in the inline
+spilling compiler (spill_bug_repro3.nula, 2026-07-24).  Functions with
+>~50 spilled locals inside nested if/else branches produce wrong
+arithmetic results (e.g. `1 + 2 * 3` returns 1 instead of 7).
 
-- Lambda/closure support (Stage 4) — the Pratt parser needs `fn(x) => body`
-  syntax and function-application evaluation
-- HM type inference
-- MIR lowering → `.nbc` codec
-- Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
+Minimal reproduction at `/tmp/spill_bug_repro3.nula` (bisected threshold
+at n=24 dummies per branch, ~54 spills).  Linear functions with the same
+local count work correctly — the bug is specific to branched code.
+
+Once this compiler bug is fixed, Stage 4 can proceed.
 
 ## What remains
 
