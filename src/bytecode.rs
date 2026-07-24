@@ -539,6 +539,9 @@ pub struct ActorMeta {
     pub is_workflow: bool,
     /// True if this actor was generated from an `agent` declaration.
     pub is_agent: bool,
+    /// True if from organization (RFC 0009).
+    #[serde(default)]
+    pub is_organization: bool,
     /// Tool schemas exposed to this agent actor.
     pub tools: Vec<ToolSchema>,
     /// Semantic-memory vector dimensions, if configured for this agent.
@@ -576,6 +579,7 @@ impl ActorMeta {
             behavior_indices: Vec::new(),
             is_workflow: false,
             is_agent: false,
+            is_organization: false,
             tools: Vec::new(),
             semantic_memory_dimensions: None,
             procedural_memory_namespace: None,
