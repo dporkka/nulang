@@ -122,6 +122,8 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
                 fallback_config: a.fallback_config.clone(),
                 retry_config: a.retry_config.clone(),
                 type_hash: None,
+                version: a.version,
+                migrations: String::new(),
             });
         }
         hir::Decl::Workflow { name, .. } => {

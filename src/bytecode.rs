@@ -557,7 +557,15 @@ pub struct ActorMeta {
     /// NTIR structural type hash.
     #[serde(default)]
     pub type_hash: Option<[u8; 32]>,
+    /// Entity schema version (RFC 0008).  Defaults to 1.
+    #[serde(default = "default_version")]
+    pub version: u32,
+    /// Serialized migration contracts (JSON `Vec<MigrationDecl>`).  RFC 0008.
+    #[serde(default)]
+    pub migrations: String,
 }
+
+fn default_version() -> u32 { 1 }
 impl ActorMeta {
     pub fn new(name: impl Into<String>) -> Self {
         ActorMeta {
@@ -575,6 +583,8 @@ impl ActorMeta {
             fallback_config: String::new(),
             retry_config: String::new(),
             type_hash: None,
+            version: 1,
+            migrations: String::new(),
         }
     }
 }
