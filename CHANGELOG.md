@@ -59,7 +59,7 @@ in this version; they are recorded here to establish their tier.
 - CRDT operations and merge semantics (`src/runtime/crdt.rs`,
   `src/runtime/crdt_reg.rs`).
 
-### Added since 1.0.0-frozen — 2026-07-23
+### Added since 1.0.0-frozen — 2026-07-23 (partial; typechecking + runtime TBD)
 
 - **RFC 0005/0007 — `entity` keyword and event sourcing.** `entity` desugars
   to `persistent actor` with `event_sourced` default state model. `events`
