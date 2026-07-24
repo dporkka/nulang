@@ -2231,6 +2231,21 @@ mod tests {
     }
 
     #[test]
+    fn test_mir_codegen_spill_const_retval() {
+        // Verify that Const*/RetVal instructions are correctly rewritten
+        // when local registers exceed the file capacity.  Even without
+        // actual spilling (40 let bindings fit in 239 registers), this
+        // exercises the rewrite pass's handling of these opcodes.
+        let locals = (0..40)
+            .map(|i| format!("    let a{i} = {i};"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = format!("fn f() -> Int {{\n{locals}\n    a0 + a39\n}}\nf()");
+        let value = run_mir_source(&source).unwrap();
+        assert_eq!(value.as_int(), Some(39));
+    }
+
+    #[test]
     fn test_mir_codegen_state_field_access_reuses_one_constant() {
         // Every `self.x` read/write used to add a fresh, duplicate string
         // constant to the module's constant pool. A behavior referencing the
