@@ -58,3 +58,10 @@ Workarounds:
 - HM type inference
 - MIR lowering → `.nbc` codec
 - Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
+
+## Related RFCs implemented in this session
+
+- RFC 0008: `migration` block parsing (parser + AST + HIR + ActorMeta)
+- RFC 0009: `organization` keyword parsing (desugars to entity)
+- RFC 0003 Item 6: `CryptoProvider`, `ForeignInterop` traits
+- RFC 0003 Item 2: `combined.lean` unified typing judgment
