@@ -1,12 +1,17 @@
-// bootstrap/compiler_core.nula — Stage 2: Pratt expression parser
+// bootstrap/compiler_core.nula — Stage 3: identifiers, let bindings, variables
 // in Nulang Core, using String.length / String.charAt built-in effects.
 //
 // Returns (value << 32) | pos.
 //
 // RFC 0002 Core surface: fn, let, if/else, Int, Bool, recursion,
 //   IO.print, perform String.length, perform String.charAt.
+//
+// NOTE: Core Int is 16-bit signed (-32768..32767).  Hash uses seed 0,
+// multiplier 5 to stay in range.  "let" hashes to 3321.
 
 fn is_digit(c: Int) -> Bool { c >= 48 and c <= 57 }
+fn is_alpha(c: Int) -> Bool { (c >= 65 and c <= 90) or (c >= 97 and c <= 122) }
+fn is_alphanum(c: Int) -> Bool { is_alpha(c) or is_digit(c) or c == 95 }
 fn is_space(c: Int) -> Bool { c == 32 or c == 10 or c == 13 or c == 9 }
 
 fn skip_ws(src: String, pos: Int, len: Int) -> Int {
@@ -24,20 +29,45 @@ fn read_int(src: String, pos: Int, len: Int, acc: Int) -> Int {
     }
 }
 
+fn read_ident(src: String, pos: Int, len: Int, h: Int) -> Int {
+    if pos >= len then (h << 32) + pos
+    else {
+        let c = perform String.charAt(src, pos);
+        if is_alphanum(c) then {
+            let nh = h * 5 + c;
+            read_ident(src, pos + 1, len, nh)
+        } else (h << 32) + pos
+    }
+}
+
+fn env_lookup(e0: Int, e1: Int, elen: Int, h: Int) -> Int {
+    if elen <= 0 then 0
+    else if elen >= 2 then {
+        let s1 = e1;
+        let h1 = s1 >> 32;
+        if h1 == h then s1 & 0xFFFFFFFF
+        else {
+            let s0 = e0;
+            let h0 = s0 >> 32;
+            if h0 == h then s0 & 0xFFFFFFFF
+            else 0
+        }
+    } else {
+        let s0 = e0;
+        let h0 = s0 >> 32;
+        if h0 == h then s0 & 0xFFFFFFFF
+        else 0
+    }
+}
+
 fn prec_of(c: Int) -> Int {
     if c == 43 then 1 else if c == 45 then 1
     else if c == 42 then 2 else if c == 47 then 2
     else 0
 }
 
-// Single-function Pratt parser.  No forward references needed.
-// parse_pratt(src, pos, len, left, min_prec):
-//   left=0 on first call, min_prec=0 on first call.
-//   Prefix always parsed when left==0 (regardless of min_prec).
-//   Infix operators parsed until precedence < min_prec.
-
-fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int) -> Int {
-    // Parse prefix atom (only on initial call when no left operand yet)
+// "let" with seed=0, mult=5: 0*5+108=108; 108*5+101=641; 641*5+116=3321
+fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: Int, e1: Int, elen: Int) -> Int {
     let pair = if left == 0 then {
         let p = skip_ws(src, pos, len);
         if p >= len then (0 << 32) + p
@@ -45,7 +75,7 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int) -> Int
             let c = perform String.charAt(src, p);
             if is_digit(c) then read_int(src, p, len, 0)
             else if c == 40 then {
-                let inner = parse_pratt(src, p + 1, len, 0, 0);
+                let inner = parse_pratt(src, p + 1, len, 0, 0, e0, e1, elen);
                 let v = inner >> 32;
                 let q = inner & 0xFFFFFFFF;
                 let q2 = skip_ws(src, q, len);
@@ -54,6 +84,47 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int) -> Int
                     if c2 == 41 then (v << 32) + (q2 + 1)
                     else (v << 32) + q2
                 } else (v << 32) + q2
+            } else if is_alpha(c) then {
+                let ident = read_ident(src, p, len, 0);
+                let h = ident >> 32;
+                let q = ident & 0xFFFFFFFF;
+                if h == 3321 then {
+                    let q2 = skip_ws(src, q, len);
+                    let var_id = read_ident(src, q2, len, 0);
+                    let vh = var_id >> 32;
+                    let q3 = var_id & 0xFFFFFFFF;
+                    let q4 = skip_ws(src, q3, len);
+                    if q4 < len then {
+                        let c3 = perform String.charAt(src, q4);
+                        if c3 == 61 then {
+                            let bound = parse_pratt(src, q4 + 1, len, 0, 0, e0, e1, elen);
+                            let bv = bound >> 32;
+                            let bp = bound & 0xFFFFFFFF;
+                            let bp2 = skip_ws(src, bp, len);
+                            if bp2 + 1 < len then {
+                                let ci = perform String.charAt(src, bp2);
+                                let cn = perform String.charAt(src, bp2 + 1);
+                                if ci == 105 and cn == 110 then {
+                                    let entry = (vh << 32) + bv;
+                                    if elen == 0 then {
+                                        parse_pratt(src, bp2 + 2, len, 0, 0, entry, e1, 1)
+                                    } else {
+                                        parse_pratt(src, bp2 + 2, len, 0, 0, e0, entry, 2)
+                                    }
+                                } else (bv << 32) + bp2
+                            } else (bv << 32) + bp2
+                        } else {
+                            let v = env_lookup(e0, e1, elen, h);
+                            (v << 32) + q
+                        }
+                    } else {
+                        let v = env_lookup(e0, e1, elen, h);
+                        (v << 32) + q
+                    }
+                } else {
+                    let v = env_lookup(e0, e1, elen, h);
+                    (v << 32) + q
+                }
             } else (0 << 32) + p
         }
     } else (left << 32) + pos;
@@ -61,7 +132,6 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int) -> Int
     let lv = pair >> 32;
     let lp = pair & 0xFFFFFFFF;
 
-    // Parse infix operators (loop via tail recursion)
     let p = skip_ws(src, lp, len);
     if p >= len then pair
     else {
@@ -69,7 +139,7 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int) -> Int
         let prec = prec_of(c);
         if prec == 0 or prec < min_prec then pair
         else {
-            let rhs = parse_pratt(src, p + 1, len, 0, prec);
+            let rhs = parse_pratt(src, p + 1, len, 0, prec, e0, e1, elen);
             let rv = rhs >> 32;
             let rp = rhs & 0xFFFFFFFF;
             let result = if c == 43 then lv + rv
@@ -78,14 +148,14 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int) -> Int
             else if c == 47 then {
                 if rv == 0 then lv else lv / rv
             } else lv;
-            parse_pratt(src, rp, len, result, min_prec)
+            parse_pratt(src, rp, len, result, min_prec, e0, e1, elen)
         }
     }
 }
 
 fn parse(src: String) -> Int {
     let len = perform String.length(src);
-    let result = parse_pratt(src, 0, len, 0, 0);
+    let result = parse_pratt(src, 0, len, 0, 0, 0, 0, 0);
     result >> 32
 }
 
@@ -93,6 +163,6 @@ fn main() {
     perform IO.print(parse("42"))
     perform IO.print(parse("1 + 2 * 3"))
     perform IO.print(parse("(1 + 2) * 3"))
-    perform IO.print(parse("100 / 2 / 5"))
-    perform IO.print(parse("1 + 2 + 3 + 4 + 5"))
+    perform IO.print(parse("let x = 42 in x + 1"))
+    perform IO.print(parse("let x = 10 in let y = 20 in x * y"))
 }
