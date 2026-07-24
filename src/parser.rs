@@ -3886,6 +3886,33 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn test_parse_organization_decl() {
+        let source = r#"organization Team {
+            state lead: Int = 0
+            behavior get() { self.lead }
+        }"#;
+        let mut lexer = Lexer::new(source);
+        let tokens = lexer.lex().unwrap();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_module().unwrap();
+        assert_eq!(ast.decls.len(), 1);
+        match &ast.decls[0] {
+            Decl::Actor { name, persistent, state_fields, .. } => {
+                assert_eq!(name, "Team");
+                assert!(*persistent, "organization should be persistent by default");
+                assert_eq!(state_fields.len(), 1);
+                assert_eq!(state_fields[0].0, "lead");
+                assert_eq!(
+                    state_fields[0].1,
+                    StateModel::EventSourced,
+                    "organization state defaults to event_sourced"
+                );
+            }
+            _ => panic!("Expected Actor decl from organization desugaring"),
+        }
+    }
     #[test]
     fn test_parse_entity_with_events_block() {
         let source = r#"entity BankAccount {
