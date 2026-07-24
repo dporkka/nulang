@@ -280,6 +280,22 @@ impl MirCodegen {
                 next_spill_slot += 1;
             }
         }
+        // The post-processing spill rewrite uses register values to
+        // detect spilled locals.  Spilled locals whose reg_of() wraps
+        // into r15..r253 would collide with non-spilled locals and
+        // can't be distinguished.  We allow at most 17 spilled locals
+        // (mapping to r0..r14 + r254..r255) before wrapping occurs.
+        const MAX_SPILL_SLOTS: u32 = 17;
+        if next_spill_slot as u32 > MAX_SPILL_SLOTS {
+            self.module.instructions = saved_instructions;
+            return Err(compile_err(format!(
+                "function '{}' has {} locals ({} spilled), exceeding the register-spill capacity of {}; split into smaller functions",
+                func.name,
+                func.locals.len(),
+                next_spill_slot,
+                MAX_SPILL_SLOTS
+            ), Span::default()));
+        }
         if func.params.len() > MAX_STAGED_ARGS {
             // Mirrors stage_args's call-site limit: the prologue below reads
             // incoming arguments from r0..r11 (the same staging zone callers
@@ -1147,8 +1163,13 @@ fn emit_spill_store(src: u8, slot: u16) -> Instruction {
 ///   CapLoad: op1 = cap_idx(not a register), op2 = dst(write)
 ///
 /// Skipped entirely (not spilled-aware):
-///   Jmp, JmpT, JmpF, Switch, Ret, RetVal, Resume,
-///   SpillLoad, SpillStore, Handle, Perform, Send, Ask, Spawn, Const*
+///   Jmp, JmpT, JmpF, Switch, Ret, Resume,
+///   SpillLoad, SpillStore, Handle, Perform, Send, Ask, Spawn
+///
+/// Handled specially:
+///   RetVal: op1 = return value (read) — SpillLoad before if needed
+///   Const0/1/2/M1: op1 = dst (write) — SpillStore after if needed
+///   ConstU/ConstL: op3 = dst (write) — SpillStore after if needed
 fn spill_rewrite_instructions(
     instructions: &[Instruction],
     spill_map: &FxHashMap<u32, u16>,
@@ -1167,7 +1188,6 @@ fn spill_rewrite_instructions(
                 | OpCode::JmpF
                 | OpCode::Switch
                 | OpCode::Ret
-                | OpCode::RetVal
                 | OpCode::Resume
                 | OpCode::SpillLoad
                 | OpCode::SpillStore
@@ -1176,14 +1196,45 @@ fn spill_rewrite_instructions(
                 | OpCode::Send
                 | OpCode::Ask
                 | OpCode::Spawn
-                | OpCode::Const0
-                | OpCode::Const1
-                | OpCode::Const2
-                | OpCode::ConstM1
-                | OpCode::ConstU
-                | OpCode::ConstL
         ) {
             out.push(*instr);
+            continue;
+        }
+
+        // RetVal: op1 = return value (read).  Load from spill slot if needed.
+        if op == OpCode::RetVal {
+            if let Some(slot) = find_spill_slot_for_reg(spill_map, instr.op1) {
+                out.push(emit_spill_load(slot, SPILL_TEMP));
+                out.push(Instruction::new1(OpCode::RetVal, SPILL_TEMP));
+            } else {
+                out.push(*instr);
+            }
+            continue;
+        }
+
+        // Const0/Const1/Const2/ConstM1: op1 = dst (write).
+        if op == OpCode::Const0 || op == OpCode::Const1
+            || op == OpCode::Const2 || op == OpCode::ConstM1
+        {
+            let dst_reg = instr.op1;
+            if let Some(slot) = find_spill_slot_for_reg(spill_map, dst_reg) {
+                out.push(Instruction::new1(op, SPILL_TEMP));
+                out.push(emit_spill_store(SPILL_TEMP, slot));
+            } else {
+                out.push(*instr);
+            }
+            continue;
+        }
+
+        // ConstU/ConstL: op1:op2 = constant index, op3 = dst (write).
+        if op == OpCode::ConstU || op == OpCode::ConstL {
+            let dst_reg = instr.op3;
+            if let Some(slot) = find_spill_slot_for_reg(spill_map, dst_reg) {
+                out.push(Instruction::new3(op, instr.op1, instr.op2, SPILL_TEMP));
+                out.push(emit_spill_store(SPILL_TEMP, slot));
+            } else {
+                out.push(*instr);
+            }
             continue;
         }
 
