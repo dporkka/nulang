@@ -40,24 +40,23 @@ nulang bootstrap/compiler_core.nula
 - **Variable references:** identifier hashing (hash*5, seed 0). "let"=3321.
 - **Return-value encoding:** `(val << 32) | pos` packs value + position.
 
-## Stage 4 blocker: MIR register limit
+## Register limit status (resolved 2026-07-24)
 
-Adding lambda/closure support to the Pratt parser requires ~261 local
-variables, exceeding the MIR register allocator's capacity.
+Inline register spilling (commit 06b03c6) replaced the post-processing
+spill rewrite with SpillLoad/SpillStore emission during codegen.  There
+is no longer any capacity limit on spilled locals — functions of any
+size compile correctly, limited only by the compiler frontend's stack
+size (roughly 370 MIR locals with the default 8 MB stack).
 
-MIR register spilling (`SpillLoad`/`SpillStore` opcodes 0xF5/0xF6) was
-added (2026-07-23), allowing functions to exceed the 239-register limit.
-However, the post-processing spill rewrite has a capacity of 17 spilled
-locals (~256 total MIR locals) due to register wrapping ambiguity;
-functions exceeding this get a clear error instead of silent corruption.
+The bootstrap parser's ~261 locals is now well within the supported range.
 
-The bootstrap parser's ~261 locals is just above this limit.
+## What remains
 
-Workarounds:
-- Reduce local count: inline helper functions, merge branches
-- Split parser across multiple top-level functions (requires forward
-  references or mutual recursion — not currently supported in Core)
-- Implement full inline spilling (removes the 17-slot capacity limit)
+- Lambda/closure support (Stage 4) — the Pratt parser needs `fn(x) => body`
+  syntax and function-application evaluation
+- HM type inference
+- MIR lowering → `.nbc` codec
+- Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
 
 ## What remains
 

@@ -80,11 +80,13 @@ in this version; they are recorded here to establish their tier.
 - **MIR register spilling.** Functions with more locals than fit in the
   register file (238 usable registers) now spill excess locals into a
   frame-local `Vec<Value>` via `SpillLoad`/`SpillStore` opcodes (0xF5/0xF6).
-  Fix (2026-07-24): Const*/RetVal opcodes are now spill-aware, and a
-  capacity check (17 spilled locals, ~256 total MIR locals) prevents silent
-  corruption from register-wrapping collisions. This unblocks the
-  self-hosting bootstrap compiler (RFC 0003 Item 3) which needs ~261 locals
-  for lambda support (just above the current limit; future work).
+  Fix (2026-07-24): replaced post-processing spill rewrite with inline
+  SpillLoad/SpillStore emission during codegen, removing the 17-slot
+  capacity limit entirely.  Functions of any size now compile correctly
+  (limited only by compiler frontend stack size).  Cleanup: removed
+  spill_rewrite_instructions, find_spill_slot_for_reg, standalone reg_of,
+  emit_spill_load/store.  Net -112 lines.  Unblocks the self-hosting
+  bootstrap compiler (RFC 0003 Item 3) which needs ~261 locals.
 - **Formal semantics: capability lattice proofs.** All five lattice theorems
   in `spec/formal/capabilities.lean` proved via exhaustive case analysis:
   `join_assoc`, `join_comm`, `join_idem`, `cap_sendable`, `discharge_sendable`.
