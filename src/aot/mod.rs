@@ -26,11 +26,12 @@ use crate::mir;
 use crate::types::{NuResult, Span};
 
 /// Compiled AOT module ready for execution.
-#[allow(dead_code)]
 pub struct AotModule {
     /// The Cranelift JIT module that owns compiled code memory.
+    #[allow(dead_code)]
     jit_module: JITModule,
     /// Reusable function builder context.
+    #[allow(dead_code)]
     builder_context: FunctionBuilderContext,
     /// Compiled function pointers indexed by MIR function index.
     compiled_funcs: Vec<*const u8>,

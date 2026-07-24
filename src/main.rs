@@ -628,7 +628,7 @@ fn run_frontend(source: &str, file_path: Option<&str>, verbose: bool) -> NuResul
     Ok(ast)
 }
 
-#[allow(unused_variables)]
+#[cfg_attr(not(feature = "wasm-backend"), allow(unused_variables))]
 fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &str, out_file: Option<&str>) -> NuResult<()> {
     let ast = run_frontend(source, file_path, verbose)?;
 

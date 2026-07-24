@@ -1,11 +1,8 @@
-#![allow(unused_imports)]
-use quinn::{ClientConfig, Endpoint, ServerConfig};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use quinn::{Endpoint, ServerConfig};
+use rustls::pki_types::PrivateKeyDer;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use parking_lot::Mutex;
@@ -39,7 +36,7 @@ impl QuicTransport {
         let priv_key = PrivateKeyDer::try_from(priv_key)
             .map_err(|e| std::io::Error::other(format!("QUIC private key: {}", e)))?;
 
-        let server_config = ServerConfig::with_single_cert(cert_chain, priv_key)
+        let server_config = ServerConfig::with_single_cert(vec![cert_der], priv_key)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         let endpoint = tokio_rt.block_on(async { Endpoint::server(server_config, addr) })?;
 

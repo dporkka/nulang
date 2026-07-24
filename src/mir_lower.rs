@@ -22,7 +22,10 @@ use crate::ast::Pattern;
 use crate::hir;
 use crate::mir;
 use crate::types::{NuError, NuResult, Span, Type};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+type FxHashMap<K, V> =
+    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 fn nyi(feature: &str, span: Span) -> NuError {
     NuError::NotYetImplemented { feature: feature.to_string(), span }
@@ -221,8 +224,8 @@ fn lower_decl_bodies(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
 struct ModuleCtx {
     name: String,
     functions: Vec<Option<mir::Function>>,
-    func_map: HashMap<String, usize>,
-    extern_map: HashMap<String, usize>,
+    func_map: FxHashMap<String, usize>,
+    extern_map: FxHashMap<String, usize>,
     foreign: Vec<mir::ForeignFunction>,
     /// Actor behaviors, reserved (with their fully-qualified "Actor.behavior"
     /// name) in pass 1 and filled in pass 2 — mirrors `functions`, but never
@@ -237,7 +240,7 @@ struct ModuleCtx {
     /// Declared variant constructors: ctor name -> has_payload. Populated in
     /// pass 1 from `Decl::VariantType` so construction sites (`Some(41)`,
     /// `None`) resolve regardless of source order; see `reserve_decl`.
-    ctor_map: HashMap<String, bool>,
+    ctor_map: FxHashMap<String, bool>,
     next_lambda: u32,
 }
 
@@ -246,15 +249,15 @@ impl ModuleCtx {
         ModuleCtx {
             name: name.to_string(),
             functions: Vec::new(),
-            func_map: HashMap::new(),
-            extern_map: HashMap::new(),
+            func_map: FxHashMap::default(),
+            extern_map: FxHashMap::default(),
             foreign: Vec::new(),
             behaviors: Vec::new(),
             behavior_names: Vec::new(),
             actor_metas: Vec::new(),
             compensation_of: Vec::new(),
             parallel_branches_of: Vec::new(),
-            ctor_map: HashMap::new(),
+            ctor_map: FxHashMap::default(),
             next_lambda: 0,
         }
     }

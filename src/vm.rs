@@ -1681,11 +1681,11 @@ impl VM {
             for (i, bits) in regs.iter().enumerate() {
                 self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
             }
-            let region_len = jit
-                .compiled_region_len(module_idx, pc)
-                .expect("JIT-ran region must be recorded as compiled");
-            self.frames[frame_idx].pc += region_len;
-            return true;
+            if let Some(region_len) = jit.compiled_region_len(module_idx, pc) {
+                self.frames[frame_idx].pc += region_len;
+                return true;
+            }
+            // JIT executed but region not tracked — fall back to interpretation.
         }
         // JIT fell back to interpretation — continue in the interpreter.
         false
@@ -1846,26 +1846,19 @@ impl VM {
                         || (!b.effect_name.contains('.') && b.effect_name == effect_name)
                 };
 
-                let handler_idx = self.handler_stack.iter().rposition(|hf| {
-                    if let Some(module) = self.modules.get(hf.module_idx) {
-                        if let Some(ht) = module.handler_tables.get(hf.handler_table_idx) {
-                            ht.bindings.iter().any(|b| matches_binding(b))
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                });
+                let handler_result = self.handler_stack.iter().enumerate().rev().find_map(
+                    |(idx, hf)| {
+                        let module = self.modules.get(hf.module_idx)?;
+                        let ht = module.handler_tables.get(hf.handler_table_idx)?;
+                        ht.bindings.iter().find(|b| matches_binding(*b)).map(|binding| {
+                            (idx, binding.handler_offset, binding.result_reg)
+                        })
+                    },
+                );
 
-                let target_offset = if let Some(handler_stack_idx) = handler_idx {
-                    let (handler_offset, result_reg) = {
-                        let hf = &self.handler_stack[handler_stack_idx];
-                        let module = self.modules.get(hf.module_idx).unwrap();
-                        let ht = module.handler_tables.get(hf.handler_table_idx).unwrap();
-                        let binding = ht.bindings.iter().find(|b| matches_binding(*b)).unwrap();
-                        (binding.handler_offset, binding.result_reg)
-                    };
+                let target_offset = if let Some((handler_stack_idx, handler_offset, result_reg)) =
+                    handler_result
+                {
                     self.handler_stack[handler_stack_idx].resume_dst = result_reg;
                     Some(handler_offset)
                 } else {
@@ -1877,7 +1870,7 @@ impl VM {
                     })
                 };
 
-                if let Some(handler_stack_idx) = handler_idx {
+                if let Some((handler_stack_idx, _, _)) = handler_result {
                     let cont = Continuation::capture(self, dst_reg).ok_or_else(|| {
                         NuError::VMError { msg: "Cannot capture continuation: no current frame".into(), span: Span::default() }
                     })?;

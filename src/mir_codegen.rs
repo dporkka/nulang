@@ -27,7 +27,10 @@ use crate::bytecode::{
 };
 use crate::mir;
 use crate::types::{NuError, NuResult, PrimitiveType, Span, Type};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+
+type FxHashMap<K, V> =
+    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 const FUNC_VALUE_REG: u8 = 254;
 /// First general-purpose local register. r0..(LOCAL_BASE-1) is the call/effect staging zone,
 /// r12..r14 are spill scratch registers, and rLOCAL_BASE..253 hold MIR locals that are not spilled.
@@ -63,14 +66,14 @@ struct JumpPatch {
 pub struct MirCodegen {
     module: CodeModule,
     /// Module-wide record field ids, mirroring the stable compiler's layout.
-    field_map: HashMap<String, u8>,
+    field_map: FxHashMap<String, u8>,
     next_field_id: u8,
     /// Constant-pool index of each `self.field` name already emitted for
     /// `StateGet`/`StateSet`, so repeated access to the same field reuses
     /// one constant instead of growing the pool with a fresh duplicate
     /// string every time (unlike record fields, `state` is string-keyed at
     /// runtime, not a positional slot `field_id` could cover).
-    state_field_constants: HashMap<String, usize>,
+    state_field_constants: FxHashMap<String, usize>,
     /// Per-function float-ness of MIR locals (see `float_locals`), used to
     /// pick float opcode variants for arithmetic and comparisons. Rebuilt
     /// at the start of every `compile_function`.
@@ -81,9 +84,9 @@ impl MirCodegen {
     pub fn new(module_name: impl Into<String>) -> Self {
         MirCodegen {
             module: CodeModule::new(module_name),
-            field_map: HashMap::new(),
+            field_map: FxHashMap::default(),
             next_field_id: 0,
-            state_field_constants: HashMap::new(),
+            state_field_constants: FxHashMap::default(),
             float_locals: Vec::new(),
         }
     }
@@ -269,7 +272,7 @@ impl MirCodegen {
         // is_spilled_local uses the local id directly (not the wrapped
         // reg_of) to avoid false negatives from u8 wrapping.
         let spilled_threshold = FUNC_VALUE_REG as u32 - LOCAL_BASE;
-        let mut spill_map: HashMap<u32, u16> = HashMap::new();
+        let mut spill_map: FxHashMap<u32, u16> = FxHashMap::default();
         let mut next_spill_slot: u16 = 0;
         for i in 0..func.locals.len() as u32 {
             if i >= spilled_threshold {
@@ -308,10 +311,10 @@ impl MirCodegen {
             self.emit(Instruction::new3(OpCode::CapLoad, i as u8, reg_of(*cap), 0));
         }
 
-        let mut block_offsets: HashMap<mir::BlockId, usize> = HashMap::new();
+        let mut block_offsets: FxHashMap<mir::BlockId, usize> = FxHashMap::default();
         let mut patches: Vec<JumpPatch> = Vec::new();
         // Handler-param moves to inject at the start of handler body blocks.
-        let mut handler_prologues: HashMap<mir::BlockId, Vec<mir::LocalId>> = HashMap::new();
+        let mut handler_prologues: FxHashMap<mir::BlockId, Vec<mir::LocalId>> = FxHashMap::default();
         for table in &func.handler_tables {
             for binding in &table.bindings {
                 if binding.params.len() > MAX_STAGED_ARGS {
@@ -342,7 +345,7 @@ impl MirCodegen {
             block_offsets.insert(block.id, self.module.instructions.len());
             if let Some(params) = handler_prologues.get(&block.id) {
                 // The VM delivers effect arguments in r0..rN.
-                for (i, p) in params.clone().iter().enumerate() {
+                for (i, p) in params.iter().enumerate() {
                     let dst = reg_of(*p);
                     if i as u8 != dst {
                         self.emit(Instruction::new2(OpCode::Move, i as u8, dst));
@@ -983,7 +986,7 @@ impl MirCodegen {
         &mut self,
         term: &mir::Terminator,
         func_name: &str,
-        block_offsets: &HashMap<mir::BlockId, usize>,
+        block_offsets: &FxHashMap<mir::BlockId, usize>,
         patches: &mut Vec<JumpPatch>,
     ) -> NuResult<()> {
         match term {
@@ -1148,7 +1151,7 @@ fn emit_spill_store(src: u8, slot: u16) -> Instruction {
 ///   SpillLoad, SpillStore, Handle, Perform, Send, Ask, Spawn, Const*
 fn spill_rewrite_instructions(
     instructions: &[Instruction],
-    spill_map: &HashMap<u32, u16>,
+    spill_map: &FxHashMap<u32, u16>,
 ) -> Vec<Instruction> {
     let mut out = Vec::with_capacity(instructions.len() * 3 / 2);
 
@@ -1286,7 +1289,7 @@ fn spill_rewrite_instructions(
 
 /// Given a register value (possibly wrapping for spilled locals), return the
 /// spill slot if this register corresponds to a spilled local.
-fn find_spill_slot_for_reg(spill_map: &HashMap<u32, u16>, reg: u8) -> Option<u16> {
+fn find_spill_slot_for_reg(spill_map: &FxHashMap<u32, u16>, reg: u8) -> Option<u16> {
     for (&local_id, &slot) in spill_map {
         // reg_of wraps: (LOCAL_BASE + local_id) as u8
         let mapped = (LOCAL_BASE + local_id) as u8;
@@ -1678,11 +1681,9 @@ fn terminator_successors(term: &mir::Terminator) -> Vec<usize> {
 #[derive(Default)]
 struct DropPlan {
     /// Before the block's first statement (after any handler prologue).
-    block_entry: HashMap<usize, Vec<mir::LocalId>>,
-    /// Before the first instruction of statement (block, stmt).
-    before_stmt: HashMap<(usize, usize), Vec<mir::LocalId>>,
-    /// After the last instruction of statement (block, stmt).
-    after_stmt: HashMap<(usize, usize), Vec<mir::LocalId>>,
+    block_entry: FxHashMap<usize, Vec<mir::LocalId>>,
+    before_stmt: FxHashMap<(usize, usize), Vec<mir::LocalId>>,
+    after_stmt: FxHashMap<(usize, usize), Vec<mir::LocalId>>,
 }
 
 /// Compute conservative `Drop` placements for one function; see the section

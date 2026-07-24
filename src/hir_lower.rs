@@ -18,6 +18,9 @@ use crate::ast::{BinOp, Decl, Expr, FunctionAnnotation, Literal};
 use crate::hir;
 use crate::types::{Capability, EffectRow, Span, Type};
 
+type FxHashMap<K, V> =
+    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+
 pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
     let mut module = hir::Module::new(&ast.name);
     let tools = collect_tool_schemas(&ast.decls);
@@ -661,8 +664,8 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
     // crash) and emits a `ParallelBranchCompleted` event after each branch.
     // Mirrors the stable compiler's `compile_workflow` exactly.
     let mut flattened_steps: Vec<ast::WorkflowStep> = Vec::new();
-    let mut parallel_branch_names: std::collections::HashMap<usize, Vec<String>> =
-        std::collections::HashMap::new();
+    let mut parallel_branch_names: FxHashMap<usize, Vec<String>> =
+        FxHashMap::default();
     let mut parallel_counter = 0usize;
 
     for item in items {

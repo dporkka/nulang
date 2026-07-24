@@ -8,7 +8,8 @@ use crate::lexer::{Token, TokenKind};
 use crate::types::{
     Capability, Effect, EffectRow, NuError, NuResult, PrimitiveType, Region, Span, Type, TypeVar,
 };
-use std::collections::HashMap;
+type FxHashMap<K, V> =
+    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 // ---------------------------------------------------------------------------
 // Operator Precedence (13 levels, higher = tighter binding)
@@ -66,19 +67,19 @@ fn infix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
-    local_type_params: HashMap<String, TypeVar>,
-    global_type_constructors: HashMap<String, TypeVar>,
-}
-
-impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
-        Parser {
-            tokens,
-            pos: 0,
-            local_type_params: HashMap::new(),
-            global_type_constructors: HashMap::new(),
-        }
-    }
+    local_type_params: FxHashMap<String, TypeVar>,
+    global_type_constructors: FxHashMap<String, TypeVar>,
+ }
+ 
+ impl Parser {
+     pub fn new(tokens: Vec<Token>) -> Self {
+         Parser {
+             tokens,
+             pos: 0,
+             local_type_params: FxHashMap::default(),
+             global_type_constructors: FxHashMap::default(),
+         }
+     }
 
     // === Entry Points ===
 
@@ -150,7 +151,7 @@ impl Parser {
         self.skip_newlines();
         let public = self.consume_if(&TokenKind::Pub);
         self.skip_newlines();
-        match self.peek_kind().clone() {
+        match self.peek_kind() {
             TokenKind::Fn => self.parse_function(public, annotations),
             TokenKind::Actor | TokenKind::Persistent | TokenKind::Entity | TokenKind::Organization => {
                 let backend = annotations.iter().find_map(|a| match a {
@@ -166,7 +167,7 @@ impl Parser {
             TokenKind::Type => {
                 self.advance(); // consume 'type'
                 self.skip_newlines();
-                match self.peek_kind().clone() {
+                match self.peek_kind() {
                     TokenKind::Alias => self.parse_type_alias(public),
                     _ => {
                         // Peek ahead: if we see a '{' it's a record, if '|' or variant-like it's variant
@@ -233,7 +234,7 @@ impl Parser {
                 }
             };
             self.expect(TokenKind::LParen)?;
-            let mut fields: HashMap<String, String> = HashMap::new();
+            let mut fields: FxHashMap<String, String> = FxHashMap::default();
             self.skip_newlines();
             while !self.match_token(&TokenKind::RParen) && !self.is_at_end() {
                 let field_name = self.expect_ident("annotation field name")?;
@@ -366,7 +367,7 @@ impl Parser {
             if self.match_token(&TokenKind::RBrace) {
                 break;
             }
-            match self.peek_kind().clone() {
+            match self.peek_kind() {
                 TokenKind::State => {
                     self.advance(); // 'state'
                     let model = self.parse_state_model(default_model);
@@ -1389,7 +1390,7 @@ impl Parser {
             if self.match_token(&TokenKind::RBrace) {
                 break;
             }
-            match self.peek_kind().clone() {
+            match self.peek_kind() {
                 TokenKind::Step => {
                     items.push(WorkflowItem::Step(self.parse_workflow_step()?));
                 }
@@ -1492,7 +1493,7 @@ impl Parser {
 
         // Look ahead to determine if it's a record or variant
         self.skip_newlines();
-        match self.peek_kind().clone() {
+        match self.peek_kind() {
             TokenKind::LBrace => {
                 // Record type
                 self.advance(); // '{'
@@ -1576,7 +1577,7 @@ impl Parser {
         let span = self.current_span();
         self.advance(); // consume 'extern'
 
-        let library = match self.peek_kind().clone() {
+        let library = match self.peek_kind() {
             TokenKind::StringLit(s) => {
                 let s = s.clone();
                 self.advance();
