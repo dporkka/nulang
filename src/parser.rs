@@ -4936,6 +4936,17 @@ mod tests {
             }
         "#;
         let err = parse(source).unwrap_err();
+        match err {
+            NuError::ParseError { msg, .. } => {
+                assert!(
+                    msg.contains("duplicate on_exit hook for state 'A'"),
+                    "{}",
+                    msg
+                )
+            }
+            _ => panic!("Expected ParseError"),
+        }
+    }
 
     #[test]
     fn test_parse_entity_with_migration_block() {
@@ -4965,17 +4976,6 @@ mod tests {
                 assert_eq!(migrations[0].event_migrations[0].0, "Deposited");
             }
             _ => panic!("Expected Actor decl"),
-        }
-    }
-        match err {
-            NuError::ParseError { msg, .. } => {
-                assert!(
-                    msg.contains("duplicate on_exit hook for state 'A'"),
-                    "{}",
-                    msg
-                )
-            }
-            _ => panic!("Expected ParseError"),
         }
     }
 
