@@ -451,7 +451,7 @@ mod tests {
         let lib = StdLib::new();
         assert_eq!(
             lib.effects(),
-            vec!["IO", "Int", "Timer", "Signal", "LLM", "Actor", "Otp"]
+            vec!["IO", "Int", "String", "Timer", "Signal", "LLM", "Actor", "Otp"]
         );
     }
 

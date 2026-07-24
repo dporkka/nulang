@@ -39,16 +39,25 @@ nulang --emit-nbc --out bootstrap/self_test.nbc bootstrap/self_test.nula
 nulang bootstrap/self_test.nbc
 ```
 
-## What's implemented
 
-- **lexer:** single-token scanning (`+`, `IntLit`, `EOF`)
-- **parser:** `IntLit` and `IntLit + IntLit` expressions
-- **emitter:** bytecode `ConstU` + `IAdd` + `Halt` + `RetVal`
+## What's implemented (Stage 2 — 2026-07-23)
 
-## What remains (Stage 2)
+- **Lexer:** character-at-a-time scanning over source strings via
+  `perform String.charAt` and `perform String.length` (added 2026-07-23).
+  Recognises integers, `+`, `-`, `*`, `/`, `(`, `)`, and whitespace.
+- **Parser:** recursive-descent with left-associative binary operators
+  at correct precedence (term/factor/atom).  No token buffer — the
+  parser reads characters directly from the source string.
+- **Evaluator:** computes integer arithmetic expressions with correct
+  precedence and associativity, including parenthesised subexpressions.
+- **Return-value encoding:** `(val << 32) | pos` — packs both the
+  computed value and the updated source position into a single Int,
+  working around the absence of tuple returns in Core.
 
-- Multi-token lexer (identifiers, keywords, delimiters)
-- Pratt parser for full Core expressions
-- HM type inference (deferred to separate module)
-- MIR lowering → `src/format/nbc.rs` codec
+## What remains (Stage 3+)
+
+- Multi-character lexer (identifiers, keywords, multi-char operators)
+- Pratt parser for full Core expressions (variables, lets, lambdas)
+- HM type inference
+- MIR lowering → `.nbc` codec
 - Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
