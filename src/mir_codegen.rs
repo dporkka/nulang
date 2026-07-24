@@ -40,6 +40,7 @@ const SCRATCH0: u8 = 0;
 const SCRATCH1: u8 = 1;
 const SPILL_TEMP: u8 = 12;
 const SPILL_TEMP2: u8 = 13;
+#[allow(dead_code)]
 const SPILL_TEMP3: u8 = 14;
 
 fn not_yet_implemented(feature: &str, span: Span) -> NuError {
@@ -78,6 +79,10 @@ pub struct MirCodegen {
     /// pick float opcode variants for arithmetic and comparisons. Rebuilt
     /// at the start of every `compile_function`.
     float_locals: Vec<bool>,
+    /// Per-function spill map: local_id → spill slot in frame's spill vector.
+    /// Built at the start of compile_function.  SpillLoad/SpillStore are
+    /// emitted inline during codegen via local_reg / local_dst / spill_write_done.
+    spill_map: FxHashMap<u32, u16>,
 }
 
 impl MirCodegen {
@@ -88,6 +93,7 @@ impl MirCodegen {
             next_field_id: 0,
             state_field_constants: FxHashMap::default(),
             float_locals: Vec::new(),
+            spill_map: FxHashMap::default(),
         }
     }
 
@@ -98,6 +104,61 @@ impl MirCodegen {
             .get(id.0 as usize)
             .copied()
             .unwrap_or(false)
+    }
+
+    // -- Inline register spilling -----------------------------------------
+    // Locals exceeding the register file are spilled into the frame's spill
+    // vector.  These methods emit SpillLoad/SpillStore during codegen so no
+    // post-processing rewrite is needed — spilled locals never occupy a
+    // physical register, avoiding u8-wrapping ambiguity.
+
+    fn is_spilled(&self, id: mir::LocalId) -> bool {
+        self.spill_map.contains_key(&id.0)
+    }
+
+    /// Read a local: emits SpillLoad if spilled, returns the register.
+    fn local_reg(&mut self, id: mir::LocalId) -> u8 {
+        if let Some(&slot) = self.spill_map.get(&id.0) {
+            self.emit(Instruction::new3(
+                OpCode::SpillLoad, (slot >> 8) as u8, (slot & 0xFF) as u8, SPILL_TEMP2,
+            ));
+            SPILL_TEMP2
+        } else {
+            (LOCAL_BASE + id.0) as u8
+        }
+    }
+
+    /// Destination register for a write.  For spilled locals this is
+    /// SPILL_TEMP; the caller MUST call spill_write_done after emitting
+    /// the writing instruction.
+    fn local_dst(&self, id: mir::LocalId) -> u8 {
+        if self.spill_map.contains_key(&id.0) {
+            SPILL_TEMP
+        } else {
+            (LOCAL_BASE + id.0) as u8
+        }
+    }
+
+    /// Emit SpillStore to complete a write to a spilled local.
+    fn spill_write_done(&mut self, id: mir::LocalId) {
+        if let Some(&slot) = self.spill_map.get(&id.0) {
+            self.emit(Instruction::new3(
+                OpCode::SpillStore, SPILL_TEMP, (slot >> 8) as u8, (slot & 0xFF) as u8,
+            ));
+        }
+    }
+
+    /// Drop a spilled local: load → drop → store nil back.
+    fn spill_drop(&mut self, id: mir::LocalId) {
+        if let Some(&slot) = self.spill_map.get(&id.0) {
+            self.emit(Instruction::new3(
+                OpCode::SpillLoad, (slot >> 8) as u8, (slot & 0xFF) as u8, SPILL_TEMP2,
+            ));
+            self.emit(Instruction::new1(OpCode::Drop, SPILL_TEMP2));
+            self.emit(Instruction::new3(
+                OpCode::SpillStore, SPILL_TEMP2, (slot >> 8) as u8, (slot & 0xFF) as u8,
+            ));
+        }
     }
 
     /// Constant-pool index for a `self.field` name, reusing an existing
@@ -267,34 +328,18 @@ impl MirCodegen {
         let mut saved_instructions = Vec::new();
         std::mem::swap(&mut saved_instructions, &mut self.module.instructions);
         let function_start = saved_instructions.len();
-        // Build the spill map: locals whose register would overflow the
-        // physical register file get a slot in the frame's spill vector.
-        // is_spilled_local uses the local id directly (not the wrapped
-        // reg_of) to avoid false negatives from u8 wrapping.
+        // Build the spill map: locals whose id exceeds the register file
+        // get a slot in the frame's spill vector.  Inline spilling via
+        // local_reg / local_dst / spill_write_done emits SpillLoad/SpillStore
+        // during codegen — no capacity limit, no wrapping ambiguity.
+        self.spill_map.clear();
         let spilled_threshold = FUNC_VALUE_REG as u32 - LOCAL_BASE;
-        let mut spill_map: FxHashMap<u32, u16> = FxHashMap::default();
         let mut next_spill_slot: u16 = 0;
         for i in 0..func.locals.len() as u32 {
             if i >= spilled_threshold {
-                spill_map.insert(i, next_spill_slot);
+                self.spill_map.insert(i, next_spill_slot);
                 next_spill_slot += 1;
             }
-        }
-        // The post-processing spill rewrite uses register values to
-        // detect spilled locals.  Spilled locals whose reg_of() wraps
-        // into r15..r253 would collide with non-spilled locals and
-        // can't be distinguished.  We allow at most 17 spilled locals
-        // (mapping to r0..r14 + r254..r255) before wrapping occurs.
-        const MAX_SPILL_SLOTS: u32 = 17;
-        if next_spill_slot as u32 > MAX_SPILL_SLOTS {
-            self.module.instructions = saved_instructions;
-            return Err(compile_err(format!(
-                "function '{}' has {} locals ({} spilled), exceeding the register-spill capacity of {}; split into smaller functions",
-                func.name,
-                func.locals.len(),
-                next_spill_slot,
-                MAX_SPILL_SLOTS
-            ), Span::default()));
         }
         if func.params.len() > MAX_STAGED_ARGS {
             // Mirrors stage_args's call-site limit: the prologue below reads
@@ -317,14 +362,17 @@ impl MirCodegen {
 
         // Prologue: move incoming arguments into their local registers.
         for (i, param) in func.params.iter().enumerate() {
-            let dst = reg_of(*param);
+            let dst = self.local_dst(*param);
             let src = i as u8;
             if src != dst {
                 self.emit(Instruction::new2(OpCode::Move, src, dst));
             }
+            self.spill_write_done(*param);
         }
         for (i, cap) in func.captures.iter().enumerate() {
-            self.emit(Instruction::new3(OpCode::CapLoad, i as u8, reg_of(*cap), 0));
+            let dst = self.local_dst(*cap);
+            self.emit(Instruction::new3(OpCode::CapLoad, i as u8, dst, 0));
+            self.spill_write_done(*cap);
         }
 
         let mut block_offsets: FxHashMap<mir::BlockId, usize> = FxHashMap::default();
@@ -362,39 +410,49 @@ impl MirCodegen {
             if let Some(params) = handler_prologues.get(&block.id) {
                 // The VM delivers effect arguments in r0..rN.
                 for (i, p) in params.iter().enumerate() {
-                    let dst = reg_of(*p);
+                    let dst = self.local_dst(*p);
                     if i as u8 != dst {
                         self.emit(Instruction::new2(OpCode::Move, i as u8, dst));
                     }
+                    self.spill_write_done(*p);
                 }
             }
             if let Some(ids) = drop_plan.block_entry.get(&bi) {
                 for id in ids {
-                    self.emit(Instruction::new1(OpCode::Drop, reg_of(*id)));
+                    if self.is_spilled(*id) {
+                        self.spill_drop(*id);
+                    } else {
+                        self.emit(Instruction::new1(OpCode::Drop, (LOCAL_BASE + id.0) as u8));
+                    }
                 }
             }
             for (si, stmt) in block.stmts.iter().enumerate() {
                 if let Some(ids) = drop_plan.before_stmt.get(&(bi, si)) {
                     for id in ids {
-                        self.emit(Instruction::new1(OpCode::Drop, reg_of(*id)));
+                        if self.is_spilled(*id) {
+                            self.spill_drop(*id);
+                        } else {
+                            self.emit(Instruction::new1(OpCode::Drop, (LOCAL_BASE + id.0) as u8));
+                        }
                     }
                 }
                 self.compile_stmt(stmt, func, &mut handle_patches)?;
                 if let Some(ids) = drop_plan.after_stmt.get(&(bi, si)) {
                     for id in ids {
-                        self.emit(Instruction::new1(OpCode::Drop, reg_of(*id)));
+                        if self.is_spilled(*id) {
+                            self.spill_drop(*id);
+                        } else {
+                            self.emit(Instruction::new1(OpCode::Drop, (LOCAL_BASE + id.0) as u8));
+                        }
                     }
                 }
             }
             self.compile_terminator(&block.terminator, &func.name, &block_offsets, &mut patches)?;
         }
 
-        // Post-process: if any locals were spilled, rewrite instructions
-        // to use SpillLoad/SpillStore through scratch registers.
-        if !spill_map.is_empty() {
-            self.module.instructions =
-                spill_rewrite_instructions(&self.module.instructions, &spill_map);
-        }
+        // (SpillLoad/SpillStore are emitted inline during codegen via
+        // local_reg / local_dst / spill_write_done — no post-processing
+        // rewrite pass is needed.)
 
         // Patch forward jumps now that all block offsets are known.
         for patch in &patches {
@@ -429,7 +487,7 @@ impl MirCodegen {
                     .blocks
                     .get(b.body.0 as usize)
                     .and_then(|blk| match blk.terminator {
-                        mir::Terminator::Resume(id) => Some(reg_of(id)),
+                        mir::Terminator::Resume(id) => Some(self.local_reg(id)),
                         _ => None,
                     })
                     .unwrap_or(0);
@@ -466,23 +524,30 @@ impl MirCodegen {
     ) -> NuResult<()> {
         match stmt {
             mir::Stmt::Assign { dst, op } => {
-                self.compile_rvalue(reg_of(*dst), op)?;
+            let _spill_dst = self.local_dst(*dst);
+            self.compile_rvalue(_spill_dst, op)?;
+            self.spill_write_done(*dst);
             }
             mir::Stmt::StoreFieldNamed { obj, field, src } => {
                 let fid = self.field_id(field)?;
+            let _robj = self.local_reg(*obj);
+            let _rsrc = self.local_reg(*src);
                 self.emit(Instruction::new3(
                     OpCode::RecS,
-                    reg_of(*obj),
+                    _robj,
                     fid,
-                    reg_of(*src),
+                    _rsrc,
                 ));
             }
             mir::Stmt::ArrayStore { arr, idx, src } => {
+            let _rarr = self.local_reg(*arr);
+            let _ridx = self.local_reg(*idx);
+            let _rsrc = self.local_reg(*src);
                 self.emit(Instruction::new3(
                     OpCode::ArrStore,
-                    reg_of(*arr),
-                    reg_of(*idx),
-                    reg_of(*src),
+                    _rarr,
+                    _ridx,
+                    _rsrc,
                 ));
             }
             mir::Stmt::EnterHandle { table } => {
@@ -500,11 +565,12 @@ impl MirCodegen {
             }
             mir::Stmt::StateSet { field, src } => {
                 let field_idx = self.state_field_constant(field);
+            let _rsrc = self.local_reg(*src);
                 self.emit(Instruction::new3(
                     OpCode::StateSet,
                     ((field_idx >> 8) & 0xFF) as u8,
                     (field_idx & 0xFF) as u8,
-                    reg_of(*src),
+                    _rsrc,
                 ));
             }
             mir::Stmt::Emit { event, args } => {
@@ -531,7 +597,7 @@ impl MirCodegen {
             ), Span::default()));
         }
         for (i, a) in args.iter().enumerate() {
-            let src = reg_of(*a);
+            let src = self.local_reg(*a);
             if src != i as u8 {
                 self.emit(Instruction::new2(OpCode::Move, src, i as u8));
             }
@@ -545,44 +611,50 @@ impl MirCodegen {
                 self.load_constant(dst, c);
             }
             mir::RValue::Load(id) => {
-                let src = reg_of(*id);
+                let src = self.local_reg(*id);
                 if src != dst {
                     self.emit(Instruction::new2(OpCode::Move, src, dst));
                 }
             }
             mir::RValue::LoadFieldNamed { obj, field } => {
                 let fid = self.field_id(field)?;
-                self.emit(Instruction::new3(OpCode::RecL, reg_of(*obj), fid, dst));
+            let _robj = self.local_reg(*obj);
+                self.emit(Instruction::new3(OpCode::RecL, _robj, fid, dst));
             }
             mir::RValue::LoadFieldPos { obj, index } => {
-                self.emit(Instruction::new3(OpCode::FieldL, reg_of(*obj), *index, dst));
+            let _robj = self.local_reg(*obj);
+                self.emit(Instruction::new3(OpCode::FieldL, _robj, *index, dst));
             }
             mir::RValue::ArrayLoad { arr, idx } => {
+            let _rarr = self.local_reg(*arr);
+            let _ridx = self.local_reg(*idx);
                 self.emit(Instruction::new3(
                     OpCode::ArrLoad,
-                    reg_of(*arr),
-                    reg_of(*idx),
+                    _rarr,
+                    _ridx,
                     dst,
                 ));
             }
             mir::RValue::ArrayLen(arr) => {
-                self.emit(Instruction::new2(OpCode::ArrLen, reg_of(*arr), dst));
+            let _rarr = self.local_reg(*arr);
+                self.emit(Instruction::new2(OpCode::ArrLen, _rarr, dst));
             }
             mir::RValue::ArrayLit(elems) => {
                 self.load_constant(SCRATCH0, &Constant::Int(elems.len() as i64));
                 self.emit(Instruction::new2(OpCode::ArrAlloc, SCRATCH0, dst));
                 for (i, e) in elems.iter().enumerate() {
                     self.load_constant(SCRATCH1, &Constant::Int(i as i64));
+            let _re = self.local_reg(*e);
                     self.emit(Instruction::new3(
                         OpCode::ArrStore,
                         dst,
                         SCRATCH1,
-                        reg_of(*e),
+                        _re,
                     ));
                 }
             }
             mir::RValue::Unary(op, id) => {
-                let src = reg_of(*id);
+                let src = self.local_reg(*id);
                 // `Deref`/`Ref` are register copies, same as the stable
                 // compiler's compile_unary: Nulang's ref cells are locals
                 // reassigned in place (see lower_place's Var arm), not a
@@ -610,8 +682,8 @@ impl MirCodegen {
                 }
             }
             mir::RValue::Binary(op, l, r) => {
-                let lr = reg_of(*l);
-                let rr = reg_of(*r);
+                let lr = self.local_reg(*l);
+                let rr = self.local_reg(*r);
                 // The type checker rejects mixed int/float arithmetic, so
                 // operands are homogeneous: one float operand means both
                 // are floats and the F* opcode variants are required (the
@@ -641,18 +713,22 @@ impl MirCodegen {
                 }
             }
             mir::RValue::StringEq(l, r) => {
+            let _rl = self.local_reg(*l);
+            let _rr = self.local_reg(*r);
                 self.emit(Instruction::new3(
                     OpCode::SCmpEq,
-                    reg_of(*l),
-                    reg_of(*r),
+                    _rl,
+                    _rr,
                     dst,
                 ));
             }
             mir::RValue::StrConcat(l, r) => {
+            let _rl = self.local_reg(*l);
+            let _rr = self.local_reg(*r);
                 self.emit(Instruction::new3(
                     OpCode::SConcat,
-                    reg_of(*l),
-                    reg_of(*r),
+                    _rl,
+                    _rr,
                     dst,
                 ));
             }
@@ -664,7 +740,8 @@ impl MirCodegen {
                         self.load_constant(FUNC_VALUE_REG, &Constant::Int(*idx as i64));
                     }
                     mir::FuncRef::Local(id) => {
-                        self.emit(Instruction::new2(OpCode::Move, reg_of(*id), FUNC_VALUE_REG));
+            let _rid = self.local_reg(*id);
+                        self.emit(Instruction::new2(OpCode::Move, _rid, FUNC_VALUE_REG));
                     }
                 }
                 self.stage_args(args)?;
@@ -683,18 +760,20 @@ impl MirCodegen {
                     dst,
                 ));
                 for (i, cap) in captures.iter().enumerate() {
+            let _rcap = self.local_reg(*cap);
                     self.emit(Instruction::new3(
                         OpCode::CapStore,
                         dst,
                         i as u8,
-                        reg_of(*cap),
+                        _rcap,
                     ));
                 }
             }
             mir::RValue::Tuple(elems) => {
                 self.emit(Instruction::new2(OpCode::TupleMk, elems.len() as u8, dst));
                 for (i, e) in elems.iter().enumerate() {
-                    self.emit(Instruction::new3(OpCode::FieldS, dst, i as u8, reg_of(*e)));
+            let _re = self.local_reg(*e);
+                    self.emit(Instruction::new3(OpCode::FieldS, dst, i as u8, _re));
                 }
             }
             mir::RValue::Record(fields) => {
@@ -710,7 +789,8 @@ impl MirCodegen {
                 let slot_count = max_field_id.saturating_add(1);
                 self.emit(Instruction::new2(OpCode::RecMk, slot_count, dst));
                 for ((_, e), fid) in fields.iter().zip(field_ids) {
-                    self.emit(Instruction::new3(OpCode::RecS, dst, fid, reg_of(*e)));
+            let _re = self.local_reg(*e);
+                    self.emit(Instruction::new3(OpCode::RecS, dst, fid, _re));
                 }
             }
             mir::RValue::Perform { effect, op, args } => {
@@ -729,7 +809,7 @@ impl MirCodegen {
                 ));
             }
             mir::RValue::LlmAsk { prompt } => {
-                let src = reg_of(*prompt);
+                let src = self.local_reg(*prompt);
                 if src != dst {
                     self.emit(Instruction::new2(OpCode::Move, src, dst));
                 }
@@ -796,7 +876,8 @@ impl MirCodegen {
                     .join(",");
                 let spec = format!("{}:{}", max_params, ids);
                 let spec_idx = self.module.add_constant(Constant::String(spec));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*timeout), SCRATCH0));
+            let _rtimeout = self.local_reg(*timeout);
+                self.emit(Instruction::new2(OpCode::Move, _rtimeout, SCRATCH0));
                 self.emit(Instruction::new3(
                     OpCode::ReceiveWait,
                     ((spec_idx >> 8) & 0xFF) as u8,
@@ -818,10 +899,12 @@ impl MirCodegen {
                 ));
             }
             mir::RValue::Migrate { actor, node } => {
+            let _ractor = self.local_reg(*actor);
+            let _rnode = self.local_reg(*node);
                 self.emit(Instruction::new3(
                     OpCode::Migrate,
-                    reg_of(*actor),
-                    reg_of(*node),
+                    _ractor,
+                    _rnode,
                     dst,
                 ));
             }
@@ -857,9 +940,10 @@ impl MirCodegen {
                 // Protect the actor value in a register outside the 0..15
                 // staging zone before staging args, mirroring the Call/
                 // FUNC_VALUE_REG pattern.
+            let _ractor = self.local_reg(*actor);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*actor),
+                    _ractor,
                     FUNC_VALUE_REG,
                 ));
                 self.stage_args(args)?;
@@ -877,9 +961,10 @@ impl MirCodegen {
                 behavior_idx,
                 args,
             } => {
+            let _ractor = self.local_reg(*actor);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*actor),
+                    _ractor,
                     FUNC_VALUE_REG,
                 ));
                 self.stage_args(args)?;
@@ -901,25 +986,31 @@ impl MirCodegen {
                 actor,
                 template,
             } => {
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*name), SCRATCH0 + 1));
+            let _rid = self.local_reg(*id);
+                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
+            let _rname = self.local_reg(*name);
+                self.emit(Instruction::new2(OpCode::Move, _rname, SCRATCH0 + 1));
+            let _ractor = self.local_reg(*actor);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*actor),
+                    _ractor,
                     SCRATCH0 + 2,
                 ));
+            let _rtemplate = self.local_reg(*template);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*template),
+                    _rtemplate,
                     SCRATCH0 + 3,
                 ));
                 self.emit(Instruction::new1(OpCode::PipelineStage, dst));
             }
             mir::RValue::PipelineRun { id, input } => {
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
+            let _rid = self.local_reg(*id);
+                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
+            let _rinput = self.local_reg(*input);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*input),
+                    _rinput,
                     SCRATCH0 + 1,
                 ));
                 self.emit(Instruction::new1(OpCode::PipelineRun, dst));
@@ -933,23 +1024,29 @@ impl MirCodegen {
                 actor,
                 description,
             } => {
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*name), SCRATCH0 + 1));
+            let _rid = self.local_reg(*id);
+                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
+            let _rname = self.local_reg(*name);
+                self.emit(Instruction::new2(OpCode::Move, _rname, SCRATCH0 + 1));
+            let _ractor = self.local_reg(*actor);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*actor),
+                    _ractor,
                     SCRATCH0 + 2,
                 ));
+            let _rdescription = self.local_reg(*description);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*description),
+                    _rdescription,
                     SCRATCH0 + 3,
                 ));
                 self.emit(Instruction::new1(OpCode::SupervisorWorker, dst));
             }
             mir::RValue::SupervisorRun { id, task } => {
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*task), SCRATCH0 + 1));
+            let _rid = self.local_reg(*id);
+                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
+            let _rtask = self.local_reg(*task);
+                self.emit(Instruction::new2(OpCode::Move, _rtask, SCRATCH0 + 1));
                 self.emit(Instruction::new1(OpCode::SupervisorRun, dst));
             }
             mir::RValue::DebateNew {
@@ -957,15 +1054,18 @@ impl MirCodegen {
                 rounds,
                 threshold,
             } => {
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*topic), SCRATCH0));
+            let _rtopic = self.local_reg(*topic);
+                self.emit(Instruction::new2(OpCode::Move, _rtopic, SCRATCH0));
+            let _rrounds = self.local_reg(*rounds);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*rounds),
+                    _rrounds,
                     SCRATCH0 + 1,
                 ));
+            let _rthreshold = self.local_reg(*threshold);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*threshold),
+                    _rthreshold,
                     SCRATCH0 + 2,
                 ));
                 self.emit(Instruction::new1(OpCode::DebateNew, dst));
@@ -976,22 +1076,27 @@ impl MirCodegen {
                 stance,
                 actor,
             } => {
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*name), SCRATCH0 + 1));
+            let _rid = self.local_reg(*id);
+                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
+            let _rname = self.local_reg(*name);
+                self.emit(Instruction::new2(OpCode::Move, _rname, SCRATCH0 + 1));
+            let _rstance = self.local_reg(*stance);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*stance),
+                    _rstance,
                     SCRATCH0 + 2,
                 ));
+            let _ractor = self.local_reg(*actor);
                 self.emit(Instruction::new2(
                     OpCode::Move,
-                    reg_of(*actor),
+                    _ractor,
                     SCRATCH0 + 3,
                 ));
                 self.emit(Instruction::new1(OpCode::DebateParticipant, dst));
             }
             mir::RValue::DebateRun { id } => {
-                self.emit(Instruction::new2(OpCode::Move, reg_of(*id), SCRATCH0));
+            let _rid = self.local_reg(*id);
+                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
                 self.emit(Instruction::new1(OpCode::DebateRun, dst));
             }
         }
@@ -1008,7 +1113,8 @@ impl MirCodegen {
         match term {
             mir::Terminator::Return(val) => match val {
                 Some(id) => {
-                    self.emit(Instruction::new1(OpCode::RetVal, reg_of(*id)));
+            let _rid = self.local_reg(*id);
+                    self.emit(Instruction::new1(OpCode::RetVal, _rid));
                 }
                 None => {
                     self.emit(Instruction::new1(OpCode::Const0, SCRATCH0));
@@ -1034,7 +1140,7 @@ impl MirCodegen {
                 }
             }
             mir::Terminator::Branch { cond, then_, else_ } => {
-                let cond_reg = reg_of(*cond);
+                let cond_reg = self.local_reg(*cond);
 
                 // JmpF to else_ when the condition is false.
                 let jmpf_idx = self.module.instructions.len();
@@ -1074,7 +1180,8 @@ impl MirCodegen {
                 }
             }
             mir::Terminator::Resume(id) => {
-                self.emit(Instruction::new1(OpCode::Resume, reg_of(*id)));
+            let _rid = self.local_reg(*id);
+                self.emit(Instruction::new1(OpCode::Resume, _rid));
             }
             mir::Terminator::Unterminated => {
                 return Err(compile_err(format!(
@@ -1135,225 +1242,6 @@ impl MirCodegen {
 }
 
 // ---------------------------------------------------------------------------
-// Register spilling helpers
-// ---------------------------------------------------------------------------
-// Functions with more locals than fit in the register file (rLOCAL_BASE..253)
-// spill excess locals into the frame's spilled: Vec<Value>.  The spill
-// rewriting pass below replaces direct register references with SpillLoad/
-// SpillStore sequences through r12..r14 (SPILL_TEMP / SPILL_TEMP2 / SPILL_TEMP3).
-
-
-fn emit_spill_load(slot: u16, dst: u8) -> Instruction {
-    Instruction::new3(OpCode::SpillLoad, (slot >> 8) as u8, (slot & 0xFF) as u8, dst)
-}
-
-fn emit_spill_store(src: u8, slot: u16) -> Instruction {
-    Instruction::new3(OpCode::SpillStore, src, (slot >> 8) as u8, (slot & 0xFF) as u8)
-}
-
-/// Post-processing pass: rewrite instructions that reference spilled
-/// locals into SpillLoad/SpillStore sequences using scratch registers.
-///
-/// Operand semantics (default for most opcodes):
-///   op1 = write(dst), op2 = read, op3 = read
-///
-/// Exceptions handled:
-///   Move: op1 = src(read), op2 = dst(write)
-///   Call: op1 = func(read), op3 = dst(write)  (op2 = argc, not a register)
-///   CapLoad: op1 = cap_idx(not a register), op2 = dst(write)
-///
-/// Skipped entirely (not spilled-aware):
-///   Jmp, JmpT, JmpF, Switch, Ret, Resume,
-///   SpillLoad, SpillStore, Handle, Perform, Send, Ask, Spawn
-///
-/// Handled specially:
-///   RetVal: op1 = return value (read) — SpillLoad before if needed
-///   Const0/1/2/M1: op1 = dst (write) — SpillStore after if needed
-///   ConstU/ConstL: op3 = dst (write) — SpillStore after if needed
-fn spill_rewrite_instructions(
-    instructions: &[Instruction],
-    spill_map: &FxHashMap<u32, u16>,
-) -> Vec<Instruction> {
-    let mut out = Vec::with_capacity(instructions.len() * 3 / 2);
-
-    for instr in instructions {
-        let op = instr.opcode;
-
-        // Skip control flow and special opcodes whose operands
-        // are not general-purpose registers.
-        if matches!(
-            op,
-            OpCode::Jmp
-                | OpCode::JmpT
-                | OpCode::JmpF
-                | OpCode::Switch
-                | OpCode::Ret
-                | OpCode::Resume
-                | OpCode::SpillLoad
-                | OpCode::SpillStore
-                | OpCode::Handle
-                | OpCode::Perform
-                | OpCode::Send
-                | OpCode::Ask
-                | OpCode::Spawn
-        ) {
-            out.push(*instr);
-            continue;
-        }
-
-        // RetVal: op1 = return value (read).  Load from spill slot if needed.
-        if op == OpCode::RetVal {
-            if let Some(slot) = find_spill_slot_for_reg(spill_map, instr.op1) {
-                out.push(emit_spill_load(slot, SPILL_TEMP));
-                out.push(Instruction::new1(OpCode::RetVal, SPILL_TEMP));
-            } else {
-                out.push(*instr);
-            }
-            continue;
-        }
-
-        // Const0/Const1/Const2/ConstM1: op1 = dst (write).
-        if op == OpCode::Const0 || op == OpCode::Const1
-            || op == OpCode::Const2 || op == OpCode::ConstM1
-        {
-            let dst_reg = instr.op1;
-            if let Some(slot) = find_spill_slot_for_reg(spill_map, dst_reg) {
-                out.push(Instruction::new1(op, SPILL_TEMP));
-                out.push(emit_spill_store(SPILL_TEMP, slot));
-            } else {
-                out.push(*instr);
-            }
-            continue;
-        }
-
-        // ConstU/ConstL: op1:op2 = constant index, op3 = dst (write).
-        if op == OpCode::ConstU || op == OpCode::ConstL {
-            let dst_reg = instr.op3;
-            if let Some(slot) = find_spill_slot_for_reg(spill_map, dst_reg) {
-                out.push(Instruction::new3(op, instr.op1, instr.op2, SPILL_TEMP));
-                out.push(emit_spill_store(SPILL_TEMP, slot));
-            } else {
-                out.push(*instr);
-            }
-            continue;
-        }
-
-        // Move: op1 = src(read), op2 = dst(write), op3 = unused
-        if op == OpCode::Move {
-            let mut new_instr = *instr;
-            let src_reg = instr.op1;
-            let dst_reg = instr.op2;
-
-            // Check if a spilled local maps to src_reg or dst_reg by
-            // reverse-lookup in the spill map.  Since reg_of wraps for
-            // spilled locals, we match any register that appears in the
-            // normal (non-spilled) range only — spilled locals are >= 254
-            // which wraps, so we check the local-id → register mapping.
-            // Actually, we reverse the computation: local_id → slot.
-            // The register in the instruction may have wrapped, so we
-            // can't reliably map back to a local_id.  Instead, we rely
-            // on the fact that all locals mapped to the core range r15..r253
-            // are NOT spilled, and every other register value is impossible.
-            //
-            // Pragmatic approach: scan spill_map entries and check if
-            // reg_of(local_id) (wrapping) matches the instruction operand.
-            // This is O(spilled_locals) per instruction — fine for our scale.
-
-            let src_spilled = find_spill_slot_for_reg(spill_map, src_reg);
-            let dst_spilled = find_spill_slot_for_reg(spill_map, dst_reg);
-
-            // Load spilled source into SPILL_TEMP before the Move.
-            if let Some(slot) = src_spilled {
-                out.push(emit_spill_load(slot, SPILL_TEMP));
-                new_instr.op1 = SPILL_TEMP;
-            }
-
-            // Store destination into spill slot after the Move.
-            if let Some(slot) = dst_spilled {
-                new_instr.op2 = SPILL_TEMP2;
-                out.push(new_instr);
-                out.push(emit_spill_store(SPILL_TEMP2, slot));
-            } else {
-                out.push(new_instr);
-            }
-            continue;
-        }
-
-        // Call: op1 = func(read), op2 = argc, op3 = dst(write)
-        // Only handle the destination spill at op3.
-        if op == OpCode::Call {
-            let dst_reg = instr.op3;
-            if let Some(slot) = find_spill_slot_for_reg(spill_map, dst_reg) {
-                let mut new_instr = *instr;
-                new_instr.op3 = SPILL_TEMP;
-                out.push(new_instr);
-                out.push(emit_spill_store(SPILL_TEMP, slot));
-            } else {
-                out.push(*instr);
-            }
-            continue;
-        }
-
-        // CapLoad: op1 = cap_idx (not a register), op2 = dst(write)
-        if op == OpCode::CapLoad {
-            let dst_reg = instr.op2;
-            if let Some(slot) = find_spill_slot_for_reg(spill_map, dst_reg) {
-                let mut new_instr = *instr;
-                new_instr.op2 = SPILL_TEMP2;
-                out.push(new_instr);
-                out.push(emit_spill_store(SPILL_TEMP2, slot));
-            } else {
-                out.push(*instr);
-            }
-            continue;
-        }
-
-        // Default case: op1 = write, op2 = read, op3 = read
-        {
-            let mut new_instr = *instr;
-
-            // op2 (read): emit SpillLoad before, replace with SPILL_TEMP2
-            if let Some(slot) = find_spill_slot_for_reg(spill_map, instr.op2) {
-                out.push(emit_spill_load(slot, SPILL_TEMP2));
-                new_instr.op2 = SPILL_TEMP2;
-            }
-
-            // op3 (read): emit SpillLoad before, replace with SPILL_TEMP3
-            if let Some(slot) = find_spill_slot_for_reg(spill_map, instr.op3) {
-                out.push(emit_spill_load(slot, SPILL_TEMP3));
-                new_instr.op3 = SPILL_TEMP3;
-            }
-
-            // op1 (write): replace with SPILL_TEMP, emit SpillStore after
-            if let Some(slot) = find_spill_slot_for_reg(spill_map, instr.op1) {
-                new_instr.op1 = SPILL_TEMP;
-                out.push(new_instr);
-                out.push(emit_spill_store(SPILL_TEMP, slot));
-            } else {
-                out.push(new_instr);
-            }
-        }
-    }
-
-    out
-}
-
-/// Given a register value (possibly wrapping for spilled locals), return the
-/// spill slot if this register corresponds to a spilled local.
-fn find_spill_slot_for_reg(spill_map: &FxHashMap<u32, u16>, reg: u8) -> Option<u16> {
-    for (&local_id, &slot) in spill_map {
-        // reg_of wraps: (LOCAL_BASE + local_id) as u8
-        let mapped = (LOCAL_BASE + local_id) as u8;
-        if mapped == reg {
-            return Some(slot);
-        }
-    }
-    None
-}
-
-fn reg_of(id: mir::LocalId) -> u8 {
-    (LOCAL_BASE + id.0) as u8
-}
 
 fn binary_opcode(op: &crate::ast::BinOp, is_float: bool) -> NuResult<OpCode> {
     use crate::ast::BinOp;
