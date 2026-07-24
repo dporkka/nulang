@@ -61,14 +61,15 @@ fn prec_of(c: Int) -> Int {
 }
 
 fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: Int, e1: Int, elen: Int) -> Int {
-    let pair = if left == 0 then {
+    let no_left = 1 << 40;
+    let pair = if left == no_left then {
         let p = skip_ws(src, pos, len);
         if p >= len then (0 << 16) + p
         else {
             let c = perform String.charAt(src, p);
             if is_digit(c) then read_int(src, p, len, 0)
             else if c == 40 then {
-                let inner = parse_pratt(src, p + 1, len, 0, 0, e0, e1, elen);
+                let inner = parse_pratt(src, p + 1, len, no_left, 0, e0, e1, elen);
                 let v = inner >> 16;
                 let q = inner & 0xFFFF;
                 let q2 = skip_ws(src, q, len);
@@ -90,7 +91,7 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                     if q4 < len then {
                         let c3 = perform String.charAt(src, q4);
                         if c3 == 61 then {
-                            let bound = parse_pratt(src, q4 + 1, len, 0, 0, e0, e1, elen);
+                            let bound = parse_pratt(src, q4 + 1, len, no_left, 0, e0, e1, elen);
                             let bv = bound >> 16;
                             let bp = bound & 0xFFFF;
                             let bp2 = skip_ws(src, bp, len);
@@ -100,9 +101,9 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                                 if ci == 105 and cn == 110 then {
                                     let entry = (vh << 32) + bv;
                                     if elen == 0 then {
-                                        parse_pratt(src, bp2 + 2, len, 0, 0, entry, e1, 1)
+                                        parse_pratt(src, bp2 + 2, len, no_left, 0, entry, e1, 1)
                                     } else {
-                                        parse_pratt(src, bp2 + 2, len, 0, 0, e0, entry, 2)
+                                        parse_pratt(src, bp2 + 2, len, no_left, 0, e0, entry, 2)
                                     }
                                 } else (bv << 16) + bp2
                             } else (bv << 16) + bp2
@@ -133,7 +134,7 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                                         let c4 = perform String.charAt(src, q6 + 1);
                                         if c3 == 61 and c4 == 62 then {
                                             let body_start = q6 + 2;
-                                            let body_parsed = parse_pratt(src, body_start, len, 0, 0, e0, e1, elen);
+                                            let body_parsed = parse_pratt(src, body_start, len, no_left, 0, e0, e1, elen);
                                             let body_end = body_parsed & 0xFFFF;
                                             let flag = 1 << 30;
                                             let enc = flag + (ph << 23) + (((body_start & 0x7F) << 16));
@@ -170,7 +171,7 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
     else {
         let c = perform String.charAt(src, p);
         if c == 40 then {
-            let arg = parse_pratt(src, p + 1, len, 0, 0, e0, e1, elen);
+            let arg = parse_pratt(src, p + 1, len, no_left, 0, e0, e1, elen);
             let av = arg >> 16;
             let ap = arg & 0xFFFF;
             let ap2 = skip_ws(src, ap, len);
@@ -184,10 +185,10 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                         let cap_v = lv & 0xFF;
                         let entry_param = (ph << 32) + av;
                         if cap_h == 0 then {
-                            parse_pratt(src, bs, len, 0, 0, entry_param, 0, 1)
+                            parse_pratt(src, bs, len, no_left, 0, entry_param, 0, 1)
                         } else {
                             let entry_cap = (cap_h << 32) + cap_v;
-                            parse_pratt(src, bs, len, 0, 0, entry_cap, entry_param, 2)
+                            parse_pratt(src, bs, len, no_left, 0, entry_cap, entry_param, 2)
                         }
                     } else {
                         (lv << 16) + ap2
@@ -200,7 +201,7 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
             let prec = prec_of(c);
             if prec == 0 or prec < min_prec then pair
             else {
-                let rhs = parse_pratt(src, p + 1, len, 0, prec, e0, e1, elen);
+                let rhs = parse_pratt(src, p + 1, len, no_left, prec, e0, e1, elen);
                 let rv = rhs >> 16;
                 let rp = rhs & 0xFFFF;
                 let result = if c == 43 then lv + rv
@@ -217,7 +218,7 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
 
 fn parse(src: String) -> Int {
     let len = perform String.length(src);
-    let result = parse_pratt(src, 0, len, 0, 0, 0, 0, 0);
+    let result = parse_pratt(src, 0, len, 1 << 40, 0, 0, 0, 0);
     result >> 16
 }
 
