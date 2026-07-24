@@ -223,6 +223,51 @@ impl HttpProvider for ReqwestHttpProvider {
 pub trait Transport: crate::runtime::NetworkTransport {}
 impl<T: crate::runtime::NetworkTransport> Transport for T {}
 
+// ---------------------------------------------------------------------------
+// Crypto provider — the interface for cryptographic operations
+// ---------------------------------------------------------------------------
+
+/// A crypto provider supplies hashing, secure random, and optional signing.
+/// The default implementation uses BLAKE3 + `getrandom` + `ed25519-dalek`
+/// (`src/runtime/identity.rs`). A future runtime could implement this with
+/// a hardware security module, a different hash function, or whatever
+/// cryptographic primitives exist in 2125.
+pub trait CryptoProvider: Send + Sync {
+    /// Compute the BLAKE3-256 hash of `data`.
+    /// (The algorithm is BLAKE3, not SHA-256 — the output length is 32 bytes.)
+    fn hash(&self, data: &[u8]) -> [u8; 32];
+
+    /// Fill `buf` with cryptographically secure random bytes.
+    fn random_bytes(&self, buf: &mut [u8]);
+
+    /// Sign `message` with the node's Ed25519 private key.
+    /// Returns the 64-byte signature, or `None` if no key is configured.
+    fn sign(&self, message: &[u8]) -> Option<[u8; 64]>;
+
+    /// Verify an Ed25519 signature.  `public_key` is 32 bytes, `signature`
+    /// is 64 bytes.  Returns `true` iff the signature is valid.
+    fn verify(&self, public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool;
+}
+
+// ---------------------------------------------------------------------------
+// Foreign-interop backend — the interface for calling foreign code
+// ---------------------------------------------------------------------------
+
+/// A foreign-interop backend bridges the Nulang VM to an external language
+/// runtime.  The default implementation uses PyO3 for Python interop
+/// (`src/python/`, feature `python`).  A future runtime could implement
+/// this with a JavaScript engine, a WASM component model host, or whatever
+/// foreign runtime exists in 2125.
+pub trait ForeignInterop: Send {
+    /// Call a named foreign function with the given arguments.
+    /// Returns the marshalled result on success, or an error string.
+    fn call(&mut self, module: &str, function: &str, args: &[Value]) -> Result<Value, String>;
+
+    /// Import a foreign module, making its exports available via `call`.
+    /// Returns an error string if the module cannot be loaded.
+    fn import(&mut self, name: &str) -> Result<(), String>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

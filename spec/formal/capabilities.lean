@@ -192,24 +192,26 @@ theorem join_idem : ∀ a : Cap, join a a = a := by
 
 /--
   **Theorem: Sendable Capabilities are Safe for Actor Boundaries**
+
   If the runtime permits a value `v : τ @ cap` to cross an actor
-  boundary, then `cap ≤ Val` (i.e., `is_sendable cap`).
+  boundary (`is_sendable cap = true`), then either:
+  1. `cap ≤ Val` (value semantics — immutable, alias-tracked), or
+  2. `cap = Tag` (tagged pointer — safe to copy, no dereference).
+
   A value whose capability is `Iso`, `Trn`, or `Ref` must NOT cross
   an actor boundary — the capability lattice forbids it.
+
+  **Divergence note (2026-07):** The original statement
+  `∀ cap, is_sendable cap → le cap .Val` is **false** for `cap = Tag`:
+  `is_sendable Tag = true` but `le Tag Val = false`.  `Tag` is
+  sendable because tagged pointers carry no ownership and can be
+  safely copied across actor boundaries without dereferencing, but
+  `Tag` is not a subtype of `Val` in the lattice (it sits at the
+  bottom, not below `Val`).  The corrected statement uses a
+  disjunction to capture both cases.
 -/
-theorem cap_sendable : ∀ (cap : Cap), is_sendable cap → le cap .Val := by
+theorem cap_sendable : ∀ (cap : Cap), is_sendable cap = true → (le cap .Val = true ∨ cap = .Tag) := by
   intro cap h
-  -- The proof reduces to checking each of the 8 capability cases.
-  -- is_sendable matches LinearIso, Linear, Val, Tag.
-  -- le LinearIso Val = true (by join table).
-  -- le Linear Val = true (by join table).
-  -- le Val Val = true (idempotence).
-  -- le Tag Val = false — but is_sendable Tag is true and le Tag Val is false.
-  -- This is a known divergence: `is_sendable` includes `Tag` because
-  -- tagged pointers are safe to send (no dereference), but `le Tag Val`
-  -- is false in the lattice. The actual guarantee is weaker:
-  -- `is_tagged_or_val` is sufficient for sendability. The theorem
-  -- statement needs refinement to match the implementation.
   sorry
 
 /--
@@ -221,5 +223,141 @@ theorem discharge_sendable : ∀ (cap : Cap), is_sendable cap → is_sendable (d
   sorry
 
 end Cap
+
+-- ==================================================================
+-- CAPABILITY-ANNOTATED TYPING JUDGMENT  Γ ⊢ e : τ @ cap
+-- ==================================================================
+
+/--
+  Capability-aware context: each binding carries a type and a
+  capability.  Extends the base `Context` from `types.lean` with
+  capability annotations.  In a full implementation, `Scheme` would
+  also carry capability parameters; here we keep the capability
+  explicit in the binding for clarity.
+-/
+abbrev CapContext := List (Name × Ty × Cap)
+
+/-- Look up a variable in the capability context. -/
+def CapContext.lookup (Γ : CapContext) (x : Name) : Option (Ty × Cap) :=
+  match Γ with
+  | [] => none
+  | (y, τ, c) :: rest => if x == y then some (τ, c) else rest.lookup x
+
+/-- The empty capability context. -/
+def CapContext.empty : CapContext := []
+
+-- ------------------------------------------------------------------
+-- Typing rules
+-- ------------------------------------------------------------------
+
+/--
+  `HasTypeCap Γ e τ cap` — in context `Γ`, expression `e` has type `τ`
+  with capability `cap`.
+
+  Rules:
+  - `tVar`:       variable lookup, capability from binding
+  - `tLit{Int,Bool,String}`: literals are always `Val` (sendable, immutable)
+  - `tLambda`:    closures are `Val` (sendable, immutable reference)
+  - `tApp`:       application joins function and argument capabilities
+  - `tLet`:       let-binding propagates the body's capability
+  - `tIf`:        conditional joins branch capabilities
+  - `tSend`:      send requires sendable capability (hypothetical — needs Expr.send)
+  - `tSpawn`:     spawned actor ref is `Tag` (hypothetical — needs Expr.spawn)
+
+  The judgment mirrors `HasType` from `types.lean` but adds capability
+  propagation through join at merge points and capability checks at
+  actor boundaries.
+-/
+inductive HasTypeCap : CapContext → Expr → Ty → Cap → Prop where
+
+-- ** Variable **
+| tVar : ∀ {Γ x τ cap},
+    Γ.lookup x = some (τ, cap) →
+    HasTypeCap Γ (.var x) τ cap
+
+-- ** Literals **
+| tLitInt : ∀ {Γ n},
+    HasTypeCap Γ (.litInt n) .int .Val
+| tLitBool : ∀ {Γ b},
+    HasTypeCap Γ (.litBool b) .bool .Val
+| tLitString : ∀ {Γ s},
+    HasTypeCap Γ (.litString s) .string .Val
+
+-- ** Lambda (closures are Val — safe to send) **
+| tLambda : ∀ {Γ x τ₁ e τ₂ cap₁ cap₂},
+    HasTypeCap ((x, τ₁, cap₁) :: Γ) e τ₂ cap₂ →
+    HasTypeCap Γ (.lambda x τ₁ e) (.fn τ₁ τ₂) .Val
+
+-- ** Application (join capabilities of function and argument) **
+| tApp : ∀ {Γ e₁ e₂ τ₁ τ₂ cap₁ cap₂},
+    HasTypeCap Γ e₁ (.fn τ₂ τ₁) cap₁ →
+    HasTypeCap Γ e₂ τ₂ cap₂ →
+    HasTypeCap Γ (.app e₁ e₂) τ₁ (Cap.join cap₁ cap₂)
+
+-- ** Let (generalize bound type, propagate body capability) **
+| tLet : ∀ {Γ x e₁ e₂ τ₁ τ₂ cap₁ cap₂},
+    HasTypeCap Γ e₁ τ₁ cap₁ →
+    HasTypeCap ((x, τ₁, cap₁) :: Γ) e₂ τ₂ cap₂ →
+    HasTypeCap Γ (.letIn x e₁ e₂) τ₂ cap₂
+
+-- ** If (join branch capabilities at merge point) **
+| tIf : ∀ {Γ e₁ e₂ e₃ τ cap₁ cap₂ cap₃},
+    HasTypeCap Γ e₁ .bool cap₁ →
+    HasTypeCap Γ e₂ τ cap₂ →
+    HasTypeCap Γ e₃ τ cap₃ →
+    HasTypeCap Γ (.ifThenElse e₁ e₂ e₃) τ (Cap.join cap₂ cap₃)
+
+-- ** Send: message crossing actor boundary requires sendability **
+-- Note: `Expr` does not yet have a `send` constructor.  This rule is
+-- stated for the capability discipline completeness and would take
+-- `Expr.send e` as its subject when `Expr` is extended.
+| tSend : ∀ {Γ e τ cap},
+    HasTypeCap Γ e τ cap →
+    Cap.is_sendable cap = true →
+    HasTypeCap Γ e τ cap
+
+-- ** Spawn: spawned actor reference is always Tag (sendable) **
+-- Note: `Expr` does not yet have a `spawn` constructor.  When added,
+-- this rule would type `spawn { e }` at some actor type with `Tag`.
+| tSpawn : ∀ {Γ e τ cap},
+    HasTypeCap Γ e τ cap →
+    HasTypeCap Γ e τ .Tag
+
+-- ==================================================================
+-- LINEAR-ISO CONSUMPTION TRACKING
+-- ==================================================================
+
+/--
+  `consumed Γ x` holds iff `x` is not present in the capability
+  context `Γ`.  In the full linear typing discipline (which refines
+  `HasTypeCap` to track input *and output* contexts), a linear
+  binding (`LinearIso` or `Linear`) is removed from the output
+  context after its single use.  `consumed` checks that removal.
+
+  At merge points (if/else branches), both paths must produce the
+  same output context — i.e., both consume the same linear bindings.
+-/
+def consumed (Γ : CapContext) (x : Name) : Bool :=
+  Γ.lookup x == none
+
+/--
+  **Theorem: Linear bindings are consumed at most once.**
+
+  If `x` is bound with a linear capability (`LinearIso`) in the
+  initial context and a term `e` is well-typed under that context,
+  then `x` is consumed — it does not persist in the context for
+  further use.  This enforces the "use exactly once" discipline for
+  linear capabilities.
+
+  The theorem requires the full context-splitting semantics (input/
+  output context pairs) that a production linear type system would
+  carry.  In the simplified single-context `HasTypeCap` judgment
+  above, the statement is aspirational and the proof is open.
+-/
+theorem linear_at_most_once : ∀ (Γ : CapContext) (x : Name) (τ : Ty) (e : Expr) (τ' : Ty) (cap : Cap),
+    HasTypeCap ((x, τ, .LinearIso) :: Γ) e τ' cap →
+    consumed Γ x = true := by
+  intro Γ x τ e τ' cap h
+  sorry
 
 end Nulang
