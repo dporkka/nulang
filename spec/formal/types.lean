@@ -309,6 +309,12 @@ inductive HasType : Context → Expr → Ty → Prop where
     HasType Γ e₁ .bool →
     HasType Γ e₂ .bool →
     HasType Γ (.binOp op e₁ e₂) .bool
+| tStrConcat : ∀ {Γ e₁ e₂},
+    HasType Γ e₁ .string →
+    HasType Γ e₂ .string →
+    HasType Γ (.strConcat e₁ e₂) .string
+| tUnit : ∀ {Γ},
+    HasType Γ .unitVal (.prim .Unit)
 
 -- ==================================================================
 -- SMALL-STEP OPERATIONAL SEMANTICS  e ↦ e'
@@ -458,7 +464,7 @@ inductive Steps : Expr → Expr → Prop where
 theorem weakening {Γ : Context} {x : Name} {σ : Scheme} {e : Expr} {τ : Ty}
     (h : HasType Γ e τ) :
     HasType ((x, σ) :: Γ) e τ := by
-  induction h with
+  induction h using HasType.rec_on_ctx with
   | tVar Γ' y τ' σ' hlookup hinst =>
       apply HasType.tVar
       · unfold Context.lookup
@@ -485,11 +491,11 @@ theorem weakening {Γ : Context} {x : Name} {σ : Scheme} {e : Expr} {τ : Ty}
         simpa using ih₂
   | tIf Γ' e₁ e₂ e₃ τ' hc ihc ht iht he ihe =>
       apply HasType.tIf <;> assumption
-  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ =>
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
       apply HasType.tBinOpIntArith hop <;> assumption
-  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ =>
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
       apply HasType.tBinOpIntCmp hop <;> assumption
-  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ =>
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
       apply HasType.tBinOpBoolLogic hop <;> assumption
   | tStrConcat Γ' e₁ e₂ h₁ ih₁ h₂ ih₂ =>
       apply HasType.tStrConcat <;> assumption
@@ -529,7 +535,7 @@ theorem context_drop_shadowed {Γ : Context} {x : Name} {σ σ' : Scheme} {e : E
     (h_sigma : σ.body.fv ⊆ ((x, σ') :: Γ).freeTypeVars)
     (h : HasType ((x, σ') :: (x, σ) :: Γ) e τ) :
     HasType ((x, σ') :: Γ) e τ := by
-  induction h with
+  induction h using HasType.rec_on_ctx with
   | tVar Γ' y τ' s hlookup hinst =>
       apply HasType.tVar
       · unfold Context.lookup
@@ -559,15 +565,86 @@ theorem context_drop_shadowed {Γ : Context} {x : Name} {σ σ' : Scheme} {e : E
         simpa [h_scheme_eq] using ih₂
   | tIf Γ' e₁ e₂ e₃ τ' hc ihc ht iht he ihe =>
       apply HasType.tIf <;> assumption
-  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ =>
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
       apply HasType.tBinOpIntArith hop <;> assumption
-  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ =>
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
       apply HasType.tBinOpIntCmp hop <;> assumption
-  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ =>
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
       apply HasType.tBinOpBoolLogic hop <;> assumption
   | tStrConcat Γ' e₁ e₂ h₁ ih₁ h₂ ih₂ =>
       apply HasType.tStrConcat <;> assumption
   | tUnit Γ' => apply HasType.tUnit
+
+/--
+  **Custom induction principle for `HasType`.**
+
+  Provides explicit `Γ` parameters for each case handler, ensuring
+  compatibility with Lean 4.32.1 where `induction h with | tApp Γ' ... =>`
+  may not bind the implicit context parameter.
+
+  Use `induction h using HasType.rec_on_ctx` instead of `induction h with`.
+-/
+theorem HasType.rec_on_ctx {motive : Context → Expr → Ty → Prop}
+    (tVar : ∀ (Γ : Context) (x : Name) (τ : Ty) (σ : Scheme),
+      Γ.lookup x = some σ → (σ.instantiate defaultFresh).1 = τ →
+      motive Γ (.var x) τ)
+    (tLitInt : ∀ (Γ : Context) (n : Int), motive Γ (.litInt n) .int)
+    (tLitBool : ∀ (Γ : Context) (b : Bool), motive Γ (.litBool b) .bool)
+    (tLitString : ∀ (Γ : Context) (s : String), motive Γ (.litString s) .string)
+    (tLambda : ∀ (Γ : Context) (x : Name) (τ₁ : Ty) (e : Expr) (τ₂ : Ty),
+      HasType ((x, ⟨[], τ₁⟩) :: Γ) e τ₂ →
+      motive ((x, ⟨[], τ₁⟩) :: Γ) e τ₂ →
+      motive Γ (.lambda x τ₁ e) (.fn τ₁ τ₂))
+    (tApp : ∀ (Γ : Context) (e₁ e₂ : Expr) (τ₁ τ₂ : Ty),
+      HasType Γ e₁ (.fn τ₂ τ₁) → HasType Γ e₂ τ₂ →
+      motive Γ e₁ (.fn τ₂ τ₁) → motive Γ e₂ τ₂ →
+      motive Γ (.app e₁ e₂) τ₁)
+    (tLet : ∀ (Γ : Context) (x : Name) (e₁ e₂ : Expr) (τ₁ τ₂ : Ty),
+      HasType Γ e₁ τ₁ →
+      HasType ((x, Scheme.generalize (Context.freeTypeVars Γ) τ₁) :: Γ) e₂ τ₂ →
+      motive Γ e₁ τ₁ →
+      motive ((x, Scheme.generalize (Context.freeTypeVars Γ) τ₁) :: Γ) e₂ τ₂ →
+      motive Γ (.letIn x e₁ e₂) τ₂)
+    (tIf : ∀ (Γ : Context) (e₁ e₂ e₃ : Expr) (τ : Ty),
+      HasType Γ e₁ .bool → HasType Γ e₂ τ → HasType Γ e₃ τ →
+      motive Γ e₁ .bool → motive Γ e₂ τ → motive Γ e₃ τ →
+      motive Γ (.ifThenElse e₁ e₂ e₃) τ)
+    (tBinOpIntArith : ∀ (Γ : Context) (op : BinOp) (e₁ e₂ : Expr),
+      op ∈ [.add, .sub, .mul, .div, .mod] →
+      HasType Γ e₁ .int → HasType Γ e₂ .int →
+      motive Γ e₁ .int → motive Γ e₂ .int →
+      motive Γ (.binOp op e₁ e₂) .int)
+    (tBinOpIntCmp : ∀ (Γ : Context) (op : BinOp) (e₁ e₂ : Expr),
+      op ∈ [.eq, .neq, .lt, .le, .gt, .ge] →
+      HasType Γ e₁ .int → HasType Γ e₂ .int →
+      motive Γ e₁ .int → motive Γ e₂ .int →
+      motive Γ (.binOp op e₁ e₂) .bool)
+    (tBinOpBoolLogic : ∀ (Γ : Context) (op : BinOp) (e₁ e₂ : Expr),
+      op ∈ [.and, .or] →
+      HasType Γ e₁ .bool → HasType Γ e₂ .bool →
+      motive Γ e₁ .bool → motive Γ e₂ .bool →
+      motive Γ (.binOp op e₁ e₂) .bool)
+    (tStrConcat : ∀ (Γ : Context) (e₁ e₂ : Expr),
+      HasType Γ e₁ .string → HasType Γ e₂ .string →
+      motive Γ e₁ .string → motive Γ e₂ .string →
+      motive Γ (.strConcat e₁ e₂) .string)
+    (tUnit : ∀ (Γ : Context), motive Γ .unitVal (.prim .Unit))
+    {Γ : Context} {e : Expr} {τ : Ty} (h : HasType Γ e τ) : motive Γ e τ := by
+  refine HasType.rec (motive := λ Γ' e' τ' _ => motive Γ' e' τ')
+    (fun Γ' x τ σ hlookup hinst => tVar Γ' x τ σ hlookup hinst)
+    (fun Γ' n => tLitInt Γ' n)
+    (fun Γ' b => tLitBool Γ' b)
+    (fun Γ' s => tLitString Γ' s)
+    (fun Γ' x τ₁ e' τ₂ h_body ih => tLambda Γ' x τ₁ e' τ₂ h_body ih)
+    (fun Γ' e₁ e₂ τ₁ τ₂ h₁ ih₁ h₂ ih₂ => tApp Γ' e₁ e₂ τ₁ τ₂ h₁ h₂ ih₁ ih₂)
+    (fun Γ' x e₁ e₂ τ₁ τ₂ h₁ ih₁ h₂ ih₂ => tLet Γ' x e₁ e₂ τ₁ τ₂ h₁ h₂ ih₁ ih₂)
+    (fun Γ' e₁ e₂ e₃ τ hc ihc ht iht he ihe => tIf Γ' e₁ e₂ e₃ τ hc ht he ihc iht ihe)
+    (fun Γ' op e₁ e₂ hop h₁ ih₁ h₂ ih₂ => tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂)
+    (fun Γ' op e₁ e₂ hop h₁ ih₁ h₂ ih₂ => tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂)
+    (fun Γ' op e₁ e₂ hop h₁ ih₁ h₂ ih₂ => tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂)
+    (fun Γ' e₁ e₂ h₁ ih₁ h₂ ih₂ => tStrConcat Γ' e₁ e₂ h₁ h₂ ih₁ ih₂)
+    (fun Γ' => tUnit Γ')
+    h
 
 /-- All type annotations in an expression are closed (no free type variables). -/
 def annotationsClosed : Expr → Prop
@@ -620,7 +697,7 @@ lemma closed_type_under_closed_context {Γ : Context} {e : Expr} {τ : Ty}
     (h_params : ∀ (x : Name) (σ : Scheme), Γ.lookup x = some σ → σ.params = [])
     (h_closed : annotationsClosed e) :
     τ.fv = [] := by
-  induction h with
+  induction h using HasType.rec_on_ctx with
   | tVar Γ' x τ' σ' hlookup hinst =>
       have h_empty_params : σ'.params = [] := h_params x σ' hlookup
       have h_body_fv : σ'.body.fv = [] := by
@@ -683,11 +760,10 @@ lemma closed_type_under_closed_context {Γ : Context} {e : Expr} {τ : Ty}
   | tIf Γ' e₁ e₂ e₃ τ' hc ihc ht iht he ihe =>
       rcases h_closed with ⟨_, he₂_closed, _⟩
       exact iht hΓ h_params he₂_closed
-  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ => rfl
-  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ => rfl
-  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ => rfl
-  | tStrConcat Γ' e₁ e₂ h₁ ih₁ h₂ ih₂ =>
-      rfl
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ => rfl
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ => rfl
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ => rfl
+  | tStrConcat Γ' e₁ e₂ h₁ ih₁ h₂ ih₂ => rfl
   | tUnit Γ' => rfl
 
 /--
@@ -755,7 +831,7 @@ theorem substitution_lemma {Γ : Context} {x : Name} {τ₁ τ₂ : Ty} {e v : E
     (hv : HasType Γ v τ₁)
     (h_fv : τ₁.fv = []) :
     HasType Γ (subst x v e) τ₂ := by
-  induction h with
+  induction h using HasType.rec_on_ctx with
   | tVar Γ' y τ σ hlookup hinst =>
       unfold subst
       by_cases h_eq : y = x
@@ -848,17 +924,17 @@ theorem substitution_lemma {Γ : Context} {x : Name} {τ₁ τ₂ : Ty} {e v : E
       · exact ihc
       · exact iht
       · exact ihe
-  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ =>
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
       unfold subst
       apply HasType.tBinOpIntArith hop
       · exact substitution_lemma h₁ hv h_fv
       · exact substitution_lemma h₂ hv h_fv
-  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ =>
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
       unfold subst
       apply HasType.tBinOpIntCmp hop
       · exact substitution_lemma h₁ hv h_fv
       · exact substitution_lemma h₂ hv h_fv
-  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ =>
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ ih₁ ih₂ =>
       unfold subst
       apply HasType.tBinOpBoolLogic hop
       · exact substitution_lemma h₁ hv h_fv
@@ -946,7 +1022,7 @@ theorem canonical_forms {v : Expr} {τ : Ty}
 -/
 theorem progress (e : Expr) (τ : Ty) (h : HasType Context.empty e τ) :
   isValue e ∨ (∃ e', Step e e') := by
-  induction h with
+  induction h using HasType.rec_on_ctx with
   | tVar Γ' x τ' σ' hlookup hinst =>
       -- Variable in empty context: impossible
       unfold Context.empty at hlookup
