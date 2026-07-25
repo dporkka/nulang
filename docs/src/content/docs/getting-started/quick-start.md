@@ -61,27 +61,17 @@ actor Counter {
         self.count = self.count + 1
     }
 
-    behavior get(sender: Actor) {
-        send sender reply(self.count)
-    }
+    behavior get() { self.count }
 }
 
-actor Main {
-    behavior run() {
-        let counter = spawn Counter {} in {
-            send counter inc()
-            send counter inc()
-            send counter get(self)
-        }
-    }
-
-    behavior reply(value: Int) {
-        perform IO.print("Count is: " + Int.to_string(value))
-    }
+let c = spawn Counter {} in {
+    send c inc()
+    send c inc()
+    ask c get()
 }
-
-spawn Main {} in {}
 ```
+
+Use `spawn` to create an actor, `send` to fire-and-forget a message, and `ask` to call a behavior and wait for its return value.
 
 ## Algebraic Effects
 
