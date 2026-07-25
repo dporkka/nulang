@@ -1,12 +1,12 @@
 import { defineConfig } from 'astro/config';
+import sitemap from '@astrojs/sitemap';
 import starlight from '@astrojs/starlight';
 import tailwindcss from '@astrojs/tailwind';
 
 // https://starlight.astro.build/reference/configuration
 export default defineConfig({
   site: 'https://nulang.org',
-  integrations: [
-    starlight({
+  integrations: [sitemap(), starlight({
       title: 'Nulang',
       description: 'A distributed, actor-based programming language',
       defaultLocale: 'en',
@@ -87,10 +87,25 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Blog',
+          collapsed: true,
+          items: [
+            { label: 'Why Nulang?', link: 'blog/' },
+          ],
+        },
+        {
           label: 'Reference',
           collapsed: true,
           items: [
             { label: 'API Reference', link: 'https://github.com/dporkka/nulang/blob/main/docs/api.md' },
+          ],
+        },
+        {
+          label: 'Legal',
+          collapsed: true,
+          items: [
+            { label: 'Terms of Service', link: 'terms/' },
+            { label: 'Privacy Policy', link: 'privacy/' },
           ],
         },
       ],

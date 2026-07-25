@@ -11,26 +11,28 @@ hero:
       link: /getting-started/installation/
       icon: right-arrow
       variant: primary
-    - text: View on GitHub
-      link: https://github.com/dporkka/nulang
-      icon: external
-      variant: secondary
     - text: Nulang Cloud
       link: https://www.nulang.cloud
       icon: external
-      variant: minimal
+      variant: secondary
 ---
 
 import HeroBackground from '../../components/animations/HeroBackground.astro';
 import SupervisionTree from '../../components/animations/SupervisionTree.astro';
 import DistributionDemo from '../../components/animations/DistributionDemo.astro';
 import AIPipeline from '../../components/animations/AIPipeline.astro';
+import StructuredData from '../../components/StructuredData.astro';
+import CopyMarkdown from '../../components/CopyMarkdown.astro';
 import GcDemo from '../../components/animations/GcDemo.astro';
 
 <HeroBackground />
 
+<StructuredData />
+
 ## Why Nulang?
 
+
+<CopyMarkdown />
 Building reliable distributed systems today usually means stitching together actors, queues, databases, workflow engines, and observability tools. Nulang integrates those capabilities into the language itself so you can focus on your application logic instead of infrastructure plumbing.
 
 <div class="benefit-row">

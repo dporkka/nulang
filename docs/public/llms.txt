@@ -1,0 +1,58 @@
+# Nulang
+> A distributed, actor-based programming language with algebraic effects, row-polymorphic types, and reference capabilities. Built in Rust with a register-based VM, Cranelift JIT, WASM backend, and native AOT compilation.
+
+## When to use Nulang
+- Building fault-tolerant distributed systems with Erlang-style supervision trees.
+- Writing AI agents with built-in LLM integration, memory (episodic/semantic/procedural), and multi-agent patterns (pipelines, debates, supervisor teams).
+- Durable workflows with checkpointed state, saga compensation, and crash recovery.
+- Anywhere you want static types + algebraic effects + actor model in one language.
+
+## Key Features
+- Actor model with BEAM/OTP primitives, location transparency, gossip clustering, CRDTs
+- Hindley-Milner type inference with row polymorphism and Pony-inspired reference capabilities (iso, trn, ref, val, box, tag, lineariso)
+- Koka-inspired algebraic effects with compile-time checking and effect rows
+- JIT tiering (Cranelift), WASM backend (wasm-encoder + Wasmtime), native AOT
+- Provider-agnostic AI runtime (OpenAI, Ollama) with agents, pipelines, debates, supervisors
+- Register-based bytecode VM with 138 opcodes, 256-register frames
+
+## Quick Install
+```bash
+git clone https://github.com/dporkka/nulang.git
+cd nulang
+cargo build --release
+cargo run -- --repl
+```
+
+## Quick Example
+```nulang
+actor Counter {
+    state count: Int = 0
+    behavior inc() { self.count = self.count + 1 }
+    behavior get(sender: Actor) { send sender reply(self.count) }
+}
+let counter = spawn Counter {} in {
+    send counter inc()
+    counter
+}
+```
+
+## Documentation
+- [Installation](https://nulang.org/getting-started/installation/): Build from source, prerequisites, feature flags.
+- [Quick Start](https://nulang.org/getting-started/quick-start/): Hello World, actors, algebraic effects.
+- [Syntax Basics](https://nulang.org/language/syntax/): Functions, bindings, control flow, records, variants.
+- [Type System](https://nulang.org/language/types/): HM inference, row polymorphism, reference capabilities, ADTs.
+- [Algebraic Effects](https://nulang.org/language/effects/): Perform, handle, resume, effect rows, built-in effects.
+- [Actor Model](https://nulang.org/actors/overview/): Spawn, send, receive, lifecycle, scheduling, priorities.
+- [Distribution & Clustering](https://nulang.org/actors/distribution/): Location transparency, gossip, CRDT replication, persistence.
+- [Supervision Trees](https://nulang.org/actors/supervision/): OTP supervisors, child policies, cascading shutdown.
+- [Standard Library](https://nulang.org/stdlib/overview/): IO, Int, Timer, Signal, LLM, Actor, Otp built-in effects.
+- [AI Agents](https://nulang.org/ai/overview/): Agent declarations, spawning, tools, providers.
+- [Agent Memory](https://nulang.org/ai/memory/): Episodic, semantic, procedural memory subsystems.
+- [Multi-Agent Patterns](https://nulang.org/ai/multi-agent/): Pipelines, debates, supervisor teams.
+- [Durable Workflows](https://nulang.org/workflows/overview/): Steps, parallel branches, saga compensation, crash recovery.
+- [Signals, Timers & Queries](https://nulang.org/workflows/signals-timers/): Suspension/resume primitives for workflows.
+
+## Links
+- [GitHub](https://github.com/dporkka/nulang): Source code, issues, contributions.
+- [Nulang Cloud](https://www.nulang.cloud): Hosted runtime platform.
+- [License](https://github.com/dporkka/nulang/blob/main/LICENSE): Apache 2.0.

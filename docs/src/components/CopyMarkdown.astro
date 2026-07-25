@@ -1,0 +1,108 @@
+---
+// CopyMarkdown.astro — floating button to copy Nulang context to clipboard
+// Renders on the homepage below the hero section.
+---
+
+<button id="copy-markdown-btn" class="copy-markdown-btn" type="button">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+  </svg>
+  Copy for AI
+</button>
+
+<style>
+  .copy-markdown-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--nu-orange);
+    background: transparent;
+    border: 1px solid var(--nu-orange);
+    border-radius: 0.5rem;
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease;
+  }
+  .copy-markdown-btn:hover {
+    background: var(--nu-orange);
+    color: var(--sl-color-bg);
+  }
+  .copy-markdown-btn.copied {
+    background: var(--nu-orange);
+    color: var(--sl-color-bg);
+  }
+</style>
+
+<script>
+  const MARKDOWN = `# Nulang Language Reference for AI Agents
+
+Nulang is a distributed, actor-based programming language written in Rust (repo: dporkka/nulang, Apache 2.0). It fuses Erlang-style fault-tolerant actors with a Hindley-Milner type system, row-polymorphic algebraic effects, and Pony-inspired reference capabilities.
+
+## Architecture
+- Compiler pipeline: Lexer → Parser → TypeChecker (Algorithm W) → EffectChecker → CapabilityAnalyzer → HIR → MIR → bytecode
+- Two backends: Bytecode VM (default), Native AOT (--backend native), WASM (--backend wasm|wasm-run|wasm-aot)
+- Register-based VM: 32-bit fixed-width instructions, 256 registers per frame
+- JIT: Cranelift-based tiered compilation, hot-counter threshold 1000
+- Runtime: single-threaded cooperative scheduler, crossbeam deques, ORCA GC with cycle detection
+
+## Type System
+- Hindley-Milner inference with row polymorphism for records and effects
+- Reference capabilities: iso, trn, ref, val, box, tag, lineariso (compile-time only)
+- Effect rows: every function carries an effect row (!{IO, State})
+- Algebraic effects: perform, handle, resume — compose without monad transformers
+
+## Actor Model
+- Erlang-style: spawn, send (!), receive, link, monitor, trap_exit
+- Supervision trees: one_for_one, one_for_all, rest_for_one, simple_one_for_one
+- Location transparency: ActorAddress = Local | Remote(node_id, actor_id)
+- Gossip-based cluster membership, 8 CRDT types with delta-state replication
+- Per-actor GC (64KB bump-allocated heaps), no global stop-the-world
+
+## AI Runtime (src/ai/)
+- agent declarations with model, system_prompt, tools, memory config
+- Provider-agnostic: OpenAI + Ollama
+- Three memory subsystems: episodic (turn window), semantic (vector embeddings), procedural (learned patterns)
+- Multi-agent: Pipeline (sequential stages), Debate (pro/con + moderator), Supervisor teams (OTP-style restart)
+- Non-blocking LLM calls in actor behaviors via suspend/resume
+
+## CLI
+\`\`\`bash
+cargo run -- --repl                    # REPL
+cargo run -- --eval '<expr>'           # Evaluate
+cargo run -- --check file.nula         # Type-check only
+cargo run -- file.nula                 # Compile + run
+cargo run -- --backend native file.nula # AOT compile + run
+cargo run -- --backend wasm file.nula  # WASM compile
+cargo run -- --lsp                     # Language server
+\`\`\`
+
+## Key Files
+- src/vm.rs — Value (i64-tagged u64), Frame, VM, callback traits
+- src/runtime/mod.rs — Runtime god-object
+- src/typechecker.rs — Algorithm W inference
+- src/effect_checker.rs — effect + capability analysis
+- src/jit/ — Cranelift JIT with SIMD auto-vectorization
+- src/ai/ — LLM client, memory, pipelines, debates, supervisors`;
+
+  const button = document.getElementById('copy-markdown-btn');
+  if (button) {
+
+  button.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(MARKDOWN);
+      button.classList.add('copied');
+      const originalHTML = button.innerHTML;
+      button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg> Copied!';
+      setTimeout(() => {
+        button.classList.remove('copied');
+        button.innerHTML = originalHTML;
+      }, 2000);
+    } catch {
+      // Clipboard API unavailable — no-op
+    }
+  });
+  }
+</script>
