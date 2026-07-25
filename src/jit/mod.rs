@@ -286,6 +286,22 @@ impl JitSession {
         self.compiled.len()
     }
 
+    /// Address of the `JIT_SAFEPOINT_PTR` global, embedded as an i64
+    /// constant in CLIF so JIT code can load the current actor's counter
+    /// without indirection through a thread-local.
+    pub fn safepoint_ptr_addr() -> i64 {
+        let ptr: *const std::sync::atomic::AtomicPtr<u64> =
+            &raw const crate::jit::runtime::JIT_SAFEPOINT_PTR;
+        ptr as i64
+    }
+
+    /// Address of the `JIT_YIELD_PC` static, embedded as an i64 constant
+    /// in CLIF so the cold yield path can store to it inline.
+    pub fn yield_pc_addr() -> i64 {
+        let ptr: *const std::sync::atomic::AtomicU64 = &raw const crate::jit::runtime::JIT_YIELD_PC;
+        ptr as i64
+    }
+
     /// Compile a SIMD-vectorizable bytecode region.
     /// First analyzes the region for vectorizable array loop patterns. If found,
     /// emits SIMD CLIF (I64x2/F64x2/I32x4/F32x4), falling back to the

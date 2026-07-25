@@ -978,6 +978,9 @@ pub struct VM {
     handler_stack: Vec<HandlerFrame>,
     /// Step counter (for debugging / limits).
     step_count: usize,
+    /// Set by try_jit_execute when a JIT safepoint triggers a yield.
+    /// Consumed by run_from / resume to return early; reset at start of run_from.
+    pub yield_pending: bool,
     /// Optional JIT session for tiered compilation.
     jit_session: Option<Box<dyn JitBackend>>,
     /// Per-module constant pools converted to raw bits for the JIT.
@@ -1073,6 +1076,7 @@ impl VM {
             current_frame_idx: None,
             handler_stack: Vec::new(),
             step_count: 0,
+            yield_pending: false,
             jit_session: JitSession::new().map(|j| Box::new(j) as Box<dyn JitBackend>),
             jit_constants: Vec::new(),
             node_id: 0,
@@ -1484,6 +1488,8 @@ impl VM {
     /// reuse it; otherwise create a fresh frame. This lets actor behavior
     /// handlers receive their arguments.
     pub fn run_from(&mut self, module_idx: usize, pc: usize) -> NuResult<Value> {
+        self.yield_pending = false;
+
         if self.frames.is_empty() {
             let mut frame = Frame::new(None, module_idx);
             frame.pc = pc;
@@ -1530,7 +1536,11 @@ impl VM {
             }
 
             match self.step() {
-                Ok(()) => {}
+                Ok(()) => {
+                    if self.yield_pending {
+                        return Ok(Value::nil());
+                    }
+                }
                 Err(NuError::VMError { msg, span: _ }) if msg == "Halt" => {
                     return Ok(self
                         .current_frame_idx
@@ -1548,6 +1558,7 @@ impl VM {
     /// Continues from the current frame state (set by `restore_suspended_state`)
     /// until the program halts, yields again, or errors.
     pub fn resume(&mut self) -> NuResult<Value> {
+        self.yield_pending = false;
         loop {
             if let Some(idx) = self.current_frame_idx {
                 let m_idx = self.frames[idx].module_idx;
@@ -1581,7 +1592,11 @@ impl VM {
             }
 
             match self.step() {
-                Ok(()) => {}
+                Ok(()) => {
+                    if self.yield_pending {
+                        return Ok(Value::nil());
+                    }
+                }
                 Err(NuError::VMError { msg, span: _ }) if msg == "Halt" => {
                     return Ok(self
                         .current_frame_idx
@@ -1656,6 +1671,15 @@ impl VM {
             for (i, bits) in regs.iter().enumerate() {
                 self.frames[frame_idx].regs[i] = Value::from_bits(*bits);
             }
+
+            // Check if JIT yielded at a safepoint.
+            if let Some(yield_offset) = crate::jit::runtime::take_jit_yield_pc() {
+                self.frames[frame_idx].pc = pc + yield_offset;
+                self.yield_pending = true;
+                self.step_count += 1;
+                return true;
+            }
+
             if let Some(region_len) = jit.compiled_region_len(module_idx, pc) {
                 self.frames[frame_idx].pc += region_len;
                 return true;

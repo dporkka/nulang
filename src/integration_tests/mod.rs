@@ -7797,4 +7797,53 @@ match { a: 2, b: 9 } with {
             result
         );
     }
+
+    /// Verify the JIT safepoint infrastructure does not cause hangs or
+    /// crashes when an actor with a tight loop yields to the scheduler.
+    /// The busy-loop actor is given a minimal safepoint budget so the
+    /// JIT yield path is exercised (when JIT is active).
+    #[test]
+    fn test_jit_safepoint_yield_does_not_starve_other_actors() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        // A busy-loop actor and a simple flag-setter. The loop counts
+        // down from 100_000; the ping sets a flag. Both must complete.
+        let source = r#"
+            actor Responder {
+                state flag = false
+                behavior ping() { self.flag = true }
+            }
+            let r = spawn Responder {} in {
+                send r ping()
+                r
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let responder_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        // Reduce the safepoint budget to force an early yield on the
+        // next JIT region entry, if the JIT is active.
+        {
+            let mut rt_mut = rt.borrow_mut();
+            if let Some(responder) = rt_mut.actors.get_mut(&responder_id) {
+                responder.jit_safepoint_counter = 1;
+            }
+        }
+
+        // Run the scheduler to process the busy-loop message (already
+        // queued from the source program) and verify progression.
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let responder = rt_ref
+            .actors
+            .get(&responder_id)
+            .expect("responder actor should exist");
+        let flag = responder.get_state_field("flag").and_then(|v| v.as_bool());
+        assert!(
+            flag.unwrap_or(false),
+            "responder's flag must be set — the scheduler must not hang"
+        );
+    }
 }

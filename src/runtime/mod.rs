@@ -1249,6 +1249,96 @@ impl Runtime {
         }
     }
 
+    /// Resume an actor that yielded at a JIT safepoint.
+    ///
+    /// Mirrors the structure of `resume_suspended_llm_step` but without
+    /// LLM-specific logic: re-installs callbacks, restores VM state,
+    /// resets the safepoint counter, and resumes execution.
+    fn resume_suspended_jit_yield(&mut self, actor_id: u64) {
+        let suspended = match self.actors.get_mut(&actor_id) {
+            Some(actor) => actor.suspended_execution.take(),
+            None => return,
+        };
+        let Some(suspended) = suspended else { return };
+
+        if self.vm.is_none() {
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.suspended_execution = Some(suspended);
+            }
+            return;
+        }
+
+        let self_ptr: *mut Runtime = self;
+        unsafe {
+            let vm = (*self_ptr).vm.as_mut().unwrap();
+            vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
+            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks {
+                runtime: self_ptr,
+            }));
+            vm.restore_suspended_state(suspended.vm_state);
+
+            // Reset the safepoint budget and wire the pointer for JIT code.
+            if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                actor.jit_safepoint_counter = crate::jit::runtime::JIT_SAFEPOINT_BUDGET;
+                crate::jit::runtime::set_jit_safepoint_ptr(&mut actor.jit_safepoint_counter);
+            }
+
+            (*self_ptr).vm_exec_begin();
+            let result = vm.resume();
+            crate::jit::runtime::clear_jit_safepoint_ptr();
+
+            match result {
+                Ok(_) if vm.yield_pending => {
+                    // JIT safepoint yield: re-capture VM state.
+                    if let Some(vm_state) = vm.take_suspended_state() {
+                        if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                            actor.suspended_execution =
+                                Some(crate::runtime::actor::SuspendedExecution {
+                                    vm_state,
+                                    behavior_idx: suspended.behavior_idx,
+                                    step_name: suspended.step_name.clone(),
+                                });
+                            actor.jit_yield_pending = true;
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // Behavior completed: clear suspension.
+                    if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                        actor.jit_yield_pending = false;
+                    }
+                }
+                Err(crate::types::NuError::Suspended(_)) => {
+                    // Re-suspended (e.g. signal wait or receive-wait):
+                    // re-capture VM state.
+                    if let Some(vm_state) = vm.take_suspended_state() {
+                        let signal_name = vm.suspended_signal_name.take();
+                        let receive_timeout = vm.suspended_receive_timeout.take();
+                        if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                            let marker = suspension_marker(actor, signal_name);
+                            actor.waiting_signal = marker;
+                            actor.suspended_execution =
+                                Some(crate::runtime::actor::SuspendedExecution {
+                                    vm_state,
+                                    behavior_idx: suspended.behavior_idx,
+                                    step_name: suspended.step_name,
+                                });
+                        }
+                        (*self_ptr).maybe_schedule_receive_wait(actor_id, receive_timeout);
+                    }
+                }
+                Err(_) => {
+                    // Other error: clear suspension.
+                    if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                        actor.jit_yield_pending = false;
+                    }
+                }
+            }
+            (*self_ptr).vm_exec_end();
+        }
+        self.requeue_if_mail_pending(actor_id);
+    }
+
     /// Enqueue an actor on the scheduler at its current priority. All
     /// scheduler enqueue paths go through here so a priority set via
     /// `perform Actor.set_priority` takes effect on the next (re)queue;
@@ -2095,6 +2185,21 @@ impl Runtime {
 
     pub fn step_actor(&mut self, actor_id: u64) {
         self.current_actor = Some(actor_id);
+
+        // If the actor yielded at a JIT safepoint, resume it inline before
+        // attempting to receive the next message. The resume may complete the
+        // behavior (clearing suspended_execution) or re-suspend (setting it
+        // again), after which the normal suspended_execution guard below
+        // prevents processing new messages while the behavior is live.
+        let jit_yield = self
+            .actors
+            .get(&actor_id)
+            .map(|a| a.jit_yield_pending)
+            .unwrap_or(false);
+        if jit_yield {
+            self.resume_suspended_jit_yield(actor_id);
+        }
+
         let msg_opt = {
             let actor = match self.actors.get_mut(&actor_id) {
                 Some(a) => a,
@@ -3165,12 +3270,37 @@ impl Runtime {
             vm.set_current_frame(frame);
 
             (*self_ptr).vm_exec_begin();
+
+            // Reset JIT safepoint counter for this behavior invocation.
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.jit_safepoint_counter = crate::jit::runtime::JIT_SAFEPOINT_BUDGET;
+                crate::jit::runtime::set_jit_safepoint_ptr(&mut actor.jit_safepoint_counter);
+            }
+
             let result = vm.run_from(module_idx, code_offset);
+
+            // JIT safepoint yield: capture state for inline resume on next turn.
+            if vm.yield_pending {
+                if let Some(vm_state) = vm.take_suspended_state() {
+                    if let Some(actor) = self.actors.get_mut(&actor_id) {
+                        actor.suspended_execution =
+                            Some(crate::runtime::actor::SuspendedExecution {
+                                vm_state,
+                                behavior_idx: 0,
+                                step_name: String::new(),
+                            });
+                        actor.jit_yield_pending = true;
+                    }
+                }
+                crate::jit::runtime::clear_jit_safepoint_ptr();
+                (*self_ptr).vm_exec_end();
+                return Ok(Value::nil());
+            }
             // Capture VM state for a workflow signal wait, a non-blocking
             // LLM call, or a timed selective receive. Doing this here avoids
             // aliasing the Runtime through the callback while the VM borrow
             // is active.
-            if let Err(crate::types::NuError::Suspended(_)) = result {
+            if let Err(crate::types::NuError::Suspended(_)) = &result {
                 if let Some(vm_state) = vm.take_suspended_state() {
                     let signal_name = vm.suspended_signal_name.take();
                     let receive_timeout = vm.suspended_receive_timeout.take();
@@ -3184,8 +3314,6 @@ impl Runtime {
                                 step_name: String::new(),
                             });
                     }
-                    // Arm the receive-after timeout on the first
-                    // suspension; a no-op for the other sentinels.
                     self.maybe_schedule_receive_wait(actor_id, receive_timeout);
                 }
             }
@@ -3195,6 +3323,7 @@ impl Runtime {
             // suspend still needs. Runs on every path, so wakes of other
             // actors are not lost when THIS actor suspends.
             (*self_ptr).vm_exec_end();
+            crate::jit::runtime::clear_jit_safepoint_ptr();
             // String-id values index into this runtime VM's constant pool. When
             // the result is returned to a different VM (e.g. the top-level VM
             // that invoked `ask`), the id is meaningless there. Convert string

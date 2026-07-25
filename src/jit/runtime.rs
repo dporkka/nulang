@@ -1,5 +1,8 @@
 //! Runtime helper functions callable from JIT-compiled code.
 
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+
 use crate::value_layout::{sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK, TAG_PTR};
 use crate::vm::Value;
 
@@ -259,8 +262,6 @@ pub extern "C" fn nulang_fneg(a: u64) -> u64 {
 // Actor callback thread-local for JIT runtime helpers
 // -----------------------------------------------------------------------
 
-use std::cell::UnsafeCell;
-
 /// Raw pair representing a `*mut dyn ActorVmCallbacks` fat pointer.
 /// Stored as two usize values to avoid zero-initialization UB.
 #[derive(Clone, Copy)]
@@ -303,6 +304,64 @@ pub fn clear_jit_callbacks() {
     JIT_CALLBACKS.with(|cell| unsafe {
         *cell.get() = CbPair::NULL;
     });
+}
+
+// ---------------------------------------------------------------------------
+// JIT Safepoint: reduction-count preemption for long-running JIT regions
+// ---------------------------------------------------------------------------
+
+/// How many JIT region entries a behavior may execute before yielding
+/// back to the scheduler. Reset at each behavior invocation.
+pub const JIT_SAFEPOINT_BUDGET: u64 = 1000;
+
+/// Dummy counter that never reaches 0 — acts as fallback when no runtime
+/// actor is executing JIT code. `i64::MAX` is used because the safepoint
+/// check is a signed `≤ 0` comparison.
+static JIT_SAFEPOINT_DUMMY: AtomicU64 = AtomicU64::new(i64::MAX as u64);
+
+/// Process-global pointer to the current actor's `jit_safepoint_counter`.
+/// Set/cleared by the runtime. `AtomicPtr` so JIT code can load it via a
+/// single embedded address constant without indirection through a
+/// thread-local.
+pub static JIT_SAFEPOINT_PTR: AtomicPtr<u64> =
+    AtomicPtr::new(&JIT_SAFEPOINT_DUMMY as *const AtomicU64 as *mut u64);
+
+pub fn set_jit_safepoint_ptr(ptr: *mut u64) {
+    JIT_SAFEPOINT_PTR.store(ptr, Ordering::Release);
+}
+
+pub fn clear_jit_safepoint_ptr() {
+    JIT_SAFEPOINT_PTR.store(
+        &JIT_SAFEPOINT_DUMMY as *const AtomicU64 as *mut u64,
+        Ordering::Release,
+    );
+}
+
+/// Bytecode offset where the JIT yielded, or `u64::MAX` if no yield is
+/// pending. Set by JIT-compiled code (inline store), consumed by
+/// `try_jit_execute`. Single-scheduler-thread invariant: no CAS needed.
+pub static JIT_YIELD_PC: AtomicU64 = AtomicU64::new(u64::MAX);
+
+pub fn take_jit_yield_pc() -> Option<usize> {
+    let old = JIT_YIELD_PC.swap(u64::MAX, Ordering::AcqRel);
+    if old == u64::MAX {
+        None
+    } else {
+        Some(old as usize)
+    }
+}
+
+/// Called from JIT-compiled code when the safepoint budget is exhausted.
+///
+/// Stores the bytecode offset where execution should resume (relative to
+/// region start) and returns 1 (must yield).
+///
+/// # Safety
+/// Called only from JIT-compiled code on the scheduler thread.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_safepoint_yield(resume_offset: u64) -> u64 {
+    JIT_YIELD_PC.store(resume_offset, Ordering::Release);
+    1 // must yield
 }
 
 unsafe fn with_callbacks<R>(f: impl FnOnce(&mut dyn crate::vm::ActorVmCallbacks) -> R) -> R {
@@ -400,9 +459,9 @@ mod tests {
     fn test_jit_helpers_linked() {
         // Force the linker to retain the JIT runtime helpers by taking
         // their addresses. Without this, the linker may strip them since
-        // they are only called from JIT-compiled code.
         let _ = super::nulang_arr_store as unsafe extern "C" fn(_, _, _, _);
         let _ = super::nulang_arr_len as unsafe extern "C" fn(_, _, _);
         let _ = super::nulang_field_load as unsafe extern "C" fn(_, _, _, _);
+        let _ = super::nulang_safepoint_yield as unsafe extern "C" fn(u64) -> u64;
     }
 }

@@ -204,6 +204,12 @@ pub struct Actor {
     cycle_sentinel: Option<*mut OrcaHeader>,
     /// Suspended VM state for a workflow step waiting on a signal.
     pub suspended_execution: Option<SuspendedExecution>,
+    /// JIT safepoint counter: decremented per JIT region entry in JIT code.
+    /// When it reaches 0, the JIT yields back to the scheduler.
+    pub jit_safepoint_counter: u64,
+    /// True when suspended_execution holds a JIT-yield suspension
+    /// (as opposed to an LLM/signal/receive-wait suspension).
+    pub jit_yield_pending: bool,
     /// Name of the signal this workflow actor is currently waiting for, if any.
     pub waiting_signal: Option<String>,
     /// Signals that have been received by this workflow actor (name, payload).
@@ -305,6 +311,8 @@ impl Actor {
             links: Vec::new(),
             trap_exits: false,
             priority: ActorPriority::Normal,
+            jit_safepoint_counter: crate::jit::runtime::JIT_SAFEPOINT_BUDGET,
+            jit_yield_pending: false,
             reduction_count: 0,
             turn_reductions: 0,
             max_reductions: 1000,

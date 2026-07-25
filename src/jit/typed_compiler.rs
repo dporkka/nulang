@@ -34,6 +34,7 @@ use std::collections::HashMap;
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::jit::compiler::{emit_arr_load, CompileError};
+use crate::jit::JitSession;
 
 // ---------------------------------------------------------------------------
 // NaN-tag constants and CLIF helpers — single source in `cranelift_utils`
@@ -865,14 +866,44 @@ pub fn compile_bytecode_region_typed(
         blocks.insert(i, builder.create_block());
     }
     let return_block = builder.create_block();
-
-    // Jump from entry to the first instruction's block
+    // Inject JIT safepoint: decrement counter, yield if exhausted.
+    // Pointer is never null (initialized to a VM-owned dummy).
+    let safepoint_ptr_addr = JitSession::safepoint_ptr_addr();
+    let ptr_addr = builder.ins().iconst(types::I64, safepoint_ptr_addr);
+    let counter_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_addr, 0);
+    let counter = builder
+        .ins()
+        .load(types::I64, MemFlags::new(), counter_ptr, 0);
+    let one = builder.ins().iconst(types::I64, 1);
+    let new_counter = builder.ins().isub(counter, one);
+    builder
+        .ins()
+        .store(MemFlags::new(), new_counter, counter_ptr, 0);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let exhausted = builder
+        .ins()
+        .icmp(IntCC::SignedLessThanOrEqual, new_counter, zero);
+    let yield_block = builder.create_block();
     if let Some(&first_block) = blocks.get(&start_offset) {
-        builder.ins().jump(first_block, &[]);
+        builder
+            .ins()
+            .brif(exhausted, yield_block, &[], first_block, &[]);
     } else {
-        builder.ins().return_(&[]);
+        builder
+            .ins()
+            .brif(exhausted, yield_block, &[], return_block, &[]);
     }
 
+    // Yield block: store 0 to JIT_YIELD_PC, then return.
+    builder.switch_to_block(yield_block);
+    let yield_pc_addr = JitSession::yield_pc_addr();
+    let yield_pc_ptr = builder.ins().iconst(types::I64, yield_pc_addr);
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder.ins().store(MemFlags::new(), zero, yield_pc_ptr, 0);
+    builder.ins().jump(return_block, &[]);
+
+    // Seal all new blocks.
+    builder.seal_block(yield_block);
     // Mutable copy of type metadata so we can propagate result types
     let mut meta = type_metadata.map(|m| m.clone()).unwrap_or_default();
 
