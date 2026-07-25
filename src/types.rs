@@ -1184,6 +1184,9 @@ impl NuError {
                 out.push_str(msg);
                 out.push_str(RESET);
                 out.push('\n');
+            } else {
+                // No source line available — just print the message
+                out.push_str(&format!("  {msg}\n"));
             }
 
             // Suggestion

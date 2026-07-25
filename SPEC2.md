@@ -34,7 +34,7 @@ Unless otherwise noted, examples in sections describing *implemented* features a
 
 This document is the design target for Nulang 2.0. The implementation in this repository is an alpha (the v0.9 series) that realizes a substantial subset of the design. This section records, as of the current commit, what is implemented and what remains planned, so readers can distinguish descriptions of working behavior from aspirational ones. Sections that describe unimplemented surface are marked **Planned** inline.
 
-> **Verification note (July 2026).** The syntax, keyword, and semantic claims in Chapters 1–12 and Appendices A–C were re-verified against the implementation in July 2026 — specifically `src/lexer.rs` (keyword inventory, literals, operators), `src/parser.rs` (grammar), `src/ast.rs` (AST shapes), `src/typechecker.rs` (inference, defaults), `src/effect_checker.rs` (effect rows, capability lattice, sendability), `src/vm.rs` (runtime effect dispatch, arithmetic), `src/hir_lower.rs` (pipe semantics, AI builtins), and `src/main.rs` (CLI). Chapters 13–15 and Appendix D describe planned surfaces and were only annotated as such, not verified line-by-line.
+> **Verification note (July 2026).** The syntax, keyword, and semantic claims in Chapters 1–12 and Appendices A–C were re-verified against the implementation in July 2026 — specifically `src/lexer.rs` (keyword inventory, literals, operators), `src/parser.rs` (grammar), `src/ast.rs` (AST shapes), `src/typechecker.rs` (inference, defaults), `src/effect_checker.rs` (effect rows, capability lattice, sendability), `src/vm.rs` (runtime effect dispatch, arithmetic), `src/hir_lower.rs` (pipe semantics, AI builtins), `src/main.rs` (CLI), and `src/fuzz.rs` (typechecker fuzzer). Chapters 13–15 and Appendix D describe planned surfaces and were only annotated as such, not verified line-by-line.
 
 **Implemented and verified against the source tree:**
 
@@ -425,9 +425,7 @@ A minimal Nulang program is a single module file that need not contain a `main` 
 
 ```nulang
 // hello.nula: a minimal Nulang program
-handle perform Console.println("Hello, World!") {
-  | Console.println(msg) => unit
-}
+perform IO.print("Hello, World!")
 ```
 
 If the module declares `fn main()`, that function is the entry point instead. Programs compile to bytecode for the Nulang register VM, which initializes the runtime, evaluates the entry function, and starts the actor scheduler. (Compilation to WebAssembly with a `__nulang_start` export is **Planned**; see Chapter 13.)
@@ -605,7 +603,7 @@ Two quirks of the current grammar are worth noting:
 - **Bitwise operators bind tighter than arithmetic.** `1 + 2 & 3` parses as `1 + (2 & 3)`. Use parentheses when mixing arithmetic and bitwise operators. (This ordering is inherited from the precedence table and may be revised before 2.0.)
 - **Single `|` is not an infix operator.** It is reserved as the match-arm and variant separator, so bitwise OR is written `|||` (or the keyword `or` for booleans).
 
-There is no `**` exponentiation operator, no `++` concatenation operator, and no `~` bitwise-not operator.
+There is no `**` exponentiation operator and no `~` bitwise-not operator.
 
 ### 2.6.1 Arithmetic Operators
 
@@ -1170,6 +1168,8 @@ Each operation has a name, a list of parameter types, and a return type. Effect 
 ## 4.3 Performing Effects
 
 The `perform` keyword invokes an effect operation:
+
+> **Note:** In the examples below, `Console` is a user-declared effect name used for illustration. The built-in I/O effect is `IO` (`IO.print`, `IO.println`, `IO.read`), which is handled by the runtime without requiring an explicit `handle` expression. The `Console` examples demonstrate how to declare, perform, and handle custom effects — the same patterns apply to any user-defined effect.
 
 ```nulang
 fn greet_user() -> Unit ! {Console} {
@@ -2426,7 +2426,7 @@ In-language failover constructs (`with_failover` / `on_failure`) are planned; to
 
 # Chapter 13: WebAssembly Integration — Planned
 
-> **Status: not implemented.** No WebAssembly backend exists in the current implementation. Nulang programs are compiled through the AST → HIR → MIR pipeline to a register-based bytecode executed by the Nulang virtual machine, with hot regions JIT-compiled to native code via Cranelift. This chapter describes the planned Wasm target and is retained as the design reference; every construct in it (`@export`, `@import`, `config wasi`, `wasm { ... }` blocks) is unimplemented.
+> **Status: partially implemented.** A WASM backend exists behind the `wasm-backend` Cargo feature flag: `src/mir_wasm.rs` compiles MIR to `.wasm` modules (i64-tagged values, SIMD lowering), and `src/wasm_runtime.rs` provides a Wasmtime host runtime with AOT compilation support. The CLI exposes `--backend wasm|wasm-run|wasm-aot` when the feature is enabled. The WASM-specific surface constructs in this chapter (`@export`, `@import`, `config wasi`, `wasm { ... }` blocks) remain unimplemented; only the MIR→WASM compiler and Wasmtime runtime exist today.
 
 ## 13.1 Compilation Target
 
@@ -2823,11 +2823,20 @@ insufficient for durable long-horizon computation.
 > - `nulang file.nula` — compile and run a source file
 > - `nulang --eval 'expr'` / `-e` — evaluate a source string
 > - `nulang --check file.nula` / `-c` — type, effect, and capability checking only (no execution)
-> - `nulang --repl` / `-r` — interactive read-eval-print loop (also the default when no arguments are given)
-> - `nulang --verbose file.nula` / `-v` — print AST, bytecode, and inferred types while running
+> - `nulang --repl` / `-r` — interactive read-eval-print loop
+> - `nulang --verbose` / `-v` — print AST, bytecode, and inferred types while running
+> - `nulang --lsp` — start the stdio Language Server (tower-lsp)
+> - `nulang --backend bytecode|native` — select execution backend (default: bytecode)
+> - `nulang --emit-nbc --out <file>` — compile to a frozen `.nbc` bytecode artifact
+> - `nulang file.nbc` — run a pre-compiled `.nbc` artifact directly
+> - `nulang --verify <src> file.nbc` — verify `.nbc` source hash against `<src>`
+> - `nulang --doc` — generate Markdown API docs (`docs/api.md`)
+> - `nulang --emit-stdlib-docs <dir>` — generate per-effect stdlib docs
+> - `nulang --color auto|always|never` — colorize error output
 > - `nulang --version` / `-V`, `nulang --help` / `-h`
+> - `nulang nula new|build|test|run` — package manager commands
 >
-> (`--help` also advertises `nulang --lsp` for the stdio language server; in the current build that flag is not wired into the argument parser and is rejected as an unknown option — a known issue to be fixed.)
+> When the `wasm-backend` Cargo feature is enabled, `--backend` also accepts `wasm|wasm-run|wasm-aot`.
 
 ## 15.1 Deployment
 

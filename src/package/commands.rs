@@ -41,6 +41,7 @@ fn print_usage() {
     println!("Usage: nulang nula <COMMAND>");
     println!();
     println!("Commands:");
+    println!("  new          Scaffold a new package directory");
     println!("  build        Resolve dependencies and type-check the package");
     println!("  build-wasm   Build package to .wasm + .cwasm (AOT, requires wasmtime)");
     println!("  test         Run every .nula file in the package's tests/ directory");
@@ -48,9 +49,17 @@ fn print_usage() {
 }
 
 /// `nula new <name>`: scaffold a package directory.
-fn cmd_new(name: Option<&str>) -> NuResult<()> {
-    let name =
-        name.ok_or_else(|| NuError::PackageError { msg: "nula new requires a package name".to_string(), span: Span::default() })?;
+fn cmd_new(path_arg: Option<&str>) -> NuResult<()> {
+    let path_str =
+        path_arg.ok_or_else(|| NuError::PackageError { msg: "nula new requires a package name or path".to_string(), span: Span::default() })?;
+    let dir = PathBuf::from(path_str);
+    let name = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| NuError::PackageError { msg: format!(
+            "invalid path '{}' — cannot extract package name",
+            path_str
+        ), span: Span::default() })?;
     if name.is_empty()
         || !name
             .chars()
@@ -61,15 +70,14 @@ fn cmd_new(name: Option<&str>) -> NuResult<()> {
             name
         ), span: Span::default() });
     }
-    let dir = PathBuf::from(name);
     if dir.exists() {
         return Err(NuError::PackageError { msg: format!(
             "directory '{}' already exists",
-            name
+            dir.display()
         ), span: Span::default() });
     }
     scaffold_package(&dir, name)?;
-    println!("Created package '{}'", name);
+    println!("Created package '{}' at '{}'", name, dir.display());
     Ok(())
 }
 
@@ -220,10 +228,22 @@ mod tests {
 
     #[test]
     fn test_cmd_new_rejects_invalid_name() {
-        let err = cmd_new(Some("../escape")).expect_err("path-like names are rejected");
+        // Path with invalid package name (contains '.')
+        let err = cmd_new(Some("./my.app")).expect_err("dots in name are rejected");
         assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
         let err = cmd_new(None).expect_err("missing name is rejected");
         assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
+    }
+
+    #[test]
+    fn test_cmd_new_accepts_path() {
+        let dir = std::env::temp_dir().join(format!("nulang_new_path_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path_str = dir.to_str().expect("temp dir should be valid UTF-8");
+        let result = cmd_new(Some(path_str));
+        assert!(result.is_ok(), "path with valid basename should succeed: {:?}", result.err());
+        assert!(dir.join("Nulang.toml").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
