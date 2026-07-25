@@ -1,6 +1,6 @@
 # Nulang Self-Hosting Bootstrap
 
-> **Status:** Stage 3 working. Stage 4 (lambdas) unblocked — compiler bug fixed.
+> **Status:** Stage 5 — closures with environment capture working.
 > **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
 > that targets the `.nbc` format (RFC 0001).
 
@@ -20,54 +20,37 @@ source.nula
 | `host.nula` | Host shim |
 | `compiler_core.nula` | Lexer + Pratt parser + evaluator in Nulang Core |
 | `self_test.nula` | Core conformance target (fib(10) = 55) |
+| `spill_bug_repro.nula` | Minimal repro for spill temp clobbering bug (fixed) |
 
 ## Running
 
 ```bash
 nulang bootstrap/compiler_core.nula
-# Expected: 42, 7, 9, 43, 200
+# Expected: 42, 7, 9, 43, 200, 6, 36, 11, 8, 7
 ```
 
-## What's implemented (Stage 3 — 2026-07-23)
+## What's implemented
 
-- **Lexer:** character-at-a-time scanning via `perform String.charAt` /
-  `String.length`. Recognises integers, identifiers, `let`, `in`, `fn`,
-  `+`, `-`, `*`, `/`, `(`, `)`, whitespace.
-- **Parser:** single-function Pratt parser (no forward references needed).
-  Correct operator precedence and left-associativity.
+### Stage 3 — Arithmetic + let bindings (2026-07-23)
+- **Lexer:** character-at-a-time scanning via `perform String.charAt` / `String.length`.
+- **Parser:** single-function Pratt parser with correct precedence and left-associativity.
 - **Let bindings:** `let x = 42 in x + 1` → 43. 2-slot environment (e0, e1).
-- **Variable references:** identifier hashing (hash*5, seed 0). "let"=3321.
-- **Return-value encoding:** `(val << 32) | pos` packs value + position.
 
-## Register limit status (resolved 2026-07-24)
+### Stage 5 — Closures with environment capture (2026-07-24)
+- **Lambdas:** `fn(x) => x + 1` — parsed inline in the Pratt prefix handler.
+- **Function application:** `f(arg)` — handled as a postfix operator with highest precedence.
+- **Environment capture:** `let a = 3 in (fn(x) => a + x)(5)` → 8. The closure captures the defining environment (up to 1 binding, stored in bits 8-15 of the 30-bit closure tag).
+- **Currying:** `let add = fn(a) => fn(b) => a + b in add(3)(4)` → 7.
+- **Closure encoding:** 30-bit flag `1 << 30` in the high word of the 32-bit value; low 16 bits are the source position. Packed fields: flag | (ph << 23) | (body_start << 16) | (cap_hash << 8) | cap_value.
+- **Out-of-band sentinel:** `left == 1 << 40` replaces `left == 0` to distinguish "no left operand" from the valid expression result 0.
 
-Inline register spilling (commit 06b03c6) removed the capacity limit.
-
-## Spill temp clobbering bug (fixed 2026-07-24)
-
-A correctness bug where `local_reg()` always used the same temp register
-(r13) for spilled reads was fixed in commit db22c67. Round-robin temp
-allocation (r12/r13/r14) prevents clobbering when instructions read
-multiple spilled locals. The repro at bootstrap/spill_bug_repro.nula
-now produces correct results.
+### Register spilling (2026-07-24)
+- Inline spilling (commit 06b03c6): no capacity limit.
+- Round-robin temp registers (commit db22c67): prevents clobbering in multi-operand spilled reads.
 
 ## What remains
 
-- Lambda/closure support (Stage 4) — `fn` parsing and function-application
-  evaluation in the Pratt parser (closure encoding design needed)
 - HM type inference
 - MIR lowering → `.nbc` codec
 - Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
-## What remains
-
-- Lambda/closure support (Stage 4)
-- HM type inference
-- MIR lowering → `.nbc` codec
-- Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
-
-## Related RFCs implemented in this session
-
-- RFC 0008: `migration` block parsing (parser + AST + HIR + ActorMeta)
-- RFC 0009: `organization` keyword parsing (desugars to entity)
-- RFC 0003 Item 6: `CryptoProvider`, `ForeignInterop` traits
-- RFC 0003 Item 2: `combined.lean` unified typing judgment
+- Multi-binding environment capture (currently limited to 1 captured binding)

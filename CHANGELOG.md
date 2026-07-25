@@ -82,11 +82,15 @@ in this version; they are recorded here to establish their tier.
   frame-local `Vec<Value>` via `SpillLoad`/`SpillStore` opcodes (0xF5/0xF6).
   Fix (2026-07-24): replaced post-processing spill rewrite with inline
   SpillLoad/SpillStore emission during codegen, removing the 17-slot
-  capacity limit entirely.  Functions of any size now compile correctly
-  (limited only by compiler frontend stack size).  Cleanup: removed
-  spill_rewrite_instructions, find_spill_slot_for_reg, standalone reg_of,
-  emit_spill_load/store.  Net -112 lines.  Unblocks the self-hosting
-  bootstrap compiler (RFC 0003 Item 3) which needs ~261 locals.
+  capacity limit entirely.  Round-robin temp register allocation (r12/r13/r14)
+  prevents clobbering in multi-operand spilled reads.  Net -112 lines.
+  Unblocks the self-hosting bootstrap compiler (RFC 0003 Item 3).
+- **Self-hosting bootstrap: Stage 5 (closures with env capture).** The
+  `bootstrap/compiler_core.nula` Pratt evaluator now supports `fn(x) => body`
+  lambdas, function application `f(arg)`, and environment capture
+  (`let a = 3 in (fn(x) => a + x)(5)` → 8).  Closure encoding: 30-bit flag
+  with packed param-hash, body-start, and captured binding.  Out-of-band
+  sentinel `1 << 40` distinguishes "no left operand" from value 0.
 - **Formal semantics: capability lattice proofs.** All five lattice theorems
   in `spec/formal/capabilities.lean` proved via exhaustive case analysis:
   `join_assoc`, `join_comm`, `join_idem`, `cap_sendable`, `discharge_sendable`.
