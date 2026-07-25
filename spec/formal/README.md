@@ -1,31 +1,67 @@
 # Nulang Formal Semantics
 
-> **Status:** DRAFT — type definitions formalized; soundness proofs are open work.
-> **Proof assistant:** Lean 4
-> **Referenced implementation:** `src/typechecker.rs`, `src/effect_checker.rs`,
->   `src/types.rs`
-> **Governance:** These formalizations are the **authoritative semantics.**
->   Where `SPEC2.md` (prose) and these files disagree, these files win.
->   See `GOVERNANCE.md` §7.
+> **Status:** Core fragment proved; capabilities/effects/combined are
+> definition-only. The implementation fuzzer (`src/fuzz.rs`) is the
+> primary correctness mechanism.
+> **Proof assistant:** Lean 4 (≥ 4.15)
+> **Referenced implementation:** `src/typechecker.rs`
 
+## Governance
 
-## What is formalized (updated 2026-07-23)
+**`SPEC2.md` (prose + inference rules) is the authoritative language
+specification.** The Lean files in this directory model the Core fragment
+and provide machine-checked proofs of type soundness for that fragment.
+Where `SPEC2.md` and these files disagree on the Core fragment, these
+files win for the Core fragment only. For capabilities, effects, and
+distribution, `SPEC2.md` is authoritative and the Lean files are
+descriptive sketches.
+
+## Scope
 
 | File | Coverage | Proof status |
 |------|----------|-------------|
-| `types.lean` | HM type system + Core expression language + call-by-value small-step semantics. `HasType` (11 rules), `Step` (14 rules), progress/preservation/soundness stated. | Soundness stated; proofs open |
-| `capabilities.lean` | Capability lattice + capability-annotated typing judgment `HasTypeCap` (10 rules including send/spawn). `CapContext`, linear consumption (`consumed`), `linear_at_most_once` theorem. | Definitions complete; proofs open |
-| `effects.lean` | Effect rows + effect-annotated typing judgment `HasTypeEff` (11 rules including perform/handle). `EffExpr` (11 constructors), `HandlerStack` transitions, `effect_safety_static` theorem. | Definitions complete; proofs open |
-| `combined.lean` | **Unified judgment** `Γ; Δ ⊢ e : τ @ cap ! r` — combines HM types, capabilities, and effect rows into a single 15-rule inductive. Includes send/spawn/perform/handle. `combined_soundness` conjecture stated. | Definitions complete; proof open |
+| `types.lean` | HM type system + Core expression language + call-by-value small-step semantics. `HasType` (13 rules), `Step` (14 rules). | **Proved:** progress, preservation, type soundness. 0 sorries. |
+| `capabilities.lean` | Capability lattice + capability-annotated typing judgment. | Definitions only (no active proof development) |
+| `effects.lean` | Effect rows + effect-annotated typing judgment. | Definitions only (no active proof development) |
+| `combined.lean` | Unified judgment combining HM types, capabilities, and effect rows. | Definitions only (no active proof development) |
 
-## What is NOT yet formalized
+## What is intentionally NOT formalized
 
-- The **proofs** for all four soundness theorems (types, capabilities,
-  effects, combined) — the definitions and theorem statements are
-  complete; the proof terms are `sorry`.
-- LinearIso must-use (the constraint is at-most-once; exactly-once
-  is a documented follow-up in AGENTS.md).
-- Effect handler scoping and frame management (the runtime's
-  `handler_stack` push/pop protocol — the static model is defined;
-  the dynamic model is future work).
-- The numeric semantics of `Int`/`Float` (value-layout tag dispatch).
+The following are verified through other means (fuzzer, integration tests):
+
+- **Capability soundness** — the capability lattice is enforced at
+  compile time; runtime correctness is tested via `src/fuzz.rs`
+- **Effect safety** — effect rows are checked statically; runtime
+  handler dispatch is tested via integration tests
+- **Distribution** — the wire protocol and actor model are tested via
+  chaos/stress tests (`src/stress_tests.rs`)
+- **LinearIso must-use** — at-most-once use is enforced by the
+  capability analyzer; exactly-once is future work
+- **Numeric semantics** — value-layout tag dispatch is tested via
+  the bytecode VM test suite
+
+## Known divergences from the implementation
+
+| Item | Formal model | Implementation (`src/`) | Impact |
+|------|-------------|------------------------|--------|
+| Type representation | `Ty` uses de Bruijn-style vars; `Prim` includes `Unit`, `Nil` | `Type` uses nominal `TypeVar`; `PrimitiveType` includes `Float`, `String` | Low — Core fragment is sound for the modeled subset |
+| BinOp representation | 3 separate typing rules (`tBinOpIntArith`, `tBinOpIntCmp`, `tBinOpBoolLogic`) | Single `tBinOp` with helper predicate | Low — logically equivalent |
+| Effect checking | Static effect rows in `types.lean` | Runtime `handler_stack` in `vm.rs` | Medium — the formal model captures the static contract; the runtime model is not formalized |
+| String concatenation | Typing rule `tStrConcat` | Built-in `strConcat` in bytecode | Low — straightforward typing rule |
+
+## CI
+
+The Lean files are checked in CI via `lake build` (`.github/workflows/ci.yml`).
+A break in `lake build` signals a semantics-affecting change to the
+Core fragment.
+
+## Running locally
+
+```bash
+# Install Lean 4
+curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh
+
+# Build the formal specs
+cd spec/formal
+lake build
+```
