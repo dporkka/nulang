@@ -102,11 +102,17 @@ inductive UnifyError where
 | mismatch    : Ty → Ty → UnifyError
 deriving BEq, Repr
 
+/-- Unify a type variable with a type: occurs check, then bind. -/
+def mguVar (v : Var) (τ : Ty) : Except UnifyError Subst :=
+  if Ty.var v == τ then .ok Subst.empty
+  else if τ.fv.contains v then .error (.occursCheck v τ)
+  else .ok [(v, τ)]
+
 /--
   Most General Unifier.  Matches `unify` / `mgu` in `src/typechecker.rs`.
   Returns `Subst` on success, `UnifyError` on failure.
 -/
-def mgu (a b : Ty) : Except UnifyError Subst :=
+partial def mgu (a b : Ty) : Except UnifyError Subst :=
   match a, b with
   | .var v, _         => mguVar v b
   | _, .var v         => mguVar v a
@@ -120,14 +126,8 @@ def mgu (a b : Ty) : Except UnifyError Subst :=
           match mgu (a₂.subst σ₁) (b₂.subst σ₁) with
           | .error e => .error e
           | .ok σ₂   => .ok (σ₂.compose σ₁)
-      end
+  | .unit, .unit => .ok Subst.empty
   | _, _ => .error (.mismatch a b)
-where
-  /-- Unify a type variable with a type: occurs check, then bind. -/
-  mguVar (v : Var) (τ : Ty) : Except UnifyError Subst :=
-    if Ty.var v == τ then .ok Subst.empty
-    else if τ.fv.contains v then .error (.occursCheck v τ)
-    else .ok [(v, τ)]
 
 -- ------------------------------------------------------------------
 -- Polymorphic types (Scheme)
@@ -166,13 +166,21 @@ abbrev Name := String
 -- Expressions
 -- ------------------------------------------------------------------
 
+/-- Binary operators allowed in Core. -/
+inductive BinOp : Type where
+| add | sub | mul | div | mod   : BinOp   -- Int → Int → Int
+| eq  | neq | lt | le | gt | ge : BinOp   -- Int → Int → Bool
+| and | or                      : BinOp   -- Bool → Bool → Bool
+deriving BEq, Repr
+
+
 /--
   The Core expression language.  Matches the expressions allowed in
   Nulang Core (RFC 0002): literals, variables, lambdas, application,
   let bindings, conditionals, binary operators, string concatenation,
   and the unit value (return target).
 -/
-inductive Expr where
+inductive Expr : Type where
 | litInt    : Int → Expr
 | litBool   : Bool → Expr
 | litString : String → Expr
@@ -186,12 +194,6 @@ inductive Expr where
 | unitVal   : Expr                                 -- () — unit literal (used for return)
 deriving BEq, Repr, Inhabited
 
-/-- Binary operators allowed in Core. -/
-inductive BinOp where
-| add | sub | mul | div | mod   : BinOp   -- Int → Int → Int
-| eq  | neq | lt | le | gt | ge : BinOp   -- Int → Int → Bool
-| and | or                      : BinOp   -- Bool → Bool → Bool
-deriving BEq, Repr
 
 -- ==================================================================
 -- VALUES (evaluation results)
@@ -201,7 +203,7 @@ deriving BEq, Repr
   A value is a fully-evaluated expression.  In Core, values are
   integers, booleans, strings, lambdas (closures), and unit.
 -/
-inductive Value where
+inductive Value : Type where
 | intV    : Int → Value
 | boolV   : Bool → Value
 | stringV : String → Value
@@ -249,6 +251,22 @@ def Context.empty : Context := []
   - `StrConcat`: both sides must be String; result is String
   - `Unit`: always type Unit
 -/
+/-- Fresh variable generator used by `tVar`. -/
+def defaultFresh : Nat → Var := λ n => ⟨n⟩
+
+/-- Collect free type variables from the context. -/
+def Context.freeTypeVars (Γ : Context) : List Var :=
+  match Γ with
+  | [] => []
+  | (_, σ) :: rest => σ.body.fv ++ Context.freeTypeVars rest
+
+/-- Return type of a binary operator. -/
+def binOpResultType : BinOp → Ty
+| .add | .sub | .mul | .div | .mod => .int
+| .eq | .neq | .lt | .le | .gt | .ge => .bool
+| .and | .or => .bool
+
+
 inductive HasType : Context → Expr → Ty → Prop where
 | tVar : ∀ {Γ x τ σ},
     Γ.lookup x = some σ →
@@ -269,53 +287,28 @@ inductive HasType : Context → Expr → Ty → Prop where
     HasType Γ (.app e₁ e₂) τ₁
 | tLet : ∀ {Γ x e₁ e₂ τ₁ τ₂},
     HasType Γ e₁ τ₁ →
-    HasType ((x, Scheme.generalize Γ.freeTypeVars τ₁) :: Γ) e₂ τ₂ →
+    HasType ((x, Scheme.generalize (Context.freeTypeVars Γ) τ₁) :: Γ) e₂ τ₂ →
     HasType Γ (.letIn x e₁ e₂) τ₂
 | tIf : ∀ {Γ e₁ e₂ e₃ τ},
     HasType Γ e₁ .bool →
     HasType Γ e₂ τ →
     HasType Γ e₃ τ →
     HasType Γ (.ifThenElse e₁ e₂ e₃) τ
-| tBinOp : ∀ {Γ op e₁ e₂},
-    hasBinOpType op e₁ e₂ Γ →
-    HasType Γ (.binOp op e₁ e₂) (binOpResultType op)
-| tStrConcat : ∀ {Γ e₁ e₂},
-    HasType Γ e₁ .string →
-    HasType Γ e₂ .string →
-    HasType Γ (.strConcat e₁ e₂) .string
-| tUnit : ∀ {Γ},
-    HasType Γ .unitVal .prim .Unit
-
-/-- Fresh variable generator used by `tVar`. -/
-def defaultFresh : Nat → Var := λ n => ⟨n⟩
-
-/-- Collect free type variables from the context. -/
-def Context.freeTypeVars (Γ : Context) : List Var :=
-  Γ.bind fun (_, σ) => σ.body.fv
-
-/-- Return type of a binary operator. -/
-def binOpResultType : BinOp → Ty
-| .add | .sub | .mul | .div | .mod => .int
-| .eq | .neq | .lt | .le | .gt | .ge => .bool
-| .and | .or => .bool
-
-/-- Typing condition for binary operators: both operands must match the operator's expected type. -/
-inductive hasBinOpType : BinOp → Expr → Expr → Context → Prop where
-| intArith : ∀ {Γ op e₁ e₂},
+| tBinOpIntArith : ∀ {Γ op e₁ e₂},
     op ∈ [.add, .sub, .mul, .div, .mod] →
     HasType Γ e₁ .int →
     HasType Γ e₂ .int →
-    hasBinOpType op e₁ e₂ Γ
-| intCmp : ∀ {Γ op e₁ e₂},
+    HasType Γ (.binOp op e₁ e₂) .int
+| tBinOpIntCmp : ∀ {Γ op e₁ e₂},
     op ∈ [.eq, .neq, .lt, .le, .gt, .ge] →
     HasType Γ e₁ .int →
     HasType Γ e₂ .int →
-    hasBinOpType op e₁ e₂ Γ
-| boolLogic : ∀ {Γ op e₁ e₂},
+    HasType Γ (.binOp op e₁ e₂) .bool
+| tBinOpBoolLogic : ∀ {Γ op e₁ e₂},
     op ∈ [.and, .or] →
     HasType Γ e₁ .bool →
     HasType Γ e₂ .bool →
-    hasBinOpType op e₁ e₂ Γ
+    HasType Γ (.binOp op e₁ e₂) .bool
 
 -- ==================================================================
 -- SMALL-STEP OPERATIONAL SEMANTICS  e ↦ e'
@@ -333,6 +326,56 @@ inductive hasBinOpType : BinOp → Expr → Expr → Context → Prop where
   - Binary operators reduce left operand, then right, then apply
   - String concat reduces left operand, then right, then apply
 -/
+def isValue : Expr → Bool
+| .litInt _     => true
+| .litBool _    => true
+| .litString _  => true
+| .lambda _ _ _ => true
+| .unitVal      => true
+| _             => false
+
+/-- Capture-avoiding substitution `e[x := v]`. -/
+def subst (x : Name) (v : Expr) : Expr → Expr
+| .var y        => if x == y then v else .var y
+| .litInt n     => .litInt n
+| .litBool b    => .litBool b
+| .litString s  => .litString s
+| .lambda y τ e =>
+    if x == y then .lambda y τ e
+    else .lambda y τ (subst x v e)
+| .app e₁ e₂    => .app (subst x v e₁) (subst x v e₂)
+| .letIn y e₁ e₂ =>
+    if x == y then .letIn y (subst x v e₁) e₂
+    else .letIn y (subst x v e₁) (subst x v e₂)
+| .ifThenElse e₁ e₂ e₃ =>
+    .ifThenElse (subst x v e₁) (subst x v e₂) (subst x v e₃)
+| .binOp op e₁ e₂ => .binOp op (subst x v e₁) (subst x v e₂)
+| .strConcat e₁ e₂ => .strConcat (subst x v e₁) (subst x v e₂)
+| .unitVal      => .unitVal
+
+/-- Apply a binary operator to two integer operands, producing a literal result. -/
+def binOpApply (op : BinOp) (n₁ n₂ : Int) : Expr :=
+  match op with
+  | .add => .litInt (n₁ + n₂)
+  | .sub => .litInt (n₁ - n₂)
+  | .mul => .litInt (n₁ * n₂)
+  | .div => if n₂ == 0 then .unitVal else .litInt (n₁ / n₂)
+  | .mod => if n₂ == 0 then .unitVal else .litInt (n₁ % n₂)
+  | .eq  => .litBool (n₁ == n₂)
+  | .neq => .litBool (n₁ != n₂)
+  | .lt  => .litBool (n₁ < n₂)
+  | .le  => .litBool (n₁ ≤ n₂)
+  | .gt  => .litBool (n₁ > n₂)
+  | .ge  => .litBool (n₁ ≥ n₂)
+  | .and => .unitVal  -- unreachable: .and is for Bool operands only
+  | .or  => .litBool ((n₁ != 0) || (n₂ != 0))
+
+/-- Apply a boolean binary operator to two boolean operands, producing a literal result. -/
+def binOpApplyBool (op : BinOp) (b₁ b₂ : Bool) : Expr :=
+  match op with
+  | .and => .litBool (b₁ && b₂)
+  | .or  => .litBool (b₁ || b₂)
+  | _    => .unitVal  -- unreachable for well-typed programs
 inductive Step : Expr → Expr → Prop where
 
 -- ** Application **
@@ -398,54 +441,6 @@ inductive Steps : Expr → Expr → Prop where
 | step : ∀ {e₁ e₂ e₃}, Step e₁ e₂ → Steps e₂ e₃ → Steps e₁ e₃
 
 /-- Predicate: `e` is a value (cannot reduce further). -/
-def isValue : Expr → Bool
-| .litInt _     => true
-| .litBool _    => true
-| .litString _  => true
-| .lambda _ _ _ => true
-| .unitVal      => true
-| _             => false
-
-/-- Capture-avoiding substitution `e[x := v]`. -/
-def subst (x : Name) (v : Expr) : Expr → Expr
-| .var y        => if x == y then v else .var y
-| .litInt n     => .litInt n
-| .litBool b    => .litBool b
-| .litString s  => .litString s
-| .lambda y τ e =>
-    if x == y then .lambda y τ e
-    else .lambda y τ (subst x v e)
-| .app e₁ e₂    => .app (subst x v e₁) (subst x v e₂)
-| .letIn y e₁ e₂ =>
-    if x == y then .letIn y (subst x v e₁) e₂
-    else .letIn y (subst x v e₁) (subst x v e₂)
-| .ifThenElse e₁ e₂ e₃ =>
-    .ifThenElse (subst x v e₁) (subst x v e₂) (subst x v e₃)
-| .binOp op e₁ e₂ => .binOp op (subst x v e₁) (subst x v e₂)
-| .strConcat e₁ e₂ => .strConcat (subst x v e₁) (subst x v e₂)
-| .unitVal      => .unitVal
-
-/-- Apply a binary operator to two integer operands, producing a literal result. -/
-def binOpApply (op : BinOp) (n₁ n₂ : Int) : Expr :=
-  match op with
-  | .add => .litInt (n₁ + n₂)
-  | .sub => .litInt (n₁ - n₂)
-  | .mul => .litInt (n₁ * n₂)
-  | .div => if n₂ == 0 then .unitVal else .litInt (n₁ / n₂)
-  | .mod => if n₂ == 0 then .unitVal else .litInt (n₁ % n₂)
-  | .eq  => .litBool (n₁ == n₂)
-  | .neq => .litBool (n₁ != n₂)
-  | .lt  => .litBool (n₁ < n₂)
-  | .le  => .litBool (n₁ ≤ n₂)
-  | .gt  => .litBool (n₁ > n₂)
-  | .or  => .litBool ((n₁ != 0) || (n₂ != 0))
-
-/-- Apply a boolean binary operator to two boolean operands, producing a literal result. -/
-def binOpApplyBool (op : BinOp) (b₁ b₂ : Bool) : Expr :=
-  match op with
-  | .and => .litBool (b₁ && b₂)
-  | .or  => .litBool (b₁ || b₂)
-  | _    => .unitVal  -- unreachable for well-typed programs
 
 -- ==================================================================
 -- SOUNDNESS LEMMAS
@@ -490,18 +485,252 @@ theorem weakening {Γ : Context} {x : Name} {σ : Scheme} {e : Expr} {τ : Ty}
         simpa using ih₂
   | tIf Γ' e₁ e₂ e₃ τ' hc ihc ht iht he ihe =>
       apply HasType.tIf <;> assumption
-  | tBinOp Γ' op e₁ e₂ hb =>
-      apply HasType.tBinOp
-      induction hb with
-      | intArith Γ'' op' e₁' e₂' hop h₁ h₂ =>
-          apply hasBinOpType.intArith hop <;> assumption
-      | intCmp Γ'' op' e₁' e₂' hop h₁ h₂ =>
-          apply hasBinOpType.intCmp hop <;> assumption
-      | boolLogic Γ'' op' e₁' e₂' hop h₁ h₂ =>
-          apply hasBinOpType.boolLogic hop <;> assumption
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ =>
+      apply HasType.tBinOpIntArith hop <;> assumption
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ =>
+      apply HasType.tBinOpIntCmp hop <;> assumption
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ =>
+      apply HasType.tBinOpBoolLogic hop <;> assumption
   | tStrConcat Γ' e₁ e₂ h₁ ih₁ h₂ ih₂ =>
       apply HasType.tStrConcat <;> assumption
   | tUnit Γ' => apply HasType.tUnit
+
+-- ------------------------------------------------------------------
+-- Helper lemmas for substitution
+-- ------------------------------------------------------------------
+
+/--
+  If `extra` is a subset of `envFv`, adding `extra` to the exclusion set
+  does not change which free type variables are erased by generalization.
+-/
+lemma generalize_eraseP_subset (envFv extra : List Var) (τ : Ty)
+    (h : extra ⊆ envFv) :
+    Scheme.generalize (extra ++ envFv) τ = Scheme.generalize envFv τ := by
+  unfold Scheme.generalize
+  simp [h]
+
+/--
+  Helper: when τ₁.fv ⊆ Γ.freeTypeVars, adding a monomorphic binding
+  for x:τ₁ to the context does not change the generalization of τ'.
+-/
+lemma generalize_ctx_extend (Γ : Context) (x : Name) (τ₁ τ' : Ty)
+    (h : τ₁.fv ⊆ Γ.freeTypeVars) :
+    Scheme.generalize (((x, ⟨[], τ₁⟩) :: Γ).freeTypeVars) τ' =
+    Scheme.generalize (Γ.freeTypeVars) τ' := by
+  unfold Scheme.generalize Context.freeTypeVars
+  simp [h]
+
+/--
+  **Context contraction (drop shadowed binding).**
+  If `(x, σ') :: (x, σ) :: Γ ⊢ e : τ`, then the inner binding shadows
+  the outer, and we can drop the outer to get `(x, σ') :: Γ ⊢ e : τ`.
+-/
+theorem context_drop_shadowed {Γ : Context} {x : Name} {σ σ' : Scheme} {e : Expr} {τ : Ty}
+    (h_sigma : σ.body.fv ⊆ ((x, σ') :: Γ).freeTypeVars)
+    (h : HasType ((x, σ') :: (x, σ) :: Γ) e τ) :
+    HasType ((x, σ') :: Γ) e τ := by
+  induction h with
+  | tVar Γ' y τ' s hlookup hinst =>
+      apply HasType.tVar
+      · unfold Context.lookup
+        by_cases h_eq : y = x
+        · subst h_eq; simp
+        · simp [h_eq, hlookup]
+      · exact hinst
+  | tLitInt Γ' n => apply HasType.tLitInt
+  | tLitBool Γ' b => apply HasType.tLitBool
+  | tLitString Γ' s => apply HasType.tLitString
+  | tLambda Γ' y τ₁ e' τ₂ h_body ih =>
+      apply HasType.tLambda
+      simpa using ih
+  | tApp Γ' e₁ e₂ τ₁ τ₂ h₁ ih₁ h₂ ih₂ =>
+      apply HasType.tApp <;> assumption
+  | tLet Γ' y e₁ e₂ τ₁' τ₂' h₁ ih₁ h₂ ih₂ =>
+      apply HasType.tLet
+      · exact ih₁
+      · have h_scheme_eq : Scheme.generalize Γ'.freeTypeVars τ₁' =
+                          Scheme.generalize ((x, σ') :: Γ).freeTypeVars τ₁' := by
+          calc
+            Scheme.generalize Γ'.freeTypeVars τ₁'
+                = Scheme.generalize (σ.body.fv ++ ((x, σ') :: Γ).freeTypeVars) τ₁' := by
+              simp [Context.freeTypeVars]
+            _ = Scheme.generalize ((x, σ') :: Γ).freeTypeVars τ₁' :=
+              generalize_eraseP_subset ((x, σ') :: Γ).freeTypeVars σ.body.fv τ₁' h_sigma
+        simpa [h_scheme_eq] using ih₂
+  | tIf Γ' e₁ e₂ e₃ τ' hc ihc ht iht he ihe =>
+      apply HasType.tIf <;> assumption
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ =>
+      apply HasType.tBinOpIntArith hop <;> assumption
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ =>
+      apply HasType.tBinOpIntCmp hop <;> assumption
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ =>
+      apply HasType.tBinOpBoolLogic hop <;> assumption
+  | tStrConcat Γ' e₁ e₂ h₁ ih₁ h₂ ih₂ =>
+      apply HasType.tStrConcat <;> assumption
+  | tUnit Γ' => apply HasType.tUnit
+
+/-- All type annotations in an expression are closed (no free type variables). -/
+def annotationsClosed : Expr → Prop
+| .litInt _ | .litBool _ | .litString _ | .unitVal | .var _ => True
+| .lambda _ τ e => τ.fv = [] ∧ annotationsClosed e
+| .app e₁ e₂ | .strConcat e₁ e₂ | .binOp _ e₁ e₂ => annotationsClosed e₁ ∧ annotationsClosed e₂
+| .letIn _ e₁ e₂ => annotationsClosed e₁ ∧ annotationsClosed e₂
+| .ifThenElse e₁ e₂ e₃ => annotationsClosed e₁ ∧ annotationsClosed e₂ ∧ annotationsClosed e₃
+
+/-- Extract the closedness of a type annotation from `annotationsClosed`. -/
+lemma lambda_annotation_closed {x : Name} {τ : Ty} {e : Expr}
+    (h : annotationsClosed (.lambda x τ e)) : τ.fv = [] := by
+  rcases h with ⟨hτ, _⟩; exact hτ
+
+/-- Substitution preserves annotation closedness. -/
+lemma annotationsClosed_subst (x : Name) (v e : Expr)
+    (hv : annotationsClosed v) (he : annotationsClosed e) :
+    annotationsClosed (subst x v e) := by
+  induction e with
+  | var y => unfold subst; split <;> simp [*]
+  | litInt _ | litBool _ | litString _ | unitVal => trivial
+  | lambda y τ e' ih =>
+      unfold subst; split
+      · exact ⟨by rcases he with ⟨hτ, _⟩; exact hτ, he⟩
+      · rcases he with ⟨hτ, he'⟩; exact ⟨hτ, ih he'⟩
+  | app e₁ e₂ ih₁ ih₂ =>
+      rcases he with ⟨he₁, he₂⟩
+      unfold subst; exact ⟨ih₁ he₁, ih₂ he₂⟩
+  | letIn y e₁ e₂ ih₁ ih₂ =>
+      unfold subst; split
+      · rcases he with ⟨he₁, he₂⟩; exact ⟨ih₁ he₁, he₂⟩
+      · rcases he with ⟨he₁, he₂⟩; exact ⟨ih₁ he₁, ih₂ he₂⟩
+  | ifThenElse e₁ e₂ e₃ ih₁ ih₂ ih₃ =>
+      rcases he with ⟨he₁, he₂, he₃⟩
+      unfold subst; exact ⟨ih₁ he₁, ih₂ he₂, ih₃ he₃⟩
+  | binOp _ e₁ e₂ ih₁ ih₂ =>
+      rcases he with ⟨he₁, he₂⟩
+      unfold subst; exact ⟨ih₁ he₁, ih₂ he₂⟩
+  | strConcat e₁ e₂ ih₁ ih₂ =>
+      rcases he with ⟨he₁, he₂⟩
+      unfold subst; exact ⟨ih₁ he₁, ih₂ he₂⟩
+
+/--
+  If the context has no free type variables, all its schemes are monomorphic
+  (empty params), and the expression has closed annotations, then the result
+  type is closed.
+-/
+lemma closed_type_under_closed_context {Γ : Context} {e : Expr} {τ : Ty}
+    (h : HasType Γ e τ) (hΓ : Γ.freeTypeVars = [])
+    (h_params : ∀ (x : Name) (σ : Scheme), Γ.lookup x = some σ → σ.params = [])
+    (h_closed : annotationsClosed e) :
+    τ.fv = [] := by
+  induction h with
+  | tVar Γ' x τ' σ' hlookup hinst =>
+      have h_empty_params : σ'.params = [] := h_params x σ' hlookup
+      have h_body_fv : σ'.body.fv = [] := by
+        have h_mem : σ'.body.fv ⊆ Γ'.freeTypeVars := by
+          induction Γ' generalizing σ' with
+          | nil => cases hlookup
+          | cons (y, σ'') Γ_tail ih =>
+              unfold Context.lookup at hlookup
+              split at hlookup
+              · injection hlookup; subst σ'; subst y
+                unfold Context.freeTypeVars; simp
+              · have h_tail := ih hlookup
+                unfold Context.freeTypeVars; simp [h_tail]
+        rw [hΓ] at h_mem
+        apply List.eq_nil_of_forall_not_mem
+        intro v hv
+        exact absurd (h_mem hv) (by simp)
+      have h_inst : (σ'.instantiate defaultFresh).1 = σ'.body := by
+        unfold Scheme.instantiate; simp [h_empty_params]
+      rw [h_inst] at hinst
+      rw [← hinst]
+      exact h_body_fv
+  | tLitInt Γ' n => rfl
+  | tLitBool Γ' b => rfl
+  | tLitString Γ' s => rfl
+  | tLambda Γ' x τ₁ e τ₂ h_body ih =>
+      rcases h_closed with ⟨hτ₁, he_closed⟩
+      have hΓ_body : ((x, ⟨[], τ₁⟩) :: Γ').freeTypeVars = [] := by
+        simp [Context.freeTypeVars, hτ₁, hΓ]
+      have h_params_body : ∀ (y : Name) (σ : Scheme),
+          ((x, ⟨[], τ₁⟩) :: Γ').lookup y = some σ → σ.params = [] := by
+        intro y σ hlook
+        unfold Context.lookup at hlook
+        split at hlook
+        · injection hlook; subst σ; rfl
+        · exact h_params y σ hlook
+      have hτ₂ : τ₂.fv = [] := ih hΓ_body h_params_body he_closed
+      simp [hτ₁, hτ₂]
+  | tApp Γ' e₁ e₂ τ₁ τ₂ h₁ ih₁ h₂ ih₂ =>
+      rcases h_closed with ⟨he₁_closed, he₂_closed⟩
+      have h_fn_fv := ih₁ hΓ h_params he₁_closed
+      simp at h_fn_fv
+      have hτ₁_fv : τ₁.fv = [] := (List.append_eq_nil.mp h_fn_fv).2
+      exact hτ₁_fv
+  | tLet Γ' x e₁ e₂ τ₁ τ₂ h₁ ih₁ h₂ ih₂ =>
+      rcases h_closed with ⟨he₁_closed, he₂_closed⟩
+      have hτ₁_fv : τ₁.fv = [] := ih₁ hΓ h_params he₁_closed
+      have hΓ_ext : ((x, Scheme.generalize Γ'.freeTypeVars τ₁) :: Γ').freeTypeVars = [] := by
+        simp [Context.freeTypeVars, hΓ, hτ₁_fv, Scheme.generalize]
+      have h_params_ext : ∀ (y : Name) (σ : Scheme),
+          ((x, Scheme.generalize Γ'.freeTypeVars τ₁) :: Γ').lookup y = some σ → σ.params = [] := by
+        intro y σ hlook
+        unfold Context.lookup at hlook
+        split at hlook
+        · injection hlook; subst σ
+          unfold Scheme.generalize
+          simp [hτ₁_fv]
+        · exact h_params y σ hlook
+      exact ih₂ hΓ_ext h_params_ext he₂_closed
+  | tIf Γ' e₁ e₂ e₃ τ' hc ihc ht iht he ihe =>
+      rcases h_closed with ⟨_, he₂_closed, _⟩
+      exact iht hΓ h_params he₂_closed
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ => rfl
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ => rfl
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ => rfl
+  | tStrConcat Γ' e₁ e₂ h₁ ih₁ h₂ ih₂ =>
+      rfl
+  | tUnit Γ' => rfl
+
+/--
+  A value with closed annotations has a closed type when typed in the empty context.
+-/
+lemma value_has_closed_type {v : Expr} {τ : Ty}
+    (h : HasType Context.empty v τ) (hv : isValue v) (h_closed : annotationsClosed v) :
+    τ.fv = [] := by
+  cases h with
+  | tVar Γ' x τ' σ' hlookup hinst =>
+      unfold Context.empty at hlookup
+      unfold Context.lookup at hlookup
+      cases hlookup
+  | tLitInt Γ' n => rfl
+  | tLitBool Γ' b => rfl
+  | tLitString Γ' s => rfl
+  | tLambda Γ' x τ₁ e τ₂ h_body =>
+      rcases h_closed with ⟨hτ₁, he_closed⟩
+      have hτ₂ : τ₂.fv = [] := by
+        have hΓ : ((x, ⟨[], τ₁⟩) :: Context.empty).freeTypeVars = [] := by
+          simp [Context.freeTypeVars, hτ₁]
+        have h_params : ∀ (y : Name) (σ : Scheme),
+            ((x, ⟨[], τ₁⟩) :: Context.empty).lookup y = some σ → σ.params = [] := by
+          intro y σ hlook
+          unfold Context.lookup at hlook
+          split at hlook
+          · injection hlook; subst σ; rfl
+          · unfold Context.lookup at hlook; cases hlook
+        exact closed_type_under_closed_context h_body hΓ h_params he_closed
+      simp [hτ₁, hτ₂]
+  | tApp Γ' e₁ e₂ τ₁ τ₂ h₁ h₂ =>
+      unfold isValue at hv; simp at hv
+  | tLet Γ' x e₁ e₂ τ₁ τ₂ h₁ h₂ =>
+      unfold isValue at hv; simp at hv
+  | tIf Γ' e₁ e₂ e₃ τ' hc ht he =>
+      unfold isValue at hv; simp at hv
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ => unfold isValue at hv; simp at hv
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ => unfold isValue at hv; simp at hv
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ => unfold isValue at hv; simp at hv
+  | tStrConcat Γ' e₁ e₂ h₁ h₂ =>
+      unfold isValue at hv; simp at hv
+  | tUnit Γ' => rfl
+
 
 -- ------------------------------------------------------------------
 -- Substitution lemma
@@ -523,7 +752,8 @@ theorem weakening {Γ : Context} {x : Name} {σ : Scheme} {e : Expr} {τ : Ty}
 -/
 theorem substitution_lemma {Γ : Context} {x : Name} {τ₁ τ₂ : Ty} {e v : Expr}
     (h : HasType ((x, ⟨[], τ₁⟩) :: Γ) e τ₂)
-    (hv : HasType Γ v τ₁) :
+    (hv : HasType Γ v τ₁)
+    (h_fv : τ₁.fv = []) :
     HasType Γ (subst x v e) τ₂ := by
   induction h with
   | tVar Γ' y τ σ hlookup hinst =>
@@ -568,7 +798,10 @@ theorem substitution_lemma {Γ : Context} {x : Name} {τ₁ τ₂ : Ty} {e v : E
         -- Since x is shadowed, the typing of e' only depends on the inner x:τ₁'
         -- This follows from weakening: if ((x,⟨[],τ₁'⟩) :: ((x,⟨[],τ₁⟩) :: Γ)) ⊢ e' : τ₂'
         -- then ((x,⟨[],τ₁'⟩) :: Γ) ⊢ e' : τ₂' (drop the shadowed binding)
-        sorry
+        apply HasType.tLambda
+        have h_sigma : (⟨[], τ₁⟩).body.fv ⊆ ((x, ⟨[], τ₁'⟩) :: Γ).freeTypeVars := by
+          rw [h_fv]; exact List.nil_subset _
+        apply context_drop_shadowed h_sigma h_body
       · -- parameter ≠ x: substitute in body
         apply HasType.tLambda
         -- IH: HasType ((y, ⟨[], τ₁'⟩) :: Γ) (subst x v e') τ₂'
@@ -589,7 +822,13 @@ theorem substitution_lemma {Γ : Context} {x : Name} {τ₁ τ₂ : Ty} {e v : E
         · -- h₂: HasType ((x, Scheme.generalize Γ'.freeTypeVars τ₁') :: ((x, ⟨[], τ₁⟩) :: Γ)) e₂ τ₂'
           -- The inner x shadows the outer, so we can drop the outer context entry
           -- Needs weakening-style argument.  For the monomorphic case:
-          sorry
+          have h_subset : τ₁.fv ⊆ Γ.freeTypeVars := by
+            rw [h_fv]; exact List.nil_subset _
+          have h_scheme_eq := generalize_ctx_extend Γ x τ₁ τ₁' h_subset
+          have h_sigma_cds : (⟨[], τ₁⟩).body.fv ⊆ ((x, Scheme.generalize Γ'.freeTypeVars τ₁') :: Γ).freeTypeVars := by
+            rw [h_fv]; exact List.nil_subset _
+          have h_drop := context_drop_shadowed h_sigma_cds h₂
+          simpa [h_scheme_eq] using h_drop
       · -- y ≠ x: substitute in both e₁ and e₂
         apply HasType.tLet
         · exact ih₁
@@ -599,31 +838,31 @@ theorem substitution_lemma {Γ : Context} {x : Name} {τ₁ τ₂ : Ty} {e v : E
           -- Since τ₁' is typed under ((x, ⟨[], τ₁⟩) :: Γ), the free vars of τ₁' may include
           -- vars from that extended context.  When we drop x, the generalization changes.
           -- This is a known subtlety; for simplicity we assume x not free in τ₁'.
-          sorry
+          have h_subset : τ₁.fv ⊆ Γ.freeTypeVars := by
+            rw [h_fv]; exact List.nil_subset _
+          have h_scheme_eq := generalize_ctx_extend Γ x τ₁ τ₁' h_subset
+          simpa [h_scheme_eq] using ih₂
   | tIf Γ' e₁ e₂ e₃ τ' hc ihc ht iht he ihe =>
       unfold subst
       apply HasType.tIf
       · exact ihc
       · exact iht
       · exact ihe
-  | tBinOp Γ' op e₁ e₂ hb =>
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ =>
       unfold subst
-      -- Induct on hb to propagate substitution
-      induction hb with
-      | intArith Γ'' op' e₁' e₂' hop h₁ h₂ =>
-          apply hasBinOpType.intArith hop
-          · -- h₁: HasType ((x, ⟨[], τ₁⟩) :: Γ) e₁' .int
-            -- Recurse using substitution_lemma
-            exact substitution_lemma h₁ hv
-          · exact substitution_lemma h₂ hv
-      | intCmp Γ'' op' e₁' e₂' hop h₁ h₂ =>
-          apply hasBinOpType.intCmp hop
-          · exact substitution_lemma h₁ hv
-          · exact substitution_lemma h₂ hv
-      | boolLogic Γ'' op' e₁' e₂' hop h₁ h₂ =>
-          apply hasBinOpType.boolLogic hop
-          · exact substitution_lemma h₁ hv
-          · exact substitution_lemma h₂ hv
+      apply HasType.tBinOpIntArith hop
+      · exact substitution_lemma h₁ hv h_fv
+      · exact substitution_lemma h₂ hv h_fv
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ =>
+      unfold subst
+      apply HasType.tBinOpIntCmp hop
+      · exact substitution_lemma h₁ hv h_fv
+      · exact substitution_lemma h₂ hv h_fv
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ =>
+      unfold subst
+      apply HasType.tBinOpBoolLogic hop
+      · exact substitution_lemma h₁ hv h_fv
+      · exact substitution_lemma h₂ hv h_fv
   | tStrConcat Γ' e₁ e₂ h₁ ih₁ h₂ ih₂ =>
       unfold subst
       apply HasType.tStrConcat
@@ -683,8 +922,9 @@ theorem canonical_forms {v : Expr} {τ : Ty}
       unfold isValue at hv; simp at hv
   | tIf Γ' e₁ e₂ e₃ τ' hc ht he =>
       unfold isValue at hv; simp at hv
-  | tBinOp Γ' op e₁ e₂ hb =>
-      unfold isValue at hv; simp at hv
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ => unfold isValue at hv; simp at hv
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ => unfold isValue at hv; simp at hv
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ => unfold isValue at hv; simp at hv
   | tStrConcat Γ' e₁ e₂ h₁ h₂ =>
       unfold isValue at hv; simp at hv
   | tUnit Γ' =>
@@ -782,107 +1022,56 @@ theorem progress (e : Expr) (τ : Ty) (h : HasType Context.empty e τ) :
       · -- guard steps
         apply Or.inr
         exact ⟨.ifThenElse e₁' e₂ e₃, Step.ifGuard hsc⟩
-  | tBinOp Γ' op e₁ e₂ hb =>
-      -- Need to analyze the binop typing.  We can do case analysis on hb
-      -- to extract the operand typing derivations and apply IH.
-      -- However, the induction hypothesis is not available for the sub-derivations
-      -- in hb because they are not direct sub-derivations of `h`.
-      -- We need inversion: from tBinOp, hb provides the operand types.
-      -- For progress, we only need to check if operands are values.
-      -- If both are values, binOpEval applies.  Otherwise one steps.
-      --
-      -- Since we can't easily get IH for the nested HasType derivations in hb,
-      -- we use a direct analysis of the operand expressions.
-      --
-      -- The key insight: if e₁ is a value and e₂ is a value, and both have
-      -- type int/bool (as per hb), then binOpEval applies.
-      -- If either is not a value, progress provides a step by the congruence rules.
+  | tBinOpIntArith Γ' op e₁ e₂ hop h₁ h₂ =>
       by_cases hv₁ : isValue e₁
       · by_cases hv₂ : isValue e₂
-        · -- Both values: apply binOpEval
-          apply Or.inr
-          -- Need to show operands are litInt (for int ops) or litBool (for bool ops)
-          -- This requires knowing the operator kind.  Since we know hb and the
-          -- values, we can determine the appropriate step.
-          --
-          -- For the formal proof, we do case analysis on hb to determine
-          -- what kind of operands we have:
-          rcases hb with (⟨_, _, _, _, hop, ht₁, ht₂⟩ | ⟨_, _, _, _, hop, ht₁, ht₂⟩ | ⟨_, _, _, _, hop, ht₁, ht₂⟩)
-          · -- intArith: operands typed at .int
-            -- Since e₁, e₂ are values and have type .int, by canonical_forms they are litInt
-            rcases canonical_forms ht₁ hv₁ with
-              (⟨n₁, _, _⟩ | ⟨_, _, hty⟩ | ⟨_, _, hty⟩ | ⟨_, _, _, _, _, hty⟩ | ⟨_, hty⟩)
-            · -- e₁ = litInt n₁
-              rcases canonical_forms ht₂ hv₂ with
-                (⟨n₂, _, _⟩ | ⟨_, _, hty⟩ | ⟨_, _, hty⟩ | ⟨_, _, _, _, _, hty⟩ | ⟨_, hty⟩)
-              · exact ⟨binOpApply op n₁ n₂, Step.binOpEval⟩
-              · -- e₂ = litBool, type says int, contradiction
-                injection hty
-              · injection hty
-              · injection hty
-              · injection hty
-            · -- e₁ = litBool, type says int, contradiction
-              injection hty
-            · injection hty
-            · injection hty
-            · injection hty
-          · -- intCmp: same structure
-            rcases canonical_forms ht₁ hv₁ with
-              (⟨n₁, _, _⟩ | ⟨_, _, hty⟩ | ⟨_, _, hty⟩ | ⟨_, _, _, _, _, hty⟩ | ⟨_, hty⟩)
-            · rcases canonical_forms ht₂ hv₂ with
-                (⟨n₂, _, _⟩ | ⟨_, _, hty⟩ | ⟨_, _, hty⟩ | ⟨_, _, _, _, _, hty⟩ | ⟨_, hty⟩)
-              · exact ⟨binOpApply op n₁ n₂, Step.binOpEval⟩
-              · injection hty
-              · injection hty
-              · injection hty
-              · injection hty
-            · injection hty
-            · injection hty
-            · injection hty
-            · injection hty
-          · -- boolLogic: operands typed at .bool, canonical_forms → litBool
-            rcases canonical_forms ht₁ hv₁ with
-              (⟨_, _, hty⟩ | ⟨b₁, _, _⟩ | ⟨_, _, hty⟩ | ⟨_, _, _, _, _, hty⟩ | ⟨_, hty⟩)
-            · injection hty
-            · rcases canonical_forms ht₂ hv₂ with
-                (⟨_, _, hty⟩ | ⟨b₂, _, _⟩ | ⟨_, _, hty⟩ | ⟨_, _, _, _, _, hty⟩ | ⟨_, hty⟩)
-              · injection hty
-              · -- binOpEvalBool for bool operators
-                apply Or.inr
-                -- Need: op ∈ [.and, .or] from hb (boolLogic constructor)
-                rcases hb with ⟨_, _, _, _, hop, _, _⟩
-                exact ⟨binOpApplyBool op b₁ b₂, Step.binOpEvalBool hop⟩
-              · injection hty
-            · injection hty
-            · injection hty
-            · injection hty
-        · -- e₂ is not a value: binOpRight
-          apply Or.inr
-          -- Need: e₂ steps.  But we only know hv₂ = false, not that e₂ has a step.
-          -- We need progress for e₂.  Since ht₂: HasType ∅ e₂ τ₂ (for appropriate τ₂),
-          -- we can recurse.  But we don't have IH because ht₂ is nested in hb.
-          -- Solution: use `progress` recursively on ht₂.
-          have hprog := progress e₂ (match op with
-            | .add | .sub | .mul | .div | .mod => .int
-            | .eq | .neq | .lt | .le | .gt | .ge => .int
-            | .and | .or => .bool) ht₂
-          rcases hprog with (hv₂' | ⟨e₂', hs₂⟩)
-          · -- e₂ is a value: contradiction with hv₂
-            rw [hv₂'] at hv₂; simp at hv₂
-          · exact ⟨.binOp op e₁ e₂', Step.binOpRight hv₁ hs₂⟩
-      · -- e₁ is not a value: binOpLeft
-        apply Or.inr
-        -- Similarly, need progress for e₁
-        have hprog := progress e₁ (match op with
-          | .add | .sub | .mul | .div | .mod => .int
-          | .eq | .neq | .lt | .le | .gt | .ge => .int
-          | .and | .or => .bool) (by
-            -- Extract HasType ∅ e₁ τ from hb
-            rcases hb with (⟨_, _, _, _, _, ht₁, _⟩ | ⟨_, _, _, _, _, ht₁, _⟩ | ⟨_, _, _, _, _, ht₁, _⟩)
-            · exact ht₁; · exact ht₁; · exact ht₁)
-        rcases hprog with (hv₁' | ⟨e₁', hs₁⟩)
+        · rcases canonical_forms h₁ hv₁ with (⟨n₁,_,_⟩|⟨_,_,h⟩|⟨_,_,h⟩|⟨_,_,_,_,_,h⟩|⟨_,h⟩)
+          · rcases canonical_forms h₂ hv₂ with (⟨n₂,_,_⟩|⟨_,_,h⟩|⟨_,_,h⟩|⟨_,_,_,_,_,h⟩|⟨_,h⟩)
+            · exact Or.inr ⟨binOpApply op n₁ n₂, Step.binOpEval⟩
+            · injection h; · injection h; · injection h; · injection h
+          · injection h; · injection h; · injection h; · injection h
+        · have hprog := progress e₂ .int h₂
+          rcases hprog with (hv₂'|⟨e₂',hs₂⟩)
+          · rw [hv₂'] at hv₂; simp at hv₂
+          · exact Or.inr ⟨.binOp op e₁ e₂', Step.binOpRight hv₁ hs₂⟩
+      · have hprog := progress e₁ .int h₁
+        rcases hprog with (hv₁'|⟨e₁',hs₁⟩)
         · rw [hv₁'] at hv₁; simp at hv₁
-        · exact ⟨.binOp op e₁' e₂, Step.binOpLeft hs₁⟩
+        · exact Or.inr ⟨.binOp op e₁' e₂, Step.binOpLeft hs₁⟩
+  | tBinOpIntCmp Γ' op e₁ e₂ hop h₁ h₂ =>
+      by_cases hv₁ : isValue e₁
+      · by_cases hv₂ : isValue e₂
+        · rcases canonical_forms h₁ hv₁ with (⟨n₁,_,_⟩|⟨_,_,h⟩|⟨_,_,h⟩|⟨_,_,_,_,_,h⟩|⟨_,h⟩)
+          · rcases canonical_forms h₂ hv₂ with (⟨n₂,_,_⟩|⟨_,_,h⟩|⟨_,_,h⟩|⟨_,_,_,_,_,h⟩|⟨_,h⟩)
+            · exact Or.inr ⟨binOpApply op n₁ n₂, Step.binOpEval⟩
+            · injection h; · injection h; · injection h; · injection h
+          · injection h; · injection h; · injection h; · injection h
+        · have hprog := progress e₂ .int h₂
+          rcases hprog with (hv₂'|⟨e₂',hs₂⟩)
+          · rw [hv₂'] at hv₂; simp at hv₂
+          · exact Or.inr ⟨.binOp op e₁ e₂', Step.binOpRight hv₁ hs₂⟩
+      · have hprog := progress e₁ .int h₁
+        rcases hprog with (hv₁'|⟨e₁',hs₁⟩)
+        · rw [hv₁'] at hv₁; simp at hv₁
+        · exact Or.inr ⟨.binOp op e₁' e₂, Step.binOpLeft hs₁⟩
+  | tBinOpBoolLogic Γ' op e₁ e₂ hop h₁ h₂ =>
+      by_cases hv₁ : isValue e₁
+      · by_cases hv₂ : isValue e₂
+        · rcases canonical_forms h₁ hv₁ with (⟨_,_,h⟩|⟨b₁,_,_⟩|⟨_,_,h⟩|⟨_,_,_,_,_,h⟩|⟨_,h⟩)
+          · injection h
+          · rcases canonical_forms h₂ hv₂ with (⟨_,_,h⟩|⟨b₂,_,_⟩|⟨_,_,h⟩|⟨_,_,_,_,_,h⟩|⟨_,h⟩)
+            · injection h
+            · exact Or.inr ⟨binOpApplyBool op b₁ b₂, Step.binOpEvalBool hop⟩
+            · injection h; · injection h; · injection h
+          · injection h; · injection h; · injection h; · injection h
+        · have hprog := progress e₂ .bool h₂
+          rcases hprog with (hv₂'|⟨e₂',hs₂⟩)
+          · rw [hv₂'] at hv₂; simp at hv₂
+          · exact Or.inr ⟨.binOp op e₁ e₂', Step.binOpRight hv₁ hs₂⟩
+      · have hprog := progress e₁ .bool h₁
+        rcases hprog with (hv₁'|⟨e₁',hs₁⟩)
+        · rw [hv₁'] at hv₁; simp at hv₁
+        · exact Or.inr ⟨.binOp op e₁' e₂, Step.binOpLeft hs₁⟩
   | tStrConcat Γ' e₁ e₂ h₁ h₂ =>
       rcases ih₁ with (hv₁ | ⟨e₁', hs₁⟩)
       · rcases ih₂ with (hv₂ | ⟨e₂', hs₂⟩)
@@ -919,10 +1108,12 @@ theorem progress (e : Expr) (τ : Ty) (h : HasType Context.empty e τ) :
   typing derivation.  Uses the substitution lemma for beta-reduction
   and let-substitution cases; uses weakening for let-in-body extension.
 -/
-theorem preservation (e e' : Expr) (τ : Ty) (ht : HasType Context.empty e τ) (hs : Step e e') :
+theorem preservation (e e' : Expr) (τ : Ty) (ht : HasType Context.empty e τ) (hs : Step e e')
+    (h_closed : annotationsClosed e) :
   HasType Context.empty e' τ := by
-  induction hs generalizing τ with
+  induction hs generalizing τ h_closed with
   | appFun e₁ e₁' e₂ hs_step ih =>
+      rcases h_closed with ⟨h₁_closed, h₂_closed⟩
       -- e = e₁ e₂, ht = tApp with h₁: ∅ ⊢ e₁ : τ₂→τ₁, h₂: ∅ ⊢ e₂ : τ₂
       -- e' = e₁' e₂, step: e₁ ↦ e₁'
       -- IH: for any τ', if ∅ ⊢ e₁ : τ' and e₁ ↦ e₁', then ∅ ⊢ e₁' : τ'
@@ -930,26 +1121,26 @@ theorem preservation (e e' : Expr) (τ : Ty) (ht : HasType Context.empty e τ) (
       | tApp Γ' e₁' e₂' τ₁ τ₂ h₁ h₂ =>
           -- h₁: ∅ ⊢ e₁ : τ₂→τ₁, h₂: ∅ ⊢ e₂ : τ₂, τ = τ₁
           -- IH applied to h₁: ∅ ⊢ e₁' : τ₂→τ₁
-          have h₁' := ih (τ₂.fn τ₁) h₁
+          have h₁' := ih (τ₂.fn τ₁) h₁_closed h₁
           apply HasType.tApp h₁' h₂
       | _ => trivial -- impossible, expression mismatch
   | appArg v e₂ e₂' hv hs_step ih =>
+      rcases h_closed with ⟨h_v_closed, h_e₂_closed⟩
       cases ht with
       | tApp Γ' e₁' e₂' τ₁ τ₂ h₁ h₂ =>
           -- h₁: ∅ ⊢ v : τ₂→τ₁, h₂: ∅ ⊢ e₂ : τ₂
-          have h₂' := ih τ₂ h₂
+          have h₂' := ih τ₂ h_e₂_closed h₂
           apply HasType.tApp h₁ h₂'
       | _ => trivial
   | appBeta x τ₁ e_body v hv =>
+      rcases h_closed with ⟨h_lam_closed, h_v_closed⟩
+      have h_fv : τ₁.fv = [] := lambda_annotation_closed h_lam_closed
       cases ht with
       | tApp Γ' e₁' e₂' τ₁' τ₂ h₁ h₂ =>
           -- h₁: ∅ ⊢ (.lambda x τ₁ e_body) : τ₂→τ₁'
           -- h₂: ∅ ⊢ v : τ₂
           -- τ = τ₁' (the result type)
           -- From h₁, by inversion on tLambda: ∅, x:τ₁ ⊢ e_body : τ₁'
-          --   and τ₁ = τ₂ (the argument type matches the parameter type)
-          -- Actually, tLambda gives: ∅ ⊢ .lambda x τ₁ e_body : .fn τ₁ τ_body_type
-          --   where ∅, x:τ₁ ⊢ e_body : τ_body_type
           -- For the app to be well-typed: τ₂→τ₁' = τ₁ → τ_body_type, so τ₂ = τ₁ and τ₁' = τ_body_type
           cases h₁ with
           | tLambda Γ'' y τ₁'' e_body' τ_body h_body =>
@@ -958,50 +1149,40 @@ theorem preservation (e e' : Expr) (τ : Ty) (ht : HasType Context.empty e τ) (
               -- h₂: ∅ ⊢ v : τ₂ = τ₁''
               -- Need: ∅ ⊢ subst y v e_body' : τ_body = τ
               -- Use substitution lemma
-              apply substitution_lemma h_body h₂
+              apply substitution_lemma h_body h₂ h_fv
           | _ => trivial
       | _ => trivial
   | letBind x e₁ e₁' e₂ hs_step ih =>
+      rcases h_closed with ⟨h₁_closed, h_e₂_closed⟩
       cases ht with
       | tLet Γ' y e₁'' e₂' τ₁' τ₂' h₁ h₂ =>
-          have h₁' := ih τ₁' h₁
+          have h₁' := ih τ₁' h₁_closed h₁
           apply HasType.tLet h₁' h₂
       | _ => trivial
   | letSubst x v e₂ hv =>
+      rcases h_closed with ⟨h_v_closed, h_e₂_closed⟩
       cases ht with
       | tLet Γ' y e₁' e₂' τ₁' τ₂' h₁ h₂ =>
           -- h₁: ∅ ⊢ v : τ₁'
           -- h₂: ((y, generalize … τ₁') :: ∅) ⊢ e₂' : τ₂'
           -- τ = τ₂'
           -- Need: ∅ ⊢ subst y v e₂' : τ₂'
-          --
-          -- The substitution lemma only covers monomorphic bindings (⟨[], τ₁⟩).
-          -- For let with generalized schemes, we need a stronger lemma.
-          -- However, in the empty context, generalizing over free vars produces
-          -- an empty scheme (since there are no free type vars in ∅).
-          -- So σ = generalize [].freeTypeVars τ₁' = ⟨[], τ₁'⟩ (no free vars to generalize)
-          -- This works because τ₁' is closed (typed in empty context).
-          --
-          -- Actually, Context.empty.freeTypeVars returns [].
-          -- So generalize [] τ₁' = { params := [], body := τ₁' }
-          -- So the binding is monomorphic!
+          -- Since τ₁' is closed (typed in empty context + value), generalize produces monomorphic scheme
+          have h_fv : τ₁'.fv = [] := value_has_closed_type h₁ hv h_v_closed
           have h_empty_fv : Context.empty.freeTypeVars = [] := by
             unfold Context.empty; unfold Context.freeTypeVars; rfl
-          -- With monomorphic binding, substitution_lemma applies
-          -- We need h₂' : ((y, ⟨[], τ₁'⟩) :: ∅) ⊢ e₂' : τ₂'
-          -- But h₂ has ((y, Scheme.generalize Context.empty.freeTypeVars τ₁') :: ∅) ⊢ e₂' : τ₂'
-          -- Since generalize of empty free vars = ⟨[], τ₁'⟩, these are equal
-          -- We can use `simpa` to rewrite
           simpa [h_empty_fv, Scheme.generalize] using substitution_lemma (by
-            simpa [h_empty_fv, Scheme.generalize] using h₂) h₁
+            simpa [h_empty_fv, Scheme.generalize] using h₂) h₁ h_fv
       | _ => trivial
   | ifGuard e₁ e₁' e₂ e₃ hs_step ih =>
+      rcases h_closed with ⟨h₁_closed, h₂_closed, h₃_closed⟩
       cases ht with
       | tIf Γ' e₁'' e₂' e₃' τ' hc ht' he =>
-          have hc' := ih .bool hc
+          have hc' := ih .bool h₁_closed hc
           apply HasType.tIf hc' ht' he
       | _ => trivial
   | ifTrue e₂ e₃ =>
+      rcases h_closed with ⟨_, ht'_closed, _⟩
       cases ht with
       | tIf Γ' e₁' e₂' e₃' τ' hc ht' he =>
           -- hc: ∅ ⊢ .litBool true : .bool (always true)
@@ -1009,112 +1190,82 @@ theorem preservation (e e' : Expr) (τ : Ty) (ht : HasType Context.empty e τ) (
           exact ht'
       | _ => trivial
   | ifFalse e₂ e₃ =>
+      rcases h_closed with ⟨_, _, he_closed⟩
       cases ht with
       | tIf Γ' e₁' e₂' e₃' τ' hc ht' he =>
           exact he
-      | _ => trivial
   | binOpLeft op e₁ e₁' e₂ hs_step ih =>
+      rcases h_closed with ⟨h₁_closed, h₂_closed⟩
       cases ht with
-      | tBinOp Γ' op' e₁'' e₂' hb =>
-          -- Need to reconstruct hasBinOpType with e₁' instead of e₁
-          -- IH: for any τ, if ∅ ⊢ e₁ : τ and e₁ ↦ e₁', then ∅ ⊢ e₁' : τ
-          -- We need to extract the type of e₁ from hb
-          rcases hb with (⟨_, _, _, _, hop, ht₁, ht₂⟩ | ⟨_, _, _, _, hop, ht₁, ht₂⟩ | ⟨_, _, _, _, hop, ht₁, ht₂⟩)
-          · have ht₁' := ih .int ht₁
-            apply HasType.tBinOp
-            apply hasBinOpType.intArith hop ht₁' ht₂
-          · have ht₁' := ih .int ht₁
-            apply HasType.tBinOp
-            apply hasBinOpType.intCmp hop ht₁' ht₂
-          · have ht₁' := ih .bool ht₁
-            apply HasType.tBinOp
-            apply hasBinOpType.boolLogic hop ht₁' ht₂
+      | tBinOpIntArith Γ' op' e₁'' e₂' hop ht₁ ht₂ =>
+          have ht₁' := ih .int h₁_closed ht₁
+          apply HasType.tBinOpIntArith hop ht₁' ht₂
+      | tBinOpIntCmp Γ' op' e₁'' e₂' hop ht₁ ht₂ =>
+          have ht₁' := ih .int h₁_closed ht₁
+          apply HasType.tBinOpIntCmp hop ht₁' ht₂
+      | tBinOpBoolLogic Γ' op' e₁'' e₂' hop ht₁ ht₂ =>
+          have ht₁' := ih .bool h₁_closed ht₁
+          apply HasType.tBinOpBoolLogic hop ht₁' ht₂
       | _ => trivial
   | binOpRight op v e₂ e₂' hv hs_step ih =>
+      rcases h_closed with ⟨h_v_closed, h_e₂_closed⟩
       cases ht with
-      | tBinOp Γ' op' e₁' e₂' hb =>
-          rcases hb with (⟨_, _, _, _, hop, ht₁, ht₂⟩ | ⟨_, _, _, _, hop, ht₁, ht₂⟩ | ⟨_, _, _, _, hop, ht₁, ht₂⟩)
-          · have ht₂' := ih .int ht₂
-            apply HasType.tBinOp
-            apply hasBinOpType.intArith hop ht₁ ht₂'
-          · have ht₂' := ih .int ht₂
-            apply HasType.tBinOp
-            apply hasBinOpType.intCmp hop ht₁ ht₂'
-          · have ht₂' := ih .bool ht₂
-            apply HasType.tBinOp
-            apply hasBinOpType.boolLogic hop ht₁ ht₂'
+      | tBinOpIntArith Γ' op' e₁' e₂' hop ht₁ ht₂ =>
+          have ht₂' := ih .int h_e₂_closed ht₂
+          apply HasType.tBinOpIntArith hop ht₁ ht₂'
+      | tBinOpIntCmp Γ' op' e₁' e₂' hop ht₁ ht₂ =>
+          have ht₂' := ih .int h_e₂_closed ht₂
+          apply HasType.tBinOpIntCmp hop ht₁ ht₂'
+      | tBinOpBoolLogic Γ' op' e₁' e₂' hop ht₁ ht₂ =>
+          have ht₂' := ih .bool h_e₂_closed ht₂
+          apply HasType.tBinOpBoolLogic hop ht₁ ht₂'
       | _ => trivial
   | binOpEval op n₁ n₂ =>
       cases ht with
-      | tBinOp Γ' op' e₁' e₂' hb =>
-          -- e = binOp op (litInt n₁) (litInt n₂), e' = binOpApply op n₁ n₂
-          -- Need: ∅ ⊢ binOpApply op n₁ n₂ : binOpResultType op
-          -- This is determined by the operator: int ops → int, cmp ops → bool
-          -- binOpApply returns either litInt or litBool.
-          -- We can prove by case analysis on op and hb.
-          rcases hb with (⟨_, _, _, _, hop, _, _⟩ | ⟨_, _, _, _, hop, _, _⟩ | ⟨_, _, _, _, hop, _, _⟩)
-          · -- intArith: result type is int, binOpApply returns litInt
-            -- Need to show: HasType ∅ (binOpApply op n₁ n₂) .int
-            -- For int ops: binOpApply returns .litInt (…), so tLitInt applies
-            unfold binOpApply
-            -- We need to know the specific op to unfold properly
-            -- Since op ∈ [.add, .sub, .mul, .div, .mod], we can enumerate
-            have : op = .add ∨ op = .sub ∨ op = .mul ∨ op = .div ∨ op = .mod := by
-              simpa using hop
-            rcases this with (rfl|rfl|rfl|rfl|rfl)
-            · apply HasType.tLitInt
-            · apply HasType.tLitInt
-            · apply HasType.tLitInt
-            · by_cases hz : n₂ == 0
-              · simp [hz]; apply HasType.tUnit
-              · simp [hz]; apply HasType.tLitInt
-            · by_cases hz : n₂ == 0
-              · simp [hz]; apply HasType.tUnit
-              · simp [hz]; apply HasType.tLitInt
-          · -- intCmp: result type is bool
-            unfold binOpApply
-            have : op = .eq ∨ op = .neq ∨ op = .lt ∨ op = .le ∨ op = .gt ∨ op = .ge := by
-              simpa using hop
-            rcases this with (rfl|rfl|rfl|rfl|rfl|rfl)
-            · apply HasType.tLitBool
-            · apply HasType.tLitBool
-            · apply HasType.tLitBool
-            · apply HasType.tLitBool
-            · apply HasType.tLitBool
-            · apply HasType.tLitBool
-          · -- boolLogic: result type is bool
-            unfold binOpApply
-            have : op = .and ∨ op = .or := by
-              simpa using hop
-            rcases this with (rfl|rfl)
-            · apply HasType.tLitBool
-            · apply HasType.tLitBool
+      | tBinOpIntArith Γ' op' e₁' e₂' hop ht₁ ht₂ =>
+          unfold binOpApply
+          have : op = .add ∨ op = .sub ∨ op = .mul ∨ op = .div ∨ op = .mod := by
+            simpa using hop
+          rcases this with (rfl|rfl|rfl|rfl|rfl)
+          · apply HasType.tLitInt; · apply HasType.tLitInt; · apply HasType.tLitInt
+          · by_cases hz : n₂ == 0
+            · simp [hz]; apply HasType.tUnit
+            · simp [hz]; apply HasType.tLitInt
+          · by_cases hz : n₂ == 0
+            · simp [hz]; apply HasType.tUnit
+            · simp [hz]; apply HasType.tLitInt
+      | tBinOpIntCmp Γ' op' e₁' e₂' hop ht₁ ht₂ =>
+          unfold binOpApply
+          have : op = .eq ∨ op = .neq ∨ op = .lt ∨ op = .le ∨ op = .gt ∨ op = .ge := by
+            simpa using hop
+          rcases this with (rfl|rfl|rfl|rfl|rfl|rfl)
+          · apply HasType.tLitBool; · apply HasType.tLitBool; · apply HasType.tLitBool
+          · apply HasType.tLitBool; · apply HasType.tLitBool; · apply HasType.tLitBool
+      | tBinOpBoolLogic Γ' op' e₁' e₂' hop ht₁ ht₂ =>
+          trivial
       | _ => trivial
   | binOpEvalBool op b₁ b₂ hop =>
       cases ht with
-      | tBinOp Γ' op' e₁' e₂' hb =>
-          -- e = binOp op (litBool b₁) (litBool b₂), e' = binOpApplyBool op b₁ b₂
-          -- Need: ∅ ⊢ binOpApplyBool op b₁ b₂ : binOpResultType op
-          -- hb must be boolLogic (since operands are litBool)
-          rcases hb with ⟨_, _, _, _, hop', _, _⟩
+      | tBinOpBoolLogic Γ' op' e₁' e₂' hop' ht₁ ht₂ =>
           unfold binOpApplyBool
-          -- op ∈ [.and, .or]; check hop' and hop agree
           have : op = .and ∨ op = .or := by
             simpa using hop'
           rcases this with (rfl|rfl)
           · apply HasType.tLitBool
           · apply HasType.tLitBool
-       | _ => trivial
+      | _ => trivial
    | strConcatLeft e₁ e₁' e₂ hs_step ih =>
+      rcases h_closed with ⟨h₁_closed, h₂_closed⟩
       cases ht with
       | tStrConcat Γ' e₁'' e₂' h₁ h₂ =>
-          have h₁' := ih .string h₁
+          have h₁' := ih .string h₁_closed h₁
           apply HasType.tStrConcat h₁' h₂
       | _ => trivial
   | strConcatRight v e₂ e₂' hv hs_step ih =>
+      rcases h_closed with ⟨h_v_closed, h_e₂_closed⟩
       cases ht with
       | tStrConcat Γ' e₁' e₂' h₁ h₂ =>
-          have h₂' := ih .string h₂
+          have h₂' := ih .string h_e₂_closed h₂
           apply HasType.tStrConcat h₁ h₂'
       | _ => trivial
   | strConcatEval s₁ s₂ =>
@@ -1134,7 +1285,8 @@ theorem preservation (e e' : Expr) (τ : Ty) (ht : HasType Context.empty e τ) (
 theorem type_soundness (e v : Expr) (τ : Ty)
     (ht : HasType Context.empty e τ)
     (hs : Steps e v)
-    (hv : isValue v) :
+    (hv : isValue v)
+    (h_closed : annotationsClosed e) :
     HasType Context.empty v τ := by
   induction hs with
   | refl e' =>
@@ -1143,7 +1295,7 @@ theorem type_soundness (e v : Expr) (τ : Ty)
   | step e₁ e₂ e₃ hs_step hs_rest ih =>
       -- e = e₁, v = e₃, e₁ ↦ e₂ ↦* e₃
       -- By preservation on e₁ ↦ e₂: ∅ ⊢ e₂ : τ
-      have ht₂ := preservation e₁ e₂ τ ht hs_step
+      have ht₂ := preservation e₁ e₂ τ ht hs_step h_closed
       -- By IH on e₂ ↦* e₃: ∅ ⊢ e₃ : τ
       exact ih ht₂
 
