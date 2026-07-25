@@ -10,6 +10,7 @@ pub mod effect_checker;
 pub mod hir;
 pub mod hir_lower;
 pub mod integration_tests;
+pub mod fuzz;
 pub mod lexer;
 #[cfg(feature = "lsp")]
 pub mod lsp;
