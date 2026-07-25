@@ -319,15 +319,15 @@ fn run_full_pipeline_safe(source: &str) -> Result<(), String> {
 }
 
 #[allow(dead_code)]
-fn fuzz_one(rng: &mut XorShift64, corpus: &[&str]) -> Result<(), String> {
+fn fuzz_one(rng: &mut XorShift64, corpus: &[&str]) -> Result<(), (String, String)> {
     let seed = corpus[rng.index(corpus)];
     let mutant = mutate(rng, seed, corpus);
 
-    run_frontend_safe(&mutant)?;
+    run_frontend_safe(&mutant).map_err(|msg| (mutant.clone(), msg))?;
 
     // Occasionally test full pipeline (~1 in 5)
     if rng.range(0, 5) == 0 {
-        run_full_pipeline_safe(&mutant)?;
+        run_full_pipeline_safe(&mutant).map_err(|msg| (mutant, msg))?;
     }
 
     Ok(())
@@ -346,25 +346,19 @@ mod tests {
     fn fuzz_typechecker_quick() {
         let corpus = seed_corpus();
         let mut rng = XorShift64(0xDEAD_BEEF_CAFE_BABE);
-        let mut panics: Vec<(usize, String, String)> = Vec::new();
-
-        // Replay RNG to capture panic sources
-        let mut replay = XorShift64(0xDEAD_BEEF_CAFE_BABE);
+        let mut panics: Vec<(String, String)> = Vec::new();
 
         for _ in 0..1000 {
-            if let Err(msg) = fuzz_one(&mut rng, &corpus) {
-                let seed = corpus[replay.index(&corpus)];
-                let mutant = mutate(&mut replay, seed, &corpus);
-                panics.push((panics.len(), mutant, msg));
-            } else {
-                // Advance replay RNG to stay in sync with main RNG
-                let seed = corpus[replay.index(&corpus)];
-                let _ = mutate(&mut replay, seed, &corpus);
+            if let Err((source, msg)) = fuzz_one(&mut rng, &corpus) {
+                panics.push((source, msg));
+                if panics.len() >= 5 {
+                    break; // Enough evidence, stop early
+                }
             }
         }
 
         if !panics.is_empty() {
-            for (_i, source, msg) in &panics {
+            for (source, msg) in &panics {
                 eprintln!(
                     "PANIC: {}\nSource:\n---\n{}\n---\n",
                     msg, source
@@ -386,9 +380,9 @@ mod tests {
         let mut panic_count = 0;
 
         for _ in 0..10_000 {
-            if let Err(msg) = fuzz_one(&mut rng, &corpus) {
+            if let Err((source, msg)) = fuzz_one(&mut rng, &corpus) {
                 panic_count += 1;
-                eprintln!("PANIC: {}", msg);
+                eprintln!("PANIC: {}\nSource:\n---\n{}\n---\n", msg, source);
                 if panic_count >= 10 {
                     panic!("Too many panics ({}) — aborting", panic_count);
                 }

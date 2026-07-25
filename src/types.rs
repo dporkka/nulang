@@ -923,6 +923,26 @@ impl Span {
         })
     }
 
+    /// 1-indexed line number of span end (reads from thread-local SourceMap).
+    pub fn end_line(&self) -> usize {
+        SOURCE_MAP.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|sm| sm.line_col(self.end).0)
+                .unwrap_or(0)
+        })
+    }
+
+    /// 1-indexed column of span end (reads from thread-local SourceMap).
+    pub fn end_column(&self) -> usize {
+        SOURCE_MAP.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .map(|sm| sm.line_col(self.end).1)
+                .unwrap_or(0)
+        })
+    }
+
     /// The source line containing this span's start, if a SourceMap is set.
     pub fn source_line(&self) -> Option<String> {
         SOURCE_MAP.with(|slot| {
@@ -1260,6 +1280,8 @@ impl NuError {
                     Some("only Int, Float, Bool, String, and Unit are supported in FFI declarations")
                 } else if msg.contains("Match expression with no arms") {
                     Some("add at least one pattern match arm")
+                } else if msg.contains("wrong number of arguments") {
+                    Some("check the function definition or remove extra arguments")
                 } else {
                     None
                 }

@@ -1587,28 +1587,33 @@ impl NulangLanguageServer {
 
 /// Convert a `NuError` into an LSP `Diagnostic`.
 fn nu_error_to_diagnostic(err: NuError) -> Diagnostic {
-    let (message, line, column) = match err {
+    let (message, start_line, start_col, end_line, end_col) = match err {
         NuError::LexError { msg, span }
         | NuError::ParseError { msg, span }
         | NuError::TypeError { msg, span }
         | NuError::EffectError { msg, span }
         | NuError::CapError { msg, span }
         | NuError::FFIError { msg, span }
-        | NuError::NotYetImplemented { feature: msg, span } => (msg, span.line(), span.column()),
+        | NuError::NotYetImplemented { feature: msg, span } => {
+            (msg, span.line(), span.column(), span.end_line(), span.end_column())
+        }
         NuError::RuntimeError { msg, span }
         | NuError::VMError { msg, span }
         | NuError::PythonError { msg, span }
-        | NuError::PackageError { msg, span } => (msg, span.line(), span.column()),
-        NuError::Suspended(kind) => (format!("VM suspended: {}", kind), 1, 1),
+        | NuError::PackageError { msg, span } => {
+            (msg, span.line(), span.column(), span.end_line(), span.end_column())
+        }
+        NuError::Suspended(kind) => {
+            (format!("VM suspended: {}", kind), 1, 1, 1, 1)
+        }
     };
 
     // Lines/columns in the Span are 1-based; LSP uses 0-based.
-    let line0 = line.saturating_sub(1) as u32;
-    let col0 = column.saturating_sub(1) as u32;
-    let pos = Position::new(line0, col0);
+    let start = Position::new(start_line.saturating_sub(1) as u32, start_col.saturating_sub(1) as u32);
+    let end = Position::new(end_line.saturating_sub(1) as u32, end_col.saturating_sub(1) as u32);
 
     Diagnostic {
-        range: Range::new(pos, pos),
+        range: Range::new(start, end),
         severity: Some(DiagnosticSeverity::ERROR),
         code: None,
         code_description: None,

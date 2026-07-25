@@ -751,7 +751,9 @@ impl<'a> Lexer<'a> {
                         None => break,
                     }
                 }
-                let content = self.source[content_start..self.pos.saturating_sub(2)].to_string();
+                let end = self.pos.saturating_sub(2);
+                let end = if end < content_start { content_start } else { end };
+                let content = self.source[content_start..end].to_string();
                 Token {
                     kind: TokenKind::Comment(content),
                     span: Span::new(start as u32, self.pos as u32),

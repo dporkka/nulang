@@ -1364,6 +1364,25 @@ impl TypeChecker {
             arg_types.push(apply_subst(&arg_ty, &subst));
         }
 
+        // Check arity if the function type is already resolved to a Function type
+        let func_ty_subst = apply_subst(&func_ty, &subst);
+        if let Type::Function { param: ref fn_param, .. } = &func_ty_subst {
+            let expected_count = match fn_param.as_ref() {
+                Type::Tuple(types) => types.len(),
+                _ => 1,
+            };
+            if arg_types.len() != expected_count {
+                return Err(NuError::TypeError {
+                    msg: format!(
+                        "wrong number of arguments: expected {}, got {}",
+                        expected_count,
+                        arg_types.len()
+                    ),
+                    span,
+                });
+            }
+        }
+
         // Create a fresh result type
         let result_ty = Type::Var(TypeVar::fresh());
 
