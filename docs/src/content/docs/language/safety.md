@@ -2,8 +2,11 @@
 title: Safety
 description: How Nulang guarantees memory safety, type safety, and fault tolerance at compile time.
 ---
+import CapabilityDemo from '../../../components/animations/CapabilityDemo.astro';
 
 ## Reference Capabilities
+
+<CapabilityDemo />
 
 Nulang's capability system (inspired by Pony) prevents data races and use-after-free at compile time. There are seven capabilities:
 

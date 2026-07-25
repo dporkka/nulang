@@ -1,0 +1,90 @@
+---
+---
+
+<svg viewBox="0 0 400 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="JIT tiering visualization: interpreted vs compiled execution speed">
+  <!-- Interpreted bar -->
+  <rect class="jit-bar" data-bar="0" x="60" y="200" width="80" height="0" rx="4" />
+  <text x="100" y="225" class="jit-label">Interpreted</text>
+  <text class="jit-speed" data-speed="0" x="100" y="195" opacity="0">~10 ms/op</text>
+
+  <!-- Hot threshold line -->
+  <line class="jit-threshold" x1="40" y1="60" x2="360" y2="60" stroke-dasharray="12,4" />
+  <text class="jit-threshold-label" x="200" y="50">Hot threshold (1000 calls)</text>
+
+  <!-- JIT-compiled bar -->
+  <rect class="jit-bar jit-compiled" data-bar="1" x="260" y="200" width="80" height="0" rx="4" />
+  <text x="300" y="225" class="jit-label">JIT Compiled</text>
+  <text class="jit-speed" data-speed="1" x="300" y="195" opacity="0">~0.4 ms/op</text>
+
+  <!-- Speedup callout -->
+  <text class="jit-speedup" x="200" y="160" opacity="0">25x faster</text>
+</svg>
+
+<style is:global>
+  .jit-bar { fill: var(--sl-color-gray-4); transition: height 0.6s ease-out, fill 0.3s ease; }
+  .jit-bar.jit-compiled { fill: var(--sl-color-accent); }
+  .jit-threshold { stroke: #eab308; stroke-width: 1.5; }
+  .jit-threshold-label { font-size: 10px; text-anchor: middle; fill: #eab308; font-weight: 500; }
+  .jit-label { font-size: 11px; text-anchor: middle; fill: var(--sl-color-gray-2); }
+  .jit-speed { font-size: 11px; text-anchor: middle; fill: var(--sl-color-gray-2); font-weight: 600; transition: opacity 0.3s ease; }
+  .jit-speedup { font-size: 18px; text-anchor: middle; fill: var(--sl-color-accent-high); font-weight: 700; transition: opacity 0.5s ease 0.5s; }
+  .jit-speedup.visible { opacity: 1; }
+  .jit-speed.visible { opacity: 1; }
+</style>
+
+<script>
+  function initJitDemo() {
+    const bars = document.querySelectorAll('.jit-bar');
+    const speeds = document.querySelectorAll('.jit-speed');
+    const speedup = document.querySelector('.jit-speedup');
+    if (bars.length === 0) return;
+
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    function animate() {
+      // Interpreted bar: grows to ~50% height
+      bars[0].setAttribute('height', reducedMotion ? '100' : '0');
+      speeds[0].classList.add('visible');
+
+      setTimeout(() => {
+        bars[0].setAttribute('height', '100');
+        bars[0].setAttribute('y', '100');
+
+        // JIT bar: grows to ~25% height (shorter = faster)
+        setTimeout(() => {
+          bars[1].setAttribute('height', '25');
+          bars[1].setAttribute('y', '175');
+          speeds[1].classList.add('visible');
+
+          setTimeout(() => {
+            speedup?.classList.add('visible');
+          }, 400);
+        }, 600);
+      }, reducedMotion ? 0 : 300);
+    }
+
+    if (reducedMotion) {
+      bars[0].setAttribute('height', '100');
+      bars[0].setAttribute('y', '100');
+      bars[1].setAttribute('height', '25');
+      bars[1].setAttribute('y', '175');
+      speeds.forEach(s => s.classList.add('visible'));
+      speedup?.classList.add('visible');
+    } else {
+      // Start animation when visible
+      const observer = new IntersectionObserver((entries) => {
+        if (entries[0].isIntersecting) {
+          animate();
+          observer.disconnect();
+        }
+      }, { threshold: 0.3 });
+      observer.observe(bars[0].closest('svg')!);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initJitDemo);
+  } else {
+    initJitDemo();
+  }
+</script>

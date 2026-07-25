@@ -1,0 +1,97 @@
+---
+---
+
+<svg viewBox="0 0 400 250" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Actor isolation: capabilities prevent shared-memory data races, only messages cross actor boundaries">
+  <!-- Actor 1 -->
+  <rect class="cap-actor-box" x="20" y="40" width="150" height="140" rx="8" />
+  <text x="95" y="60" class="cap-actor-label">Actor A</text>
+  <circle class="cap-value" cx="60" cy="100" r="10" data-cap="val" />
+  <text x="60" y="130" class="cap-value-label">val</text>
+  <circle class="cap-value" cx="110" cy="100" r="10" data-cap="iso" />
+  <text x="110" y="130" class="cap-value-label">iso</text>
+  <circle class="cap-value" cx="85" cy="160" r="10" data-cap="ref" />
+  <text x="85" y="180" class="cap-value-label">ref</text>
+
+  <!-- Actor 2 -->
+  <rect class="cap-actor-box" x="230" y="40" width="150" height="140" rx="8" />
+  <text x="305" y="60" class="cap-actor-label">Actor B</text>
+  <circle class="cap-value" cx="270" cy="100" r="10" data-cap="tag" />
+  <text x="270" y="130" class="cap-value-label">tag</text>
+  <circle class="cap-value" cx="320" cy="100" r="10" data-cap="val" />
+  <text x="320" y="130" class="cap-value-label">val</text>
+
+  <!-- Message paths -->
+  <path class="cap-msg-path" id="cap-msg-a" d="M 150 100 Q 190 70 230 100" />
+  <path class="cap-msg-path" id="cap-msg-b" d="M 230 140 Q 190 170 150 140" />
+
+  <!-- Blocked path (ref cannot cross) -->
+  <path class="cap-blocked" d="M 110 160 Q 170 200 270 100" />
+  <line class="cap-blocked-x" x1="185" y1="142" x2="195" y2="152" />
+
+  <!-- Message particles -->
+  <circle class="cap-msg" cx="0" cy="0" r="3" opacity="0" />
+  <circle class="cap-msg" cx="0" cy="0" r="3" opacity="0" />
+
+  <!-- Legend -->
+  <text x="200" y="230" class="cap-legend">Sendable: iso, val, tag, lineariso</text>
+</svg>
+
+<style is:global>
+  .cap-actor-box { fill: var(--sl-color-bg-inline-code); stroke: var(--sl-color-hairline); stroke-width: 1; }
+  .cap-actor-label { font-size: 12px; text-anchor: middle; fill: var(--sl-color-gray-2); font-weight: 600; }
+  .cap-value { stroke-width: 2; }
+  .cap-value[data-cap="val"] { fill: #22c55e; stroke: #22c55e; }
+  .cap-value[data-cap="iso"] { fill: #3b82f6; stroke: #3b82f6; }
+  .cap-value[data-cap="ref"] { fill: #ef4444; stroke: #ef4444; }
+  .cap-value[data-cap="tag"] { fill: #a855f7; stroke: #a855f7; }
+  .cap-value-label { font-size: 9px; text-anchor: middle; fill: var(--sl-color-gray-2); pointer-events: none; }
+  .cap-msg-path { stroke: var(--sl-color-gray-4); stroke-width: 1.5; fill: none; }
+  .cap-blocked { stroke: #ef4444; stroke-width: 1; stroke-dasharray: 6,3; fill: none; opacity: 0.6; }
+  .cap-blocked-x { stroke: #ef4444; stroke-width: 2; opacity: 0.7; }
+  .cap-msg { fill: var(--sl-color-accent-high); }
+  .cap-legend { font-size: 9px; text-anchor: middle; fill: var(--sl-color-gray-3); font-style: italic; }
+</style>
+
+<script>
+  function initCapabilityDemo() {
+    const msgPaths = document.querySelectorAll('.cap-msg-path');
+    const particles = document.querySelectorAll('.cap-msg');
+    if (msgPaths.length === 0 || particles.length === 0) return;
+
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reducedMotion) return;
+
+    function sendParticle(path: SVGPathElement, particle: SVGCircleElement, reverse: boolean) {
+      const len = path.getTotalLength();
+      const duration = 2000;
+      const start = performance.now();
+
+      function animate(now: number) {
+        const elapsed = now - start;
+        const progress = Math.min(elapsed / duration, 1);
+        const t = reverse ? 1 - progress : progress;
+        const point = path.getPointAtLength(len * t);
+        particle.setAttribute('cx', String(point.x));
+        particle.setAttribute('cy', String(point.y));
+        particle.setAttribute('opacity', String(progress < 0.1 ? progress / 0.1 : progress > 0.85 ? (1 - progress) / 0.15 : 1));
+
+        if (progress < 1) {
+          requestAnimationFrame(animate);
+        } else {
+          setTimeout(() => sendParticle(path, particle, !reverse), 500);
+        }
+      }
+
+      requestAnimationFrame(animate);
+    }
+
+    sendParticle(msgPaths[0] as SVGPathElement, particles[0], false);
+    setTimeout(() => sendParticle(msgPaths[1] as SVGPathElement, particles[1], false), 1000);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initCapabilityDemo);
+  } else {
+    initCapabilityDemo();
+  }
+</script>

@@ -1,6 +1,5 @@
 ---
-// CopyMarkdown.astro — floating button to copy Nulang context to clipboard
-// Renders on the homepage below the hero section.
+// CopyMarkdown.astro — Copy Markdown button for doc pages, floats to the right
 ---
 
 <button id="copy-markdown-btn" class="copy-markdown-btn" type="button">
@@ -8,8 +7,9 @@
     <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
     <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
   </svg>
-  Copy for AI
+  Copy Markdown
 </button>
+
 
 <style>
   .copy-markdown-btn {
@@ -19,20 +19,25 @@
     padding: 0.5rem 1rem;
     font-size: 0.8125rem;
     font-weight: 500;
-    color: var(--nu-orange);
-    background: transparent;
-    border: 1px solid var(--nu-orange);
+    color: var(--sl-color-gray-2);
+    background: var(--sl-color-bg-inline-code);
+    border: 1px solid var(--sl-color-hairline);
     border-radius: 0.5rem;
     cursor: pointer;
-    transition: background 0.2s ease, color 0.2s ease;
+    float: right;
+    margin: 0 0 1rem 1.5rem;
+    transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
   }
   .copy-markdown-btn:hover {
-    background: var(--nu-orange);
-    color: var(--sl-color-bg);
+    background: var(--sl-color-accent);
+    color: #ffffff;
+    border-color: var(--sl-color-accent);
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
   }
   .copy-markdown-btn.copied {
     background: var(--nu-orange);
-    color: var(--sl-color-bg);
+    color: #ffffff;
+    border-color: var(--nu-orange);
   }
 </style>
 

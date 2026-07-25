@@ -2,8 +2,11 @@
 title: Performance
 description: Nulang's performance architecture — JIT compilation, native AOT, WASM backend, SIMD, and zero-copy execution.
 ---
+import JitDemo from '../../../components/animations/JitDemo.astro';
 
 ## JIT Tiering
+
+<JitDemo />
 
 Nulang's bytecode VM uses hot-counter tiering to compile frequently-executed code paths:
 
