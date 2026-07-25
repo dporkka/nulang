@@ -54,7 +54,7 @@ impl ReplHelper {
                 "IO.print", "IO.read", "IO.flush",
                 "Timer.sleep", "Timer.now",
                 "Signal.wait", "Signal.notify",
-                "LLM.ask", "LLM.complete",
+                "Inference.ask", "LLM.ask", "LLM.complete",
                 "Net.connect", "Net.listen",
                 "Actor.spawn", "Actor.send", "Actor.link", "Actor.monitor",
                 "Actor.trap_exit", "Actor.exit", "Actor.register", "Actor.unregister",
@@ -163,10 +163,10 @@ fn color_for_token(kind: &crate::lexer::TokenKind) -> &'static str {
         Fn | Let | Rec | In | If | Then | Else | Match | With | Case | Actor | Entity
         | Behavior | State | StateMachine | SelfKw | Spawn | Send | Remote | Ask
         | Persistent | Local | Durable | EventSourced | Crdt | Until | Emit
-        | Workflow | Step | Parallel | Compensate | Await | Subworkflow | Agent
+        | Workflow | Step | Parallel | Compensate | Agent
         | Database | Receive | Effect | Perform | Handle | Resume | Extern | Module
-        | Import | Pub | Priv | Where | Migrate | Node | Monitor | Link | Exit | For
-        | While | Loop | Break | Return | Type | Alias | Iso | Trn | Ref | Val | Box
+        | Import | Pub | Migrate | Monitor | Link | Exit | For
+        | While | Break | Return | Type | Alias | Iso | Trn | Ref | Val | Box
         | Tag | True | False | Unit | Tool | Initial | Throws | As => "\x1b[1;33m",
         // String literals — green
         StringLit(_) => "\x1b[32m",

@@ -51,8 +51,6 @@ pub enum TokenKind {
     Step,
     Parallel,
     Compensate,
-    Await,
-    Subworkflow,
     Agent,
     Database,
     Receive,
@@ -64,16 +62,12 @@ pub enum TokenKind {
     Module,
     Import,
     Pub,
-    Priv,
-    Where,
     Migrate,
-    Node,
     Monitor,
     Link,
     Exit,
     For,
     While,
-    Loop,
     Break,
     Return,
     Type,
@@ -193,8 +187,6 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Step => write!(f, "step"),
             TokenKind::Parallel => write!(f, "parallel"),
             TokenKind::Compensate => write!(f, "compensate"),
-            TokenKind::Await => write!(f, "await"),
-            TokenKind::Subworkflow => write!(f, "subworkflow"),
             TokenKind::Agent => write!(f, "agent"),
             TokenKind::Database => write!(f, "database"),
             TokenKind::Receive => write!(f, "receive"),
@@ -206,16 +198,12 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Module => write!(f, "module"),
             TokenKind::Import => write!(f, "import"),
             TokenKind::Pub => write!(f, "pub"),
-            TokenKind::Priv => write!(f, "priv"),
-            TokenKind::Where => write!(f, "where"),
             TokenKind::Migrate => write!(f, "migrate"),
-            TokenKind::Node => write!(f, "node"),
             TokenKind::Monitor => write!(f, "monitor"),
             TokenKind::Link => write!(f, "link"),
             TokenKind::Exit => write!(f, "exit"),
             TokenKind::For => write!(f, "for"),
             TokenKind::While => write!(f, "while"),
-            TokenKind::Loop => write!(f, "loop"),
             TokenKind::Break => write!(f, "break"),
             TokenKind::Return => write!(f, "return"),
             TokenKind::Type => write!(f, "type"),
@@ -932,8 +920,6 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "initial" => Some(TokenKind::Initial),
         "parallel" => Some(TokenKind::Parallel),
         "compensate" => Some(TokenKind::Compensate),
-        "await" => Some(TokenKind::Await),
-        "subworkflow" => Some(TokenKind::Subworkflow),
         "self" => Some(TokenKind::SelfKw),
         "spawn" => Some(TokenKind::Spawn),
         "send" => Some(TokenKind::Send),
@@ -947,16 +933,12 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "module" => Some(TokenKind::Module),
         "import" => Some(TokenKind::Import),
         "pub" => Some(TokenKind::Pub),
-        "priv" => Some(TokenKind::Priv),
-        "where" => Some(TokenKind::Where),
         "while" => Some(TokenKind::While),
         "migrate" => Some(TokenKind::Migrate),
-        "node" => Some(TokenKind::Node),
         "monitor" => Some(TokenKind::Monitor),
         "link" => Some(TokenKind::Link),
         "exit" => Some(TokenKind::Exit),
         "for" => Some(TokenKind::For),
-        "loop" => Some(TokenKind::Loop),
         "break" => Some(TokenKind::Break),
         "return" => Some(TokenKind::Return),
         "type" => Some(TokenKind::Type),
@@ -1229,7 +1211,7 @@ mod tests {
 
     #[test]
     fn test_workflow_keywords() {
-        let mut lexer = Lexer::new("workflow step parallel compensate await subworkflow");
+        let mut lexer = Lexer::new("workflow step parallel compensate");
         let tokens = lexer.lex().unwrap();
         let kinds: Vec<_> = tokens.iter().map(|t| t.kind.clone()).collect();
         assert_eq!(
@@ -1239,11 +1221,21 @@ mod tests {
                 TokenKind::Step,
                 TokenKind::Parallel,
                 TokenKind::Compensate,
-                TokenKind::Await,
-                TokenKind::Subworkflow,
                 TokenKind::Eof,
             ]
         );
+    }
+
+    #[test]
+    fn test_former_keywords_now_identifiers() {
+        // await, subworkflow, priv, node, loop, where were reserved but unwired;
+        // they now lex as plain identifiers.
+        for word in &["await", "subworkflow", "priv", "node", "loop", "where"] {
+            let mut lexer = Lexer::new(word);
+            let tokens = lexer.lex().unwrap();
+            assert_eq!(tokens.len(), 2); // ident + eof
+            assert!(matches!(tokens[0].kind, TokenKind::Ident(_)));
+        }
     }
 
     #[test]

@@ -81,7 +81,8 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "Migrate" => Effect::Migrate,
         "STM" => Effect::STM,
         "Async" => Effect::Async,
-        "LLM" => Effect::LLM,
+        "LLM" => Effect::Inference,
+        "Inference" => Effect::Inference,
         "Cost" => Effect::Cost,
         "Event" => Effect::Event,
         "FFI" => Effect::FFI,
@@ -1920,7 +1921,8 @@ mod tests {
         assert_eq!(parse_effect_name("FS"), Effect::FS);
         assert_eq!(parse_effect_name("Spawn"), Effect::Spawn);
         assert_eq!(parse_effect_name("Async"), Effect::Async);
-        assert_eq!(parse_effect_name("LLM"), Effect::LLM);
+        assert_eq!(parse_effect_name("LLM"), Effect::Inference);
+        assert_eq!(parse_effect_name("Inference"), Effect::Inference);
     }
 
     #[test]

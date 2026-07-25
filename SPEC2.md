@@ -314,21 +314,21 @@ persistent actor BankAccount {
 
 The `persistent` keyword enables automatic checkpointing after each behavior invocation, ensuring that the actor's state survives process restarts. The `durable` state model (one of four available) guarantees that `balance` is written to persistent storage before the behavior returns.
 
-Actors perform effects through the effect system, with their effect rows making authority explicit in the type signature. LLM inference is itself an effect — `perform LLM.ask(...)` — wired to the agent runtime (Chapter 11):
+Actors perform effects through the effect system, with their effect rows making authority explicit in the type signature. Inference (formerly "LLM") is itself an effect — `perform Inference.ask(...)` — wired to the agent runtime (Chapter 11). The legacy name `LLM` remains accepted as a deprecated alias:
 
 ```nulang
 actor ChatBot {
   state local turns: Int = 0
 
-  behavior ask(question: String) ! {LLM} {
-    let answer = perform LLM.ask(question) in
+  behavior ask(question: String) ! {Inference} {
+    let answer = perform Inference.ask(question) in
     self.turns = self.turns + 1
     answer
   }
 }
 ```
 
-The `! {LLM}` row declares that this behavior may perform LLM effects; performing an effect outside the declared row is a compile-time error. Authority capabilities (`capability llm`) that grant and revoke such authority per actor are planned — see §5.3.
+The `! {Inference}` row declares that this behavior may perform inference effects; the deprecated `{LLM}` row is also accepted. Performing an effect outside the declared row is a compile-time error. Authority capabilities (`capability llm`) that grant and revoke such authority per actor are planned — see §5.3.
 
 ## 1.4 State Models Overview
 
@@ -467,23 +467,19 @@ fn factorial(n: Int) -> Int {
 The following identifiers are reserved as keywords in Nulang and may not be used as ordinary identifiers:
 
 ```
-agent        and          ask          actor        entity       organization
-await        behavior     box          break
-case         compensate   crdt         durable
-effect       else         emit         exit
-extern       event_sourced false      fn
-for          handle       if           import
+agent        alias        and          ask          actor
+behavior     box          break        case         compensate
+crdt         durable      effect       else         emit
+entity       event_sourced exit        extern       false
+fn           for          handle       if           import
 in           iso          let          link
-local        loop         match        migrate
-module       monitor      nil          node
-not          or           parallel     perform
-persistent   priv         pub          receive
-rec          ref          resume       return
-self         send         spawn        state
-step         subworkflow  tag          then
-tool         trn          true         type
-unit         val          where        with
-workflow     alias
+local        match        migrate      module       monitor
+not          or           organization parallel     perform
+persistent   pub          receive      rec          ref
+resume       return       self         send         spawn
+state        step         tag          then         tool
+trn          true         type         unit         val
+while        with         workflow
 ```
 
 Keywords are case-sensitive and must be written in lowercase.
@@ -492,7 +488,7 @@ Notes on the inventory:
 
 - `true`, `false`, `nil`, and `unit` are literal keywords, and `and`, `or`, `not` are keyword spellings of the `&&`, `||`, `!` operators.
 - `entity` is a reserved keyword accepted by the grammar; it desugars to `persistent actor` with `event_sourced` as the default state model (see Chapter 8).
-- `await`, `exit`, `link`, `loop`, `monitor`, `node`, `priv`, `subworkflow`, and `where` are reserved but not yet accepted by the grammar (see Implementation Status). `case` is accepted only as an optional prefix on match arms.
+- `exit`, `link`, and `monitor` are used as operation names in `perform Actor.exit(...)` / `Actor.link(...)` / `Actor.monitor(...)`, and in `spawn link|monitor Actor { ... }` desugaring. `await`, `loop`, `node`, `priv`, `subworkflow`, and `where` were formerly reserved but have been freed as identifiers (they were never wired into the grammar).
 - The capability words `iso`, `trn`, `ref`, `val`, `box`, `tag` are keywords usable anywhere a capability is parsed. `lineariso` is **not** a keyword; it is recognized as a contextual identifier in capability position.
 - `organization` is a reserved keyword accepted by the grammar; it desugars to `entity` with the same durable-first defaults (RFC 0009).
 - `cap` (in the `expr :cap iso` annotation) and `to` (in `migrate a to node`) are contextual identifiers, not keywords.
@@ -509,7 +505,7 @@ Nulang uses the following naming conventions. They are conventions only — no s
 - **Types, variants, actors, and modules**: PascalCase (`String`, `Option`, `BankAccount`)
 - **Functions and variables**: snake_case (`map`, `get_balance`, `process_request`)
 - **Type variables in generics**: PascalCase, typically a single letter (`T`, `U`, `Elem`, `Key`)
-- **Effect names**: PascalCase, short for the built-ins (`IO`, `Net`, `FS`, `Rand`, `Time`, `LLM`)
+- **Effect names**: PascalCase, short for the built-ins (`IO`, `Net`, `FS`, `Rand`, `Time`, `Inference`)
 - **Constants**: UPPER_SNAKE_CASE (`MAX_RETRIES`, `PI`)
 
 Examples of valid identifiers:
@@ -1298,12 +1294,9 @@ The following effect names are recognized by the compiler without an explicit `e
 | `Migrate` | Actor migration |
 | `STM` | Software transactional memory |
 | `Async` | Asynchronous computation |
-| `LLM` | Language model inference (`LLM.ask` is runtime-backed) |
+| `Inference` | Inference provider (was `LLM`; `LLM.ask` / `Inference.ask` are runtime-backed) |
+| `LLM` | Deprecated alias for `Inference` |
 | `Cost` | Cost accounting |
-| `Event` | Event emission |
-| `FFI` | Foreign function calls |
-
-These names identify effects in rows and dispatch; they are not pre-declared operation sets. Concrete operations come from user `effect` declarations or runtime-backed operations (`LLM.ask`, `Signal.wait`, `Timer.sleep`).
 
 ## 4.7 Effect Inference
 
@@ -3389,7 +3382,7 @@ Only the built-in fixed-size array `[T]` exists today (indexed load/store, `arr[
 
 # Appendix C: Effect Reference
 
-The compiler recognizes the built-in effect names `IO`, `Net`, `FS`, `Rand`, `Time`, `Spawn`, `Send`, `Receive`, `Migrate`, `STM`, `Async`, `LLM`, `Cost`, `Event`, and `FFI` (§4.6). These names do not come with pre-declared operation sets — programs declare the operations they use with `effect` declarations, and only `LLM.ask`, `Signal.wait`, and `Timer.sleep` are backed by the runtime directly.
+The compiler recognizes the built-in effect names `IO`, `Net`, `FS`, `Rand`, `Time`, `Spawn`, `Send`, `Receive`, `Migrate`, `STM`, `Async`, `Inference`, `LLM` (deprecated alias for `Inference`), `Cost`, `Event`, and `FFI` (§4.6). These names do not come with pre-declared operation sets — programs declare the operations they use with `effect` declarations, and only `Inference.ask` / `LLM.ask`, `Signal.wait`, and `Timer.sleep` are backed by the runtime directly.
 
 The declarations below are **illustrative** — they show the planned standard-library effect surface written in current syntax. They are not shipped with the implementation.
 
@@ -3447,18 +3440,20 @@ effect Time {
 }
 ```
 
-## C.6 LLM Effect
+## C.6 Inference Effect
 
-`LLM.ask` is runtime-backed today; the broader planned surface:
+`Inference.ask` (formerly `LLM.ask`) is runtime-backed today; the broader planned surface:
 
 ```
-effect LLM {
+effect Inference {
   ask: (String) -> String
-  complete: (String, LLMOptions) -> LLMResponse
+  complete: (String, InferenceOptions) -> InferenceResponse
   embed: (String) -> Embedding
   tool_call: (String, List[Tool]) -> ToolResult
 }
 ```
+
+> **Compatibility note:** The name `LLM` (effect name, row name, and `LLM.ask` operation) remains accepted as a deprecated alias for `Inference`. New code should use `Inference`.
 
 ## C.7 Metrics Effect (illustrative)
 

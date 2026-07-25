@@ -528,7 +528,7 @@ fn desugar_agent(
                     span,
                 },
                 Expr::Perform {
-                    effect: "LLM".to_string(),
+                    effect: "Inference".to_string(),
                     op: "ask".to_string(),
                     args: vec![Expr::Var("prompt".to_string(), span)],
                     span,

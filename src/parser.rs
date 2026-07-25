@@ -2669,6 +2669,12 @@ pub struct Parser {
                 self.advance();
                 Ok(s)
             }
+            // `ask` is a reserved keyword that doubles as a valid behavior
+            // name (agent actors expose `ask(prompt)` behaviors).
+            TokenKind::Ask => {
+                self.advance();
+                Ok("ask".to_string())
+            }
             _ => Err(NuError::ParseError {
                 msg: format!("Expected {}, found {}", msg, current_kind),
                 span: self.current_span(),

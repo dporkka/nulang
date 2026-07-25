@@ -14,7 +14,7 @@
 //!   `runtime/mod.rs` (workflow actors only).
 //! - `Signal.wait`: lowered to the `SignalWait` opcode in `mir_lower.rs`,
 //!   served by the host `wait_signal` callback.
-//! - `LLM.ask`: lowered to the `LlmAsk` opcode in `mir_lower.rs`, served
+//! - `Inference.ask` (canonical) / `LLM.ask` (deprecated alias): lowered to the `LlmAsk` opcode in `mir_lower.rs`, served
 //!   by the host `llm_ask` / `complete_llm` callbacks.
 //! - `Actor.*` (link/unlink/monitor/demonitor/trap_exit/exit/register/
 //!   unregister/whereis/set_priority): `Runtime::perform_actor_builtin` in
@@ -144,12 +144,20 @@ impl StdLib {
                     description: "Suspend the workflow until the named signal arrives, then resume with unit.",
                 },
                 BuiltinOp {
+                    name: "Inference.ask",
+                    effect: "Inference",
+                    op: "ask",
+                    signature: "ask(prompt: String) -> String",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Send the prompt to the configured inference provider and return the reply; suspends non-blockingly when the runtime supports it.",
+                },
+                BuiltinOp {
                     name: "LLM.ask",
                     effect: "LLM",
                     op: "ask",
                     signature: "ask(prompt: String) -> String",
                     implemented_in: ImplSite::RuntimeHost,
-                    description: "Send the prompt to the configured LLM client and return the reply; suspends non-blockingly when the runtime supports it.",
+                    description: "Deprecated alias for `Inference.ask`. Prefer `Inference.ask` in new code.",
                 },
                 BuiltinOp {
                     name: "Actor.link",
@@ -451,7 +459,7 @@ mod tests {
         let lib = StdLib::new();
         assert_eq!(
             lib.effects(),
-            vec!["IO", "Int", "String", "Timer", "Signal", "LLM", "Actor", "Otp"]
+            vec!["IO", "Int", "String", "Timer", "Signal", "Inference", "LLM", "Actor", "Otp"]
         );
     }
 

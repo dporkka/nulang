@@ -1895,7 +1895,7 @@ impl<'a> CompletionEngine<'a> {
 
     /// Built-in effect names offered by the completion provider.
     const EFFECTS: &'static [&'static str] = &[
-        "IO", "Net", "FS", "Spawn", "Send", "Receive", "Migrate", "STM", "Async", "LLM", "Cost",
+        "IO", "Net", "FS", "Spawn", "Send", "Receive", "Migrate", "STM", "Async", "Inference", "Cost",
         "Rand", "Time", "Actor", "Provider",
     ];
 
@@ -2200,7 +2200,7 @@ mod lsp_tests {
         let labels = labels(&items);
         assert!(labels.contains(&"IO"));
         assert!(labels.contains(&"Migrate"));
-        assert!(labels.contains(&"LLM"));
+        assert!(labels.contains(&"Inference"));
     }
 
     #[test]
