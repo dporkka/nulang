@@ -35,6 +35,7 @@ docs/node_modules/
 .lake/
 *.olean
 *.olean.trace
+lake-manifest.json
 
 # Backup files
 *.bak
