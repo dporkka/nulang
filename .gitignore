@@ -30,3 +30,11 @@ docs/node_modules/
 
 .env
 *.env
+
+# Lean build artifacts
+.lake/
+*.olean
+*.olean.trace
+
+# Backup files
+*.bak
