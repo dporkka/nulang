@@ -116,6 +116,18 @@ pub enum LlmAskResult {
     Pending,
 }
 
+/// Result of a generic async effect operation from the `PerformAsync` opcode.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PerformAsyncResult {
+    /// The effect completed synchronously; `Some(content)` is the string
+    /// result (interned into the module's constant pool by the VM), `None`
+    /// means nil.
+    Ready(Option<String>),
+    /// The effect was dispatched to a background worker; the VM suspends the
+    /// current behavior and re-executes the `PerformAsync` instruction on resume.
+    Pending,
+}
+
 /// Callback interface that supplies real actor-runtime behavior for the VM's
 /// `Spawn`, `ArrAlloc`, `SConcat`, `SRead`, and `Drop` opcodes.
 pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
@@ -256,6 +268,29 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// error (same pattern as `SignalWait`).
     fn llm_ask(&mut self, model: &str, prompt: &str) -> LlmAskResult {
         LlmAskResult::Ready(self.complete_llm(model, prompt))
+    }
+
+    /// Execute a generic async effect, possibly asynchronously.
+    ///
+    /// `effect_op` is the fully-qualified effect-and-operation name (e.g.
+    /// `"Inference.ask"`). `args` are the staged argument values from
+    /// registers r0..rN; `constants` is the performing module's constant
+    /// pool for resolving string-id arguments. Returns `Ready(content)` when
+    /// the effect completed synchronously (the VM interns the content string
+    /// into its module's constant pool), or `Pending` when the call was
+    /// dispatched to a background worker — the VM then suspends the current
+    /// behavior with a `PerformAsync` sentinel and re-executes the
+    /// instruction on resume.
+    ///
+    /// The default implementation returns `Ready(None)` so the standalone VM
+    /// always gets a nil result for any async effect.
+    fn perform_async(
+        &mut self,
+        _effect_op: &str,
+        _constants: &[Constant],
+        _args: &[Value],
+    ) -> PerformAsyncResult {
+        PerformAsyncResult::Ready(None)
     }
 
     /// Create a new pipeline and return its runtime ID.
@@ -2032,25 +2067,35 @@ impl VM {
         self.actor_callbacks.commit_receive_match();
     }
 
-    fn step_llm_ask(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
-        let model_idx = instr.imm16() as usize;
-        let prompt_reg = instr.op3 as usize;
-        let model = self.module_const_string(module_idx, model_idx);
-        let prompt_value = self.frames[frame_idx].regs[prompt_reg];
-        let prompt = self.value_to_string(module_idx, prompt_value);
-        match self.actor_callbacks.llm_ask(&model, &prompt) {
-            LlmAskResult::Ready(result) => {
+
+    /// Generic async effect dispatch (`PerformAsync` opcode).
+    ///
+    /// Reads the effect_op string from the constant pool, collects arguments
+    /// from registers r0..rN, and calls `ActorVmCallbacks::perform_async`.
+    /// On `Ready(value)` the result is written to the destination register
+    /// and execution continues. On `Pending` the PC is decremented so the
+    /// instruction re-executes on resume, and the VM returns a
+    /// `Suspended(PerformAsync)` sentinel error.
+    #[inline(never)]
+    fn step_perform_async(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+        let effect_op_idx = instr.imm16() as usize;
+        let dst_reg = instr.op3 as usize;
+        let effect_op = self.module_const_string(module_idx, effect_op_idx);
+        // Pass the full frame register slice and the module's constant pool
+        // so the callback can resolve string-id arguments from registers.
+        let args = &self.frames[frame_idx].regs;
+        let constants = self.modules.get(module_idx).map(|m| &m.constants[..]).unwrap_or(&[]);
+        match self.actor_callbacks.perform_async(&effect_op, constants, args) {
+            PerformAsyncResult::Ready(result) => {
                 let value = match result {
-                    Some(ref content) => {
-                        self.add_runtime_string(module_idx, content.clone())
-                    }
+                    Some(ref content) => self.add_runtime_string(module_idx, content.clone()),
                     None => Value::nil(),
                 };
-                self.frames[frame_idx].regs[prompt_reg] = value;
+                self.frames[frame_idx].regs[dst_reg] = value;
             }
-            LlmAskResult::Pending => {
+            PerformAsyncResult::Pending => {
                 self.frames[frame_idx].pc -= 1;
-                return Err(NuError::Suspended(VmSuspension::LlmAsk));
+                return Err(NuError::Suspended(VmSuspension::PerformAsync));
             }
         }
         Ok(())
@@ -3320,8 +3365,8 @@ impl VM {
                 }
                 spilled[spill_idx as usize] = val;
             }
-            OpCode::LlmAsk => {
-                self.step_llm_ask(frame_idx, module_idx, instr)?;
+            OpCode::PerformAsync => {
+                self.step_perform_async(frame_idx, module_idx, instr)?;
             }
 
             // -- Pipeline (v0.9 AI Runtime) --

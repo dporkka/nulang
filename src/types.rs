@@ -1030,18 +1030,18 @@ pub enum NuError {
 pub enum VmSuspension {
     /// `perform Signal.wait(name)` — awaiting a workflow signal.
     SignalWait,
-    /// `perform LLM.ask(...)` — awaiting an LLM completion.
-    LlmAsk,
     /// `receive { ... } after ms => ...` — awaiting a matching message or timeout.
     ReceiveWait,
+    /// `perform <Effect>.<op>(...)` — awaiting an async effect completion.
+    PerformAsync,
 }
 
 impl std::fmt::Display for VmSuspension {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VmSuspension::SignalWait => write!(f, "SignalWait"),
-            VmSuspension::LlmAsk => write!(f, "LlmAsk"),
             VmSuspension::ReceiveWait => write!(f, "ReceiveWait"),
+            VmSuspension::PerformAsync => write!(f, "PerformAsync"),
         }
     }
 }

@@ -137,7 +137,6 @@ pub enum OpCode {
     PyToNu = 0x99,   // Convert Python object to Nulang Value (py_val_reg, dst_reg, _)
     PyFromNu = 0x9A, // Convert Nulang Value to Python object (nu_val_reg, dst_reg, _)
     PyRelease = 0x9B, // Decrement Python object reference count (py_val_reg, _, _)
-    LlmAsk = 0x9C,   // LLM ask (model_const_idx in op1+op2, prompt/dst reg in op3)
     PipelineNew = 0x9D, // Create a new pipeline (dst)
     PipelineStage = 0x9E, // Add stage to pipeline (reads r0=id, r1=name, r2=actor, r3=template; dst)
     PipelineRun = 0x9F,   // Run pipeline (reads r0=id, r1=input; dst)
@@ -195,6 +194,13 @@ pub enum OpCode {
     DebateNew = 0xC3, // Create a new debate (reads r0=topic, r1=rounds, r2=threshold; dst)
     DebateParticipant = 0xC4, // Add participant (reads r0=id, r1=name, r2=stance, r3=actor; dst)
     DebateRun = 0xC5, // Run debate (reads r0=id; dst)
+
+    // == Inference & Async Effects (0xC6) ==
+    /// Generic asynchronous effect operation (e.g. "Inference.ask").
+    /// Replaces the monolithic AI opcodes (LlmAsk, Pipeline*, etc.) with a
+    /// single suspending dispatch: effect_op string at constant pool index
+    /// (op1:op2), destination register (op3), arguments staged in r0..rN.
+    PerformAsync = 0xC6,
 
     // == Distribution (0xD0-0xDF) ==
     NodeId = 0xD0,  // Get current node id (dst)
@@ -341,7 +347,6 @@ impl OpCode {
             0x99 => Some(PyToNu),
             0x9A => Some(PyFromNu),
             0x9B => Some(PyRelease),
-            0x9C => Some(LlmAsk),
             0x9D => Some(PipelineNew),
             0x9E => Some(PipelineStage),
             0x9F => Some(PipelineRun),
@@ -354,6 +359,7 @@ impl OpCode {
             0xC3 => Some(DebateNew),
             0xC4 => Some(DebateParticipant),
             0xC5 => Some(DebateRun),
+            0xC6 => Some(PerformAsync),
             0xD0 => Some(NodeId),
             0xD1 => Some(Migrate),
             0xD2 => Some(RSend),
@@ -793,10 +799,11 @@ mod tests {
             .chain(0x70..=0x7F)
             .chain(0x80..=0x8F)
             .chain(0x90..=0x93)
-            .chain(0x94..=0x9F)
+            .chain(0x94..=0x9B)
+            .chain(0x9D..=0x9F)
             .chain(0xA0..=0xA1)
             .chain(0xB0..=0xB0)
-            .chain(0xC0..=0xC5)
+            .chain(0xC0..=0xC6)
             .chain(0xD0..=0xD5)
             .chain(0xE0..=0xE7)
             .chain(0xF0..=0xF6)

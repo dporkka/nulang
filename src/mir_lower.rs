@@ -1114,23 +1114,28 @@ impl<'c> FnLowerer<'c> {
                         Some(a) => self.lower_operand(a)?,
                         None => self.unit_temp(),
                     };
-                    self.b.assign(dst, mir::RValue::LlmAsk { prompt });
+                    self.b.assign(dst, mir::RValue::PerformAsync {
+                        effect_op: format!("Inference.ask"),
+                        args: vec![prompt],
+                    });
                     return Ok(());
                 }
                 // `perform Provider.ask("llm", prompt)` is the longevity-path
                 // equivalent of `perform LLM.ask(prompt)`: the vocabulary
                 // references an eternal "provider" abstraction, not a
-                // transient technology. Lower it to the existing LlmAsk
-                // fast-path (which correctly interns the result string into
-                // the running VM). Non-"llm" providers fall through to the
-                // generic Perform path.
+                // transient technology. Lower it to the generic PerformAsync
+                // path. Non-"llm" providers fall through to the generic
+                // Perform path.
                 if effect == "Provider" && op == "ask" && args.len() == 2 {
                     if let Some(hir::Operand::Literal(crate::ast::Literal::String(name), _)) =
                         args.first()
                     {
                         if name == "llm" {
                             let prompt = self.lower_operand(&args[1])?;
-                            self.b.assign(dst, mir::RValue::LlmAsk { prompt });
+                            self.b.assign(dst, mir::RValue::PerformAsync {
+                                effect_op: format!("Inference.ask"),
+                                args: vec![prompt],
+                            });
                             return Ok(());
                         }
                     }
@@ -2290,9 +2295,9 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         Load(x)
         | ArrayLen(x)
         | Unary(_, x)
-        | LlmAsk { prompt: x }
         | CapabilityCheck { val: x }
         | DebateRun { id: x } => out.push(*x),
+        PerformAsync { args, .. } => out.extend(args.iter().copied()),
         LoadFieldNamed { obj, .. } | LoadFieldPos { obj, .. } => out.push(*obj),
         ArrayLoad { arr, idx } => {
             out.push(*arr);

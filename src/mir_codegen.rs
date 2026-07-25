@@ -819,17 +819,15 @@ impl MirCodegen {
                     dst,
                 ));
             }
-            mir::RValue::LlmAsk { prompt } => {
-                let src = self.local_reg(*prompt);
-                if src != dst {
-                    self.emit(Instruction::new2(OpCode::Move, src, dst));
-                }
-                let model_idx = self.module.add_constant(Constant::String(String::new()));
-                // LlmAsk reads the prompt from and writes the reply to op3.
+            mir::RValue::PerformAsync { effect_op, args } => {
+                self.stage_args(args)?;
+                let eff_idx = self
+                    .module
+                    .add_constant(Constant::String(effect_op.clone()));
                 self.emit(Instruction::new3(
-                    OpCode::LlmAsk,
-                    ((model_idx >> 8) & 0xFF) as u8,
-                    (model_idx & 0xFF) as u8,
+                    OpCode::PerformAsync,
+                    ((eff_idx >> 8) & 0xFF) as u8,
+                    (eff_idx & 0xFF) as u8,
                     dst,
                 ));
             }
@@ -1512,12 +1510,11 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
                 ret(&mut out, *e);
             }
         }
-        Perform { args, .. } | FFICall { args, .. } => {
+        Perform { args, .. } | PerformAsync { args, .. } | FFICall { args, .. } => {
             for a in args {
                 cp(&mut out, *a);
             }
         }
-        LlmAsk { prompt } => cp(&mut out, *prompt),
         Migrate { actor, node } => {
             cp(&mut out, *actor);
             cp(&mut out, *node);

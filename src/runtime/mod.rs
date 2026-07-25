@@ -4444,6 +4444,38 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
     }
 
+    fn perform_async(
+        &mut self,
+        effect_op: &str,
+        _constants: &[crate::bytecode::Constant],
+        args: &[crate::vm::Value],
+    ) -> crate::vm::PerformAsyncResult {
+        match effect_op {
+            "Inference.ask" | "LLM.ask" => {
+                // Extract prompt string from r0. For RuntimeVmCallbacks the
+                // top-level path goes through `perform` which resolves
+                // string-id args through the module pool — here we already
+                // have the raw register values, so extract from r0 as a
+                // string-id and look it up in the module's constant pool.
+                let prompt = args.first().map_or(String::new(), |v| {
+                    if let Some(id) = v.as_string_id() {
+                        _constants.get(id as usize)
+                            .and_then(|c| match c {
+                                crate::bytecode::Constant::String(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    }
+                });
+                let result = self.complete_llm("", &prompt);
+                crate::vm::PerformAsyncResult::Ready(result)
+            }
+            _ => crate::vm::PerformAsyncResult::Ready(None),
+        }
+    }
+
     fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
         let mut rt = self.runtime.borrow_mut();
         if let Some(actor_id) = rt.current_actor {
@@ -5021,6 +5053,39 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 return LlmAskResult::Ready(None);
             }
             LlmAskResult::Pending
+        }
+    }
+
+    fn perform_async(
+        &mut self,
+        effect_op: &str,
+        constants: &[crate::bytecode::Constant],
+        args: &[crate::vm::Value],
+    ) -> crate::vm::PerformAsyncResult {
+        use crate::vm::{LlmAskResult, PerformAsyncResult};
+        match effect_op {
+            "Inference.ask" | "LLM.ask" => {
+                // Extract prompt from r0 (first staged argument). Resolve
+                // string-id values through the module's constant pool.
+                let prompt = args.first().map_or(String::new(), |v| {
+                    if let Some(id) = v.as_string_id() {
+                        constants.get(id as usize)
+                            .and_then(|c| match c {
+                                crate::bytecode::Constant::String(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    }
+                });
+                // Route through the existing llm_ask machinery.
+                match self.llm_ask("", &prompt) {
+                    LlmAskResult::Ready(result) => PerformAsyncResult::Ready(result),
+                    LlmAskResult::Pending => PerformAsyncResult::Pending,
+                }
+            }
+            _ => PerformAsyncResult::Ready(None),
         }
     }
 

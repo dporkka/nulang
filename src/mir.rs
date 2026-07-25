@@ -195,9 +195,13 @@ pub enum RValue {
         op: String,
         args: Vec<LocalId>,
     },
-    /// `perform LLM.ask(prompt)` — wired to the runtime's LLM client.
-    LlmAsk {
-        prompt: LocalId,
+    /// `perform <Effect>.<op>(args...)` — generic async effect dispatched
+    /// through `PerformAsync` opcode. The effect_op is the fully-qualified
+    /// name (e.g. "Inference.ask") stored in the constant pool; args are
+    /// MIR locals staged into registers r0..rN before the instruction.
+    PerformAsync {
+        effect_op: String,
+        args: Vec<LocalId>,
     },
     /// `perform Signal.wait("name")` — workflow signal wait.
     SignalWait {
@@ -567,7 +571,6 @@ mod tests {
             op: "op".into(),
             args: vec![LocalId(0)],
         };
-        let _ = RValue::LlmAsk { prompt: LocalId(0) };
         let _ = RValue::SignalWait { name: "sig".into() };
         let _ = RValue::Receive;
         let _ = RValue::ReceiveMatch {
