@@ -1,0 +1,48 @@
+name: Stale Issue & PR Cleanup
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Every Monday at 06:00 UTC
+  workflow_dispatch: # Manual trigger
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    name: Mark and close stale items
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          # Issues
+          days-before-issue-stale: 90
+          days-before-issue-close: 14
+          stale-issue-message: >
+            This issue has been automatically marked as stale because it has not had
+            recent activity. It will be closed in 14 days if no further activity occurs.
+            Feel free to comment to keep it open. Thank you for your contribution.
+          close-issue-message: >
+            This issue has been closed due to inactivity. If it is still relevant,
+            please reopen or create a new issue with updated context.
+          exempt-issue-labels: "pinned,security,roadmap,good-first-issue,help-wanted"
+
+          # PRs
+          days-before-pr-stale: 60
+          days-before-pr-close: 14
+          stale-pr-message: >
+            This pull request has been automatically marked as stale because it has not had
+            recent activity. It will be closed in 14 days if no further activity occurs.
+            If you'd like to continue working on it, please comment or push new commits.
+          close-pr-message: >
+            This pull request has been closed due to inactivity. If you'd like to resume
+            work, please reopen it or create a new PR.
+          exempt-pr-labels: "pinned,security,roadmap,blocked"
+
+          # Only scan issues/PRs with no activity in the stale period
+          days-before-issue-stale: 90
+          days-before-pr-stale: 60
+
+          # Operations per run to stay within API limits
+          operations-per-run: 30

@@ -1,0 +1,44 @@
+name: PR Title Check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  check-title:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PR title format
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Conventional Commits format:
+          #   type[(scope)][!]: description
+          VALID_TYPES="build|chore|ci|docs|feat|fix|perf|refactor|style|test"
+
+          if echo "$PR_TITLE" | grep -qE "^($VALID_TYPES)(\([a-zA-Z0-9._-]+\))?!?: .{1,}"; then
+            echo "✓ PR title follows Conventional Commits: $PR_TITLE"
+            exit 0
+          fi
+
+          echo ""
+          echo "  ERROR: PR title does not follow Conventional Commits format."
+          echo ""
+          echo "  Expected format:"
+          echo "    type[(scope)][!]: description"
+          echo ""
+          echo "  Valid types: build, chore, ci, docs, feat, fix, perf, refactor, style, test"
+          echo "  Examples:"
+          echo "    feat(vm): add PerformAsync opcode"
+          echo "    fix(parser): handle empty tuple pattern"
+          echo "    docs: update AGENTS.md"
+          echo ""
+          echo "  Your title: $PR_TITLE"
+          echo ""
+          exit 1

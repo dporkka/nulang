@@ -1,0 +1,58 @@
+version: 2
+updates:
+  # Rust crate dependencies
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "rust"
+    # Group minor/patch updates together to reduce noise
+    groups:
+      cranelift:
+        patterns:
+          - "cranelift-*"
+      wasmtime:
+        patterns:
+          - "wasmtime*"
+          - "wasm-encoder"
+      pyo3:
+        patterns:
+          - "pyo3*"
+      tokio:
+        patterns:
+          - "tokio*"
+      serde:
+        patterns:
+          - "serde*"
+    # Ignore major version bumps (reviewed manually)
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "ci"
+
+  # Root package.json (Husky)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    labels:
+      - "dependencies"
+      - "javascript"
+    open-pull-requests-limit: 2
