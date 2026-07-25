@@ -40,8 +40,8 @@ use crate::jit::compiler::{emit_arr_load, CompileError};
 // ---------------------------------------------------------------------------
 
 use crate::cranelift_utils::{
-    emit_sext48, emit_tag_bool, emit_tag_int, PAYLOAD_MASK_I64,
-    TAG_BOOL_I64, TAG_INT_I64, TAG_NIL_I64,
+    emit_sext48, emit_tag_bool, emit_tag_int, PAYLOAD_MASK_I64, TAG_BOOL_I64, TAG_INT_I64,
+    TAG_NIL_I64,
 };
 pub use crate::type_metadata::{KnownType, TypeMetadata};
 // Bytecode-level type inference
@@ -379,12 +379,7 @@ fn emit_bitcast_f64_to_i64(builder: &mut FunctionBuilder, val: Value) -> Value {
 }
 
 /// Emit a constant integer load into a register (NaN-tagged).
-pub(crate) fn emit_const(
-    builder: &mut FunctionBuilder,
-    regs_ptr: Value,
-    dst: usize,
-    value: i64,
-) {
+pub(crate) fn emit_const(builder: &mut FunctionBuilder, regs_ptr: Value, dst: usize, value: i64) {
     let tag = builder.ins().iconst(types::I64, TAG_INT_I64);
     let masked = value & PAYLOAD_MASK_I64;
     let val_part = builder.ins().iconst(types::I64, masked);

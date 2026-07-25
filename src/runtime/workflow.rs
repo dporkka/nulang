@@ -139,8 +139,7 @@ pub(crate) fn emit_event(rt: &mut Runtime, actor_id: u64, event: &str, args: &[V
         if event == "ParallelBranchCompleted" && args.len() == 2 {
             let parallel_step_name =
                 resolve_string_constant(rt, actor_id, &args[0]).unwrap_or_default();
-            let branch_name =
-                resolve_string_constant(rt, actor_id, &args[1]).unwrap_or_default();
+            let branch_name = resolve_string_constant(rt, actor_id, &args[1]).unwrap_or_default();
             let _ = rt.persistence.append_parallel_branch_completed(
                 actor_id,
                 seq,

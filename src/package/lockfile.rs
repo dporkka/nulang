@@ -63,19 +63,26 @@ impl Lockfile {
 
     /// Serialize to TOML text.
     pub fn to_toml(&self) -> NuResult<String> {
-        toml::to_string_pretty(self)
-            .map_err(|e| NuError::PackageError { msg: format!("cannot serialize lockfile: {}", e), span: Span::default() })
+        toml::to_string_pretty(self).map_err(|e| NuError::PackageError {
+            msg: format!("cannot serialize lockfile: {}", e),
+            span: Span::default(),
+        })
     }
 
     /// Parse lockfile TOML text.
     pub fn parse(source: &str) -> NuResult<Lockfile> {
-        let lockfile: Lockfile = toml::from_str(source)
-            .map_err(|e| NuError::PackageError { msg: format!("invalid {}: {}", LOCKFILE_FILE, e), span: Span::default() })?;
+        let lockfile: Lockfile = toml::from_str(source).map_err(|e| NuError::PackageError {
+            msg: format!("invalid {}: {}", LOCKFILE_FILE, e),
+            span: Span::default(),
+        })?;
         if lockfile.version != LOCKFILE_VERSION {
-            return Err(NuError::PackageError { msg: format!(
-                "unsupported {} version {} (expected {})",
-                LOCKFILE_FILE, lockfile.version, LOCKFILE_VERSION
-            ), span: Span::default() });
+            return Err(NuError::PackageError {
+                msg: format!(
+                    "unsupported {} version {} (expected {})",
+                    LOCKFILE_FILE, lockfile.version, LOCKFILE_VERSION
+                ),
+                span: Span::default(),
+            });
         }
         Ok(lockfile)
     }
@@ -83,15 +90,19 @@ impl Lockfile {
     /// Write the lockfile into `dir`.
     pub fn save(&self, dir: &Path) -> NuResult<()> {
         let path = dir.join(LOCKFILE_FILE);
-        std::fs::write(&path, self.to_toml()?)
-            .map_err(|e| NuError::PackageError { msg: format!("cannot write {}: {}", path.display(), e), span: Span::default() })
+        std::fs::write(&path, self.to_toml()?).map_err(|e| NuError::PackageError {
+            msg: format!("cannot write {}: {}", path.display(), e),
+            span: Span::default(),
+        })
     }
 
     /// Read the lockfile from `dir`.
     pub fn load(dir: &Path) -> NuResult<Lockfile> {
         let path = dir.join(LOCKFILE_FILE);
-        let source = std::fs::read_to_string(&path)
-            .map_err(|e| NuError::PackageError { msg: format!("cannot read {}: {}", path.display(), e), span: Span::default() })?;
+        let source = std::fs::read_to_string(&path).map_err(|e| NuError::PackageError {
+            msg: format!("cannot read {}: {}", path.display(), e),
+            span: Span::default(),
+        })?;
         Self::parse(&source)
     }
 }

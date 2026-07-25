@@ -4,10 +4,10 @@
 
 use crate::runtime::distributed;
 use crate::runtime::Runtime;
+use crate::runtime::GOSSIP_PAYLOAD_MAX_ENTRIES;
 use crate::runtime::{
     ActorAddress, AddressResolver, ClusterAction, ClusterState, CrdtManager, NodeId, Packet, Value,
 };
-use crate::runtime::{GOSSIP_PAYLOAD_MAX_ENTRIES};
 
 /// Enable the distributed actor system, binding to `bind_addr` for incoming
 /// connections and advertising ourselves under this address.
@@ -42,8 +42,7 @@ pub(crate) fn register_spawnable_behavior(
     name: &str,
     handler: fn(&mut crate::runtime::Actor, &[Value]),
 ) {
-    rt.spawnable_behaviors
-        .insert(name.to_string(), handler);
+    rt.spawnable_behaviors.insert(name.to_string(), handler);
 }
 
 /// Retrieve the result of a remote spawn request.
@@ -199,7 +198,6 @@ pub(crate) fn process_network(rt: &mut Runtime) {
         }
     }
 }
-
 
 /// Synchronize CRDT state with all healthy cluster members using delta-state
 /// replication, with a periodic full-state repair every

@@ -14,8 +14,8 @@
 //!   `runtime/mod.rs` (workflow actors only).
 //! - `Signal.wait`: lowered to the `SignalWait` opcode in `mir_lower.rs`,
 //!   served by the host `wait_signal` callback.
-- `Inference.ask` (canonical) / `LLM.ask` (deprecated alias): lowered to the `PerformAsync` opcode
-  in `mir_lower.rs`, served by the host `perform_async` callback.
+//! - `Inference.ask` (canonical) / `LLM.ask` (deprecated alias): lowered to the `PerformAsync` opcode
+//!   in `mir_lower.rs`, served by the host `perform_async` callback.
 //! - `Actor.*` (link/unlink/monitor/demonitor/trap_exit/exit/register/
 //!   unregister/whereis/set_priority): `Runtime::perform_actor_builtin` in
 //!   `runtime/mod.rs`, reached through both runtime host callback impls;
@@ -304,8 +304,10 @@ impl StdLib {
     /// Look up a built-in by fully-qualified name, or fail with a
     /// descriptive error naming the unknown operation.
     pub fn require(&self, name: &str) -> NuResult<&BuiltinOp> {
-        self.lookup(name)
-            .ok_or_else(|| NuError::RuntimeError { msg: format!("unknown built-in operation '{}'", name), span: Span::default() })
+        self.lookup(name).ok_or_else(|| NuError::RuntimeError {
+            msg: format!("unknown built-in operation '{}'", name),
+            span: Span::default(),
+        })
     }
 
     /// Distinct effect names covered by the registry, in first-seen order.
@@ -459,7 +461,17 @@ mod tests {
         let lib = StdLib::new();
         assert_eq!(
             lib.effects(),
-            vec!["IO", "Int", "String", "Timer", "Signal", "Inference", "LLM", "Actor", "Otp"]
+            vec![
+                "IO",
+                "Int",
+                "String",
+                "Timer",
+                "Signal",
+                "Inference",
+                "LLM",
+                "Actor",
+                "Otp"
+            ]
         );
     }
 

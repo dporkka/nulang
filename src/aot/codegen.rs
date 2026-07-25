@@ -26,9 +26,7 @@ use crate::mir;
 use crate::type_metadata::{KnownType, TypeMetadata};
 
 // Reuse NaN-tag constants and CLIF helpers from `cranelift_utils`.
-use crate::cranelift_utils::{
-    emit_sext48, emit_tag_bool, emit_tag_int, TAG_BOOL_I64, TAG_NIL_I64,
-};
+use crate::cranelift_utils::{emit_sext48, emit_tag_bool, emit_tag_int, TAG_BOOL_I64, TAG_NIL_I64};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -986,7 +984,6 @@ fn compile_unary(
         _ => Err(AotCompileError::Unsupported(format!("unary op {:?}", op))),
     }
 }
-
 
 /// Call a runtime helper function by name.
 fn call_helper(

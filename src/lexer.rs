@@ -740,7 +740,11 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 let end = self.pos.saturating_sub(2);
-                let end = if end < content_start { content_start } else { end };
+                let end = if end < content_start {
+                    content_start
+                } else {
+                    end
+                };
                 let content = self.source[content_start..end].to_string();
                 Token {
                     kind: TokenKind::Comment(content),

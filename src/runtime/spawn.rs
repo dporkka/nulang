@@ -6,9 +6,9 @@ use std::collections::HashMap;
 
 use crate::runtime::actor::{Actor, ActorBackend, BehaviorEntry};
 use crate::runtime::persistence::{PersistedValue, StateModel, WorkflowEvent};
+use crate::runtime::timer_fired_handler;
 use crate::runtime::Runtime;
 use crate::runtime::{bytecode_step_placeholder, fresh_actor_id, map_ast_state_model};
-use crate::runtime::{timer_fired_handler};
 use crate::vm::Value;
 
 /// Core spawn logic shared by all spawn entry points.

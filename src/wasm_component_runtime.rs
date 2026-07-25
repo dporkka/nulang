@@ -36,14 +36,20 @@ pub struct ComponentRuntime {
 impl ComponentRuntime {
     pub fn new(wasm_bytes: &[u8]) -> NuResult<Self> {
         let config = component_config();
-        let engine = Engine::new(&config)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime engine: {}", e), span: Span::default() })?;
-        let component = Component::new(&engine, wasm_bytes)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime component: {}", e), span: Span::default() })?;
+        let engine = Engine::new(&config).map_err(|e| NuError::VMError {
+            msg: format!("wasmtime engine: {}", e),
+            span: Span::default(),
+        })?;
+        let component = Component::new(&engine, wasm_bytes).map_err(|e| NuError::VMError {
+            msg: format!("wasmtime component: {}", e),
+            span: Span::default(),
+        })?;
 
         let config = component_config();
-        let engine = Engine::new(&config)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime engine: {}", e), span: Span::default() })?;
+        let engine = Engine::new(&config).map_err(|e| NuError::VMError {
+            msg: format!("wasmtime engine: {}", e),
+            span: Span::default(),
+        })?;
         Ok(ComponentRuntime {
             _engine: engine,
             component,
@@ -52,44 +58,69 @@ impl ComponentRuntime {
     }
 
     pub fn init(&self) -> NuResult<i64> {
-        let engine = Engine::new(&self.config)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime engine: {}", e), span: Span::default() })?;
+        let engine = Engine::new(&self.config).map_err(|e| NuError::VMError {
+            msg: format!("wasmtime engine: {}", e),
+            span: Span::default(),
+        })?;
         let mut store = Store::new(&engine, HostState {});
         let linker = wasmtime::component::Linker::<HostState>::new(&engine);
 
-        let actor = Actor::instantiate(&mut store, &self.component, &linker)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime instantiate: {}", e), span: Span::default() })?;
+        let actor = Actor::instantiate(&mut store, &self.component, &linker).map_err(|e| {
+            NuError::VMError {
+                msg: format!("wasmtime instantiate: {}", e),
+                span: Span::default(),
+            }
+        })?;
 
-        actor
-            .call_init(&mut store)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime call_init: {}", e), span: Span::default() })
+        actor.call_init(&mut store).map_err(|e| NuError::VMError {
+            msg: format!("wasmtime call_init: {}", e),
+            span: Span::default(),
+        })
     }
 
     pub fn handle_message(&self, msg: &[u8]) -> NuResult<i64> {
-        let engine = Engine::new(&self.config)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime engine: {}", e), span: Span::default() })?;
+        let engine = Engine::new(&self.config).map_err(|e| NuError::VMError {
+            msg: format!("wasmtime engine: {}", e),
+            span: Span::default(),
+        })?;
         let mut store = Store::new(&engine, HostState {});
         let linker = wasmtime::component::Linker::<HostState>::new(&engine);
 
-        let actor = Actor::instantiate(&mut store, &self.component, &linker)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime instantiate: {}", e), span: Span::default() })?;
+        let actor = Actor::instantiate(&mut store, &self.component, &linker).map_err(|e| {
+            NuError::VMError {
+                msg: format!("wasmtime instantiate: {}", e),
+                span: Span::default(),
+            }
+        })?;
 
         actor
             .call_handle_message(&mut store, msg)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime call_handle_message: {}", e), span: Span::default() })
+            .map_err(|e| NuError::VMError {
+                msg: format!("wasmtime call_handle_message: {}", e),
+                span: Span::default(),
+            })
     }
 
     pub fn checkpoint(&self) -> NuResult<Vec<u8>> {
-        let engine = Engine::new(&self.config)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime engine: {}", e), span: Span::default() })?;
+        let engine = Engine::new(&self.config).map_err(|e| NuError::VMError {
+            msg: format!("wasmtime engine: {}", e),
+            span: Span::default(),
+        })?;
         let mut store = Store::new(&engine, HostState {});
         let linker = wasmtime::component::Linker::<HostState>::new(&engine);
 
-        let actor = Actor::instantiate(&mut store, &self.component, &linker)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime instantiate: {}", e), span: Span::default() })?;
+        let actor = Actor::instantiate(&mut store, &self.component, &linker).map_err(|e| {
+            NuError::VMError {
+                msg: format!("wasmtime instantiate: {}", e),
+                span: Span::default(),
+            }
+        })?;
 
         actor
             .call_checkpoint(&mut store)
-            .map_err(|e| NuError::VMError { msg: format!("wasmtime call_checkpoint: {}", e), span: Span::default() })
+            .map_err(|e| NuError::VMError {
+                msg: format!("wasmtime call_checkpoint: {}", e),
+                span: Span::default(),
+            })
     }
 }

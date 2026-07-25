@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# ---------------------------------------------------------------------------
+# Pre-push — thorough checks before pushing to remote
+# ---------------------------------------------------------------------------
+
+set -e
+
+echo "→ cargo clippy --all-targets -- -D warnings"
+cargo clippy --all-targets -- -D warnings
+
+echo "→ cargo test"
+cargo test
+
+echo "✓ pre-push checks passed"

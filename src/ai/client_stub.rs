@@ -26,6 +26,9 @@ pub trait LlmClient: Send + Sync {
 }
 
 /// Synchronous wrapper used by the runtime and CLI entrypoints.
-pub fn complete_sync(_client: &dyn LlmClient, _request: LlmRequest) -> Result<LlmResponse, LlmError> {
+pub fn complete_sync(
+    _client: &dyn LlmClient,
+    _request: LlmRequest,
+) -> Result<LlmResponse, LlmError> {
     Err(disabled_error())
 }

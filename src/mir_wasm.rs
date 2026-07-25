@@ -797,7 +797,11 @@ mod tests {
 
 #[cfg(feature = "wasm-backend")]
 impl crate::backends::WasmBackend for WasmBackend {
-    fn compile(&mut self, module: &crate::mir::Module, name: &str) -> crate::types::NuResult<Vec<u8>> {
+    fn compile(
+        &mut self,
+        module: &crate::mir::Module,
+        name: &str,
+    ) -> crate::types::NuResult<Vec<u8>> {
         self.compile(module, name)
     }
 

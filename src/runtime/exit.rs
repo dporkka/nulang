@@ -2,8 +2,9 @@
 //! the supervision tree, and retire heaps.
 //!
 //! All functions in this module take `&mut Runtime` to access the runtime's
-use crate::runtime::{ActorState, ExitReason, Message, MessagePriority, Runtime, Supervisor,
-    SupervisorAction};
+use crate::runtime::{
+    ActorState, ExitReason, Message, MessagePriority, Runtime, Supervisor, SupervisorAction,
+};
 use crate::vm::Value;
 
 /// Exit an actor with the given reason, then run the full exit protocol:
@@ -33,12 +34,7 @@ pub(crate) fn handle_actor_exit(rt: &mut Runtime, actor_id: u64, reason: ExitRea
                 if let Some(parent_id) = sup_parent {
                     let escalate_reason =
                         ExitReason::Error("child supervisor shutdown".to_string());
-                    handle_supervisor_parent_exit(
-                        rt,
-                        parent_id,
-                        supervisor_id,
-                        escalate_reason,
-                    );
+                    handle_supervisor_parent_exit(rt, parent_id, supervisor_id, escalate_reason);
                 }
             }
             SupervisorAction::Ignore => {
@@ -152,7 +148,6 @@ pub(crate) fn reap_living_actor(rt: &mut Runtime, actor_id: u64, reason: ExitRea
     rt.remove_actor_reaping(actor_id);
 }
 
-
 // ---------------------------------------------------------------------------
 // Supervisor escalation
 // ---------------------------------------------------------------------------
@@ -175,26 +170,15 @@ pub(crate) fn handle_supervisor_parent_exit(
             let sup_parent = supervisor.parent;
             shutdown_supervisor(rt, parent_id, &supervisor);
             if let Some(grandparent_id) = sup_parent {
-                let escalate_reason =
-                    ExitReason::Error("child supervisor shutdown".to_string());
-                handle_supervisor_parent_exit(
-                    rt,
-                    grandparent_id,
-                    parent_id,
-                    escalate_reason,
-                );
+                let escalate_reason = ExitReason::Error("child supervisor shutdown".to_string());
+                handle_supervisor_parent_exit(rt, grandparent_id, parent_id, escalate_reason);
             }
         }
         SupervisorAction::Escalate => {
             let grandparent_id = supervisor.parent;
             rt.supervisors.insert(parent_id, supervisor);
             if let Some(grandparent_id) = grandparent_id {
-                handle_supervisor_parent_exit(
-                    rt,
-                    grandparent_id,
-                    child_supervisor_id,
-                    reason,
-                );
+                handle_supervisor_parent_exit(rt, grandparent_id, child_supervisor_id, reason);
             }
         }
     }
@@ -213,7 +197,12 @@ pub(crate) fn shutdown_supervisor(rt: &mut Runtime, supervisor_id: u64, supervis
     }
     rt.remove_actor_reaping(supervisor_id);
 }
-pub(crate) fn send_down_message(rt: &mut Runtime, watcher_id: u64, target_id: u64, reason: &ExitReason) {
+pub(crate) fn send_down_message(
+    rt: &mut Runtime,
+    watcher_id: u64,
+    target_id: u64,
+    reason: &ExitReason,
+) {
     let reason_str = reason.tag();
     let down_msg = Message {
         behavior_id: 0,

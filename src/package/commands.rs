@@ -24,10 +24,13 @@ pub fn run(args: &[String]) -> NuResult<()> {
             print_usage();
             Ok(())
         }
-        Some(other) => Err(NuError::PackageError { msg: format!(
-            "unknown nula subcommand '{}' (expected new, build, build-wasm, test, or run)",
-            other
-        ), span: Span::default() }),
+        Some(other) => Err(NuError::PackageError {
+            msg: format!(
+                "unknown nula subcommand '{}' (expected new, build, build-wasm, test, or run)",
+                other
+            ),
+            span: Span::default(),
+        }),
         None => {
             print_usage();
             Ok(())
@@ -50,31 +53,36 @@ fn print_usage() {
 
 /// `nula new <name>`: scaffold a package directory.
 fn cmd_new(path_arg: Option<&str>) -> NuResult<()> {
-    let path_str =
-        path_arg.ok_or_else(|| NuError::PackageError { msg: "nula new requires a package name or path".to_string(), span: Span::default() })?;
+    let path_str = path_arg.ok_or_else(|| NuError::PackageError {
+        msg: "nula new requires a package name or path".to_string(),
+        span: Span::default(),
+    })?;
     let dir = PathBuf::from(path_str);
     let name = dir
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| NuError::PackageError { msg: format!(
-            "invalid path '{}' — cannot extract package name",
-            path_str
-        ), span: Span::default() })?;
+        .ok_or_else(|| NuError::PackageError {
+            msg: format!("invalid path '{}' — cannot extract package name", path_str),
+            span: Span::default(),
+        })?;
     if name.is_empty()
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err(NuError::PackageError { msg: format!(
-            "invalid package name '{}' (use letters, digits, '-' or '_')",
-            name
-        ), span: Span::default() });
+        return Err(NuError::PackageError {
+            msg: format!(
+                "invalid package name '{}' (use letters, digits, '-' or '_')",
+                name
+            ),
+            span: Span::default(),
+        });
     }
     if dir.exists() {
-        return Err(NuError::PackageError { msg: format!(
-            "directory '{}' already exists",
-            dir.display()
-        ), span: Span::default() });
+        return Err(NuError::PackageError {
+            msg: format!("directory '{}' already exists", dir.display()),
+            span: Span::default(),
+        });
     }
     scaffold_package(&dir, name)?;
     println!("Created package '{}' at '{}'", name, dir.display());
@@ -84,8 +92,9 @@ fn cmd_new(path_arg: Option<&str>) -> NuResult<()> {
 /// Write the `Nulang.toml` + `src/main.nula` scaffold for a new package.
 fn scaffold_package(dir: &Path, name: &str) -> NuResult<()> {
     let src_dir = dir.join("src");
-    std::fs::create_dir_all(&src_dir).map_err(|e| {
-        NuError::PackageError { msg: format!("cannot create {}: {}", src_dir.display(), e), span: Span::default() }
+    std::fs::create_dir_all(&src_dir).map_err(|e| NuError::PackageError {
+        msg: format!("cannot create {}: {}", src_dir.display(), e),
+        span: Span::default(),
     })?;
     std::fs::write(
         dir.join(MANIFEST_FILE),
@@ -94,47 +103,59 @@ fn scaffold_package(dir: &Path, name: &str) -> NuResult<()> {
             name
         ),
     )
-    .map_err(|e| NuError::PackageError { msg: format!("cannot write {}: {}", MANIFEST_FILE, e), span: Span::default() })?;
+    .map_err(|e| NuError::PackageError {
+        msg: format!("cannot write {}: {}", MANIFEST_FILE, e),
+        span: Span::default(),
+    })?;
     std::fs::write(
         src_dir.join("main.nula"),
         "// Run with: nulang nula run\n\nperform IO.print(\"Hello from Nulang!\")\n",
     )
-    .map_err(|e| NuError::PackageError { msg: format!("cannot write main.nula: {}", e), span: Span::default() })?;
+    .map_err(|e| NuError::PackageError {
+        msg: format!("cannot write main.nula: {}", e),
+        span: Span::default(),
+    })?;
     Ok(())
 }
 
 /// Resolve the package in the current directory, write `Nulang.lock`, and
 /// return the entry point path.
 fn prepare_package() -> NuResult<PathBuf> {
-    let root = std::env::current_dir()
-        .map_err(|e| NuError::PackageError { msg: format!("cannot read current directory: {}", e), span: Span::default() })?;
+    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })?;
     let manifest = Manifest::load(&root)?;
     let resolution = resolve(&root, &manifest)?;
     resolution.to_lockfile().save(&root)?;
     let entry = root.join(&manifest.package.entry);
     if !entry.exists() {
-        return Err(NuError::PackageError { msg: format!(
-            "entry point {} not found",
-            entry.display()
-        ), span: Span::default() });
+        return Err(NuError::PackageError {
+            msg: format!("entry point {} not found", entry.display()),
+            span: Span::default(),
+        });
     }
     Ok(entry)
 }
 
 /// Run the current `nulang` executable with `args`, inheriting stdio.
 fn nulang_exe(args: &[&str]) -> NuResult<()> {
-    let exe = std::env::current_exe()
-        .map_err(|e| NuError::PackageError { msg: format!("cannot locate nulang executable: {}", e), span: Span::default() })?;
+    let exe = std::env::current_exe().map_err(|e| NuError::PackageError {
+        msg: format!("cannot locate nulang executable: {}", e),
+        span: Span::default(),
+    })?;
     let status = Command::new(exe)
         .args(args)
         .status()
-        .map_err(|e| NuError::PackageError { msg: format!("failed to run nulang: {}", e), span: Span::default() })?;
+        .map_err(|e| NuError::PackageError {
+            msg: format!("failed to run nulang: {}", e),
+            span: Span::default(),
+        })?;
     if !status.success() {
-        return Err(NuError::PackageError { msg: format!(
-            "nulang {} failed with status {}",
-            args.join(" "),
-            status
-        ), span: Span::default() });
+        return Err(NuError::PackageError {
+            msg: format!("nulang {} failed with status {}", args.join(" "), status),
+            span: Span::default(),
+        });
     }
     Ok(())
 }
@@ -167,7 +188,10 @@ fn cmd_run() -> NuResult<()> {
 fn cmd_test() -> NuResult<()> {
     let _entry = prepare_package()?;
     let tests_dir = std::env::current_dir()
-        .map_err(|e| NuError::PackageError { msg: format!("cannot read current directory: {}", e), span: Span::default() })?
+        .map_err(|e| NuError::PackageError {
+            msg: format!("cannot read current directory: {}", e),
+            span: Span::default(),
+        })?
         .join("tests");
     let mut test_files: Vec<PathBuf> = match std::fs::read_dir(&tests_dir) {
         Ok(entries) => entries
@@ -197,7 +221,10 @@ fn cmd_test() -> NuResult<()> {
     }
     println!("{} passed, {} failed", test_files.len() - failed, failed);
     if failed > 0 {
-        return Err(NuError::PackageError { msg: format!("{} test(s) failed", failed), span: Span::default() });
+        return Err(NuError::PackageError {
+            msg: format!("{} test(s) failed", failed),
+            span: Span::default(),
+        });
     }
     Ok(())
 }
@@ -241,7 +268,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path_str = dir.to_str().expect("temp dir should be valid UTF-8");
         let result = cmd_new(Some(path_str));
-        assert!(result.is_ok(), "path with valid basename should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "path with valid basename should succeed: {:?}",
+            result.err()
+        );
         assert!(dir.join("Nulang.toml").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -201,7 +201,10 @@ fn get_memory(caller: &mut Caller<'_, HostState>) -> Result<Memory, Error> {
 // ── Error mapping ────────────────────────────────────────────────────
 
 fn map_wasmtime_err(e: impl std::fmt::Display) -> NuError {
-    NuError::VMError { msg: format!("wasmtime: {}", e), span: Span::default() }
+    NuError::VMError {
+        msg: format!("wasmtime: {}", e),
+        span: Span::default(),
+    }
 }
 
 // ── AOT compilation ──────────────────────────────────────────────────
@@ -211,13 +214,16 @@ pub fn aot_compile(wasm_path: &str, cwasm_path: &str) -> NuResult<()> {
     let output = std::process::Command::new("wasmtime")
         .args(["compile", wasm_path, "-o", cwasm_path])
         .output()
-        .map_err(|e| NuError::VMError { msg: format!("wasmtime compile not found: {}", e), span: Span::default() })?;
+        .map_err(|e| NuError::VMError {
+            msg: format!("wasmtime compile not found: {}", e),
+            span: Span::default(),
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NuError::VMError { msg: format!(
-            "wasmtime compile failed: {}",
-            stderr.trim()
-        ), span: Span::default() });
+        return Err(NuError::VMError {
+            msg: format!("wasmtime compile failed: {}", stderr.trim()),
+            span: Span::default(),
+        });
     }
     Ok(())
 }

@@ -593,7 +593,9 @@ fn dyn_worker_module(default_count: i64) -> crate::bytecode::CodeModule {
         state_models: vec![("count".to_string(), crate::ast::StateModel::Local)],
         state_defaults: vec![("count".to_string(), Constant::Int(default_count))],
         behavior_indices: vec![0],
-        type_hash: None, version: 1, migrations: String::new(),
+        type_hash: None,
+        version: 1,
+        migrations: String::new(),
         is_workflow: false,
         is_agent: false,
         is_organization: false,
@@ -1623,7 +1625,9 @@ fn test_vm_spawn_creates_persistent_actor() {
         state_models: vec![("balance".to_string(), crate::ast::StateModel::Durable)],
         state_defaults: vec![("balance".to_string(), Constant::Int(100))],
         behavior_indices: vec![0],
-        type_hash: None, version: 1, migrations: String::new(),
+        type_hash: None,
+        version: 1,
+        migrations: String::new(),
         is_workflow: false,
         is_agent: false,
         is_organization: false,
@@ -1684,7 +1688,9 @@ fn test_vm_spawn_creates_non_persistent_actor() {
         state_models: vec![("count".to_string(), crate::ast::StateModel::Local)],
         state_defaults: vec![("count".to_string(), Constant::Int(0))],
         behavior_indices: vec![0],
-        type_hash: None, version: 1, migrations: String::new(),
+        type_hash: None,
+        version: 1,
+        migrations: String::new(),
         is_workflow: false,
         is_agent: false,
         is_organization: false,
@@ -3320,7 +3326,10 @@ fn test_remote_spawn_request_delivery() {
 /// other rounds ship deltas.
 #[test]
 fn test_crdt_sync_round_schedule() {
-    assert!(crate::runtime::distribution::crdt_sync_is_full_round(1), "first sync must be full");
+    assert!(
+        crate::runtime::distribution::crdt_sync_is_full_round(1),
+        "first sync must be full"
+    );
     for round in 2..=CRDT_FULL_SYNC_INTERVAL {
         assert!(
             !crate::runtime::distribution::crdt_sync_is_full_round(round),
@@ -3331,7 +3340,9 @@ fn test_crdt_sync_round_schedule() {
         crate::runtime::distribution::crdt_sync_is_full_round(CRDT_FULL_SYNC_INTERVAL + 1),
         "round after the interval must be a full repair sync"
     );
-    assert!(!crate::runtime::distribution::crdt_sync_is_full_round(CRDT_FULL_SYNC_INTERVAL + 2));
+    assert!(!crate::runtime::distribution::crdt_sync_is_full_round(
+        CRDT_FULL_SYNC_INTERVAL + 2
+    ));
 }
 
 /// `sync_crdts` is a no-op that does not count rounds when distribution

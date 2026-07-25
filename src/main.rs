@@ -51,9 +51,7 @@ async fn main() {
         use tracing_subscriber::{fmt, EnvFilter};
         let env_filter =
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
-        fmt().with_env_filter(env_filter)
-            .with_target(false)
-            .init();
+        fmt().with_env_filter(env_filter).with_target(false).init();
     }
 
     let args: Vec<String> = std::env::args().collect();
@@ -102,8 +100,14 @@ async fn main() {
             }
             "--version" | "-V" => {
                 println!("nulang v{}", env!("CARGO_PKG_VERSION"));
-                println!("  commit: {}", option_env!("GIT_COMMIT_HASH").unwrap_or("unknown"));
-                println!("  build:  {}", option_env!("BUILD_DATE").unwrap_or("unknown"));
+                println!(
+                    "  commit: {}",
+                    option_env!("GIT_COMMIT_HASH").unwrap_or("unknown")
+                );
+                println!(
+                    "  build:  {}",
+                    option_env!("BUILD_DATE").unwrap_or("unknown")
+                );
                 return;
             }
             "--lsp" => opts.lsp = true,
@@ -183,11 +187,26 @@ async fn main() {
             }
             arg if arg.starts_with('-') => {
                 let known: &[&str] = &[
-                    "--repl", "--eval", "--check", "--lsp", "--doc",
-                    "--backend", "--out", "--emit-nbc", "--verify",
-                    "--version", "--verbose", "--color", "--help",
+                    "--repl",
+                    "--eval",
+                    "--check",
+                    "--lsp",
+                    "--doc",
+                    "--backend",
+                    "--out",
+                    "--emit-nbc",
+                    "--verify",
+                    "--version",
+                    "--verbose",
+                    "--color",
+                    "--help",
                     "--emit-stdlib-docs",
-                    "-r", "-e", "-c", "-V", "-v", "-h",
+                    "-r",
+                    "-e",
+                    "-c",
+                    "-V",
+                    "-v",
+                    "-h",
                 ];
                 let suggestion = known
                     .iter()
@@ -268,7 +287,13 @@ async fn main() {
             }
             return;
         }
-        if let Err(e) = run_source(&code, None, opts.verbose, &opts.backend, opts.out_file.as_deref()) {
+        if let Err(e) = run_source(
+            &code,
+            None,
+            opts.verbose,
+            &opts.backend,
+            opts.out_file.as_deref(),
+        ) {
             print_error(&e, use_color);
             std::process::exit(exit_code(&e));
         }
@@ -535,7 +560,11 @@ fn exit_code(err: &NuError) -> i32 {
 ///
 /// `file_path` is an optional display name for diagnostics (e.g. "main.nula").
 #[instrument(level = "debug", skip(source))]
-fn run_frontend(source: &str, file_path: Option<&str>, verbose: bool) -> NuResult<nulang::ast::AstModule> {
+fn run_frontend(
+    source: &str,
+    file_path: Option<&str>,
+    verbose: bool,
+) -> NuResult<nulang::ast::AstModule> {
     let mut lexer = Lexer::new(source);
     nulang::types::set_source_map_with_file(source, file_path);
     let tokens = lexer.lex()?;
@@ -629,7 +658,13 @@ fn run_frontend(source: &str, file_path: Option<&str>, verbose: bool) -> NuResul
 }
 
 #[cfg_attr(not(feature = "wasm-backend"), allow(unused_variables))]
-fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &str, out_file: Option<&str>) -> NuResult<()> {
+fn run_source(
+    source: &str,
+    file_path: Option<&str>,
+    verbose: bool,
+    backend: &str,
+    out_file: Option<&str>,
+) -> NuResult<()> {
     let ast = run_frontend(source, file_path, verbose)?;
 
     match backend {
@@ -638,13 +673,17 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
             let wasm_file = out_file.unwrap_or("out.wasm");
             let hir = nulang::hir_lower::lower_module(&ast);
             let mir = nulang::mir_lower::lower_module(&hir)?;
-            use nulang::backends::WasmBackend; let mut wasm_backend = nulang::backends::DefaultWasmBackend;
+            use nulang::backends::WasmBackend;
+            let mut wasm_backend = nulang::backends::DefaultWasmBackend;
             let wasm_bytes = wasm_backend.compile(&mir, "main")?;
             if verbose {
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
             }
             std::fs::write(wasm_file, &wasm_bytes).map_err(|e| {
-                nulang::types::NuError::VMError { msg: format!("failed to write {}: {}", wasm_file, e), span: Span::default() }
+                nulang::types::NuError::VMError {
+                    msg: format!("failed to write {}: {}", wasm_file, e),
+                    span: Span::default(),
+                }
             })?;
             println!("Wrote {} ({} bytes)", wasm_file, wasm_bytes.len());
             return Ok(());
@@ -661,7 +700,10 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
             }
             std::fs::write(wasm_file, &wasm_bytes).map_err(|e| {
-                nulang::types::NuError::VMError { msg: format!("failed to write {}: {}", wasm_file, e), span: Span::default() }
+                nulang::types::NuError::VMError {
+                    msg: format!("failed to write {}: {}", wasm_file, e),
+                    span: Span::default(),
+                }
             })?;
             wasm_backend.run(&wasm_bytes)?;
             return Ok(());
@@ -677,13 +719,17 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
             };
             let hir = nulang::hir_lower::lower_module(&ast);
             let mir = nulang::mir_lower::lower_module(&hir)?;
-            use nulang::backends::WasmBackend; let mut wasm_backend = nulang::backends::DefaultWasmBackend;
+            use nulang::backends::WasmBackend;
+            let mut wasm_backend = nulang::backends::DefaultWasmBackend;
             let wasm_bytes = wasm_backend.compile(&mir, "main")?;
             if verbose {
                 println!("=== WASM ({}) bytes ===", wasm_bytes.len());
             }
             std::fs::write(&wasm_file, &wasm_bytes).map_err(|e| {
-                nulang::types::NuError::VMError { msg: format!("failed to write {}: {}", wasm_file, e), span: Span::default() }
+                nulang::types::NuError::VMError {
+                    msg: format!("failed to write {}: {}", wasm_file, e),
+                    span: Span::default(),
+                }
             })?;
             println!("Wrote {} ({} bytes)", wasm_file, wasm_bytes.len());
             nulang::wasm_runtime::aot_compile(&wasm_file, &cwasm_file)?;
@@ -692,9 +738,10 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
         }
         #[cfg(not(feature = "wasm-backend"))]
         "wasm" | "wasm-run" | "wasm-aot" => {
-            return Err(nulang::types::NuError::VMError { msg: 
-                "wasm backend not compiled in (enable 'wasm-backend' feature)".into(),
-                span: Span::default() });
+            return Err(nulang::types::NuError::VMError {
+                msg: "wasm backend not compiled in (enable 'wasm-backend' feature)".into(),
+                span: Span::default(),
+            });
         }
         "native" => {
             let hir = nulang::hir_lower::lower_module(&ast);
@@ -754,10 +801,7 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
                         g.bytes_freed,
                         g.cycles_detected
                     );
-                    eprintln!(
-                        "[runtime] actors: {} live",
-                        rt.actor_count()
-                    );
+                    eprintln!("[runtime] actors: {} live", rt.actor_count());
                 }
                 value
             } else {
@@ -772,15 +816,18 @@ fn run_source(source: &str, file_path: Option<&str>, verbose: bool, backend: &st
             Ok(())
         }
         _ => {
-            return Err(nulang::types::NuError::VMError { msg: format!(
-                "unknown backend '{}' (expected bytecode | native{})",
-                backend,
-                if cfg!(feature = "wasm-backend") {
-                    " | wasm | wasm-run | wasm-aot"
-                } else {
-                    ""
-                }
-            ), span: Span::default() });
+            return Err(nulang::types::NuError::VMError {
+                msg: format!(
+                    "unknown backend '{}' (expected bytecode | native{})",
+                    backend,
+                    if cfg!(feature = "wasm-backend") {
+                        " | wasm | wasm-run | wasm-aot"
+                    } else {
+                        ""
+                    }
+                ),
+                span: Span::default(),
+            });
         }
     }
 }
@@ -842,11 +889,16 @@ fn compile_source_to_nbc(source: &str, out_path: &str) -> NuResult<()> {
     let ast = run_frontend(source, None, false)?;
     let m = compile_with_new_pipeline(&ast, "main")?;
     let source_hash = blake3::hash(source.as_bytes());
-    let bytes = m
-        .to_nbc(Some(*source_hash.as_bytes()))
-        .map_err(|e| nulang::types::NuError::VMError { msg: e.to_string(), span: Span::default() })?;
-    std::fs::write(out_path, &bytes)
-        .map_err(|e| nulang::types::NuError::VMError { msg: format!("failed to write {out_path}: {e}"), span: Span::default() })?;
+    let bytes =
+        m.to_nbc(Some(*source_hash.as_bytes()))
+            .map_err(|e| nulang::types::NuError::VMError {
+                msg: e.to_string(),
+                span: Span::default(),
+            })?;
+    std::fs::write(out_path, &bytes).map_err(|e| nulang::types::NuError::VMError {
+        msg: format!("failed to write {out_path}: {e}"),
+        span: Span::default(),
+    })?;
     println!(
         "Wrote {out_path} ({} bytes, .nbc format v{}, language v{})",
         bytes.len(),
@@ -860,30 +912,41 @@ fn compile_source_to_nbc(source: &str, out_path: &str) -> NuResult<()> {
 /// source hash against a source file. This is the durable-distribution path:
 /// no compiler invocation, no source parse — just `from_nbc` + `VM::run`.
 fn run_nbc_file(path: &str, verify_source: Option<&str>) -> NuResult<()> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        nulang::types::NuError::VMError { msg: format!("cannot read .nbc file '{path}': {e}"), span: Span::default() }
+    let bytes = std::fs::read(path).map_err(|e| nulang::types::NuError::VMError {
+        msg: format!("cannot read .nbc file '{path}': {e}"),
+        span: Span::default(),
     })?;
-    let artifact = nulang::bytecode::CodeModule::from_nbc(&bytes)
-        .map_err(|e| nulang::types::NuError::VMError { msg: e.to_string(), span: Span::default() })?;
+    let artifact = nulang::bytecode::CodeModule::from_nbc(&bytes).map_err(|e| {
+        nulang::types::NuError::VMError {
+            msg: e.to_string(),
+            span: Span::default(),
+        }
+    })?;
 
     if let Some(src_path) = verify_source {
-        let source = std::fs::read_to_string(src_path).map_err(|e| {
-            nulang::types::NuError::VMError { msg: format!("cannot read source '{src_path}': {e}"), span: Span::default() }
-        })?;
+        let source =
+            std::fs::read_to_string(src_path).map_err(|e| nulang::types::NuError::VMError {
+                msg: format!("cannot read source '{src_path}': {e}"),
+                span: Span::default(),
+            })?;
         let computed = blake3::hash(source.as_bytes());
         match artifact.source_hash {
             Some(h) if h == *computed.as_bytes() => { /* verified */ }
             Some(h) => {
-                return Err(nulang::types::NuError::VMError { msg: format!(
+                return Err(nulang::types::NuError::VMError {
+                    msg: format!(
                     "source hash mismatch: artifact recorded {} but source {src_path} hashes to {}",
                     hex::encode(h),
                     hex::encode(computed.as_bytes()),
-                ), span: Span::default() });
+                ),
+                    span: Span::default(),
+                });
             }
             None => {
-                return Err(nulang::types::NuError::VMError { msg: 
-                    "artifact carries no source hash; cannot verify".into(),
-                    span: Span::default() });
+                return Err(nulang::types::NuError::VMError {
+                    msg: "artifact carries no source hash; cannot verify".into(),
+                    span: Span::default(),
+                });
             }
         }
     }
@@ -1049,7 +1112,8 @@ mod tests {
                 c
             }
         "#;
-        let ast = run_frontend(source, None, false).expect("frontend should accept the actor program");
+        let ast =
+            run_frontend(source, None, false).expect("frontend should accept the actor program");
         let module = compile_with_new_pipeline(&ast, "test").expect("actor program should compile");
         let (_value, runtime) = run_with_runtime(module).expect("actor program should run");
         let rt = runtime.borrow();

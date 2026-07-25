@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+# ---------------------------------------------------------------------------
+# Pre-commit — fast checks that must pass before committing
+# ---------------------------------------------------------------------------
+
+set -e
+
+echo "→ cargo fmt --check"
+cargo fmt --check
+
+echo "→ cargo check --tests (zero warnings)"
+cargo check --tests 2>&1 | grep -q "warning:" && {
+    echo "ERROR: compiler warnings found. Fix before committing."
+    exit 1
+}
+
+echo "✓ pre-commit checks passed"

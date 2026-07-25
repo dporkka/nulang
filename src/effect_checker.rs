@@ -10,9 +10,10 @@ use crate::ast::*;
 use crate::types::*;
 
 // Fast hashing for compiler-internal maps (keys are not attacker-controlled).
-type FxHashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
-type FxHashSet<T> = std::collections::HashSet<T, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
-
+type FxHashMap<K, V> =
+    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+type FxHashSet<T> =
+    std::collections::HashSet<T, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 // ---------------------------------------------------------------------------
 // Effect Row Operations

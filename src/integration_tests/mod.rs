@@ -7555,8 +7555,8 @@ match { a: 2, b: 9 } with {
     // WASM backend integration tests (requires wasm-backend feature)
     #[cfg(feature = "wasm-backend")]
     mod wasm_backend {
-        use crate::mir_wasm::WasmBackend;
         use crate::lexer::Lexer;
+        use crate::mir_wasm::WasmBackend;
         use crate::parser::Parser;
         use crate::typechecker::TypeChecker;
         use crate::types::NuResult;
@@ -7654,27 +7654,36 @@ match { a: 2, b: 9 } with {
         fn test_entity_with_events_compiles() {
             let source = "entity Counter { state count: Int = 0 events | Incremented(by: Int) | Decremented(by: Int) behavior inc(by: Int) { self.count = self.count + by } }";
             let result = run_source_new(source);
-            assert!(result.is_ok(),
+            assert!(
+                result.is_ok(),
                 "entity with events must parse and typecheck without error: {:?}",
-                result.err());
+                result.err()
+            );
         }
 
         #[test]
         fn test_entity_with_apply_block_compiles() {
             let source = "entity Counter { state count: Int = 0 events | Incremented(by: Int) apply | Incremented(by) => self.count = self.count + by behavior inc(by: Int) { self.count = self.count + by } }";
             let result = run_source_new(source);
-            assert!(result.is_ok(),
+            assert!(
+                result.is_ok(),
                 "entity with apply must parse and typecheck without error: {:?}",
-                result.err());
+                result.err()
+            );
         }
 
         #[test]
         fn test_entity_events_and_apply_as_identifiers() {
             // `events` and `apply` are contextual keywords — they remain
             // usable as field/variable names outside actor bodies.
-            let source = "fn main() { let events = [1, 2, 3]; let apply = fn(x) x + 1; apply(events[0]) }";
+            let source =
+                "fn main() { let events = [1, 2, 3]; let apply = fn(x) x + 1; apply(events[0]) }";
             let result = run_source_new(source);
-            assert!(result.is_ok(), "`events` and `apply` as identifiers must work: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "`events` and `apply` as identifiers must work: {:?}",
+                result.err()
+            );
         }
 
         #[test]
@@ -7715,56 +7724,77 @@ match { a: 2, b: 9 } with {
         }
     }
 
-        #[test]
-        fn test_organization_compiles_as_persistent_actor() {
-            let source = r#"organization Team {
+    #[test]
+    fn test_organization_compiles_as_persistent_actor() {
+        let source = r#"organization Team {
                 state members: Int = 0
                 behavior count() { self.members }
             }"#;
-            let result = run_source_new(source);
-            assert!(result.is_ok(),
-                "organization should compile: {:?}", result.err());
-        }
+        let result = run_source_new(source);
+        assert!(
+            result.is_ok(),
+            "organization should compile: {:?}",
+            result.err()
+        );
+    }
 
-        // -- break-with-value (MIR pipeline) --
+    // -- break-with-value (MIR pipeline) --
 
-        #[test]
-        fn test_while_break_with_value_returns_break_value() {
-            let source = r#"while true { break 99 }"#;
-            let result = run_source_new(source).unwrap();
-            assert_eq!(result.as_int(), Some(99),
-                "while break-with-value should return break value, got {:?}", result);
-        }
+    #[test]
+    fn test_while_break_with_value_returns_break_value() {
+        let source = r#"while true { break 99 }"#;
+        let result = run_source_new(source).unwrap();
+        assert_eq!(
+            result.as_int(),
+            Some(99),
+            "while break-with-value should return break value, got {:?}",
+            result
+        );
+    }
 
-        #[test]
-        fn test_while_break_without_value_returns_unit() {
-            let source = r#"while true { break }"#;
-            let result = run_source_new(source).unwrap();
-            assert!(result.is_unit(),
-                "while break without value should return unit, got {:?}", result);
-        }
+    #[test]
+    fn test_while_break_without_value_returns_unit() {
+        let source = r#"while true { break }"#;
+        let result = run_source_new(source).unwrap();
+        assert!(
+            result.is_unit(),
+            "while break without value should return unit, got {:?}",
+            result
+        );
+    }
 
-        #[test]
-        fn test_while_conditional_break_with_value() {
-            let source = r#"while true { if true { break 42 } else { 0 } }"#;
-            let result = run_source_new(source).unwrap();
-            assert_eq!(result.as_int(), Some(42),
-                "conditional break-with-value should return 42, got {:?}", result);
-        }
+    #[test]
+    fn test_while_conditional_break_with_value() {
+        let source = r#"while true { if true { break 42 } else { 0 } }"#;
+        let result = run_source_new(source).unwrap();
+        assert_eq!(
+            result.as_int(),
+            Some(42),
+            "conditional break-with-value should return 42, got {:?}",
+            result
+        );
+    }
 
-        #[test]
-        fn test_for_break_with_value_returns_break_value() {
-            let source = r#"for i in [1] { break 99 }"#;
-            let result = run_source_new(source).unwrap();
-            assert_eq!(result.as_int(), Some(99),
-                "for break-with-value should return break value, got {:?}", result);
-        }
+    #[test]
+    fn test_for_break_with_value_returns_break_value() {
+        let source = r#"for i in [1] { break 99 }"#;
+        let result = run_source_new(source).unwrap();
+        assert_eq!(
+            result.as_int(),
+            Some(99),
+            "for break-with-value should return break value, got {:?}",
+            result
+        );
+    }
 
-        #[test]
-        fn test_for_break_without_value_returns_unit() {
-            let source = r#"for i in [1] { break }"#;
-            let result = run_source_new(source).unwrap();
-            assert!(result.is_unit(),
-                "for break without value should return unit, got {:?}", result);
-        }
+    #[test]
+    fn test_for_break_without_value_returns_unit() {
+        let source = r#"for i in [1] { break }"#;
+        let result = run_source_new(source).unwrap();
+        assert!(
+            result.is_unit(),
+            "for break without value should return unit, got {:?}",
+            result
+        );
+    }
 }

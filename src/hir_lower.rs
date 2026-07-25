@@ -136,7 +136,10 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
                     (n.clone(), *m, t.clone(), op)
                 })
                 .collect(),
-            behaviors: behaviors.iter().map(|b| lower_behavior(b, apply_handlers)).collect(),
+            behaviors: behaviors
+                .iter()
+                .map(|b| lower_behavior(b, apply_handlers))
+                .collect(),
             init: init
                 .iter()
                 .map(|(n, e)| {
@@ -577,50 +580,60 @@ fn desugar_agent(
     ];
 
     if semantic_memory_dimensions.is_some() {
-        behaviors.push(lower_behavior(&placeholder_behavior(
-            "store_fact",
-            vec![("content", str_ty.clone())],
-            span,
-        ), &[]));
-        behaviors.push(lower_behavior(&placeholder_behavior(
-            "recall",
-            vec![("query", str_ty.clone()), ("top_k", int_ty.clone())],
-            span,
-        ), &[]));
+        behaviors.push(lower_behavior(
+            &placeholder_behavior("store_fact", vec![("content", str_ty.clone())], span),
+            &[],
+        ));
+        behaviors.push(lower_behavior(
+            &placeholder_behavior(
+                "recall",
+                vec![("query", str_ty.clone()), ("top_k", int_ty.clone())],
+                span,
+            ),
+            &[],
+        ));
     }
     if procedural_memory_namespace.is_some() {
-        behaviors.push(lower_behavior(&placeholder_behavior(
-            "store_pattern",
-            vec![
-                ("key", str_ty.clone()),
-                ("input_pattern", str_ty.clone()),
-                ("output_template", str_ty.clone()),
-            ],
-            span,
-        ), &[]));
-        behaviors.push(lower_behavior(&placeholder_behavior(
-            "get_pattern",
-            vec![("key", str_ty.clone())],
-            span,
-        ), &[]));
-        behaviors.push(lower_behavior(&placeholder_behavior(
-            "add_example",
-            vec![
-                ("task", str_ty.clone()),
-                ("input", str_ty.clone()),
-                ("output", str_ty.clone()),
-            ],
-            span,
-        ), &[]));
-        behaviors.push(lower_behavior(&placeholder_behavior(
-            "get_examples",
-            vec![
-                ("task", str_ty.clone()),
-                ("query", str_ty.clone()),
-                ("top_k", int_ty.clone()),
-            ],
-            span,
-        ), &[]));
+        behaviors.push(lower_behavior(
+            &placeholder_behavior(
+                "store_pattern",
+                vec![
+                    ("key", str_ty.clone()),
+                    ("input_pattern", str_ty.clone()),
+                    ("output_template", str_ty.clone()),
+                ],
+                span,
+            ),
+            &[],
+        ));
+        behaviors.push(lower_behavior(
+            &placeholder_behavior("get_pattern", vec![("key", str_ty.clone())], span),
+            &[],
+        ));
+        behaviors.push(lower_behavior(
+            &placeholder_behavior(
+                "add_example",
+                vec![
+                    ("task", str_ty.clone()),
+                    ("input", str_ty.clone()),
+                    ("output", str_ty.clone()),
+                ],
+                span,
+            ),
+            &[],
+        ));
+        behaviors.push(lower_behavior(
+            &placeholder_behavior(
+                "get_examples",
+                vec![
+                    ("task", str_ty.clone()),
+                    ("query", str_ty.clone()),
+                    ("top_k", int_ty.clone()),
+                ],
+                span,
+            ),
+            &[],
+        ));
     }
 
     // Already serialized above for state fields; reuse for ActorDef metadata.
@@ -639,7 +652,7 @@ fn desugar_agent(
         version: 1,
         migrations: Vec::new(),
         is_workflow: false,
-            is_organization: false,
+        is_organization: false,
         is_agent: true,
         tools: resolved_tools,
         semantic_memory_dimensions,
@@ -664,8 +677,7 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
     // crash) and emits a `ParallelBranchCompleted` event after each branch.
     // Mirrors the stable compiler's `compile_workflow` exactly.
     let mut flattened_steps: Vec<ast::WorkflowStep> = Vec::new();
-    let mut parallel_branch_names: FxHashMap<usize, Vec<String>> =
-        FxHashMap::default();
+    let mut parallel_branch_names: FxHashMap<usize, Vec<String>> = FxHashMap::default();
     let mut parallel_counter = 0usize;
 
     for item in items {
@@ -778,14 +790,17 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
         .iter()
         .enumerate()
         .map(|(i, s)| {
-            let mut def = lower_behavior(&ast::Behavior {
-                name: s.name.clone(),
-                params: Vec::new(),
-                body: s.body.clone(),
-                effect: None,
-                cap: Capability::Ref,
-                span: s.span,
-            }, &[]);
+            let mut def = lower_behavior(
+                &ast::Behavior {
+                    name: s.name.clone(),
+                    params: Vec::new(),
+                    body: s.body.clone(),
+                    effect: None,
+                    cap: Capability::Ref,
+                    span: s.span,
+                },
+                &[],
+            );
             def.compensate = s.compensate.as_ref().map(lower_body);
             def.parallel_branches = parallel_branch_names.get(&i).cloned();
             def

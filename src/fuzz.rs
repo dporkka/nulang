@@ -54,7 +54,6 @@ fn seed_corpus() -> Vec<&'static str> {
         "false",
         r#""hello""#,
         "()",
-
         // --- Arithmetic ---
         "1 + 2",
         "3 * (4 + 5)",
@@ -62,76 +61,58 @@ fn seed_corpus() -> Vec<&'static str> {
         "100 / 5",
         "7 % 3",
         "-42",
-
         // --- Comparisons ---
         "1 < 2",
         "3 >= 3",
         "5 == 5",
         "true != false",
-
         // --- Boolean logic ---
         "true and false",
         "true or false",
         "not true",
-
         // --- String concat ---
         r#""hello" ++ " " ++ "world""#,
-
         // --- If expressions ---
         "if true then 1 else 2",
         "if 1 < 2 then 10 else 20",
         "if false then 1 else if true then 2 else 3",
-
         // --- Let bindings ---
         "let x = 42; x",
         "let x = 1; let y = 2; x + y",
         "let x = 10; let y = x * 2; y + x",
-
         // --- Functions ---
         "fn(x) { x + 1 }",
         "fn(x, y) { x + y }",
         "let f = fn(x) { x * 2 }; f(21)",
         r#"let greet = fn(name) { "Hello, " ++ name }; greet("world")"#,
-
         // --- Recursive functions ---
         "let fib = fn(n) { if n <= 1 then n else fib(n - 1) + fib(n - 2) }; fib(10)",
-
         // --- Lambda application ---
         "(fn(x) { x + 1 })(41)",
-
         // --- Type annotations ---
         "fn(x: Int) -> Int { x + 1 }",
         "fn(x: Int, y: Int) -> Int { x + y }",
         "fn(b: Bool) -> Bool { not b }",
-
         // --- Records ---
         "{x = 1, y = 2}",
         r#"{name = "Alice", age = 30}"#,
         "let r = {x = 1, y = 2}; r.x + r.y",
-
         // --- Unit ---
         "let _ = (); 42",
-
         // --- Blocks ---
         "{ let x = 1; let y = 2; x + y }",
-
         // --- Nested lets and scoping ---
         "let x = 1; { let x = 2; x } + x",
-
         // --- Variant types and match ---
         "let x = 42; match x { 0 => false, _ => true }",
         "let b = true; match b { true => 1, false => 0 }",
-
         // --- Pipes ---
         "42 |> fn(x) { x + 1 }",
-
         // --- Field access ---
         "let r = {a = 1, b = 2}; r.a",
-
         // --- Comments ---
         "// comment\n42",
         "/* block */ 42",
-
         // --- Edge cases ---
         "0",
         "1",
@@ -359,15 +340,9 @@ mod tests {
 
         if !panics.is_empty() {
             for (source, msg) in &panics {
-                eprintln!(
-                    "PANIC: {}\nSource:\n---\n{}\n---\n",
-                    msg, source
-                );
+                eprintln!("PANIC: {}\nSource:\n---\n{}\n---\n", msg, source);
             }
-            panic!(
-                "Fuzzer found {} panic(s) in 1000 iterations",
-                panics.len()
-            );
+            panic!("Fuzzer found {} panic(s) in 1000 iterations", panics.len());
         }
     }
 

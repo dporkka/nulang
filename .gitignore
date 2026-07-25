@@ -38,4 +38,4 @@ docs/node_modules/
 lake-manifest.json
 
 # Backup files
-*.bak
+*.baknode_modules/

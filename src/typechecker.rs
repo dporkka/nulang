@@ -29,9 +29,10 @@ use std::collections::HashSet;
 /// Ordered list: earlier substitutions take precedence.
 pub type Substitution = Vec<(TypeVar, Type)>;
 // Fast hashing for compiler-internal maps (keys are not attacker-controlled).
-type FxHashMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
-type FxHashSet<T> = std::collections::HashSet<T, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
-
+type FxHashMap<K, V> =
+    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+type FxHashSet<T> =
+    std::collections::HashSet<T, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 /// Apply a substitution to a type, replacing any type variables that appear
 /// in the substitution with their mapped types.
@@ -1098,12 +1099,17 @@ impl TypeChecker {
                     let declared = entity_events.iter().find(|(name, _)| name == event);
                     match declared {
                         None => {
-                            let available: Vec<_> = entity_events.iter().map(|(n, _)| n.as_str()).collect();
+                            let available: Vec<_> =
+                                entity_events.iter().map(|(n, _)| n.as_str()).collect();
                             return Err(NuError::TypeError {
                                 msg: format!(
                                     "Unknown event '{}'. Available events: {}",
                                     event,
-                                    if available.is_empty() { "(none)".to_string() } else { available.join(", ") }
+                                    if available.is_empty() {
+                                        "(none)".to_string()
+                                    } else {
+                                        available.join(", ")
+                                    }
                                 ),
                                 span: *span,
                             });
@@ -1366,7 +1372,11 @@ impl TypeChecker {
 
         // Check arity if the function type is already resolved to a Function type
         let func_ty_subst = apply_subst(&func_ty, &subst);
-        if let Type::Function { param: ref fn_param, .. } = &func_ty_subst {
+        if let Type::Function {
+            param: ref fn_param,
+            ..
+        } = &func_ty_subst
+        {
             let expected_count = match fn_param.as_ref() {
                 Type::Tuple(types) => types.len(),
                 _ => 1,
@@ -2988,8 +2998,7 @@ mod tests {
             Type::Record(fields) => {
                 assert_eq!(fields.len(), 2);
                 // Fields may be in any order
-                let field_map: FxHashMap<String, Type> =
-                    fields.into_iter().collect();
+                let field_map: FxHashMap<String, Type> = fields.into_iter().collect();
                 assert_eq!(field_map.get("x"), Some(&Type::int()));
                 assert_eq!(field_map.get("y"), Some(&Type::bool()));
             }
@@ -3971,8 +3980,16 @@ mod tests {
         );
         assert!(result.is_err(), "unknown event must be a type error");
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("UnknownEvent"), "error must name the bad event: {}", err);
-        assert!(err.contains("KnownEvent"), "error must list available events: {}", err);
+        assert!(
+            err.contains("UnknownEvent"),
+            "error must name the bad event: {}",
+            err
+        );
+        assert!(
+            err.contains("KnownEvent"),
+            "error must list available events: {}",
+            err
+        );
     }
 
     #[test]
@@ -4005,6 +4022,10 @@ mod tests {
         );
         assert!(result.is_err(), "wrong arg count must be a type error");
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("expects 2 argument"), "error must mention arg count: {}", err);
+        assert!(
+            err.contains("expects 2 argument"),
+            "error must mention arg count: {}",
+            err
+        );
     }
 }

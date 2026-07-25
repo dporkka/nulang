@@ -74,15 +74,19 @@ pub struct DependencyDetail {
 impl Manifest {
     /// Parse a manifest from its TOML text.
     pub fn parse(source: &str) -> NuResult<Manifest> {
-        toml::from_str(source)
-            .map_err(|e| NuError::PackageError { msg: format!("invalid {}: {}", MANIFEST_FILE, e), span: Span::default() })
+        toml::from_str(source).map_err(|e| NuError::PackageError {
+            msg: format!("invalid {}: {}", MANIFEST_FILE, e),
+            span: Span::default(),
+        })
     }
 
     /// Load and parse the manifest in `dir`.
     pub fn load(dir: &Path) -> NuResult<Manifest> {
         let path = dir.join(MANIFEST_FILE);
-        let source = std::fs::read_to_string(&path)
-            .map_err(|e| NuError::PackageError { msg: format!("cannot read {}: {}", path.display(), e), span: Span::default() })?;
+        let source = std::fs::read_to_string(&path).map_err(|e| NuError::PackageError {
+            msg: format!("cannot read {}: {}", path.display(), e),
+            span: Span::default(),
+        })?;
         Self::parse(&source)
     }
 }

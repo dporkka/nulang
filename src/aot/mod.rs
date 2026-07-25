@@ -45,13 +45,16 @@ impl AotModule {
         // Set up Cranelift with the native target ISA.
         let mut flag_builder = settings::builder();
         let _ = flag_builder.set("enable_simd", "true");
-        let isa_builder = cranelift_native::builder().map_err(|msg| {
-            crate::types::NuError::VMError { msg: format!("host machine not supported: {}", msg), span: Span::default() }
-        })?;
+        let isa_builder =
+            cranelift_native::builder().map_err(|msg| crate::types::NuError::VMError {
+                msg: format!("host machine not supported: {}", msg),
+                span: Span::default(),
+            })?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
-            .map_err(|e| {
-                crate::types::NuError::VMError { msg: format!("failed to finalize ISA: {}", e), span: Span::default() }
+            .map_err(|e| crate::types::NuError::VMError {
+                msg: format!("failed to finalize ISA: {}", e),
+                span: Span::default(),
             })?;
 
         let mut jit_builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
@@ -78,11 +81,9 @@ impl AotModule {
             sig.returns.push(AbiParam::new(types::I64));
             let fid = jit_module
                 .declare_function(&func_name, cranelift_module::Linkage::Local, &sig)
-                .map_err(|e| {
-                    crate::types::NuError::VMError { msg: format!(
-                        "failed to declare '{}': {}",
-                        func.name, e
-                    ), span: Span::default() }
+                .map_err(|e| crate::types::NuError::VMError {
+                    msg: format!("failed to declare '{}': {}", func.name, e),
+                    span: Span::default(),
                 })?;
             func_ids.push(fid);
 
@@ -96,11 +97,9 @@ impl AotModule {
                 ub_sig.returns.push(AbiParam::new(types::I64));
                 let ub_fid = jit_module
                     .declare_function(&ub_name, cranelift_module::Linkage::Local, &ub_sig)
-                    .map_err(|e| {
-                        crate::types::NuError::VMError { msg: format!(
-                            "failed to declare unboxed '{}': {}",
-                            func.name, e
-                        ), span: Span::default() }
+                    .map_err(|e| crate::types::NuError::VMError {
+                        msg: format!("failed to declare unboxed '{}': {}", func.name, e),
+                        span: Span::default(),
                     })?;
                 unboxed_ids[idx] = Some(ub_fid);
             }
@@ -126,11 +125,9 @@ impl AotModule {
                     ub_fid,
                     codegen::CompileMode::Unboxed,
                 )
-                .map_err(|e| {
-                    crate::types::NuError::VMError { msg: format!(
-                        "AOT compilation of unboxed '{}' failed: {}",
-                        func.name, e
-                    ), span: Span::default() }
+                .map_err(|e| crate::types::NuError::VMError {
+                    msg: format!("AOT compilation of unboxed '{}' failed: {}", func.name, e),
+                    span: Span::default(),
                 })?;
 
                 // Compile boxing wrapper as the boxed function table entry.
@@ -141,11 +138,9 @@ impl AotModule {
                     func_ids[idx],
                     ub_fid,
                 )
-                .map_err(|e| {
-                    crate::types::NuError::VMError { msg: format!(
-                        "AOT boxing wrapper for '{}' failed: {}",
-                        func.name, e
-                    ), span: Span::default() }
+                .map_err(|e| crate::types::NuError::VMError {
+                    msg: format!("AOT boxing wrapper for '{}' failed: {}", func.name, e),
+                    span: Span::default(),
                 })?;
             } else {
                 // Normal boxed compilation for non-all-Int functions.
@@ -158,11 +153,9 @@ impl AotModule {
                     func_ids[idx],
                     codegen::CompileMode::Boxed,
                 )
-                .map_err(|e| {
-                    crate::types::NuError::VMError { msg: format!(
-                        "AOT compilation of '{}' failed: {}",
-                        func.name, e
-                    ), span: Span::default() }
+                .map_err(|e| crate::types::NuError::VMError {
+                    msg: format!("AOT compilation of '{}' failed: {}", func.name, e),
+                    span: Span::default(),
                 })?;
             }
 
@@ -172,9 +165,12 @@ impl AotModule {
                 }
             }
         }
-        jit_module.finalize_definitions().map_err(|e| {
-            crate::types::NuError::VMError { msg: format!("failed to finalize JIT definitions: {}", e), span: Span::default() }
-        })?;
+        jit_module
+            .finalize_definitions()
+            .map_err(|e| crate::types::NuError::VMError {
+                msg: format!("failed to finalize JIT definitions: {}", e),
+                span: Span::default(),
+            })?;
 
         let compiled_funcs: Vec<*const u8> = func_ids
             .iter()
@@ -198,7 +194,10 @@ impl AotModule {
         let ptr = self
             .compiled_funcs
             .get(idx)
-            .ok_or_else(|| crate::types::NuError::VMError { msg: "no compiled entry point".into(), span: Span::default() })?;
+            .ok_or_else(|| crate::types::NuError::VMError {
+                msg: "no compiled entry point".into(),
+                span: Span::default(),
+            })?;
 
         // Call the compiled function. Signature: extern "C" fn() -> u64
         // (for the entry point with no params).

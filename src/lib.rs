@@ -1,16 +1,19 @@
 pub mod backends;
 pub mod format;
 
+pub mod ai;
 pub mod aot;
 pub mod ast;
-pub mod cranelift_utils;
 pub mod bytecode;
+pub mod cranelift_utils;
 pub mod docgen;
 pub mod effect_checker;
+pub mod ffi;
+pub mod fuzz;
 pub mod hir;
 pub mod hir_lower;
 pub mod integration_tests;
-pub mod fuzz;
+pub mod jit;
 pub mod lexer;
 #[cfg(feature = "lsp")]
 pub mod lsp;
@@ -21,8 +24,13 @@ pub mod mir_lower;
 pub mod mir_wasm;
 pub mod package;
 pub mod parser;
+#[cfg(feature = "python")]
+pub mod python;
 pub mod repl;
+pub mod runtime;
 pub mod stdlib;
+#[cfg(test)]
+pub mod stress_tests;
 pub mod type_ir;
 pub mod type_metadata;
 pub mod typechecker;
@@ -34,11 +42,3 @@ pub mod wasm_component_runtime;
 #[cfg(feature = "wasm-backend")]
 pub mod wasm_runtime;
 pub mod wasm_types;
-pub mod ai;
-pub mod ffi;
-pub mod jit;
-#[cfg(feature = "python")]
-pub mod python;
-pub mod runtime;
-#[cfg(test)]
-pub mod stress_tests;

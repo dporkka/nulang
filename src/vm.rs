@@ -26,9 +26,9 @@
 
 use std::ffi::{c_char, CStr, CString};
 
+use crate::backends::{JitBackend, TieredAction};
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
 use crate::ffi::{call_native, CType, Signature, FFI_REGISTRY};
-use crate::backends::{JitBackend, TieredAction};
 use crate::jit::JitSession;
 use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
 use crate::types::{NuError, NuResult, Span, VmSuspension};
@@ -1333,16 +1333,20 @@ impl VM {
         if value.is_nil() {
             return Ok(value);
         }
-        let ptr = value
-            .as_ptr()
-            .ok_or_else(|| NuError::VMError { msg: "FFI C string return was not a pointer".to_string(), span: Span::default() })?;
+        let ptr = value.as_ptr().ok_or_else(|| NuError::VMError {
+            msg: "FFI C string return was not a pointer".to_string(),
+            span: Span::default(),
+        })?;
         // SAFETY: ptr is a valid null-terminated C string from cstr_to_value.
         let bytes = unsafe { CStr::from_ptr(ptr as *const c_char).to_bytes() };
         let len = bytes.len();
         let heap_ptr = self
             .actor_callbacks
             .alloc(len + 1, HeapTypeTag::String)
-            .ok_or_else(|| NuError::VMError { msg: "FFI C string heap allocation failed".to_string(), span: Span::default() })?;
+            .ok_or_else(|| NuError::VMError {
+                msg: "FFI C string heap allocation failed".to_string(),
+                span: Span::default(),
+            })?;
         // SAFETY: heap_ptr points to len+1 bytes of freshly allocated memory.
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), heap_ptr, len);
@@ -1665,7 +1669,6 @@ impl VM {
         })
     }
 
-
     /// Attempt JIT execution for the current PC.
     ///
     /// Returns `true` if the JIT executed a compiled region and advanced the
@@ -1705,11 +1708,10 @@ impl VM {
         // The VM is single-threaded, so no concurrent access.
         unsafe {
             crate::jit::runtime::set_jit_callbacks(
-                self.actor_callbacks.as_mut() as *mut dyn ActorVmCallbacks,
+                self.actor_callbacks.as_mut() as *mut dyn ActorVmCallbacks
             );
         }
-        let action =
-            jit.tiered_execute_step_typed(module_idx, pc, module, &mut regs, constants);
+        let action = jit.tiered_execute_step_typed(module_idx, pc, module, &mut regs, constants);
         crate::jit::runtime::clear_jit_callbacks();
 
         if action != TieredAction::Interpret {
@@ -1729,271 +1731,284 @@ impl VM {
     /// Execute a single bytecode instruction.
 
     /// Execute the FFICall opcode — foreign function interface dispatch.
-    fn step_fficall(&mut self, instr: Instruction, frame_idx: usize, module_idx: usize) -> NuResult<()> {
-                let func_idx = instr.imm16() as usize;
-                let dst = instr.op3;
-                let (def, module_idx) = self
-                    .modules
-                    .get(module_idx)
-                    .and_then(|m| {
-                        m.foreign_functions
-                            .get(func_idx)
-                            .map(|d| (d.clone(), module_idx))
-                    })
-                    .ok_or_else(|| {
-                        NuError::VMError { msg: format!("Foreign function {} not found", func_idx), span: Span::default() }
-                    })?;
+    fn step_fficall(
+        &mut self,
+        instr: Instruction,
+        frame_idx: usize,
+        module_idx: usize,
+    ) -> NuResult<()> {
+        let func_idx = instr.imm16() as usize;
+        let dst = instr.op3;
+        let (def, module_idx) = self
+            .modules
+            .get(module_idx)
+            .and_then(|m| {
+                m.foreign_functions
+                    .get(func_idx)
+                    .map(|d| (d.clone(), module_idx))
+            })
+            .ok_or_else(|| NuError::VMError {
+                msg: format!("Foreign function {} not found", func_idx),
+                span: Span::default(),
+            })?;
 
-                // FFI sandbox: deny calls to libraries not in the allow-list.
-                if self.ffi_sandbox && !self.ffi_allowlist.contains(&def.library) {
-                    return Err(NuError::VMError { msg: format!(
-                        "FFI sandbox blocked call to '{}' from library '{}': library not in allow-list",
-                        def.symbol, def.library
-                    ), span: Span::default() });
-                }
+        // FFI sandbox: deny calls to libraries not in the allow-list.
+        if self.ffi_sandbox && !self.ffi_allowlist.contains(&def.library) {
+            return Err(NuError::VMError {
+                msg: format!(
+                    "FFI sandbox blocked call to '{}' from library '{}': library not in allow-list",
+                    def.symbol, def.library
+                ),
+                span: Span::default(),
+            });
+        }
 
-                let params: Vec<CType> = def
-                    .params
-                    .iter()
-                    .map(|p| crate::ffi::marshal::ffi_type_to_ctype(p))
-                    .collect::<Option<_>>()
-                    .ok_or_else(|| {
-                        NuError::VMError { msg: format!(
-                            "Unsupported FFI parameter type in {}",
-                            def.symbol
-                        ), span: Span::default() }
-                    })?;
-                let ret = crate::ffi::marshal::ffi_type_to_ctype(&def.ret).ok_or_else(|| {
-                    NuError::VMError { msg: format!("Unsupported FFI return type in {:?}", def.ret), span: Span::default() }
-                })?;
-                let signature = Signature::new(params.clone(), ret);
+        let params: Vec<CType> = def
+            .params
+            .iter()
+            .map(|p| crate::ffi::marshal::ffi_type_to_ctype(p))
+            .collect::<Option<_>>()
+            .ok_or_else(|| NuError::VMError {
+                msg: format!("Unsupported FFI parameter type in {}", def.symbol),
+                span: Span::default(),
+            })?;
+        let ret =
+            crate::ffi::marshal::ffi_type_to_ctype(&def.ret).ok_or_else(|| NuError::VMError {
+                msg: format!("Unsupported FFI return type in {:?}", def.ret),
+                span: Span::default(),
+            })?;
+        let signature = Signature::new(params.clone(), ret);
 
-                // Build argument values. For CStr parameters we copy Nulang
-                // string values into temporary CString buffers whose pointers
-                // remain valid for the duration of the native call.
-                let mut cstrings: Vec<CString> = Vec::new();
-                let mut args: Vec<Value> = Vec::with_capacity(def.params.len());
-                for (i, param_ctype) in params.iter().enumerate() {
-                    let src = self.frames[frame_idx].regs[i];
-                    if *param_ctype == CType::CStr {
-                        let bytes =
-                            unsafe { self.value_to_bytes(module_idx, src) }.ok_or_else(|| {
-                                NuError::VMError { msg: format!(
-                                    "FFI argument {} for {} is not a string",
-                                    i, def.symbol
-                                ), span: Span::default() }
-                            })?;
-                        let cstring = CString::new(bytes).map_err(|e| {
-                            NuError::VMError { msg: format!(
-                                "FFI argument {} contains null byte: {}",
-                                i, e
-                            ), span: Span::default() }
-                        })?;
-                        args.push(Value::ptr(cstring.as_ptr() as *mut u8));
-                        cstrings.push(cstring);
-                    } else {
-                        args.push(src);
+        // Build argument values. For CStr parameters we copy Nulang
+        // string values into temporary CString buffers whose pointers
+        // remain valid for the duration of the native call.
+        let mut cstrings: Vec<CString> = Vec::new();
+        let mut args: Vec<Value> = Vec::with_capacity(def.params.len());
+        for (i, param_ctype) in params.iter().enumerate() {
+            let src = self.frames[frame_idx].regs[i];
+            if *param_ctype == CType::CStr {
+                let bytes = unsafe { self.value_to_bytes(module_idx, src) }.ok_or_else(|| {
+                    NuError::VMError {
+                        msg: format!("FFI argument {} for {} is not a string", i, def.symbol),
+                        span: Span::default(),
                     }
-                }
-
-                let func = {
-                    // SAFETY: caller ensures the named library is a valid shared
-                    // library. Do not hold the lock across the native call.
-                    let registry = FFI_REGISTRY.get_or_init(|| {
-                        std::sync::Mutex::new(crate::ffi::native::FfiRegistry::new())
-                    });
-                    let mut reg = registry.lock().map_err(|e| {
-                        NuError::VMError { msg: format!("FFI registry lock failed: {}", e), span: Span::default() }
-                    })?;
-                    // SAFETY: resolve_or_load opens the library if needed.
-                    unsafe { reg.resolve_or_load(&def.library, &def.symbol, signature) }.map_err(
-                        |e| {
-                            NuError::VMError { msg: format!(
-                                "FFI resolve/load failed for {}: {}",
-                                def.symbol, e
-                            ), span: Span::default() }
-                        },
-                    )?
-                };
-
-                // SAFETY: func.ptr points to a function whose ABI matches signature.
-                let mut result = unsafe { call_native(&func, &args) }.map_err(|e| {
-                    NuError::VMError { msg: format!("FFI call {} failed: {}", def.symbol, e), span: Span::default() }
                 })?;
+                let cstring = CString::new(bytes).map_err(|e| NuError::VMError {
+                    msg: format!("FFI argument {} contains null byte: {}", i, e),
+                    span: Span::default(),
+                })?;
+                args.push(Value::ptr(cstring.as_ptr() as *mut u8));
+                cstrings.push(cstring);
+            } else {
+                args.push(src);
+            }
+        }
 
-                // C string returns are temporary; copy them into the actor heap
-                // and free the temporary CString from cstr_to_value.
-                if ret == CType::CStr {
-                    result = self.copy_cstr_return(result)?;
+        let func = {
+            // SAFETY: caller ensures the named library is a valid shared
+            // library. Do not hold the lock across the native call.
+            let registry = FFI_REGISTRY
+                .get_or_init(|| std::sync::Mutex::new(crate::ffi::native::FfiRegistry::new()));
+            let mut reg = registry.lock().map_err(|e| NuError::VMError {
+                msg: format!("FFI registry lock failed: {}", e),
+                span: Span::default(),
+            })?;
+            // SAFETY: resolve_or_load opens the library if needed.
+            unsafe { reg.resolve_or_load(&def.library, &def.symbol, signature) }.map_err(|e| {
+                NuError::VMError {
+                    msg: format!("FFI resolve/load failed for {}: {}", def.symbol, e),
+                    span: Span::default(),
                 }
+            })?
+        };
 
-                self.frames[frame_idx].regs[dst as usize] = result;
-                Ok(())
+        // SAFETY: func.ptr points to a function whose ABI matches signature.
+        let mut result = unsafe { call_native(&func, &args) }.map_err(|e| NuError::VMError {
+            msg: format!("FFI call {} failed: {}", def.symbol, e),
+            span: Span::default(),
+        })?;
+
+        // C string returns are temporary; copy them into the actor heap
+        // and free the temporary CString from cstr_to_value.
+        if ret == CType::CStr {
+            result = self.copy_cstr_return(result)?;
+        }
+
+        self.frames[frame_idx].regs[dst as usize] = result;
+        Ok(())
     }
-    fn step_perform(&mut self, instr: Instruction, frame_idx: usize, module_idx: usize) -> NuResult<()> {
-                let eff_name_idx = instr.imm16();
-                let dst_reg = instr.op3;
-                let qualified_name = self.module_const_string(module_idx, eff_name_idx as usize);
-                // The MIR pipeline encodes the performed operation as
-                // "Effect.op" (e.g. "IO.print"); hand-built modules may
-                // carry a bare name with no operation.
-                let (effect_name, op_name) = match qualified_name.split_once('.') {
-                    Some((effect, op)) => (effect.to_string(), Some(op.to_string())),
-                    None => (qualified_name.clone(), None),
-                };
-                // Fast path: no user handlers installed — skip the
-                // rposition walk and dispatch directly to the built-in
-                // effect callback.  This is the common case for Actor.* builtins in
-                // actor bytecode (no user handler, empty handler_stack).
-                if self.handler_stack.is_empty() {
-                    let result = match self.modules.get(module_idx) {
-                        Some(module) => self.actor_callbacks.perform_builtin_effect_in_module(
-                            &effect_name,
-                            op_name.as_deref(),
-                            module,
-                            &self.frames[frame_idx].regs,
-                        ),
-                        None => self.actor_callbacks.perform_builtin_effect(
-                            &effect_name,
-                            op_name.as_deref(),
-                            &[],
-                            &self.frames[frame_idx].regs,
-                        ),
-                    };
-                    if let Some(result) = result {
-                        self.frames[frame_idx].regs[dst_reg as usize] = result;
-                    } else {
-                        return Err(NuError::EffectError {
-                            msg: format!("Unhandled effect: '{}'", qualified_name),
-                            span: Span::default(),
-                        });
-                    }
-                    // PC already advanced by the main loop (line 1516);
-                    // fall through to the next instruction.
-                    return Ok(());
-                }
-                // A binding matches when it names the exact "Effect.op"
-                // pair. Bindings that carry a bare effect name (no '.')
-                // predate op-qualified dispatch and match any op of that
-                // effect, preserving legacy modules.
-                let matches_binding = |b: &crate::bytecode::HandlerBinding| {
-                    b.effect_name == qualified_name
-                        || (!b.effect_name.contains('.') && b.effect_name == effect_name)
-                };
+    fn step_perform(
+        &mut self,
+        instr: Instruction,
+        frame_idx: usize,
+        module_idx: usize,
+    ) -> NuResult<()> {
+        let eff_name_idx = instr.imm16();
+        let dst_reg = instr.op3;
+        let qualified_name = self.module_const_string(module_idx, eff_name_idx as usize);
+        // The MIR pipeline encodes the performed operation as
+        // "Effect.op" (e.g. "IO.print"); hand-built modules may
+        // carry a bare name with no operation.
+        let (effect_name, op_name) = match qualified_name.split_once('.') {
+            Some((effect, op)) => (effect.to_string(), Some(op.to_string())),
+            None => (qualified_name.clone(), None),
+        };
+        // Fast path: no user handlers installed — skip the
+        // rposition walk and dispatch directly to the built-in
+        // effect callback.  This is the common case for Actor.* builtins in
+        // actor bytecode (no user handler, empty handler_stack).
+        if self.handler_stack.is_empty() {
+            let result = match self.modules.get(module_idx) {
+                Some(module) => self.actor_callbacks.perform_builtin_effect_in_module(
+                    &effect_name,
+                    op_name.as_deref(),
+                    module,
+                    &self.frames[frame_idx].regs,
+                ),
+                None => self.actor_callbacks.perform_builtin_effect(
+                    &effect_name,
+                    op_name.as_deref(),
+                    &[],
+                    &self.frames[frame_idx].regs,
+                ),
+            };
+            if let Some(result) = result {
+                self.frames[frame_idx].regs[dst_reg as usize] = result;
+            } else {
+                return Err(NuError::EffectError {
+                    msg: format!("Unhandled effect: '{}'", qualified_name),
+                    span: Span::default(),
+                });
+            }
+            // PC already advanced by the main loop (line 1516);
+            // fall through to the next instruction.
+            return Ok(());
+        }
+        // A binding matches when it names the exact "Effect.op"
+        // pair. Bindings that carry a bare effect name (no '.')
+        // predate op-qualified dispatch and match any op of that
+        // effect, preserving legacy modules.
+        let matches_binding = |b: &crate::bytecode::HandlerBinding| {
+            b.effect_name == qualified_name
+                || (!b.effect_name.contains('.') && b.effect_name == effect_name)
+        };
 
-                let handler_result = self.handler_stack.iter().enumerate().rev().find_map(
-                    |(idx, hf)| {
-                        let module = self.modules.get(hf.module_idx)?;
-                        let ht = module.handler_tables.get(hf.handler_table_idx)?;
-                        ht.bindings.iter().find(|b| matches_binding(*b)).map(|binding| {
-                            (idx, binding.handler_offset, binding.result_reg)
-                        })
-                    },
-                );
+        let handler_result = self
+            .handler_stack
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(idx, hf)| {
+                let module = self.modules.get(hf.module_idx)?;
+                let ht = module.handler_tables.get(hf.handler_table_idx)?;
+                ht.bindings
+                    .iter()
+                    .find(|b| matches_binding(*b))
+                    .map(|binding| (idx, binding.handler_offset, binding.result_reg))
+            });
 
-                let target_offset = if let Some((handler_stack_idx, handler_offset, result_reg)) =
-                    handler_result
-                {
-                    self.handler_stack[handler_stack_idx].resume_dst = result_reg;
-                    Some(handler_offset)
-                } else {
-                    self.handler_stack.last().and_then(|hf| {
-                        self.modules
-                            .get(hf.module_idx)
-                            .and_then(|m| m.handler_tables.get(hf.handler_table_idx))
-                            .and_then(|ht| ht.fallback_offset)
-                    })
-                };
+        let target_offset =
+            if let Some((handler_stack_idx, handler_offset, result_reg)) = handler_result {
+                self.handler_stack[handler_stack_idx].resume_dst = result_reg;
+                Some(handler_offset)
+            } else {
+                self.handler_stack.last().and_then(|hf| {
+                    self.modules
+                        .get(hf.module_idx)
+                        .and_then(|m| m.handler_tables.get(hf.handler_table_idx))
+                        .and_then(|ht| ht.fallback_offset)
+                })
+            };
 
-                if let Some((handler_stack_idx, _, _)) = handler_result {
-                    let cont = Continuation::capture(self, dst_reg).ok_or_else(|| {
-                        NuError::VMError { msg: "Cannot capture continuation: no current frame".into(), span: Span::default() }
-                    })?;
-                    self.handler_stack[handler_stack_idx].captured_continuation = Some(cont);
-                } else if target_offset.is_some() {
-                    let hf_idx = self.handler_stack.len().saturating_sub(1);
-                    let cont = Continuation::capture(self, dst_reg).ok_or_else(|| {
-                        NuError::VMError { msg: 
-                            "Cannot capture continuation for fallback: no current frame".into(),
-                        span: Span::default() }
-                    })?;
-                    self.handler_stack[hf_idx].captured_continuation = Some(cont);
-                } else {
-                    // No handler and no fallback: give the runtime callback a
-                    // chance to handle built-in effects (e.g. Timer.sleep in
-                    // workflow steps, IO.print in standalone scripts). Args
-                    // are in r0..rn; string-id args resolve against the
-                    // performing module's constant pool.
-                    let result = match self.modules.get(module_idx) {
-                        Some(module) => self.actor_callbacks.perform_builtin_effect_in_module(
-                            &effect_name,
-                            op_name.as_deref(),
-                            module,
-                            &self.frames[frame_idx].regs,
-                        ),
-                        None => self.actor_callbacks.perform_builtin_effect(
-                            &effect_name,
-                            op_name.as_deref(),
-                            &[],
-                            &self.frames[frame_idx].regs,
-                        ),
-                    };
-                    if let Some(result) = result {
-                        self.frames[frame_idx].regs[dst_reg as usize] = result;
-                    } else {
-                        return Err(NuError::EffectError {
-                            msg: format!("Unhandled effect: '{}'", qualified_name),
-                            span: Span::default(),
-                        });
-                    }
-                }
+        if let Some((handler_stack_idx, _, _)) = handler_result {
+            let cont = Continuation::capture(self, dst_reg).ok_or_else(|| NuError::VMError {
+                msg: "Cannot capture continuation: no current frame".into(),
+                span: Span::default(),
+            })?;
+            self.handler_stack[handler_stack_idx].captured_continuation = Some(cont);
+        } else if target_offset.is_some() {
+            let hf_idx = self.handler_stack.len().saturating_sub(1);
+            let cont = Continuation::capture(self, dst_reg).ok_or_else(|| NuError::VMError {
+                msg: "Cannot capture continuation for fallback: no current frame".into(),
+                span: Span::default(),
+            })?;
+            self.handler_stack[hf_idx].captured_continuation = Some(cont);
+        } else {
+            // No handler and no fallback: give the runtime callback a
+            // chance to handle built-in effects (e.g. Timer.sleep in
+            // workflow steps, IO.print in standalone scripts). Args
+            // are in r0..rn; string-id args resolve against the
+            // performing module's constant pool.
+            let result = match self.modules.get(module_idx) {
+                Some(module) => self.actor_callbacks.perform_builtin_effect_in_module(
+                    &effect_name,
+                    op_name.as_deref(),
+                    module,
+                    &self.frames[frame_idx].regs,
+                ),
+                None => self.actor_callbacks.perform_builtin_effect(
+                    &effect_name,
+                    op_name.as_deref(),
+                    &[],
+                    &self.frames[frame_idx].regs,
+                ),
+            };
+            if let Some(result) = result {
+                self.frames[frame_idx].regs[dst_reg as usize] = result;
+            } else {
+                return Err(NuError::EffectError {
+                    msg: format!("Unhandled effect: '{}'", qualified_name),
+                    span: Span::default(),
+                });
+            }
+        }
 
-                if let Some(offset) = target_offset {
-                    self.frames[frame_idx].pc = offset;
-                }
-                Ok(())
+        if let Some(offset) = target_offset {
+            self.frames[frame_idx].pc = offset;
+        }
+        Ok(())
     }
 
     fn step_capstore(&mut self, instr: Instruction, frame_idx: usize) -> NuResult<()> {
-                let closure_reg = instr.op1 as usize;
-                let slot = instr.op2 as usize;
-                let src = self.frames[frame_idx].regs[instr.op3 as usize];
-                let val = self.frames[frame_idx].regs[closure_reg];
-                if (val.raw & TAG_MASK) != TAG_CLOSURE {
-                    return Err(NuError::VMError { msg: format!(
-                        "CapStore target is not a closure: {}",
-                        val.to_string_repr()
-                    ), span: Span::default() });
-                }
-                let payload = val.raw & PAYLOAD_MASK;
-                let env_idx = if payload & CLOSURE_ENV_FLAG != 0 {
-                    (payload & CLOSURE_ENV_IDX_MASK) as usize
-                } else {
-                    if self.closure_envs.len() >= self.max_closure_envs {
-                        return Err(NuError::VMError { msg: format!(
+        let closure_reg = instr.op1 as usize;
+        let slot = instr.op2 as usize;
+        let src = self.frames[frame_idx].regs[instr.op3 as usize];
+        let val = self.frames[frame_idx].regs[closure_reg];
+        if (val.raw & TAG_MASK) != TAG_CLOSURE {
+            return Err(NuError::VMError {
+                msg: format!("CapStore target is not a closure: {}", val.to_string_repr()),
+                span: Span::default(),
+            });
+        }
+        let payload = val.raw & PAYLOAD_MASK;
+        let env_idx = if payload & CLOSURE_ENV_FLAG != 0 {
+            (payload & CLOSURE_ENV_IDX_MASK) as usize
+        } else {
+            if self.closure_envs.len() >= self.max_closure_envs {
+                return Err(NuError::VMError { msg: format!(
                             "closure capture environments exceeded the {} limit; this process has been running long enough to accumulate unreclaimed closure envs (see VM::closure_envs)",
                             self.max_closure_envs
                         ), span: Span::default() });
-                    }
-                    let idx = self.closure_envs.len();
-                    self.closure_envs.push(ClosureEnv {
-                        func_idx: payload as usize,
-                        captures: Vec::new(),
-                    });
-                    self.frames[frame_idx].regs[closure_reg] = Value {
-                        raw: TAG_CLOSURE | CLOSURE_ENV_FLAG | (idx as u64 & CLOSURE_ENV_IDX_MASK),
-                    };
-                    idx
-                };
-                if let Some(ptr) = src.as_ptr() {
-                    self.actor_callbacks.retain_ref(ptr);
-                }
-                let env = &mut self.closure_envs[env_idx];
-                if env.captures.len() <= slot {
-                    env.captures.resize(slot + 1, Value::nil());
-                }
-                env.captures[slot] = src;
-                Ok(())
+            }
+            let idx = self.closure_envs.len();
+            self.closure_envs.push(ClosureEnv {
+                func_idx: payload as usize,
+                captures: Vec::new(),
+            });
+            self.frames[frame_idx].regs[closure_reg] = Value {
+                raw: TAG_CLOSURE | CLOSURE_ENV_FLAG | (idx as u64 & CLOSURE_ENV_IDX_MASK),
+            };
+            idx
+        };
+        if let Some(ptr) = src.as_ptr() {
+            self.actor_callbacks.retain_ref(ptr);
+        }
+        let env = &mut self.closure_envs[env_idx];
+        if env.captures.len() <= slot {
+            env.captures.resize(slot + 1, Value::nil());
+        }
+        env.captures[slot] = src;
+        Ok(())
     }
     fn step_receive(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
         let dst = instr.op1;
@@ -2006,7 +2021,12 @@ impl VM {
         Ok(())
     }
 
-    fn step_receive_match(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+    fn step_receive_match(
+        &mut self,
+        frame_idx: usize,
+        module_idx: usize,
+        instr: Instruction,
+    ) -> NuResult<()> {
         let const_idx = instr.imm16() as usize;
         let dst = instr.op3 as usize;
         let spec = self.module_const_string(module_idx, const_idx);
@@ -2031,7 +2051,12 @@ impl VM {
         Ok(())
     }
 
-    fn step_receive_wait(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+    fn step_receive_wait(
+        &mut self,
+        frame_idx: usize,
+        module_idx: usize,
+        instr: Instruction,
+    ) -> NuResult<()> {
         let const_idx = instr.imm16() as usize;
         let dst = instr.op3 as usize;
         let spec = self.module_const_string(module_idx, const_idx);
@@ -2067,7 +2092,6 @@ impl VM {
         self.actor_callbacks.commit_receive_match();
     }
 
-
     /// Generic async effect dispatch (`PerformAsync` opcode).
     ///
     /// Reads the effect_op string from the constant pool, collects arguments
@@ -2077,15 +2101,27 @@ impl VM {
     /// instruction re-executes on resume, and the VM returns a
     /// `Suspended(PerformAsync)` sentinel error.
     #[inline(never)]
-    fn step_perform_async(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+    fn step_perform_async(
+        &mut self,
+        frame_idx: usize,
+        module_idx: usize,
+        instr: Instruction,
+    ) -> NuResult<()> {
         let effect_op_idx = instr.imm16() as usize;
         let dst_reg = instr.op3 as usize;
         let effect_op = self.module_const_string(module_idx, effect_op_idx);
         // Pass the full frame register slice and the module's constant pool
         // so the callback can resolve string-id arguments from registers.
         let args = &self.frames[frame_idx].regs;
-        let constants = self.modules.get(module_idx).map(|m| &m.constants[..]).unwrap_or(&[]);
-        match self.actor_callbacks.perform_async(&effect_op, constants, args) {
+        let constants = self
+            .modules
+            .get(module_idx)
+            .map(|m| &m.constants[..])
+            .unwrap_or(&[]);
+        match self
+            .actor_callbacks
+            .perform_async(&effect_op, constants, args)
+        {
             PerformAsyncResult::Ready(result) => {
                 let value = match result {
                     Some(ref content) => self.add_runtime_string(module_idx, content.clone()),
@@ -2276,7 +2312,12 @@ impl VM {
     }
 
     #[inline(never)]
-    fn step_call(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+    fn step_call(
+        &mut self,
+        frame_idx: usize,
+        module_idx: usize,
+        instr: Instruction,
+    ) -> NuResult<()> {
         let func_val = self.frames[frame_idx].regs[instr.op1 as usize];
         let argc = instr.op2;
         let dst = instr.op3;
@@ -2286,7 +2327,10 @@ impl VM {
             .get(module_idx)
             .and_then(|m| m.function_table.get(func_idx))
             .copied()
-            .ok_or_else(|| NuError::VMError { msg: format!("Function {} not found", func_idx), span: Span::default() })?;
+            .ok_or_else(|| NuError::VMError {
+                msg: format!("Function {} not found", func_idx),
+                span: Span::default(),
+            })?;
         let mut new_frame = Frame::new(Some(frame_idx), module_idx);
         new_frame.pc = code_offset;
         for i in 0..(argc as usize).min(256) {
@@ -2300,7 +2344,12 @@ impl VM {
     }
 
     #[inline(never)]
-    fn step_spawn(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+    fn step_spawn(
+        &mut self,
+        frame_idx: usize,
+        module_idx: usize,
+        instr: Instruction,
+    ) -> NuResult<()> {
         let behavior_idx = instr.imm16() as usize;
         let init: Vec<(String, Value)> = self
             .modules
@@ -2327,7 +2376,12 @@ impl VM {
     }
 
     #[inline(never)]
-    fn step_rsend(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+    fn step_rsend(
+        &mut self,
+        frame_idx: usize,
+        module_idx: usize,
+        instr: Instruction,
+    ) -> NuResult<()> {
         let target_reg = instr.op1 as usize;
         let behavior_idx = instr.imm16() as usize;
         let target_val = self.frames[frame_idx].regs[target_reg];
@@ -2358,14 +2412,18 @@ impl VM {
     fn step_capload(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
         let slot = instr.op1 as usize;
         let dst = instr.op2 as usize;
-        let env_val = self.frames[frame_idx].closure_env.ok_or_else(|| {
-            NuError::VMError { msg: "CapLoad outside a closure call".to_string(), span: Span::default() }
-        })?;
+        let env_val = self.frames[frame_idx]
+            .closure_env
+            .ok_or_else(|| NuError::VMError {
+                msg: "CapLoad outside a closure call".to_string(),
+                span: Span::default(),
+            })?;
         let payload = env_val.raw & PAYLOAD_MASK;
         if payload & CLOSURE_ENV_FLAG == 0 {
-            return Err(NuError::VMError { msg: 
-                "CapLoad in a closure without captures".to_string(),
-            span: Span::default() });
+            return Err(NuError::VMError {
+                msg: "CapLoad in a closure without captures".to_string(),
+                span: Span::default(),
+            });
         }
         let env_idx = (payload & CLOSURE_ENV_IDX_MASK) as usize;
         let value = self
@@ -2373,15 +2431,21 @@ impl VM {
             .get(env_idx)
             .and_then(|env| env.captures.get(slot))
             .copied()
-            .ok_or_else(|| {
-                NuError::VMError { msg: format!("CapLoad of missing capture slot {}", slot), span: Span::default() }
+            .ok_or_else(|| NuError::VMError {
+                msg: format!("CapLoad of missing capture slot {}", slot),
+                span: Span::default(),
             })?;
         self.frames[frame_idx].regs[dst] = value;
         Ok(())
     }
 
     #[inline(never)]
-    fn step_sconcat(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+    fn step_sconcat(
+        &mut self,
+        frame_idx: usize,
+        module_idx: usize,
+        instr: Instruction,
+    ) -> NuResult<()> {
         let s1 = resolve_value_string(
             &self.modules[module_idx].constants,
             self.frames[frame_idx].regs[instr.op1 as usize],
@@ -2408,7 +2472,12 @@ impl VM {
     }
 
     #[inline(never)]
-    fn step_sread(&mut self, frame_idx: usize, _module_idx: usize, instr: Instruction) -> NuResult<()> {
+    fn step_sread(
+        &mut self,
+        frame_idx: usize,
+        _module_idx: usize,
+        instr: Instruction,
+    ) -> NuResult<()> {
         let mut input = String::new();
         self.frames[frame_idx].regs[instr.op1 as usize] =
             if std::io::stdin().read_line(&mut input).is_ok() {
@@ -2479,25 +2548,25 @@ impl VM {
         Ok(())
     }
 
-
-
-
-
     pub fn step(&mut self) -> NuResult<()> {
         // Step limit: configurable via env var NULANG_STEP_LIMIT.
         // Default 10M steps — long-running actors (servers, processors) may need more.
         self.step_count += 1;
         let limit = Self::step_limit();
         if self.step_count > limit {
-            return Err(NuError::VMError { msg: format!(
-                "Step limit exceeded ({} steps). Set NULANG_STEP_LIMIT env var to increase.",
-                self.step_count
-            ), span: Span::default() });
+            return Err(NuError::VMError {
+                msg: format!(
+                    "Step limit exceeded ({} steps). Set NULANG_STEP_LIMIT env var to increase.",
+                    self.step_count
+                ),
+                span: Span::default(),
+            });
         }
 
-        let frame_idx = self
-            .current_frame_idx
-            .ok_or_else(|| NuError::VMError { msg: "No current frame".to_string(), span: Span::default() })?;
+        let frame_idx = self.current_frame_idx.ok_or_else(|| NuError::VMError {
+            msg: "No current frame".to_string(),
+            span: Span::default(),
+        })?;
 
         // Try JIT execution for hot bytecode regions before interpreting.
         if self.try_jit_execute(frame_idx) {
@@ -2511,10 +2580,17 @@ impl VM {
             let module = self
                 .modules
                 .get(module_idx)
-                .ok_or_else(|| NuError::VMError { msg: format!("Module {} not found", module_idx), span: Span::default() })?;
-            *module.instructions.get(pc).ok_or_else(|| {
-                NuError::VMError { msg: format!("PC {} out of bounds in module {}", pc, module_idx), span: Span::default() }
-            })?
+                .ok_or_else(|| NuError::VMError {
+                    msg: format!("Module {} not found", module_idx),
+                    span: Span::default(),
+                })?;
+            *module
+                .instructions
+                .get(pc)
+                .ok_or_else(|| NuError::VMError {
+                    msg: format!("PC {} out of bounds in module {}", pc, module_idx),
+                    span: Span::default(),
+                })?
         };
         self.frames[frame_idx].pc += 1;
 
@@ -2526,16 +2602,19 @@ impl VM {
             }
             OpCode::TailCall => {
                 let func_val = self.frames[frame_idx].regs[instr.op1 as usize];
-                let func_idx = func_val
-                    .as_int()
-                    .ok_or_else(|| NuError::VMError { msg: "Invalid function reference".to_string(), span: Span::default() })?
-                    as usize;
+                let func_idx = func_val.as_int().ok_or_else(|| NuError::VMError {
+                    msg: "Invalid function reference".to_string(),
+                    span: Span::default(),
+                })? as usize;
                 let code_offset = self
                     .modules
                     .get(module_idx)
                     .and_then(|m| m.function_table.get(func_idx))
                     .copied()
-                    .ok_or_else(|| NuError::VMError { msg: format!("Function {} not found", func_idx), span: Span::default() })?;
+                    .ok_or_else(|| NuError::VMError {
+                        msg: format!("Function {} not found", func_idx),
+                        span: Span::default(),
+                    })?;
                 self.frames[frame_idx].pc = code_offset;
                 return Ok(());
             }
@@ -2552,7 +2631,10 @@ impl VM {
                 // of a top-level behavior handler instead of falling through
                 // into the next compiled code region.
                 self.frames[frame_idx].regs[0] = ret_val;
-                return Err(NuError::VMError { msg: "Halt".to_string(), span: Span::default() });
+                return Err(NuError::VMError {
+                    msg: "Halt".to_string(),
+                    span: Span::default(),
+                });
             }
             OpCode::RetVal => {
                 let ret_val = self.frames[frame_idx].regs[instr.op1 as usize];
@@ -2567,7 +2649,10 @@ impl VM {
                 // of a top-level behavior handler instead of falling through
                 // into the next compiled code region.
                 self.frames[frame_idx].regs[0] = ret_val;
-                return Err(NuError::VMError { msg: "Halt".to_string(), span: Span::default() });
+                return Err(NuError::VMError {
+                    msg: "Halt".to_string(),
+                    span: Span::default(),
+                });
             }
             OpCode::ClosureCall => {
                 let closure_val = self.frames[frame_idx].regs[instr.op1 as usize];
@@ -2578,7 +2663,10 @@ impl VM {
                     .get(module_idx)
                     .and_then(|m| m.function_table.get(func_idx))
                     .copied()
-                    .ok_or_else(|| NuError::VMError { msg: format!("Function {} not found", func_idx), span: Span::default() })?;
+                    .ok_or_else(|| NuError::VMError {
+                        msg: format!("Function {} not found", func_idx),
+                        span: Span::default(),
+                    })?;
                 let mut new_frame = Frame::new(Some(frame_idx), module_idx);
                 new_frame.pc = code_offset;
                 new_frame.regs = self.frames[frame_idx].regs;
@@ -2594,10 +2682,10 @@ impl VM {
             OpCode::Panic => {
                 let pc = self.frames[frame_idx].pc.saturating_sub(1);
                 let r0_repr = self.frames[frame_idx].regs[0].to_string_repr();
-                return Err(NuError::VMError { msg: format!(
-                    "Panic at PC {}: r0={}",
-                    pc, r0_repr
-                ), span: Span::default() });
+                return Err(NuError::VMError {
+                    msg: format!("Panic at PC {}: r0={}", pc, r0_repr),
+                    span: Span::default(),
+                });
             }
 
             // -- Actor opcodes --
@@ -3205,9 +3293,10 @@ impl VM {
                         return Ok(());
                     }
                 }
-                return Err(NuError::VMError { msg: 
-                    "resume called without a captured continuation".into(),
-                span: Span::default() });
+                return Err(NuError::VMError {
+                    msg: "resume called without a captured continuation".into(),
+                    span: Span::default(),
+                });
             }
             OpCode::Unwind => {
                 self.handler_stack.pop();
@@ -3222,11 +3311,12 @@ impl VM {
             | OpCode::PyToNu
             | OpCode::PyFromNu
             | OpCode::PyRelease => {
-                return Err(NuError::VMError { msg: 
-                    "Python opcodes require native actor runtime. \
+                return Err(NuError::VMError {
+                    msg: "Python opcodes require native actor runtime. \
                      Use perform Python.call(...) instead."
                         .into(),
-                span: Span::default() });
+                    span: Span::default(),
+                });
             }
 
             // -- Distribution (MVP) --
@@ -3520,10 +3610,10 @@ impl VM {
 
             // All other opcodes are not yet implemented in the interpreter.
             _ => {
-                return Err(NuError::VMError { msg: format!(
-                    "unimplemented opcode {:?}",
-                    instr.opcode
-                ), span: Span::default() });
+                return Err(NuError::VMError {
+                    msg: format!("unimplemented opcode {:?}", instr.opcode),
+                    span: Span::default(),
+                });
             }
         }
         Ok(())
@@ -3544,7 +3634,10 @@ impl VM {
             .get(module_idx)
             .and_then(|m| m.function_table.get(func_idx))
             .copied()
-            .ok_or_else(|| NuError::VMError { msg: format!("Function {} not found", func_idx), span: Span::default() })
+            .ok_or_else(|| NuError::VMError {
+                msg: format!("Function {} not found", func_idx),
+                span: Span::default(),
+            })
     }
 
     /// Resolve a function value to a (function_table_index, closure_env).
@@ -3564,8 +3657,9 @@ impl VM {
                     .closure_envs
                     .get(env_idx)
                     .map(|env| env.func_idx)
-                    .ok_or_else(|| {
-                        NuError::VMError { msg: format!("Dangling closure environment {}", env_idx), span: Span::default() }
+                    .ok_or_else(|| NuError::VMError {
+                        msg: format!("Dangling closure environment {}", env_idx),
+                        span: Span::default(),
                     })?;
                 Ok((func_idx, Some(func_val)))
             } else {
@@ -3573,10 +3667,10 @@ impl VM {
                 Ok((payload as usize, Some(func_val)))
             }
         } else {
-            Err(NuError::VMError { msg: format!(
-                "Not a function: {}",
-                func_val.to_string_repr()
-            ), span: Span::default() })
+            Err(NuError::VMError {
+                msg: format!("Not a function: {}", func_val.to_string_repr()),
+                span: Span::default(),
+            })
         }
     }
 }
@@ -5126,7 +5220,6 @@ mod vm_tests {
             .unwrap_or(0);
         assert!(compiled > 0, "loop body must have been JIT-compiled");
     }
-
 
     /// Verify that a hot integer-arithmetic loop compiles through the
     /// type-directed (guard-stripped) path and produces the same result as

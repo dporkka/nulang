@@ -67,13 +67,13 @@ use cranelift_module::{Linkage, Module};
 use std::collections::HashMap;
 
 use crate::bytecode::Instruction;
+use crate::cranelift_utils::{emit_extract_payload, emit_sext48};
 use crate::jit::compiler::CompileError;
 #[cfg(test)]
 use crate::jit::simd_analyzer::SimdWidth;
 use crate::jit::simd_analyzer::{
     BinopKind, CmpKind, SimdElemType, SimdRegion, UnaryKind, VectorizablePattern,
 };
-use crate::cranelift_utils::{emit_extract_payload, emit_sext48};
 use crate::jit::typed_compiler::load_reg;
 use crate::value_layout::{PAYLOAD_MASK, TAG_INT};
 

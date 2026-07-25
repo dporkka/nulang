@@ -28,11 +28,17 @@ type FxHashMap<K, V> =
     std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 fn nyi(feature: &str, span: Span) -> NuError {
-    NuError::NotYetImplemented { feature: feature.to_string(), span }
+    NuError::NotYetImplemented {
+        feature: feature.to_string(),
+        span,
+    }
 }
 
 fn compile_err(msg: impl Into<String>, span: Span) -> NuError {
-    NuError::VMError { msg: msg.into(), span }
+    NuError::VMError {
+        msg: msg.into(),
+        span,
+    }
 }
 
 pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
@@ -131,10 +137,16 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
             });
         }
         hir::Decl::Workflow { name, .. } => {
-            return Err(nyi(&format!("workflow '{}' in HIR/MIR pipeline", name), Span::default()));
+            return Err(nyi(
+                &format!("workflow '{}' in HIR/MIR pipeline", name),
+                Span::default(),
+            ));
         }
         hir::Decl::Agent { name, .. } => {
-            return Err(nyi(&format!("agent '{}' in HIR/MIR pipeline", name), Span::default()));
+            return Err(nyi(
+                &format!("agent '{}' in HIR/MIR pipeline", name),
+                Span::default(),
+            ));
         }
         hir::Decl::Module { decls, .. } => {
             for d in decls {
@@ -320,14 +332,20 @@ impl ModuleCtx {
         let mut module = mir::Module::new(&self.name);
         for (i, f) in self.functions.into_iter().enumerate() {
             let mut f = f.ok_or_else(|| {
-                compile_err(format!("internal: MIR function slot {} left unfilled", i), Span::default())
+                compile_err(
+                    format!("internal: MIR function slot {} left unfilled", i),
+                    Span::default(),
+                )
             })?;
             fuse_single_use_temps(&mut f);
             module.functions.push(f);
         }
         for (i, f) in self.behaviors.into_iter().enumerate() {
             let mut f = f.ok_or_else(|| {
-                compile_err(format!("internal: MIR behavior slot {} left unfilled", i), Span::default())
+                compile_err(
+                    format!("internal: MIR behavior slot {} left unfilled", i),
+                    Span::default(),
+                )
             })?;
             fuse_single_use_temps(&mut f);
             module.behaviors.push(f);
@@ -619,7 +637,10 @@ impl<'c> FnLowerer<'c> {
                 // special case — it just overwrites that local, same as the
                 // stable compiler.
                 let dst = self.lookup(name).ok_or_else(|| {
-                    compile_err(format!("assignment to undefined variable '{}'", name), Span::default())
+                    compile_err(
+                        format!("assignment to undefined variable '{}'", name),
+                        Span::default(),
+                    )
                 })?;
                 self.lower_rvalue(dst, value)
             }
@@ -660,9 +681,9 @@ impl<'c> FnLowerer<'c> {
 
     fn read_place(&mut self, place: &hir::Place) -> NuResult<mir::LocalId> {
         match place {
-            hir::Place::Var(name, _) => self
-                .lookup(name)
-                .ok_or_else(|| compile_err(format!("undefined variable '{}'", name), Span::default())),
+            hir::Place::Var(name, _) => self.lookup(name).ok_or_else(|| {
+                compile_err(format!("undefined variable '{}'", name), Span::default())
+            }),
             hir::Place::Field { base, field, .. } => {
                 let obj = self.read_place(base)?;
                 let dst = self.b.add_temp(Type::unit());
@@ -715,10 +736,10 @@ impl<'c> FnLowerer<'c> {
                     // always wins over the ctor.
                     return self.lower_ctor_value(name, has_payload);
                 }
-                Err(compile_err(format!(
-                    "undefined variable '{}' in MIR lowering",
-                    name
-                ), Span::default()))
+                Err(compile_err(
+                    format!("undefined variable '{}' in MIR lowering", name),
+                    Span::default(),
+                ))
             }
             hir::Operand::Literal(lit, ty) => {
                 let id = self.b.add_temp(ty.clone());
@@ -750,17 +771,23 @@ impl<'c> FnLowerer<'c> {
         args: Vec<mir::LocalId>,
     ) -> NuResult<()> {
         if !has_payload {
-            return Err(compile_err(format!(
-                "constructor '{}' takes no payload; use it as a plain value, not a call",
-                name
-            ), Span::default()));
+            return Err(compile_err(
+                format!(
+                    "constructor '{}' takes no payload; use it as a plain value, not a call",
+                    name
+                ),
+                Span::default(),
+            ));
         }
         if args.len() != 1 {
-            return Err(compile_err(format!(
-                "constructor '{}' expects exactly one payload argument, got {}",
-                name,
-                args.len()
-            ), Span::default()));
+            return Err(compile_err(
+                format!(
+                    "constructor '{}' expects exactly one payload argument, got {}",
+                    name,
+                    args.len()
+                ),
+                Span::default(),
+            ));
         }
         let tag = self.b.add_temp(Type::string());
         self.b.assign(
@@ -911,10 +938,10 @@ impl<'c> FnLowerer<'c> {
                             // `fn Some(...)` wins over the ctor.
                             return self.lower_ctor_call(dst, name, has_payload, aids);
                         } else {
-                            return Err(compile_err(format!(
-                                "call to undefined function '{}'",
-                                name
-                            ), Span::default()));
+                            return Err(compile_err(
+                                format!("call to undefined function '{}'", name),
+                                Span::default(),
+                            ));
                         }
                     }
                     _ => {
@@ -1114,10 +1141,13 @@ impl<'c> FnLowerer<'c> {
                         Some(a) => self.lower_operand(a)?,
                         None => self.unit_temp(),
                     };
-                    self.b.assign(dst, mir::RValue::PerformAsync {
-                        effect_op: format!("Inference.ask"),
-                        args: vec![prompt],
-                    });
+                    self.b.assign(
+                        dst,
+                        mir::RValue::PerformAsync {
+                            effect_op: format!("Inference.ask"),
+                            args: vec![prompt],
+                        },
+                    );
                     return Ok(());
                 }
                 // `perform Provider.ask("llm", prompt)` is the longevity-path
@@ -1132,10 +1162,13 @@ impl<'c> FnLowerer<'c> {
                     {
                         if name == "llm" {
                             let prompt = self.lower_operand(&args[1])?;
-                            self.b.assign(dst, mir::RValue::PerformAsync {
-                                effect_op: format!("Inference.ask"),
-                                args: vec![prompt],
-                            });
+                            self.b.assign(
+                                dst,
+                                mir::RValue::PerformAsync {
+                                    effect_op: format!("Inference.ask"),
+                                    args: vec![prompt],
+                                },
+                            );
                             return Ok(());
                         }
                     }
@@ -1181,10 +1214,12 @@ impl<'c> FnLowerer<'c> {
                 Ok(())
             }
             hir::RValue::FFICall { symbol, args, .. } => {
-                let idx =
-                    self.ctx.extern_map.get(symbol).copied().ok_or_else(|| {
-                        compile_err(format!("unknown extern function '{}'", symbol), Span::default())
-                    })?;
+                let idx = self.ctx.extern_map.get(symbol).copied().ok_or_else(|| {
+                    compile_err(
+                        format!("unknown extern function '{}'", symbol),
+                        Span::default(),
+                    )
+                })?;
                 let mut ids = Vec::with_capacity(args.len());
                 for a in args {
                     ids.push(self.lower_operand(a)?);
@@ -1863,7 +1898,8 @@ impl<'c> FnLowerer<'c> {
         let exit = self.b.create_block();
 
         let loop_result = self.b.add_temp(Type::unit());
-        self.b.assign(loop_result, mir::RValue::Const(Constant::Int(0)));
+        self.b
+            .assign(loop_result, mir::RValue::Const(Constant::Int(0)));
 
         self.b.terminate(mir::Terminator::Jump(head));
 
@@ -1909,7 +1945,8 @@ impl<'c> FnLowerer<'c> {
                             self.b.assign(loop_result, mir::RValue::Load(val));
                         }
                         None => {
-                            self.b.assign(loop_result, mir::RValue::Const(Constant::Unit));
+                            self.b
+                                .assign(loop_result, mir::RValue::Const(Constant::Unit));
                         }
                     }
                     self.b.terminate(mir::Terminator::Jump(exit));
@@ -1937,7 +1974,8 @@ impl<'c> FnLowerer<'c> {
         let exit = self.b.create_block();
 
         let loop_result = self.b.add_temp(Type::unit());
-        self.b.assign(loop_result, mir::RValue::Const(Constant::Int(0)));
+        self.b
+            .assign(loop_result, mir::RValue::Const(Constant::Int(0)));
 
         self.b.terminate(mir::Terminator::Jump(head));
 
@@ -1948,8 +1986,7 @@ impl<'c> FnLowerer<'c> {
         }
         let c = match &cond.terminator {
             hir::Terminator::Yield(op) => self.lower_operand(op)?,
-            hir::Terminator::FnReturn(_)
-            | hir::Terminator::Break(_) => {
+            hir::Terminator::FnReturn(_) | hir::Terminator::Break(_) => {
                 let dummy = self.b.add_temp(Type::bool());
                 self.b
                     .assign(dummy, mir::RValue::Const(Constant::Bool(false)));
@@ -1991,7 +2028,8 @@ impl<'c> FnLowerer<'c> {
                             self.b.assign(loop_result, mir::RValue::Load(val));
                         }
                         None => {
-                            self.b.assign(loop_result, mir::RValue::Const(Constant::Unit));
+                            self.b
+                                .assign(loop_result, mir::RValue::Const(Constant::Unit));
                         }
                     }
                     self.b.terminate(mir::Terminator::Jump(exit));
@@ -2043,7 +2081,10 @@ impl<'c> FnLowerer<'c> {
                     self.emit_return(id);
                 }
                 hir::Terminator::Break(_) => {
-                    return Err(compile_err("break out of an effect handler body", Span::default()));
+                    return Err(compile_err(
+                        "break out of an effect handler body",
+                        Span::default(),
+                    ));
                 }
             }
         }
@@ -2093,7 +2134,10 @@ impl<'c> FnLowerer<'c> {
                         self.emit_return(id);
                     }
                     hir::Terminator::Break(_) => {
-                        return Err(compile_err("break out of an effect handler", Span::default()));
+                        return Err(compile_err(
+                            "break out of an effect handler",
+                            Span::default(),
+                        ));
                     }
                 }
             }
@@ -2292,11 +2336,9 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         | SelfRef
         | StateGet { .. } => {}
         ReceiveWait { timeout, .. } => out.push(*timeout),
-        Load(x)
-        | ArrayLen(x)
-        | Unary(_, x)
-        | CapabilityCheck { val: x }
-        | DebateRun { id: x } => out.push(*x),
+        Load(x) | ArrayLen(x) | Unary(_, x) | CapabilityCheck { val: x } | DebateRun { id: x } => {
+            out.push(*x)
+        }
         PerformAsync { args, .. } => out.extend(args.iter().copied()),
         LoadFieldNamed { obj, .. } | LoadFieldPos { obj, .. } => out.push(*obj),
         ArrayLoad { arr, idx } => {

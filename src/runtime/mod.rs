@@ -25,24 +25,20 @@ pub mod quic_transport;
 mod supervisor;
 mod supervisor_registry;
 use distributed_context::DistributedContext;
+mod agent;
+mod ai_registry;
 mod crdt;
 mod crdt_manager;
 mod crdt_reg;
+mod distribution;
+mod exit;
+mod llm;
 mod persistence;
 mod process_groups;
 mod registry;
-mod timer;
-mod llm;
-mod ai_registry;
-mod workflow;
-mod exit;
-mod distribution;
 mod spawn;
-mod agent;
-
-
-
-
+mod timer;
+mod workflow;
 
 #[cfg(test)]
 mod tests;
@@ -233,7 +229,8 @@ pub struct Runtime {
     // Bytecode modules for actors that may need to be recovered after a
     // runtime restart.  Maps actor_id -> (bytecode_module, behavior_offsets,
     // compensation_offsets).
-    pub(crate) recovery_modules: HashMap<u64, (crate::bytecode::CodeModule, Vec<usize>, Vec<Option<usize>>)>,
+    pub(crate) recovery_modules:
+        HashMap<u64, (crate::bytecode::CodeModule, Vec<usize>, Vec<Option<usize>>)>,
     // Pipelines and debates (v0.9 AI Runtime) — extracted into a registry so
     // the god-object shrinks and the subsystems can evolve independently.
     pub ai: ai_registry::AiRuntimeRegistry,
@@ -349,7 +346,6 @@ impl Runtime {
         spawn::spawn_actor_with_models(self, init, state_models, true, Some(name))
     }
 
-
     /// Spawn an actor for `module`'s behavior `behavior_idx`, seeded with
     /// the `init` state fields, and wire up its bytecode handlers. Shared
     /// body of both VM-callback `spawn_actor` impls: `RuntimeVmCallbacks`
@@ -378,7 +374,6 @@ impl Runtime {
     ) {
         spawn::register_recovery_module(self, actor_id, module, offsets, compensation_offsets)
     }
-
 
     /// Install an LLM client for `perform LLM.ask(...)` calls.
     pub fn set_llm_client(&mut self, client: Box<dyn LlmClient>) {
@@ -515,7 +510,8 @@ impl Runtime {
         }
         request.memory = memory;
         let client = self
-            .llm.client
+            .llm
+            .client
             .as_ref()
             .ok_or_else(|| LlmError::from_string("No LLM client configured"))?;
         let response = complete_sync(client.as_ref(), request)?;
@@ -3631,7 +3627,6 @@ impl Runtime {
         exit::reap_living_actor(self, actor_id, reason)
     }
 
-
     // -- Builtin Actor Effects (Actor.*) --
 
     /// Dispatch a built-in `Actor.*` effect performed by `actor_id` (the
@@ -4333,11 +4328,17 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         }
 
         if effect_name == "String" && op_name == Some("length") {
-            let s = crate::vm::resolve_value_string(constants, *regs.first().unwrap_or(&crate::vm::Value::nil()));
+            let s = crate::vm::resolve_value_string(
+                constants,
+                *regs.first().unwrap_or(&crate::vm::Value::nil()),
+            );
             return Some(crate::vm::Value::int(s.len() as i64));
         }
         if effect_name == "String" && op_name == Some("charAt") {
-            let s = crate::vm::resolve_value_string(constants, *regs.first().unwrap_or(&crate::vm::Value::nil()));
+            let s = crate::vm::resolve_value_string(
+                constants,
+                *regs.first().unwrap_or(&crate::vm::Value::nil()),
+            );
             let idx = regs.get(1).and_then(|v| v.as_int()).unwrap_or(-1);
             if idx < 0 || idx as usize >= s.len() {
                 return Some(crate::vm::Value::int(-1));
@@ -4459,7 +4460,8 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 // string-id and look it up in the module's constant pool.
                 let prompt = args.first().map_or(String::new(), |v| {
                     if let Some(id) = v.as_string_id() {
-                        _constants.get(id as usize)
+                        _constants
+                            .get(id as usize)
                             .and_then(|c| match c {
                                 crate::bytecode::Constant::String(s) => Some(s.clone()),
                                 _ => None,
@@ -4851,11 +4853,17 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             }
 
             if effect_name == "String" && op_name == Some("length") {
-                let s = crate::vm::resolve_value_string(constants, *regs.first().unwrap_or(&crate::vm::Value::nil()));
+                let s = crate::vm::resolve_value_string(
+                    constants,
+                    *regs.first().unwrap_or(&crate::vm::Value::nil()),
+                );
                 return Some(crate::vm::Value::int(s.len() as i64));
             }
             if effect_name == "String" && op_name == Some("charAt") {
-                let s = crate::vm::resolve_value_string(constants, *regs.first().unwrap_or(&crate::vm::Value::nil()));
+                let s = crate::vm::resolve_value_string(
+                    constants,
+                    *regs.first().unwrap_or(&crate::vm::Value::nil()),
+                );
                 let idx = regs.get(1).and_then(|v| v.as_int()).unwrap_or(-1);
                 if idx < 0 || idx as usize >= s.len() {
                     return Some(crate::vm::Value::int(-1));
@@ -5069,7 +5077,8 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 // string-id values through the module's constant pool.
                 let prompt = args.first().map_or(String::new(), |v| {
                     if let Some(id) = v.as_string_id() {
-                        constants.get(id as usize)
+                        constants
+                            .get(id as usize)
                             .and_then(|c| match c {
                                 crate::bytecode::Constant::String(s) => Some(s.clone()),
                                 _ => None,

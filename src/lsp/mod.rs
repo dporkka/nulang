@@ -260,9 +260,10 @@ impl LanguageServer for NulangLanguageServer {
 
         // Check type_map first for inferred/explicit types
         if let Some(ref map) = type_map {
-            if let Some(offset) =
-                Self::position_to_byte_offset(&source, &params.text_document_position_params.position)
-            {
+            if let Some(offset) = Self::position_to_byte_offset(
+                &source,
+                &params.text_document_position_params.position,
+            ) {
                 if let Some(type_str) = Self::find_type_at_offset(map, offset) {
                     return Ok(Some(Hover {
                         contents: HoverContents::Scalar(MarkedString::LanguageString(
@@ -1288,10 +1289,7 @@ impl NulangLanguageServer {
     }
 
     /// Walk the AST and extract type information for `let` bindings.
-    fn extract_type_map(
-        source: &str,
-        ast: &crate::ast::AstModule,
-    ) -> HashMap<usize, String> {
+    fn extract_type_map(source: &str, ast: &crate::ast::AstModule) -> HashMap<usize, String> {
         let mut map = HashMap::new();
         for decl in crate::effect_checker::flatten_decls(&ast.decls) {
             Self::extract_decl_types(decl, source, &mut map);
@@ -1299,11 +1297,7 @@ impl NulangLanguageServer {
         map
     }
 
-    fn extract_decl_types(
-        decl: &crate::ast::Decl,
-        source: &str,
-        map: &mut HashMap<usize, String>,
-    ) {
+    fn extract_decl_types(decl: &crate::ast::Decl, source: &str, map: &mut HashMap<usize, String>) {
         use crate::ast::Decl;
         match decl {
             Decl::Function { body, .. } => {
@@ -1337,7 +1331,9 @@ impl NulangLanguageServer {
                     Self::extract_expr_types(body, source, map);
                 }
             }
-            Decl::Workflow { items, compensate, .. } => {
+            Decl::Workflow {
+                items, compensate, ..
+            } => {
                 for item in items {
                     match item {
                         crate::ast::WorkflowItem::Step(s) => {
@@ -1364,11 +1360,7 @@ impl NulangLanguageServer {
         }
     }
 
-    fn extract_expr_types(
-        expr: &crate::ast::Expr,
-        source: &str,
-        map: &mut HashMap<usize, String>,
-    ) {
+    fn extract_expr_types(expr: &crate::ast::Expr, source: &str, map: &mut HashMap<usize, String>) {
         use crate::ast::Expr;
         match expr {
             Expr::Let {
@@ -1408,7 +1400,9 @@ impl NulangLanguageServer {
                     Self::extract_expr_types(e, source, map);
                 }
             }
-            Expr::Match { scrutinee, arms, .. } => {
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
                 Self::extract_expr_types(scrutinee, source, map);
                 for (_, guard, body) in arms {
                     if let Some(g) = guard {
@@ -1433,8 +1427,7 @@ impl NulangLanguageServer {
             Expr::Unary { expr, .. } => {
                 Self::extract_expr_types(expr, source, map);
             }
-            Expr::Tuple(exprs, _)
-            | Expr::Array(exprs, _) => {
+            Expr::Tuple(exprs, _) | Expr::Array(exprs, _) => {
                 for e in exprs {
                     Self::extract_expr_types(e, source, map);
                 }
@@ -1471,8 +1464,7 @@ impl NulangLanguageServer {
                     }
                 }
             }
-            Expr::Send { actor, args, .. }
-            | Expr::Ask { actor, args, .. } => {
+            Expr::Send { actor, args, .. } | Expr::Ask { actor, args, .. } => {
                 Self::extract_expr_types(actor, source, map);
                 for a in args {
                     Self::extract_expr_types(a, source, map);
@@ -1487,8 +1479,7 @@ impl NulangLanguageServer {
                     Self::extract_expr_types(body, source, map);
                 }
             }
-            Expr::Emit { args, .. }
-            | Expr::Perform { args, .. } => {
+            Expr::Emit { args, .. } | Expr::Perform { args, .. } => {
                 for a in args {
                     Self::extract_expr_types(a, source, map);
                 }
@@ -1503,13 +1494,10 @@ impl NulangLanguageServer {
                 Self::extract_expr_types(actor, source, map);
                 Self::extract_expr_types(node, source, map);
             }
-            Expr::CapAnnotate { expr, .. }
-            | Expr::TypeAnnotate { expr, .. } => {
+            Expr::CapAnnotate { expr, .. } | Expr::TypeAnnotate { expr, .. } => {
                 Self::extract_expr_types(expr, source, map);
             }
-            Expr::For {
-                iterable, body, ..
-            }
+            Expr::For { iterable, body, .. }
             | Expr::While {
                 cond: iterable,
                 body,
@@ -1518,8 +1506,7 @@ impl NulangLanguageServer {
                 Self::extract_expr_types(iterable, source, map);
                 Self::extract_expr_types(body, source, map);
             }
-            Expr::Return(opt_expr, _)
-            | Expr::Break(opt_expr, _) => {
+            Expr::Return(opt_expr, _) | Expr::Break(opt_expr, _) => {
                 if let Some(ref e) = opt_expr {
                     Self::extract_expr_types(e, source, map);
                 }
@@ -1529,9 +1516,7 @@ impl NulangLanguageServer {
                 Self::extract_expr_types(right, source, map);
             }
             // Leaf nodes: no sub-expressions to walk
-            Expr::Literal(..)
-            | Expr::Var(..)
-            | Expr::SelfRef(..) => {}
+            Expr::Literal(..) | Expr::Var(..) | Expr::SelfRef(..) => {}
         }
     }
     /// Find the byte offset of an identifier within the source, searching
@@ -1549,9 +1534,10 @@ impl NulangLanguageServer {
             .filter(|&(pos, _)| {
                 let abs_pos = search_start + pos;
                 let before = if abs_pos > 0 {
-                    source.as_bytes().get(abs_pos - 1).map_or(false, |&b| {
-                        !b.is_ascii_alphanumeric() && b != b'_'
-                    })
+                    source
+                        .as_bytes()
+                        .get(abs_pos - 1)
+                        .map_or(false, |&b| !b.is_ascii_alphanumeric() && b != b'_')
                 } else {
                     true
                 };
@@ -1594,23 +1580,35 @@ fn nu_error_to_diagnostic(err: NuError) -> Diagnostic {
         | NuError::EffectError { msg, span }
         | NuError::CapError { msg, span }
         | NuError::FFIError { msg, span }
-        | NuError::NotYetImplemented { feature: msg, span } => {
-            (msg, span.line(), span.column(), span.end_line(), span.end_column())
-        }
+        | NuError::NotYetImplemented { feature: msg, span } => (
+            msg,
+            span.line(),
+            span.column(),
+            span.end_line(),
+            span.end_column(),
+        ),
         NuError::RuntimeError { msg, span }
         | NuError::VMError { msg, span }
         | NuError::PythonError { msg, span }
-        | NuError::PackageError { msg, span } => {
-            (msg, span.line(), span.column(), span.end_line(), span.end_column())
-        }
-        NuError::Suspended(kind) => {
-            (format!("VM suspended: {}", kind), 1, 1, 1, 1)
-        }
+        | NuError::PackageError { msg, span } => (
+            msg,
+            span.line(),
+            span.column(),
+            span.end_line(),
+            span.end_column(),
+        ),
+        NuError::Suspended(kind) => (format!("VM suspended: {}", kind), 1, 1, 1, 1),
     };
 
     // Lines/columns in the Span are 1-based; LSP uses 0-based.
-    let start = Position::new(start_line.saturating_sub(1) as u32, start_col.saturating_sub(1) as u32);
-    let end = Position::new(end_line.saturating_sub(1) as u32, end_col.saturating_sub(1) as u32);
+    let start = Position::new(
+        start_line.saturating_sub(1) as u32,
+        start_col.saturating_sub(1) as u32,
+    );
+    let end = Position::new(
+        end_line.saturating_sub(1) as u32,
+        end_col.saturating_sub(1) as u32,
+    );
 
     Diagnostic {
         range: Range::new(start, end),
@@ -1895,8 +1893,21 @@ impl<'a> CompletionEngine<'a> {
 
     /// Built-in effect names offered by the completion provider.
     const EFFECTS: &'static [&'static str] = &[
-        "IO", "Net", "FS", "Spawn", "Send", "Receive", "Migrate", "STM", "Async", "Inference", "Cost",
-        "Rand", "Time", "Actor", "Provider",
+        "IO",
+        "Net",
+        "FS",
+        "Spawn",
+        "Send",
+        "Receive",
+        "Migrate",
+        "STM",
+        "Async",
+        "Inference",
+        "Cost",
+        "Rand",
+        "Time",
+        "Actor",
+        "Provider",
     ];
 
     pub fn new(source: &'a str) -> Self {
@@ -2331,17 +2342,30 @@ mod lsp_tests {
         let source = "fn main() { let x: Int = 42; x }";
         // compute_diagnostics now returns (diagnostics, type_map)
         let (_diagnostics, type_map) = NulangLanguageServer::compute_diagnostics(source);
-        assert!(!type_map.is_empty(), "type_map should contain an entry for 'x'");
+        assert!(
+            !type_map.is_empty(),
+            "type_map should contain an entry for 'x'"
+        );
         // The entry for x should show "Int"
         let has_int = type_map.values().any(|v| v == "Int");
-        assert!(has_int, "type_map should contain 'Int' for x: {:?}", type_map);
+        assert!(
+            has_int,
+            "type_map should contain 'Int' for x: {:?}",
+            type_map
+        );
     }
 
     #[test]
     fn test_hover_type_map_for_multiple_bindings() {
         let source = "fn main() { let x: Int = 42; let y: String = \"hi\"; x }";
         let (_diagnostics, type_map) = NulangLanguageServer::compute_diagnostics(source);
-        assert!(type_map.values().any(|v| v == "Int"), "should have Int type");
-        assert!(type_map.values().any(|v| v == "String"), "should have String type");
+        assert!(
+            type_map.values().any(|v| v == "Int"),
+            "should have Int type"
+        );
+        assert!(
+            type_map.values().any(|v| v == "String"),
+            "should have String type"
+        );
     }
 }

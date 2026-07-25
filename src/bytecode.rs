@@ -234,7 +234,7 @@ pub enum OpCode {
     /// Store a register into the frame's spill vector.
     /// op1 = source register, op2:op3 = spill index (u16 big-endian).
     SpillStore = 0xF6,
- }
+}
 
 impl OpCode {
     pub fn from_u8(v: u8) -> Option<Self> {
@@ -381,7 +381,7 @@ impl OpCode {
             0xF4 => Some(MetaCap),
             0xF5 => Some(SpillLoad),
             0xF6 => Some(SpillStore),
-             _ => None,
+            _ => None,
         }
     }
 
@@ -584,7 +584,9 @@ pub struct ActorMeta {
     pub migrations: String,
 }
 
-fn default_version() -> u32 { 1 }
+fn default_version() -> u32 {
+    1
+}
 impl ActorMeta {
     pub fn new(name: impl Into<String>) -> Self {
         ActorMeta {

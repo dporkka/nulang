@@ -1,0 +1,11 @@
+{
+  "name": "nulang-root",
+  "private": true,
+  "description": "Root workspace for Nulang tooling (Husky hooks, etc.)",
+  "scripts": {
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}

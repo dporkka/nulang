@@ -104,7 +104,10 @@ impl JitSession {
         let isa = match isa_builder.finish(settings::Flags::new(flag_builder)) {
             Ok(isa) => isa,
             Err(e) => {
-                eprintln!("JIT: failed to finalize Cranelift ISA: {} — JIT disabled", e);
+                eprintln!(
+                    "JIT: failed to finalize Cranelift ISA: {} — JIT disabled",
+                    e
+                );
                 return None;
             }
         };
@@ -283,7 +286,6 @@ impl JitSession {
         self.compiled.len()
     }
 
-
     /// Compile a SIMD-vectorizable bytecode region.
     /// First analyzes the region for vectorizable array loop patterns. If found,
     /// emits SIMD CLIF (I64x2/F64x2/I32x4/F32x4), falling back to the
@@ -375,7 +377,6 @@ pub type JitFunctionPtr = extern "C" fn(*mut u64, *const u64);
 // ---------------------------------------------------------------------------
 // Tiered Execution
 // ---------------------------------------------------------------------------
-
 
 /// Find a contiguous region of compilable instructions starting at `offset`.
 /// Returns the number of instructions in the region.

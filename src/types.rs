@@ -1101,17 +1101,35 @@ impl std::fmt::Display for NuError {
                 )
             }
             NuError::RuntimeError { msg, span } => {
-                write!(f, "Runtime error at {}:{}: {}", span.line(), span.column(), msg)
+                write!(
+                    f,
+                    "Runtime error at {}:{}: {}",
+                    span.line(),
+                    span.column(),
+                    msg
+                )
             }
             NuError::VMError { msg, span } => {
                 write!(f, "VM error at {}:{}: {}", span.line(), span.column(), msg)
             }
             NuError::Suspended(kind) => write!(f, "VM suspended: {}", kind),
             NuError::PythonError { msg, span } => {
-                write!(f, "Python error at {}:{}: {}", span.line(), span.column(), msg)
+                write!(
+                    f,
+                    "Python error at {}:{}: {}",
+                    span.line(),
+                    span.column(),
+                    msg
+                )
             }
             NuError::PackageError { msg, span } => {
-                write!(f, "Package error at {}:{}: {}", span.line(), span.column(), msg)
+                write!(
+                    f,
+                    "Package error at {}:{}: {}",
+                    span.line(),
+                    span.column(),
+                    msg
+                )
             }
         }
     }
@@ -1225,7 +1243,13 @@ impl NuError {
                 push_span_error(&mut out, "FFI error", msg, span, self.suggestion());
             }
             NuError::NotYetImplemented { feature, span } => {
-                push_span_error(&mut out, "Not yet implemented", feature, span, self.suggestion());
+                push_span_error(
+                    &mut out,
+                    "Not yet implemented",
+                    feature,
+                    span,
+                    self.suggestion(),
+                );
             }
             NuError::RuntimeError { msg, span } => {
                 push_span_error(&mut out, "Runtime error", msg, span, self.suggestion());
@@ -1280,7 +1304,9 @@ impl NuError {
                 } else if msg.contains("Field") && msg.contains("not found") {
                     Some("check the field name spelling and that the record has this field")
                 } else if msg.contains("Unsupported FFI type") {
-                    Some("only Int, Float, Bool, String, and Unit are supported in FFI declarations")
+                    Some(
+                        "only Int, Float, Bool, String, and Unit are supported in FFI declarations",
+                    )
                 } else if msg.contains("Match expression with no arms") {
                     Some("add at least one pattern match arm")
                 } else if msg.contains("wrong number of arguments") {

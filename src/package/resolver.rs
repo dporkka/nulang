@@ -129,8 +129,9 @@ impl Resolution {
 
 /// Resolve the full dependency graph of `manifest`, rooted at `root_dir`.
 pub fn resolve(root_dir: &Path, manifest: &Manifest) -> NuResult<Resolution> {
-    let root_dir = std::fs::canonicalize(root_dir).map_err(|e| {
-        NuError::PackageError { msg: format!("cannot resolve {}: {}", root_dir.display(), e), span: Span::default() }
+    let root_dir = std::fs::canonicalize(root_dir).map_err(|e| NuError::PackageError {
+        msg: format!("cannot resolve {}: {}", root_dir.display(), e),
+        span: Span::default(),
     })?;
     let mut resolver = Resolver::new(root_dir.clone());
     resolver.resolve_package(&root_dir, manifest, PackageSource::Root)?;
@@ -144,16 +145,14 @@ pub fn parse_semver(version: &str) -> NuResult<(u64, u64, u64)> {
     let mut parts = version.split('.');
     let mut next = |what: &str| -> NuResult<u64> {
         match parts.next() {
-            Some(part) => part.parse::<u64>().map_err(|_| {
-                NuError::PackageError { msg: format!(
-                    "invalid semver '{}' in version '{}'",
-                    part, version
-                ), span: Span::default() }
+            Some(part) => part.parse::<u64>().map_err(|_| NuError::PackageError {
+                msg: format!("invalid semver '{}' in version '{}'", part, version),
+                span: Span::default(),
             }),
-            None if what == "major" => Err(NuError::PackageError { msg: format!(
-                "invalid semver version '{}'",
-                version
-            ), span: Span::default() }),
+            None if what == "major" => Err(NuError::PackageError {
+                msg: format!("invalid semver version '{}'", version),
+                span: Span::default(),
+            }),
             None => Ok(0),
         }
     };
@@ -161,10 +160,10 @@ pub fn parse_semver(version: &str) -> NuResult<(u64, u64, u64)> {
     let minor = next("minor")?;
     let patch = next("patch")?;
     if parts.next().is_some() {
-        return Err(NuError::PackageError { msg: format!(
-            "invalid semver version '{}'",
-            version
-        ), span: Span::default() });
+        return Err(NuError::PackageError {
+            msg: format!("invalid semver version '{}'", version),
+            span: Span::default(),
+        });
     }
     Ok((major, minor, patch))
 }
@@ -259,58 +258,68 @@ impl Resolver {
 
         let dep_dir = if let Some(path) = &detail.path {
             let dir = parent_dir.join(path);
-            std::fs::canonicalize(&dir).map_err(|e| {
-                NuError::PackageError { msg: format!(
+            std::fs::canonicalize(&dir).map_err(|e| NuError::PackageError {
+                msg: format!(
                     "cannot resolve path dependency '{}' at {}: {}",
                     dep_name,
                     dir.display(),
                     e
-                ), span: Span::default() }
+                ),
+                span: Span::default(),
             })?
         } else if detail.git.is_some() {
             self.fetch_git(dep_name, detail)?
         } else {
-            return Err(NuError::PackageError { msg: format!(
-                "dependency '{}' must specify a path or git URL",
-                dep_name
-            ), span: Span::default() });
+            return Err(NuError::PackageError {
+                msg: format!("dependency '{}' must specify a path or git URL", dep_name),
+                span: Span::default(),
+            });
         };
 
         // Shared dependency already resolved: nothing more to do. A dir
         // still on the resolution stack means the dependency graph cycles.
         if self.by_dir.contains_key(&dep_dir) {
             if self.in_progress.contains(&dep_dir) {
-                return Err(NuError::PackageError { msg: format!(
-                    "dependency cycle detected at '{}'",
-                    dep_name
-                ), span: Span::default() });
+                return Err(NuError::PackageError {
+                    msg: format!("dependency cycle detected at '{}'", dep_name),
+                    span: Span::default(),
+                });
             }
             return Ok(());
         }
         if let Some(existing) = self.by_name.get(dep_name) {
-            return Err(NuError::PackageError { msg: format!(
-                "conflicting sources for dependency '{}': {} and {}",
-                dep_name,
-                existing.lockfile_source(),
-                PackageSource::Path(dep_dir).lockfile_source()
-            ), span: Span::default() });
+            return Err(NuError::PackageError {
+                msg: format!(
+                    "conflicting sources for dependency '{}': {} and {}",
+                    dep_name,
+                    existing.lockfile_source(),
+                    PackageSource::Path(dep_dir).lockfile_source()
+                ),
+                span: Span::default(),
+            });
         }
 
         let manifest = Manifest::load(&dep_dir)?;
         if manifest.package.name != dep_name {
-            return Err(NuError::PackageError { msg: format!(
-                "dependency '{}' resolves to package '{}' at {}",
-                dep_name,
-                manifest.package.name,
-                dep_dir.join(MANIFEST_FILE).display()
-            ), span: Span::default() });
+            return Err(NuError::PackageError {
+                msg: format!(
+                    "dependency '{}' resolves to package '{}' at {}",
+                    dep_name,
+                    manifest.package.name,
+                    dep_dir.join(MANIFEST_FILE).display()
+                ),
+                span: Span::default(),
+            });
         }
         if let Some(requirement) = &detail.version {
             if !version_satisfies(requirement, &manifest.package.version)? {
-                return Err(NuError::PackageError { msg: format!(
-                    "dependency '{}' requires version {} but {} provides {}",
-                    dep_name, requirement, dep_name, manifest.package.version
-                ), span: Span::default() });
+                return Err(NuError::PackageError {
+                    msg: format!(
+                        "dependency '{}' requires version {} but {} provides {}",
+                        dep_name, requirement, dep_name, manifest.package.version
+                    ),
+                    span: Span::default(),
+                });
             }
         }
 
@@ -339,20 +348,18 @@ impl Resolver {
     fn fetch_git(&self, dep_name: &str, detail: &DependencyDetail) -> NuResult<PathBuf> {
         let url = detail.git.as_ref().expect("checked by caller");
         let cache = self.root_dir.join(".nula").join("git");
-        std::fs::create_dir_all(&cache).map_err(|e| {
-            NuError::PackageError { msg: format!("cannot create {}: {}", cache.display(), e), span: Span::default() }
+        std::fs::create_dir_all(&cache).map_err(|e| NuError::PackageError {
+            msg: format!("cannot create {}: {}", cache.display(), e),
+            span: Span::default(),
         })?;
         let dest = cache.join(dep_name);
 
         if !dest.join(MANIFEST_FILE).exists() {
             // No usable checkout yet: (re)clone.
             if dest.exists() {
-                std::fs::remove_dir_all(&dest).map_err(|e| {
-                    NuError::PackageError { msg: format!(
-                        "cannot clear stale checkout {}: {}",
-                        dest.display(),
-                        e
-                    ), span: Span::default() }
+                std::fs::remove_dir_all(&dest).map_err(|e| NuError::PackageError {
+                    msg: format!("cannot clear stale checkout {}: {}", dest.display(), e),
+                    span: Span::default(),
                 })?;
             }
             let mut cmd = Command::new("git");
@@ -361,15 +368,19 @@ impl Resolver {
                 cmd.arg("--branch").arg(branch);
             }
             cmd.arg(url).arg(&dest);
-            let output = cmd.output().map_err(|e| {
-                NuError::PackageError { msg: format!("failed to run git clone for '{}': {}", dep_name, e), span: Span::default() }
+            let output = cmd.output().map_err(|e| NuError::PackageError {
+                msg: format!("failed to run git clone for '{}': {}", dep_name, e),
+                span: Span::default(),
             })?;
             if !output.status.success() {
-                return Err(NuError::PackageError { msg: format!(
-                    "git clone of '{}' failed: {}",
-                    url,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ), span: Span::default() });
+                return Err(NuError::PackageError {
+                    msg: format!(
+                        "git clone of '{}' failed: {}",
+                        url,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                    span: Span::default(),
+                });
             }
         }
 
@@ -380,24 +391,27 @@ impl Resolver {
                 .arg("checkout")
                 .arg(rev)
                 .output()
-                .map_err(|e| {
-                    NuError::PackageError { msg: format!(
-                        "failed to run git checkout for '{}': {}",
-                        dep_name, e
-                    ), span: Span::default() }
+                .map_err(|e| NuError::PackageError {
+                    msg: format!("failed to run git checkout for '{}': {}", dep_name, e),
+                    span: Span::default(),
                 })?;
             if !output.status.success() {
-                return Err(NuError::PackageError { msg: format!(
-                    "git checkout {} of '{}' failed: {}",
-                    rev,
-                    url,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ), span: Span::default() });
+                return Err(NuError::PackageError {
+                    msg: format!(
+                        "git checkout {} of '{}' failed: {}",
+                        rev,
+                        url,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                    span: Span::default(),
+                });
             }
         }
 
-        std::fs::canonicalize(&dest)
-            .map_err(|e| NuError::PackageError { msg: format!("cannot resolve {}: {}", dest.display(), e), span: Span::default() })
+        std::fs::canonicalize(&dest).map_err(|e| NuError::PackageError {
+            msg: format!("cannot resolve {}: {}", dest.display(), e),
+            span: Span::default(),
+        })
     }
 }
 

@@ -39,30 +39,110 @@ impl ReplHelper {
         ReplHelper {
             keywords: vec![
                 // Keywords
-                "fn", "let", "rec", "in", "if", "then", "else", "match", "with",
-                "actor", "behavior", "state", "spawn", "send", "ask", "receive",
-                "perform", "handle", "resume", "effect", "workflow", "step",
-                "parallel", "compensate", "statemachine", "event", "on_entry",
-                "on_exit", "persistent", "local", "durable", "eventsourced",
-                "crdt", "module", "import", "pub", "type", "alias", "extern",
-                "iso", "trn", "ref", "val", "box", "tag", "lineariso", "linear",
-                "true", "false", "nil", "unit", "for", "loop", "break", "return",
-                "node", "link", "monitor", "exit", "agent", "database",
+                "fn",
+                "let",
+                "rec",
+                "in",
+                "if",
+                "then",
+                "else",
+                "match",
+                "with",
+                "actor",
+                "behavior",
+                "state",
+                "spawn",
+                "send",
+                "ask",
+                "receive",
+                "perform",
+                "handle",
+                "resume",
+                "effect",
+                "workflow",
+                "step",
+                "parallel",
+                "compensate",
+                "statemachine",
+                "event",
+                "on_entry",
+                "on_exit",
+                "persistent",
+                "local",
+                "durable",
+                "eventsourced",
+                "crdt",
+                "module",
+                "import",
+                "pub",
+                "type",
+                "alias",
+                "extern",
+                "iso",
+                "trn",
+                "ref",
+                "val",
+                "box",
+                "tag",
+                "lineariso",
+                "linear",
+                "true",
+                "false",
+                "nil",
+                "unit",
+                "for",
+                "loop",
+                "break",
+                "return",
+                "node",
+                "link",
+                "monitor",
+                "exit",
+                "agent",
+                "database",
                 // Types
-                "Int", "Float", "String", "Bool", "Unit", "Nil",
+                "Int",
+                "Float",
+                "String",
+                "Bool",
+                "Unit",
+                "Nil",
                 // Built-in effects
-                "IO.print", "IO.read", "IO.flush",
-                "Timer.sleep", "Timer.now",
-                "Signal.wait", "Signal.notify",
-                "Inference.ask", "LLM.ask", "LLM.complete",
-                "Net.connect", "Net.listen",
-                "Actor.spawn", "Actor.send", "Actor.link", "Actor.monitor",
-                "Actor.trap_exit", "Actor.exit", "Actor.register", "Actor.unregister",
-                "Actor.whereis", "Actor.set_priority", "Actor.stats",
-                "Workflow.query", "Workflow.respond",
+                "IO.print",
+                "IO.read",
+                "IO.flush",
+                "Timer.sleep",
+                "Timer.now",
+                "Signal.wait",
+                "Signal.notify",
+                "Inference.ask",
+                "LLM.ask",
+                "LLM.complete",
+                "Net.connect",
+                "Net.listen",
+                "Actor.spawn",
+                "Actor.send",
+                "Actor.link",
+                "Actor.monitor",
+                "Actor.trap_exit",
+                "Actor.exit",
+                "Actor.register",
+                "Actor.unregister",
+                "Actor.whereis",
+                "Actor.set_priority",
+                "Actor.stats",
+                "Workflow.query",
+                "Workflow.respond",
                 // REPL commands
-                ":help", ":quit", ":type", ":ast", ":bytecode", ":clear",
-                ":reset", ":version", ":stats",
+                ":help",
+                ":quit",
+                ":type",
+                ":ast",
+                ":bytecode",
+                ":clear",
+                ":reset",
+                ":version",
+                ":stats",
             ]
             .into_iter()
             .map(|s| s.to_string())
@@ -161,13 +241,12 @@ fn color_for_token(kind: &crate::lexer::TokenKind) -> &'static str {
     match kind {
         // Keywords — bright yellow
         Fn | Let | Rec | In | If | Then | Else | Match | With | Case | Actor | Entity
-        | Behavior | State | StateMachine | SelfKw | Spawn | Send | Remote | Ask
-        | Persistent | Local | Durable | EventSourced | Crdt | Until | Emit
-        | Workflow | Step | Parallel | Compensate | Agent
-        | Database | Receive | Effect | Perform | Handle | Resume | Extern | Module
-        | Import | Pub | Migrate | Monitor | Link | Exit | For
-        | While | Break | Return | Type | Alias | Iso | Trn | Ref | Val | Box
-        | Tag | True | False | Unit | Tool | Initial | Throws | As => "\x1b[1;33m",
+        | Behavior | State | StateMachine | SelfKw | Spawn | Send | Remote | Ask | Persistent
+        | Local | Durable | EventSourced | Crdt | Until | Emit | Workflow | Step | Parallel
+        | Compensate | Agent | Database | Receive | Effect | Perform | Handle | Resume | Extern
+        | Module | Import | Pub | Migrate | Monitor | Link | Exit | For | While | Break
+        | Return | Type | Alias | Iso | Trn | Ref | Val | Box | Tag | True | False | Unit
+        | Tool | Initial | Throws | As => "\x1b[1;33m",
         // String literals — green
         StringLit(_) => "\x1b[32m",
         // Numeric literals — magenta
@@ -228,13 +307,19 @@ impl Repl {
 
     /// Run the interactive REPL loop.
     pub fn run(&mut self) {
-        println!("Nulang v{} \u{2014} Actor-Based Distributed Language", env!("CARGO_PKG_VERSION"));
+        println!(
+            "Nulang v{} \u{2014} Actor-Based Distributed Language",
+            env!("CARGO_PKG_VERSION")
+        );
         println!("Type :help for commands, :quit to exit\n");
 
         let mut editor = match Editor::<ReplHelper, DefaultHistory>::new() {
             Ok(ed) => ed,
             Err(e) => {
-                eprintln!("Warning: Could not initialize line editor ({}). Falling back to basic input.", e);
+                eprintln!(
+                    "Warning: Could not initialize line editor ({}). Falling back to basic input.",
+                    e
+                );
                 run_basic_repl();
                 return;
             }
@@ -609,7 +694,10 @@ impl Default for Repl {
 
 /// Fallback REPL when rustyline can't initialize (no TTY, pipe, CI, etc.).
 fn run_basic_repl() {
-    println!("Nulang v{} \u{2014} Actor-Based Distributed Language", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Nulang v{} \u{2014} Actor-Based Distributed Language",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("Line editing is not available in this environment.");
     println!("Use `nulang --eval '<code>'` to evaluate expressions, or `nulang <file.nula>` to run a file.");
     println!("Run `nulang --help` for all options.");

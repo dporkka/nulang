@@ -45,11 +45,17 @@ const SPILL_TEMP2: u8 = 13;
 const SPILL_TEMP3: u8 = 14;
 
 fn not_yet_implemented(feature: &str, span: Span) -> NuError {
-    NuError::NotYetImplemented { feature: feature.to_string(), span }
+    NuError::NotYetImplemented {
+        feature: feature.to_string(),
+        span,
+    }
 }
 
 fn compile_err(msg: impl Into<String>, span: Span) -> NuError {
-    NuError::VMError { msg: msg.into(), span }
+    NuError::VMError {
+        msg: msg.into(),
+        span,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,7 +136,10 @@ impl MirCodegen {
             let temp = SPILL_TEMP + (self.spill_read_cycle % 3);
             self.spill_read_cycle = self.spill_read_cycle.wrapping_add(1);
             self.emit(Instruction::new3(
-                OpCode::SpillLoad, (slot >> 8) as u8, (slot & 0xFF) as u8, temp,
+                OpCode::SpillLoad,
+                (slot >> 8) as u8,
+                (slot & 0xFF) as u8,
+                temp,
             ));
             temp
         } else {
@@ -153,7 +162,10 @@ impl MirCodegen {
     fn spill_write_done(&mut self, id: mir::LocalId) {
         if let Some(&slot) = self.spill_map.get(&id.0) {
             self.emit(Instruction::new3(
-                OpCode::SpillStore, SPILL_TEMP, (slot >> 8) as u8, (slot & 0xFF) as u8,
+                OpCode::SpillStore,
+                SPILL_TEMP,
+                (slot >> 8) as u8,
+                (slot & 0xFF) as u8,
             ));
         }
     }
@@ -162,11 +174,17 @@ impl MirCodegen {
     fn spill_drop(&mut self, id: mir::LocalId) {
         if let Some(&slot) = self.spill_map.get(&id.0) {
             self.emit(Instruction::new3(
-                OpCode::SpillLoad, (slot >> 8) as u8, (slot & 0xFF) as u8, SPILL_TEMP2,
+                OpCode::SpillLoad,
+                (slot >> 8) as u8,
+                (slot & 0xFF) as u8,
+                SPILL_TEMP2,
             ));
             self.emit(Instruction::new1(OpCode::Drop, SPILL_TEMP2));
             self.emit(Instruction::new3(
-                OpCode::SpillStore, SPILL_TEMP2, (slot >> 8) as u8, (slot & 0xFF) as u8,
+                OpCode::SpillStore,
+                SPILL_TEMP2,
+                (slot >> 8) as u8,
+                (slot & 0xFF) as u8,
             ));
         }
     }
@@ -193,16 +211,19 @@ impl MirCodegen {
                 .map(crate::ffi::marshal::nulang_type_to_ffi_type)
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(|| {
-                    compile_err(format!(
-                        "unsupported parameter type in extern function {}",
-                        ff.symbol
-                    ), Span::default())
+                    compile_err(
+                        format!(
+                            "unsupported parameter type in extern function {}",
+                            ff.symbol
+                        ),
+                        Span::default(),
+                    )
                 })?;
             let ret = crate::ffi::marshal::nulang_type_to_ffi_type(&ff.ret).ok_or_else(|| {
-                compile_err(format!(
-                    "unsupported return type in extern function {}",
-                    ff.symbol
-                ), Span::default())
+                compile_err(
+                    format!("unsupported return type in extern function {}", ff.symbol),
+                    Span::default(),
+                )
             })?;
             self.module.foreign_functions.push(ForeignFunctionDef {
                 library: ff.library.clone(),
@@ -282,12 +303,22 @@ impl MirCodegen {
                 .behaviors
                 .get(*comp_idx)
                 .map(|b| b.code_offset)
-                .ok_or_else(|| compile_err("internal: compensation behavior index out of range", Span::default()))?;
+                .ok_or_else(|| {
+                    compile_err(
+                        "internal: compensation behavior index out of range",
+                        Span::default(),
+                    )
+                })?;
             let entry = self
                 .module
                 .behaviors
                 .get_mut(*behavior_idx)
-                .ok_or_else(|| compile_err("internal: compensated behavior index out of range", Span::default()))?;
+                .ok_or_else(|| {
+                    compile_err(
+                        "internal: compensated behavior index out of range",
+                        Span::default(),
+                    )
+                })?;
             entry.compensate_offset = Some(comp_offset);
         }
         // Parallel-branch metadata: copy branch names onto the matching
@@ -298,7 +329,10 @@ impl MirCodegen {
                 .behaviors
                 .get_mut(*behavior_idx)
                 .ok_or_else(|| {
-                    compile_err("internal: parallel-branch behavior index out of range", Span::default())
+                    compile_err(
+                        "internal: parallel-branch behavior index out of range",
+                        Span::default(),
+                    )
                 })?;
             entry.parallel_branches = Some(branches.clone());
         }
@@ -389,7 +423,8 @@ impl MirCodegen {
         let mut block_offsets: FxHashMap<mir::BlockId, usize> = FxHashMap::default();
         let mut patches: Vec<JumpPatch> = Vec::new();
         // Handler-param moves to inject at the start of handler body blocks.
-        let mut handler_prologues: FxHashMap<mir::BlockId, Vec<mir::LocalId>> = FxHashMap::default();
+        let mut handler_prologues: FxHashMap<mir::BlockId, Vec<mir::LocalId>> =
+            FxHashMap::default();
         for table in &func.handler_tables {
             for binding in &table.bindings {
                 if binding.params.len() > MAX_STAGED_ARGS {
@@ -467,10 +502,13 @@ impl MirCodegen {
 
         // Patch forward jumps now that all block offsets are known.
         for patch in &patches {
-            let target_offset = block_offsets
-                .get(&patch.target_block)
-                .copied()
-                .ok_or_else(|| compile_err("internal: jump to unknown MIR block", Span::default()))?;
+            let target_offset =
+                block_offsets
+                    .get(&patch.target_block)
+                    .copied()
+                    .ok_or_else(|| {
+                        compile_err("internal: jump to unknown MIR block", Span::default())
+                    })?;
             let diff = target_offset as i64 - patch.instr_idx as i64;
             let instr = &mut self.module.instructions[patch.instr_idx];
             match patch.kind {
@@ -490,10 +528,9 @@ impl MirCodegen {
             let def = &func.handler_tables[table_idx];
             let mut bindings = Vec::with_capacity(def.bindings.len());
             for b in &def.bindings {
-                let rel = block_offsets
-                    .get(&b.body)
-                    .copied()
-                    .ok_or_else(|| compile_err("internal: handler body block missing", Span::default()))?;
+                let rel = block_offsets.get(&b.body).copied().ok_or_else(|| {
+                    compile_err("internal: handler body block missing", Span::default())
+                })?;
                 let result_reg = func
                     .blocks
                     .get(b.body.0 as usize)
@@ -514,7 +551,10 @@ impl MirCodegen {
                 fallback_offset: None,
             });
             if global_idx > u8::MAX as usize {
-                return Err(compile_err("too many effect handler tables in module", Span::default()));
+                return Err(compile_err(
+                    "too many effect handler tables in module",
+                    Span::default(),
+                ));
             }
             self.module.instructions[instr_idx].op1 = global_idx as u8;
         }
@@ -535,37 +575,28 @@ impl MirCodegen {
     ) -> NuResult<()> {
         match stmt {
             mir::Stmt::Assign { dst, op } => {
-            let _spill_dst = self.local_dst(*dst);
-            self.compile_rvalue(_spill_dst, op)?;
-            self.spill_write_done(*dst);
+                let _spill_dst = self.local_dst(*dst);
+                self.compile_rvalue(_spill_dst, op)?;
+                self.spill_write_done(*dst);
             }
             mir::Stmt::StoreFieldNamed { obj, field, src } => {
                 let fid = self.field_id(field)?;
-            let _robj = self.local_reg(*obj);
-            let _rsrc = self.local_reg(*src);
-                self.emit(Instruction::new3(
-                    OpCode::RecS,
-                    _robj,
-                    fid,
-                    _rsrc,
-                ));
+                let _robj = self.local_reg(*obj);
+                let _rsrc = self.local_reg(*src);
+                self.emit(Instruction::new3(OpCode::RecS, _robj, fid, _rsrc));
             }
             mir::Stmt::ArrayStore { arr, idx, src } => {
-            let _rarr = self.local_reg(*arr);
-            let _ridx = self.local_reg(*idx);
-            let _rsrc = self.local_reg(*src);
-                self.emit(Instruction::new3(
-                    OpCode::ArrStore,
-                    _rarr,
-                    _ridx,
-                    _rsrc,
-                ));
+                let _rarr = self.local_reg(*arr);
+                let _ridx = self.local_reg(*idx);
+                let _rsrc = self.local_reg(*src);
+                self.emit(Instruction::new3(OpCode::ArrStore, _rarr, _ridx, _rsrc));
             }
             mir::Stmt::EnterHandle { table } => {
                 if *table >= func.handler_tables.len() {
                     return Err(compile_err(
                         "internal: EnterHandle references unknown table",
-                        Span::default()));
+                        Span::default(),
+                    ));
                 }
                 let instr_idx = self.module.instructions.len();
                 self.emit(Instruction::new1(OpCode::Handle, 0));
@@ -576,7 +607,7 @@ impl MirCodegen {
             }
             mir::Stmt::StateSet { field, src } => {
                 let field_idx = self.state_field_constant(field);
-            let _rsrc = self.local_reg(*src);
+                let _rsrc = self.local_reg(*src);
                 self.emit(Instruction::new3(
                     OpCode::StateSet,
                     ((field_idx >> 8) & 0xFF) as u8,
@@ -601,11 +632,14 @@ impl MirCodegen {
     /// Move argument locals into the staging registers r0..rN.
     fn stage_args(&mut self, args: &[mir::LocalId]) -> NuResult<()> {
         if args.len() > MAX_STAGED_ARGS {
-            return Err(compile_err(format!(
-                "call/effect with {} arguments exceeds the MIR staging limit of {}",
-                args.len(),
-                MAX_STAGED_ARGS
-            ), Span::default()));
+            return Err(compile_err(
+                format!(
+                    "call/effect with {} arguments exceeds the MIR staging limit of {}",
+                    args.len(),
+                    MAX_STAGED_ARGS
+                ),
+                Span::default(),
+            ));
         }
         for (i, a) in args.iter().enumerate() {
             let src = self.local_reg(*a);
@@ -629,25 +663,20 @@ impl MirCodegen {
             }
             mir::RValue::LoadFieldNamed { obj, field } => {
                 let fid = self.field_id(field)?;
-            let _robj = self.local_reg(*obj);
+                let _robj = self.local_reg(*obj);
                 self.emit(Instruction::new3(OpCode::RecL, _robj, fid, dst));
             }
             mir::RValue::LoadFieldPos { obj, index } => {
-            let _robj = self.local_reg(*obj);
+                let _robj = self.local_reg(*obj);
                 self.emit(Instruction::new3(OpCode::FieldL, _robj, *index, dst));
             }
             mir::RValue::ArrayLoad { arr, idx } => {
-            let _rarr = self.local_reg(*arr);
-            let _ridx = self.local_reg(*idx);
-                self.emit(Instruction::new3(
-                    OpCode::ArrLoad,
-                    _rarr,
-                    _ridx,
-                    dst,
-                ));
+                let _rarr = self.local_reg(*arr);
+                let _ridx = self.local_reg(*idx);
+                self.emit(Instruction::new3(OpCode::ArrLoad, _rarr, _ridx, dst));
             }
             mir::RValue::ArrayLen(arr) => {
-            let _rarr = self.local_reg(*arr);
+                let _rarr = self.local_reg(*arr);
                 self.emit(Instruction::new2(OpCode::ArrLen, _rarr, dst));
             }
             mir::RValue::ArrayLit(elems) => {
@@ -655,13 +684,8 @@ impl MirCodegen {
                 self.emit(Instruction::new2(OpCode::ArrAlloc, SCRATCH0, dst));
                 for (i, e) in elems.iter().enumerate() {
                     self.load_constant(SCRATCH1, &Constant::Int(i as i64));
-            let _re = self.local_reg(*e);
-                    self.emit(Instruction::new3(
-                        OpCode::ArrStore,
-                        dst,
-                        SCRATCH1,
-                        _re,
-                    ));
+                    let _re = self.local_reg(*e);
+                    self.emit(Instruction::new3(OpCode::ArrStore, dst, SCRATCH1, _re));
                 }
             }
             mir::RValue::Unary(op, id) => {
@@ -724,24 +748,14 @@ impl MirCodegen {
                 }
             }
             mir::RValue::StringEq(l, r) => {
-            let _rl = self.local_reg(*l);
-            let _rr = self.local_reg(*r);
-                self.emit(Instruction::new3(
-                    OpCode::SCmpEq,
-                    _rl,
-                    _rr,
-                    dst,
-                ));
+                let _rl = self.local_reg(*l);
+                let _rr = self.local_reg(*r);
+                self.emit(Instruction::new3(OpCode::SCmpEq, _rl, _rr, dst));
             }
             mir::RValue::StrConcat(l, r) => {
-            let _rl = self.local_reg(*l);
-            let _rr = self.local_reg(*r);
-                self.emit(Instruction::new3(
-                    OpCode::SConcat,
-                    _rl,
-                    _rr,
-                    dst,
-                ));
+                let _rl = self.local_reg(*l);
+                let _rr = self.local_reg(*r);
+                self.emit(Instruction::new3(OpCode::SConcat, _rl, _rr, dst));
             }
             mir::RValue::Call { func, args } => {
                 // Load the callee value first (it lives above the staging
@@ -751,7 +765,7 @@ impl MirCodegen {
                         self.load_constant(FUNC_VALUE_REG, &Constant::Int(*idx as i64));
                     }
                     mir::FuncRef::Local(id) => {
-            let _rid = self.local_reg(*id);
+                        let _rid = self.local_reg(*id);
                         self.emit(Instruction::new2(OpCode::Move, _rid, FUNC_VALUE_REG));
                     }
                 }
@@ -771,19 +785,14 @@ impl MirCodegen {
                     dst,
                 ));
                 for (i, cap) in captures.iter().enumerate() {
-            let _rcap = self.local_reg(*cap);
-                    self.emit(Instruction::new3(
-                        OpCode::CapStore,
-                        dst,
-                        i as u8,
-                        _rcap,
-                    ));
+                    let _rcap = self.local_reg(*cap);
+                    self.emit(Instruction::new3(OpCode::CapStore, dst, i as u8, _rcap));
                 }
             }
             mir::RValue::Tuple(elems) => {
                 self.emit(Instruction::new2(OpCode::TupleMk, elems.len() as u8, dst));
                 for (i, e) in elems.iter().enumerate() {
-            let _re = self.local_reg(*e);
+                    let _re = self.local_reg(*e);
                     self.emit(Instruction::new3(OpCode::FieldS, dst, i as u8, _re));
                 }
             }
@@ -800,7 +809,7 @@ impl MirCodegen {
                 let slot_count = max_field_id.saturating_add(1);
                 self.emit(Instruction::new2(OpCode::RecMk, slot_count, dst));
                 for ((_, e), fid) in fields.iter().zip(field_ids) {
-            let _re = self.local_reg(*e);
+                    let _re = self.local_reg(*e);
                     self.emit(Instruction::new3(OpCode::RecS, dst, fid, _re));
                 }
             }
@@ -885,7 +894,7 @@ impl MirCodegen {
                     .join(",");
                 let spec = format!("{}:{}", max_params, ids);
                 let spec_idx = self.module.add_constant(Constant::String(spec));
-            let _rtimeout = self.local_reg(*timeout);
+                let _rtimeout = self.local_reg(*timeout);
                 self.emit(Instruction::new2(OpCode::Move, _rtimeout, SCRATCH0));
                 self.emit(Instruction::new3(
                     OpCode::ReceiveWait,
@@ -908,14 +917,9 @@ impl MirCodegen {
                 ));
             }
             mir::RValue::Migrate { actor, node } => {
-            let _ractor = self.local_reg(*actor);
-            let _rnode = self.local_reg(*node);
-                self.emit(Instruction::new3(
-                    OpCode::Migrate,
-                    _ractor,
-                    _rnode,
-                    dst,
-                ));
+                let _ractor = self.local_reg(*actor);
+                let _rnode = self.local_reg(*node);
+                self.emit(Instruction::new3(OpCode::Migrate, _ractor, _rnode, dst));
             }
             mir::RValue::SelfRef => {
                 self.emit(Instruction::new1(OpCode::SelfOp, dst));
@@ -949,12 +953,8 @@ impl MirCodegen {
                 // Protect the actor value in a register outside the 0..15
                 // staging zone before staging args, mirroring the Call/
                 // FUNC_VALUE_REG pattern.
-            let _ractor = self.local_reg(*actor);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _ractor,
-                    FUNC_VALUE_REG,
-                ));
+                let _ractor = self.local_reg(*actor);
+                self.emit(Instruction::new2(OpCode::Move, _ractor, FUNC_VALUE_REG));
                 self.stage_args(args)?;
                 self.emit(Instruction::new3(
                     OpCode::Send,
@@ -970,12 +970,8 @@ impl MirCodegen {
                 behavior_idx,
                 args,
             } => {
-            let _ractor = self.local_reg(*actor);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _ractor,
-                    FUNC_VALUE_REG,
-                ));
+                let _ractor = self.local_reg(*actor);
+                self.emit(Instruction::new2(OpCode::Move, _ractor, FUNC_VALUE_REG));
                 self.stage_args(args)?;
                 self.emit(Instruction::new3(
                     OpCode::Ask,
@@ -995,33 +991,21 @@ impl MirCodegen {
                 actor,
                 template,
             } => {
-            let _rid = self.local_reg(*id);
+                let _rid = self.local_reg(*id);
                 self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-            let _rname = self.local_reg(*name);
+                let _rname = self.local_reg(*name);
                 self.emit(Instruction::new2(OpCode::Move, _rname, SCRATCH0 + 1));
-            let _ractor = self.local_reg(*actor);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _ractor,
-                    SCRATCH0 + 2,
-                ));
-            let _rtemplate = self.local_reg(*template);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _rtemplate,
-                    SCRATCH0 + 3,
-                ));
+                let _ractor = self.local_reg(*actor);
+                self.emit(Instruction::new2(OpCode::Move, _ractor, SCRATCH0 + 2));
+                let _rtemplate = self.local_reg(*template);
+                self.emit(Instruction::new2(OpCode::Move, _rtemplate, SCRATCH0 + 3));
                 self.emit(Instruction::new1(OpCode::PipelineStage, dst));
             }
             mir::RValue::PipelineRun { id, input } => {
-            let _rid = self.local_reg(*id);
+                let _rid = self.local_reg(*id);
                 self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-            let _rinput = self.local_reg(*input);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _rinput,
-                    SCRATCH0 + 1,
-                ));
+                let _rinput = self.local_reg(*input);
+                self.emit(Instruction::new2(OpCode::Move, _rinput, SCRATCH0 + 1));
                 self.emit(Instruction::new1(OpCode::PipelineRun, dst));
             }
             mir::RValue::SupervisorNew => {
@@ -1033,28 +1017,20 @@ impl MirCodegen {
                 actor,
                 description,
             } => {
-            let _rid = self.local_reg(*id);
+                let _rid = self.local_reg(*id);
                 self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-            let _rname = self.local_reg(*name);
+                let _rname = self.local_reg(*name);
                 self.emit(Instruction::new2(OpCode::Move, _rname, SCRATCH0 + 1));
-            let _ractor = self.local_reg(*actor);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _ractor,
-                    SCRATCH0 + 2,
-                ));
-            let _rdescription = self.local_reg(*description);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _rdescription,
-                    SCRATCH0 + 3,
-                ));
+                let _ractor = self.local_reg(*actor);
+                self.emit(Instruction::new2(OpCode::Move, _ractor, SCRATCH0 + 2));
+                let _rdescription = self.local_reg(*description);
+                self.emit(Instruction::new2(OpCode::Move, _rdescription, SCRATCH0 + 3));
                 self.emit(Instruction::new1(OpCode::SupervisorWorker, dst));
             }
             mir::RValue::SupervisorRun { id, task } => {
-            let _rid = self.local_reg(*id);
+                let _rid = self.local_reg(*id);
                 self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-            let _rtask = self.local_reg(*task);
+                let _rtask = self.local_reg(*task);
                 self.emit(Instruction::new2(OpCode::Move, _rtask, SCRATCH0 + 1));
                 self.emit(Instruction::new1(OpCode::SupervisorRun, dst));
             }
@@ -1063,20 +1039,12 @@ impl MirCodegen {
                 rounds,
                 threshold,
             } => {
-            let _rtopic = self.local_reg(*topic);
+                let _rtopic = self.local_reg(*topic);
                 self.emit(Instruction::new2(OpCode::Move, _rtopic, SCRATCH0));
-            let _rrounds = self.local_reg(*rounds);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _rrounds,
-                    SCRATCH0 + 1,
-                ));
-            let _rthreshold = self.local_reg(*threshold);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _rthreshold,
-                    SCRATCH0 + 2,
-                ));
+                let _rrounds = self.local_reg(*rounds);
+                self.emit(Instruction::new2(OpCode::Move, _rrounds, SCRATCH0 + 1));
+                let _rthreshold = self.local_reg(*threshold);
+                self.emit(Instruction::new2(OpCode::Move, _rthreshold, SCRATCH0 + 2));
                 self.emit(Instruction::new1(OpCode::DebateNew, dst));
             }
             mir::RValue::DebateParticipant {
@@ -1085,26 +1053,18 @@ impl MirCodegen {
                 stance,
                 actor,
             } => {
-            let _rid = self.local_reg(*id);
+                let _rid = self.local_reg(*id);
                 self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-            let _rname = self.local_reg(*name);
+                let _rname = self.local_reg(*name);
                 self.emit(Instruction::new2(OpCode::Move, _rname, SCRATCH0 + 1));
-            let _rstance = self.local_reg(*stance);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _rstance,
-                    SCRATCH0 + 2,
-                ));
-            let _ractor = self.local_reg(*actor);
-                self.emit(Instruction::new2(
-                    OpCode::Move,
-                    _ractor,
-                    SCRATCH0 + 3,
-                ));
+                let _rstance = self.local_reg(*stance);
+                self.emit(Instruction::new2(OpCode::Move, _rstance, SCRATCH0 + 2));
+                let _ractor = self.local_reg(*actor);
+                self.emit(Instruction::new2(OpCode::Move, _ractor, SCRATCH0 + 3));
                 self.emit(Instruction::new1(OpCode::DebateParticipant, dst));
             }
             mir::RValue::DebateRun { id } => {
-            let _rid = self.local_reg(*id);
+                let _rid = self.local_reg(*id);
                 self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
                 self.emit(Instruction::new1(OpCode::DebateRun, dst));
             }
@@ -1122,7 +1082,7 @@ impl MirCodegen {
         match term {
             mir::Terminator::Return(val) => match val {
                 Some(id) => {
-            let _rid = self.local_reg(*id);
+                    let _rid = self.local_reg(*id);
                     self.emit(Instruction::new1(OpCode::RetVal, _rid));
                 }
                 None => {
@@ -1189,14 +1149,17 @@ impl MirCodegen {
                 }
             }
             mir::Terminator::Resume(id) => {
-            let _rid = self.local_reg(*id);
+                let _rid = self.local_reg(*id);
                 self.emit(Instruction::new1(OpCode::Resume, _rid));
             }
             mir::Terminator::Unterminated => {
-                return Err(compile_err(format!(
-                    "internal: unterminated MIR block in function '{}'",
-                    func_name
-                ), Span::default()));
+                return Err(compile_err(
+                    format!(
+                        "internal: unterminated MIR block in function '{}'",
+                        func_name
+                    ),
+                    Span::default(),
+                ));
             }
         }
         Ok(())
@@ -1277,7 +1240,8 @@ fn binary_opcode(op: &crate::ast::BinOp, is_float: bool) -> NuResult<OpCode> {
         // caller (there are no FCmpLe/FCmpGe opcodes).
         (BinOp::Le, true) | (BinOp::Ge, true) => Err(compile_err(
             "internal: float Le/Ge must be expanded by the caller",
-            Span::default())),
+            Span::default(),
+        )),
         (BinOp::And, _) => Ok(OpCode::And),
         (BinOp::Or, _) => Ok(OpCode::Or),
         (BinOp::BitAnd, _) => Ok(OpCode::BitAnd),
@@ -1285,7 +1249,10 @@ fn binary_opcode(op: &crate::ast::BinOp, is_float: bool) -> NuResult<OpCode> {
         (BinOp::BitXor, _) => Ok(OpCode::Xor),
         (BinOp::Shl, _) => Ok(OpCode::Shl),
         (BinOp::Shr, _) => Ok(OpCode::Shr),
-        (other, _) => Err(not_yet_implemented(&format!("binary operator {:?}", other), Span::default())),
+        (other, _) => Err(not_yet_implemented(
+            &format!("binary operator {:?}", other),
+            Span::default(),
+        )),
     }
 }
 

@@ -12,8 +12,9 @@
 
 use std::sync::Arc;
 
-use crate::ai::{EpisodicMemory, LlmClient, LlmMessage, LlmRequest, LlmResponse, ModelPricing,
-    TokenBudget};
+use crate::ai::{
+    EpisodicMemory, LlmClient, LlmMessage, LlmRequest, LlmResponse, ModelPricing, TokenBudget,
+};
 use crate::runtime::Runtime;
 
 // ---------------------------------------------------------------------------
@@ -197,17 +198,19 @@ fn complete_agent_llm_inner(rt: &mut Runtime, actor_id: u64, prompt: &str) -> Op
 /// (model, system prompt, episodic memory, pricing) without issuing any
 /// network call. Pure read/build: safe to run before handing the request
 /// to a background worker thread.
-pub(crate) fn build_agent_llm_request(rt: &Runtime, actor_id: u64, prompt: &str) -> Option<LlmRequest> {
+pub(crate) fn build_agent_llm_request(
+    rt: &Runtime,
+    actor_id: u64,
+    prompt: &str,
+) -> Option<LlmRequest> {
     let (model, system_prompt, memory_json, pricing, module) = {
         let actor = rt.actors.get(&actor_id)?;
         let module = actor.bytecode_module.clone()?;
         let model = vm_value_to_string(&actor.get_state_field("model")?, Some(&module))?;
         let system_prompt =
             vm_value_to_string(&actor.get_state_field("system_prompt")?, Some(&module))?;
-        let memory_json = vm_value_to_string(
-            &actor.get_state_field("episodic_memory")?,
-            Some(&module),
-        )?;
+        let memory_json =
+            vm_value_to_string(&actor.get_state_field("episodic_memory")?, Some(&module))?;
         let pricing = ModelPricing {
             input_cost_per_1k: actor.get_state_field("pricing_input")?.as_float()?,
             output_cost_per_1k: actor.get_state_field("pricing_output")?.as_float()?,
@@ -215,8 +218,8 @@ pub(crate) fn build_agent_llm_request(rt: &Runtime, actor_id: u64, prompt: &str)
         (model, system_prompt, memory_json, pricing, module)
     };
 
-    let memory: EpisodicMemory = serde_json::from_str(&memory_json)
-        .unwrap_or_else(|_| EpisodicMemory::new(50));
+    let memory: EpisodicMemory =
+        serde_json::from_str(&memory_json).unwrap_or_else(|_| EpisodicMemory::new(50));
 
     let mut messages = Vec::new();
     if !system_prompt.is_empty() {
@@ -261,10 +264,8 @@ pub(crate) fn finish_agent_llm(
         let usage_prompt = actor.get_state_field("usage_prompt")?.as_int()? as u32;
         let usage_completion = actor.get_state_field("usage_completion")?.as_int()? as u32;
         let usage_cost = actor.get_state_field("usage_cost")?.as_float()?;
-        let memory_json = vm_value_to_string(
-            &actor.get_state_field("episodic_memory")?,
-            Some(&module),
-        )?;
+        let memory_json =
+            vm_value_to_string(&actor.get_state_field("episodic_memory")?, Some(&module))?;
         (
             pricing,
             usage_prompt,
@@ -281,8 +282,8 @@ pub(crate) fn finish_agent_llm(
     let updated_completion = usage_completion.saturating_add(response.usage.completion);
     let updated_cost = usage_cost + new_cost;
 
-    let mut memory: EpisodicMemory = serde_json::from_str(&memory_json)
-        .unwrap_or_else(|_| EpisodicMemory::new(50));
+    let mut memory: EpisodicMemory =
+        serde_json::from_str(&memory_json).unwrap_or_else(|_| EpisodicMemory::new(50));
     memory.add_turn("user", prompt);
     memory.add_turn("assistant", &content);
     let updated_memory = serde_json::to_string(&memory).ok()?;

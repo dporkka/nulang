@@ -69,17 +69,17 @@ pub struct Parser {
     pos: usize,
     local_type_params: FxHashMap<String, TypeVar>,
     global_type_constructors: FxHashMap<String, TypeVar>,
- }
- 
- impl Parser {
-     pub fn new(tokens: Vec<Token>) -> Self {
-         Parser {
-             tokens,
-             pos: 0,
-             local_type_params: FxHashMap::default(),
-             global_type_constructors: FxHashMap::default(),
-         }
-     }
+}
+
+impl Parser {
+    pub fn new(tokens: Vec<Token>) -> Self {
+        Parser {
+            tokens,
+            pos: 0,
+            local_type_params: FxHashMap::default(),
+            global_type_constructors: FxHashMap::default(),
+        }
+    }
 
     // === Entry Points ===
 
@@ -153,7 +153,10 @@ pub struct Parser {
         self.skip_newlines();
         match self.peek_kind() {
             TokenKind::Fn => self.parse_function(public, annotations),
-            TokenKind::Actor | TokenKind::Persistent | TokenKind::Entity | TokenKind::Organization => {
+            TokenKind::Actor
+            | TokenKind::Persistent
+            | TokenKind::Entity
+            | TokenKind::Organization => {
                 let backend = annotations.iter().find_map(|a| match a {
                     crate::ast::FunctionAnnotation::Backend { kind } => Some(*kind),
                     _ => None,
@@ -348,7 +351,11 @@ pub struct Parser {
         if !is_entity && !is_org {
             self.expect(TokenKind::Actor)?;
         }
-        let default_model = if is_entity || is_org { StateModel::EventSourced } else { StateModel::Local };
+        let default_model = if is_entity || is_org {
+            StateModel::EventSourced
+        } else {
+            StateModel::Local
+        };
         // For `persistent actor` without explicit model, keep the existing Local default
         // so existing behavior is unchanged; `entity` is the durable-first form.
         let name = self.expect_ident("actor name")?;
@@ -530,7 +537,12 @@ pub struct Parser {
             };
             self.expect(TokenKind::FatArrow)?;
             let body = self.parse_expr()?;
-            handlers.push(crate::ast::ApplyHandler { event, params, body, span });
+            handlers.push(crate::ast::ApplyHandler {
+                event,
+                params,
+                body,
+                span,
+            });
             self.skip_newlines();
         }
         if handlers.is_empty() {
@@ -1910,8 +1922,8 @@ pub struct Parser {
                     TokenKind::Ident(name) if name == "after" => {
                         let saved = self.pos;
                         self.advance(); // consume 'after'
-                        // Peek: is the next token expression-like?
-                        // `after => ...` is invalid (missing timeout), so don't try.
+                                        // Peek: is the next token expression-like?
+                                        // `after => ...` is invalid (missing timeout), so don't try.
                         let looks_like_after = self.peek_kind() != &TokenKind::FatArrow
                             && self.peek_kind() != &TokenKind::Eof
                             && self.is_expr_start();
@@ -3894,7 +3906,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn test_parse_organization_decl() {
         let source = r#"organization Team {
@@ -3907,7 +3918,12 @@ mod tests {
         let ast = parser.parse_module().unwrap();
         assert_eq!(ast.decls.len(), 1);
         match &ast.decls[0] {
-            Decl::Actor { name, persistent, state_fields, .. } => {
+            Decl::Actor {
+                name,
+                persistent,
+                state_fields,
+                ..
+            } => {
                 assert_eq!(name, "Team");
                 assert!(*persistent, "organization should be persistent by default");
                 assert_eq!(state_fields.len(), 1);
@@ -3932,15 +3948,16 @@ mod tests {
         }"#;
         let ast = parse(source).unwrap();
         match &ast.decls[0] {
-            Decl::Actor {
-                name, events, ..
-            } => {
+            Decl::Actor { name, events, .. } => {
                 assert_eq!(name, "BankAccount");
                 assert_eq!(events.len(), 2);
                 assert_eq!(events[0].name, "Deposited");
                 assert_eq!(events[0].params.len(), 1);
                 assert_eq!(events[0].params[0].0, "amount");
-                assert!(matches!(events[0].params[0].1, Type::Primitive(PrimitiveType::Int)));
+                assert!(matches!(
+                    events[0].params[0].1,
+                    Type::Primitive(PrimitiveType::Int)
+                ));
                 assert_eq!(events[1].name, "Withdrawn");
                 assert_eq!(events[1].params.len(), 1);
                 assert_eq!(events[1].params[0].0, "amount");
@@ -4380,7 +4397,8 @@ mod tests {
         let expr = parse_expr("after").unwrap();
         assert!(
             matches!(expr, Expr::Var(ref name, _) if name == "after"),
-            "bare `after` must parse as a variable, got {:?}", expr
+            "bare `after` must parse as a variable, got {:?}",
+            expr
         );
     }
 
@@ -4390,7 +4408,8 @@ mod tests {
         let expr = parse_expr("after(1)").unwrap();
         assert!(
             matches!(expr, Expr::App { ref func, .. } if matches!(func.as_ref(), Expr::Var(ref name, _) if name == "after")),
-            "`after(1)` must parse as function call, got {:?}", expr
+            "`after(1)` must parse as function call, got {:?}",
+            expr
         );
     }
 
@@ -5005,7 +5024,12 @@ mod tests {
         }"#;
         let ast = parse(source).unwrap();
         match &ast.decls[0] {
-            Decl::Actor { name, version, migrations, .. } => {
+            Decl::Actor {
+                name,
+                version,
+                migrations,
+                ..
+            } => {
                 assert_eq!(name, "BankAccount");
                 assert_eq!(*version, 3);
                 assert_eq!(migrations.len(), 1);

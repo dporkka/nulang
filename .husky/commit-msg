@@ -1,0 +1,33 @@
+#!/usr/bin/env sh
+# ---------------------------------------------------------------------------
+# Commit message lint — enforce Conventional Commits format
+# ---------------------------------------------------------------------------
+# Allowed types; add new ones as the project evolves.
+# "Revert" and "Merge" prefixes are always allowed.
+
+COMMIT_MSG=$(cat "$1")
+
+# Skip revert and merge commits
+echo "$COMMIT_MSG" | grep -qE '^(Revert|Merge)' && exit 0
+
+# Conventional Commit pattern:
+#   type[(scope)][!]: description
+#   type = build|chore|ci|docs|feat|fix|perf|refactor|style|test
+VALID_TYPES="build|chore|ci|docs|feat|fix|perf|refactor|style|test"
+
+if ! echo "$COMMIT_MSG" | head -1 | grep -qE "^($VALID_TYPES)(\([a-zA-Z0-9._-]+\))?!?: .{1,}"; then
+    echo ""
+    echo "  ERROR: Commit message does not follow Conventional Commits format."
+    echo ""
+    echo "  Expected format:"
+    echo "    type[(scope)][!]: description"
+    echo ""
+    echo "  Valid types: build, chore, ci, docs, feat, fix, perf, refactor, style, test"
+    echo "  Examples:"
+    echo "    feat(vm): add PerformAsync opcode"
+    echo "    fix(parser): handle empty tuple pattern"
+    echo "    docs: update AGENTS.md"
+    echo "    chore: bump deps"
+    echo ""
+    exit 1
+fi

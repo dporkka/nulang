@@ -25,9 +25,10 @@ pub struct QuicTransport {
 
 impl QuicTransport {
     pub fn bind(addr: SocketAddr) -> std::io::Result<Self> {
-        let tokio_rt = Arc::new(Runtime::new().map_err(|e| {
-            std::io::Error::other(format!("QUIC tokio runtime: {}", e))
-        })?);
+        let tokio_rt = Arc::new(
+            Runtime::new()
+                .map_err(|e| std::io::Error::other(format!("QUIC tokio runtime: {}", e)))?,
+        );
 
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])
             .map_err(|e| std::io::Error::other(format!("QUIC cert generation: {}", e)))?;

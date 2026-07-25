@@ -3,9 +3,9 @@
 //! This module eliminates ~60 lines of duplicated constants and helper functions
 //! between `src/jit/typed_compiler.rs` and `src/aot/codegen.rs`.
 
+use crate::value_layout::{PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT, TAG_NIL};
 use cranelift::prelude::*;
 use cranelift_frontend::FunctionBuilder;
-use crate::value_layout::{PAYLOAD_MASK, SIGN_BIT, TAG_BOOL, TAG_INT, TAG_NIL};
 
 // ---------------------------------------------------------------------------
 // Constants — cast once here, import everywhere

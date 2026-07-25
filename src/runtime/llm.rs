@@ -60,8 +60,7 @@ impl LlmState {
     pub fn new() -> Self {
         let (llm_tx, llm_rx) = std::sync::mpsc::channel();
         let llm_tx_worker = llm_tx.clone();
-        let (llm_request_tx, llm_request_rx) =
-            crossbeam::channel::unbounded::<LlmWorkItem>();
+        let (llm_request_tx, llm_request_rx) = crossbeam::channel::unbounded::<LlmWorkItem>();
 
         // Spawn a persistent LLM worker thread.
         let _worker = std::thread::Builder::new()
@@ -75,13 +74,10 @@ impl LlmState {
                     Err(_) => return,
                 };
                 while let Ok(item) = llm_request_rx.recv() {
-                    let result =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            tokio_rt.block_on(item.client.complete(item.request))
-                        }))
-                        .unwrap_or_else(|_| {
-                            Err(LlmError::from_string("LLM worker thread panicked"))
-                        });
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        tokio_rt.block_on(item.client.complete(item.request))
+                    }))
+                    .unwrap_or_else(|_| Err(LlmError::from_string("LLM worker thread panicked")));
                     let _ = llm_tx_worker.send((item.actor_id, result));
                 }
             });
