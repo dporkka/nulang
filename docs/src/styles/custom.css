@@ -65,6 +65,22 @@
 }
 
 /* ── Landing Page Hero ── */
+.hero {
+  position: relative;
+  overflow: hidden;
+  padding: 4rem 0;
+}
+.hero > *:not(.hero-bg-canvas) {
+  position: relative;
+  z-index: 1;
+}
+.hero-bg-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.7;
+}
 .hero h1 {
   background: linear-gradient(90deg, var(--sl-color-accent) 37%, var(--nu-orange) 37%);
   background-clip: text;
@@ -73,8 +89,6 @@
   line-height: 1.3;
   overflow: visible;
 }
-
-
 /* ── Split-color header title (desktop only) ── */
 @media (min-width: 50rem) {
   .site-title span {
@@ -154,8 +168,8 @@
 
 @media (min-width: 50rem) {
   .hero img {
-    width: 12rem;
-    height: 12rem;
+    width: 9rem;
+    height: 9rem;
     margin: 0;
   }
 }
@@ -226,8 +240,8 @@
 
 .feature-card:hover {
   border-color: var(--sl-color-accent);
-  transform: translateY(-0.25rem);
-  box-shadow: 0 8px 25px -8px rgba(59, 130, 246, 0.2);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.12);
 }
 
 .feature-card h3 {
@@ -356,13 +370,6 @@
   gap: 3rem;
   align-items: center;
   margin: 4rem 0;
-  opacity: 0;
-  transform: translateY(24px);
-  transition: opacity 0.6s ease-out, transform 0.6s ease-out;
-}
-.benefit-row.visible {
-  opacity: 1;
-  transform: translateY(0);
 }
 .benefit-row-reverse .benefit-text { order: 2; }
 .benefit-row-reverse .benefit-demo { order: 1; }
@@ -403,13 +410,11 @@
   background: var(--sl-color-bg-inline-code);
   border: 1px solid var(--sl-color-hairline);
   border-left: 3px solid var(--sl-color-accent);
-  opacity: 0;
-  transform: translateY(24px);
-  transition: opacity 0.6s ease-out, transform 0.6s ease-out;
 }
-.benefit-callout.visible {
-  opacity: 1;
-  transform: translateY(0);
+.benefit-callout h3 {
+  color: var(--sl-color-accent-high);
+  font-size: 1.25rem;
+  font-weight: 600;
 }
 
 /* ── Accessibility: respect reduced motion ── */

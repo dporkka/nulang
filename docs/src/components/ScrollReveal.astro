@@ -1,3 +1,5 @@
+<div aria-hidden="true" style="display:none"></div>
+
 <script>
   // Scroll-triggered entrance animations for benefit rows and callout
   function initScrollAnimations() {
@@ -6,6 +8,7 @@
       document.querySelectorAll('.benefit-row, .benefit-callout').forEach(el => el.classList.add('visible'));
       return;
     }
+    const elements = document.querySelectorAll('.benefit-row, .benefit-callout');
     const observer = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (entry.isIntersecting) {
@@ -13,12 +16,17 @@
           observer.unobserve(entry.target);
         }
       });
-    }, { threshold: 0.15, rootMargin: '0px 0px -40px 0px' });
-    document.querySelectorAll('.benefit-row, .benefit-callout').forEach(el => observer.observe(el));
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initScrollAnimations);
-  } else {
-    initScrollAnimations();
+    }, { threshold: 0.1 });
+    elements.forEach(el => observer.observe(el));
+    // Also reveal any elements already in the viewport on load
+    setTimeout(() => {
+      elements.forEach(el => {
+        const rect = el.getBoundingClientRect();
+        if (rect.top < window.innerHeight && rect.bottom > 0) {
+          el.classList.add('visible');
+          observer.unobserve(el);
+        }
+      });
+    }, 100);
   }
 </script>
