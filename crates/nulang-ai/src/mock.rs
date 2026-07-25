@@ -1,14 +1,16 @@
-//! Mock LLM client available when the optional AI runtime is disabled.
+//! Mock LLM client for tests.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::ai::client::LlmClient;
-use crate::ai::request::LlmRequest;
-use crate::ai::response::{LlmError, LlmResponse, TokenUsage, ToolCall};
+use async_trait::async_trait;
 
+use crate::client::LlmClient;
+use crate::request::LlmRequest;
+use crate::response::{LlmError, LlmResponse, TokenUsage, ToolCall};
+
+/// A test client that returns a fixed response, a sequence of responses, or
+/// tool calls, and optionally records the requests it receives.
 #[derive(Debug, Clone)]
 pub struct MockLlmClient {
     response: LlmResponse,
@@ -18,29 +20,26 @@ pub struct MockLlmClient {
     delay: std::time::Duration,
 }
 
+#[async_trait]
 impl LlmClient for MockLlmClient {
-    fn complete(
-        &self,
-        request: LlmRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<LlmResponse, LlmError>> + Send + '_>> {
-        Box::pin(async move {
-            if let Ok(mut calls) = self.calls.lock() {
-                calls.push(request);
-            }
-            if !self.delay.is_zero() {
-                std::thread::sleep(self.delay);
-            }
-            let idx = self.index.fetch_add(1, Ordering::SeqCst);
-            if idx < self.responses.len() {
-                self.responses[idx].clone()
-            } else {
-                Ok(self.response.clone())
-            }
-        })
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, LlmError> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(request);
+        }
+        if !self.delay.is_zero() {
+            std::thread::sleep(self.delay);
+        }
+        let idx = self.index.fetch_add(1, Ordering::SeqCst);
+        if idx < self.responses.len() {
+            self.responses[idx].clone()
+        } else {
+            Ok(self.response.clone())
+        }
     }
 }
 
 impl MockLlmClient {
+    /// Create a mock client that returns the given response.
     pub fn new(response: LlmResponse) -> Self {
         Self {
             response,
@@ -51,16 +50,21 @@ impl MockLlmClient {
         }
     }
 
+    /// Create a mock client that returns a plain text response.
     pub fn text(content: impl Into<String>) -> Self {
         Self::with_usage(content, TokenUsage::default())
     }
 
+    /// Create a mock client that waits for `delay` before returning a plain
+    /// text response. The sleep runs inside the async `complete`; callers run
+    /// it under `block_on` on their own thread, so a blocking sleep is fine.
     pub fn delayed(content: impl Into<String>, delay: std::time::Duration) -> Self {
         let mut client = Self::text(content);
         client.delay = delay;
         client
     }
 
+    /// Create a mock client that returns a plain text response with usage.
     pub fn with_usage(content: impl Into<String>, usage: TokenUsage) -> Self {
         Self::new(LlmResponse {
             content: Some(content.into()),
@@ -71,6 +75,7 @@ impl MockLlmClient {
         })
     }
 
+    /// Create a mock client that returns a single tool call.
     pub fn tool_call(
         name: impl Into<String>,
         arguments: serde_json::Map<String, serde_json::Value>,
@@ -78,6 +83,7 @@ impl MockLlmClient {
         Self::tool_call_with_usage(name, arguments, TokenUsage::default())
     }
 
+    /// Create a mock client that returns a single tool call with usage.
     pub fn tool_call_with_usage(
         name: impl Into<String>,
         arguments: serde_json::Map<String, serde_json::Value>,
@@ -96,10 +102,14 @@ impl MockLlmClient {
         })
     }
 
+    /// Create a mock client that returns each response in order (all Ok).
+    /// The final response repeats when the sequence is exhausted.
     pub fn sequence(responses: Vec<LlmResponse>) -> Self {
         Self::sequence_with_errors(responses.into_iter().map(Ok).collect())
     }
 
+    /// Create a mock client that returns each result (Ok or Err) in order.
+    /// The final result repeats when the sequence is exhausted.
     pub fn sequence_with_errors(responses: Vec<Result<LlmResponse, LlmError>>) -> Self {
         let default_response = LlmResponse {
             content: None,
@@ -117,6 +127,7 @@ impl MockLlmClient {
         }
     }
 
+    /// Return the requests recorded by this mock client.
     pub fn recorded_calls(&self) -> Vec<LlmRequest> {
         self.calls.lock().map_or_else(|_| Vec::new(), |g| g.clone())
     }

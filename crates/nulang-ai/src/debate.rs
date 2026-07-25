@@ -4,23 +4,21 @@
 //! moderator agent.  Over a fixed number of rounds each participant responds to
 //! the topic and the accumulated arguments, and the moderator synthesizes a
 //! final conclusion.
-
-use crate::runtime::Runtime;
-
+//!
+//! Implementors of [`DebateRuntime`] provide the actor `ask` behavior. Test
+//! code can use a mock implementation to avoid spinning up a real actor
+//! system.
 // ---------------------------------------------------------------------------
 // Runtime abstraction
 // ---------------------------------------------------------------------------
-
+///
 /// Minimal runtime capability required to execute a debate.
+///
+/// Test code can provide a mock implementation to avoid spinning up a real
+/// actor system.
 pub trait DebateRuntime {
     /// Send `prompt` to `agent_id` and return the textual response.
     fn ask_agent(&mut self, agent_id: u64, prompt: &str) -> Result<String, String>;
-}
-
-impl DebateRuntime for Runtime {
-    fn ask_agent(&mut self, agent_id: u64, prompt: &str) -> Result<String, String> {
-        crate::ai::PipelineRuntime::ask_agent(self, agent_id, prompt)
-    }
 }
 
 // ---------------------------------------------------------------------------

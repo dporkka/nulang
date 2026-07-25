@@ -1286,7 +1286,13 @@ impl<'c> FnLowerer<'c> {
                 Ok(())
             }
             hir::RValue::PipelineNew { .. } => {
-                self.b.assign(dst, mir::RValue::PipelineNew);
+                self.b.assign(
+                    dst,
+                    mir::RValue::PerformAsync {
+                        effect_op: "Pipeline.new".to_string(),
+                        args: vec![],
+                    },
+                );
                 Ok(())
             }
             hir::RValue::PipelineStage {
@@ -1302,11 +1308,9 @@ impl<'c> FnLowerer<'c> {
                 let t = self.lower_operand(template)?;
                 self.b.assign(
                     dst,
-                    mir::RValue::PipelineStage {
-                        id: i,
-                        name: n,
-                        actor: a,
-                        template: t,
+                    mir::RValue::PerformAsync {
+                        effect_op: "Pipeline.stage".to_string(),
+                        args: vec![i, n, a, t],
                     },
                 );
                 Ok(())
@@ -1314,12 +1318,23 @@ impl<'c> FnLowerer<'c> {
             hir::RValue::PipelineRun { id, input, .. } => {
                 let i = self.lower_operand(id)?;
                 let inp = self.lower_operand(input)?;
-                self.b
-                    .assign(dst, mir::RValue::PipelineRun { id: i, input: inp });
+                self.b.assign(
+                    dst,
+                    mir::RValue::PerformAsync {
+                        effect_op: "Pipeline.run".to_string(),
+                        args: vec![i, inp],
+                    },
+                );
                 Ok(())
             }
             hir::RValue::SupervisorNew { .. } => {
-                self.b.assign(dst, mir::RValue::SupervisorNew);
+                self.b.assign(
+                    dst,
+                    mir::RValue::PerformAsync {
+                        effect_op: "Supervisor.new".to_string(),
+                        args: vec![],
+                    },
+                );
                 Ok(())
             }
             hir::RValue::SupervisorWorker {
@@ -1335,11 +1350,9 @@ impl<'c> FnLowerer<'c> {
                 let d = self.lower_operand(description)?;
                 self.b.assign(
                     dst,
-                    mir::RValue::SupervisorWorker {
-                        id: i,
-                        name: n,
-                        actor: a,
-                        description: d,
+                    mir::RValue::PerformAsync {
+                        effect_op: "Supervisor.worker".to_string(),
+                        args: vec![i, n, a, d],
                     },
                 );
                 Ok(())
@@ -1347,8 +1360,13 @@ impl<'c> FnLowerer<'c> {
             hir::RValue::SupervisorRun { id, task, .. } => {
                 let i = self.lower_operand(id)?;
                 let t = self.lower_operand(task)?;
-                self.b
-                    .assign(dst, mir::RValue::SupervisorRun { id: i, task: t });
+                self.b.assign(
+                    dst,
+                    mir::RValue::PerformAsync {
+                        effect_op: "Supervisor.run".to_string(),
+                        args: vec![i, t],
+                    },
+                );
                 Ok(())
             }
             hir::RValue::DebateNew {
@@ -1362,10 +1380,9 @@ impl<'c> FnLowerer<'c> {
                 let th = self.lower_operand(threshold)?;
                 self.b.assign(
                     dst,
-                    mir::RValue::DebateNew {
-                        topic: top,
-                        rounds: r,
-                        threshold: th,
+                    mir::RValue::PerformAsync {
+                        effect_op: "Debate.new".to_string(),
+                        args: vec![top, r, th],
                     },
                 );
                 Ok(())
@@ -1383,18 +1400,22 @@ impl<'c> FnLowerer<'c> {
                 let a = self.lower_operand(actor)?;
                 self.b.assign(
                     dst,
-                    mir::RValue::DebateParticipant {
-                        id: i,
-                        name: n,
-                        stance: s,
-                        actor: a,
+                    mir::RValue::PerformAsync {
+                        effect_op: "Debate.participant".to_string(),
+                        args: vec![i, n, s, a],
                     },
                 );
                 Ok(())
             }
             hir::RValue::DebateRun { id, .. } => {
                 let i = self.lower_operand(id)?;
-                self.b.assign(dst, mir::RValue::DebateRun { id: i });
+                self.b.assign(
+                    dst,
+                    mir::RValue::PerformAsync {
+                        effect_op: "Debate.run".to_string(),
+                        args: vec![i],
+                    },
+                );
                 Ok(())
             }
             hir::RValue::Receive { arms, after, .. } => self.lower_receive(dst, arms, after),
@@ -2330,15 +2351,11 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         | Receive
         | ReceiveMatch { .. }
         | ReceiveCommit
-        | PipelineNew
-        | SupervisorNew
         | Spawn { .. }
         | SelfRef
         | StateGet { .. } => {}
         ReceiveWait { timeout, .. } => out.push(*timeout),
-        Load(x) | ArrayLen(x) | Unary(_, x) | CapabilityCheck { val: x } | DebateRun { id: x } => {
-            out.push(*x)
-        }
+        Load(x) | ArrayLen(x) | Unary(_, x) | CapabilityCheck { val: x } => out.push(*x),
         PerformAsync { args, .. } => out.extend(args.iter().copied()),
         LoadFieldNamed { obj, .. } | LoadFieldPos { obj, .. } => out.push(*obj),
         ArrayLoad { arr, idx } => {
@@ -2349,14 +2366,6 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         Binary(_, l, r) | StringEq(l, r) | StrConcat(l, r) => {
             out.push(*l);
             out.push(*r);
-        }
-        PipelineRun { id, input } => {
-            out.push(*id);
-            out.push(*input);
-        }
-        SupervisorRun { id, task } => {
-            out.push(*id);
-            out.push(*task);
         }
         Call { func, args } => {
             if let mir::FuncRef::Local(f) = func {
@@ -2378,45 +2387,6 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         Send { actor, args, .. } | Ask { actor, args, .. } => {
             out.push(*actor);
             out.extend(args.iter().copied());
-        }
-        PipelineStage {
-            id,
-            name,
-            actor,
-            template,
-        } => {
-            for x in [id, name, actor, template] {
-                out.push(*x);
-            }
-        }
-        SupervisorWorker {
-            id,
-            name,
-            actor,
-            description,
-        } => {
-            for x in [id, name, actor, description] {
-                out.push(*x);
-            }
-        }
-        DebateNew {
-            topic,
-            rounds,
-            threshold,
-        } => {
-            for x in [topic, rounds, threshold] {
-                out.push(*x);
-            }
-        }
-        DebateParticipant {
-            id,
-            name,
-            stance,
-            actor,
-        } => {
-            for x in [id, name, stance, actor] {
-                out.push(*x);
-            }
         }
     }
 }

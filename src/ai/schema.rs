@@ -5,7 +5,7 @@
 
 use serde_json::Map;
 
-use crate::ai::request::ToolSchema;
+use crate::ai::ToolSchema;
 use crate::types::{PrimitiveType, Type};
 
 /// Convert a Nulang type into a JSON Schema value.

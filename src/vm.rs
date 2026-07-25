@@ -105,17 +105,6 @@ pub enum SignalWaitResult {
     NotReady,
 }
 
-/// Result of an LLM completion request from the `LlmAsk` opcode.
-#[derive(Debug, Clone, PartialEq)]
-pub enum LlmAskResult {
-    /// The response is ready: `Some(content)` on success, `None` on failure.
-    /// The VM writes the response string (or `nil`) into the prompt register.
-    Ready(Option<String>),
-    /// The request was handed to a background worker; the VM suspends the
-    /// current behavior and re-executes the `LlmAsk` instruction on resume.
-    Pending,
-}
-
 /// Result of a generic async effect operation from the `PerformAsync` opcode.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PerformAsyncResult {
@@ -266,8 +255,8 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
     /// return `Pending` and deliver the response on a later resume, in which
     /// case the VM suspends the behavior with an `LlmAsk:suspend` sentinel
     /// error (same pattern as `SignalWait`).
-    fn llm_ask(&mut self, model: &str, prompt: &str) -> LlmAskResult {
-        LlmAskResult::Ready(self.complete_llm(model, prompt))
+    fn llm_ask(&mut self, model: &str, prompt: &str) -> PerformAsyncResult {
+        PerformAsyncResult::Ready(self.complete_llm(model, prompt))
     }
 
     /// Execute a generic async effect, possibly asynchronously.
@@ -291,57 +280,6 @@ pub trait ActorVmCallbacks: std::any::Any + std::fmt::Debug {
         _args: &[Value],
     ) -> PerformAsyncResult {
         PerformAsyncResult::Ready(None)
-    }
-
-    /// Create a new pipeline and return its runtime ID.
-    fn pipeline_new(&mut self) -> i64 {
-        0
-    }
-
-    /// Add a stage to an existing pipeline and return its ID.
-    fn pipeline_stage(&mut self, _id: i64, _name: &str, _actor_id: u64, _template: &str) -> i64 {
-        -1
-    }
-
-    /// Run a pipeline and return its final output string.
-    fn pipeline_run(&mut self, _id: i64, _input: &str) -> Option<String> {
-        None
-    }
-
-    /// Create a new supervisor team and return its runtime ID.
-    fn supervisor_new(&mut self) -> i64 {
-        0
-    }
-
-    /// Add a worker to an existing supervisor team and return its ID.
-    fn supervisor_worker(
-        &mut self,
-        _id: i64,
-        _name: &str,
-        _actor_id: u64,
-        _description: &str,
-    ) -> i64 {
-        -1
-    }
-
-    /// Run a supervisor team and return its final output string.
-    fn supervisor_run(&mut self, _id: i64, _task: &str) -> Option<String> {
-        None
-    }
-
-    /// Create a new debate and return its runtime ID.
-    fn debate_new(&mut self, _topic: &str, _rounds: i64, _threshold: f64) -> i64 {
-        0
-    }
-
-    /// Add a participant to an existing debate and return its ID.
-    fn debate_participant(&mut self, _id: i64, _name: &str, _stance: &str, _actor_id: u64) -> i64 {
-        -1
-    }
-
-    /// Run a debate and return its final output string.
-    fn debate_run(&mut self, _id: i64) -> Option<String> {
-        None
     }
 
     /// Try to receive a message from the current actor's mailbox.
@@ -3457,99 +3395,6 @@ impl VM {
             }
             OpCode::PerformAsync => {
                 self.step_perform_async(frame_idx, module_idx, instr)?;
-            }
-
-            // -- Pipeline (v0.9 AI Runtime) --
-            OpCode::PipelineNew => {
-                let dst = instr.op1;
-                let id = self.actor_callbacks.pipeline_new();
-                self.frames[frame_idx].regs[dst as usize] = Value::int(id);
-            }
-            OpCode::PipelineStage => {
-                let dst = instr.op1;
-                let regs = &self.frames[frame_idx].regs;
-                let id = regs[0].as_int().unwrap_or(0);
-                let name = self.value_to_string(module_idx, regs[1]);
-                let actor_id = regs[2].as_actor_id().unwrap_or(0);
-                let template = self.value_to_string(module_idx, regs[3]);
-                let result = self
-                    .actor_callbacks
-                    .pipeline_stage(id, &name, actor_id, &template);
-                self.frames[frame_idx].regs[dst as usize] = Value::int(result);
-            }
-            OpCode::PipelineRun => {
-                let dst = instr.op1;
-                let regs = &self.frames[frame_idx].regs;
-                let id = regs[0].as_int().unwrap_or(0);
-                let input = self.value_to_string(module_idx, regs[1]);
-                let value = match self.actor_callbacks.pipeline_run(id, &input) {
-                    Some(content) => self.add_runtime_string(module_idx, content),
-                    None => Value::nil(),
-                };
-                self.frames[frame_idx].regs[dst as usize] = value;
-            }
-
-            // -- Supervisor (v0.9 AI Runtime) --
-            OpCode::SupervisorNew => {
-                let dst = instr.op1;
-                let id = self.actor_callbacks.supervisor_new();
-                self.frames[frame_idx].regs[dst as usize] = Value::int(id);
-            }
-            OpCode::SupervisorWorker => {
-                let dst = instr.op1;
-                let regs = &self.frames[frame_idx].regs;
-                let id = regs[0].as_int().unwrap_or(0);
-                let name = self.value_to_string(module_idx, regs[1]);
-                let actor_id = regs[2].as_actor_id().unwrap_or(0);
-                let description = self.value_to_string(module_idx, regs[3]);
-                let result =
-                    self.actor_callbacks
-                        .supervisor_worker(id, &name, actor_id, &description);
-                self.frames[frame_idx].regs[dst as usize] = Value::int(result);
-            }
-            OpCode::SupervisorRun => {
-                let dst = instr.op1;
-                let regs = &self.frames[frame_idx].regs;
-                let id = regs[0].as_int().unwrap_or(0);
-                let task = self.value_to_string(module_idx, regs[1]);
-                let value = match self.actor_callbacks.supervisor_run(id, &task) {
-                    Some(content) => self.add_runtime_string(module_idx, content),
-                    None => Value::nil(),
-                };
-                self.frames[frame_idx].regs[dst as usize] = value;
-            }
-
-            // -- Debate (v0.9 AI Runtime) --
-            OpCode::DebateNew => {
-                let dst = instr.op1;
-                let regs = &self.frames[frame_idx].regs;
-                let topic = self.value_to_string(module_idx, regs[0]);
-                let rounds = regs[1].as_int().unwrap_or(1);
-                let threshold = regs[2].as_float().unwrap_or(0.5);
-                let id = self.actor_callbacks.debate_new(&topic, rounds, threshold);
-                self.frames[frame_idx].regs[dst as usize] = Value::int(id);
-            }
-            OpCode::DebateParticipant => {
-                let dst = instr.op1;
-                let regs = &self.frames[frame_idx].regs;
-                let id = regs[0].as_int().unwrap_or(0);
-                let name = self.value_to_string(module_idx, regs[1]);
-                let stance = self.value_to_string(module_idx, regs[2]);
-                let actor_id = regs[3].as_actor_id().unwrap_or(0);
-                let result = self
-                    .actor_callbacks
-                    .debate_participant(id, &name, &stance, actor_id);
-                self.frames[frame_idx].regs[dst as usize] = Value::int(result);
-            }
-            OpCode::DebateRun => {
-                let dst = instr.op1;
-                let regs = &self.frames[frame_idx].regs;
-                let id = regs[0].as_int().unwrap_or(0);
-                let value = match self.actor_callbacks.debate_run(id) {
-                    Some(content) => self.add_runtime_string(module_idx, content),
-                    None => Value::nil(),
-                };
-                self.frames[frame_idx].regs[dst as usize] = value;
             }
 
             // -- Reference counting / deallocation --

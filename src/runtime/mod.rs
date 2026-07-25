@@ -4448,30 +4448,84 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     fn perform_async(
         &mut self,
         effect_op: &str,
-        _constants: &[crate::bytecode::Constant],
+        constants: &[crate::bytecode::Constant],
         args: &[crate::vm::Value],
     ) -> crate::vm::PerformAsyncResult {
         match effect_op {
             "Inference.ask" | "LLM.ask" => {
-                // Extract prompt string from r0. For RuntimeVmCallbacks the
-                // top-level path goes through `perform` which resolves
-                // string-id args through the module pool — here we already
-                // have the raw register values, so extract from r0 as a
-                // string-id and look it up in the module's constant pool.
-                let prompt = args.first().map_or(String::new(), |v| {
-                    if let Some(id) = v.as_string_id() {
-                        _constants
-                            .get(id as usize)
-                            .and_then(|c| match c {
-                                crate::bytecode::Constant::String(s) => Some(s.clone()),
-                                _ => None,
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        String::new()
-                    }
-                });
+                let prompt = resolve_first_string(constants, args);
                 let result = self.complete_llm("", &prompt);
+                crate::vm::PerformAsyncResult::Ready(result)
+            }
+            "Pipeline.new" => {
+                let id = self.runtime.borrow_mut().pipeline_new();
+                crate::vm::PerformAsyncResult::Ready(Some(id.to_string()))
+            }
+            "Pipeline.stage" => {
+                let id = id_arg(constants, args, 0);
+                let name = string_arg(constants, args, 1);
+                let actor = actor_arg(args, 2);
+                let template = string_arg(constants, args, 3);
+                let result = self
+                    .runtime
+                    .borrow_mut()
+                    .pipeline_stage(id, &name, actor, &template);
+                let r = result.map(|id| id as i64).unwrap_or(-1);
+                crate::vm::PerformAsyncResult::Ready(Some(r.to_string()))
+            }
+            "Pipeline.run" => {
+                let id = id_arg(constants, args, 0);
+                let input = string_arg(constants, args, 1);
+                let result = self.runtime.borrow_mut().pipeline_run(id, &input).ok();
+                crate::vm::PerformAsyncResult::Ready(result)
+            }
+            "Supervisor.new" => {
+                let id = self.runtime.borrow_mut().supervisor_new();
+                crate::vm::PerformAsyncResult::Ready(Some(id.to_string()))
+            }
+            "Supervisor.worker" => {
+                let id = id_arg(constants, args, 0);
+                let name = string_arg(constants, args, 1);
+                let actor = actor_arg(args, 2);
+                let description = string_arg(constants, args, 3);
+                let result =
+                    self.runtime
+                        .borrow_mut()
+                        .supervisor_worker(id, &name, actor, &description);
+                let r = result.map(|id| id as i64).unwrap_or(-1);
+                crate::vm::PerformAsyncResult::Ready(Some(r.to_string()))
+            }
+            "Supervisor.run" => {
+                let id = id_arg(constants, args, 0);
+                let task = string_arg(constants, args, 1);
+                let result = self.runtime.borrow_mut().supervisor_run(id, &task).ok();
+                crate::vm::PerformAsyncResult::Ready(result)
+            }
+            "Debate.new" => {
+                let topic = string_arg(constants, args, 0);
+                let rounds = int_arg(args, 1);
+                let threshold = float_arg(args, 2);
+                let id = self
+                    .runtime
+                    .borrow_mut()
+                    .debate_new(&topic, rounds, threshold);
+                crate::vm::PerformAsyncResult::Ready(Some(id.to_string()))
+            }
+            "Debate.participant" => {
+                let id = id_arg(constants, args, 0);
+                let name = string_arg(constants, args, 1);
+                let stance = string_arg(constants, args, 2);
+                let actor = actor_arg(args, 3);
+                let result = self
+                    .runtime
+                    .borrow_mut()
+                    .debate_participant(id, &name, &stance, actor);
+                let r = result.map(|id| id as i64).unwrap_or(-1);
+                crate::vm::PerformAsyncResult::Ready(Some(r.to_string()))
+            }
+            "Debate.run" => {
+                let id = id_arg(constants, args, 0);
+                let result = self.runtime.borrow_mut().debate_run(id).ok();
                 crate::vm::PerformAsyncResult::Ready(result)
             }
             _ => crate::vm::PerformAsyncResult::Ready(None),
@@ -4504,62 +4558,6 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             response_format: None,
         };
         rt.complete_llm_request(request, Vec::new()).ok()?.content
-    }
-
-    fn pipeline_new(&mut self) -> i64 {
-        self.runtime.borrow_mut().pipeline_new() as i64
-    }
-
-    fn pipeline_stage(&mut self, id: i64, name: &str, actor_id: u64, template: &str) -> i64 {
-        self.runtime
-            .borrow_mut()
-            .pipeline_stage(id as u64, name, actor_id, template)
-            .map(|id| id as i64)
-            .unwrap_or(-1)
-    }
-
-    fn pipeline_run(&mut self, id: i64, input: &str) -> Option<String> {
-        self.runtime
-            .borrow_mut()
-            .pipeline_run(id as u64, input)
-            .ok()
-    }
-
-    fn supervisor_new(&mut self) -> i64 {
-        self.runtime.borrow_mut().supervisor_new() as i64
-    }
-
-    fn supervisor_worker(&mut self, id: i64, name: &str, actor_id: u64, description: &str) -> i64 {
-        self.runtime
-            .borrow_mut()
-            .supervisor_worker(id as u64, name, actor_id, description)
-            .map(|id| id as i64)
-            .unwrap_or(-1)
-    }
-
-    fn supervisor_run(&mut self, id: i64, task: &str) -> Option<String> {
-        self.runtime
-            .borrow_mut()
-            .supervisor_run(id as u64, task)
-            .ok()
-    }
-
-    fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> i64 {
-        self.runtime
-            .borrow_mut()
-            .debate_new(topic, rounds, threshold) as i64
-    }
-
-    fn debate_participant(&mut self, id: i64, name: &str, stance: &str, actor_id: u64) -> i64 {
-        self.runtime
-            .borrow_mut()
-            .debate_participant(id as u64, name, stance, actor_id)
-            .map(|id| id as i64)
-            .unwrap_or(-1)
-    }
-
-    fn debate_run(&mut self, id: i64) -> Option<String> {
-        self.runtime.borrow_mut().debate_run(id as u64).ok()
     }
 
     fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
@@ -4609,6 +4607,57 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             }
         }
     }
+}
+
+// Helpers for extracting typed arguments from PerformAsync register values.
+fn int_arg(args: &[crate::vm::Value], idx: usize) -> i64 {
+    args.get(idx).and_then(|v| v.as_int()).unwrap_or(0)
+}
+
+fn actor_arg(args: &[crate::vm::Value], idx: usize) -> u64 {
+    args.get(idx).and_then(|v| v.as_actor_id()).unwrap_or(0)
+}
+
+fn float_arg(args: &[crate::vm::Value], idx: usize) -> f64 {
+    args.get(idx).and_then(|v| v.as_float()).unwrap_or(0.0)
+}
+
+fn string_arg(
+    constants: &[crate::bytecode::Constant],
+    args: &[crate::vm::Value],
+    idx: usize,
+) -> String {
+    args.get(idx).map_or(String::new(), |v| {
+        if let Some(s) = v.as_string_id() {
+            constants
+                .get(s as usize)
+                .and_then(|c| match c {
+                    crate::bytecode::Constant::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    })
+}
+
+fn resolve_first_string(
+    constants: &[crate::bytecode::Constant],
+    args: &[crate::vm::Value],
+) -> String {
+    string_arg(constants, args, 0)
+}
+
+fn id_arg(constants: &[crate::bytecode::Constant], args: &[crate::vm::Value], idx: usize) -> u64 {
+    // Try int first (legacy path), then parse string-id from constants as u64.
+    if let Some(v) = args.get(idx) {
+        if let Some(n) = v.as_int() {
+            return n as u64;
+        }
+    }
+    let s = string_arg(constants, args, idx);
+    s.parse::<u64>().unwrap_or(0)
 }
 
 /// Raw-pointer callbacks used when the runtime itself executes an actor's
@@ -4963,8 +5012,8 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         }
     }
 
-    fn llm_ask(&mut self, model: &str, prompt: &str) -> crate::vm::LlmAskResult {
-        use crate::vm::LlmAskResult;
+    fn llm_ask(&mut self, model: &str, prompt: &str) -> crate::vm::PerformAsyncResult {
+        use crate::vm::PerformAsyncResult;
         unsafe {
             let rt = &mut *self.runtime;
             let actor_id = self.actor_id;
@@ -4972,7 +5021,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             // Nested synchronous paths (pipelines, ask_actor_sync) keep the
             // blocking behavior.
             if !rt.llm.suspend_enabled {
-                return LlmAskResult::Ready(self.complete_llm(model, prompt));
+                return PerformAsyncResult::Ready(self.complete_llm(model, prompt));
             }
 
             // Re-executed after a resume: a completed response is waiting.
@@ -5019,9 +5068,9 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                             }
                         };
                         rt.current_actor = prev_current_actor;
-                        LlmAskResult::Ready(content)
+                        PerformAsyncResult::Ready(content)
                     }
-                    Err(_) => LlmAskResult::Ready(None),
+                    Err(_) => PerformAsyncResult::Ready(None),
                 };
             }
 
@@ -5032,7 +5081,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 .map(|a| a.llm_inflight)
                 .unwrap_or(false)
             {
-                return LlmAskResult::Pending;
+                return PerformAsyncResult::Pending;
             }
 
             // Build the request on the scheduler thread, then hand it to a
@@ -5049,7 +5098,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             };
             // Build failure (e.g. missing agent state fields): nil response.
             let Some(request) = request else {
-                return LlmAskResult::Ready(None);
+                return PerformAsyncResult::Ready(None);
             };
             if !(*rt).dispatch_llm_request(actor_id, request, prompt) {
                 // Dispatch failed: fall back to a nil response.
@@ -5058,9 +5107,9 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     actor.llm_inflight = false;
                     actor.llm_pending_prompt = None;
                 }
-                return LlmAskResult::Ready(None);
+                return PerformAsyncResult::Ready(None);
             }
-            LlmAskResult::Pending
+            PerformAsyncResult::Pending
         }
     }
 
@@ -5070,83 +5119,75 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         constants: &[crate::bytecode::Constant],
         args: &[crate::vm::Value],
     ) -> crate::vm::PerformAsyncResult {
-        use crate::vm::{LlmAskResult, PerformAsyncResult};
+        use crate::vm::PerformAsyncResult;
         match effect_op {
             "Inference.ask" | "LLM.ask" => {
-                // Extract prompt from r0 (first staged argument). Resolve
-                // string-id values through the module's constant pool.
-                let prompt = args.first().map_or(String::new(), |v| {
-                    if let Some(id) = v.as_string_id() {
-                        constants
-                            .get(id as usize)
-                            .and_then(|c| match c {
-                                crate::bytecode::Constant::String(s) => Some(s.clone()),
-                                _ => None,
-                            })
-                            .unwrap_or_default()
-                    } else {
-                        String::new()
-                    }
-                });
-                // Route through the existing llm_ask machinery.
-                match self.llm_ask("", &prompt) {
-                    LlmAskResult::Ready(result) => PerformAsyncResult::Ready(result),
-                    LlmAskResult::Pending => PerformAsyncResult::Pending,
-                }
+                let prompt = resolve_first_string(constants, args);
+                self.llm_ask("", &prompt)
+            }
+            "Pipeline.new" => {
+                let id = unsafe { (*self.runtime).pipeline_new() };
+                PerformAsyncResult::Ready(Some(id.to_string()))
+            }
+            "Pipeline.stage" => {
+                let id = id_arg(constants, args, 0);
+                let name = string_arg(constants, args, 1);
+                let actor = actor_arg(args, 2);
+                let template = string_arg(constants, args, 3);
+                let result = unsafe { (*self.runtime).pipeline_stage(id, &name, actor, &template) };
+                let r = result.map(|id| id as i64).unwrap_or(-1);
+                PerformAsyncResult::Ready(Some(r.to_string()))
+            }
+            "Pipeline.run" => {
+                let id = id_arg(constants, args, 0);
+                let input = string_arg(constants, args, 1);
+                let result = unsafe { (*self.runtime).pipeline_run(id, &input).ok() };
+                PerformAsyncResult::Ready(result)
+            }
+            "Supervisor.new" => {
+                let id = unsafe { (*self.runtime).supervisor_new() };
+                PerformAsyncResult::Ready(Some(id.to_string()))
+            }
+            "Supervisor.worker" => {
+                let id = id_arg(constants, args, 0);
+                let name = string_arg(constants, args, 1);
+                let actor = actor_arg(args, 2);
+                let description = string_arg(constants, args, 3);
+                let result =
+                    unsafe { (*self.runtime).supervisor_worker(id, &name, actor, &description) };
+                let r = result.map(|id| id as i64).unwrap_or(-1);
+                PerformAsyncResult::Ready(Some(r.to_string()))
+            }
+            "Supervisor.run" => {
+                let id = id_arg(constants, args, 0);
+                let task = string_arg(constants, args, 1);
+                let result = unsafe { (*self.runtime).supervisor_run(id, &task).ok() };
+                PerformAsyncResult::Ready(result)
+            }
+            "Debate.new" => {
+                let topic = string_arg(constants, args, 0);
+                let rounds = int_arg(args, 1);
+                let threshold = float_arg(args, 2);
+                let id = unsafe { (*self.runtime).debate_new(&topic, rounds, threshold) };
+                PerformAsyncResult::Ready(Some(id.to_string()))
+            }
+            "Debate.participant" => {
+                let id = id_arg(constants, args, 0);
+                let name = string_arg(constants, args, 1);
+                let stance = string_arg(constants, args, 2);
+                let actor = actor_arg(args, 3);
+                let result =
+                    unsafe { (*self.runtime).debate_participant(id, &name, &stance, actor) };
+                let r = result.map(|id| id as i64).unwrap_or(-1);
+                PerformAsyncResult::Ready(Some(r.to_string()))
+            }
+            "Debate.run" => {
+                let id = id_arg(constants, args, 0);
+                let result = unsafe { (*self.runtime).debate_run(id).ok() };
+                PerformAsyncResult::Ready(result)
             }
             _ => PerformAsyncResult::Ready(None),
         }
-    }
-
-    fn pipeline_new(&mut self) -> i64 {
-        unsafe { (*self.runtime).pipeline_new() as i64 }
-    }
-
-    fn pipeline_stage(&mut self, id: i64, name: &str, actor_id: u64, template: &str) -> i64 {
-        unsafe {
-            (*self.runtime)
-                .pipeline_stage(id as u64, name, actor_id, template)
-                .map(|id| id as i64)
-                .unwrap_or(-1)
-        }
-    }
-
-    fn pipeline_run(&mut self, id: i64, input: &str) -> Option<String> {
-        unsafe { (*self.runtime).pipeline_run(id as u64, input).ok() }
-    }
-
-    fn supervisor_new(&mut self) -> i64 {
-        unsafe { (*self.runtime).supervisor_new() as i64 }
-    }
-
-    fn supervisor_worker(&mut self, id: i64, name: &str, actor_id: u64, description: &str) -> i64 {
-        unsafe {
-            (*self.runtime)
-                .supervisor_worker(id as u64, name, actor_id, description)
-                .map(|id| id as i64)
-                .unwrap_or(-1)
-        }
-    }
-
-    fn supervisor_run(&mut self, id: i64, task: &str) -> Option<String> {
-        unsafe { (*self.runtime).supervisor_run(id as u64, task).ok() }
-    }
-
-    fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> i64 {
-        unsafe { (*self.runtime).debate_new(topic, rounds, threshold) as i64 }
-    }
-
-    fn debate_participant(&mut self, id: i64, name: &str, stance: &str, actor_id: u64) -> i64 {
-        unsafe {
-            (*self.runtime)
-                .debate_participant(id as u64, name, stance, actor_id)
-                .map(|id| id as i64)
-                .unwrap_or(-1)
-        }
-    }
-
-    fn debate_run(&mut self, id: i64) -> Option<String> {
-        unsafe { (*self.runtime).debate_run(id as u64).ok() }
     }
 
     fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {

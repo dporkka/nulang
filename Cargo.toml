@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/nulang-ai"]
+
 [package]
 name = "nulang"
 version = "0.13.0-alpha.1"
@@ -22,26 +25,13 @@ categories = ["development-tools", "programming-languages"]
 language-version = "1.0.0-frozen"
 
 [features]
-# All optional subsystems are on by default so `cargo build`/`cargo test`
-# behave exactly as before this feature set was introduced. Build with
-# `--no-default-features --features <subset>` for a leaner binary, e.g.
-# `cargo build --no-default-features --features sqlite` skips PyO3 and the
-# LSP server entirely.
 default = ["python", "sqlite", "lsp", "ai-runtime"]
-# Python interop (native-actor `perform Python.call(...)`). Fully isolated
-# to src/python/ — nothing else in the crate depends on it.
 python = ["dep:pyo3"]
-# libSQL-backed persistence (LibsqlStore). MemoryStore and
-# JsonFileStore remain available without this feature.
 sqlite = ["dep:libsql"]
 lsp = ["dep:tower-lsp"]
 wasm-backend = ["dep:wasm-encoder", "dep:wasmtime"]
 wit-bindgen = []
-# AI runtime (LLM providers, agents, memory, pipelines, debates, supervisor
-# teams). This is an Experimental-tier feature that will eventually move to
-# the Cloud SDK (`nlc.ai`). Disable for a leaner build without provider
-# integrations or async-trait machinery.
-ai-runtime = ["dep:reqwest", "dep:async-trait"]
+ai-runtime = ["dep:nulang-ai", "dep:reqwest"]
 # Experimental SIMD JIT compiler (disabled: unsound — no register write-back,
 # baked trip count, find_trip_count_hint always returns None). ~2700 lines of
 # dead weight in production builds.
@@ -79,20 +69,15 @@ cranelift-frontend = "0.132"
 tower-lsp = { version = "0.20", optional = true }
 tokio = { version = "1.37.0", features = ["full", "macros", "net", "rt-multi-thread", "time"] }
 
-# HTTP client + async trait glue for AI provider integrations (optional;
-# enabled by the `ai-runtime` feature).
-reqwest = { version = "0.12", features = ["json"], optional = true }
-async-trait = { version = "0.1", optional = true }
-
 # Python interop (optional, see [features])
 pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"], optional = true }
 # libSQL persistence backend (LibsqlStore + remote Turso support)
 libsql = { version = "0.10.0-pre.4", optional = true }
 # Native library loading
 libloading = "0.8"
-# Synchronization primitives (parking_lot guards are smaller and never poison)
-parking_lot = "0.12"
-# WASM binary encoding (optional, see [features])
+# AI runtime crate (optional; enabled by the `ai-runtime` feature).
+nulang-ai = { path = "crates/nulang-ai", optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
 wasm-encoder = { version = "0.220", optional = true }
 # WASM runtime using Wasmtime (optional, see [features])
 wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow", "component-model", "wat"] }

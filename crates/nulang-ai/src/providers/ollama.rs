@@ -3,9 +3,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::ai::client::LlmClient;
-use crate::ai::request::{LlmMessage, LlmRequest, ToolSchema};
-use crate::ai::response::{LlmError, LlmErrorKind, LlmResponse, TokenUsage, ToolCall};
+use crate::client::LlmClient;
+use crate::request::{LlmMessage, LlmRequest, ToolSchema};
+use crate::response::{LlmError, LlmErrorKind, LlmResponse, TokenUsage, ToolCall};
 
 /// Client for the Ollama HTTP API.
 #[derive(Debug, Clone)]
@@ -106,7 +106,7 @@ impl OllamaClient {
         Self {
             base_url: base_url.to_string(),
             model: model.to_string(),
-            client: crate::ai::client::http_client(),
+            client: crate::client::http_client(),
         }
     }
 

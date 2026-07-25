@@ -6,9 +6,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::ai::client::LlmClient;
-use crate::ai::request::{LlmMessage, LlmRequest, ToolSchema};
-use crate::ai::response::{LlmError, LlmErrorKind, LlmResponse, TokenUsage, ToolCall};
+use crate::client::LlmClient;
+use crate::request::{LlmMessage, LlmRequest, ToolSchema};
+use crate::response::{LlmError, LlmErrorKind, LlmResponse, TokenUsage, ToolCall};
 
 /// Client for the OpenAI chat completions API.
 #[derive(Debug, Clone)]
@@ -120,8 +120,8 @@ impl LlmClient for OpenAiClient {
 
 // -- Error classification helpers -------------------------------------------
 
-/// Classify a `reqwest::Error` into an `LlmError`. Timeout → Timeout,
-/// everything else → ProviderError with the error text.
+/// Classify a `reqwest::Error` into an `LlmError`. Timeout -> Timeout,
+/// everything else -> ProviderError with the error text.
 fn classify_reqwest_error(e: reqwest::Error) -> LlmError {
     if e.is_timeout() {
         LlmError::new(
@@ -160,7 +160,7 @@ impl OpenAiClient {
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: api_key.into(),
             model: model.into(),
-            client: crate::ai::client::http_client(),
+            client: crate::client::http_client(),
         }
     }
 
@@ -174,7 +174,7 @@ impl OpenAiClient {
             base_url: base_url.into(),
             api_key: api_key.into(),
             model: model.into(),
-            client: crate::ai::client::http_client(),
+            client: crate::client::http_client(),
         }
     }
 

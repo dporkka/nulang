@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ai::request::LlmMessage;
+use crate::request::LlmMessage;
 
 /// A single conversational turn stored in episodic memory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,37 +39,28 @@ impl EpisodicMemory {
 
     /// Append a new turn to memory, evicting the oldest turn if over capacity.
     pub fn add_turn(&mut self, role: impl Into<String>, content: impl Into<String>) {
-        if self.max_turns == 0 {
-            return;
-        }
-        if self.turns.len() >= self.max_turns {
-            self.turns.pop_front();
-        }
         self.turns.push_back(Turn {
             role: role.into(),
             content: content.into(),
         });
+        while self.turns.len() > self.max_turns {
+            self.turns.pop_front();
+        }
     }
 
     /// Return the `n` most recent turns, oldest first.
     pub fn recent(&self, n: usize) -> Vec<&Turn> {
-        self.turns
-            .iter()
-            .rev()
-            .take(n)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect()
+        let start = self.turns.len().saturating_sub(n);
+        self.turns.iter().skip(start).collect()
     }
 
     /// Materialize all stored turns as [`LlmMessage`] values.
     pub fn to_messages(&self) -> Vec<LlmMessage> {
         self.turns
             .iter()
-            .map(|turn| LlmMessage {
-                role: turn.role.clone(),
-                content: turn.content.clone(),
+            .map(|t| LlmMessage {
+                role: t.role.clone(),
+                content: t.content.clone(),
             })
             .collect()
     }
@@ -90,51 +81,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_episodic_memory_add_turn_and_recent() {
-        let mut mem = EpisodicMemory::new(10);
+    fn test_empty_memory() {
+        let mem = EpisodicMemory::new(10);
         assert_eq!(mem.len(), 0);
+        assert!(mem.to_messages().is_empty());
+    }
 
-        mem.add_turn("system", "You are helpful.");
-        mem.add_turn("user", "Hello!");
-        mem.add_turn("assistant", "Hi there!");
+    #[test]
+    fn test_add_and_retrieve() {
+        let mut mem = EpisodicMemory::new(10);
+        mem.add_turn("user", "hello");
+        mem.add_turn("assistant", "hi there");
+        assert_eq!(mem.len(), 2);
+        let msgs = mem.to_messages();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].content, "hello");
+    }
 
+    #[test]
+    fn test_max_turns_eviction() {
+        let mut mem = EpisodicMemory::new(3);
+        for i in 0..5 {
+            mem.add_turn("user", format!("msg {}", i));
+        }
         assert_eq!(mem.len(), 3);
+        let msgs = mem.to_messages();
+        assert_eq!(msgs[0].content, "msg 2");
+        assert_eq!(msgs[2].content, "msg 4");
+    }
 
+    #[test]
+    fn test_recent() {
+        let mut mem = EpisodicMemory::new(10);
+        for i in 0..5 {
+            mem.add_turn("user", format!("msg {}", i));
+        }
         let recent = mem.recent(2);
         assert_eq!(recent.len(), 2);
-        assert_eq!(recent[0].role, "user");
-        assert_eq!(recent[0].content, "Hello!");
-        assert_eq!(recent[1].role, "assistant");
-        assert_eq!(recent[1].content, "Hi there!");
+        assert_eq!(recent[0].content, "msg 3");
+        assert_eq!(recent[1].content, "msg 4");
     }
 
     #[test]
-    fn test_episodic_memory_to_messages() {
-        let mut mem = EpisodicMemory::new(5);
-        mem.add_turn("user", "What is 2+2?");
-        mem.add_turn("assistant", "4");
-
-        let messages = mem.to_messages();
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, "user");
-        assert_eq!(messages[0].content, "What is 2+2?");
-        assert_eq!(messages[1].role, "assistant");
-        assert_eq!(messages[1].content, "4");
+    fn test_recent_less_than_n() {
+        let mut mem = EpisodicMemory::new(10);
+        mem.add_turn("user", "only");
+        let recent = mem.recent(5);
+        assert_eq!(recent.len(), 1);
     }
 
     #[test]
-    fn test_episodic_memory_max_turns_eviction() {
-        let mut mem = EpisodicMemory::new(3);
-        mem.add_turn("user", "one");
-        mem.add_turn("user", "two");
-        mem.add_turn("user", "three");
-        mem.add_turn("user", "four");
+    fn test_clear() {
+        let mut mem = EpisodicMemory::new(10);
+        mem.add_turn("user", "hello");
+        mem.clear();
+        assert_eq!(mem.len(), 0);
+    }
 
-        assert_eq!(mem.len(), 3);
-
-        let messages = mem.to_messages();
-        assert_eq!(messages[0].content, "two");
-        assert_eq!(messages[1].content, "three");
-        assert_eq!(messages[2].content, "four");
+    #[test]
+    fn test_zero_max_turns() {
+        let mut mem = EpisodicMemory::new(0);
+        mem.add_turn("user", "hello");
+        assert_eq!(mem.len(), 0);
     }
 }

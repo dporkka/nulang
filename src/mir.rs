@@ -279,43 +279,6 @@ pub enum RValue {
         behavior_idx: usize,
         args: Vec<LocalId>,
     },
-    // AI runtime builtins
-    PipelineNew,
-    PipelineStage {
-        id: LocalId,
-        name: LocalId,
-        actor: LocalId,
-        template: LocalId,
-    },
-    PipelineRun {
-        id: LocalId,
-        input: LocalId,
-    },
-    SupervisorNew,
-    SupervisorWorker {
-        id: LocalId,
-        name: LocalId,
-        actor: LocalId,
-        description: LocalId,
-    },
-    SupervisorRun {
-        id: LocalId,
-        task: LocalId,
-    },
-    DebateNew {
-        topic: LocalId,
-        rounds: LocalId,
-        threshold: LocalId,
-    },
-    DebateParticipant {
-        id: LocalId,
-        name: LocalId,
-        stance: LocalId,
-        actor: LocalId,
-    },
-    DebateRun {
-        id: LocalId,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -605,40 +568,6 @@ mod tests {
             behavior_idx: 0,
             args: vec![LocalId(0)],
         };
-        let _ = RValue::PipelineNew;
-        let _ = RValue::PipelineStage {
-            id: LocalId(0),
-            name: LocalId(0),
-            actor: LocalId(0),
-            template: LocalId(0),
-        };
-        let _ = RValue::PipelineRun {
-            id: LocalId(0),
-            input: LocalId(0),
-        };
-        let _ = RValue::SupervisorNew;
-        let _ = RValue::SupervisorWorker {
-            id: LocalId(0),
-            name: LocalId(0),
-            actor: LocalId(0),
-            description: LocalId(0),
-        };
-        let _ = RValue::SupervisorRun {
-            id: LocalId(0),
-            task: LocalId(0),
-        };
-        let _ = RValue::DebateNew {
-            topic: LocalId(0),
-            rounds: LocalId(0),
-            threshold: LocalId(0),
-        };
-        let _ = RValue::DebateParticipant {
-            id: LocalId(0),
-            name: LocalId(0),
-            stance: LocalId(0),
-            actor: LocalId(0),
-        };
-        let _ = RValue::DebateRun { id: LocalId(0) };
     }
 
     #[test]

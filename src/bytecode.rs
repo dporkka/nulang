@@ -1,6 +1,6 @@
 //! Bytecode ISA, instruction encoding, and module format for the Nulang VM.
 
-use crate::ai::request::ToolSchema;
+use crate::ai::ToolSchema;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -129,7 +129,7 @@ pub enum OpCode {
     Unwind = 0x93,  // Unwind effect handler
 
     // == Python Interop (0x94-0x9B) ==
-    PyImport = 0x94,      // Import Python module (module_name_const_idx, dst_reg, _)
+    PyImport = 0x94,  // Import Python module (module_name_const_idx, dst_reg, _)
     PyGetAttr = 0x95, // Get attribute from Python object (obj_reg, attr_name_const_idx, dst_reg)
     PyCall = 0x96,    // Call Python callable (callable_reg, arg_count, dst_reg)
     PyCallKw = 0x97, // Call Python callable with kwargs (callable_reg, args_tuple_reg, kwargs_dict_reg, dst_reg uses op3)
@@ -137,9 +137,6 @@ pub enum OpCode {
     PyToNu = 0x99,   // Convert Python object to Nulang Value (py_val_reg, dst_reg, _)
     PyFromNu = 0x9A, // Convert Nulang Value to Python object (nu_val_reg, dst_reg, _)
     PyRelease = 0x9B, // Decrement Python object reference count (py_val_reg, _, _)
-    PipelineNew = 0x9D, // Create a new pipeline (dst)
-    PipelineStage = 0x9E, // Add stage to pipeline (reads r0=id, r1=name, r2=actor, r3=template; dst)
-    PipelineRun = 0x9F,   // Run pipeline (reads r0=id, r1=input; dst)
 
     // == Actor & Concurrency, cont. (0xA0-0xAF) ==
     // Timed selective receive: `receive { | B(x) => e ... } after ms => body`.
@@ -184,16 +181,6 @@ pub enum OpCode {
 
     // == FFI (0xB0-0xBF) ==
     FFICall = 0xB0, // Call foreign function (func_idx high, func_idx low, dst)
-
-    // == Supervisor (0xC0-0xCF) ==
-    SupervisorNew = 0xC0,    // Create a new supervisor team (dst)
-    SupervisorWorker = 0xC1, // Add worker to team (reads r0=id, r1=name, r2=actor, r3=description; dst)
-    SupervisorRun = 0xC2,    // Run supervisor team (reads r0=id, r1=task; dst)
-
-    // == Debate (0xC3-0xCF) ==
-    DebateNew = 0xC3, // Create a new debate (reads r0=topic, r1=rounds, r2=threshold; dst)
-    DebateParticipant = 0xC4, // Add participant (reads r0=id, r1=name, r2=stance, r3=actor; dst)
-    DebateRun = 0xC5, // Run debate (reads r0=id; dst)
 
     // == Inference & Async Effects (0xC6) ==
     /// Generic asynchronous effect operation (e.g. "Inference.ask").
@@ -347,18 +334,9 @@ impl OpCode {
             0x99 => Some(PyToNu),
             0x9A => Some(PyFromNu),
             0x9B => Some(PyRelease),
-            0x9D => Some(PipelineNew),
-            0x9E => Some(PipelineStage),
-            0x9F => Some(PipelineRun),
             0xA0 => Some(ReceiveWait),
             0xA1 => Some(ReceiveCommit),
             0xB0 => Some(FFICall),
-            0xC0 => Some(SupervisorNew),
-            0xC1 => Some(SupervisorWorker),
-            0xC2 => Some(SupervisorRun),
-            0xC3 => Some(DebateNew),
-            0xC4 => Some(DebateParticipant),
-            0xC5 => Some(DebateRun),
             0xC6 => Some(PerformAsync),
             0xD0 => Some(NodeId),
             0xD1 => Some(Migrate),
@@ -802,10 +780,9 @@ mod tests {
             .chain(0x80..=0x8F)
             .chain(0x90..=0x93)
             .chain(0x94..=0x9B)
-            .chain(0x9D..=0x9F)
             .chain(0xA0..=0xA1)
             .chain(0xB0..=0xB0)
-            .chain(0xC0..=0xC6)
+            .chain(0xC6..=0xC6)
             .chain(0xD0..=0xD5)
             .chain(0xE0..=0xE7)
             .chain(0xF0..=0xF6)

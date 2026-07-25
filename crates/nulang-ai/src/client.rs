@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 
-use crate::ai::request::LlmRequest;
-use crate::ai::response::{LlmError, LlmResponse};
+use crate::request::LlmRequest;
+use crate::response::{LlmError, LlmResponse};
 
 /// Async trait implemented by all LLM provider clients.
 #[async_trait]
@@ -60,8 +60,8 @@ pub(crate) fn http_client() -> reqwest::Client {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::request::LlmRequest;
-    use crate::ai::response::{LlmResponse, TokenUsage};
+    use crate::request::LlmRequest;
+    use crate::response::{LlmResponse, TokenUsage};
 
     struct TestClient;
 
@@ -95,7 +95,10 @@ mod tests {
         // The CLI runs script execution synchronously inside #[tokio::main],
         // so complete_sync must not panic with "Cannot start a runtime from
         // within a runtime" when a runtime context is active on this thread.
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let client = TestClient;
         let request = LlmRequest::default();
         let result = rt.block_on(async { complete_sync(&client, request) });

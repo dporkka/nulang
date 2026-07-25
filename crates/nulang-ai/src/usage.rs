@@ -1,7 +1,7 @@
 //! Token-usage tracking and cost estimation for the AI Runtime.
 
-use crate::ai::request::ModelPricing;
-use crate::ai::response::TokenUsage;
+use crate::request::ModelPricing;
+use crate::response::TokenUsage;
 
 /// Estimated cost in USD for a given usage and pricing rates.
 pub fn estimated_cost(usage: &TokenUsage, pricing: &ModelPricing) -> f64 {

@@ -11,8 +11,8 @@
 //! flow expression — the old design stored `if` as a *body terminator*,
 //! which reordered any code lowered after it.
 
-use crate::ai::request::ToolSchema;
 use crate::ai::schema::function_to_tool_schema;
+use crate::ai::ToolSchema;
 use crate::ast;
 use crate::ast::{BinOp, Decl, Expr, FunctionAnnotation, Literal};
 use crate::hir;
@@ -386,7 +386,7 @@ fn desugar_agent(
         output: 0.0,
     });
     let max_turns = memory.as_ref().map(|m| m.max_turns).unwrap_or(50);
-    let initial_memory = serde_json::to_string(&crate::ai::memory::EpisodicMemory::new(max_turns))
+    let initial_memory = serde_json::to_string(&crate::ai::EpisodicMemory::new(max_turns))
         .unwrap_or_else(|_| "{}".to_string());
 
     let semantic_memory_dimensions = semantic_memory.as_ref().map(|m| m.dimensions);

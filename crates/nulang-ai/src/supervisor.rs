@@ -5,8 +5,10 @@
 //! final accumulated result.  Each worker is prompted with the previous worker's
 //! output (or the original task for the first worker) so the team behaves like
 //! a sequential refinement chain.
-
-use crate::runtime::Runtime;
+//!
+//! Implementors of [`SupervisorRuntime`] provide the actor `ask` behavior.
+//! Test code can use a mock implementation to avoid spinning up a real actor
+//! system.
 
 // ---------------------------------------------------------------------------
 // Runtime abstraction
@@ -14,17 +16,11 @@ use crate::runtime::Runtime;
 
 /// Minimal runtime capability required to execute a supervisor team.
 ///
-/// Implemented for [`Runtime`] using the actor `ask` behavior.  Test code can
-/// provide a mock implementation to avoid spinning up a real actor system.
+/// Test code can provide a mock implementation to avoid spinning up a real
+/// actor system.
 pub trait SupervisorRuntime {
     /// Send `prompt` to `agent_id` and return the textual response.
     fn ask_agent(&mut self, agent_id: u64, prompt: &str) -> Result<String, String>;
-}
-
-impl SupervisorRuntime for Runtime {
-    fn ask_agent(&mut self, agent_id: u64, prompt: &str) -> Result<String, String> {
-        crate::ai::PipelineRuntime::ask_agent(self, agent_id, prompt)
-    }
 }
 
 // ---------------------------------------------------------------------------

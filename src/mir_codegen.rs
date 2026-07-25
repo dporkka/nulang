@@ -982,92 +982,6 @@ impl MirCodegen {
                 // Ask writes its result back into its own op1 register.
                 self.emit(Instruction::new2(OpCode::Move, FUNC_VALUE_REG, dst));
             }
-            mir::RValue::PipelineNew => {
-                self.emit(Instruction::new1(OpCode::PipelineNew, dst));
-            }
-            mir::RValue::PipelineStage {
-                id,
-                name,
-                actor,
-                template,
-            } => {
-                let _rid = self.local_reg(*id);
-                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-                let _rname = self.local_reg(*name);
-                self.emit(Instruction::new2(OpCode::Move, _rname, SCRATCH0 + 1));
-                let _ractor = self.local_reg(*actor);
-                self.emit(Instruction::new2(OpCode::Move, _ractor, SCRATCH0 + 2));
-                let _rtemplate = self.local_reg(*template);
-                self.emit(Instruction::new2(OpCode::Move, _rtemplate, SCRATCH0 + 3));
-                self.emit(Instruction::new1(OpCode::PipelineStage, dst));
-            }
-            mir::RValue::PipelineRun { id, input } => {
-                let _rid = self.local_reg(*id);
-                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-                let _rinput = self.local_reg(*input);
-                self.emit(Instruction::new2(OpCode::Move, _rinput, SCRATCH0 + 1));
-                self.emit(Instruction::new1(OpCode::PipelineRun, dst));
-            }
-            mir::RValue::SupervisorNew => {
-                self.emit(Instruction::new1(OpCode::SupervisorNew, dst));
-            }
-            mir::RValue::SupervisorWorker {
-                id,
-                name,
-                actor,
-                description,
-            } => {
-                let _rid = self.local_reg(*id);
-                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-                let _rname = self.local_reg(*name);
-                self.emit(Instruction::new2(OpCode::Move, _rname, SCRATCH0 + 1));
-                let _ractor = self.local_reg(*actor);
-                self.emit(Instruction::new2(OpCode::Move, _ractor, SCRATCH0 + 2));
-                let _rdescription = self.local_reg(*description);
-                self.emit(Instruction::new2(OpCode::Move, _rdescription, SCRATCH0 + 3));
-                self.emit(Instruction::new1(OpCode::SupervisorWorker, dst));
-            }
-            mir::RValue::SupervisorRun { id, task } => {
-                let _rid = self.local_reg(*id);
-                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-                let _rtask = self.local_reg(*task);
-                self.emit(Instruction::new2(OpCode::Move, _rtask, SCRATCH0 + 1));
-                self.emit(Instruction::new1(OpCode::SupervisorRun, dst));
-            }
-            mir::RValue::DebateNew {
-                topic,
-                rounds,
-                threshold,
-            } => {
-                let _rtopic = self.local_reg(*topic);
-                self.emit(Instruction::new2(OpCode::Move, _rtopic, SCRATCH0));
-                let _rrounds = self.local_reg(*rounds);
-                self.emit(Instruction::new2(OpCode::Move, _rrounds, SCRATCH0 + 1));
-                let _rthreshold = self.local_reg(*threshold);
-                self.emit(Instruction::new2(OpCode::Move, _rthreshold, SCRATCH0 + 2));
-                self.emit(Instruction::new1(OpCode::DebateNew, dst));
-            }
-            mir::RValue::DebateParticipant {
-                id,
-                name,
-                stance,
-                actor,
-            } => {
-                let _rid = self.local_reg(*id);
-                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-                let _rname = self.local_reg(*name);
-                self.emit(Instruction::new2(OpCode::Move, _rname, SCRATCH0 + 1));
-                let _rstance = self.local_reg(*stance);
-                self.emit(Instruction::new2(OpCode::Move, _rstance, SCRATCH0 + 2));
-                let _ractor = self.local_reg(*actor);
-                self.emit(Instruction::new2(OpCode::Move, _ractor, SCRATCH0 + 3));
-                self.emit(Instruction::new1(OpCode::DebateParticipant, dst));
-            }
-            mir::RValue::DebateRun { id } => {
-                let _rid = self.local_reg(*id);
-                self.emit(Instruction::new2(OpCode::Move, _rid, SCRATCH0));
-                self.emit(Instruction::new1(OpCode::DebateRun, dst));
-            }
         }
         Ok(())
     }
@@ -1421,8 +1335,6 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
         | Receive
         | ReceiveMatch { .. }
         | ReceiveCommit
-        | PipelineNew
-        | SupervisorNew
         | Spawn { .. }
         | SelfRef
         | StateGet { .. } => {}
@@ -1493,54 +1405,6 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
                 cp(&mut out, *a);
             }
         }
-        PipelineStage {
-            id,
-            name,
-            actor,
-            template,
-        } => {
-            for x in [id, name, actor, template] {
-                cp(&mut out, *x);
-            }
-        }
-        PipelineRun { id, input } => {
-            cp(&mut out, *id);
-            cp(&mut out, *input);
-        }
-        SupervisorWorker {
-            id,
-            name,
-            actor,
-            description,
-        } => {
-            for x in [id, name, actor, description] {
-                cp(&mut out, *x);
-            }
-        }
-        SupervisorRun { id, task } => {
-            cp(&mut out, *id);
-            cp(&mut out, *task);
-        }
-        DebateNew {
-            topic,
-            rounds,
-            threshold,
-        } => {
-            cp(&mut out, *topic);
-            cp(&mut out, *rounds);
-            cp(&mut out, *threshold);
-        }
-        DebateParticipant {
-            id,
-            name,
-            stance,
-            actor,
-        } => {
-            for x in [id, name, stance, actor] {
-                cp(&mut out, *x);
-            }
-        }
-        DebateRun { id } => cp(&mut out, *id),
     }
     out
 }
