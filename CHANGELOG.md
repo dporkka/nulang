@@ -109,18 +109,17 @@ feature flag or explicitly marked experimental.*
 - `sqlite` feature: libsql/Turso persistence. Behind `--features sqlite`.
 - `lsp` feature: the tower-lsp language server (`src/lsp/`). Behind
   `--features lsp`.
-- `ai-runtime` feature: the AI runtime (`src/ai/`) — LLM providers,
-  pipelines, debates, supervisor teams, the `LlmAsk` opcode, and the `LLM`
-  effect. Behind `--features ai-runtime` (enabled by default; omit it for a
-  leaner build). **Deprecated since 1.0.0-frozen:** `Effect::LLM` and
-  `OpCode::LlmAsk` are deprecated in favor of
-  `perform Provider.ask("llm", prompt)`, which references an eternal
-  "provider" abstraction rather than a transient technology. The
-  `LLM`/`LlmAsk` surface remains functional for the deprecation cycle (≥2
-  major versions) and will be removed in 3.0 (RFC 0003, item 5 breaking
-  phase). New code should use `Provider.ask`. The `Provider` effect is
-  Stable-tier: it is the general, runtime-registered effect handler for any
-  provider, with `"llm"` as the first registered name.
+- `ai-runtime` feature: the AI runtime (`crates/nulang-ai/` workspace crate,
+  re-exported through `src/ai/`) — LLM providers (OpenAI, Ollama), pipelines,
+  debates, supervisor teams, memory subsystems, and usage tracking. Behind
+  `--features ai-runtime` (enabled by default). **Changed in 1.0.0-frozen:**
+  all AI effects now dispatch through the generic `PerformAsync` opcode
+  (`0xC6`) with `effect_op` strings (`"Inference.ask"`, `"Pipeline.run"`,
+  etc.). The dedicated `LlmAsk` opcode and the `PipelineNew`…`DebateRun`
+  opcode range (0x9D–0xC5) have been removed. AI types live in the
+  `nulang-ai` crate with zero core dependencies; the core `ActorVmCallbacks`
+  trait no longer carries AI-specific methods. The `LLM` effect redirects to
+  `Provider.ask` under the hood.
 - AOT native backend (`src/aot/`), JIT tiering (`src/jit/`), QUIC transport
   (`src/runtime/quic_transport.rs`).
 

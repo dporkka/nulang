@@ -58,14 +58,14 @@ If you are building AI agents that must remember state, durable workflows that s
 ### Current Status
 
 Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM and JIT, actor runtime, supervision, effects, capabilities, distribution, durability, and AI runtime all exist and are tested today:
-- ✅ All 1392 tests pass with `cargo test` (1424 with `--features wasm-backend`)
-- ✅ Builds with `cargo build`
+- ✅ All 1425 tests pass with `cargo test` (1373 core + 52 `nulang-ai`; add `--features wasm-backend` for WASM tests)
+- ✅ Builds with `cargo build` or leaner `cargo build --no-default-features`
 - ✅ i64-tagged `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`) — immune to WASM NaN canonicalization
-- ✅ 138-opcode bytecode ISA (arithmetic, control flow, closures, objects, effects, actors, FFI, Python, distribution)
+- ✅ ~127-opcode bytecode ISA — generic `PerformAsync` effect dispatch replaces AI-specific opcodes
 - ✅ Hindley-Milner type inference with algebraic effects, user-declared variant types (construction + recursive pattern matching with guards), and row-polymorphic records (`fn(r) r.x + r.y` accepts any record with `x` and `y`; closed record annotations stay exact)
 - ✅ Actor runtime: spawn, `spawn link`/`spawn monitor`, send, monitors, links, supervision, timers, registry, process groups, selective `receive` with `after`, actor priority
 - ✅ ORCA-style per-actor GC with cycle detection
-- ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams
+- ✅ AI runtime: `agent` declarations, LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams — extracted to `nulang-ai` workspace crate; all AI effects dispatch through generic `PerformAsync`
 - ✅ Durable workflow runtime: `workflow` declarations with steps, timers, signals, saga compensation
 - ✅ Format stability: frozen `.nbc` bytecode artifacts, NUL0 wire protocol versioning, language version `1.0.0-frozen` (RFC 0001/0002)
 - ✅ `entity` declarations: durable-first actors (event-sourced by default) for long-lived domain objects
@@ -99,7 +99,7 @@ fewer system dependencies:
 | `python` | PyO3 Python interop (`src/python/`) | No — on by default |
 | `sqlite` | libsql/Turso persistence (`persistence.rs`) | No — on by default |
 | `lsp` | tower-lsp language server (`src/lsp/`) | No — on by default |
-| `ai-runtime` | AI runtime — LLM providers, pipelines, debates, supervisor teams (`src/ai/`) | No — on by default |
+| `ai-runtime` | AI runtime — LLM providers, pipelines, debates, supervisor teams (`crates/nulang-ai/`) | No — on by default |
 | `wasm-backend` | WASM compiler (`mir_wasm.rs`) + Wasmtime runtime (`wasm_runtime.rs`), `--backend wasm\|wasm-run\|wasm-aot` | Yes — requires `wasmtime` CLI for AOT |
 
 ```bash
@@ -132,6 +132,9 @@ cargo run -- --check myprogram.nula
 # Evaluate a string
 cargo run -- --eval 'perform IO.print("Hello")'
 
+# Start the REPL
+cargo run -- --repl
+
 # Native/AOT backend: compile to native code via Cranelift
 cargo run -- --backend native myprogram.nula
 
@@ -144,8 +147,27 @@ cargo run --features wasm-backend -- --backend wasm-run myprogram.nula
 # WASM backend: compile to .wasm + AOT .cwasm (requires wasmtime CLI)
 cargo run --features wasm-backend -- --backend wasm-aot myprogram.nula
 
-# Package manager (also: nula build-wasm for WASM AOT builds)
+# Compile to .nbc bytecode artifact (don't run)
+cargo run -- --emit-nbc myprogram.nula
+
+# Run a pre-compiled .nbc artifact
+cargo run -- myprogram.nbc
+
+# Verify .nbc source hash against source
+cargo run -- --verify myprogram.nula -- myprogram.nbc
+
+# Generate Markdown API docs (docs/api.md)
+cargo run -- --doc
+
+# Generate per-effect stdlib docs
+cargo run -- --emit-stdlib-docs docs/stdlib/
+
+# Package manager
 cargo run -- nula new my-app
+cargo run -- nula build my-app
+cargo run -- nula test my-app
+cargo run -- nula run my-app
+cargo run -- nula build-wasm my-app   # WASM AOT build
 ```
 
 ### Examples
@@ -290,7 +312,7 @@ let dbl = fn(x) { x * 2 } in
              v                v                 v
    +------------------+ +------------------+ +------------------+
    | Bytecode Backend | | Native/AOT       | | WASM Backend     |
-   | (138 opcodes)    | | (Cranelift)      | | (wasm-encoder)   |
+   | (~127 opcodes)   | | (Cranelift)      | | (wasm-encoder)   |
    +------------------+ +------------------+ +------------------+
              |                |                 |
              v                v                 v
@@ -350,8 +372,8 @@ let dbl = fn(x) { x * 2 } in
 | `jit/mod` | JIT session manager, tiered execution, hot-counter tracking | ~610 |
 | `jit/compiler` | Bytecode → Cranelift IR (50 opcodes) | ~1,080 |
 | `jit/typed_compiler` | Type-directed JIT: direct CLIF when operand types are known | ~2,110 |
-| `jit/simd_analyzer` / `jit/simd_compiler` | Vectorizable-loop detection + SIMD CLIF emission | ~3,190 |
-| `jit/runtime` | NaN-tag-aware runtime helpers for JIT (31 extern C functions) | ~395 |
+| `ai` | Re-export facade for `nulang-ai` crate + Runtime trait impls | ~350 |
+| `nulang-ai` | Workspace crate: LLM providers, memory, pipelines, debates, supervisor teams | ~4,000 |
 | `runtime/mod` | Runtime coordinator: actors, scheduling, GC, supervision, distribution | ~5,260 |
 | `runtime/actor` | Actor struct, lifecycle, state management | ~520 |
 | `runtime/scheduler` | Work-stealing queues + reduction-bounded cooperative scheduler | ~570 |
@@ -360,20 +382,6 @@ let dbl = fn(x) { x * 2 } in
 | `runtime/registry` | Local actor name registry (register/whereis/registered) | ~210 |
 | `runtime/process_groups` | Decentralized actor group membership (Erlang pg) | ~285 |
 | `runtime/heap` | Per-actor bump allocator with ORCA object headers | ~1,690 |
-| `runtime/gc` | ORCA reference counting (3-count protocol) | ~1,430 |
-| `runtime/orca_cycle` | Intra-node cycle detector with weighted heuristic | ~1,680 |
-| `runtime/supervisor` | Erlang/OTP-style supervision strategies | ~750 |
-| `runtime/network` | TCP transport, NUL0 wire protocol | ~2,360 |
-| `runtime/cluster` | Gossip-based cluster membership + failure detection | ~1,210 |
-| `runtime/distributed` | Location-transparent actor addressing | ~2,060 |
-| `runtime/crdt` | CRDT trait + GCounter, PNCounter, GSet, ORSet, AWORSet | ~1,365 |
-| `runtime/crdt_reg` | LWWRegister, MVRegister, RGA sequence CRDT | ~875 |
-| `runtime/crdt_manager` | CRDT factory, sync ops, inter-node merge | ~1,160 |
-| `runtime/persistence` | Snapshot/journal stores (MemoryStore, JsonFileStore, LibsqlStore) | ~1,290 |
-| `python/bridge` + `python/marshal` | PyO3 interpreter bridge + Value↔Python marshalling | ~1,290 |
-| `ffi` | C-compatible FFI layer, native-library registry, embedder C API | ~1,440 |
-| `ai` | LLM providers (OpenAI, Ollama), memory, pipelines, debates, supervisor teams | ~3,250 |
-| `lsp` | tower-lsp language server (12 features incl. hover, inlay hints, completion) | ~2,000 |
 | `package` | Nula package manager (manifest, lockfile, resolver, commands) | ~1,240 |
 | `format` | Frozen artifact formats (`.nbc` bytecode, NUL0 wire protocol) + migration registry | ~590 |
 | `docgen` | Documentation generator: .nula doc comments → docs/api.md | ~430 |
@@ -381,8 +389,7 @@ let dbl = fn(x) { x * 2 } in
 | `repl` | Interactive REPL with :type, :ast, :bytecode commands | ~800 |
 | `main` | CLI entry point (run, repl, eval, check, lsp, backend selection) | ~940 |
 | `integration_tests` / `stress_tests` / `runtime/tests` / `jit/tests` | End-to-end pipeline, chaos, runtime, and JIT test suites | ~13,600 |
-
-**Total: ~93,900 lines of Rust across 104 source files with 1392 tests (1424 with `--features wasm-backend`).**
+**Total: ~90,000 lines of Rust across 100+ source files with 1425 tests (1373 core + 52 `nulang-ai`).**
 
 ---
 

@@ -12,9 +12,7 @@ editUrl: false
 
 # LLM Effect
 
-The `LLM` effect provides the following built-in operations, wired into the VM and runtime.
-
-> **Deprecated since language version 1.0.0-frozen.** `LLM.ask` is deprecated in favor of `perform Provider.ask("llm", prompt)`, which references a general provider abstraction. The `LLM`/`LlmAsk` surface remains functional for the deprecation cycle (≥2 major versions). New code should use `Provider.ask`.
+The `LLM` effect provides the following built-in operations, wired through the generic `PerformAsync` effect dispatch. The compiler emits a single `PerformAsync` bytecode with the effect-op string `"LLM.ask"`; the VM routes it to the registered LLM client via the runtime's effect handler.
 
 | Operation | Signature | Description |
 |-----------|-----------|-------------|

@@ -3,6 +3,8 @@ title: Multi-Agent Patterns
 description: Compose multiple Nulang agents into pipelines, debate teams, and supervisor hierarchies.
 ---
 
+> **Implementation note**: The `Pipeline`, `Debate`, and `Supervisor` types live in the `nulang-ai` workspace crate. They interact with the VM through the generic `PerformAsync` effect dispatch — no dedicated AI bytecodes are needed. The user-facing syntax is identical.
+
 ## Patterns for Multiple Agents
 
 Nulang's AI runtime provides three multi-agent patterns that compose agents into structured workflows. Each pattern addresses a different coordination need.
