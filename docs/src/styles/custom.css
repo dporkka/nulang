@@ -70,16 +70,10 @@
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  background-size: 200% 200%;
-  animation: gradient-shift 6s ease-in-out infinite;
   line-height: 1.3;
   overflow: visible;
 }
 
-@keyframes gradient-shift {
-  0%, 100% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-}
 
 /* ── Split-color header title (desktop only) ── */
 @media (min-width: 50rem) {
@@ -101,19 +95,19 @@
 /* ── Hero button restyling ── */
 .hero .actions a[href*="getting-started"] {
   background: var(--sl-color-accent);
-  color: var(--nu-orange);
+  color: #ffffff;
   border: none;
-  font-weight: 600;
+  font-weight: 500;
 }
 .hero .actions a[href*="nulang.cloud"] {
   background: transparent;
   color: var(--sl-color-accent);
   border: 2px solid var(--sl-color-accent);
-  font-weight: 600;
+  font-weight: 500;
 }
 .hero .actions a[href*="nulang.cloud"]:hover {
   background: var(--nu-orange);
-  color: var(--sl-color-accent);
+  color: #ffffff;
   border-color: var(--nu-orange);
 }
 
@@ -432,3 +426,49 @@
   background: linear-gradient(90deg, var(--sl-color-accent), transparent);
   border-radius: 1px;
 }
+
+/* ── Theme toggle — icon-only with Sun/Moon ── */
+starlight-theme-select select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: transparent;
+  cursor: pointer;
+}
+starlight-theme-select label {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+starlight-theme-select label::before {
+  content: '';
+  display: block;
+  width: 1.125rem;
+  height: 1.125rem;
+  position: absolute;
+  left: 0.4375rem;
+  pointer-events: none;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  background-color: var(--sl-color-text);
+}
+/* Sun icon (shown in dark mode = currently-dark, user wants light) */
+:root[data-theme="dark"] starlight-theme-select label::before {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='5'/%3E%3Cpath d='M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42'/%3E%3C/svg%3E");
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='5'/%3E%3Cpath d='M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42'/%3E%3C/svg%3E");
+}
+/* Moon icon (shown in light mode = currently-light, user wants dark) */
+:root[data-theme="light"] starlight-theme-select label::before {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'/%3E%3C/svg%3E");
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'%3E%3Cpath d='M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z'/%3E%3C/svg%3E");
+}
+
+

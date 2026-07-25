@@ -1,13 +1,12 @@
 ---
 title: Multi-Agent Patterns
-description: Compose multiple Nulang agents into pipelines, debate teams, and supervisor hierarchies.
+description: Compose multiple agents using the nulang-ai library — pipelines, debate teams, and supervisor hierarchies.
 ---
 
-> **Implementation note**: The `Pipeline`, `Debate`, and `Supervisor` types live in the `nulang-ai` workspace crate. They interact with the VM through the generic `PerformAsync` effect dispatch — no dedicated AI bytecodes are needed. The user-facing syntax is identical.
 
 ## Patterns for Multiple Agents
 
-Nulang's AI runtime provides three multi-agent patterns that compose agents into structured workflows. Each pattern addresses a different coordination need.
+The nulang-ai library provides three multi-agent patterns that compose agents into structured workflows. Each pattern addresses a different coordination need.
 
 | Pattern | Use case |
 |---------|----------|
@@ -94,7 +93,7 @@ The supervisor team runtime wraps agents in a supervision tree. Each agent is a 
 | Restart the failed agent only | One-for-one |
 | Restart all agents in the team | One-for-all |
 
-This mirrors the [actor supervision model](/actors/supervision/) — the same OTP primitives, applied to agents. The difference is that agent supervisors understand LLM-specific failure modes (rate limits, provider outages) and can apply backoff before restarting.
+This extends the [actor supervision model](/actors/supervision/) — the same OTP primitives, applied to agents. The difference is that agent supervisors understand LLM-specific failure modes (rate limits, provider outages) and can apply backoff before restarting.
 
 ### When to use supervisor teams
 

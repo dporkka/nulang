@@ -1,11 +1,11 @@
 ---
 title: Agent Memory
-description: Three memory subsystems for Nulang agents — episodic conversation history, semantic fact recall, and procedural pattern learning.
+description: Three memory subsystems for agents built with the nulang-ai library — episodic conversation history, semantic fact recall, and procedural pattern learning.
 ---
 
 ## Three Memory Subsystems
 
-Nulang agents have three independent memory subsystems, each configured separately and persisted independently. All three survive node restarts when a persistence store is attached.
+Agents built with nulang-ai have three independent memory subsystems, each configured separately and persisted independently. All three survive node restarts when a persistence store is attached.
 
 | Memory | Config field | Purpose |
 |--------|-------------|---------|

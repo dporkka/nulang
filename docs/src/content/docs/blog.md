@@ -21,7 +21,7 @@ Both languages share the actor model, supervision trees, and "let it crash" phil
 | **Effects** | Algebraic effects, compile-time checked | No effect tracking |
 | **Performance** | JIT + native AOT, zero-copy | BEAM VM, garbage-collected |
 | **Memory model** | Per-actor heaps, ORCA GC | Shared heap, per-process GC |
-| **AI primitives** | First-class agents with memory | Library-level (Nx, Bumblebee) |
+| **AI library** | Optional nulang-ai library with memory | Library-level (Nx, Bumblebee) |
 
 **Takeaway**: If you want Erlang's fault tolerance with static types that catch bugs at compile time and native performance, Nulang is designed for you.
 
@@ -65,13 +65,13 @@ The AI ecosystem has converged on Python and TypeScript, but both languages were
 
 | | Nulang | Python/TypeScript |
 |---|---|---|
-| **Agent declaration** | Language-level `agent` keyword | Library objects (LangChain, etc.) |
+| **Agent declaration** | Declarative `agent` keyword | Library objects (LangChain, etc.) |
 | **Memory** | 3 built-in subsystems | Manual vector DB integration |
 | **Multi-agent** | Pipelines, debates, supervisors | Custom orchestration code |
 | **Determinism** | Type-checked effect isolation | No effect guarantees |
 | **Persistence** | Built-in checkpointing, event sourcing | External databases |
 
-**Takeaway**: Python and TypeScript have vast AI library ecosystems. Nulang gives you language-level primitives that eliminate boilerplate for the common patterns: define an agent, give it memory, compose agents into teams. No LangChain required.
+**Takeaway**: Python and TypeScript have vast AI library ecosystems. Nulang gives you declarative primitives that eliminate boilerplate for the common patterns: define an agent, give it memory, compose agents into teams. No LangChain required.
 
 ---
 

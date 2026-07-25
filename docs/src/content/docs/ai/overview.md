@@ -1,13 +1,12 @@
 ---
 title: AI Agents Overview
-description: Declare LLM-powered agents as language primitives — spawning, the ask operator, and tool binding.
+description: Build LLM-powered agents using the nulang-ai library — spawning, asking, and tool binding.
 ---
 
-> **Library crate**: The AI agent types (`agent` declarations, `Pipeline`, `Supervisor`, `Debate`) live in the `nulang-ai` workspace crate. The core language has no built-in AI bytecodes — all AI operations dispatch through the generic `PerformAsync` effect mechanism, making the runtime extensible without VM changes.
 
-## Agents as Language Primitives
+## AI Agents
 
-Nulang treats AI agents as first-class declarations, not library objects. An `agent` is a named record of configuration — model, system prompt, tools, memory, pricing — that the runtime spawns like an actor. You interact with an agent through the `ask` operator, which is a synchronous request/reply call.
+Nulang's AI capabilities live in the optional nulang-ai library crate. An `agent` is a named record of configuration — model, system prompt, tools, memory, pricing — that the runtime spawns like an actor through the generic PerformAsync effect mechanism. No special AI bytecodes or language extensions are needed. You interact with an agent through the `ask` operator, which is a synchronous request/reply call.
 
 ## Declaring an Agent
 

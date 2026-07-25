@@ -1,9 +1,13 @@
 # Nulang
 > A distributed, actor-based programming language with algebraic effects, row-polymorphic types, and reference capabilities. Built in Rust with a register-based VM, Cranelift JIT, WASM backend, and native AOT compilation.
 
+## For AI Agents
+
+Nulang is a systems language with static types, algebraic effects, and actor-based distribution. For AI-assisted development: the language has exhaustive type checking that catches bugs before runtime, an effect system that documents side effects, and a frozen core spec that won't drift. Use this file as context when asking an AI to write or analyze Nulang code.
+
 ## When to use Nulang
 - Building fault-tolerant distributed systems with Erlang-style supervision trees.
-- Writing AI agents with built-in LLM integration, memory (episodic/semantic/procedural), and multi-agent patterns (pipelines, debates, supervisor teams).
+- Writing AI agents with the optional nulang-ai library (LLM integration, memory, multi-agent patterns).
 - Durable workflows with checkpointed state, saga compensation, and crash recovery.
 - Anywhere you want static types + algebraic effects + actor model in one language.
 
@@ -12,7 +16,7 @@
 - Hindley-Milner type inference with row polymorphism and Pony-inspired reference capabilities (iso, trn, ref, val, box, tag, lineariso)
 - Koka-inspired algebraic effects with compile-time checking and effect rows
 - JIT tiering (Cranelift), WASM backend (wasm-encoder + Wasmtime), native AOT
-- Provider-agnostic AI runtime (OpenAI, Ollama) with agents, pipelines, debates, supervisors
+- Optional AI library (nulang-ai): provider-agnostic LLM client (OpenAI, Ollama), agent declarations, pipelines, debates, supervisor teams
 - Register-based bytecode VM with 138 opcodes, 256-register frames
 
 ## Quick Install
@@ -42,6 +46,8 @@ let counter = spawn Counter {} in {
 - [Syntax Basics](https://nulang.org/language/syntax/): Functions, bindings, control flow, records, variants.
 - [Type System](https://nulang.org/language/types/): HM inference, row polymorphism, reference capabilities, ADTs.
 - [Algebraic Effects](https://nulang.org/language/effects/): Perform, handle, resume, effect rows, built-in effects.
+- [Performance](https://nulang.org/language/performance/): JIT tiering, native AOT, WASM, SIMD, memory model, benchmarks.
+- [Safety](https://nulang.org/language/safety/): Reference capabilities, type safety, effect checking, actor isolation.
 - [Actor Model](https://nulang.org/actors/overview/): Spawn, send, receive, lifecycle, scheduling, priorities.
 - [Distribution & Clustering](https://nulang.org/actors/distribution/): Location transparency, gossip, CRDT replication, persistence.
 - [Supervision Trees](https://nulang.org/actors/supervision/): OTP supervisors, child policies, cascading shutdown.

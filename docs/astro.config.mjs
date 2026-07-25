@@ -6,6 +6,14 @@ import tailwindcss from '@astrojs/tailwind';
 // https://starlight.astro.build/reference/configuration
 export default defineConfig({
   site: 'https://nulang.org',
+  head: [
+    { tag: 'meta', attrs: { property: 'og:type', content: 'website' } },
+    { tag: 'meta', attrs: { property: 'og:image', content: 'https://nulang.org/og-image.png' } },
+    { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
+    { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+    { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
+    { tag: 'meta', attrs: { name: 'twitter:image', content: 'https://nulang.org/og-image.png' } },
+  ],
   integrations: [sitemap(), starlight({
       title: 'Nulang',
       description: 'A distributed, actor-based programming language',
@@ -44,6 +52,8 @@ export default defineConfig({
             { label: 'Syntax Basics', link: 'language/syntax/' },
             { label: 'Type System', link: 'language/types/' },
             { label: 'Algebraic Effects', link: 'language/effects/' },
+            { label: 'Performance', link: 'language/performance/' },
+            { label: 'Safety', link: 'language/safety/' },
           ],
         },
         {
