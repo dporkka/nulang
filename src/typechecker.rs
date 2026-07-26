@@ -163,16 +163,18 @@ fn effect_row_compatible(e1: &EffectRow, e2: &EffectRow) -> bool {
         (EffectRow::Closed(a), EffectRow::Closed(b)) => {
             let mut a_sorted = a.clone();
             let mut b_sorted = b.clone();
-            a_sorted.sort_by(|x, y| format!("{:?}", x).cmp(&format!("{:?}", y)));
-            b_sorted.sort_by(|x, y| format!("{:?}", x).cmp(&format!("{:?}", y)));
+            a_sorted.sort();
+            b_sorted.sort();
             a_sorted == b_sorted
         }
         (EffectRow::Open(a, _), EffectRow::Closed(b))
         | (EffectRow::Closed(b), EffectRow::Open(a, _)) => b.iter().all(|e| a.contains(e)),
         (EffectRow::Open(a, _), EffectRow::Open(b, _)) => {
-            // Both open: compatible if they share the same fixed effects
-            // (full row unification would require more sophisticated handling)
-            a.iter().all(|e| b.contains(e)) || b.iter().all(|e| a.contains(e))
+            // Both sides must agree on fixed effects; row variables are
+            // assumed compatible (full row unification requires Region
+            // to participate in the Type::Var substitution machinery,
+            // which is a larger refactor — see REVIEW plan Phase 1 item 3).
+            a.iter().all(|e| b.contains(e)) && b.iter().all(|e| a.contains(e))
         }
     }
 }

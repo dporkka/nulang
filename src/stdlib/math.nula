@@ -1,0 +1,48 @@
+// Nulang standard library — math functions.
+// Language version: 2.0.0-alpha
+
+/// Absolute value.
+pub fn abs(x: Int) -> Int {
+    if x < 0 then -x else x
+}
+
+/// Minimum of two integers.
+pub fn min(a: Int, b: Int) -> Int {
+    if a < b then a else b
+}
+
+/// Maximum of two integers.
+pub fn max(a: Int, b: Int) -> Int {
+    if a > b then a else b
+}
+
+/// Clamp x to the range [lo, hi].
+pub fn clamp(x: Int, lo: Int, hi: Int) -> Int {
+    if x < lo then lo
+    else if x > hi then hi
+    else x
+}
+
+/// Integer exponentiation (x^y) for non-negative y.
+pub fn pow(base: Int, exp: Int) -> Int {
+    let rec loop(b: Int, e: Int, acc: Int) -> Int {
+        if e == 0 then acc
+        else loop(b, e - 1, acc * b)
+    }
+    in loop(base, exp, 1)
+}
+
+/// Factorial. Returns 1 for n <= 1.
+pub fn factorial(n: Int) -> Int {
+    let rec loop(i: Int, acc: Int) -> Int {
+        if i <= 1 then acc
+        else loop(i - 1, acc * i)
+    }
+    in loop(n, 1)
+}
+
+/// Greatest common divisor (Euclidean algorithm).
+pub fn gcd(a: Int, b: Int) -> Int {
+    if b == 0 then abs(a)
+    else gcd(b, a % b)
+}

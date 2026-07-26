@@ -491,11 +491,19 @@ impl crate::backends::JitBackend for JitSession {
                 } else {
                     Some(&meta)
                 };
+                // Try typed compilation first
                 if let Some(func) = unsafe {
                     self.compile_region_typed(module_idx, pc, region_len, instructions, meta_ref)
                 } {
                     func(regs.as_mut_ptr(), constants.as_ptr());
                     return crate::backends::TieredAction::RanJit;
+                }
+                // Try SIMD vectorization
+                if let Some(func) = unsafe {
+                    self.compile_region_simd(module_idx, pc, region_len, instructions, meta_ref)
+                } {
+                    func(regs.as_mut_ptr(), constants.as_ptr());
+                    return crate::backends::TieredAction::CompiledSimdAndRan;
                 }
             }
         }

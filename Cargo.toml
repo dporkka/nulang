@@ -32,11 +32,8 @@ lsp = ["dep:tower-lsp"]
 wasm-backend = ["dep:wasm-encoder", "dep:wasmtime"]
 wit-bindgen = []
 ai-runtime = ["dep:nulang-ai", "dep:reqwest"]
-# Experimental SIMD JIT compiler (disabled: unsound — no register write-back,
-# baked trip count, find_trip_count_hint always returns None). ~2700 lines of
-# dead weight in production builds.
-simd-experimental = []
-# Experimental QUIC transport (disabled: empty stubs, panics in bind()).
+http-client = ["dep:reqwest"]
+# Experimental QUIC transport (wire up in progress — requires quinn feature flags).
 quic-experimental = []
 
 [dependencies]

@@ -671,6 +671,7 @@ fn exit_code(err: &NuError) -> i32 {
         NuError::Suspended(_) => 0, // Not an error — runtime handles suspensions
         NuError::PythonError { .. } => 11,
         NuError::PackageError { .. } => 12,
+        NuError::Multiple(_) => 3, // Same as ParseError — accumulated parse errors
     }
 }
 
@@ -703,6 +704,12 @@ fn run_frontend(
     pd.append(&mut ast.decls);
     ast.decls = pd;
 
+    // 2b. Resolve imports — load and merge declarations from imported files.
+    let base_dir = std::path::Path::new(file_path.unwrap_or("."))
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let mut visited = std::collections::HashSet::new();
+    nulang::resolver::resolve_imports(&mut ast, base_dir, &mut visited)?;
     if verbose {
         println!("=== AST ===");
         println!("{:#?}", ast);
@@ -974,6 +981,12 @@ fn run_with_runtime(
     vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
         runtime.clone(),
     )));
+    #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
+    {
+        runtime.borrow_mut().http_provider = Some(std::sync::Arc::new(
+            nulang::backends::ReqwestHttpProvider::new(),
+        ));
+    }
     let value = vm.run()?;
     runtime.borrow_mut().run_scheduler();
     Ok((value, runtime))

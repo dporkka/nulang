@@ -146,13 +146,13 @@ pub trait HttpProvider: Send + Sync {
 }
 
 /// Default HTTP provider backed by `reqwest` (requires `ai-runtime` feature).
-#[cfg(feature = "ai-runtime")]
+#[cfg(any(feature = "ai-runtime", feature = "http-client"))]
 #[derive(Debug, Clone)]
 pub struct ReqwestHttpProvider {
     client: reqwest::Client,
 }
 
-#[cfg(feature = "ai-runtime")]
+#[cfg(any(feature = "ai-runtime", feature = "http-client"))]
 impl ReqwestHttpProvider {
     /// Create a new reqwest-backed HTTP provider with a default timeout.
     pub fn new() -> Self {
@@ -164,14 +164,14 @@ impl ReqwestHttpProvider {
     }
 }
 
-#[cfg(feature = "ai-runtime")]
+#[cfg(any(feature = "ai-runtime", feature = "http-client"))]
 impl Default for ReqwestHttpProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(feature = "ai-runtime")]
+#[cfg(any(feature = "ai-runtime", feature = "http-client"))]
 impl HttpProvider for ReqwestHttpProvider {
     fn post_json(&self, url: &str, body: &str) -> Result<String, String> {
         let client = self.client.clone();
@@ -290,8 +290,7 @@ mod tests {
         }
         check_blanket::<crate::runtime::TcpTransport>();
     }
-
-    #[cfg(feature = "ai-runtime")]
+    #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
     #[test]
     fn test_http_provider_is_object_safe() {
         fn accepts_http(_h: &dyn HttpProvider) {

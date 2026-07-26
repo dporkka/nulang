@@ -72,7 +72,7 @@ pub fn effect_row_diff(row: &EffectRow, handled: &Effect) -> EffectRow {
 pub fn parse_effect_name(name: &str) -> Effect {
     match name {
         "IO" => Effect::IO,
-        "Net" => Effect::Net,
+        "Net" | "Http" => Effect::Net,
         "FS" => Effect::FS,
         "Rand" => Effect::Rand,
         "Time" => Effect::Time,
@@ -1921,6 +1921,7 @@ mod tests {
         assert_eq!(parse_effect_name("Net"), Effect::Net);
         assert_eq!(parse_effect_name("FS"), Effect::FS);
         assert_eq!(parse_effect_name("Spawn"), Effect::Spawn);
+        assert_eq!(parse_effect_name("Http"), Effect::Net);
         assert_eq!(parse_effect_name("Async"), Effect::Async);
         assert_eq!(parse_effect_name("LLM"), Effect::Inference);
         assert_eq!(parse_effect_name("Inference"), Effect::Inference);

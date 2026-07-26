@@ -193,6 +193,9 @@ pub struct Runtime {
     // LLM subsystem (v0.9 AI Runtime): client, worker thread, token budget,
     // completion channel, and non-blocking suspension state.
     pub llm: llm::LlmState,
+    // HTTP client provider (v0.13). Filled in at startup when a concrete
+    // HttpProvider impl is available (reqwest behind ai-runtime/http-client).
+    pub http_provider: Option<std::sync::Arc<dyn crate::backends::HttpProvider>>,
 
     // Actor name registry (v0.7)
     pub registry: ActorRegistry,
@@ -281,6 +284,7 @@ impl Runtime {
             persistence: Box::new(MemoryStore::new()),
             vm: None,
             llm: llm::LlmState::new(),
+            http_provider: None,
             pending_receive_wakes: Vec::new(),
             draining_receive_wakes: false,
             idle_callback: None,
@@ -4473,6 +4477,44 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             }
             return Some(crate::vm::Value::int(s.as_bytes()[idx as usize] as i64));
         }
+        if effect_name == "Http" {
+            match op_name {
+                Some("get") => {
+                    let url = crate::vm::resolve_value_string(constants, *regs.first()?);
+                    let mut rt = self.runtime.borrow_mut();
+                    let result = rt
+                        .http_provider
+                        .as_ref()
+                        .map(|p| p.get(&url))
+                        .unwrap_or(Err("no HTTP provider configured".to_string()));
+                    return Some(match result {
+                        Ok(body) => match &mut rt.vm {
+                            Some(vm) => vm.allocate_string(&body),
+                            None => Value::nil(),
+                        },
+                        Err(_e) => Value::nil(),
+                    });
+                }
+                Some("post") => {
+                    let url = crate::vm::resolve_value_string(constants, *regs.first()?);
+                    let body = crate::vm::resolve_value_string(constants, *regs.get(1)?);
+                    let mut rt = self.runtime.borrow_mut();
+                    let result = rt
+                        .http_provider
+                        .as_ref()
+                        .map(|p| p.post_json(&url, &body))
+                        .unwrap_or(Err("no HTTP provider configured".to_string()));
+                    return Some(match result {
+                        Ok(resp_body) => match &mut rt.vm {
+                            Some(vm) => vm.allocate_string(&resp_body),
+                            None => Value::nil(),
+                        },
+                        Err(_e) => Value::nil(),
+                    });
+                }
+                _ => return None,
+            }
+        }
         if effect_name == "Provider" && op_name == Some("ask") {
             // General runtime-registered provider dispatch. The first arg is
             // the provider name (string); the second is the prompt/request
@@ -5046,6 +5088,44 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     return Some(crate::vm::Value::int(-1));
                 }
                 return Some(crate::vm::Value::int(s.as_bytes()[idx as usize] as i64));
+            }
+            if effect_name == "Http" {
+                match op_name {
+                    Some("get") => {
+                        let url = crate::vm::resolve_value_string(constants, *regs.first()?);
+                        let rt = &mut *self.runtime;
+                        let result = rt
+                            .http_provider
+                            .as_ref()
+                            .map(|p| p.get(&url))
+                            .unwrap_or(Err("no HTTP provider configured".to_string()));
+                        return Some(match result {
+                            Ok(body) => match &mut rt.vm {
+                                Some(vm) => vm.allocate_string(&body),
+                                None => Value::nil(),
+                            },
+                            Err(_e) => Value::nil(),
+                        });
+                    }
+                    Some("post") => {
+                        let url = crate::vm::resolve_value_string(constants, *regs.first()?);
+                        let body = crate::vm::resolve_value_string(constants, *regs.get(1)?);
+                        let rt = &mut *self.runtime;
+                        let result = rt
+                            .http_provider
+                            .as_ref()
+                            .map(|p| p.post_json(&url, &body))
+                            .unwrap_or(Err("no HTTP provider configured".to_string()));
+                        return Some(match result {
+                            Ok(resp_body) => match &mut rt.vm {
+                                Some(vm) => vm.allocate_string(&resp_body),
+                                None => Value::nil(),
+                            },
+                            Err(_e) => Value::nil(),
+                        });
+                    }
+                    _ => return None,
+                }
             }
             if effect_name == "Provider" && op_name == Some("ask") {
                 // General runtime-registered provider dispatch (actor path).

@@ -69,6 +69,9 @@ pub struct Parser {
     pos: usize,
     local_type_params: FxHashMap<String, TypeVar>,
     global_type_constructors: FxHashMap<String, TypeVar>,
+    /// Accumulated parse errors from error-recovery. Callers that want
+    /// all errors (not just the first) call `consumed_diagnostics()`.
+    diagnostics: Vec<NuError>,
 }
 
 impl Parser {
@@ -78,6 +81,7 @@ impl Parser {
             pos: 0,
             local_type_params: FxHashMap::default(),
             global_type_constructors: FxHashMap::default(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -85,6 +89,7 @@ impl Parser {
 
     #[tracing::instrument(level = "debug", skip(self))]
     pub fn parse_module(&mut self) -> NuResult<AstModule> {
+        self.diagnostics.clear();
         let mut decls = Vec::new();
         self.skip_newlines();
         while !self.is_at_end() {
@@ -102,10 +107,11 @@ impl Parser {
                     // Rewind any tokens a failed declaration parse consumed.
                     self.pos = decl_start;
                     if consumed > 0 {
-                        // A declaration started but failed mid-way: surface the
-                        // real declaration error instead of retrying the
-                        // remaining tokens as an expression.
-                        return Err(e);
+                        // Declaration started but failed mid-way: record the
+                        // error and synchronize to the next top-level keyword.
+                        self.diagnostics.push(e);
+                        self.error_sync();
+                        continue;
                     }
                     // Not a declaration — this must be the top-level script body.
                     // Parse all remaining tokens as a block of expressions,
@@ -136,10 +142,48 @@ impl Parser {
             }
             self.skip_newlines_semicolons();
         }
+        if !self.diagnostics.is_empty() {
+            return Err(NuError::Multiple(std::mem::take(&mut self.diagnostics)));
+        }
         Ok(AstModule {
             name: "main".to_string(),
             decls,
         })
+    }
+
+    /// Discard tokens until a top-level declaration keyword, block closer, or EOF.
+    /// This is the error-recovery synchronization point — after a failed
+    /// declaration we skip to the next construct we can reliably re-parse.
+    fn error_sync(&mut self) {
+        while !self.is_at_end() {
+            match self.peek_kind() {
+                TokenKind::Fn
+                | TokenKind::Actor
+                | TokenKind::Persistent
+                | TokenKind::Entity
+                | TokenKind::Organization
+                | TokenKind::StateMachine
+                | TokenKind::Agent
+                | TokenKind::Workflow
+                | TokenKind::Database
+                | TokenKind::Type
+                | TokenKind::Effect
+                | TokenKind::Extern
+                | TokenKind::Import
+                | TokenKind::Module
+                | TokenKind::Let => return,
+                TokenKind::RBrace | TokenKind::RBracket | TokenKind::RParen => return,
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+    }
+
+    /// Consume and return all diagnostics accumulated during error-recovery
+    /// parsing. After this call, the diagnostics buffer is empty.
+    pub fn consumed_diagnostics(&mut self) -> Vec<NuError> {
+        std::mem::take(&mut self.diagnostics)
     }
 
     // === Declarations ===

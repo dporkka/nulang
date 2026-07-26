@@ -257,7 +257,10 @@ pub struct SimdRegion {
     /// Registers that hold array references (input + output arrays).
     pub array_regs: Vec<u8>,
     /// Known trip count if statically determinable (e.g. from `ArrLen`).
+    /// `Some(0)` means "runtime-determined from `arr_len_reg`".
     pub trip_count_hint: Option<usize>,
+    /// Register holding the `ArrLen` result when `trip_count_hint == Some(0)`.
+    pub arr_len_reg: Option<u8>,
 }
 
 // ---------------------------------------------------------------------------
@@ -599,9 +602,8 @@ pub fn analyze_region(
         if has_loop_carried_dependency(&pattern, &stores, idx_reg) {
             return None;
         }
-
         // Requirement 4: Try to find trip count hint.
-        let trip_count_hint = find_trip_count_hint(body, &array_regs);
+        let (trip_count_hint, arr_len_reg) = find_trip_count_hint(body, &array_regs);
 
         return Some(SimdRegion {
             start_offset,
@@ -612,6 +614,7 @@ pub fn analyze_region(
             induction_var_reg: induction_reg.unwrap(),
             array_regs,
             trip_count_hint,
+            arr_len_reg,
         });
     }
 
@@ -625,7 +628,7 @@ pub fn analyze_region(
             return None;
         }
 
-        let trip_count_hint = find_trip_count_hint(body, &array_regs);
+        let (trip_count_hint, arr_len_reg) = find_trip_count_hint(body, &array_regs);
 
         return Some(SimdRegion {
             start_offset,
@@ -636,6 +639,7 @@ pub fn analyze_region(
             induction_var_reg: induction_reg.unwrap(),
             array_regs,
             trip_count_hint,
+            arr_len_reg,
         });
     }
 
@@ -649,7 +653,7 @@ pub fn analyze_region(
             return None;
         }
 
-        let trip_count_hint = find_trip_count_hint(body, &array_regs);
+        let (trip_count_hint, arr_len_reg) = find_trip_count_hint(body, &array_regs);
 
         return Some(SimdRegion {
             start_offset,
@@ -660,9 +664,9 @@ pub fn analyze_region(
             induction_var_reg: induction_reg.unwrap(),
             array_regs,
             trip_count_hint,
+            arr_len_reg,
         });
     }
-
     None
 }
 
@@ -1014,21 +1018,16 @@ fn infer_elem_type_cmp(
 // ---------------------------------------------------------------------------
 
 /// Try to find a static trip count hint from `ArrLen` in the loop body.
-///
-/// If an `ArrLen` instruction reads one of the arrays and the result is used
-/// in a comparison, we may be able to determine the loop bound.
-fn find_trip_count_hint(body: &[Instruction], array_regs: &[u8]) -> Option<usize> {
+fn find_trip_count_hint(body: &[Instruction], array_regs: &[u8]) -> (Option<usize>, Option<u8>) {
     // Look for ArrLen on one of the arrays in the loop.
     for instr in body {
         if instr.opcode == OpCode::ArrLen {
             if array_regs.contains(&instr.op1) {
-                // We found ArrLen on a participating array.
-                // If the result register is used in a comparison with the
-                // induction variable, the trip count equals the array length.
-                // However, we don't know the actual length at analysis time.
-                // Return None for the actual value, but we could return a
-                // sentinel or mark it as "array-length-bound".
-                // For now, we can't know the static length without runtime info.
+                // Found ArrLen on a participating array. The result register
+                // (instr.op2) holds the array length at runtime.
+                // Return Some(0) as a sentinel for "runtime-determined" plus
+                // the register so the compiler can load the length.
+                return (Some(0), Some(instr.op2));
             }
         }
     }
@@ -1036,20 +1035,13 @@ fn find_trip_count_hint(body: &[Instruction], array_regs: &[u8]) -> Option<usize
     // Look for a constant comparison that gives us a fixed trip count.
     for instr in body {
         match instr.opcode {
-            OpCode::Const0 | OpCode::Const1 | OpCode::Const2 | OpCode::ConstM1 => {
-                // These constants could be loop bounds.
-            }
-            OpCode::ICmpLt | OpCode::ICmpLe | OpCode::ICmpGt | OpCode::ICmpGe => {
-                // Comparison involving induction variable and a constant/ArrLen result
-                // could reveal the trip count.
-            }
+            OpCode::Const0 | OpCode::Const1 | OpCode::Const2 | OpCode::ConstM1 => {}
+            OpCode::ICmpLt | OpCode::ICmpLe | OpCode::ICmpGt | OpCode::ICmpGe => {}
             _ => {}
         }
     }
 
-    // Without evaluating constants, we can't determine a static trip count.
-    // The JIT can still vectorize with runtime length checks.
-    None
+    (None, None)
 }
 
 // ---------------------------------------------------------------------------

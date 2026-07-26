@@ -1679,6 +1679,19 @@ fn nu_error_to_diagnostic(err: NuError) -> Diagnostic {
             span.end_column(),
         ),
         NuError::Suspended(kind) => (format!("VM suspended: {}", kind), 1, 1, 1, 1),
+        NuError::Multiple(errors) => {
+            // Emit one diagnostic per accumulated error.
+            let mut diags = Vec::new();
+            for err in errors {
+                diags.push(nu_error_to_diagnostic(err));
+            }
+            // Return first; the caller should handle Multiple specially.
+            // FIXME: return multiple diagnostics instead of just the first.
+            if let Some(first) = diags.into_iter().next() {
+                return first;
+            }
+            ("Multiple parse errors".to_string(), 1, 1, 1, 1)
+        }
     };
 
     // Lines/columns in the Span are 1-based; LSP uses 0-based.

@@ -7846,4 +7846,103 @@ match { a: 2, b: 9 } with {
             "responder's flag must be set — the scheduler must not hang"
         );
     }
+
+    // -- Http effect tests ----------------------------------------------
+
+    #[test]
+    fn test_http_get_effect_row() {
+        let source = r#"
+            fn fetch() -> String ! {Net} {
+                let body = perform Http.get("http://example.com")
+                body
+            }
+        "#;
+        let result = run_source(source);
+        assert!(
+            result.is_ok(),
+            "Http.get should type-check when {{Net}} is declared: {:?}",
+            result.err()
+        );
+    }
+    #[test]
+    fn test_http_post_effect_row() {
+        let source = r#"
+            fn post_it() -> String ! {Net} {
+                let body = perform Http.post("http://example.com", "{}")
+                body
+            }
+        "#;
+        let result = run_source(source);
+        assert!(
+            result.is_ok(),
+            "Http.post should type-check when {{Net}} is declared: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_http_get_requires_net_effect() {
+        // Http.get should be rejected when called from a function that does not declare {Net}.
+        let source = r#"
+            fn do_http() -> String ! {Net} { perform Http.get("http://example.com") }
+            fn pure() -> String ! {} { do_http() }
+        "#;
+        let result = check_module_effects(source);
+        assert!(
+            result.is_err(),
+            "pure function calling Http.get must be rejected"
+        );
+    }
+    #[test]
+    fn test_http_get_mocked() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let called: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+        let cb = called.clone();
+        let url_seen: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+        let url_clone = url_seen.clone();
+
+        rt.borrow_mut()
+            .install_test_handler("Http.get", move |regs| {
+                *cb.borrow_mut() = true;
+                // regs[0] is the URL string id — resolve it from constants at call time
+                // but for a mock we just record that we were called
+                *url_clone.borrow_mut() = format!("{:?}", regs);
+                Some(Value::nil())
+            });
+
+        let source = r#"perform Http.get("http://example.com/api")"#;
+        let value = run_source_new_with_runtime(source, rt).unwrap();
+        assert_eq!(value, Value::nil());
+        assert!(
+            *called.borrow(),
+            "test handler should have intercepted Http.get"
+        );
+    }
+
+    #[test]
+    fn test_http_post_mocked() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let called: Rc<RefCell<bool>> = Rc::new(RefCell::new(false));
+        let cb = called.clone();
+
+        rt.borrow_mut()
+            .install_test_handler("Http.post", move |_regs| {
+                *cb.borrow_mut() = true;
+                Some(Value::nil())
+            });
+
+        let source = r#"perform Http.post("http://example.com/api", "{}")"#;
+        let value = run_source_new_with_runtime(source, rt).unwrap();
+        assert_eq!(value, Value::nil());
+        assert!(
+            *called.borrow(),
+            "test handler should have intercepted Http.post"
+        );
+    }
 }

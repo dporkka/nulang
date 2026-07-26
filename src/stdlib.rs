@@ -20,10 +20,9 @@
 //!   unregister/whereis/set_priority): `Runtime::perform_actor_builtin` in
 //!   `runtime/mod.rs`, reached through both runtime host callback impls;
 //!   the standalone VM answers them with a nil no-op.
-//! - `Otp.*` (create_supervisor/supervise_child/set_template/start_child/
-//!   terminate_child/child_count): `Runtime::perform_otp_builtin` in
-//!   `runtime/mod.rs`, reached through both runtime host callback impls;
-//!   the standalone VM answers them with a nil no-op.
+//! - `Http.get` / `Http.post`: the runtime host's `perform_builtin_effect`
+//!   callback in `runtime/mod.rs`, dispatched through `HttpProvider` trait
+//!   (ReqwestHttpProvider behind `ai-runtime` / `http-client` feature).
 
 use crate::types::Span;
 use crate::types::{NuError, NuResult};
@@ -163,6 +162,22 @@ impl StdLib {
                     signature: "ask(prompt: String) -> String",
                     implemented_in: ImplSite::RuntimeHost,
                     description: "Deprecated alias for `Inference.ask`. Prefer `Inference.ask` in new code.",
+                },
+                BuiltinOp {
+                    name: "Http.get",
+                    effect: "Http",
+                    op: "get",
+                    signature: "get(url: String) -> String",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Perform an HTTP GET request to `url` and return the response body as a string on success, nil on error. Requires the `http-client` or `ai-runtime` feature for the reqwest provider.",
+                },
+                BuiltinOp {
+                    name: "Http.post",
+                    effect: "Http",
+                    op: "post",
+                    signature: "post(url: String, body: String) -> String",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Perform an HTTP POST request to `url` with a JSON body and return the response body as a string on success, nil on error. Requires the `http-client` or `ai-runtime` feature for the reqwest provider.",
                 },
                 BuiltinOp {
                     name: "Actor.link",
@@ -459,6 +474,14 @@ mod tests {
             lib.lookup("Actor.whereis").unwrap().implemented_in,
             ImplSite::RuntimeHost
         );
+        assert_eq!(
+            lib.lookup("Http.get").unwrap().implemented_in,
+            ImplSite::RuntimeHost
+        );
+        assert_eq!(
+            lib.lookup("Http.post").unwrap().implemented_in,
+            ImplSite::RuntimeHost
+        );
     }
 
     #[test]
@@ -475,6 +498,7 @@ mod tests {
                 "Signal",
                 "Inference",
                 "LLM",
+                "Http",
                 "Actor",
                 "Otp"
             ]

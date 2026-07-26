@@ -194,22 +194,20 @@ pub fn compile_simd_region(
         );
     }
 
-    // If no trip count hint is available, we can't determine the loop bounds
-    // at compile time — fall back to scalar.
-    let _trip_count_hint = match simd_region.trip_count_hint {
-        Some(n) => n,
-        None => {
-            return fallback_to_scalar(
-                module,
-                builder_context,
-                ctx,
-                func_name,
-                simd_region.start_offset,
-                simd_region.num_instrs,
-                instructions,
-            );
-        }
-    };
+    // If no trip count hint and no ArrLen register, fall back to scalar.
+    let trip_count_is_runtime =
+        simd_region.trip_count_hint == Some(0) && simd_region.arr_len_reg.is_some();
+    if simd_region.trip_count_hint.is_none() && !trip_count_is_runtime {
+        return fallback_to_scalar(
+            module,
+            builder_context,
+            ctx,
+            func_name,
+            simd_region.start_offset,
+            simd_region.num_instrs,
+            instructions,
+        );
+    }
 
     ctx.clear();
 
@@ -222,41 +220,36 @@ pub fn compile_simd_region(
 
     // -----------------------------------------------------------------------
     // Create blocks
-    //
-    // Each loop header takes a block parameter for the loop index (i64).
-    // This is how Cranelift implements phi-nodes: block parameters are
-    // passed as arguments on every branch that targets the block.
     // -----------------------------------------------------------------------
 
     let entry_block = builder.create_block();
     builder.append_block_params_for_function_params(entry_block);
 
-    // Scalar prefix loop: for (i = 0; i < prefix_count; i++)
+    // Scalar prefix loop
     let prefix_header = builder.create_block();
-    builder.append_block_param(prefix_header, types::I64); // param: index
+    builder.append_block_param(prefix_header, types::I64);
     let prefix_body = builder.create_block();
 
-    // SIMD main loop: for (i = prefix_count; i + width <= trip_count; i += width)
+    // SIMD main loop
     let simd_header = builder.create_block();
-    builder.append_block_param(simd_header, types::I64); // param: index
+    builder.append_block_param(simd_header, types::I64);
     let simd_body = builder.create_block();
 
-    // Scalar epilogue loop: for (i = simd_end; i < trip_count; i++)
+    // Scalar epilogue loop
     let epilogue_header = builder.create_block();
-    builder.append_block_param(epilogue_header, types::I64); // param: index
+    builder.append_block_param(epilogue_header, types::I64);
     let epilogue_body = builder.create_block();
-
+    let _epilogue_post = builder.create_block();
     let return_block = builder.create_block();
 
     // -----------------------------------------------------------------------
-    // Entry block
+    // Entry: load registers pointer, compute trip count
     // -----------------------------------------------------------------------
 
     builder.switch_to_block(entry_block);
     builder.seal_block(entry_block);
-
     let regs_ptr = builder.block_params(entry_block)[0];
-    let _consts_ptr = builder.block_params(entry_block)[1];
+    let _constants_ptr = builder.block_params(entry_block)[1];
 
     // Extract array registers from the pattern
     let (lhs_arr_reg, rhs_arr_reg, dst_arr_reg) = match &simd_region.pattern {
@@ -300,10 +293,17 @@ pub fn compile_simd_region(
     let rhs_base = emit_extract_payload(&mut builder, rhs_base_tagged);
     let dst_base = emit_extract_payload(&mut builder, dst_base_tagged);
 
-    // Trip count (from the hint — we verified it's Some above)
-    let trip_count = builder.ins().iconst(types::I64, _trip_count_hint as i64);
-
-    // Vector width constant
+    // Trip count: either compile-time constant or loaded from ArrLen register
+    let trip_count = if trip_count_is_runtime {
+        let arr_len_reg = simd_region.arr_len_reg.unwrap();
+        let offset = i32::from(arr_len_reg) * 8;
+        let addr = builder.ins().iadd_imm(regs_ptr, offset as i64);
+        let mem_flags = MemFlags::trusted();
+        builder.ins().load(types::I64, mem_flags, addr, 0)
+    } else {
+        let n = simd_region.trip_count_hint.unwrap_or(0) as i64;
+        builder.ins().iconst(types::I64, n)
+    };
     let vwidth = vector_width(simd_region.elem_type) as i64;
     let vwidth_val = builder.ins().iconst(types::I64, vwidth);
 
@@ -1164,6 +1164,7 @@ mod simd_compiler_tests {
             induction_var_reg: 0,
             array_regs: vec![10, 11, 12],
             trip_count_hint: Some(8),
+            arr_len_reg: None,
         }
     }
 
@@ -1186,6 +1187,7 @@ mod simd_compiler_tests {
             induction_var_reg: 0,
             array_regs: vec![10, 11, 12],
             trip_count_hint: Some(8),
+            arr_len_reg: None,
         }
     }
 
@@ -1334,6 +1336,7 @@ mod simd_compiler_tests {
             induction_var_reg: 0,
             array_regs: vec![10, 11, 12],
             trip_count_hint: Some(8),
+            arr_len_reg: None,
         };
         assert_eq!(vector_width(i32_region.elem_type), 4);
         assert_eq!(i32_region.width, SimdWidth::Width4);
@@ -1355,6 +1358,7 @@ mod simd_compiler_tests {
             induction_var_reg: 0,
             array_regs: vec![10, 11, 12],
             trip_count_hint: Some(8),
+            arr_len_reg: None,
         };
         assert_eq!(vector_width(f32_region.elem_type), 4);
         assert_eq!(f32_region.width, SimdWidth::Width4);
@@ -1384,7 +1388,8 @@ mod simd_compiler_tests {
             elem_type: SimdElemType::Int64,
             induction_var_reg: 0,
             array_regs: vec![10, 11, 12],
-            trip_count_hint: Some(5), // 5 elements → 2-wide SIMD + 1 epilogue
+            trip_count_hint: Some(5),
+            arr_len_reg: None, // 5 elements → 2-wide SIMD + 1 epilogue
         };
 
         let instructions = vec![
@@ -1449,6 +1454,7 @@ mod simd_compiler_tests {
             induction_var_reg: 0,
             array_regs: vec![10, 11, 12],
             trip_count_hint: Some(8),
+            arr_len_reg: None,
         };
 
         let ptr2 = compile_simd_region(
@@ -1486,6 +1492,7 @@ mod simd_compiler_tests {
             induction_var_reg: 0,
             array_regs: vec![10, 11, 12],
             trip_count_hint: Some(8),
+            arr_len_reg: None,
         };
 
         let instructions = vec![
@@ -1566,7 +1573,8 @@ mod simd_compiler_tests {
             elem_type: SimdElemType::Int64,
             induction_var_reg: 0,
             array_regs: vec![10, 11, 12],
-            trip_count_hint: None, // No hint → fallback
+            trip_count_hint: None,
+            arr_len_reg: None, // No hint → fallback
         };
 
         let instructions = vec![

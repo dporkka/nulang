@@ -1095,6 +1095,9 @@ pub enum NuError {
         msg: String,
         span: Span,
     },
+    /// Multiple errors accumulated during error-recovery parsing.
+    /// The `Vec` is non-empty; individual errors preserve their spans.
+    Multiple(Vec<NuError>),
 }
 
 /// Reason the VM suspended execution of a behavior.
@@ -1196,6 +1199,13 @@ impl std::fmt::Display for NuError {
                     span.column(),
                     msg
                 )
+            }
+            NuError::Multiple(errors) => {
+                writeln!(f, "{} parse errors:", errors.len())?;
+                for (i, err) in errors.iter().enumerate() {
+                    writeln!(f, "  {}. {}", i + 1, err)?;
+                }
+                Ok(())
             }
             NuError::PackageError { msg, span } => {
                 write!(
@@ -1343,6 +1353,12 @@ impl NuError {
             NuError::PackageError { msg, span } => {
                 push_span_error(&mut out, "Package error", msg, span, self.suggestion());
             }
+            NuError::Multiple(errors) => {
+                for err in errors {
+                    out.push_str(&err.format_rich());
+                    out.push('\n');
+                }
+            }
         }
         out
     }
@@ -1360,6 +1376,7 @@ impl NuError {
             NuError::VMError { msg, .. } => msg,
             NuError::PythonError { msg, .. } => msg,
             NuError::PackageError { msg, .. } => msg,
+            NuError::Multiple(_) => return None,
             NuError::NotYetImplemented { .. } => return None,
             NuError::Suspended(_) => return None,
         };
@@ -1443,7 +1460,7 @@ impl NuError {
             }
             NuError::CapError { msg, .. } => {
                 if msg.contains("cannot be sent") {
-                    Some("only `val` and `tag` capabilities are sendable between actors")
+                    Some("only `val`, `iso`, and `tag` capabilities are sendable between actors — use `val` for immutable shared data, `iso` for transfer-only ownership")
                 } else if msg.contains("linear") && msg.contains("consumed") {
                     Some("linear values can only be used once; use `.clone()` to make a copy, or restructure to avoid the second use")
                 } else {

@@ -35,6 +35,7 @@ pub mod prelude_source;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod repl;
+pub mod resolver;
 pub mod runtime;
 pub mod stdlib;
 #[cfg(test)]
