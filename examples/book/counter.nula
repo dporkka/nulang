@@ -1,0 +1,20 @@
+// Counter Actor — declare, spawn, send messages.
+// Run with: nulang examples/book/counter.nula
+
+actor Counter {
+    state count = 0
+
+    behavior inc() {
+        self.count = self.count + 1
+    }
+
+    behavior get() {
+        self.count
+    }
+}
+
+let c = spawn Counter {}
+c ! inc()
+c ! inc()
+c ! inc()
+ask c get()

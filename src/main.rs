@@ -975,21 +975,69 @@ fn run_with_runtime(
     nulang::vm::Value,
     std::rc::Rc<std::cell::RefCell<nulang::runtime::Runtime>>,
 )> {
-    let runtime = std::rc::Rc::new(std::cell::RefCell::new(nulang::runtime::Runtime::new()));
-    let mut vm = VM::new();
-    vm.load_module(m);
-    vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
-        runtime.clone(),
-    )));
-    #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
-    {
-        runtime.borrow_mut().http_provider = Some(std::sync::Arc::new(
-            nulang::backends::ReqwestHttpProvider::new(),
-        ));
+    // Multi-shard mode: controlled by NULANG_SHARDS env var (default 1).
+    let num_shards: usize = std::env::var("NULANG_SHARDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+
+    if num_shards > 1 {
+        // Create sharded runtimes upfront. Shard 0 serves the top-level
+        // VM (all initial `spawn` calls land here); other shards run their
+        // own schedulers in background threads.
+        let mut shards = nulang::runtime::Runtime::new_sharded(num_shards);
+        let remaining = shards.split_off(1);
+        let shard_0 = shards.pop().unwrap();
+
+        let runtime = std::rc::Rc::new(std::cell::RefCell::new(shard_0));
+        let mut vm = VM::new();
+        vm.load_module(m);
+        vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
+            runtime.clone(),
+        )));
+        #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
+        {
+            runtime.borrow_mut().http_provider = Some(std::sync::Arc::new(
+                nulang::backends::ReqwestHttpProvider::new(),
+            ));
+        }
+        let value = vm.run()?;
+        // Drop the VM (and its callback box, which holds an Rc clone) so
+        // we can unwrap the Rc below.
+        drop(vm);
+
+        let mut shard_0 = std::rc::Rc::try_unwrap(runtime)
+            .unwrap_or_else(|_| panic!("Rc has unexpected live clones"))
+            .into_inner();
+
+        // Spawn worker threads for shards 1..N, run shard 0 on the main
+        // thread so the return value captures its post-scheduler state.
+        std::thread::scope(|s| {
+            for mut rt in remaining {
+                s.spawn(move || {
+                    rt.run_scheduler();
+                });
+            }
+            shard_0.run_scheduler();
+        });
+        Ok((value, std::rc::Rc::new(std::cell::RefCell::new(shard_0))))
+    } else {
+        let runtime = std::rc::Rc::new(std::cell::RefCell::new(nulang::runtime::Runtime::new()));
+        let mut vm = VM::new();
+        vm.load_module(m);
+        vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
+            runtime.clone(),
+        )));
+        #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
+        {
+            runtime.borrow_mut().http_provider = Some(std::sync::Arc::new(
+                nulang::backends::ReqwestHttpProvider::new(),
+            ));
+        }
+        let value = vm.run()?;
+        runtime.borrow_mut().run_scheduler();
+        Ok((value, runtime))
     }
-    let value = vm.run()?;
-    runtime.borrow_mut().run_scheduler();
-    Ok((value, runtime))
 }
 
 fn check_source(source: &str, file_path: Option<&str>, verbose: bool) -> NuResult<()> {

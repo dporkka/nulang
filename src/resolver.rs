@@ -108,7 +108,6 @@ fn filter_decls(decls: Vec<Decl>, items: &[String]) -> Vec<Decl> {
 
 #[cfg(test)]
 mod tests {
-    use super::decl_name;
     use super::*;
     use crate::ast::{Expr, Literal};
     use crate::types::Span;

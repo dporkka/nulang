@@ -1,0 +1,4 @@
+// Hello World — the simplest Nulang program.
+// Run with: nulang examples/book/hello.nula
+
+perform IO.print("Hello, Nulang!")

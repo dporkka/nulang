@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 
 use tracing::warn;
 
@@ -156,6 +157,32 @@ fn actor_exit_reason(value: Option<&Value>, constants: &[crate::bytecode::Consta
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Cross-shard message type for multi-threaded scheduler
+// ---------------------------------------------------------------------------
+
+/// A message routed between Runtime shards in a multi-threaded deployment.
+///
+/// Each shard owns a disjoint subset of actors (by `actor_id % shard_count`).
+/// Cross-shard messages carry only value-type payloads (ints, strings, bools,
+/// unit, nil) — heap pointers are stripped before sending, matching the
+/// network wire-protocol restriction. This keeps ORCA reference counting
+/// local to each shard.
+#[derive(Debug)]
+enum CrossShardMsg {
+    /// Deliver a message to an actor on the target shard.
+    DeliverMessage {
+        target_id: u64,
+        behavior_id: u16,
+        payload: Vec<Value>,
+        sender: u64,
+    },
+    /// Enqueue an actor on the target shard (wake from idle/waiting).
+    EnqueueActor {
+        actor_id: u64,
+        priority: ActorPriority,
+    },
+}
 
 pub struct Runtime {
     pub actors: HashMap<u64, Actor>,
@@ -255,11 +282,27 @@ pub struct Runtime {
     /// The embedder (e.g. NLC guest agent) wires this to host signaling.
     pub idle_callback: Option<Box<dyn FnMut()>>,
     // Test effect handlers — installed via `install_test_handler` to
-    // intercept `perform Effect.op` calls in tests.  Key is the qualified
-    // name (e.g. "IO.print", "DB.write").  A handler returns `Some(value)`
-    // to mock the effect or `None` to fall through to real dispatch.
     pub test_handlers: HashMap<String, Box<dyn Fn(&[Value]) -> Option<Value>>>,
+
+    // -- Multi-threaded scheduler sharding --
+    /// This shard's index (0-based). Always 0 for a single-shard runtime.
+    pub shard_idx: u16,
+    /// Total number of shards. Always 1 for a single-shard runtime.
+    pub shard_count: u16,
+    /// Channels to send messages to every shard (including self — unused).
+    /// `None` when `shard_count == 1` (single-shard, no cross-shard routing).
+    cross_shard_tx: Option<Vec<mpsc::SyncSender<CrossShardMsg>>>,
+    /// Channel to receive messages for this shard.
+    /// `None` when `shard_count == 1`.
+    cross_shard_rx: Option<mpsc::Receiver<CrossShardMsg>>,
 }
+
+// SAFETY: in sharded mode each Runtime runs on exactly one thread (shard
+// ownership by actor_id % shard_count). Cross-shard communication uses
+// mpsc channels; no two threads access the same Runtime's internal state.
+// The contained VM, callback trait objects, and raw ORCA pointers are all
+// thread-confined.
+unsafe impl Send for Runtime {}
 
 impl Runtime {
     pub fn new() -> Self {
@@ -295,7 +338,66 @@ impl Runtime {
             pending_spawn_responses: HashMap::new(),
             dlq_actor_id: None,
             test_handlers: HashMap::new(),
+            shard_idx: 0,
+            shard_count: 1,
+            cross_shard_tx: None,
+            cross_shard_rx: None,
         }
+    }
+
+    /// Create a shard Runtime. Private — use [`Runtime::new_sharded`] to
+    /// create a set of N shards with cross-shard channels wired.
+    fn new_shard(
+        shard_idx: u16,
+        shard_count: u16,
+        cross_shard_tx: Vec<mpsc::SyncSender<CrossShardMsg>>,
+        cross_shard_rx: mpsc::Receiver<CrossShardMsg>,
+    ) -> Self {
+        let mut rt = Runtime::new();
+        rt.shard_idx = shard_idx;
+        rt.shard_count = shard_count;
+        rt.cross_shard_tx = Some(cross_shard_tx);
+        rt.cross_shard_rx = Some(cross_shard_rx);
+        // Only shard 0 binds network transport; others skip it.
+        if shard_idx != 0 {
+            rt.distributed.enabled = false;
+        }
+        rt
+    }
+
+    /// Create `num_shards` Runtime instances, each wired with cross-shard
+    /// channels. Returns a `Vec` of Runtimes ready to `run_scheduler()` in
+    /// their own threads. Shard 0 owns network binding and cycle detection;
+    /// all shards process their local actors independently.
+    ///
+    /// Actor assignment: `actor_id % num_shards` determines the owning shard.
+    /// Cross-shard messages carry only value types (no heap pointers), keeping
+    /// ORCA reference counting local to each shard.
+    pub fn new_sharded(num_shards: usize) -> Vec<Runtime> {
+        assert!(num_shards > 0, "num_shards must be >= 1");
+        if num_shards == 1 {
+            return vec![Runtime::new()];
+        }
+
+        // Create a sync_channel per shard (bounded, 1024 messages deep).
+        let channels: Vec<(
+            mpsc::SyncSender<CrossShardMsg>,
+            mpsc::Receiver<CrossShardMsg>,
+        )> = (0..num_shards).map(|_| mpsc::sync_channel(1024)).collect();
+
+        let senders: Vec<mpsc::SyncSender<CrossShardMsg>> =
+            channels.iter().map(|(tx, _)| tx.clone()).collect();
+
+        let mut shards = Vec::with_capacity(num_shards);
+        for (i, (_tx, rx)) in channels.into_iter().enumerate() {
+            shards.push(Runtime::new_shard(
+                i as u16,
+                num_shards as u16,
+                senders.clone(),
+                rx,
+            ));
+        }
+        shards
     }
 
     /// Install a test handler that intercepts `perform Effect.op` calls.
@@ -1348,6 +1450,19 @@ impl Runtime {
     /// `perform Actor.set_priority` takes effect on the next (re)queue;
     /// unknown actors (e.g. already exited) enqueue at the Normal default.
     pub(crate) fn enqueue_actor(&self, actor_id: u64) {
+        // Cross-shard routing: if the actor lives on another shard, send
+        // an EnqueueActor message. The receiving shard's drain loop enqueues
+        // it locally.
+        if self.shard_count > 1 {
+            let target_shard = (actor_id % self.shard_count as u64) as u16;
+            if target_shard != self.shard_idx {
+                let priority = ActorPriority::Normal;
+                let tx = self.cross_shard_tx.as_ref().unwrap();
+                let _ = tx[target_shard as usize]
+                    .try_send(CrossShardMsg::EnqueueActor { actor_id, priority });
+                return;
+            }
+        }
         let priority = self
             .actors
             .get(&actor_id)
@@ -1736,6 +1851,37 @@ impl Runtime {
             .map(|idx| idx as u16)
     }
     pub fn send_message_by_id(&mut self, target_id: u64, behavior_id: u16, args: &[Value]) {
+        // Cross-shard routing: if the target actor lives on another shard,
+        // validate the payload (no heap pointers — ORCA is per-shard) and
+        // send via the cross-shard channel. The receiving shard delivers it
+        // through `deliver_cross_shard_message`.
+        if self.shard_count > 1 {
+            let target_shard = (target_id % self.shard_count as u64) as u16;
+            if target_shard != self.shard_idx {
+                // Reject payloads that carry heap pointers, actor refs, or
+                // closures — same restriction as the NUL0 wire protocol.
+                // Strings are fine (they travel by content through the
+                // sender's module pool).
+                for arg in args {
+                    if arg.is_ptr() || arg.is_actor_ref() || arg.is_closure() {
+                        tracing::warn!(
+                            "nulang-shard: dropping cross-shard message to actor {}: \
+                             payload contains heap pointer / actor ref / closure",
+                            target_id
+                        );
+                        return;
+                    }
+                }
+                let tx = self.cross_shard_tx.as_ref().unwrap();
+                let _ = tx[target_shard as usize].try_send(CrossShardMsg::DeliverMessage {
+                    target_id,
+                    behavior_id,
+                    payload: args.to_vec(),
+                    sender: self.current_actor.unwrap_or(0),
+                });
+                return;
+            }
+        }
         let msg = Message {
             behavior_id,
             payload: args.to_vec(),
@@ -1850,6 +1996,101 @@ impl Runtime {
                 }
             } else {
                 self.resume_suspended_receive_wait(target_id);
+            }
+        }
+    }
+
+    // -- Cross-shard message handling --
+
+    /// Deliver a message that arrived from another shard.  No ORCA
+    /// reference-counting is performed because cross-shard payloads are
+    /// restricted to value types (ints, strings, bools, unit, nil).
+    fn deliver_cross_shard_message(
+        &mut self,
+        target_id: u64,
+        behavior_id: u16,
+        payload: Vec<Value>,
+        sender: u64,
+    ) {
+        let msg = Message {
+            behavior_id,
+            payload,
+            sender,
+            priority: MessagePriority::Normal,
+        };
+        if let Some(actor) = self.actors.get_mut(&target_id) {
+            if let Err(_dropped) = actor.mailbox.push(msg) {
+                self.route_to_dlq(
+                    &Message {
+                        behavior_id,
+                        payload: Vec::new(),
+                        sender,
+                        priority: MessagePriority::System,
+                    },
+                    "mailbox full (cross-shard)",
+                );
+            }
+        } else {
+            self.route_to_dlq(
+                &Message {
+                    behavior_id,
+                    payload: Vec::new(),
+                    sender,
+                    priority: MessagePriority::System,
+                },
+                "target actor not found (cross-shard)",
+            );
+        }
+        self.enqueue_actor(target_id);
+        // Wake an actor suspended in a timed selective receive (same as
+        // local path, but without the deferred-wake machinery since
+        // cross-shard messages arrive between steps, never mid-VM-exec).
+        let wake_for_receive = self
+            .actors
+            .get(&target_id)
+            .map(|a| {
+                a.suspended_execution.is_some()
+                    && a.receive_wait.map(|w| !w.timed_out).unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if wake_for_receive {
+            // We're not inside a VM call here (drain runs between steps),
+            // so resume directly.
+            self.resume_suspended_receive_wait(target_id);
+        }
+    }
+
+    /// Drain all pending cross-shard messages into local mailboxes. Called
+    /// at the top of every scheduler-loop iteration before dequeuing work.
+    fn drain_cross_shard_messages(&mut self) {
+        // Collect messages first (releasing the rx borrow), then process.
+        let mut pending: Vec<CrossShardMsg> = Vec::new();
+        {
+            let rx = match self.cross_shard_rx.as_ref() {
+                Some(rx) => rx,
+                None => return,
+            };
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => pending.push(msg),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+        for msg in pending {
+            match msg {
+                CrossShardMsg::DeliverMessage {
+                    target_id,
+                    behavior_id,
+                    payload,
+                    sender,
+                } => {
+                    self.deliver_cross_shard_message(target_id, behavior_id, payload, sender);
+                }
+                CrossShardMsg::EnqueueActor { actor_id, priority } => {
+                    self.scheduler.enqueue_with_priority(actor_id, priority);
+                }
             }
         }
     }
@@ -2010,6 +2251,10 @@ impl Runtime {
         const GC_PUMP_INTERVAL: u64 = 256;
         let mut ticks: u64 = 0;
         loop {
+            // Drain any cross-shard messages before checking the local
+            // scheduler queue. In-flight messages from other shards inject
+            // actors into the local scheduler.
+            self.drain_cross_shard_messages();
             let actor_id = match self.scheduler.dequeue() {
                 Some(actor_id) => actor_id,
                 None => {

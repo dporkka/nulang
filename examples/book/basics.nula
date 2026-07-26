@@ -1,0 +1,24 @@
+// Basic Syntax — values, functions, control flow, records.
+// Run with: nulang examples/book/basics.nula
+
+// Values and bindings
+let x = 42
+let name = "Nulang"
+let active = true
+
+// Functions
+let greet = fn(n) { "Hello, " + n }
+let g = greet(name)
+
+// Control flow
+let status = if x > 50 then "high" else "low"
+
+// Records
+let point = { x: 3, y: 4 }
+let dist = point.x + point.y  -- 7
+
+// Pipe operator
+let doubled = 5 |> fn(n) { n + 3 } |> fn(n) { n * 2 }
+
+// Return the greeting
+g

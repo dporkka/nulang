@@ -1,0 +1,46 @@
+// Chat Room — actors send messages to each other.
+// Demonstrates actor spawn, state, behaviors, and message passing.
+// Run with: nulang examples/book/chat.nula
+
+actor ChatRoom {
+    state messages: Int = 0
+
+    behavior broadcast(sender_name: String, text: String) {
+        self.messages = self.messages + 1
+        perform IO.print("[" + sender_name + "]: " + text)
+    }
+
+    behavior count() {
+        perform IO.print(
+            "Total messages: " + perform Int.to_string(self.messages)
+        )
+    }
+}
+
+actor ChatClient {
+    state room_ref = 0
+
+    behavior init(room: Int) {
+        self.room_ref = room
+    }
+
+    behavior say(name: String, text: String) {
+        self.room_ref ! broadcast(name, text)
+    }
+}
+
+fn main() {
+    let room = spawn ChatRoom {}
+
+    let alice = spawn ChatClient {}
+    let bob = spawn ChatClient {}
+
+    alice ! init(room)
+    bob ! init(room)
+
+    alice ! say("Alice", "Hello!")
+    bob ! say("Bob", "Hi Alice!")
+
+    room ! count()
+    0
+}

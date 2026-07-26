@@ -1,0 +1,7 @@
+// Algebraic Effects — perform and handle a custom effect.
+// Nulang resolves effects by name at runtime; no effect declaration needed.
+// Run with: nulang examples/book/effects.nula
+
+handle perform Math.getAnswer() with {
+    Math.getAnswer() => 42
+}
