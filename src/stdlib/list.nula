@@ -1,0 +1,105 @@
+// Nulang standard library — List operations over native arrays.
+// Import: `import std.list`
+//
+// Arrays are built-in: [1, 2, 3] syntax, arr[i] indexing, arr.len().
+// This module adds functional combinators.
+
+/// Map a function over every element, returning a new array.
+pub fn map[T, U](arr: [T], f: fn(T) -> U) -> [U] {
+    let result = [];
+    let mut i = 0;
+    let len = arr.len();
+    while i < len {
+        result.push(f(arr[i]));
+        i = i + 1;
+    };
+    result
+}
+
+/// Keep elements that satisfy a predicate.
+pub fn filter[T](arr: [T], pred: fn(T) -> Bool) -> [T] {
+    let result = [];
+    let mut i = 0;
+    let len = arr.len();
+    while i < len {
+        let item = arr[i];
+        if pred(item) then { result.push(item); } else { };
+        i = i + 1;
+    };
+    result
+}
+
+/// Reduce from the left: fold([a,b,c], init, f) = f(f(f(init,a),b),c).
+pub fn fold[T, U](arr: [T], init: U, f: fn(U, T) -> U) -> U {
+    let mut acc = init;
+    let mut i = 0;
+    let len = arr.len();
+    while i < len {
+        acc = f(acc, arr[i]);
+        i = i + 1;
+    };
+    acc
+}
+
+/// Append two arrays into a new array.
+pub fn append[T](left: [T], right: [T]) -> [T] {
+    let result = [];
+    let mut i = 0;
+    while i < left.len() { result.push(left[i]); i = i + 1; };
+    let mut j = 0;
+    while j < right.len() { result.push(right[j]); j = j + 1; };
+    result
+}
+
+/// Reverse an array.
+pub fn reverse[T](arr: [T]) -> [T] {
+    let result = [];
+    let mut i = arr.len();
+    while i > 0 { i = i - 1; result.push(arr[i]); };
+    result
+}
+
+/// Get the nth element (0-indexed), or return default if out of bounds.
+pub fn nth[T](arr: [T], n: Int, default: T) -> T {
+    if n >= 0 && n < arr.len() then arr[n] else default
+}
+
+/// Take the first n elements.
+pub fn take[T](arr: [T], n: Int) -> [T] {
+    let result = [];
+    let mut i = 0;
+    let limit = if n < arr.len() then n else arr.len();
+    while i < limit { result.push(arr[i]); i = i + 1; };
+    result
+}
+
+/// Drop the first n elements.
+pub fn drop[T](arr: [T], n: Int) -> [T] {
+    let result = [];
+    let mut i = n;
+    let len = arr.len();
+    while i < len { result.push(arr[i]); i = i + 1; };
+    result
+}
+
+/// Check if any element satisfies a predicate.
+pub fn any[T](arr: [T], pred: fn(T) -> Bool) -> Bool {
+    let mut i = 0;
+    let len = arr.len();
+    while i < len {
+        if pred(arr[i]) then { return true; } else { };
+        i = i + 1;
+    };
+    false
+}
+
+/// Check if all elements satisfy a predicate.
+pub fn all[T](arr: [T], pred: fn(T) -> Bool) -> Bool {
+    let mut i = 0;
+    let len = arr.len();
+    while i < len {
+        if !pred(arr[i]) then { return false; } else { };
+        i = i + 1;
+    };
+    true
+}

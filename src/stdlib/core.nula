@@ -1,0 +1,114 @@
+// Nulang standard library — core types and combinators.
+// Auto-loaded into every Nulang program as `import std.core`.
+// Language version: 2.0.0-alpha
+
+// ── Option type ──────────────────────────────────────────────────────────
+
+/// Optional value: either Some(value) or None.
+pub type Option[T] = Some(T) | None
+
+/// Map a function over an Option.
+pub fn map[T, U](opt: Option[T], f: fn(T) -> U) -> Option[U] {
+    match opt {
+        Some(x) => Some(f(x)),
+        None => None,
+    }
+}
+
+/// Chain an Option-returning function.
+pub fn and_then[T, U](opt: Option[T], f: fn(T) -> Option[U]) -> Option[U] {
+    match opt {
+        Some(x) => f(x),
+        None => None,
+    }
+}
+
+/// Extract the value or return a default.
+pub fn unwrap_or[T](opt: Option[T], default: T) -> T {
+    match opt {
+        Some(x) => x,
+        None => default,
+    }
+}
+
+/// Returns true if the Option is Some.
+pub fn is_some[T](opt: Option[T]) -> Bool {
+    match opt {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Returns true if the Option is None.
+pub fn is_none[T](opt: Option[T]) -> Bool {
+    match opt {
+        Some(_) => false,
+        None => true,
+    }
+}
+
+// ── Result type ──────────────────────────────────────────────────────────
+
+/// Result of a fallible operation: either Ok(value) or Error(reason).
+pub type Result[T, E] = Ok(T) | Error(E)
+
+/// Map a function over a successful Result.
+pub fn map_result[T, U, E](r: Result[T, E], f: fn(T) -> U) -> Result[U, E] {
+    match r {
+        Ok(x) => Ok(f(x)),
+        Error(e) => Error(e),
+    }
+}
+
+/// Map a function over the error case.
+pub fn map_error[T, E, F](r: Result[T, E], f: fn(E) -> F) -> Result[T, F] {
+    match r {
+        Ok(x) => Ok(x),
+        Error(e) => Error(f(e)),
+    }
+}
+
+/// Chain a Result-returning function.
+pub fn and_then_result[T, U, E](r: Result[T, E], f: fn(T) -> Result[U, E]) -> Result[U, E] {
+    match r {
+        Ok(x) => f(x),
+        Error(e) => Error(e),
+    }
+}
+
+/// Extract the value or return a default.
+pub fn unwrap_or_result[T, E](r: Result[T, E], default: T) -> T {
+    match r {
+        Ok(x) => x,
+        Error(_) => default,
+    }
+}
+
+/// Returns true if the Result is Ok.
+pub fn is_ok[T, E](r: Result[T, E]) -> Bool {
+    match r {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+}
+
+/// Returns true if the Result is Error.
+pub fn is_error[T, E](r: Result[T, E]) -> Bool {
+    match r {
+        Ok(_) => false,
+        Error(_) => true,
+    }
+}
+
+// ── Identity and composition ─────────────────────────────────────────────
+
+/// Identity function. Returns its argument unchanged.
+pub fn id[T](x: T) -> T { x }
+
+/// Function composition: (f ∘ g)(x) = f(g(x)).
+pub fn compose[A, B, C](f: fn(B) -> C, g: fn(A) -> B) -> fn(A) -> C {
+    fn(x: A) -> C { f(g(x)) }
+}
+
+/// Constant function: always returns the same value.
+pub fn const_fn[T, U](x: T, _y: U) -> T { x }

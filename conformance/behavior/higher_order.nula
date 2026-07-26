@@ -1,0 +1,11 @@
+fn map(arr: [Int], f: fn(Int) -> Int) -> [Int] {
+    let result = [];
+    let i = 0;
+    while i < arr.len() {
+        result.push(f(arr[i]));
+        i = i + 1;
+    };
+    result
+}
+let doubled = map([1, 2, 3], fn(x) x * 2);
+perform IO.print(doubled[0] + doubled[1] + doubled[2])

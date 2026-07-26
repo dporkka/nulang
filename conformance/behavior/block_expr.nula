@@ -1,0 +1,6 @@
+let result = {
+    let x = 10;
+    let y = 20;
+    x + y
+};
+perform IO.print(result)
