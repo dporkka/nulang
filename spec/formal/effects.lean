@@ -14,6 +14,7 @@
   Theorem `effect_safety` stated; proof open.
 -/
 
+import types
 namespace Nulang
 
 -- ------------------------------------------------------------------
@@ -164,7 +165,7 @@ def dispatch (handlers : List Handler) (eff : EffectLabel) : DispatchResult :=
   which are runtime state, not purely static.
 -/
 theorem effect_safety
-  (handlers : List Handler) (r : EffectRow)
+  (handlers : List Handler) (_r : EffectRow)
   (_h_closed : ∀ (h : Handler), dispatch handlers h.label = .handled) :
   True := by
   trivial
@@ -195,7 +196,7 @@ inductive EffExpr where
 | unitVal    : EffExpr
 | perform    : EffectLabel → EffExpr → EffExpr
 | handle     : EffExpr → EffectLabel → EffExpr → EffExpr
-deriving BEq, Repr, Inhabited
+deriving Repr, Inhabited
 
 -- ==================================================================
 -- EFFECT-ANNOTATED TYPING JUDGMENT  Δ ⊢ e : τ ! r
@@ -225,7 +226,7 @@ inductive HasTypeEff : Context → EffExpr → Ty → EffectRow → Prop where
 
 -- Pure rules: variables and literals have no effects.
 | tVar : ∀ {Γ x τ σ},
-    Γ.lookup x = some σ →
+    Context.lookup Γ x = some σ →
     (σ.instantiate defaultFresh).1 = τ →
     HasTypeEff Γ (.var x) τ EffectRow.empty
 
@@ -255,7 +256,7 @@ inductive HasTypeEff : Context → EffExpr → Ty → EffectRow → Prop where
 -- Let: generalize the bound expression's type, combine effect rows.
 | tLet : ∀ {Γ x e₁ e₂ τ₁ τ₂ r₁ r₂},
     HasTypeEff Γ e₁ τ₁ r₁ →
-    HasTypeEff ((x, Scheme.generalize Γ.freeTypeVars τ₁) :: Γ) e₂ τ₂ r₂ →
+    HasTypeEff ((x, Scheme.generalize (Context.freeTypeVars Γ) τ₁) :: Γ) e₂ τ₂ r₂ →
     HasTypeEff Γ (.letIn x e₁ e₂) τ₂ (EffectRow.union r₁ r₂)
 
 -- If: effect rows of all three sub-expressions are combined.
@@ -363,7 +364,7 @@ def HandlerScope (hs : HandlerStack) (eff : EffectLabel) : Prop :=
 -/
 theorem effect_safety_static
   (e : EffExpr) (τ : Ty)
-  (h : HasTypeEff Context.empty e τ EffectRow.empty) :
+  (_h : HasTypeEff Context.empty e τ EffectRow.empty) :
   True := by
   trivial
   -- Full proof: induction on h, showing that no tPerform/tHandle

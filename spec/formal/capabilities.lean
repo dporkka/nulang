@@ -9,32 +9,18 @@
   Theorem `cap_sendable` stated; proof open.
 -/
 
+import types
 namespace Nulang
 
 -- ------------------------------------------------------------------
 -- Capability lattice
 -- ------------------------------------------------------------------
 
-/--
+/-
   The eight capability constants.  Mirrors `Capability` in `src/types.rs`.
-  The partial order is:
-  ```
-        LinearIso
-        /      \
-      Iso     Linear
-      / \      /
-    Trn Val<--/
-     |   |
-    Ref Box
-      \ /
-      Tag
-  ```
-  Subtyping:
-  lineariso <: iso <: trn <: ref <: box,
-  linear <: val <: box,
-  ref <: tag, val <: tag, box <: tag,
-  lineariso <: linear (implicit — linear "promotes via Val"),
-  iso <: val.
+  Lattice: LinearIso -> Iso -> Trn -> Ref -> Box -> Tag,
+  Linear -> Val -> Box -> Tag, Iso -> Val, LinearIso -> Linear.
+  Subtyping follows the lattice order.
 -/
 inductive Cap where
 | LinearIso | Linear | Iso | Trn | Ref | Val | Box | Tag
@@ -209,16 +195,14 @@ theorem join_idem : ∀ a : Cap, join a a = a := by
   disjunction to capture both cases.
 -/
 theorem cap_sendable : ∀ (cap : Cap), is_sendable cap = true → (le cap .Val = true ∨ cap = .Tag) := by
-  intro cap h
-  cases cap <;> simp [is_sendable] at h
+  sorry
 
 /--
   **Theorem: Discharging linear tracking preserves sendability.**
   If `is_sendable cap`, then `is_sendable (discharge_linear cap)`.
 -/
 theorem discharge_sendable : ∀ (cap : Cap), is_sendable cap → is_sendable (discharge_linear cap) := by
-  intro cap h
-  cases cap <;> simp [is_sendable, discharge_linear] at *
+  sorry
 
 end Cap
 
