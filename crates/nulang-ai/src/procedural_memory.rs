@@ -146,6 +146,11 @@ impl ProceduralMemory {
                 .map(|examples| examples.len())
                 .sum::<usize>()
     }
+
+    /// Return true if no patterns or examples are stored.
+    pub fn is_empty(&self) -> bool {
+        self.patterns.is_empty() && self.examples.is_empty()
+    }
 }
 
 fn token_set(text: &str) -> std::collections::HashSet<String> {

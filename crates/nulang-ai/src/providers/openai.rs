@@ -54,7 +54,7 @@ impl LlmClient for OpenAiClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| classify_reqwest_error(e))?;
+            .map_err(classify_reqwest_error)?;
 
         let status = response.status();
         if !status.is_success() {

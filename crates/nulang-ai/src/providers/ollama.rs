@@ -109,9 +109,10 @@ impl OllamaClient {
             client: crate::client::http_client(),
         }
     }
+}
 
-    /// Default client for a local Ollama instance running on port 11434.
-    pub fn default() -> Self {
+impl Default for OllamaClient {
+    fn default() -> Self {
         Self::new("http://localhost:11434", "llama3.1")
     }
 }

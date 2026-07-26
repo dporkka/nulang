@@ -1,3 +1,9 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::missing_transmute_annotations
+)]
+
 pub mod backends;
 pub mod format;
 

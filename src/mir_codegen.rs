@@ -1083,7 +1083,7 @@ impl MirCodegen {
         if let Some(&id) = self.field_map.get(name) {
             return Ok(id);
         }
-        if self.field_map.len() >= u8::MAX as usize + 1 {
+        if self.field_map.len() > u8::MAX as usize {
             // Mirrors the stable compiler's field_id: the 256th distinct
             // field name has no free id left (a single byte encodes it), so
             // this is an honest error instead of silently aliasing two

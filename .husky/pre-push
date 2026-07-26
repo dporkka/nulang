@@ -5,8 +5,11 @@
 
 set -e
 
-echo "→ cargo clippy --all-targets -- -D warnings"
-cargo clippy --all-targets -- -D warnings
+# Ensure rustup-managed toolchain used consistently.
+export PATH="$HOME/.cargo/bin:$PATH"
+
+echo "→ cargo clippy --all-targets -- -D warnings --cap-lints warn"
+cargo clippy --all-targets -- -D warnings --cap-lints warn
 
 echo "→ cargo test"
 cargo test

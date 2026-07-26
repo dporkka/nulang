@@ -4073,7 +4073,6 @@ impl Runtime {
     ///
     /// The `supervisor` value is passed in because callers remove it from
     /// `self.supervisors` before deciding to shut it down — looking it up in
-
     // -- Distributed Actor System --
 
     pub fn enable_distribution(&mut self, bind_addr: std::net::SocketAddr) -> std::io::Result<()> {
@@ -4169,7 +4168,7 @@ impl Runtime {
 /// Round 1 is full; rounds 2..=N are delta; round N+1 is full again.
 const CRDT_FULL_SYNC_INTERVAL: u64 = 16;
 
-/// True when the given 1-based sync round should ship full state.
+// True when the given 1-based sync round should ship full state.
 
 // ---------------------------------------------------------------------------
 // CycleRuntime implementation

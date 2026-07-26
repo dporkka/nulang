@@ -861,7 +861,7 @@ fn try_lookup_content_hash(runtime: &Runtime, behavior_name: &str) -> Option<[u8
 /// the membership table, actor messages are parsed and delivered to the
 /// target actor's mailbox, and spawn requests are answered with a
 /// [`Packet::SpawnResponse`] (hence the mutable transport).
-
+///
 /// Send a transport-level acknowledgement for a successfully processed packet.
 fn ack_packet(
     transport: &mut dyn NetworkTransport,

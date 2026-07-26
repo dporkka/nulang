@@ -74,6 +74,11 @@ impl EpisodicMemory {
     pub fn len(&self) -> usize {
         self.turns.len()
     }
+
+    /// Return true if no turns are stored.
+    pub fn is_empty(&self) -> bool {
+        self.turns.is_empty()
+    }
 }
 
 #[cfg(test)]
