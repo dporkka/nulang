@@ -1,0 +1,2 @@
+let result = if true then "yes" else "no";
+perform IO.print(result)

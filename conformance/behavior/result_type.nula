@@ -1,0 +1,8 @@
+type Result = Ok(Int) | Err(String)
+fn unwrap(r: Result) -> Int {
+    match r {
+        Ok(n) => n,
+        Err(_) => 0,
+    }
+}
+perform IO.print(unwrap(Ok(42)) + unwrap(Err("fail")))

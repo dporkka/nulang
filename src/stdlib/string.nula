@@ -1,0 +1,36 @@
+// Nulang standard library — String operations.
+// Import: `import std.string`
+//
+// Strings are built-in: "..." syntax, s + t concatenation,
+// String.length(s), String.charAt(s, idx).
+
+/// Remove leading and trailing whitespace from a string.
+pub fn trim(s: String) -> String {
+    // Strip leading whitespace
+    let mut start = 0;
+    let len = String.length(s);
+    while start < len {
+        let c = String.charAt(s, start);
+        if c == 32 || c == 9 || c == 10 || c == 13 then { start = start + 1; } else { break; };
+    };
+    // Strip trailing whitespace
+    let mut end = len;
+    while end > start {
+        let c = String.charAt(s, end - 1);
+        if c == 32 || c == 9 || c == 10 || c == 13 then { end = end - 1; } else { break; };
+    };
+    // Manual substring
+    let mut result = "";
+    let mut i = start;
+    while i < end {
+        result = result + String.charAt(s, i);
+        i = i + 1;
+    };
+    result
+}
+
+/// Get the length of a string in bytes.
+pub fn length(s: String) -> Int { String.length(s) }
+
+/// Check if the string is empty.
+pub fn is_empty(s: String) -> Bool { String.length(s) == 0 }

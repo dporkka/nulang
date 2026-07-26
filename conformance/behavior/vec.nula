@@ -1,0 +1,5 @@
+let v = Vec.new();
+Vec.push(v, 1);
+Vec.push(v, 2);
+Vec.push(v, 3);
+perform IO.print(Vec.len(v))
