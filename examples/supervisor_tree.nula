@@ -1,0 +1,74 @@
+// Supervisor Tree — nested OTP supervisors with restart strategies.
+// A root supervisor manages child supervisors and workers.
+// Demonstrates the OTP built-in effect surface.
+//
+// Run with: nulang examples/supervisor_tree.nula
+
+actor Worker {
+    state id: Int = 0
+    state healthy: Bool = true
+
+    behavior init(worker_id: Int) {
+        self.id = worker_id
+        perform IO.print(
+            "Worker " + perform Int.to_string(worker_id) + " started"
+        )
+    }
+
+    behavior work(x: Int) {
+        if self.healthy then
+            perform IO.print(
+                "Worker " + perform Int.to_string(self.id) +
+                " processed " + perform Int.to_string(x)
+            )
+        else
+            perform IO.print(
+                "Worker " + perform Int.to_string(self.id) + " is sick, skipping"
+            )
+    }
+
+    behavior sicken() {
+        self.healthy = false
+        perform IO.print(
+            "Worker " + perform Int.to_string(self.id) + " is now sick"
+        )
+    }
+}
+
+fn main() {
+    // Create a root supervisor (one_for_one strategy = 0)
+    let root = perform Otp.create_supervisor("root", 0)
+
+    // Create a simple-one-for-one child pool (strategy = 3)
+    let pool = perform Otp.create_supervisor("worker_pool", 3)
+    let t = perform Otp.set_template(pool, "Worker")
+
+    // Start two workers from the template
+    let w1 = perform Otp.start_child(pool)
+    let w2 = perform Otp.start_child(pool)
+
+    // Initialize and do work
+    w1 ! init(1)
+    w2 ! init(2)
+    w1 ! work(10)
+    w2 ! work(20)
+
+    // Check count
+    let count = perform Otp.child_count(pool)
+    perform IO.print(
+        "Active workers: " + perform Int.to_string(count)
+    )
+
+    // Terminate one worker normally
+    let r = perform Otp.terminate_child(pool, w2)
+    let count2 = perform Otp.child_count(pool)
+    perform IO.print(
+        "After terminate: " + perform Int.to_string(count2)
+    )
+
+    // Make worker 1 sick, then check it still exists (not killed)
+    w1 ! sicken()
+    w1 ! work(99)
+
+    0
+}

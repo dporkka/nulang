@@ -1,0 +1,42 @@
+{
+  "name": "nulang",
+  "displayName": "Nulang",
+  "description": "Nulang language support — syntax highlighting, diagnostics, goto-definition, and more",
+  "version": "0.1.0",
+  "publisher": "nulang",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/dporkka/nulang",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:nulang"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "nulang",
+        "aliases": ["Nulang", "nulang"],
+        "extensions": [".nula"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "nulang",
+        "scopeName": "source.nulang",
+        "path": "./syntaxes/nulang.tmLanguage.json"
+      }
+    ]
+  },
+  "scripts": {
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.0.0"
+  }
+}

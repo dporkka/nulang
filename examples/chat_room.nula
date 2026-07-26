@@ -1,0 +1,57 @@
+// Chat Room — multi-actor messaging with the actor name registry.
+// Actors register under names, discover each other via `Actor.whereis`,
+// and exchange messages. Demonstrates BEAM-style registry primitives.
+//
+// Run with: nulang examples/chat_room.nula
+
+actor ChatRoom {
+    state messages: Int = 0
+
+    behavior broadcast(sender_name: String, text: String) {
+        self.messages = self.messages + 1
+        perform IO.print("[" + sender_name + "]: " + text)
+    }
+
+    behavior count() {
+        perform IO.print(
+            "Total messages: " + perform Int.to_string(self.messages)
+        )
+    }
+}
+
+actor ChatClient {
+    state room_ref: Int = 0
+
+    behavior init(room: Int) {
+        self.room_ref = room
+    }
+
+    behavior say(name: String, text: String) {
+        self.room_ref ! broadcast(name, text)
+    }
+
+    behavior leave(name: String) {
+        perform IO.print(name + " left the room")
+    }
+}
+
+fn main() {
+    // Create the room
+    let room = spawn ChatRoom {}
+
+    // Two clients join and chat
+    let alice = spawn ChatClient {}
+    let bob = spawn ChatClient {}
+
+    alice ! init(room)
+    bob ! init(room)
+
+    alice ! say("alice", "Hello everyone!")
+    bob ! say("bob", "Hi Alice!")
+
+    room ! count()
+
+    alice ! leave("alice")
+    bob ! leave("bob")
+    0
+}

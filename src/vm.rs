@@ -482,6 +482,53 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
             }
             return Some(Value::int(s.as_bytes()[idx as usize] as i64));
         }
+        if effect_name == "String" && op_name == Some("concat") {
+            let a = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
+            let b = resolve_value_string(constants, *regs.get(1).unwrap_or(&Value::nil()));
+            let combined = a + &b;
+            let bytes = combined.into_bytes();
+            match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                Some(ptr) => {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                    }
+                    return Some(Value::ptr(ptr));
+                }
+                None => return Some(Value::nil()),
+            }
+        }
+        if effect_name == "String" && op_name == Some("substring") {
+            let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
+            let start = regs.get(1).and_then(|v| v.as_int()).unwrap_or(0);
+            let len = regs.get(2).and_then(|v| v.as_int()).unwrap_or(0);
+            if start < 0 || len < 0 || start as usize > s.len() {
+                return Some(Value::nil());
+            }
+            let end = ((start + len) as usize).min(s.len());
+            let sub = &s[start as usize..end];
+            let bytes = sub.as_bytes().to_vec();
+            match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                Some(ptr) => {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                    }
+                    return Some(Value::ptr(ptr));
+                }
+                None => return Some(Value::nil()),
+            }
+        }
+        if effect_name == "Debug" && op_name == Some("inspect") {
+            let label = regs
+                .first()
+                .map(|v| resolve_value_string(constants, *v))
+                .unwrap_or_default();
+            let val = regs.get(1).copied().unwrap_or(Value::nil());
+            let file = crate::types::source_map_file().unwrap_or_else(|| "<unknown>".to_string());
+            eprintln!("[{}] {} = {}", file, label, val.to_string_repr());
+            return Some(val);
+        }
         if effect_name != "IO" {
             return None;
         }
@@ -496,6 +543,26 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 } else {
                     println!("{}", message);
                 }
+                Some(Value::unit())
+            }
+            Some("log") => {
+                let level = regs
+                    .first()
+                    .map(|v| resolve_value_string(constants, *v))
+                    .unwrap_or_default();
+                let message = regs
+                    .get(1)
+                    .map(|v| resolve_value_string(constants, *v))
+                    .unwrap_or_default();
+                eprintln!("[{}] {}", level.to_uppercase(), message);
+                Some(Value::unit())
+            }
+            Some("log_error") => {
+                let message = regs
+                    .first()
+                    .map(|v| resolve_value_string(constants, *v))
+                    .unwrap_or_default();
+                eprintln!("ERROR: {}", message);
                 Some(Value::unit())
             }
             Some("read") => {
@@ -1478,6 +1545,12 @@ impl VM {
                         .map(|f| f.regs[0])
                         .unwrap_or(Value::unit()));
                 }
+                Err(NuError::VMError { msg, span }) => {
+                    return Err(NuError::VMError {
+                        msg: self.enrich_error(msg),
+                        span,
+                    })
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -1548,6 +1621,12 @@ impl VM {
                         .map(|f| f.regs[0])
                         .unwrap_or(Value::unit()));
                 }
+                Err(NuError::VMError { msg, span }) => {
+                    return Err(NuError::VMError {
+                        msg: self.enrich_error(msg),
+                        span,
+                    })
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -1603,6 +1682,12 @@ impl VM {
                         .and_then(|i| self.frames.get(i))
                         .map(|f| f.regs[0])
                         .unwrap_or(Value::unit()));
+                }
+                Err(NuError::VMError { msg, span }) => {
+                    return Err(NuError::VMError {
+                        msg: self.enrich_error(msg),
+                        span,
+                    })
                 }
                 Err(e) => return Err(e),
             }
@@ -2508,6 +2593,28 @@ impl VM {
             };
         }
         Ok(())
+    }
+
+    fn enrich_error(&self, msg: String) -> String {
+        let mut e = msg;
+        e.push_str("\nStack trace:");
+        let mut depth = 0;
+        let mut idx = self.current_frame_idx;
+        while let Some(i) = idx {
+            let fr = &self.frames[i];
+            let name = self
+                .modules
+                .get(fr.module_idx)
+                .map(|m| m.name.as_str())
+                .unwrap_or("?");
+            e.push_str(&format!("\n  [{}] {}:pc{}", depth, name, fr.pc));
+            depth += 1;
+            idx = fr.caller_idx;
+        }
+        if depth == 0 {
+            e.push_str("\n  (empty)");
+        }
+        e
     }
 
     pub fn step(&mut self) -> NuResult<()> {

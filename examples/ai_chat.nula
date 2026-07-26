@@ -1,0 +1,45 @@
+// AI Chat — conversation loop with the LLM built-in effect.
+// An agent actor maintains conversation memory and queries the
+// inference provider via `perform Inference.ask`. Requires the
+// `ai-runtime` feature (enabled by default).
+//
+// Run with: nulang examples/ai_chat.nula
+
+actor ChatAgent {
+    state history: String = ""
+    state turn: Int = 0
+
+    behavior ask(prompt: String) {
+        self.turn = self.turn + 1
+
+        // Query the inference provider directly
+        let reply = perform Inference.ask(prompt)
+        self.history = self.history + "\nQ: " + prompt + "\nA: " + reply
+
+        perform IO.print(
+            "[Turn " + perform Int.to_string(self.turn) + "] " + reply
+        )
+    }
+
+    behavior summarize() {
+        let summary = perform Inference.ask(
+            "Summarize this conversation:\n" + self.history
+        )
+        perform IO.print("Summary: " + summary)
+    }
+
+    behavior reset() {
+        self.history = ""
+        self.turn = 0
+        perform IO.print("Conversation reset")
+    }
+}
+
+fn main() {
+    let bot = spawn ChatAgent {}
+    bot ! ask("What is the capital of France?")
+    bot ! ask("What is its population?")
+    bot ! summarize()
+    bot ! reset()
+    0
+}

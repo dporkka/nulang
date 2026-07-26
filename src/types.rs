@@ -872,6 +872,14 @@ pub fn set_source_map(source: &str) {
     set_source_map_with_file(source, None);
 }
 
+pub fn source_map_file() -> Option<String> {
+    SOURCE_MAP.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(|sm| sm.file_path().map(|s| s.to_string()))
+    })
+}
+
 /// Install a SourceMap with an optional file path (e.g. "main.nula").
 /// Call before any Span display for richer diagnostics.
 pub fn set_source_map_with_file(source: &str, file: Option<&str>) {
@@ -968,6 +976,73 @@ impl Span {
 // ---------------------------------------------------------------------------
 
 pub type NuResult<T> = Result<T, NuError>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    E001UnclosedDelimiter,
+    E002UnboundVariable,
+    E003TypeMismatch,
+    E004MissingEffect,
+    E005SendabilityViolation,
+    E006LinearUseAfterConsume,
+    E007InfiniteType,
+    E008FieldNotFound,
+    E009WrongArity,
+    E010MatchNoArms,
+    E011StepLimitExceeded,
+    E012UnhandledEffect,
+}
+
+impl ErrorCode {
+    pub fn code_str(&self) -> &'static str {
+        match self {
+            ErrorCode::E001UnclosedDelimiter => "E001",
+            ErrorCode::E002UnboundVariable => "E002",
+            ErrorCode::E003TypeMismatch => "E003",
+            ErrorCode::E004MissingEffect => "E004",
+            ErrorCode::E005SendabilityViolation => "E005",
+            ErrorCode::E006LinearUseAfterConsume => "E006",
+            ErrorCode::E007InfiniteType => "E007",
+            ErrorCode::E008FieldNotFound => "E008",
+            ErrorCode::E009WrongArity => "E009",
+            ErrorCode::E010MatchNoArms => "E010",
+            ErrorCode::E011StepLimitExceeded => "E011",
+            ErrorCode::E012UnhandledEffect => "E012",
+        }
+    }
+    pub fn explain(&self) -> &'static str {
+        match self {
+            ErrorCode::E001UnclosedDelimiter => "An opening delimiter was never closed.",
+            ErrorCode::E002UnboundVariable => "A name was used but never defined in scope.",
+            ErrorCode::E003TypeMismatch => "Two types that should be equal are not.",
+            ErrorCode::E004MissingEffect => {
+                "A function performs an effect not in its declared effect row."
+            }
+            ErrorCode::E005SendabilityViolation => {
+                "A value with an unsafe capability was sent between actors."
+            }
+            ErrorCode::E006LinearUseAfterConsume => {
+                "A linear value was used after it was consumed."
+            }
+            ErrorCode::E007InfiniteType => "The occurs check failed.",
+            ErrorCode::E008FieldNotFound => "A record field was accessed but does not exist.",
+            ErrorCode::E009WrongArity => {
+                "A function was called with the wrong number of arguments."
+            }
+            ErrorCode::E010MatchNoArms => "A match expression has zero arms.",
+            ErrorCode::E011StepLimitExceeded => "The VM step limit was exceeded.",
+            ErrorCode::E012UnhandledEffect => {
+                "An effect was performed but no handler exists for it."
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.code_str())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum NuError {
@@ -1273,6 +1348,50 @@ impl NuError {
     }
 
     /// Return a computed suggestion based on the error kind and message.
+    pub fn error_code(&self) -> Option<ErrorCode> {
+        let msg = match self {
+            NuError::LexError { msg, .. } => msg,
+            NuError::ParseError { msg, .. } => msg,
+            NuError::TypeError { msg, .. } => msg,
+            NuError::EffectError { msg, .. } => msg,
+            NuError::CapError { msg, .. } => msg,
+            NuError::FFIError { msg, .. } => msg,
+            NuError::RuntimeError { msg, .. } => msg,
+            NuError::VMError { msg, .. } => msg,
+            NuError::PythonError { msg, .. } => msg,
+            NuError::PackageError { msg, .. } => msg,
+            NuError::NotYetImplemented { .. } => return None,
+            NuError::Suspended(_) => return None,
+        };
+        if msg.contains("unclosed") {
+            Some(ErrorCode::E001UnclosedDelimiter)
+        } else if msg.contains("Unbound variable") {
+            Some(ErrorCode::E002UnboundVariable)
+        } else if msg.contains("Cannot unify") {
+            Some(ErrorCode::E003TypeMismatch)
+        } else if msg.contains("not a subset of allowed effects") {
+            Some(ErrorCode::E004MissingEffect)
+        } else if msg.contains("cannot be sent") {
+            Some(ErrorCode::E005SendabilityViolation)
+        } else if msg.contains("linear") && msg.contains("consumed") {
+            Some(ErrorCode::E006LinearUseAfterConsume)
+        } else if msg.contains("Infinite type") {
+            Some(ErrorCode::E007InfiniteType)
+        } else if msg.contains("Field") && msg.contains("not found") {
+            Some(ErrorCode::E008FieldNotFound)
+        } else if msg.contains("wrong number of arguments") {
+            Some(ErrorCode::E009WrongArity)
+        } else if msg.contains("Match expression with no arms") {
+            Some(ErrorCode::E010MatchNoArms)
+        } else if msg.contains("Step limit exceeded") {
+            Some(ErrorCode::E011StepLimitExceeded)
+        } else if msg.contains("Unhandled effect") {
+            Some(ErrorCode::E012UnhandledEffect)
+        } else {
+            None
+        }
+    }
+
     pub fn suggestion(&self) -> Option<&str> {
         match self {
             NuError::ParseError { msg, .. } => {

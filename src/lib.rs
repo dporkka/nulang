@@ -9,6 +9,7 @@ pub mod cranelift_utils;
 pub mod docgen;
 pub mod effect_checker;
 pub mod ffi;
+pub mod fmt;
 pub mod fuzz;
 pub mod hir;
 pub mod hir_lower;
@@ -24,6 +25,7 @@ pub mod mir_lower;
 pub mod mir_wasm;
 pub mod package;
 pub mod parser;
+pub mod prelude_source;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod repl;

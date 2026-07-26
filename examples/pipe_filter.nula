@@ -1,0 +1,51 @@
+// Pipe & Filter — data transformation pipelines using the `|>` operator
+// and closures. Each stage is a pure function that transforms data;
+// chaining them builds a readable processing pipeline.
+//
+// Run with: nulang examples/pipe_filter.nula
+
+// -- Pipeline stages as pure functions --
+fn double(n: Int) -> Int { n * 2 }
+
+fn add_ten(n: Int) -> Int { n + 10 }
+
+fn is_even(n: Int) -> Bool { n % 2 == 0 }
+
+// -- String processing pipeline --
+fn shout(s: String) -> String { s + "!" }
+
+fn greet(name: String) -> String { "Hello, " + name }
+
+fn main() {
+    // Arithmetic pipeline with the pipe operator
+    let result = 5
+        |> double
+        |> add_ten
+        |> double
+    perform IO.print(perform Int.to_string(result))
+
+    // Boolean pipeline
+    let flag = 42
+        |> double
+        |> is_even
+    perform IO.print(if flag then "even" else "odd")
+
+    // String pipeline
+    let message = "world"
+        |> greet
+        |> shout
+    perform IO.print(message)
+
+    // Anonymous closure in a pipeline
+    let inc = fn(n) { n + 1 }
+    let v = 41 |> inc
+    perform IO.print(perform Int.to_string(v))
+
+    // Multi-step closure pipeline
+    let triple = fn(n) { n * 3 }
+    let square = fn(n) { n * n }
+    let w = 2 |> triple |> square
+    perform IO.print(perform Int.to_string(w))
+
+    0
+}

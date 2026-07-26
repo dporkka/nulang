@@ -102,6 +102,9 @@ impl StdLib {
                     implemented_in: ImplSite::StandaloneVm,
                     description: "Read one line from stdin; returns the line without the trailing newline.",
                 },
+                BuiltinOp { name: "IO.log", effect: "IO", op: "log", signature: "log(level: String, message: String) -> Unit", implemented_in: ImplSite::StandaloneVm, description: "Log a message at the given level to stderr.", },
+                BuiltinOp { name: "IO.log_error", effect: "IO", op: "log_error", signature: "log_error(message: String) -> Unit", implemented_in: ImplSite::StandaloneVm, description: "Log an error message to stderr.", },
+                BuiltinOp { name: "Debug.inspect", effect: "Debug", op: "inspect", signature: "inspect(label: String, value: a) -> a", implemented_in: ImplSite::StandaloneVm, description: "Print a labeled value to stderr and return it unchanged.", },
                 BuiltinOp {
                     name: "Int.to_string",
                     effect: "Int",
@@ -127,6 +130,8 @@ impl StdLib {
                     implemented_in: ImplSite::StandaloneVm,
                     description: "Return the byte at the given index in the string, or -1 if out of bounds.",
                 },
+                BuiltinOp { name: "String.concat", effect: "String", op: "concat", signature: "concat(a: String, b: String) -> String", implemented_in: ImplSite::StandaloneVm, description: "Concatenate two strings.", },
+                BuiltinOp { name: "String.substring", effect: "String", op: "substring", signature: "substring(s: String, start: Int, len: Int) -> String", implemented_in: ImplSite::StandaloneVm, description: "Extract a substring.", },
                 BuiltinOp {
                     name: "Timer.sleep",
                     effect: "Timer",
@@ -463,6 +468,7 @@ mod tests {
             lib.effects(),
             vec![
                 "IO",
+                "Debug",
                 "Int",
                 "String",
                 "Timer",

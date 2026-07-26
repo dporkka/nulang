@@ -64,6 +64,25 @@ async fn main() {
     }
 
     // `nulang nula <cmd>` dispatches to the package manager.
+    if args[1] == "fmt" {
+        if args.len() < 3 {
+            eprintln!("fmt needs file");
+            std::process::exit(1);
+        }
+        let p = &args[2];
+        let s = std::fs::read_to_string(p).unwrap();
+        match nulang::fmt::format_source(&s) {
+            Ok(f) => {
+                std::fs::write(p, &f).unwrap();
+                println!("Formatted {}", p);
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args[1] == "nula" {
         if let Err(e) = nulang::package::commands::run(&args[2..]) {
             print_error(&e, true);
@@ -150,6 +169,33 @@ async fn main() {
                     i += 1;
                 } else {
                     eprintln!("Error: --emit-stdlib-docs requires a directory argument");
+                    std::process::exit(1);
+                }
+            }
+            "init" => {
+                if i + 1 < args.len() {
+                    opts.init = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("init requires a name");
+                    std::process::exit(1);
+                }
+            }
+            "--watch" => {
+                if i + 1 < args.len() {
+                    opts.watch = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("--watch requires a file");
+                    std::process::exit(1);
+                }
+            }
+            "--explain" => {
+                if i + 1 < args.len() {
+                    opts.explain = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("--explain requires a code");
                     std::process::exit(1);
                 }
             }
@@ -270,6 +316,69 @@ async fn main() {
         }
     }
 
+    if let Some(n) = &opts.init {
+        let d = std::path::PathBuf::from(n);
+        if d.exists() {
+            eprintln!("dir exists");
+            std::process::exit(1);
+        }
+        std::fs::create_dir_all(&d).unwrap();
+        let m = d.join("main.nula");
+        std::fs::write(
+            &m,
+            format!(
+                "// {} - Nulang experiment\nperform IO.print(\"Hello!\")\n",
+                n
+            ),
+        )
+        .unwrap();
+        println!("Created {}", m.display());
+        return;
+    }
+    if let Some(c) = &opts.explain {
+        use nulang::types::ErrorCode;
+        let e = match c.to_uppercase().as_str() {
+            "E001" => ErrorCode::E001UnclosedDelimiter,
+            "E002" => ErrorCode::E002UnboundVariable,
+            "E003" => ErrorCode::E003TypeMismatch,
+            "E004" => ErrorCode::E004MissingEffect,
+            "E005" => ErrorCode::E005SendabilityViolation,
+            "E006" => ErrorCode::E006LinearUseAfterConsume,
+            "E007" => ErrorCode::E007InfiniteType,
+            "E008" => ErrorCode::E008FieldNotFound,
+            "E009" => ErrorCode::E009WrongArity,
+            "E010" => ErrorCode::E010MatchNoArms,
+            "E011" => ErrorCode::E011StepLimitExceeded,
+            "E012" => ErrorCode::E012UnhandledEffect,
+            _ => {
+                eprintln!("Unknown: {}", c);
+                std::process::exit(1);
+            }
+        };
+        println!("{}", e.explain());
+        return;
+    }
+    if let Some(p) = &opts.watch {
+        let p = p.clone();
+        let v = opts.verbose;
+        let b = opts.backend.clone();
+        let uc = color_enabled(&opts);
+        eprintln!("Watching {}...", p);
+        let mut lm = std::fs::metadata(&p).ok().and_then(|m| m.modified().ok());
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let cm = std::fs::metadata(&p).ok().and_then(|m| m.modified().ok());
+            if cm != lm {
+                lm = cm;
+                eprintln!("\n--- {} ---", p);
+                if let Ok(s) = std::fs::read_to_string(&p) {
+                    if let Err(e) = run_source(&s, Some(&p), v, &b, None) {
+                        print_error(&e, uc);
+                    }
+                }
+            }
+        }
+    }
     if opts.repl {
         let mut repl = Repl::new();
         repl.run();
@@ -392,6 +501,9 @@ struct Options {
     emit_stdlib_docs: Option<String>,
     /// Color mode: "auto" (default), "always", or "never".
     color: String,
+    init: Option<String>,
+    watch: Option<String>,
+    explain: Option<String>,
 }
 
 impl Default for Options {
@@ -409,6 +521,9 @@ impl Default for Options {
             verify_source: None,
             emit_stdlib_docs: None,
             color: "auto".to_string(),
+            init: None,
+            watch: None,
+            explain: None,
         }
     }
 }
@@ -445,6 +560,10 @@ fn print_help() {
     );
     println!("  nula <cmd>       Package manager (new, build, test, run)");
     println!("  --version, -V    Print version and exit");
+    println!("  init <name>      Scaffold experiment");
+    println!("  --watch <file>   Re-run on changes");
+    println!("  --explain <CODE> Error code help");
+    println!("  fmt <file>       Format in-place");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  --color auto|always|never  Colorize error output (default: auto)");
     println!("  -h, --help       Show this help message");
@@ -565,13 +684,24 @@ fn run_frontend(
     file_path: Option<&str>,
     verbose: bool,
 ) -> NuResult<nulang::ast::AstModule> {
+    let ps = nulang::prelude_source::PRELUDE_SOURCE;
+    let mut pl = Lexer::new(ps);
+    nulang::types::set_source_map_with_file(ps, Some("<prelude>"));
+    let pt = pl.lex()?;
+    let mut pp = Parser::new(pt);
+    let pa = pp.parse_module()?;
     let mut lexer = Lexer::new(source);
     nulang::types::set_source_map_with_file(source, file_path);
     let tokens = lexer.lex()?;
-
-    // 2. Parse
     let mut parser = Parser::new(tokens);
-    let ast = parser.parse_module()?;
+    let mut ast = parser.parse_module()?;
+    let mut pd: Vec<nulang::ast::Decl> = pa
+        .decls
+        .into_iter()
+        .filter(|d| matches!(d, nulang::ast::Decl::VariantType { .. }))
+        .collect();
+    pd.append(&mut ast.decls);
+    ast.decls = pd;
 
     if verbose {
         println!("=== AST ===");
@@ -605,10 +735,7 @@ fn run_frontend(
     let mut cap_analyzer = CapabilityAnalyzer::new();
     let cap_ctx = CapContext::new();
     let cap_body = |analyzer: &mut CapabilityAnalyzer, body: &nulang::ast::Expr| -> NuResult<()> {
-        analyzer
-            .infer_cap(&cap_ctx, body)
-            .map(|_| ())
-            .map_err(|e| e)
+        analyzer.infer_cap(&cap_ctx, body).map(|_| ())
     };
     for decl in flat_decls.iter().copied() {
         match decl {
@@ -737,12 +864,10 @@ fn run_source(
             return Ok(());
         }
         #[cfg(not(feature = "wasm-backend"))]
-        "wasm" | "wasm-run" | "wasm-aot" => {
-            return Err(nulang::types::NuError::VMError {
-                msg: "wasm backend not compiled in (enable 'wasm-backend' feature)".into(),
-                span: Span::default(),
-            });
-        }
+        "wasm" | "wasm-run" | "wasm-aot" => Err(nulang::types::NuError::VMError {
+            msg: "wasm backend not compiled in (enable 'wasm-backend' feature)".into(),
+            span: Span::default(),
+        }),
         "native" => {
             let hir = nulang::hir_lower::lower_module(&ast);
             let mir = nulang::mir_lower::lower_module(&hir)?;
@@ -764,7 +889,7 @@ fn run_source(
             if !result_str.is_empty() && result_str != "unit" && result_str != "()" {
                 println!("{}", result_str);
             }
-            return Ok(());
+            Ok(())
         }
         "bytecode" => {
             // Bytecode backend (default).
@@ -807,7 +932,7 @@ fn run_source(
             } else {
                 let mut vm = VM::new();
                 vm.load_module(m);
-                vm.run().map_err(|e| e)?
+                vm.run()?
             };
             let result_str = value.to_string_repr();
             if !result_str.is_empty() && result_str != "unit" && result_str != "()" {
@@ -815,20 +940,18 @@ fn run_source(
             }
             Ok(())
         }
-        _ => {
-            return Err(nulang::types::NuError::VMError {
-                msg: format!(
-                    "unknown backend '{}' (expected bytecode | native{})",
-                    backend,
-                    if cfg!(feature = "wasm-backend") {
-                        " | wasm | wasm-run | wasm-aot"
-                    } else {
-                        ""
-                    }
-                ),
-                span: Span::default(),
-            });
-        }
+        _ => Err(nulang::types::NuError::VMError {
+            msg: format!(
+                "unknown backend '{}' (expected bytecode | native{})",
+                backend,
+                if cfg!(feature = "wasm-backend") {
+                    " | wasm | wasm-run | wasm-aot"
+                } else {
+                    ""
+                }
+            ),
+            span: Span::default(),
+        }),
     }
 }
 
@@ -851,7 +974,7 @@ fn run_with_runtime(
     vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
         runtime.clone(),
     )));
-    let value = vm.run().map_err(|e| e)?;
+    let value = vm.run()?;
     runtime.borrow_mut().run_scheduler();
     Ok((value, runtime))
 }
@@ -953,7 +1076,7 @@ fn run_nbc_file(path: &str, verify_source: Option<&str>) -> NuResult<()> {
 
     let mut vm = VM::new();
     vm.load_module(artifact.module);
-    let value = vm.run().map_err(|e| e)?;
+    let value = vm.run()?;
     let result_str = value.to_string_repr();
     if !result_str.is_empty() && result_str != "unit" && result_str != "()" {
         println!("{}", result_str);

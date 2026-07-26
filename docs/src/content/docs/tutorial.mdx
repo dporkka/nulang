@@ -1,0 +1,188 @@
+---
+title: Tutorial
+description: A guided tour of Nulang — from installation to distributed actors.
+---
+
+Welcome to Nulang! This tutorial walks you through the language from first principles. By the end, you'll be writing actors, handling effects, and building distributed systems.
+
+## 1. Installation
+
+Install Nulang by building from source:
+
+```bash
+git clone https://github.com/dporkka/nulang.git
+cd nulang
+cargo build --release
+```
+
+Verify your installation:
+
+```bash
+cargo run -- --version
+cargo run -- --repl
+```
+
+For detailed platform-specific instructions, see the [Installation](/getting-started/installation/) page.
+
+## 2. Hello, World!
+
+Nulang uses **algebraic effects** for I/O. Print to the console with `perform IO.print`:
+
+```nulang
+perform IO.print("Hello, Nulang!")
+```
+
+Run it:
+
+```bash
+cargo run -- --eval 'perform IO.print("Hello, Nulang!")'
+```
+
+Or start the REPL and type interactively:
+
+```bash
+cargo run -- --repl
+nulang> perform IO.print("Hello, Nulang!")
+```
+
+## 3. Variables and Functions
+
+Bind values with `let` and define functions with `fn`:
+
+```nulang
+let x = 42
+let greeting = "Hello"
+
+fn add(a: Int, b: Int) -> Int {
+    a + b
+}
+
+perform IO.print(perform Int.to_string(add(x, 8)))
+```
+
+Closures capture their environment:
+
+```nulang
+let base = 10
+let add_base = fn(x) { x + base }
+perform IO.print(perform Int.to_string(add_base(5)))  // 15
+```
+
+## 4. Types and Pattern Matching
+
+Nulang has Hindley-Milner type inference — types are usually optional. Declare custom variant types and match on them:
+
+```nulang
+type Option[T] = Some(T) | None
+
+fn unwrap_or(opt: Option[Int], default: Int) -> Int {
+    match opt with {
+        | Some(x) => x
+        | None => default
+    }
+}
+
+let present = Some(42)
+let absent = None
+perform IO.print(perform Int.to_string(unwrap_or(present, 0)))  // 42
+perform IO.print(perform Int.to_string(unwrap_or(absent, 99)))  // 99
+```
+
+Pattern matching supports guards, nested patterns, records, and wildcards:
+
+```nulang
+type Color = Red | Green | Blue
+
+fn describe(c: Color) -> String {
+    match c with {
+        | Red => "warm"
+        | Green => "natural"
+        | Blue => "cool"
+    }
+}
+
+fn classify(n: Int) -> String {
+    match n with {
+        | x if x < 0 => "negative"
+        | 0 => "zero"
+        | _ => "positive"
+    }
+}
+```
+
+## 5. Actors
+
+Actors are the core concurrency primitive. Each actor has private state and a set of named behaviors:
+
+```nulang
+actor Counter {
+    state count: Int = 0
+
+    behavior inc() {
+        self.count = self.count + 1
+    }
+
+    behavior get() { self.count }
+}
+```
+
+Spawn an actor, send it messages with `!`, and query it with `ask`:
+
+```nulang
+let counter = spawn Counter {}
+counter ! inc()
+counter ! inc()
+let result = ask counter get()
+perform IO.print(perform Int.to_string(result))  // 2
+```
+
+Actors can link together for fault tolerance, register names in the global registry, and monitor each other's lifecycle:
+
+```nulang
+actor Worker {
+    behavior start(name: String) {
+        perform Actor.register(name)
+        perform IO.print(name + " registered")
+    }
+    behavior work() {
+        perform Actor.exit(0)  // normal shutdown
+    }
+}
+```
+
+See [Distributed Actors](/actors/overview/) for distribution, clustering, and supervision trees.
+
+## 6. Algebraic Effects
+
+Effects are Nulang's mechanism for side-effect management. The compiler tracks which effects each function may perform, and handlers intercept those effects at runtime:
+
+```nulang
+effect Logger {
+    log: (String) -> Unit
+}
+
+fn greet(name: String) {
+    perform Logger.log("greeting " + name)
+    perform IO.print("Hello, " + name)
+}
+
+handle greet("World") {
+    | Logger.log(msg) resume => {
+        perform IO.print("[LOG] " + msg)
+    }
+}
+```
+
+Built-in effects include `IO`, `Timer`, `Signal`, `Inference` (LLM), `Actor`, and `Otp` (supervisors). See the [Standard Library](/stdlib/overview/) for the complete reference.
+
+## 7. Next Steps
+
+You've covered the foundations. Here's where to go next:
+
+- **[Language Syntax](/language/syntax/)** — deep dive into expressions, declarations, and modules
+- **[Type System](/language/types/)** — reference capabilities, row polymorphism, and effect rows
+- **[Distributed Actors](/actors/overview/)** — clustering, location transparency, and CRDTs
+- **[AI Agents](/ai/overview/)** — LLM integration, pipelines, debates, and supervisor teams
+- **[Durable Workflows](/workflows/overview/)** — signals, timers, queries, and saga transactions
+
+Browse the full [API Reference](https://github.com/dporkka/nulang/blob/main/docs/api.md) or explore the [examples on GitHub](https://github.com/dporkka/nulang/tree/main/examples).

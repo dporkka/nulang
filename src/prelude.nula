@@ -1,0 +1,15 @@
+// Nulang Prelude — auto-imported into every module.
+// Core types that every Nulang program can use without explicit imports.
+//
+// This file is NOT user-editable. It is embedded at compile time and
+// prepended to every source file automatically.
+
+// -- Option type: represents an optional value --
+//    Some(x) — a value is present
+//    None    — no value
+type Option[T] = Some(T) | None
+
+// -- Result type: represents success or failure --
+//    Ok(x)    — successful result
+//    Error(e) — failure with an error value
+type Result[Ok, Err] = Ok(Ok) | Error(Err)

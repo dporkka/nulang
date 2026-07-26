@@ -63,6 +63,7 @@ struct DocumentState {
     version: i32,
     source: String,
     type_map: Option<HashMap<usize, String>>,
+    ast: Option<crate::ast::AstModule>,
 }
 
 impl NulangLanguageServer {
@@ -178,12 +179,17 @@ impl LanguageServer for NulangLanguageServer {
 
         {
             let mut docs = self.documents.lock().unwrap();
+            let ast = Lexer::new(&source)
+                .lex()
+                .ok()
+                .and_then(|tokens| Parser::new(tokens).parse_module().ok());
             docs.insert(
                 uri.clone(),
                 DocumentState {
                     version,
                     source: source.clone(),
                     type_map: Some(type_map),
+                    ast,
                 },
             );
         }
@@ -211,6 +217,10 @@ impl LanguageServer for NulangLanguageServer {
                 doc.version = version;
                 doc.source = source.clone();
                 doc.type_map = Some(type_map);
+                doc.ast = Lexer::new(&source)
+                    .lex()
+                    .ok()
+                    .and_then(|tokens| Parser::new(tokens).parse_module().ok());
             }
         }
 
@@ -285,13 +295,41 @@ impl LanguageServer for NulangLanguageServer {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .clone();
         let docs = self.documents.lock().unwrap();
-        let source = match docs.get(&params.text_document_position_params.text_document.uri) {
-            Some(doc) => doc.source.clone(),
+        let doc = match docs.get(&uri) {
+            Some(d) => d,
             None => return Ok(None),
         };
+        let source = doc.source.clone();
+        let ast = doc.ast.clone();
         drop(docs);
-        Ok(self.goto_def(&source, params.text_document_position_params.position))
+
+        // Search local definitions first
+        if let Some(loc) =
+            self.goto_def_local(&source, params.text_document_position_params.position, &uri)
+        {
+            return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+        }
+
+        // Try cross-file: extract word and search imported modules
+        let line = params.text_document_position_params.position.line as usize;
+        let col = params.text_document_position_params.position.character as usize;
+        if let Some(target_line) = source.lines().nth(line) {
+            let byte_col = utf16_col_to_byte(target_line, col);
+            if let Some(word) = self.word_at(target_line, byte_col) {
+                if let Some(ref a) = ast {
+                    if let Some(loc) = self.goto_def_cross_file(&uri, word, a) {
+                        return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
@@ -301,9 +339,11 @@ impl LanguageServer for NulangLanguageServer {
             None => return Ok(None),
         };
         drop(docs);
+        let uri = params.text_document_position.text_document.uri.clone();
         Ok(Some(self.find_refs(
             &source,
             params.text_document_position.position,
+            &uri,
         )))
     }
 
@@ -317,7 +357,7 @@ impl LanguageServer for NulangLanguageServer {
             None => return Ok(None),
         };
         drop(docs);
-        let locs = self.find_refs(&source, params.position);
+        let locs = self.find_refs(&source, params.position, &params.text_document.uri);
         Ok(locs.first().map(|l| PrepareRenameResponse::Range(l.range)))
     }
 
@@ -328,7 +368,11 @@ impl LanguageServer for NulangLanguageServer {
             None => return Ok(None),
         };
         drop(docs);
-        let locs = self.find_refs(&source, params.text_document_position.position);
+        let locs = self.find_refs(
+            &source,
+            params.text_document_position.position,
+            &params.text_document_position.text_document.uri,
+        );
         if locs.is_empty() {
             return Ok(None);
         }
@@ -537,27 +581,58 @@ impl NulangLanguageServer {
         Some(&line[s..e])
     }
 
-    fn goto_def(&self, source: &str, position: Position) -> Option<GotoDefinitionResponse> {
+    fn goto_def_local(&self, source: &str, position: Position, uri: &Url) -> Option<Location> {
         let line = position.line as usize;
         let col = position.character as usize;
         let target_line = source.lines().nth(line)?;
-        // LSP columns are UTF-16 code units; map to a byte offset on a char
-        // boundary before touching the line's bytes.
         let word = self.word_at(target_line, utf16_col_to_byte(target_line, col))?;
         let tokens = Lexer::new(source).lex().ok()?;
         let ast = Parser::new(tokens).parse_module().ok()?;
         let _ = TypeChecker::new().check_module(&ast).ok()?;
         for decl in &ast.decls {
-            if let Some(loc) = self.find_decl(decl, word) {
-                return Some(GotoDefinitionResponse::Scalar(loc));
+            if let Some(loc) = self.find_decl(decl, word, uri) {
+                return Some(loc);
             }
         }
         None
     }
-    fn find_decl(&self, decl: &crate::ast::Decl, word: &str) -> Option<Location> {
+
+    /// Follow import statements to find definitions in other files.
+    fn goto_def_cross_file(
+        &self,
+        current_uri: &Url,
+        word: &str,
+        ast: &crate::ast::AstModule,
+    ) -> Option<Location> {
+        for decl in &ast.decls {
+            if let crate::ast::Decl::Import { path, .. } = decl {
+                let docs = self.documents.lock().unwrap();
+                // Resolve relative to current file's directory
+                if let Ok(mut resolved) = current_uri.to_file_path() {
+                    resolved.pop();
+                    resolved.push(path);
+                    resolved.set_extension("nula");
+                    if let Ok(imported_uri) = Url::from_file_path(&resolved) {
+                        if let Some(doc) = docs.get(&imported_uri) {
+                            if let Some(ref imported_ast) = doc.ast {
+                                for d in &imported_ast.decls {
+                                    if let Some(loc) = self.find_decl(d, word, &imported_uri) {
+                                        return Some(loc);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                drop(docs);
+            }
+        }
+        None
+    }
+    fn find_decl(&self, decl: &crate::ast::Decl, word: &str, uri: &Url) -> Option<Location> {
         use crate::ast::Decl;
         let loc = |s: &crate::types::Span| Location {
-            uri: Url::parse("file:///current.nula").unwrap(),
+            uri: uri.clone(),
             range: Range {
                 start: Position::new(
                     s.line().saturating_sub(1) as u32,
@@ -587,7 +662,7 @@ impl NulangLanguageServer {
                     return Some(loc(span));
                 }
                 for d in decls {
-                    if let Some(l) = self.find_decl(d, word) {
+                    if let Some(l) = self.find_decl(d, word, uri) {
                         return Some(l);
                     }
                 }
@@ -596,7 +671,7 @@ impl NulangLanguageServer {
             _ => None,
         }
     }
-    fn find_refs(&self, source: &str, position: Position) -> Vec<Location> {
+    fn find_refs(&self, source: &str, position: Position, uri: &Url) -> Vec<Location> {
         let line = position.line as usize;
         let col = position.character as usize;
         let target_line = match source.lines().nth(line) {
@@ -618,14 +693,20 @@ impl NulangLanguageServer {
         let _ = TypeChecker::new().check_module(&ast);
         let mut locs = Vec::new();
         for decl in &ast.decls {
-            self.collect_refs(decl, &word, &mut locs);
+            self.collect_refs(decl, &word, &mut locs, uri);
         }
         locs
     }
-    fn collect_refs(&self, decl: &crate::ast::Decl, word: &str, locs: &mut Vec<Location>) {
+    fn collect_refs(
+        &self,
+        decl: &crate::ast::Decl,
+        word: &str,
+        locs: &mut Vec<Location>,
+        uri: &Url,
+    ) {
         use crate::ast::Decl;
         let loc = |s: &crate::types::Span| Location {
-            uri: Url::parse("file:///current.nula").unwrap(),
+            uri: uri.clone(),
             range: Range {
                 start: Position::new(
                     s.line().saturating_sub(1) as u32,
@@ -687,7 +768,7 @@ impl NulangLanguageServer {
                     locs.push(loc(span));
                 }
                 for d in decls {
-                    self.collect_refs(d, word, locs);
+                    self.collect_refs(d, word, locs, uri);
                 }
             }
             _ => {}
@@ -1865,6 +1946,9 @@ impl<'a> InlayHintEngine<'a> {
 /// document. It does not require a full parse or typecheck.
 pub struct CompletionEngine<'a> {
     source: &'a str,
+    function_names: Vec<String>,
+    variant_names: Vec<String>,
+    type_names: Vec<String>,
 }
 
 impl<'a> CompletionEngine<'a> {
@@ -1911,7 +1995,41 @@ impl<'a> CompletionEngine<'a> {
     ];
 
     pub fn new(source: &'a str) -> Self {
-        CompletionEngine { source }
+        CompletionEngine {
+            source,
+            function_names: Vec::new(),
+            variant_names: Vec::new(),
+            type_names: Vec::new(),
+        }
+    }
+
+    /// Populate cached names from a parsed AST.
+    pub fn set_ast_info(&mut self, ast: &crate::ast::AstModule) {
+        for decl in &ast.decls {
+            match decl {
+                crate::ast::Decl::Function { name, .. } => {
+                    self.function_names.push(name.clone());
+                }
+                crate::ast::Decl::Actor {
+                    name, behaviors, ..
+                } => {
+                    self.type_names.push(name.clone());
+                    for b in behaviors {
+                        self.function_names.push(b.name.clone());
+                    }
+                }
+                crate::ast::Decl::VariantType { name, variants, .. } => {
+                    self.type_names.push(name.clone());
+                    for (vname, _) in variants {
+                        self.variant_names.push(vname.clone());
+                    }
+                }
+                crate::ast::Decl::TypeAlias { name, .. } => {
+                    self.type_names.push(name.clone());
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Return completion items at the given LSP position.
@@ -1946,13 +2064,49 @@ impl<'a> CompletionEngine<'a> {
             }
         }
 
-        // Top-level function names (`fun name(...)`).
+        // Regex-based function names (fallback when no AST).
         for name in self.top_level_functions() {
             if name.to_lowercase().starts_with(&prefix_lower) {
                 items.push(CompletionItem {
                     label: name,
                     kind: Some(CompletionItemKind::FUNCTION),
                     detail: Some("function".to_string()),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Cached function names from AST.
+        for name in &self.function_names {
+            if name.to_lowercase().starts_with(&prefix_lower) {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some("function".to_string()),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Cached variant constructors.
+        for name in &self.variant_names {
+            if name.to_lowercase().starts_with(&prefix_lower) {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::CONSTRUCTOR),
+                    detail: Some("variant".to_string()),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Cached type names.
+        for name in &self.type_names {
+            if name.to_lowercase().starts_with(&prefix_lower) {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::CLASS),
+                    detail: Some("type".to_string()),
                     ..CompletionItem::default()
                 });
             }

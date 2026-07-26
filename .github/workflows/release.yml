@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Test (release)
+        run: cargo test --release
+
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          cp target/release/nulang dist/nulang-linux-x86_64
+          cd dist && tar czf nulang-linux-x86_64.tar.gz nulang-linux-x86_64
+          sha256sum nulang-linux-x86_64.tar.gz > nulang-linux-x86_64.tar.gz.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/nulang-linux-x86_64.tar.gz
+            dist/nulang-linux-x86_64.tar.gz.sha256
+          generate_release_notes: true

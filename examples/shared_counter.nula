@@ -1,0 +1,63 @@
+// Shared Counter — distributed counter via actor messaging.
+// Multiple worker actors increment a shared counter held by a
+// coordinator. Demonstrates request-response patterns between
+// actors using the `!` send operator and behavior dispatch.
+//
+// Run with: nulang examples/shared_counter.nula
+
+actor Counter {
+    state value: Int = 0
+
+    behavior increment(amount: Int) {
+        self.value = self.value + amount
+    }
+
+    behavior decrement(amount: Int) {
+        self.value = self.value - amount
+    }
+
+    behavior read() {
+        perform IO.print(
+            "Counter value: " + perform Int.to_string(self.value)
+        )
+    }
+}
+
+actor Worker {
+    state counter_ref: Int = 0
+    state name: String = "anon"
+
+    behavior init(name_str: String, counter: Int) {
+        self.name = name_str
+        self.counter_ref = counter
+    }
+
+    behavior do_inc(amount: Int) {
+        self.counter_ref ! increment(amount)
+    }
+
+    behavior do_dec(amount: Int) {
+        self.counter_ref ! decrement(amount)
+    }
+}
+
+fn main() {
+    let counter = spawn Counter {}
+
+    let w1 = spawn Worker {}
+    let w2 = spawn Worker {}
+
+    w1 ! init("alice", counter)
+    w2 ! init("bob", counter)
+
+    w1 ! do_inc(10)
+    w2 ! do_inc(5)
+    w1 ! do_dec(3)
+
+    counter ! read()
+
+    w2 ! do_inc(42)
+    counter ! read()
+
+    0
+}
