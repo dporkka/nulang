@@ -100,10 +100,28 @@ pub struct HandlerBindingDef {
     /// the handler frame (discarding the captured continuation), and jumps
     /// to the handle's join block.
     pub resume: bool,
+    /// Whether the continuation is consumed at most once (linear use of
+    /// `resume`).  When `true` the VM can skip heap-allocating the
+    /// `Continuation` struct and use the existing frame chain instead.
+    /// Analysis is deferred — currently always `false`.
+    pub single_shot: bool,
     /// Block containing the handler body; ends in `Terminator::Resume` for
     /// resuming handlers, in a `PopHandler` + `Terminator::Jump` to the
     /// handle's join block for non-resuming ones.
     pub body: BlockId,
+}
+
+/// Identifies a statically-resolved handler target.
+///
+/// When the effect checker determines that a `perform` is handled by an
+/// enclosing `handle` block whose handler table and binding are known at
+/// compile time, the MIR lowering fills in this reference.  `table_index`
+/// names an entry in the current function's `handler_tables`, and
+/// `binding_index` names a binding within that table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandlerRef {
+    pub table_index: u32,
+    pub binding_index: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +212,10 @@ pub enum RValue {
         effect: String,
         op: String,
         args: Vec<LocalId>,
+        /// Statically-resolved handler target, if the enclosing `handle`
+        /// block is known at compile time.  `None` for dynamic dispatch
+        /// via the string-based `handler_stack` walk.
+        resolved_handler: Option<HandlerRef>,
     },
     /// `perform <Effect>.<op>(args...)` — generic async effect dispatched
     /// through `PerformAsync` opcode. The effect_op is the fully-qualified
@@ -202,6 +224,7 @@ pub enum RValue {
     PerformAsync {
         effect_op: String,
         args: Vec<LocalId>,
+        resolved_handler: Option<HandlerRef>,
     },
     /// `perform Signal.wait("name")` — workflow signal wait.
     SignalWait {
@@ -533,6 +556,7 @@ mod tests {
             effect: "eff".into(),
             op: "op".into(),
             args: vec![LocalId(0)],
+            resolved_handler: None,
         };
         let _ = RValue::SignalWait { name: "sig".into() };
         let _ = RValue::Receive;

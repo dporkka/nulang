@@ -2016,6 +2016,73 @@ impl VM {
         Ok(())
     }
 
+    /// Statically-resolved effect dispatch.  Looks up the handler table
+    /// and binding directly by index instead of walking the handler stack
+    /// and matching by effect name string.  The handler table index comes
+    /// from the `Handle` opcode that installed the handler frame; the
+    /// binding index identifies the specific handler arm.
+    fn step_perform_direct(
+        &mut self,
+        instr: Instruction,
+        frame_idx: usize,
+        module_idx: usize,
+    ) -> NuResult<()> {
+        let table_idx = instr.op1 as usize;
+        let binding_idx = instr.op2 as usize;
+        let dst_reg = instr.op3;
+
+        // Look up the handler binding from the module's handler tables.
+        let module = self
+            .modules
+            .get(module_idx)
+            .ok_or_else(|| NuError::VMError {
+                msg: "PerformDirect: module not found".into(),
+                span: Span::default(),
+            })?;
+        let handler_table =
+            module
+                .handler_tables
+                .get(table_idx)
+                .ok_or_else(|| NuError::VMError {
+                    msg: format!("PerformDirect: handler table {} not found", table_idx),
+                    span: Span::default(),
+                })?;
+        let binding = handler_table
+            .bindings
+            .get(binding_idx)
+            .ok_or_else(|| NuError::VMError {
+                msg: format!(
+                    "PerformDirect: binding {} not found in table {}",
+                    binding_idx, table_idx
+                ),
+                span: Span::default(),
+            })?;
+
+        // Find the handler frame with the matching table index and module.
+        // The `Handle` opcode pushes the frame with this table index; the
+        // PerformDirect then finds it and installs the continuation.
+        let hf_idx = self
+            .handler_stack
+            .iter()
+            .rposition(|hf| hf.handler_table_idx == table_idx && hf.module_idx == module_idx)
+            .ok_or_else(|| NuError::VMError {
+                msg: format!("PerformDirect: no handler frame for table {}", table_idx),
+                span: Span::default(),
+            })?;
+
+        // Set the result register and capture the continuation.
+        self.handler_stack[hf_idx].resume_dst = binding.result_reg;
+        let cont = Continuation::capture(self, dst_reg).ok_or_else(|| NuError::VMError {
+            msg: "Cannot capture continuation: no current frame".into(),
+            span: Span::default(),
+        })?;
+        self.handler_stack[hf_idx].captured_continuation = Some(cont);
+
+        // Jump to the handler body.
+        self.frames[frame_idx].pc = binding.handler_offset;
+        Ok(())
+    }
+
     fn step_capstore(&mut self, instr: Instruction, frame_idx: usize) -> NuResult<()> {
         let closure_reg = instr.op1 as usize;
         let slot = instr.op2 as usize;
@@ -3346,6 +3413,9 @@ impl VM {
             OpCode::Perform => {
                 self.step_perform(instr, frame_idx, module_idx)?;
             }
+            OpCode::PerformDirect => {
+                self.step_perform_direct(instr, frame_idx, module_idx)?;
+            }
             OpCode::Resume => {
                 let val = self.frames[frame_idx].regs[instr.op1 as usize];
                 // The continuation lives on the innermost *matching* handler
@@ -4006,6 +4076,7 @@ mod vm_tests {
             handler_offset: 7,
             arg_count: 0,
             result_reg: 0,
+            single_shot: false,
         }]);
 
         // Program layout:
@@ -4104,6 +4175,7 @@ mod vm_tests {
             handler_offset: 10,
             arg_count: 0,
             result_reg: 0,
+            single_shot: false,
         }];
         module.add_handler_table(HandlerTable {
             bindings: outer_bindings,
@@ -4116,6 +4188,7 @@ mod vm_tests {
             handler_offset: 12,
             arg_count: 0,
             result_reg: 0,
+            single_shot: false,
         }];
         module.add_handler_table(HandlerTable {
             bindings: inner_bindings,
@@ -4199,12 +4272,14 @@ mod vm_tests {
                     handler_offset: 8,
                     arg_count: 0,
                     result_reg: 0,
+                    single_shot: false,
                 },
                 HandlerBinding {
                     effect_name: "GetB".to_string(),
                     handler_offset: 11,
                     arg_count: 0,
                     result_reg: 0,
+                    single_shot: false,
                 },
             ],
             fallback_offset: None,
@@ -4278,6 +4353,7 @@ mod vm_tests {
                 handler_offset: 8,
                 arg_count: 0,
                 result_reg: 0,
+                single_shot: false,
             }],
             fallback_offset: Some(11), // fallback handler
         });
@@ -5279,6 +5355,7 @@ mod vm_tests {
                 handler_offset: 10,
                 arg_count: 0,
                 result_reg: 0,
+                single_shot: false,
             }],
             fallback_offset: None,
         });
@@ -5288,6 +5365,7 @@ mod vm_tests {
                 handler_offset: 12,
                 arg_count: 0,
                 result_reg: 0,
+                single_shot: false,
             }],
             fallback_offset: None,
         });
@@ -5397,6 +5475,7 @@ mod vm_tests {
                 handler_offset: 8,
                 arg_count: 0,
                 result_reg: 0,
+                single_shot: false,
             }],
             fallback_offset: None,
         });
@@ -5456,6 +5535,7 @@ mod vm_tests {
                 handler_offset: 8,
                 arg_count: 0,
                 result_reg: 0,
+                single_shot: false,
             }],
             fallback_offset: None,
         });
@@ -5507,6 +5587,7 @@ mod vm_tests {
                 handler_offset: 8,
                 arg_count: 0,
                 result_reg: 0,
+                single_shot: false,
             }],
             fallback_offset: None,
         });

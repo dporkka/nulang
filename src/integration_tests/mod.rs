@@ -4,6 +4,7 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::bytecode::OpCode;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use crate::runtime::{
@@ -726,6 +727,88 @@ mod tests {
     fn test_source_handler_catches_matching_op() {
         let source = r#"handle perform IO.foo() { | IO.foo() => 1 }"#;
         assert_int(source, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Effect monomorphization: PerformDirect bytecode emission
+    // -----------------------------------------------------------------------
+
+    /// When a `perform` is inside a statically-known `handle` block, the
+    /// compiler emits `PerformDirect` instead of `Perform` — the handler
+    /// table and binding indices are baked into the instruction.
+    #[test]
+    fn test_perform_direct_emitted_for_statically_resolved_handler() {
+        let source = r#"handle perform IO.print("hi") { | IO.print(msg) => unit }"#;
+        let module = compile_source_new(source).expect("compile should succeed");
+        let has_perform_direct = module
+            .instructions
+            .iter()
+            .any(|i| i.opcode == OpCode::PerformDirect);
+        let has_perform = module
+            .instructions
+            .iter()
+            .any(|i| i.opcode == OpCode::Perform);
+        assert!(
+            has_perform_direct,
+            "statically-resolved perform must emit PerformDirect"
+        );
+        assert!(
+            !has_perform,
+            "statically-resolved perform must NOT emit dynamic Perform"
+        );
+        // And the program still evaluates correctly.
+        let (value, _ty) = run_source(source).unwrap();
+        assert!(value.is_unit(), "perform+handler should yield unit");
+    }
+
+    /// A `perform` with no handler in scope (e.g. built-in effect like
+    /// `IO.print` called at the top level) still uses the dynamic `Perform`
+    /// opcode — no monomorphization applies.
+    #[test]
+    fn test_perform_uses_dynamic_opcode_when_no_handler() {
+        let source = r#"perform IO.print("hello")"#;
+        let module = compile_source_new(source).expect("compile should succeed");
+        let has_perform = module
+            .instructions
+            .iter()
+            .any(|i| i.opcode == OpCode::Perform);
+        assert!(
+            has_perform,
+            "unresolved perform must emit dynamic Perform opcode"
+        );
+        let has_perform_direct = module
+            .instructions
+            .iter()
+            .any(|i| i.opcode == OpCode::PerformDirect);
+        assert!(
+            !has_perform_direct,
+            "unresolved perform must NOT emit PerformDirect"
+        );
+    }
+
+    /// Nested handler resolution: the inner handler shadows the outer one.
+    #[test]
+    fn test_nested_handler_resolves_to_inner() {
+        let source = r#"
+            handle {
+                handle { perform E.op() }
+                    { | E.op() => 2 }
+            } { | E.op() => 1 }
+        "#;
+        assert_int(source, 2);
+    }
+    /// A program with a mix of resolved and unresolved performs works.
+    #[test]
+    fn test_mixed_resolved_and_unresolved_performs() {
+        // A handle with two performs — both should use PerformDirect.
+        let source = r#"
+            handle {
+                perform E.one();
+                perform E.two()
+            } { | E.one() resume => 1 | E.two() resume => 2 }
+        "#;
+        // The last perform resumes with 2, so the handle evaluates to 2.
+        assert_int(source, 2);
     }
 
     // -----------------------------------------------------------------------

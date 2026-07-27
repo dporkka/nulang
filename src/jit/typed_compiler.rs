@@ -122,7 +122,11 @@ pub fn infer_reg_types(module: &CodeModule, pc: usize) -> TypeMetadata {
     for instr in &instructions[start..end] {
         if matches!(
             instr.opcode,
-            OpCode::Handle | OpCode::Perform | OpCode::Resume | OpCode::Unwind
+            OpCode::Handle
+                | OpCode::Perform
+                | OpCode::PerformDirect
+                | OpCode::Resume
+                | OpCode::Unwind
         ) {
             return meta;
         }

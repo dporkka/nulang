@@ -122,11 +122,17 @@ pub enum OpCode {
     SignalWait = 0x8E,   // Workflow signal wait (signal_name_const_idx, dst)
     ReceiveMatch = 0x8F, // Selective receive (spec_const_idx, dst); payload lands in dst+1..
 
-    // == Effects (0x90-0x93) ==
+    // == Effects (0x90-0x93, 0x9C) ==
     Perform = 0x90, // Perform effect operation (eff_id, op_id, args, dst)
     Handle = 0x91,  // Install effect handler (handler_table_idx)
     Resume = 0x92,  // Resume from effect handler with value (val_reg)
     Unwind = 0x93,  // Unwind effect handler
+    /// Statically-resolved effect dispatch.  `op1` = handler table index
+    /// (into `code_module.handler_tables`), `op2` = binding index (into
+    /// `HandlerTable.bindings`), `op3` = result register.  The VM looks up
+    /// the handler offset and register mapping directly from the table —
+    /// no string comparison or `handler_stack` walk.
+    PerformDirect = 0x9C,
 
     // == Python Interop (0x94-0x9B) ==
     PyImport = 0x94,  // Import Python module (module_name_const_idx, dst_reg, _)
@@ -334,6 +340,7 @@ impl OpCode {
             0x99 => Some(PyToNu),
             0x9A => Some(PyFromNu),
             0x9B => Some(PyRelease),
+            0x9C => Some(PerformDirect),
             0xA0 => Some(ReceiveWait),
             0xA1 => Some(ReceiveCommit),
             0xB0 => Some(FFICall),
@@ -484,6 +491,9 @@ pub struct HandlerBinding {
     pub arg_count: u8,
     /// Register to place the effect operation result into (for resume).
     pub result_reg: u8,
+    /// Whether the continuation is consumed at most once.  When `true` the
+    /// VM may skip heap-allocating the `Continuation`.  Analysis deferred.
+    pub single_shot: bool,
 }
 
 /// A handler table: maps effect names to their handler implementations.
@@ -952,6 +962,7 @@ mod tests {
                 handler_offset: 100,
                 arg_count: 1,
                 result_reg: 0,
+                single_shot: false,
             }],
             fallback_offset: Some(200),
         };
@@ -1027,6 +1038,7 @@ mod tests {
                 handler_offset: 10,
                 arg_count: 2,
                 result_reg: 1,
+                single_shot: false,
             }],
             fallback_offset: None,
         };

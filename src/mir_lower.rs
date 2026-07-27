@@ -455,6 +455,11 @@ struct FnLowerer<'c> {
     /// is > 0 must unwind that many frames first (the VM does not unwind
     /// `handler_stack` on `Ret`).
     handle_depth: usize,
+    /// Stack of active handler scopes.  Each entry is `(table_index, [(binding_index, effect_qualified_name)])`.
+    /// Pushed when lowering a `handle` block (after `EnterHandle`) and
+    /// popped when the `handle`'s join block is reached.  Used to resolve
+    /// `Perform` operations to a statically-known `HandlerRef`.
+    handler_scope: Vec<(usize, Vec<(usize, String)>)>,
 }
 
 impl<'c> FnLowerer<'c> {
@@ -466,6 +471,7 @@ impl<'c> FnLowerer<'c> {
             loop_exits: Vec::new(),
             loop_results: Vec::new(),
             handle_depth: 0,
+            handler_scope: Vec::new(),
         }
     }
 
@@ -507,6 +513,9 @@ impl<'c> FnLowerer<'c> {
     fn emit_return(&mut self, id: mir::LocalId) {
         for _ in 0..self.handle_depth {
             self.b.emit(mir::Stmt::PopHandler);
+            // Pop the corresponding handler scope entry so a `return`
+            // inside a handle block correctly unwinds the scope stack.
+            self.handler_scope.pop();
         }
         self.b.terminate(mir::Terminator::Return(Some(id)));
     }
@@ -1146,6 +1155,7 @@ impl<'c> FnLowerer<'c> {
                         mir::RValue::PerformAsync {
                             effect_op: format!("Inference.ask"),
                             args: vec![prompt],
+                            resolved_handler: None,
                         },
                     );
                     return Ok(());
@@ -1167,6 +1177,7 @@ impl<'c> FnLowerer<'c> {
                                 mir::RValue::PerformAsync {
                                     effect_op: format!("Inference.ask"),
                                     args: vec![prompt],
+                                    resolved_handler: None,
                                 },
                             );
                             return Ok(());
@@ -1186,12 +1197,33 @@ impl<'c> FnLowerer<'c> {
                 for a in args {
                     ids.push(self.lower_operand(a)?);
                 }
+                // Resolve this perform to a statically-known handler if one
+                // is in scope.  Search the handler scope stack from the
+                // innermost (most recent) to outermost.
+                let qualified = format!("{}.{}", effect, op);
+                let resolved = self
+                    .handler_scope
+                    .iter()
+                    .rev()
+                    .find_map(|(table_idx, bindings)| {
+                        bindings.iter().rev().find_map(|(binding_idx, name)| {
+                            if name == &qualified {
+                                Some(mir::HandlerRef {
+                                    table_index: *table_idx as u32,
+                                    binding_index: *binding_idx as u32,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                    });
                 self.b.assign(
                     dst,
                     mir::RValue::Perform {
                         effect: effect.clone(),
                         op: op.clone(),
                         args: ids,
+                        resolved_handler: resolved,
                     },
                 );
                 Ok(())
@@ -1291,6 +1323,7 @@ impl<'c> FnLowerer<'c> {
                     mir::RValue::PerformAsync {
                         effect_op: "Pipeline.new".to_string(),
                         args: vec![],
+                        resolved_handler: None,
                     },
                 );
                 Ok(())
@@ -1311,6 +1344,7 @@ impl<'c> FnLowerer<'c> {
                     mir::RValue::PerformAsync {
                         effect_op: "Pipeline.stage".to_string(),
                         args: vec![i, n, a, t],
+                        resolved_handler: None,
                     },
                 );
                 Ok(())
@@ -1323,6 +1357,7 @@ impl<'c> FnLowerer<'c> {
                     mir::RValue::PerformAsync {
                         effect_op: "Pipeline.run".to_string(),
                         args: vec![i, inp],
+                        resolved_handler: None,
                     },
                 );
                 Ok(())
@@ -1333,6 +1368,7 @@ impl<'c> FnLowerer<'c> {
                     mir::RValue::PerformAsync {
                         effect_op: "Supervisor.new".to_string(),
                         args: vec![],
+                        resolved_handler: None,
                     },
                 );
                 Ok(())
@@ -1353,6 +1389,7 @@ impl<'c> FnLowerer<'c> {
                     mir::RValue::PerformAsync {
                         effect_op: "Supervisor.worker".to_string(),
                         args: vec![i, n, a, d],
+                        resolved_handler: None,
                     },
                 );
                 Ok(())
@@ -1365,6 +1402,7 @@ impl<'c> FnLowerer<'c> {
                     mir::RValue::PerformAsync {
                         effect_op: "Supervisor.run".to_string(),
                         args: vec![i, t],
+                        resolved_handler: None,
                     },
                 );
                 Ok(())
@@ -1383,6 +1421,7 @@ impl<'c> FnLowerer<'c> {
                     mir::RValue::PerformAsync {
                         effect_op: "Debate.new".to_string(),
                         args: vec![top, r, th],
+                        resolved_handler: None,
                     },
                 );
                 Ok(())
@@ -1403,6 +1442,7 @@ impl<'c> FnLowerer<'c> {
                     mir::RValue::PerformAsync {
                         effect_op: "Debate.participant".to_string(),
                         args: vec![i, n, s, a],
+                        resolved_handler: None,
                     },
                 );
                 Ok(())
@@ -1414,6 +1454,7 @@ impl<'c> FnLowerer<'c> {
                     mir::RValue::PerformAsync {
                         effect_op: "Debate.run".to_string(),
                         args: vec![i],
+                        resolved_handler: None,
                     },
                 );
                 Ok(())
@@ -1667,6 +1708,7 @@ impl<'c> FnLowerer<'c> {
                             effect: "non-exhaustive match".to_string(),
                             op: "raise".to_string(),
                             args: Vec::new(),
+                            resolved_handler: None,
                         },
                     );
                     self.b.terminate(mir::Terminator::Jump(join));
@@ -2077,8 +2119,15 @@ impl<'c> FnLowerer<'c> {
             bindings: Vec::new(),
         });
         self.b.emit(mir::Stmt::EnterHandle { table: table_idx });
-
-        // Body: yielded value lands in dst, then pop the handler frame.
+        // Push handler scope with pre-scanned binding entries so that
+        // `Perform` operations inside the body (lowered next) can resolve
+        // to statically-known `HandlerRef` values.
+        let scope_bindings: Vec<(usize, String)> = handlers
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (i, format!("{}.{}", h.effect_name, h.op_name)))
+            .collect();
+        self.handler_scope.push((table_idx, scope_bindings));
         // The depth is tracked so a `return` inside the body (or inside
         // nested branches/loops) unwinds every frame still on the stack —
         // see emit_return.
@@ -2172,11 +2221,13 @@ impl<'c> FnLowerer<'c> {
                 effect_name: format!("{}.{}", h.effect_name, h.op_name),
                 params,
                 resume: h.resume,
+                single_shot: false,
                 body: hb,
             });
         }
         self.b.handler_table_mut(table_idx).bindings = bindings;
 
+        self.handler_scope.pop();
         self.b.switch_to(join);
         Ok(())
     }

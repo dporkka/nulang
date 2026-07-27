@@ -360,7 +360,9 @@ impl WasmBackend {
             RValue::Call { func: fr, args } => {
                 self.compile_call(body, fr, args, func);
             }
-            RValue::Perform { effect, op, args } => {
+            RValue::Perform {
+                effect, op, args, ..
+            } => {
                 self.compile_perform(body, effect, op, args, func);
             }
             _ => {

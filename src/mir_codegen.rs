@@ -544,6 +544,7 @@ impl MirCodegen {
                     handler_offset: function_start + rel,
                     arg_count: b.params.len() as u8,
                     result_reg,
+                    single_shot: b.single_shot,
                 });
             }
             let global_idx = self.module.add_handler_table(HandlerTable {
@@ -813,22 +814,40 @@ impl MirCodegen {
                     self.emit(Instruction::new3(OpCode::RecS, dst, fid, _re));
                 }
             }
-            mir::RValue::Perform { effect, op, args } => {
+            mir::RValue::Perform {
+                effect,
+                op,
+                args,
+                resolved_handler,
+            } => {
                 self.stage_args(args)?;
-                // The dispatch name carries the operation as "Effect.op"
-                // (e.g. "IO.print") so the VM matches handlers on the
-                // (effect, op) pair instead of the effect name alone.
-                let eff_idx = self
-                    .module
-                    .add_constant(Constant::String(format!("{}.{}", effect, op)));
-                self.emit(Instruction::new3(
-                    OpCode::Perform,
-                    ((eff_idx >> 8) & 0xFF) as u8,
-                    (eff_idx & 0xFF) as u8,
-                    dst,
-                ));
+                if let Some(href) = resolved_handler {
+                    // Statically-resolved handler — emit PerformDirect with
+                    // table and binding indices, skipping the string lookup.
+                    self.emit(Instruction::new3(
+                        OpCode::PerformDirect,
+                        href.table_index as u8,
+                        href.binding_index as u8,
+                        dst,
+                    ));
+                } else {
+                    // Dynamic dispatch via the handler_stack walk.
+                    let eff_idx = self
+                        .module
+                        .add_constant(Constant::String(format!("{}.{}", effect, op)));
+                    self.emit(Instruction::new3(
+                        OpCode::Perform,
+                        ((eff_idx >> 8) & 0xFF) as u8,
+                        (eff_idx & 0xFF) as u8,
+                        dst,
+                    ));
+                }
             }
-            mir::RValue::PerformAsync { effect_op, args } => {
+            mir::RValue::PerformAsync {
+                effect_op,
+                args,
+                resolved_handler: _,
+            } => {
                 self.stage_args(args)?;
                 let eff_idx = self
                     .module
