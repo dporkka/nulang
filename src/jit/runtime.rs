@@ -3,14 +3,10 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
-use crate::value_layout::{sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK, TAG_PTR};
+use crate::value_layout::{is_float_raw, sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK, TAG_PTR};
 use crate::vm::Value;
 
-/// True when `v` holds a real IEEE-754 float (any bit pattern that is not a NaN).
-#[inline]
-fn is_float_raw(v: u64) -> bool {
-    f64::from_bits(v).is_nan() == false
-}
+// is_float_raw is now imported from crate::value_layout (integer bitmask, no FPU).
 
 #[no_mangle]
 pub extern "C" fn nulang_iadd(a: u64, b: u64) -> u64 {

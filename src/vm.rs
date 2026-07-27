@@ -606,8 +606,8 @@ pub struct Value {
 }
 
 use crate::value_layout::{
-    sext48, PAYLOAD_MASK, TAG_ACTOR, TAG_BOOL, TAG_CLOSURE, TAG_INT, TAG_MASK, TAG_NIL, TAG_PTR,
-    TAG_STRING, TAG_UNIT,
+    is_float_raw, sext48, PAYLOAD_MASK, TAG_ACTOR, TAG_BOOL, TAG_CLOSURE, TAG_INT, TAG_MASK,
+    TAG_NIL, TAG_PTR, TAG_STRING, TAG_UNIT,
 };
 
 impl Value {
@@ -681,8 +681,9 @@ impl Value {
     pub fn is_int(&self) -> bool {
         (self.raw & TAG_MASK) == TAG_INT
     }
+    #[inline]
     pub fn is_float(&self) -> bool {
-        self.as_float().is_some()
+        is_float_raw(self.raw)
     }
     pub fn is_bool(&self) -> bool {
         (self.raw & TAG_MASK) == TAG_BOOL
@@ -700,14 +701,12 @@ impl Value {
             None
         }
     }
-
+    #[inline]
     pub fn as_float(&self) -> Option<f64> {
-        let f = f64::from_bits(self.raw);
-        // All tagged values are quiet NaNs, so any non-NaN bit pattern is a real float.
-        if f.is_nan() {
-            None
+        if is_float_raw(self.raw) {
+            Some(f64::from_bits(self.raw))
         } else {
-            Some(f)
+            None
         }
     }
 
@@ -1160,6 +1159,26 @@ impl VM {
         }
     }
 
+
+    /// Return a shared reference to the currently executing frame.
+    #[inline(always)]
+    fn current_frame(&self) -> &Frame {
+        &self.frames[self.current_frame_idx.expect("no current frame")]
+    }
+
+    /// Return a mutable reference to the currently executing frame.
+    #[inline(always)]
+    fn current_frame_mut(&mut self) -> &mut Frame {
+        &mut self.frames[self.current_frame_idx.expect("no current frame")]
+    }
+
+    /// Return a reference to the CodeModule for the current frame.
+    /// The module index does not change within a single `step()` call,
+    /// so the compiler can hoist this lookup.
+    #[inline(always)]
+    fn current_module(&self) -> &CodeModule {
+        &self.modules[self.current_frame().module_idx]
+    }
     /// Override the closure-env ceiling. Exposed for testing the limit
     /// without actually allocating `MAX_CLOSURE_ENVS` entries.
     #[cfg(test)]

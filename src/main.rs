@@ -42,8 +42,7 @@ use nulang::vm::VM;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use tracing::instrument;
-#[tokio::main]
-async fn main() {
+fn main() {
     // Initialize structured tracing (RUST_LOG env var controls verbosity).
     // Default level: warn (silent for normal runs). Users opt in with
     // RUST_LOG=nulang=debug or RUST_LOG=info.
@@ -306,7 +305,8 @@ async fn main() {
     if opts.lsp {
         #[cfg(feature = "lsp")]
         {
-            nulang::lsp::run_lsp_server().await;
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async { nulang::lsp::run_lsp_server().await });
             return;
         }
         #[cfg(not(feature = "lsp"))]
