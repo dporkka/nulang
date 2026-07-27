@@ -913,7 +913,8 @@ impl std::fmt::Debug for Frame {
 ///
 /// Created by `Handle` opcode, popped by `Unwind`.
 /// When `Perform` finds this handler, it captures a `Continuation`
-/// and stores it here for `Resume` to use.
+/// and stores it here for `Resume` to use.  For single-shot handlers
+/// the lightweight `SingleShotState` is used instead — no heap allocation.
 #[derive(Debug, Clone)]
 pub struct HandlerFrame {
     /// Index into the module's handler_tables.
@@ -926,6 +927,29 @@ pub struct HandlerFrame {
     pub resume_dst: u8,
     /// Captured continuation (set by Perform, consumed by Resume).
     pub captured_continuation: Option<Continuation>,
+    /// Lightweight continuation state for single-shot handlers.
+    /// When `Some`, `captured_continuation` is `None` and `Resume`
+    /// restores from this inline state without a heap allocation.
+    pub single_shot_state: Option<SingleShotState>,
+}
+
+/// Inline continuation state for single-shot effect handlers.
+///
+/// A single-shot handler resumes the continuation at most once.
+/// Instead of deep-cloning every frame into a heap-allocated
+/// `Continuation`, we snapshot only the current frame's registers
+/// and restore them on `Resume`.  This avoids a `Vec<Frame>`
+/// allocation (~few hundred bytes + per-frame metadata).
+#[derive(Debug, Clone)]
+pub struct SingleShotState {
+    /// PC after the `PerformDirect` instruction (the continuation point).
+    pub resume_pc: usize,
+    /// Destination register for the resume value.
+    pub resume_dst: u8,
+    /// Step count at capture time.
+    pub step_count: usize,
+    /// Snapshot of the current frame's registers at the perform site.
+    pub regs: [Value; 256],
 }
 
 impl HandlerFrame {
@@ -941,6 +965,7 @@ impl HandlerFrame {
             resume_pc,
             resume_dst,
             captured_continuation: None,
+            single_shot_state: None,
         }
     }
 }
@@ -2072,11 +2097,27 @@ impl VM {
 
         // Set the result register and capture the continuation.
         self.handler_stack[hf_idx].resume_dst = binding.result_reg;
-        let cont = Continuation::capture(self, dst_reg).ok_or_else(|| NuError::VMError {
-            msg: "Cannot capture continuation: no current frame".into(),
-            span: Span::default(),
-        })?;
-        self.handler_stack[hf_idx].captured_continuation = Some(cont);
+
+        if binding.single_shot {
+            // Fast path: snapshot registers inline — no heap allocation.
+            let frame = &self.frames[frame_idx];
+            let mut regs = [Value::nil(); 256];
+            for (i, r) in frame.regs.iter().enumerate() {
+                regs[i] = *r;
+            }
+            self.handler_stack[hf_idx].single_shot_state = Some(SingleShotState {
+                resume_pc: frame.pc,
+                resume_dst: dst_reg,
+                step_count: self.step_count,
+                regs,
+            });
+        } else {
+            let cont = Continuation::capture(self, dst_reg).ok_or_else(|| NuError::VMError {
+                msg: "Cannot capture continuation: no current frame".into(),
+                span: Span::default(),
+            })?;
+            self.handler_stack[hf_idx].captured_continuation = Some(cont);
+        }
 
         // Jump to the handler body.
         self.frames[frame_idx].pc = binding.handler_offset;
@@ -3421,6 +3462,21 @@ impl VM {
                 // The continuation lives on the innermost *matching* handler
                 // frame (Perform uses rposition), which is not necessarily the
                 // top of the stack when nested handlers bind different effects.
+                // Check single-shot state first — no heap allocation needed.
+                if let Some(hf) = self
+                    .handler_stack
+                    .iter_mut()
+                    .rev()
+                    .find(|hf| hf.single_shot_state.is_some())
+                {
+                    if let Some(state) = hf.single_shot_state.take() {
+                        self.frames[frame_idx].regs = state.regs;
+                        self.frames[frame_idx].regs[state.resume_dst as usize] = val;
+                        self.frames[frame_idx].pc = state.resume_pc;
+                        self.step_count = state.step_count;
+                        return Ok(());
+                    }
+                }
                 if let Some(hf) = self
                     .handler_stack
                     .iter_mut()

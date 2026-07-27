@@ -333,7 +333,7 @@ let dbl = fn(x) { x * 2 } in
              v                v                 v
    +------------------+ +------------------+ +------------------+
    | Bytecode Backend | | Native/AOT       | | WASM Backend     |
-   | (~127 opcodes)   | | (Cranelift)      | | (wasm-encoder)   |
+   | (133 opcodes)    | | (Cranelift)      | | (wasm-encoder)   |
    +------------------+ +------------------+ +------------------+
              |                |                 |
              v                v                 v
@@ -381,7 +381,7 @@ let dbl = fn(x) { x * 2 } in
 | `hir` / `hir_lower` | High-level IR and AST → HIR lowering | ~2,730 |
 | `mir` / `mir_lower` | Mid-level IR and HIR → MIR lowering | ~3,660 |
 | `mir_codegen` | MIR-to-bytecode compilation with register allocation | ~2,290 |
-| `bytecode` | 138 opcodes, 32-bit fixed-width instructions | ~1,060 |
+| `bytecode` | 133 opcodes, 32-bit fixed-width instructions | ~1,060 |
 | `value_layout` | Canonical i64-tagged tag/mask constants (single source of truth) | ~300 |
 | `vm` | Register-based virtual machine, effect handlers, JIT tiering hook | ~5,640 |
 | `aot/mod` + `aot/codegen` | AOT native compiler: MIR → Cranelift object code | ~1,410 |

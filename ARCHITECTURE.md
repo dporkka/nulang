@@ -311,8 +311,7 @@ the instructions, the constant pool, `function_table` (code offsets),
 block), `actor_metadata` (`ActorMeta`, incl. the agent flags in §6.3),
 `foreign_functions`, and `tools` (`@tool` schemas, §6.5).
 
-**Opcode space:** 137 opcodes in 17 categories (`OpCode`, `src/bytecode.rs`,
-counting the source's comment-header groups):
+**Opcode space:** 133 opcodes (`OpCode`, `src/bytecode.rs`):
 
 | Range | Category | Count | Examples |
 |-------|----------|------:|----------|
@@ -326,13 +325,15 @@ counting the source's comment-header groups):
 | 0x70–0x7F | Memory & objects | 16 | `Alloc`, `Field*`, `Arr*`, `Tuple*`, `Rec*`, `IsTag`, `Unpack`, `Copy`, `Drop` |
 | 0x80–0x8F | Actor & concurrency | 16 | `Spawn`, `Send`, `Ask`, `Receive`, `Monitor`…`Unlink`, `StateGet/Set`, `Emit`, `SignalWait`, `ReceiveMatch` |
 | 0x90–0x93 | Effects | 4 | `Perform`, `Handle`, `Resume`, `Unwind` |
-| 0x94–0x9F | Python interop & AI | 12 | `PyImport`…`PyRelease`, `LlmAsk`, `PipelineNew/Stage/Run` |
+| 0x94–0x9B | Python interop | 8 | `PyImport`…`PyRelease` |
+| 0x9C | Direct effect dispatch | 1 | `PerformDirect` |
+| 0xA0–0xA1 | Actor concurrency (cont.) | 2 | `ReceiveWait`, `ReceiveCommit` |
 | 0xB0 | FFI | 1 | `FFICall` |
-| 0xC0–0xC2 | Supervisor teams | 3 | `SupervisorNew/Worker/Run` |
-| 0xC3–0xC5 | Debates | 3 | `DebateNew/Participant/Run` |
+| 0xC6 | Async effect dispatch | 1 | `PerformAsync` |
 | 0xD0–0xD5 | Distribution | 6 | `NodeId`, `Migrate`, `RSend`, `RAsk`, `RSpawn`, `Gossip` |
 | 0xE0–0xE7 | String & IO | 8 | `SConcat`, `SPrint/SRead`, `FOpen`…`FClose`, `Print` |
 | 0xF0–0xF4 | Debug & meta | 5 | `DbgBreak/Print/Stack`, `MetaType/Cap` |
+| 0xF5–0xF6 | Register spill | 2 | `SpillLoad`, `SpillStore` |
 
 **Value representation:** NaN-boxed `u64` (`Value { raw: u64 }`, `src/vm.rs`).
 The canonical layout lives in **`src/value_layout.rs`** — the single source
@@ -1319,20 +1320,12 @@ whose generated behaviors provide the interface:
   `usage_prompt`, `usage_completion`, `usage_cost`, `pricing_input`,
   `pricing_output`, and — when configured — `semantic_memory` and
   `procedural_memory` (JSON snapshots of the corresponding stores).
-- `ask(prompt)` behavior: reads the state fields above and performs
-  `LLM.ask(prompt)`, which MIR lowering turns into the `LlmAsk` opcode.
-- `usage()` behavior: returns `[prompt_tokens, completion_tokens, cost]`.
-- Memory behaviors (`store_fact` / `recall` for semantic memory;
-  `store_pattern` / `get_pattern` / `add_example` / `get_examples` for
-  procedural memory) are placeholders compiled with unit bodies — the
-  runtime intercepts them by name and serves them from the deserialized
-  stores instead of executing bytecode.
-- `tools` names are resolved at lowering time against the module's
-  `@tool`-annotated functions. An unresolvable name produces an honest
-  `NotYetImplemented` compile error, never a silent drop.
+- `LLM.ask(prompt)`, which MIR lowering dispatches through the generic
+  `PerformAsync` (0xC6) effect opcode with the `"Inference.ask"` effect-op
+  string.
 
-At the VM boundary (`src/vm.rs`), `LlmAsk` reads the model string from the
-constant pool and the prompt from a register, calls
+At the VM boundary (`src/vm.rs`), `PerformAsync` with `"Inference.ask"` reads
+the model string from the constant pool and the prompt from a register, calls
 `ActorVmCallbacks::complete_llm(model, prompt)`, and writes the reply string
 (or `nil`) back into the same register. The bytecode module records agent
 metadata (`ActorMeta { is_agent, tools, semantic_memory_dimensions,

@@ -2221,7 +2221,7 @@ impl<'c> FnLowerer<'c> {
                 effect_name: format!("{}.{}", h.effect_name, h.op_name),
                 params,
                 resume: h.resume,
-                single_shot: false,
+                single_shot: crate::effect_checker::is_single_shot(&h.body, h.resume),
                 body: hb,
             });
         }

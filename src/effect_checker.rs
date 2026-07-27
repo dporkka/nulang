@@ -1834,6 +1834,122 @@ fn pat_binding_names(pat: &Pattern, acc: &mut Vec<String>) {
 }
 
 // ---------------------------------------------------------------------------
+// Single-shot linearity analysis for effect handlers
+// ---------------------------------------------------------------------------
+
+/// Determine whether a handler body is *single-shot*: the continuation is
+/// consumed at most once on every control-flow path.  When `true` the VM can
+/// skip heap-allocating a `Continuation` and use a lightweight inline path.
+///
+/// In Nulang the `resume` keyword on a handler arm (`| E.op() resume => body`)
+/// is syntactic sugar — there is no explicit `resume(…)` call.  The body's
+/// final value is *implicitly* resumed.  A resuming handler body therefore
+/// has exactly one resume point (the body terminator) unless the body
+/// contains a loop whose interior might indirectly trigger another resume
+/// (e.g. via a nested `perform`).
+///
+/// The analysis is conservative:
+/// - Non-resuming handlers are trivially single-shot (zero resumes).
+/// - Resuming handlers are single-shot iff the body contains no `While`/`For`
+///   loops and no function/routine calls that might resume transitively.
+/// - `If`/`Match` branches are checked individually; having two branches both
+///   end in a resume is fine — only one branch executes per invocation.
+pub fn is_single_shot(body: &crate::hir::Body, resume: bool) -> bool {
+    if !resume {
+        return true; // zero-shot: the continuation is never invoked
+    }
+    body_is_single_shot(body)
+}
+
+fn body_is_single_shot(body: &crate::hir::Body) -> bool {
+    for stmt in &body.stmts {
+        if !stmt_is_single_shot(stmt) {
+            return false;
+        }
+    }
+    // The terminator is always an implicit resume for resuming handlers —
+    // that's the single shot.  No further check needed at the terminator.
+    true
+}
+
+fn stmt_is_single_shot(stmt: &crate::hir::Stmt) -> bool {
+    match stmt {
+        crate::hir::Stmt::Let { value, .. } | crate::hir::Stmt::Assign { value, .. } => {
+            rvalue_is_single_shot(value)
+        }
+        crate::hir::Stmt::StateSet { .. } | crate::hir::Stmt::Emit { .. } => true,
+    }
+}
+
+fn rvalue_is_single_shot(rv: &crate::hir::RValue) -> bool {
+    match rv {
+        // Straight-line leaf values are fine.
+        crate::hir::RValue::Use(_)
+        | crate::hir::RValue::Literal(..)
+        | crate::hir::RValue::Binary(..)
+        | crate::hir::RValue::Unary(..)
+        | crate::hir::RValue::Tuple(..)
+        | crate::hir::RValue::Record(..)
+        | crate::hir::RValue::Array(..)
+        | crate::hir::RValue::FieldAccess { .. }
+        | crate::hir::RValue::Index { .. }
+        | crate::hir::RValue::SelfRef(_)
+        | crate::hir::RValue::CapCheck { .. } => true,
+
+        // Function calls — conservative: a callee might perform an effect
+        // that is handled by an outer handler, causing a second resume
+        // into this handler body.
+        crate::hir::RValue::Call { .. }
+        | crate::hir::RValue::Closure { .. }
+        | crate::hir::RValue::RecClosure { .. } => false,
+
+        // Branches: check each arm.  Both branches ending in a resume is
+        // fine — only one executes.
+        crate::hir::RValue::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            body_is_single_shot(then_body)
+                && else_body.as_ref().map_or(true, |b| body_is_single_shot(b))
+        }
+        crate::hir::RValue::Match { arms, .. } => arms.iter().all(|(_, guard, arm_body)| {
+            body_is_single_shot(arm_body) && guard.as_ref().map_or(true, |g| body_is_single_shot(g))
+        }),
+
+        // Loops: the loop body could execute multiple times, and each
+        // iteration might trigger an indirect resume via a nested
+        // `perform`.  Conservative: not single-shot.
+        crate::hir::RValue::While { .. } | crate::hir::RValue::For { .. } => false,
+
+        // Nested `handle`: check the body and each handler body.
+        crate::hir::RValue::Handle { body, handlers, .. } => {
+            body_is_single_shot(body) && handlers.iter().all(|h| is_single_shot(&h.body, h.resume))
+        }
+
+        // `perform` and `receive` are straight-line operations from the
+        // handler body's perspective — they don't resume into *this*
+        // handler body multiple times.
+        crate::hir::RValue::Perform { .. }
+        | crate::hir::RValue::Receive { .. }
+        | crate::hir::RValue::Spawn { .. }
+        | crate::hir::RValue::Send { .. }
+        | crate::hir::RValue::Ask { .. }
+        | crate::hir::RValue::Migrate { .. }
+        | crate::hir::RValue::FFICall { .. }
+        | crate::hir::RValue::PipelineNew { .. }
+        | crate::hir::RValue::PipelineStage { .. }
+        | crate::hir::RValue::PipelineRun { .. }
+        | crate::hir::RValue::SupervisorNew { .. }
+        | crate::hir::RValue::SupervisorWorker { .. }
+        | crate::hir::RValue::SupervisorRun { .. }
+        | crate::hir::RValue::DebateNew { .. }
+        | crate::hir::RValue::DebateParticipant { .. }
+        | crate::hir::RValue::DebateRun { .. } => true,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit Tests
 // ---------------------------------------------------------------------------
 

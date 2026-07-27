@@ -17,6 +17,7 @@
 //! | Compare | ICmp{Eq,Lt,Gt,Le,Ge}, FCmp{Eq,Lt,Gt} |
 //! | Logic | Not, And, Or |
 //! | Control | Jmp, JmpT, JmpF |
+//! | Effects  | PerformDirect (yields to interpreter) |
 //! | Convert | IToF, FToI |
 //! | Debug | DbgPrint |
 
@@ -94,6 +95,7 @@ pub fn is_opcode_compilable(op: OpCode) -> bool {
             | OpCode::ArrStore
             | OpCode::ArrLen
             | OpCode::FieldL
+            | OpCode::PerformDirect
     )
 }
 
@@ -654,6 +656,20 @@ pub fn compile_bytecode_region(
                     RuntimeHelper::FieldL,
                 );
             }
+            OpCode::PerformDirect => {
+                // Yield to interpreter at this exact instruction.
+                // The interpreter handles continuation capture and
+                // handler dispatch.  Store the relative PC offset
+                // so try_jit_execute re-enters the interpreter at
+                // the PerformDirect instruction.
+                let yield_pc_addr = JitSession::yield_pc_addr();
+                let yield_pc_ptr = builder.ins().iconst(types::I64, yield_pc_addr);
+                let rel_offset = builder.ins().iconst(types::I64, (pc - start_offset) as i64);
+                builder
+                    .ins()
+                    .store(MemFlags::new(), rel_offset, yield_pc_ptr, 0);
+                builder.ins().jump(return_block, &[]);
+            }
             _ => {
                 builder.ins().jump(return_block, &[]);
             }
@@ -661,7 +677,13 @@ pub fn compile_bytecode_region(
 
         let is_terminator = matches!(
             instr.opcode,
-            OpCode::Jmp | OpCode::JmpT | OpCode::JmpF | OpCode::Halt | OpCode::Ret | OpCode::RetVal
+            OpCode::Jmp
+                | OpCode::JmpT
+                | OpCode::JmpF
+                | OpCode::Halt
+                | OpCode::Ret
+                | OpCode::RetVal
+                | OpCode::PerformDirect
         );
 
         if !is_terminator {

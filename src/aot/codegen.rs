@@ -216,6 +216,18 @@ fn compile_terminator_with_params(
                 .brif(is_true, then_block, &then_args, else_block, &else_args);
             Ok(())
         }
+        mir::Terminator::Resume(id) => {
+            // In the interpreter a handler body ends with `Resume`,
+            // which restores the captured continuation with a value.
+            // At the AOT level we compile it as a normal return — the
+            // resume value is the function's result.
+            let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
+            let v = *local_vals
+                .get(&reg)
+                .ok_or_else(|| AotCompileError::Internal("resume value uninitialized".into()))?;
+            builder.ins().return_(&[v]);
+            Ok(())
+        }
         _ => Err(AotCompileError::Unsupported(format!(
             "terminator {:?}",
             term
@@ -604,6 +616,12 @@ fn compile_stmt(
             local_vals.insert(reg, val);
             Ok(())
         }
+        mir::Stmt::EnterHandle { .. } | mir::Stmt::PopHandler => {
+            // Handler tables and the handler stack are a runtime (VM)
+            // concept — at the AOT level these are no-ops.  The handler
+            // body is compiled inline as ordinary blocks.
+            Ok(())
+        }
         _ => Err(AotCompileError::Unsupported(format!(
             "statement {:?}",
             stmt
@@ -687,6 +705,27 @@ fn compile_rvalue(
                 ))
             }
         }
+
+        mir::RValue::Perform {
+            resolved_handler: Some(_),
+            ..
+        } => {
+            // PerformDirect (statically-resolved handler) is not yet
+            // supported in the AOT backend.  Use the bytecode backend
+            // for effectful code, or the JIT which yields to the
+            // interpreter for PerformDirect.
+            Err(AotCompileError::Unsupported(
+                "PerformDirect: effectful code is not yet supported in the native backend. \
+                 Use --backend bytecode instead."
+                    .into(),
+            ))
+        }
+        mir::RValue::Perform {
+            resolved_handler: None,
+            ..
+        } => Err(AotCompileError::Unsupported(
+            "Perform with dynamic dispatch is not supported in the native backend".into(),
+        )),
 
         _ => Err(AotCompileError::Unsupported(format!("rvalue {:?}", rv))),
     }
