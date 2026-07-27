@@ -1,0 +1,87 @@
+---
+import Default from '@astrojs/starlight/components/Head.astro';
+
+const { entry } = Astro.locals.starlightRoute;
+const site = 'https://nulang.org';
+const isHome = Astro.url.pathname === '/' || entry.data.template === 'splash';
+const canonical = new URL(Astro.url.pathname, site).href;
+
+// Breadcrumbs from the URL path (skip on homepage).
+const segments = Astro.url.pathname.split('/').filter(Boolean);
+const titleCase = (s: string) =>
+  s.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+const crumbs = [{ name: 'Home', item: site + '/' }];
+segments.forEach((seg, i) => {
+  const isLast = i === segments.length - 1;
+  crumbs.push({
+    name: isLast ? entry.data.title : titleCase(seg),
+    item: new URL('/' + segments.slice(0, i + 1).join('/') + '/', site).href,
+  });
+});
+
+const org = {
+  '@type': 'Organization',
+  name: 'Nulang',
+  url: site,
+  logo: site + '/favicon.svg',
+  sameAs: ['https://github.com/dporkka/nulang', 'https://www.nulang.cloud'],
+};
+
+const graph: any[] = [];
+if (isHome) {
+  graph.push({
+    '@type': 'WebSite',
+    name: 'Nulang',
+    url: site,
+    description:
+      'A distributed, actor-based programming language with algebraic effects and row-polymorphic types',
+    publisher: org,
+    potentialAction: {
+      '@type': 'SearchAction',
+      target: site + '/?q={search_term_string}',
+      'query-input': 'required name=search_term_string',
+    },
+  });
+  graph.push({
+    '@type': 'SoftwareSourceCode',
+    name: 'Nulang',
+    description:
+      'A distributed, actor-based programming language with algebraic effects, row-polymorphic types, and reference capabilities. Built in Rust with a register-based VM, Cranelift JIT, WASM backend, and native AOT compilation.',
+    programmingLanguage: ['Nulang', 'Rust'],
+    url: site,
+    codeRepository: 'https://github.com/dporkka/nulang',
+    license: 'https://github.com/dporkka/nulang/blob/main/LICENSE',
+    author: org,
+    keywords:
+      'programming language, actor model, algebraic effects, distributed systems, Rust, WASM, JIT, type inference, reference capabilities, BEAM, OTP',
+    operatingSystem: 'Linux, macOS',
+    version: '0.9.0',
+  });
+} else {
+  graph.push({
+    '@type': 'TechArticle',
+    headline: entry.data.title,
+    description: entry.data.description,
+    url: canonical,
+    inLanguage: 'en',
+    author: org,
+    publisher: org,
+    isPartOf: { '@type': 'WebSite', name: 'Nulang', url: site },
+  });
+  if (crumbs.length > 1) {
+    graph.push({
+      '@type': 'BreadcrumbList',
+      itemListElement: crumbs.map((c, i) => ({
+        '@type': 'ListItem',
+        position: i + 1,
+        name: c.name,
+        item: c.item,
+      })),
+    });
+  }
+}
+
+const jsonld = JSON.stringify({ '@context': 'https://schema.org', '@graph': graph });
+---
+<Default><slot /></Default>
+<script type="application/ld+json" set:html={jsonld} />

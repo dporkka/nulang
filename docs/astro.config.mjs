@@ -14,7 +14,7 @@ export default defineConfig({
     { tag: 'meta', attrs: { name: 'twitter:card', content: 'summary_large_image' } },
     { tag: 'meta', attrs: { name: 'twitter:image', content: 'https://nulang.org/og-image.png' } },
   ],
-  integrations: [sitemap(), starlight({
+  integrations: [sitemap({ filter: (page) => !page.endsWith('.md') && !page.endsWith('/llms-full.txt') }), starlight({
       title: 'Nulang',
       description: 'A distributed, actor-based programming language',
       defaultLocale: 'en',
@@ -28,6 +28,7 @@ export default defineConfig({
       components: {
         Footer: './src/components/Footer.astro',
         Header: './src/components/Header.astro',
+        Head: './src/components/Head.astro',
       },
       editLink: {
         baseUrl: 'https://github.com/dporkka/nulang/edit/main/docs/',

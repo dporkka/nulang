@@ -33,6 +33,7 @@ If you are building AI agents that must remember state, durable workflows that s
 - **Composable capabilities** — AI, storage, networking, and external services are expressed through the same effect system and live in libraries, not the language core.
 - **Memory safety without runtime pauses** — reference capabilities and per-actor ORCA GC keep you safe while actors stay responsive.
 - **Compile once, run anywhere** — bytecode, native AOT, or WASM backends from the same source.
+- **Local-first, cloud-optional** — build and run entirely on your machine, then deploy the same code to [Nulang Cloud](https://www.nulang.cloud) with no rewrite.
 
 ### Key Features
 
@@ -61,7 +62,7 @@ Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM 
 - ✅ All 1425 tests pass with `cargo test` (1373 core + 52 `nulang-ai`; add `--features wasm-backend` for WASM tests)
 - ✅ Builds with `cargo build` or leaner `cargo build --no-default-features`
 - ✅ i64-tagged `Value` representation with distinct high-16 type tags (canonical constants in `src/value_layout.rs`) — immune to WASM NaN canonicalization
-- ✅ ~127-opcode bytecode ISA — generic `PerformAsync` effect dispatch replaces AI-specific opcodes
+- ✅ 133-opcode bytecode ISA — generic `PerformAsync` effect dispatch replaces AI-specific opcodes
 - ✅ Hindley-Milner type inference with algebraic effects, user-declared variant types (construction + recursive pattern matching with guards), and row-polymorphic records (`fn(r) r.x + r.y` accepts any record with `x` and `y`; closed record annotations stay exact)
 - ✅ Actor runtime: spawn, `spawn link`/`spawn monitor`, send, monitors, links, supervision, timers, registry, process groups, selective `receive` with `after`, actor priority
 - ✅ ORCA-style per-actor GC with cycle detection
@@ -69,6 +70,26 @@ Nulang is **Alpha** — but not a greenfield project. The compiler pipeline, VM 
 - ✅ Durable workflow runtime: `workflow` declarations with steps, timers, signals, saga compensation
 - ✅ Format stability: frozen `.nbc` bytecode artifacts, NUL0 wire protocol versioning, language version `1.0.0-frozen` (RFC 0001/0002)
 - ✅ `entity` declarations: durable-first actors (event-sourced by default) for long-lived domain objects
+
+---
+
+## Nulang Cloud
+
+**[Nulang Cloud](https://www.nulang.cloud)** is the managed platform that runs Nulang entities in production so you don't operate the infrastructure — the same actors, workflows, and effects you build locally, hosted and scaled for you.
+
+Build on your laptop with the open-source toolchain in this repo, then deploy to Nulang Cloud with no rewrite. The same source code has the same observable behavior in a single-process REPL, a local CLI binary, and the hosted cloud runtime.
+
+- **Zero-config deploy** — Nulang compiles to WebAssembly and runs in sandboxed cloud runtimes.
+- **Independent auto-scaling** — each actor type scales on its own message-queue depth and load.
+- **Zero cold start** — hot actors stay warm; idle actors hibernate and resume on the next message.
+- **Managed durability** — durable actors, event journals, timers, and workflows are persisted and recovered for you.
+- **Location-transparent messaging** across nodes and regions — the same `send`/`ask` code.
+- **Platform host effects** — AI (LLM/vector), billing, identity, and observability provided as hosted services, not baked into the language.
+- **Tenant isolation** in sandboxed WASM runtimes.
+
+Nulang Cloud is an optional hosted service built on the same WASM artifacts. The language and runtime in this repo are **Apache-2.0** and fully self-hostable — no lock-in.
+
+[Get started at nulang.cloud →](https://www.nulang.cloud)
 
 ---
 

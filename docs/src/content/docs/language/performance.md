@@ -40,7 +40,7 @@ The bytecode VM is designed for compact code and fast dispatch:
 
 - **32-bit instructions**: `{opcode: u8, op1: u8, op2: u8, op3: u8}` — fixed-width, cache-friendly.
 - **256 registers per frame**: Flat `Vec<u64>` with 48-bit payload + 16-bit type tag.
-- **138 opcodes**: 17 category ranges (arithmetic, control flow, closures, actors, effects, FFI, etc.).
+- **133 opcodes**: spanning the ranges above (arithmetic, control flow, closures, actors, effects, FFI, etc.).
 - **i64-tagged values**: integers, floats, booleans, nil, and unit are all represented inline — no boxing, no heap allocation for primitives.
 
 ## Memory Model

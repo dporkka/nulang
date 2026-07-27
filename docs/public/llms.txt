@@ -58,6 +58,10 @@ let counter = spawn Counter {} in {
 - [Durable Workflows](https://nulang.org/workflows/overview/): Steps, parallel branches, saga compensation, crash recovery.
 - [Signals, Timers & Queries](https://nulang.org/workflows/signals-timers/): Suspension/resume primitives for workflows.
 
+## For AI Agents: Machine-Readable Surfaces
+- Full documentation as one file: https://nulang.org/llms-full.txt
+- Every doc page has a clean Markdown twin at the same path + `.md` (e.g. https://nulang.org/language/types.md).
+
 ## Links
 - [GitHub](https://github.com/dporkka/nulang): Source code, issues, contributions.
 - [Nulang Cloud](https://www.nulang.cloud): Hosted runtime platform.

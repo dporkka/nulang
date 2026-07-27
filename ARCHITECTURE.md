@@ -222,7 +222,8 @@ runtime; the two halves meet in the `Perform` opcode.
   Any waiting on I/O happens inside the hook implementation, never in the VM
   interpreter loop itself.
 - `perform LLM.ask(prompt)` never reaches the generic path: MIR lowering
-  special-cases it into the `LlmAsk` opcode (§6.3).
+  dispatches it through the generic `PerformAsync` (0xC6) effect opcode with
+  the `"Inference.ask"` effect-op string (§6.3).
 
 **Determinism.** The static row tells the durable-execution layer (§4) which
 operations a body *may* perform; capturing and replaying effect results for
