@@ -810,9 +810,9 @@ fn test_infer_reg_types_conservative() {
 
     let meta2 = infer_reg_types(&module2, 2);
     assert!(
-        meta2.reg_types.is_empty(),
+        meta2.is_empty(),
         "unmodeled opcodes must clobber all register types, got {:?}",
-        meta2.reg_types
+        meta2
     );
 }
 
@@ -975,7 +975,7 @@ fn test_typed_path_matches_scalar_path() {
     // Typed path.
     let meta = infer_reg_types(&module, 5);
     assert!(
-        !meta.reg_types.is_empty(),
+        !meta.is_empty(),
         "int loop registers must be typed"
     );
     let mut typed_jit = make_jit();

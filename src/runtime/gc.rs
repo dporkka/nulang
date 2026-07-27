@@ -483,7 +483,9 @@ impl OrcaGc {
 
                 // Remove from deferred list so process_deferred doesn't
                 // access freed memory.
-                self.deferred_decrements.retain(|&h| h != op.object_header);
+                if let Some(pos) = self.deferred_decrements.iter().position(|&h| h == op.object_header) {
+                    self.deferred_decrements.swap_remove(pos);
+                }
             }
         }
     }
@@ -571,12 +573,12 @@ impl OrcaGc {
     // Internal helpers
     // ------------------------------------------------------------------
 
-    /// Remove `header` from the deferred-decrement list.
-    ///
-    /// Called by the cycle detector before it reclaims an object, so that a
+    /// Remove `header` from the deferred-decrement list.  Avoids that a
     /// later `process_deferred` pass does not touch freed memory.
     pub fn remove_deferred(&mut self, header: *mut OrcaHeader) {
-        self.deferred_decrements.retain(|&h| h != header);
+        if let Some(pos) = self.deferred_decrements.iter().position(|&h| h == header) {
+            self.deferred_decrements.swap_remove(pos);
+        }
     }
 
     /// Free an object and update statistics.
@@ -628,7 +630,9 @@ impl OrcaGc {
         // still queued here; never let the deferred list point at freed
         // memory (process_deferred drains one entry at a time for the same
         // reason).
-        self.deferred_decrements.retain(|&h| h != header_ptr);
+        if let Some(pos) = self.deferred_decrements.iter().position(|&h| h == header_ptr) {
+            self.deferred_decrements.swap_remove(pos);
+        }
 
         self.stats.objects_freed += 1;
         self.stats.bytes_freed += size as u64;

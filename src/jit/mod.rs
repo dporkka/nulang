@@ -214,11 +214,7 @@ impl JitSession {
         }
 
         let has_known_types = type_metadata
-            .map(|m| {
-                m.reg_types
-                    .values()
-                    .any(|&t| t != crate::jit::typed_compiler::KnownType::Unknown)
-            })
+            .map(|m| !m.is_empty())
             .unwrap_or(false);
 
         if has_known_types {
@@ -486,7 +482,7 @@ impl crate::backends::JitBackend for JitSession {
             let region_len = find_compilable_region(pc, instructions);
             if region_len >= 3 {
                 let meta = typed_compiler::infer_reg_types(module, pc);
-                let meta_ref = if meta.reg_types.is_empty() {
+                let meta_ref = if meta.is_empty() {
                     None
                 } else {
                     Some(&meta)

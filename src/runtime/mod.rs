@@ -4978,7 +4978,12 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
         let mut rt = self.runtime.borrow_mut();
         let actor_id = rt.current_actor?;
-        let msg = rt.actors.get(&actor_id)?.mailbox.pop()?;
+        let msg = {
+            rt.actors
+                .get_mut(&actor_id)?
+                .mailbox
+                .pop()?
+        };
         // ORCA receiver protocol: hold heap pointers carried by the message.
         rt.hold_payload_refs(actor_id, &msg.payload);
         let val = msg
@@ -4995,11 +5000,12 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     ) -> Option<(usize, Vec<crate::vm::Value>)> {
         let mut rt = self.runtime.borrow_mut();
         let actor_id = rt.current_actor?;
-        let (pos, payload) = rt
-            .actors
-            .get(&actor_id)?
-            .mailbox
-            .receive_match(behavior_ids)?;
+        let (pos, payload) = {
+            rt.actors
+                .get_mut(&actor_id)?
+                .mailbox
+                .receive_match(behavior_ids)?
+        };
         // ORCA receiver protocol: hold heap pointers carried by the message.
         rt.hold_payload_refs(actor_id, &payload);
         Some((pos, payload))
@@ -5645,8 +5651,13 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
 
     fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
         unsafe {
-            let actor = (*self.runtime).actors.get(&self.actor_id)?;
-            let msg = actor.mailbox.pop()?;
+            let msg = {
+                (*self.runtime)
+                    .actors
+                    .get_mut(&self.actor_id)?
+                    .mailbox
+                    .pop()?
+            };
             // ORCA receiver protocol: hold heap pointers carried by the message.
             (*self.runtime).hold_payload_refs(self.actor_id, &msg.payload);
             let val = msg
@@ -5663,8 +5674,13 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         behavior_ids: &[u16],
     ) -> Option<(usize, Vec<crate::vm::Value>)> {
         unsafe {
-            let actor = (*self.runtime).actors.get(&self.actor_id)?;
-            let (pos, payload) = actor.mailbox.receive_match(behavior_ids)?;
+            let (pos, payload) = {
+                (*self.runtime)
+                    .actors
+                    .get_mut(&self.actor_id)?
+                    .mailbox
+                    .receive_match(behavior_ids)?
+            };
             // ORCA receiver protocol: hold heap pointers carried by the message.
             (*self.runtime).hold_payload_refs(self.actor_id, &payload);
             Some((pos, payload))

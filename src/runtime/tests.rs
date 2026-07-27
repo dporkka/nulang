@@ -35,7 +35,7 @@ fn test_spawn_send_step_sequence() {
 
 #[test]
 fn test_mailbox_push_pop() {
-    let mb = Mailbox::new(4);
+    let mut mb = Mailbox::new(4);
     let msg = Message {
         behavior_id: 0,
         payload: vec![Value::int(42)],

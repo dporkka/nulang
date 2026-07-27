@@ -84,9 +84,6 @@ impl Parser {
             diagnostics: Vec::new(),
         }
     }
-
-    // === Entry Points ===
-
     #[tracing::instrument(level = "debug", skip(self))]
     pub fn parse_module(&mut self) -> NuResult<AstModule> {
         self.diagnostics.clear();
@@ -2655,6 +2652,54 @@ impl Parser {
 
     fn is_at_end(&self) -> bool {
         self.peek_kind() == &TokenKind::Eof
+    }
+
+    /// Skip tokens until a synchronization point: semicolon, newline followed
+    /// by a declaration keyword, or any declaration-start token.
+    fn synchronize(&mut self) {
+        // Declaration-start keywords
+        const SYNC_TOKENS: &[TokenKind] = &[
+            TokenKind::Fn,
+            TokenKind::Actor,
+            TokenKind::Persistent,
+            TokenKind::Entity,
+            TokenKind::Organization,
+            TokenKind::StateMachine,
+            TokenKind::Agent,
+            TokenKind::Workflow,
+            TokenKind::Database,
+            TokenKind::Type,
+            TokenKind::Effect,
+            TokenKind::Extern,
+            TokenKind::Import,
+            TokenKind::Module,
+            TokenKind::Pub,
+        ];
+        while !self.is_at_end() {
+            let kind = self.peek_kind().clone();
+            if kind == TokenKind::Semicolon || kind == TokenKind::Newline {
+                // At a statement boundary: peek ahead past newlines for a
+                // declaration keyword. If the next non-newline token is a
+                // declaration keyword, stop here.
+                let saved = self.pos;
+                self.skip_newlines();
+                if self.is_at_end() {
+                    self.pos = saved;
+                    return;
+                }
+                let next = self.peek_kind();
+                if SYNC_TOKENS.contains(next) || *next == TokenKind::Eof {
+                    self.pos = saved;
+                    return;
+                }
+                self.pos = saved;
+            }
+            if SYNC_TOKENS.contains(&kind) {
+                return;
+            }
+            // Track brace depth to avoid syncing inside nested blocks
+            self.advance();
+        }
     }
 
     fn peek_kind(&self) -> &TokenKind {
