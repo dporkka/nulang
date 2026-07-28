@@ -1,0 +1,282 @@
+// bootstrap/compile_hex.nula — Compile expressions to hex-encoded VM bytecode.
+// Outputs u32 instruction words as 8-char hex, one per line.
+// Run: echo "1 + 2" | nulang bootstrap/compile_hex.nula
+
+fn is_digit(c: Int) -> Bool { c >= 48 and c <= 57 }
+fn is_alpha(c: Int) -> Bool { (c >= 65 and c <= 90) or (c >= 97 and c <= 122) }
+fn is_alphanum(c: Int) -> Bool { is_alpha(c) or is_digit(c) or c == 95 }
+fn is_space(c: Int) -> Bool { c == 32 or c == 10 or c == 13 or c == 9 }
+
+fn skip_ws(src: String, pos: Int, len: Int) -> Int {
+    if pos >= len then pos
+    else if is_space(perform String.charAt(src, pos)) then skip_ws(src, pos + 1, len)
+    else pos
+}
+
+fn read_int(src: String, pos: Int, len: Int, acc: Int) -> Int {
+    if pos >= len then (acc << 16) + pos
+    else {
+        let c = perform String.charAt(src, pos);
+        if is_digit(c) then read_int(src, pos + 1, len, acc * 10 + (c - 48))
+        else (acc << 16) + pos
+    }
+}
+
+fn read_ident(src: String, pos: Int, len: Int, h: Int) -> Int {
+    if pos >= len then (h << 16) + pos
+    else {
+        let c = perform String.charAt(src, pos);
+        if is_alphanum(c) then {
+            let nh = h * 5 + c;
+            read_ident(src, pos + 1, len, nh)
+        } else (h << 16) + pos
+    }
+}
+
+fn env_lookup(e0: Int, e1: Int, e2: Int, e3: Int, elen: Int, h: Int) -> Int {
+    if elen <= 0 then 0
+    else {
+        let slot = if elen >= 4 then e3
+        else if elen >= 3 then e2
+        else if elen >= 2 then e1
+        else e0;
+        let sh = slot >> 32;
+        if sh == h then slot & 0xFFFFFFFF
+        else env_lookup(e0, e1, e2, 0, elen - 1, h)
+    }
+}
+
+fn prec_of(c: Int) -> Int {
+    if c == 43 then 2 else if c == 45 then 2
+    else if c == 42 then 3 else if c == 47 then 3
+    else 0
+}
+
+fn parse_cmp(src: String, p: Int, len: Int) -> Int {
+    if p >= len then 0 else {
+        let c = perform String.charAt(src, p);
+        if c == 61 and p + 1 < len then {
+            let c2 = perform String.charAt(src, p + 1);
+            if c2 == 61 then (1 << 16) + (0x40 << 8) + 2 else 0
+        } else if c == 33 and p + 1 < len then {
+            let c2 = perform String.charAt(src, p + 1);
+            if c2 == 61 then (1 << 16) + (0x41 << 8) + 2 else 0
+        } else if c == 60 then {
+            if p + 1 < len then { let c2 = perform String.charAt(src, p + 1);
+                if c2 == 61 then (1 << 16) + (0x44 << 8) + 2 else (1 << 16) + (0x42 << 8) + 1
+            } else (1 << 16) + (0x42 << 8) + 1
+        } else if c == 62 then {
+            if p + 1 < len then { let c2 = perform String.charAt(src, p + 1);
+                if c2 == 61 then (1 << 16) + (0x45 << 8) + 2 else (1 << 16) + (0x43 << 8) + 1
+            } else (1 << 16) + (0x43 << 8) + 1
+        } else 0
+    }
+}
+
+// Convert nybble (0-15) to hex char
+fn hex_digit(n: Int) -> String {
+    if n < 10 then perform Int.to_string(n)
+    else if n == 10 then "a" else if n == 11 then "b"
+    else if n == 12 then "c" else if n == 13 then "d"
+    else if n == 14 then "e" else "f"
+}
+
+// Print a u32 as 8-char hex. Start with "" to work around string-var concat bug.
+fn emit_hex(w: Int) {
+    perform IO.print("" +
+        hex_digit((w >> 28) & 0xF) +
+        hex_digit((w >> 24) & 0xF) +
+        hex_digit((w >> 20) & 0xF) +
+        hex_digit((w >> 16) & 0xF) +
+        hex_digit((w >> 12) & 0xF) +
+        hex_digit((w >> 8) & 0xF) +
+        hex_digit((w >> 4) & 0xF) +
+        hex_digit(w & 0xF)
+    )
+}
+
+// Encode instruction: opcode<<24 | op1<<16 | op2<<8 | op3
+fn instr(opcode: Int, op1: Int, op2: Int, op3: Int) -> Int {
+    (opcode << 24) + (op1 << 16) + (op2 << 8) + op3
+}
+
+// Returns (result_reg << 16) | pos.
+fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: Int, e1: Int, e2: Int, e3: Int, elen: Int) -> Int {
+    let no_left = 1 << 40;
+    let pair = if left == no_left then {
+        let p = skip_ws(src, pos, len);
+        if p >= len then (nr << 16) + p
+        else {
+            let c = perform String.charAt(src, p);
+            if is_digit(c) then {
+                let packed = read_int(src, p, len, 0);
+                let num = packed >> 16;
+                let q = packed & 0xFFFF;
+                if num == 0 then emit_hex(instr(0x03, nr, 0, 0))
+                else if num == 1 then emit_hex(instr(0x04, nr, 0, 0))
+                else if num == 2 then emit_hex(instr(0x05, nr, 0, 0))
+                else if num == -1 then emit_hex(instr(0x06, nr, 0, 0))
+                else emit_hex(instr(0x07, nr, 0, 0));
+                (nr << 16) + q
+            } else if c == 40 then {
+                let inner = comp(src, p + 1, len, no_left, -1, nr, e0, e1, e2, e3, elen);
+                let rv = inner >> 16;
+                let rp = inner & 0xFFFF;
+                let q2 = skip_ws(src, rp, len);
+                if q2 < len then {
+                    let c2 = perform String.charAt(src, q2);
+                    if c2 == 41 then (rv << 16) + (q2 + 1)
+                    else (rv << 16) + q2
+                } else (rv << 16) + q2
+            } else if is_alpha(c) then {
+                let ident = read_ident(src, p, len, 0);
+                let h = ident >> 16;
+                let q = ident & 0xFFFF;
+                if h == 3321 then {
+                    let q2 = skip_ws(src, q, len);
+                    let var_id = read_ident(src, q2, len, 0);
+                    let vh = var_id >> 16;
+                    let q3 = var_id & 0xFFFF;
+                    let q4 = skip_ws(src, q3, len);
+                    if q4 < len then {
+                        let c3 = perform String.charAt(src, q4);
+                        if c3 == 61 then {
+                            let bound = comp(src, q4 + 1, len, no_left, -1, nr, e0, e1, e2, e3, elen);
+                            let vr = bound >> 16;
+                            let vp = bound & 0xFFFF;
+                            let vp2 = skip_ws(src, vp, len);
+                            if vp2 + 1 < len then {
+                                let ci = perform String.charAt(src, vp2);
+                                let cn = perform String.charAt(src, vp2 + 1);
+                                if ci == 105 and cn == 110 then {
+                                    let entry = (vh << 32) + vr;
+                                    let nxt = nr + 1;
+                                    if elen == 0 then comp(src, vp2 + 2, len, no_left, -1, nxt, entry, 0, 0, 0, 1)
+                                    else if elen == 1 then comp(src, vp2 + 2, len, no_left, -1, nxt, e0, entry, 0, 0, 2)
+                                    else if elen == 2 then comp(src, vp2 + 2, len, no_left, -1, nxt, e0, e1, entry, 0, 3)
+                                    else comp(src, vp2 + 2, len, no_left, -1, nxt, e0, e1, e2, entry, 4)
+                                } else (vr << 16) + vp2
+                            } else (vr << 16) + vp2
+                        } else (nr << 16) + p
+                    } else (nr << 16) + p
+                } else if h == 627 then {
+                    let cond = comp(src, q, len, no_left, -1, nr, e0, e1, e2, e3, elen);
+                    let cr = cond >> 16;
+                    let cp = cond & 0xFFFF;
+                    let cnext = nr + 1;
+                    let cp2 = skip_ws(src, cp, len);
+                    let then_id = read_ident(src, cp2, len, 0);
+                    let th = then_id >> 16;
+                    let tp = then_id & 0xFFFF;
+                    if th == 17715 then {
+                        let then_body = comp(src, tp, len, no_left, -1, cnext, e0, e1, e2, e3, elen);
+                        let tr = then_body >> 16;
+                        let tbp = then_body & 0xFFFF;
+                        let tbp2 = skip_ws(src, tbp, len);
+                        let else_id = read_ident(src, tbp2, len, 0);
+                        let eh = else_id >> 16;
+                        let ep = else_id & 0xFFFF;
+                        if eh == 16001 then {
+                            let else_body = comp(src, ep, len, no_left, -1, cnext, e0, e1, e2, e3, elen);
+                            let er = else_body >> 16;
+                            let ebp = else_body & 0xFFFF;
+                            (er << 16) + ebp
+                        } else (nr << 16) + p
+                    } else (nr << 16) + p
+                } else if h == 18036 then {
+                    emit_hex(instr(0x04, nr, 0, 0));
+                    (nr << 16) + q
+                } else if h == 79251 then {
+                    emit_hex(instr(0x03, nr, 0, 0));
+                    (nr << 16) + q
+                } else if h == 3421 then {
+                    let inner = comp(src, q, len, no_left, -1, nr, e0, e1, e2, e3, elen);
+                    let iv = inner >> 16;
+                    let ip = inner & 0xFFFF;
+                    let dr = nr + 1;
+                    emit_hex(instr(0x03, dr, 0, 0));
+                    let dr2 = nr + 2;
+                    emit_hex(instr(0x40, iv, dr, dr2));
+                    (dr2 << 16) + ip
+                } else {
+                    let reg = env_lookup(e0, e1, e2, e3, elen, h);
+                    if reg == 0 then (nr << 16) + p
+                    else {
+                        emit_hex(instr(0x12, reg, nr, 0));
+                        (nr << 16) + q
+                    }
+                }
+            } else { (nr << 16) + p }
+        }
+    } else (left << 16) + pos;
+
+    let lr = pair >> 16;
+    let lp = pair & 0xFFFF;
+    let p = skip_ws(src, lp, len);
+    if p >= len then pair
+    else {
+        let c = perform String.charAt(src, p);
+        if c == 61 or c == 33 or c == 60 or c == 62 then {
+            let cmp = parse_cmp(src, p, len);
+            if cmp == 0 then pair else {
+                let cprec = cmp >> 16;
+                let cop = (cmp >> 8) & 0xFF;
+                let clen = cmp & 0xFF;
+                if cprec < min_prec then pair else {
+                    let rhs = comp(src, p + clen, len, no_left, cprec, nr + 1, e0, e1, e2, e3, elen);
+                    let rr = rhs >> 16;
+                    let rp = rhs & 0xFFFF;
+                    let dr = nr + 2;
+                    emit_hex(instr(cop, lr, rr, dr));
+                    comp(src, rp, len, dr, min_prec, dr + 1, e0, e1, e2, e3, elen)
+                }
+            }
+        } else if is_alpha(c) then {
+            let ident = read_ident(src, p, len, 0);
+            let kw = ident >> 16;
+            let q = ident & 0xFFFF;
+            if kw == 3075 then {
+                if 0 < min_prec then pair else {
+                    let rhs = comp(src, q, len, no_left, 0, nr + 1, e0, e1, e2, e3, elen);
+                    let rr = rhs >> 16;
+                    let rp = rhs & 0xFFFF;
+                    comp(src, rp, len, rr, min_prec, rr + 1, e0, e1, e2, e3, elen)
+                }
+            } else if kw == 669 then {
+                if 0 < min_prec then pair else {
+                    let dr = nr + 1;
+                    emit_hex(instr(0x04, dr, 0, 0));
+                    let rhs = comp(src, q, len, no_left, 0, dr + 1, e0, e1, e2, e3, elen);
+                    let rr = rhs >> 16;
+                    let rp = rhs & 0xFFFF;
+                    comp(src, rp, len, rr, min_prec, rr + 1, e0, e1, e2, e3, elen)
+                }
+            } else pair
+        } else {
+            let prec = prec_of(c);
+            if prec == 0 or prec < min_prec then pair else {
+                let opcode = if c == 43 then 0x20 else if c == 45 then 0x21
+                else if c == 42 then 0x22 else 0x23;
+                let rhs = comp(src, p + 1, len, no_left, prec, nr + 1, e0, e1, e2, e3, elen);
+                let rr = rhs >> 16;
+                let rp = rhs & 0xFFFF;
+                let dr = nr + 2;
+                emit_hex(instr(opcode, lr, rr, dr));
+                comp(src, rp, len, dr, min_prec, dr + 1, e0, e1, e2, e3, elen)
+            }
+        }
+    }
+}
+
+fn compile(src: String) {
+    let len = perform String.length(src);
+    perform IO.print("; " + src);
+    let result = comp(src, 0, len, 1 << 40, -1, 8, 0, 0, 0, 0, 0);
+    emit_hex(instr(0x01, 0, 0, 0));
+    perform IO.print("; result in r" + perform Int.to_string(result >> 16))
+}
+
+fn main() {
+    let input = perform IO.read();
+    if input == "" then compile("1 + 2") else compile(input)
+}

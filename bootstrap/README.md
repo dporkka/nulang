@@ -20,6 +20,7 @@ source.nula
 | `host.nula` | Host shim |
 | `compiler_core.nula` | Lexer + Pratt parser + evaluator in Nulang Core |
 | `compile_arith.nula` | Bytecode compiler for arithmetic (prints VM instructions) |
+| `compile_hex.nula` | Hex-output bytecode compiler (u32 words as 8-char hex) |
 | `self_test.nula` | Core conformance target (fib(10) = 55) |
 | `spill_bug_repro.nula` | Minimal repro for spill temp clobbering bug (fixed) |
 
@@ -73,13 +74,20 @@ nulang bootstrap/compiler_core.nula < /dev/null
 - **Boolean literals:** `true` → 1, `false` → 0.
 - **Stdin REPL:** reads expression from stdin, evaluates, prints result.
 
-### Stage 9 — Bytecode compiler: arithmetic, if/then/else, let bindings (2026-07-28)
+### Stage 9 — Bytecode compiler (text) + hex output (2026-07-28)
 - **compile_arith.nula:** single-pass Pratt compiler emits VM instructions as text.
 - Supports integer literals, `+`, `-`, `*`, `/`, and parenthesized expressions.
 - Register allocation: starts at r8, linear assignment per subexpression.
 - **let bindings:** scoped variables via env (hash|reg), 4 slots. Variable refs emit Move.
 - **if/then/else:** JmpF/Jmp with position-based labels (L0e/L0x).
 - Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `Move`, `ICmp*`, `JmpF` (short-circuit), `Jmp`, `Halt`.
+
+### Stage 10 — Hex bytecode output (2026-07-28)
+- **compile_hex.nula:** emits u32 instruction words as 8-char hex (one per line).
+- Adds `hex_digit` helper and `emit_hex` for hex formatting.
+- Works around Nulang string-var concatenation bug using `""` prefix trick.
+- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `ICmp*`, `Move`, `Halt`.
+- Limitation: ConstU operand encoding needs constant pool; if/then/else not yet in hex.
 
 ## What remains
 
