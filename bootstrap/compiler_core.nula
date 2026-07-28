@@ -159,6 +159,31 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                             } else (0 << 16) + p
                         } else (0 << 16) + p
                     } else (0 << 16) + p
+                } else if h == 627 then {
+                    // "if" keyword: if <cond> then <then> else <else>
+                    let cond = parse_pratt(src, q, len, no_left, 0, e0, e1, e2, e3, elen);
+                    let cv = cond >> 16;
+                    let cp = cond & 0xFFFF;
+                    let cp2 = skip_ws(src, cp, len);
+                    let then_id = read_ident(src, cp2, len, 0);
+                    let th = then_id >> 16;
+                    let tp = then_id & 0xFFFF;
+                    if th == 17715 then {
+                        let then_body = parse_pratt(src, tp, len, no_left, 0, e0, e1, e2, e3, elen);
+                        let tv = then_body >> 16;
+                        let tbp = then_body & 0xFFFF;
+                        let tbp2 = skip_ws(src, tbp, len);
+                        let else_id = read_ident(src, tbp2, len, 0);
+                        let eh = else_id >> 16;
+                        let ep = else_id & 0xFFFF;
+                        if eh == 16001 then {
+                            let else_body = parse_pratt(src, ep, len, no_left, 0, e0, e1, e2, e3, elen);
+                            let ev = else_body >> 16;
+                            let ebp = else_body & 0xFFFF;
+                            let result = if cv != 0 then tv else ev;
+                            (result << 16) + ebp
+                        } else (0 << 16) + p
+                    } else (0 << 16) + p
                 } else {
                     let v = env_lookup(e0, e1, e2, e3, elen, h);
                     (v << 16) + q
@@ -241,4 +266,9 @@ fn main() {
     // New tests: 3- and 4-deep let bindings
     perform IO.print(parse("let a = 1 in let b = 2 in let c = 3 in a + b + c"))
     perform IO.print(parse("let a = 1 in let b = 2 in let c = 3 in let d = 4 in a + b + c + d"))
+    // if/then/else tests
+    perform IO.print(parse("if 1 then 42 else 0"))
+    perform IO.print(parse("if 0 then 42 else 99"))
+    perform IO.print(parse("if 1 + 1 then 10 else 20"))
+    perform IO.print(parse("let x = 5 in if x then x + 1 else 0"))
 }

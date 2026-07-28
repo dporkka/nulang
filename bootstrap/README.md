@@ -1,6 +1,6 @@
 # Nulang Self-Hosting Bootstrap
 
-> **Status:** Stage 6 — 4-slot environment, closures with 1-capture.
+> **Status:** Stage 7 — if/then/else, 4-slot env, closures with 1-capture.
 > **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
 > that targets the `.nbc` format (RFC 0001).
 
@@ -26,7 +26,7 @@ source.nula
 
 ```bash
 nulang bootstrap/compiler_core.nula
-# Expected: 42, 7, 9, 43, 200, 6, 36, 11, 8, 7, 6, 10
+# Expected: 42, 7, 9, 43, 200, 6, 36, 11, 8, 7, 6, 10, 42, 99, 10, 6
 ```
 
 ## What's implemented
@@ -50,6 +50,12 @@ nulang bootstrap/compiler_core.nula
 - **Closures:** still capture 1 binding (most recent), encoded as before in bits 8-15 of the closure tag.
 - **New tests:** `let a=1 in let b=2 in let c=3 in a+b+c` → 6, 4-deep → 10.
 
+### Stage 7 — if/then/else (2026-07-28)
+- **Conditional:** `if <cond> then <then> else <else>` — parsed in the Pratt prefix handler.
+- Keyword hashes: `if`=627, `then`=17715, `else`=16001.
+- Non-zero condition values are truthy; zero is falsy.
+- **Tests:** `if 1 then 42 else 0` → 42, `if 0 then 42 else 99` → 99, `let x=5 in if x then x+1 else 0` → 6.
+
 ### Register spilling (2026-07-24)
 - Inline spilling (commit 06b03c6): no capacity limit.
 - Round-robin temp registers (commit db22c67): prevents clobbering in multi-operand spilled reads.
@@ -60,3 +66,5 @@ nulang bootstrap/compiler_core.nula
 - MIR lowering → `.nbc` codec
 - Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
 - Multi-binding closure capture (closures still limited to 1 captured variable)
+- Boolean operators (`and`/`or`/`not`)
+- Comparison operators (`==`, `<`, `>`, `<=`, `>=`)
