@@ -116,7 +116,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                 else if num == 1 then emit_hex(instr(0x04, nr, 0, 0))
                 else if num == 2 then emit_hex(instr(0x05, nr, 0, 0))
                 else if num == -1 then emit_hex(instr(0x06, nr, 0, 0))
-                else emit_hex(instr(0x07, nr, 0, 0));
+                else emit_hex(instr(0x07, 0, 0, nr));
                 (nr << 16) + q
             } else if c == 40 then {
                 let inner = comp(src, p + 1, len, no_left, -1, nr, e0, e1, e2, e3, elen);
@@ -169,9 +169,11 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                     let th = then_id >> 16;
                     let tp = then_id & 0xFFFF;
                     if th == 17715 then {
+                        emit_hex(instr(0x52, cr, 0, 0));
                         let then_body = comp(src, tp, len, no_left, -1, cnext, e0, e1, e2, e3, elen);
                         let tr = then_body >> 16;
                         let tbp = then_body & 0xFFFF;
+                        emit_hex(instr(0x50, 0, 0, 0));
                         let tbp2 = skip_ws(src, tbp, len);
                         let else_id = read_ident(src, tbp2, len, 0);
                         let eh = else_id >> 16;
@@ -278,5 +280,5 @@ fn compile(src: String) {
 
 fn main() {
     let input = perform IO.read();
-    if input == "" then compile("1 + 2") else compile(input)
+    if input == "" then compile("if 1 then 42 else 0") else compile(input)
 }

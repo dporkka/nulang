@@ -80,14 +80,14 @@ nulang bootstrap/compiler_core.nula < /dev/null
 - Register allocation: starts at r8, linear assignment per subexpression.
 - **let bindings:** scoped variables via env (hash|reg), 4 slots. Variable refs emit Move.
 - **if/then/else:** JmpF/Jmp with position-based labels (L0e/L0x).
-- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `Move`, `ICmp*`, `JmpF` (short-circuit), `Jmp`, `Halt`.
+- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `Move`, `ICmp*`, `JmpF` (short-circuit), `Jmp`, `JmpF`, `Jmp`, `Halt`.
 
 ### Stage 10 — Hex bytecode output (2026-07-28)
 - **compile_hex.nula:** emits u32 instruction words as 8-char hex (one per line).
 - Adds `hex_digit` helper and `emit_hex` for hex formatting.
 - Works around Nulang string-var concatenation bug using `""` prefix trick.
-- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `ICmp*`, `Move`, `Halt`.
-- Limitation: ConstU operand encoding needs constant pool; if/then/else not yet in hex.
+- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `ICmp*`, `Move`, `JmpF`, `Jmp`, `Halt`.
+- Limitation: ConstU needs constant pool; JmpF/Jmp use placeholder offset 0 (need post-processing).
 
 ## What remains
 
