@@ -1,8 +1,10 @@
-// bootstrap/compile_arith.nula — Compile arithmetic to VM bytecode text.
-// Single-function compiler, modeled after parse_pratt.
-// Run: echo "1 + 2 * 3" | nulang bootstrap/compile_arith.nula
+// bootstrap/compile_arith.nula — Compile expressions to VM bytecode text.
+// Single-function compiler. Supports arithmetic + if/then/else.
+// Run: echo "if 1 then 42 else 0" | nulang bootstrap/compile_arith.nula
 
 fn is_digit(c: Int) -> Bool { c >= 48 and c <= 57 }
+fn is_alpha(c: Int) -> Bool { (c >= 65 and c <= 90) or (c >= 97 and c <= 122) }
+fn is_alphanum(c: Int) -> Bool { is_alpha(c) or is_digit(c) or c == 95 }
 fn is_space(c: Int) -> Bool { c == 32 or c == 10 or c == 13 or c == 9 }
 
 fn skip_ws(src: String, pos: Int, len: Int) -> Int {
@@ -17,6 +19,17 @@ fn read_int(src: String, pos: Int, len: Int, acc: Int) -> Int {
         let c = perform String.charAt(src, pos);
         if is_digit(c) then read_int(src, pos + 1, len, acc * 10 + (c - 48))
         else (acc << 16) + pos
+    }
+}
+
+fn read_ident(src: String, pos: Int, len: Int, h: Int) -> Int {
+    if pos >= len then (h << 16) + pos
+    else {
+        let c = perform String.charAt(src, pos);
+        if is_alphanum(c) then {
+            let nh = h * 5 + c;
+            read_ident(src, pos + 1, len, nh)
+        } else (h << 16) + pos
     }
 }
 
@@ -75,6 +88,42 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int) -> I
                     if c2 == 41 then (rv << 16) + (q2 + 1)
                     else (rv << 16) + q2
                 } else (rv << 16) + q2
+            } else if is_alpha(c) then {
+                let ident = read_ident(src, p, len, 0);
+                let h = ident >> 16;
+                let q = ident & 0xFFFF;
+                if h == 627 then {
+                    // "if" keyword: if <cond> then <a> else <b>
+                    let cond = comp(src, q, len, no_left, 0, nr);
+                    let cr = cond >> 16;
+                    let cp = cond & 0xFFFF;
+                    let cnext = nr + 1;
+                    let cp2 = skip_ws(src, cp, len);
+                    let then_id = read_ident(src, cp2, len, 0);
+                    let th = then_id >> 16;
+                    let tp = then_id & 0xFFFF;
+                    if th == 17715 then {
+                        perform IO.print("  JmpF r" + perform Int.to_string(cr) + " L" + perform Int.to_string(p) + "e");
+                        let then_body = comp(src, tp, len, no_left, 0, cnext);
+                        let tr = then_body >> 16;
+                        let tbp = then_body & 0xFFFF;
+                        perform IO.print("  Jmp L" + perform Int.to_string(p) + "x");
+                        perform IO.print("L" + perform Int.to_string(p) + "e:");
+                        let tbp2 = skip_ws(src, tbp, len);
+                        let else_id = read_ident(src, tbp2, len, 0);
+                        let eh = else_id >> 16;
+                        let ep = else_id & 0xFFFF;
+                        if eh == 16001 then {
+                            let else_body = comp(src, ep, len, no_left, 0, cnext);
+                            let er = else_body >> 16;
+                            let ebp = else_body & 0xFFFF;
+                            perform IO.print("L" + perform Int.to_string(p) + "x:");
+                            (er << 16) + ebp
+                        } else (nr << 16) + p
+                    } else (nr << 16) + p
+                } else {
+                    (nr << 16) + p
+                }
             } else {
                 (nr << 16) + p
             }
@@ -114,7 +163,7 @@ fn compile(src: String) {
 fn main() {
     let input = perform IO.read();
     if input == "" then {
-        compile("1 + 2 * 3")
+        compile("if 1 then 42 else 0")
     } else {
         compile(input)
     }

@@ -73,11 +73,12 @@ nulang bootstrap/compiler_core.nula < /dev/null
 - **Boolean literals:** `true` → 1, `false` → 0.
 - **Stdin REPL:** reads expression from stdin, evaluates, prints result.
 
-### Stage 9 — Bytecode compiler for arithmetic (2026-07-28)
+### Stage 9 — Bytecode compiler: arithmetic + if/then/else (2026-07-28)
 - **compile_arith.nula:** single-pass Pratt compiler emits VM instructions as text.
 - Supports integer literals, `+`, `-`, `*`, `/`, and parenthesized expressions.
 - Register allocation: starts at r8, linear assignment per subexpression.
-- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `Halt`.
+- **if/then/else:** JmpF/Jmp with position-based labels (L0e/L0x).
+- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `JmpF`, `Jmp`, `Halt`.
 
 ## What remains
 
