@@ -5,6 +5,7 @@ members = ["crates/nulang-ai"]
 name = "nulang"
 version = "0.13.0-alpha.1"
 edition = "2021"
+autobenches = false
 authors = ["David Porkka"]
 license = "Apache-2.0"
 description = "Nulang - Distributed Actor-Based Programming Language with AI Agent Support"

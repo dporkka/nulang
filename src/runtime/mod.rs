@@ -3710,17 +3710,11 @@ impl Runtime {
         actor.sequence = snapshot.sequence;
         actor.waiting_signal = snapshot.waiting_signal;
         for (name, value) in snapshot.state {
-            // Rehydrate the semantic_memory and procedural_memory JSON strings
-            // by allocating them on the actor heap so runtime helpers can read
-            // them as pointer values.
-            if name == "semantic_memory" || name == "procedural_memory" {
-                if let PersistedValue::String(json) = &value {
-                    let ptr = actor.allocate_string(json);
-                    actor.set_state_field(name, ptr);
-                    continue;
-                }
-            }
-            actor.set_state_field(name, value.to_value());
+            // to_value_on_heap allocates string content on the actor heap
+            // so runtime helpers (semantic_memory, procedural_memory, etc.)
+            // can read them as pointer values.
+            let v = value.to_value_on_heap(&mut actor);
+            actor.set_state_field(name, v);
         }
         // Parse cached retry/fallback configs from restored state for agents.
         if is_agent {
@@ -3855,18 +3849,24 @@ impl Runtime {
                 .collect();
             for entry in entries_to_replay {
                 let behavior_idx = entry.behavior_id as usize;
-                let payload: Vec<Value> = entry.payload.iter().map(|p| p.to_value()).collect();
-                if self.has_native_handler(actor_id, behavior_idx) {
-                    let handler = self
-                        .actors
-                        .get(&actor_id)
-                        .and_then(|a| a.behavior_table.get(behavior_idx))
-                        .map(|b| b.handler_fn)?;
+                let native_handler = self
+                    .actors
+                    .get(&actor_id)
+                    .and_then(|a| a.behavior_table.get(behavior_idx))
+                    .and_then(|b| if !b.name.is_empty() { Some(b.handler_fn) } else { None });
+                let is_bytecode = self.has_bytecode_handler(actor_id, behavior_idx);
+
+                if let Some(handler) = native_handler {
                     if let Some(actor) = self.actors.get_mut(&actor_id) {
+                        let payload: Vec<Value> = entry.payload.iter().map(|p| p.to_value_on_heap(actor)).collect();
                         handler(actor, &payload);
                         actor.sequence = entry.sequence;
                     }
-                } else if self.has_bytecode_handler(actor_id, behavior_idx) {
+                } else if is_bytecode {
+                    let payload: Vec<Value> = {
+                        let actor = self.actors.get_mut(&actor_id)?;
+                        entry.payload.iter().map(|p| p.to_value_on_heap(actor)).collect()
+                    };
                     self.current_actor = Some(actor_id);
                     let _ = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
                     self.current_actor = None;
@@ -3918,19 +3918,12 @@ impl Runtime {
                 actor.set_state_field("parallel_progress", Value::int(current + 1));
             }
             WorkflowEvent::Custom { name, args, .. } => {
-                let values: Vec<Value> = args.iter().map(|a| a.to_value()).collect();
+                let values: Vec<Value> = args.iter().map(|a| a.to_value_on_heap(actor)).collect();
                 actor.event_log.push((name.clone(), values));
             }
         }
     }
 
-    fn has_native_handler(&self, actor_id: u64, behavior_idx: usize) -> bool {
-        self.actors
-            .get(&actor_id)
-            .and_then(|a| a.behavior_table.get(behavior_idx))
-            .map(|e| !e.name.is_empty())
-            .unwrap_or(false)
-    }
 
     // -- Fault Tolerance: Links --
 
