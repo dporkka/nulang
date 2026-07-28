@@ -2084,6 +2084,7 @@ mod tests {
         let ctx = EffectContext::empty();
         let lam = Expr::Lambda {
             params: vec![("x".to_string(), None)],
+            ret_type: None,
             body: Box::new(Expr::Var("x".to_string(), s())),
             effect: None,
             span: s(),
@@ -2318,6 +2319,7 @@ mod tests {
         let ctx = CapContext::new();
         let lam = Expr::Lambda {
             params: vec![("x".to_string(), None)],
+            ret_type: None,
             body: Box::new(Expr::Var("x".to_string(), s())),
             effect: None,
             span: s(),
@@ -2332,6 +2334,7 @@ mod tests {
         let ctx = CapContext::new().with_binding("y", Capability::Ref);
         let lam = Expr::Lambda {
             params: vec![("x".to_string(), None)],
+            ret_type: None,
             body: Box::new(Expr::Binary {
                 op: BinOp::Add,
                 left: Box::new(Expr::Var("x".to_string(), s())),
@@ -2630,6 +2633,7 @@ mod tests {
         let ctx = EffectContext::empty();
         let lam = Expr::Lambda {
             params: vec![("x".to_string(), None)],
+            ret_type: None,
             body: Box::new(Expr::Perform {
                 effect: "IO".to_string(),
                 op: "print".to_string(),
@@ -2649,6 +2653,7 @@ mod tests {
         let ctx = EffectContext::empty();
         let lam = Expr::Lambda {
             params: vec![("x".to_string(), None)],
+            ret_type: None,
             body: Box::new(Expr::Perform {
                 effect: "FS".to_string(),
                 op: "read".to_string(),
@@ -2844,6 +2849,7 @@ mod tests {
         let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
         let lam = Expr::Lambda {
             params: vec![("y".to_string(), None)],
+            ret_type: None,
             body: Box::new(lvar("x")),
             effect: None,
             span: s(),
@@ -3158,6 +3164,7 @@ mod tests {
         let ctx = EffectContext::empty();
         let pure_lambda = Expr::Lambda {
             params: vec![],
+            ret_type: None,
             body: Box::new(Expr::Literal(Literal::Unit, s())),
             effect: None,
             span: s(),

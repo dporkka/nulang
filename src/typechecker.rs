@@ -976,6 +976,7 @@ impl TypeChecker {
                 body,
                 effect,
                 span,
+                ..
             } => self.infer_lambda(ctx, params, body, effect.as_ref(), *span),
 
             // Application: infer function, infer arg, unify, return result
@@ -2546,6 +2547,7 @@ mod tests {
     // Helper to create a lambda
     fn lambda(param: &str, body: Expr) -> Expr {
         Expr::Lambda {
+            ret_type: None,
             params: vec![(param.to_string(), None)],
             body: Box::new(body),
             effect: None,
@@ -3485,6 +3487,7 @@ mod tests {
         let mut tc = TypeChecker::new();
         let ctx = TypeContext::new();
         let lam = Expr::Lambda {
+                ret_type: None,
             params: vec![("x".to_string(), Some(Type::int()))],
             body: Box::new(var("x")),
             effect: Some(EffectRow::Closed(vec![Effect::IO])),

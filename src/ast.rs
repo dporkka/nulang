@@ -45,6 +45,7 @@ pub enum Expr {
     /// Lambda: fn(x: T) -> e
     Lambda {
         params: Vec<(String, Option<Type>)>,
+        ret_type: Option<Type>,
         body: Box<Expr>,
         effect: Option<EffectRow>,
         span: Span,

@@ -859,8 +859,8 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         Expr::Lambda {
             params,
             body: lb,
-            effect: _,
             span,
+            ..
         } => {
             let lambda_body = lower_body(lb);
             let ty = Type::unit();

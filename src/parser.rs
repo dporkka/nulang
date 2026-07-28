@@ -108,6 +108,9 @@ impl Parser {
                         // error and synchronize to the next top-level keyword.
                         self.diagnostics.push(e);
                         self.error_sync();
+                        if !self.is_at_end() {
+                            self.advance(); // skip past the sync token to avoid re-parsing the same broken decl
+                        }
                         continue;
                     }
                     // Not a declaration — this must be the top-level script body.
@@ -2120,13 +2123,23 @@ impl Parser {
         let params = self.parse_params()?;
         self.expect(TokenKind::RParen)?;
 
-        // Lambda syntax: fn(x) -> body  or  fn(x) body
-        // The -> introduces the body expression (not a return type)
-        self.consume_if(&TokenKind::Arrow);
+        // Optional return type: fn(x) -> RetType { body }
+        let ret_type = if self.consume_if(&TokenKind::Arrow) {
+            // Look ahead: if the next token is '{', this arrow introduces
+            // the body (bare arrow syntax); otherwise it's a return type.
+            if self.match_token(&TokenKind::LBrace) {
+                None
+            } else {
+                Some(self.parse_type()?)
+            }
+        } else {
+            None
+        };
 
         let body = self.parse_expr()?;
         Ok(Expr::Lambda {
             params,
+            ret_type,
             body: Box::new(body),
             effect: None,
             span,
