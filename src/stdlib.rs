@@ -180,6 +180,14 @@ impl StdLib {
                     description: "Perform an HTTP POST request to `url` with a JSON body and return the response body as a string on success, nil on error. Requires the `http-client` or `ai-runtime` feature for the reqwest provider.",
                 },
                 BuiltinOp {
+                    name: "Http.serve",
+                    effect: "Http",
+                    op: "serve",
+                    signature: "serve(port: Int, handler: fn(String) -> String) -> Int",
+                    implemented_in: ImplSite::RuntimeHost,
+                    description: "Start an HTTP/1.1 server on `port`. For each request, calls `handler(body)` and returns the result as the response body with status 200. Returns the actual bound port.",
+                },
+                BuiltinOp {
                     name: "Actor.link",
                     effect: "Actor",
                     op: "link",

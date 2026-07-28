@@ -80,6 +80,7 @@ wasm-encoder = { version = "0.220", optional = true }
 wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow", "component-model", "wat"] }
 blake3 = "1.8"
 quinn = "0.11"
+httparse = "1.9"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
 rcgen = "0.14"
 multihash = "0.19.1"

@@ -1184,16 +1184,15 @@ impl VM {
         }
     }
 
-
     /// Return a shared reference to the currently executing frame.
     #[inline(always)]
-    fn current_frame(&self) -> &Frame {
+    fn _current_frame(&self) -> &Frame {
         &self.frames[self.current_frame_idx.expect("no current frame")]
     }
 
     /// Return a mutable reference to the currently executing frame.
     #[inline(always)]
-    fn current_frame_mut(&mut self) -> &mut Frame {
+    fn _current_frame_mut(&mut self) -> &mut Frame {
         &mut self.frames[self.current_frame_idx.expect("no current frame")]
     }
 
@@ -1201,8 +1200,8 @@ impl VM {
     /// The module index does not change within a single `step()` call,
     /// so the compiler can hoist this lookup.
     #[inline(always)]
-    fn current_module(&self) -> &CodeModule {
-        &self.modules[self.current_frame().module_idx]
+    fn _current_module(&self) -> &CodeModule {
+        &self.modules[self._current_frame().module_idx]
     }
     /// Override the closure-env ceiling. Exposed for testing the limit
     /// without actually allocating `MAX_CLOSURE_ENVS` entries.

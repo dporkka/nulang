@@ -19,6 +19,7 @@ pub use heap_serialize::*;
 mod cluster;
 mod distributed;
 mod distributed_context;
+mod http_server;
 mod network;
 mod orca_cycle;
 #[cfg(feature = "quic-experimental")]
@@ -223,6 +224,8 @@ pub struct Runtime {
     // HTTP client provider (v0.13). Filled in at startup when a concrete
     // HttpProvider impl is available (reqwest behind ai-runtime/http-client).
     pub http_provider: Option<std::sync::Arc<dyn crate::backends::HttpProvider>>,
+    // HTTP server (v0.14). Set by `perform Http.serve(port, handler)`.
+    pub http_server: Option<crate::runtime::http_server::HttpServerState>,
 
     // Actor name registry (v0.7)
     pub registry: ActorRegistry,
@@ -328,6 +331,7 @@ impl Runtime {
             vm: None,
             llm: llm::LlmState::new(),
             http_provider: None,
+            http_server: None,
             pending_receive_wakes: Vec::new(),
             draining_receive_wakes: false,
             idle_callback: None,
@@ -4857,6 +4861,37 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let mut rt = self.runtime.borrow_mut();
             return rt.perform_otp_builtin(op_name, module, regs);
         }
+        if effect_name == "Http" && op_name == Some("serve") {
+            let port = regs
+                .first()
+                .and_then(|v| v.as_int().map(|n| n as u16))
+                .unwrap_or(0);
+            let handler_val = regs.get(1).copied().unwrap_or(crate::vm::Value::nil());
+            let handler_func_idx = if handler_val.is_closure() {
+                (handler_val.as_raw() & crate::value_layout::PAYLOAD_MASK) as usize
+            } else if let Some(idx) = handler_val.as_int() {
+                idx as usize
+            } else {
+                return Some(crate::vm::Value::nil());
+            };
+
+            match crate::runtime::http_server::HttpServerState::bind(
+                port,
+                module.clone(),
+                handler_func_idx,
+            ) {
+                Ok(server) => {
+                    let actual_port = server.port;
+                    let mut rt = self.runtime.borrow_mut();
+                    rt.http_server = Some(server);
+                    return Some(crate::vm::Value::int(actual_port as i64));
+                }
+                Err(e) => {
+                    eprintln!("Http.serve: failed to bind port {}: {}", port, e);
+                    return Some(crate::vm::Value::nil());
+                }
+            }
+        }
         self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
     }
 
@@ -4978,12 +5013,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
         let mut rt = self.runtime.borrow_mut();
         let actor_id = rt.current_actor?;
-        let msg = {
-            rt.actors
-                .get_mut(&actor_id)?
-                .mailbox
-                .pop()?
-        };
+        let msg = { rt.actors.get_mut(&actor_id)?.mailbox.pop()? };
         // ORCA receiver protocol: hold heap pointers carried by the message.
         rt.hold_payload_refs(actor_id, &msg.payload);
         let val = msg
@@ -5447,6 +5477,37 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             }
             if effect_name == "Otp" {
                 return (*self.runtime).perform_otp_builtin(op_name, module, regs);
+            }
+            if effect_name == "Http" && op_name == Some("serve") {
+                let port = regs
+                    .first()
+                    .and_then(|v| v.as_int().map(|n| n as u16))
+                    .unwrap_or(0);
+                let handler_val = regs.get(1).copied().unwrap_or(crate::vm::Value::nil());
+                let handler_func_idx = if handler_val.is_closure() {
+                    (handler_val.as_raw() & crate::value_layout::PAYLOAD_MASK) as usize
+                } else if let Some(idx) = handler_val.as_int() {
+                    idx as usize
+                } else {
+                    return Some(crate::vm::Value::nil());
+                };
+
+                match crate::runtime::http_server::HttpServerState::bind(
+                    port,
+                    module.clone(),
+                    handler_func_idx,
+                ) {
+                    Ok(server) => {
+                        let actual_port = server.port;
+                        let rt = &mut *self.runtime;
+                        rt.http_server = Some(server);
+                        return Some(crate::vm::Value::int(actual_port as i64));
+                    }
+                    Err(e) => {
+                        eprintln!("Http.serve: failed to bind port {}: {}", port, e);
+                        return Some(crate::vm::Value::nil());
+                    }
+                }
             }
             self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
         }

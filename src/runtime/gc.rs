@@ -483,7 +483,11 @@ impl OrcaGc {
 
                 // Remove from deferred list so process_deferred doesn't
                 // access freed memory.
-                if let Some(pos) = self.deferred_decrements.iter().position(|&h| h == op.object_header) {
+                if let Some(pos) = self
+                    .deferred_decrements
+                    .iter()
+                    .position(|&h| h == op.object_header)
+                {
                     self.deferred_decrements.swap_remove(pos);
                 }
             }
@@ -630,7 +634,11 @@ impl OrcaGc {
         // still queued here; never let the deferred list point at freed
         // memory (process_deferred drains one entry at a time for the same
         // reason).
-        if let Some(pos) = self.deferred_decrements.iter().position(|&h| h == header_ptr) {
+        if let Some(pos) = self
+            .deferred_decrements
+            .iter()
+            .position(|&h| h == header_ptr)
+        {
             self.deferred_decrements.swap_remove(pos);
         }
 

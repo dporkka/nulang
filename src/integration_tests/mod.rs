@@ -8028,4 +8028,45 @@ match { a: 2, b: 9 } with {
             "test handler should have intercepted Http.post"
         );
     }
+
+    #[test]
+    fn test_http_serve_roundtrip() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            fn echo(body: String) -> String {
+                body
+            }
+            perform Http.serve(0, echo)
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        // value is the bound port (Int).
+        let port = value
+            .as_int()
+            .expect("Http.serve should return the bound port");
+        assert!(port > 0, "expected a real port, got {}", port);
+
+        // Make an HTTP request to the server from the test thread.
+        let mut stream = TcpStream::connect(("127.0.0.1", port as u16))
+            .expect("failed to connect to HTTP server");
+        let request =
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 13\r\n\r\nhello, world!"
+                .to_string();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+
+        assert!(
+            response.contains("200 OK"),
+            "expected 200, got: {}",
+            response
+        );
+        assert!(
+            response.contains("hello, world!"),
+            "expected echoed body, got: {}",
+            response
+        );
+    }
 }

@@ -974,10 +974,7 @@ fn test_typed_path_matches_scalar_path() {
 
     // Typed path.
     let meta = infer_reg_types(&module, 5);
-    assert!(
-        !meta.is_empty(),
-        "int loop registers must be typed"
-    );
+    assert!(!meta.is_empty(), "int loop registers must be typed");
     let mut typed_jit = make_jit();
     let typed =
         unsafe { typed_jit.compile_region_typed(0, 5, 7, &module.instructions, Some(&meta)) }

@@ -3,7 +3,9 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
-use crate::value_layout::{is_float_raw, sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK, TAG_PTR};
+use crate::value_layout::{
+    is_float_raw, sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK, TAG_PTR,
+};
 use crate::vm::Value;
 
 // is_float_raw is now imported from crate::value_layout (integer bitmask, no FPU).

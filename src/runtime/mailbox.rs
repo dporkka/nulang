@@ -182,9 +182,7 @@ impl Mailbox {
 
     /// True when all queues and the skip-buffer are empty.
     pub fn is_empty(&self) -> bool {
-        self.system_queue.is_empty()
-            && self.skip_buffer.is_empty()
-            && self.normal_queue.is_empty()
+        self.system_queue.is_empty() && self.skip_buffer.is_empty() && self.normal_queue.is_empty()
     }
 
     /// Drain system queue, skip-buffer, and normal queue (in priority/FIFO
@@ -416,7 +414,7 @@ mod tests {
         // All 400 messages should be present
         assert_eq!(mb.len(), 400);
 
-        let mut mb = Arc::get_mut(&mut mb).expect("only reference after join");
+        let mb = Arc::get_mut(&mut mb).expect("only reference after join");
         let mut count = 0;
         while mb.pop().is_some() {
             count += 1;

@@ -153,8 +153,7 @@ pub fn is_float_raw(raw: u64) -> bool {
     // Integer-only NaN detection: exponent != 0x7FF (not a NaN) OR mantissa == 0 (infinity).
     // Equivalent to !f64::from_bits(raw).is_nan() but stays in integer domain,
     // avoiding FPU register pressure and domain-crossing penalties.
-    (raw & 0x7FF0_0000_0000_0000) != 0x7FF0_0000_0000_0000
-        || (raw & 0x000F_FFFF_FFFF_FFFF) == 0
+    (raw & 0x7FF0_0000_0000_0000) != 0x7FF0_0000_0000_0000 || (raw & 0x000F_FFFF_FFFF_FFFF) == 0
 }
 
 // ---------------------------------------------------------------------------

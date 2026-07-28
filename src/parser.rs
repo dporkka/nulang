@@ -2656,7 +2656,7 @@ impl Parser {
 
     /// Skip tokens until a synchronization point: semicolon, newline followed
     /// by a declaration keyword, or any declaration-start token.
-    fn synchronize(&mut self) {
+    fn _synchronize(&mut self) {
         // Declaration-start keywords
         const SYNC_TOKENS: &[TokenKind] = &[
             TokenKind::Fn,
