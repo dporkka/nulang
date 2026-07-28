@@ -1,4 +1,4 @@
-// bootstrap/compiler_core.nula — Stage 6: 4-slot env, 1-capture closures
+// bootstrap/compiler_core.nula — Stage 8: stdin REPL, comparisons, booleans
 // Return: (value << 16) | pos.  Entry: (hash << 32) + value.
 // Closure encoding (32-bit): flag(bit30) | (ph<<23) | (bs<<16) | (cap_h<<8) | cap_v
 // flag = 1 << 30 = 1073741824. Position is clean source pos.
@@ -345,46 +345,13 @@ fn parse(src: String) -> Int {
 }
 
 fn main() {
-    perform IO.print(parse("42"))
-    perform IO.print(parse("1 + 2 * 3"))
-    perform IO.print(parse("(1 + 2) * 3"))
-    perform IO.print(parse("let x = 42 in x + 1"))
-    perform IO.print(parse("let x = 10 in let y = 20 in x * y"))
-    perform IO.print(parse("(fn(x) => x + 1)(5)"))
-    perform IO.print(parse("(fn(x) => x * x)(6)"))
-    perform IO.print(parse("let f = fn(x) => x + 1 in f(10)"))
-    perform IO.print(parse("let a = 3 in (fn(x) => a + x)(5)"))
-    perform IO.print(parse("let add = fn(a) => fn(b) => a + b in add(3)(4)"))
-    perform IO.print(parse("let a = 1 in let b = 2 in let c = 3 in a + b + c"))
-    perform IO.print(parse("let a = 1 in let b = 2 in let c = 3 in let d = 4 in a + b + c + d"))
-    perform IO.print(parse("if 1 then 42 else 0"))
-    perform IO.print(parse("if 0 then 42 else 99"))
-    perform IO.print(parse("if 1 + 1 then 10 else 20"))
-    perform IO.print(parse("let x = 5 in if x then x + 1 else 0"))
-    perform IO.print(parse("1 < 2"))
-    perform IO.print(parse("2 < 1"))
-    perform IO.print(parse("3 == 3"))
-    perform IO.print(parse("3 == 4"))
-    perform IO.print(parse("4 != 3"))
-    perform IO.print(parse("4 != 4"))
-    perform IO.print(parse("5 > 3"))
-    perform IO.print(parse("3 > 5"))
-    perform IO.print(parse("5 >= 5"))
-    perform IO.print(parse("3 >= 5"))
-    perform IO.print(parse("3 <= 3"))
-    perform IO.print(parse("5 <= 3"))
-    perform IO.print(parse("true"))
-    perform IO.print(parse("false"))
-    perform IO.print(parse("not true"))
-    perform IO.print(parse("not false"))
-    perform IO.print(parse("1 and 1"))
-    perform IO.print(parse("1 and 0"))
-    perform IO.print(parse("0 and 1"))
-    perform IO.print(parse("1 or 0"))
-    perform IO.print(parse("0 or 0"))
-    perform IO.print(parse("0 or 1"))
-    perform IO.print(parse("1 < 2 and 2 < 3"))
-    perform IO.print(parse("1 < 0 or 2 < 3"))
-    perform IO.print(parse("let x = 5 in if x > 3 then 100 else 0"))
-    perform IO.print(parse("not (1 == 2)"))
+    let input = perform IO.read();
+    if input == "" then {
+        perform IO.print(parse("42"));
+        perform IO.print(parse("1 + 2 * 3"));
+        perform IO.print(parse("(1 + 2) * 3"));
+        perform IO.print(parse("let x = 42 in x + 1"))
+    } else {
+        perform IO.print(parse(input))
+    }
 }

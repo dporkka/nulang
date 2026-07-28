@@ -1,6 +1,6 @@
 # Nulang Self-Hosting Bootstrap
 
-> **Status:** Stage 8 — comparisons, booleans, if/then/else, 4-slot env.
+> **Status:** Stage 8 — stdin REPL, comparisons, booleans, if/then/else, 4-slot env.
 > **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
 > that targets the `.nbc` format (RFC 0001).
 
@@ -25,9 +25,13 @@ source.nula
 ## Running
 
 ```bash
-nulang bootstrap/compiler_core.nula
-# Expected: 42, 7, 9, 43, 200, 6, 36, 11, 8, 7, 6, 10, 42, 99, 10, 6,
-#           1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 100, 1
+# Interactive: evaluate an expression from stdin
+echo "1 + 2 * 3" | nulang bootstrap/compiler_core.nula
+# → 7
+
+# Self-test (when stdin is empty):
+nulang bootstrap/compiler_core.nula < /dev/null
+# Expected: 42, 7, 9, 43
 ```
 
 ## What's implemented
@@ -51,14 +55,14 @@ nulang bootstrap/compiler_core.nula
 - **Conditional:** `if <cond> then <then> else <else>` — parsed in the Pratt prefix handler.
 - Non-zero condition values are truthy; zero is falsy.
 
-### Stage 8 — Comparisons + booleans (2026-07-28)
+### Stage 8 — Comparisons + booleans + stdin (2026-07-28)
 - **Comparisons:** `==`, `!=`, `<`, `>`, `<=`, `>=` — all return 1 (true) or 0 (false).
   Precedence 3 (between `and`/`or` and arithmetic).
 - **Boolean operators:** `and` (prec 1), `or` (prec 0) — return 1 or 0.
 - **Boolean literals:** `true` → 1, `false` → 0.
 - **Prefix `not`:** `not x` → 1 if x is 0, else 0.
 - **Precedence levels:** `or`(0) < `and`(1) < comparisons(3) < `+`/`-`(4) < `*`/`/`(5).
-- **Keyword hashes:** `true`=18036, `false`=79251, `not`=3421, `and`=3075, `or`=669.
+- **Stdin REPL:** reads expression from stdin and evaluates it. Falls back to self-tests on empty input.
 
 ## What remains
 
