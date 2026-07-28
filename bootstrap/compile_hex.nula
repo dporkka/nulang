@@ -120,7 +120,10 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                 else if num == 1 then emit_hex(instr(0x04, nr, 0, 0))
                 else if num == 2 then emit_hex(instr(0x05, nr, 0, 0))
                 else if num == -1 then emit_hex(instr(0x06, nr, 0, 0))
-                else emit_hex(instr(0x07, 0, 0, nr));
+                else {
+                    remark("const " + perform Int.to_string(num));
+                    emit_hex(instr(0x07, 0, 0, nr))
+                };
                 (nr << 16) + q
             } else if c == 40 then {
                 let inner = comp(src, p + 1, len, no_left, -1, nr, e0, e1, e2, e3, elen);
