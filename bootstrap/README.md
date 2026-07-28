@@ -1,6 +1,6 @@
 # Nulang Self-Hosting Bootstrap
 
-> **Status:** Stage 5 — closures with environment capture working.
+> **Status:** Stage 6 — 4-slot environment, closures with 1-capture.
 > **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
 > that targets the `.nbc` format (RFC 0001).
 
@@ -26,7 +26,7 @@ source.nula
 
 ```bash
 nulang bootstrap/compiler_core.nula
-# Expected: 42, 7, 9, 43, 200, 6, 36, 11, 8, 7
+# Expected: 42, 7, 9, 43, 200, 6, 36, 11, 8, 7, 6, 10
 ```
 
 ## What's implemented
@@ -44,6 +44,12 @@ nulang bootstrap/compiler_core.nula
 - **Closure encoding:** 30-bit flag `1 << 30` in the high word of the 32-bit value; low 16 bits are the source position. Packed fields: flag | (ph << 23) | (body_start << 16) | (cap_hash << 8) | cap_value.
 - **Out-of-band sentinel:** `left == 1 << 40` replaces `left == 0` to distinguish "no left operand" from the valid expression result 0.
 
+### Stage 6 — 4-slot environment (2026-07-28)
+- **Environment:** expanded from 2 slots (e0, e1) to 4 slots (e0..e3), supporting up to 4 nested `let` bindings.
+- **Lookup:** recursive `env_lookup` searches most-recent slot first for correct shadowing.
+- **Closures:** still capture 1 binding (most recent), encoded as before in bits 8-15 of the closure tag.
+- **New tests:** `let a=1 in let b=2 in let c=3 in a+b+c` → 6, 4-deep → 10.
+
 ### Register spilling (2026-07-24)
 - Inline spilling (commit 06b03c6): no capacity limit.
 - Round-robin temp registers (commit db22c67): prevents clobbering in multi-operand spilled reads.
@@ -53,4 +59,4 @@ nulang bootstrap/compiler_core.nula
 - HM type inference
 - MIR lowering → `.nbc` codec
 - Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
-- Multi-binding environment capture (currently limited to 1 captured binding)
+- Multi-binding closure capture (closures still limited to 1 captured variable)
