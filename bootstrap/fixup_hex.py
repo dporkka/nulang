@@ -67,33 +67,59 @@ def fixup(lines: list[str]) -> list[str]:
                 if check_li in line_to_ic:
                     jmpf_info.append((check_li, line_to_ic[check_li]))
                     break
-        elif "Jmp -> end" in marker:
+        elif marker in ("; Jmp -> end", "; Jmp -> or_end", "; Jmp -> and_end"):
             for check_li in range(li + 1, len(lines)):
                 if check_li in line_to_ic:
                     jmp_info.append((check_li, line_to_ic[check_li]))
                     break
     
-    else_markers = [li for li, m in markers.items() if m.startswith("; else:")]
-    end_markers = [li for li, m in markers.items() if m.startswith("; end:")]
+    else_markers  = [li for li, m in markers.items() if m.startswith("; else:")]
+    end_markers   = [li for li, m in markers.items() if m.startswith("; end:")]
+    and_end_markers = [li for li, m in markers.items() if m.startswith("; and_end:")]
+    or_right_markers = [li for li, m in markers.items() if m.startswith("; or_right:")]
+    or_end_markers = [li for li, m in markers.items() if m.startswith("; or_end:")]
     
     patched = {}  # line_idx -> new word
     
-    # Patch JmpF offsets
+    
+    # Patch JmpF offsets (targets: else, and_end, or_right)
     for jf_li, jf_ic in reversed(jmpf_info):
         target_ic = None
-        for em in else_markers:
-            if em > jf_li:
-                for check_li in range(em + 1, len(lines)):
-                    if check_li in line_to_ic:
-                        target_ic = line_to_ic[check_li]
-                        break
-                break
+        # Check marker after this JmpF to determine target type
+        marker_li = jf_li - 1  # marker is just before the instruction
+        marker = markers.get(marker_li, "")
+        
+        if "and_end" in marker:
+            for em in and_end_markers:
+                if em > jf_li:
+                    for check_li in range(em + 1, len(lines)):
+                        if check_li in line_to_ic:
+                            target_ic = line_to_ic[check_li]
+                            break
+                    break
+        elif "or_right" in marker:
+            for em in or_right_markers:
+                if em > jf_li:
+                    for check_li in range(em + 1, len(lines)):
+                        if check_li in line_to_ic:
+                            target_ic = line_to_ic[check_li]
+                            break
+                    break
+        else:
+            # Default: JmpF -> else
+            for em in else_markers:
+                if em > jf_li:
+                    for check_li in range(em + 1, len(lines)):
+                        if check_li in line_to_ic:
+                            target_ic = line_to_ic[check_li]
+                            break
+                    break
         if target_ic is not None:
             offset = target_ic - jf_ic - 1
             old_word = [w for li, w in instr_lines if li == jf_li][0]
             patched[jf_li] = patch_jmpf(old_word, offset)
     
-    # Patch Jmp offsets (check ; end: first, then ; else:, then end of list)
+    # Patch Jmp offsets (check ; end: then ; or_end: then ; else: then end of list)
     for jp_li, jp_ic in reversed(jmp_info):
         target_ic = None
         for em in end_markers:
@@ -103,6 +129,14 @@ def fixup(lines: list[str]) -> list[str]:
                         target_ic = line_to_ic[check_li]
                         break
                 break
+        if target_ic is None:
+            for em in or_end_markers:
+                if em > jp_li:
+                    for check_li in range(em + 1, len(lines)):
+                        if check_li in line_to_ic:
+                            target_ic = line_to_ic[check_li]
+                            break
+                    break
         if target_ic is None:
             for em in else_markers:
                 if em > jp_li:

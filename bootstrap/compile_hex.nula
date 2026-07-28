@@ -251,18 +251,27 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
             let q = ident & 0xFFFF;
             if kw == 3075 then {
                 if 0 < min_prec then pair else {
+                    remark("JmpF -> and_end");
+                    emit_hex(instr(0x52, lr, 0, 0));
                     let rhs = comp(src, q, len, no_left, 0, nr + 1, e0, e1, e2, e3, elen);
                     let rr = rhs >> 16;
                     let rp = rhs & 0xFFFF;
+                    remark("and_end:");
                     comp(src, rp, len, rr, min_prec, rr + 1, e0, e1, e2, e3, elen)
                 }
             } else if kw == 669 then {
                 if 0 < min_prec then pair else {
+                    remark("JmpF -> or_right");
+                    emit_hex(instr(0x52, lr, 0, 0));
                     let dr = nr + 1;
                     emit_hex(instr(0x04, dr, 0, 0));
+                    remark("Jmp -> or_end");
+                    emit_hex(instr(0x50, 0, 0, 0));
+                    remark("or_right:");
                     let rhs = comp(src, q, len, no_left, 0, dr + 1, e0, e1, e2, e3, elen);
                     let rr = rhs >> 16;
                     let rp = rhs & 0xFFFF;
+                    remark("or_end:");
                     comp(src, rp, len, rr, min_prec, rr + 1, e0, e1, e2, e3, elen)
                 }
             } else pair
@@ -292,5 +301,5 @@ fn compile(src: String) {
 
 fn main() {
     let input = perform IO.read();
-    if input == "" then compile("if 1 then 42 else 0") else compile(input)
+    if input == "" then compile("1 < 2 and 2 < 3") else compile(input)
 }
