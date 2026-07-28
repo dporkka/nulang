@@ -13,13 +13,13 @@ if [ "$result" != "55" ]; then
 fi
 echo "PASS: self_test.nula = 55"
 
-# 2. compiler_core.nula: parses 5 expressions, last is 10*20 = 200
+# 2. compiler_core.nula: parses 4 expressions, last is 'let x = 42 in x + 1' = 43
 result=$($NULANG bootstrap/compiler_core.nula 2>&1 | tail -1)
-if [ "$result" != "200" ]; then
-    echo "FAIL: compiler_core.nula expected 200, got '$result'"
+if [ "$result" != "43" ]; then
+    echo "FAIL: compiler_core.nula expected 43, got '$result'"
     exit 1
 fi
-echo "PASS: compiler_core.nula = 200"
+echo "PASS: compiler_core.nula = 43"
 
 # 3. host.nula: placeholder shim, returns 0 until Stage 3 wiring
 result=$($NULANG bootstrap/host.nula 2>&1 | tail -1)

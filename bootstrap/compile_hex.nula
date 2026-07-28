@@ -60,7 +60,7 @@ fn parse_cmp(src: String, p: Int, len: Int) -> Int {
             if c2 == 61 then (1 << 16) + (0x40 << 8) + 2 else 0
         } else if c == 33 and p + 1 < len then {
             let c2 = perform String.charAt(src, p + 1);
-            if c2 == 61 then (1 << 16) + (0x41 << 8) + 2 else 0
+            if c2 == 61 then (1 << 16) + (0xFF << 8) + 2 else 0
         } else if c == 60 then {
             if p + 1 < len then { let c2 = perform String.charAt(src, p + 1);
                 if c2 == 61 then (1 << 16) + (0x43 << 8) + 2 else (1 << 16) + (0x41 << 8) + 1
@@ -256,8 +256,12 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                     let rhs = comp(src, p + clen, len, no_left, cprec, nr + 1, e0, e1, e2, e3, elen);
                     let rr = rhs >> 18;
                     let rp = rhs & 0x1FFFF;
-                    let dr = nr + 2;
-                    emit_hex(instr(cop, lr, rr, dr));
+                    if cop == 0xFF then {
+                        emit_hex(instr(0x40, lr, rr, dr));
+                        emit_hex(instr(0x49, dr, dr, 0))
+                    } else {
+                        emit_hex(instr(cop, lr, rr, dr))
+                    };
                     comp(src, rp, len, dr + (1 << 39), min_prec, dr + 1, e0, e1, e2, e3, elen)
                 }
             }

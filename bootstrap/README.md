@@ -1,6 +1,6 @@
 # Nulang Self-Hosting Bootstrap
 
-> **Status:** Stage 9 — bytecode compiler for arithmetic, stdin REPL.
+> **Status:** Stage 10 — end-to-end hex → .nbc pipeline.
 > **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
 > that targets the `.nbc` format (RFC 0001).
 
@@ -8,8 +8,11 @@
 
 ```
 source.nula
-  → compiler_core.nula   (lexer + parser + evaluator in Core)
-  → source.nbc            (frozen bytecode artifact)
+  → compiler_core.nula      (lexer + parser + evaluator in Core)
+  → compile_hex.nula         (Core → hex bytecode emitter)
+  → fixup_hex.py             (patch jump offsets + constant pool)
+  → hex2nbc.py               (hex → .nbc binary)
+  → source.nbc               (frozen bytecode artifact)
   → VM::run(nbc)
 ```
 
@@ -21,6 +24,8 @@ source.nula
 | `compiler_core.nula` | Lexer + Pratt parser + evaluator in Nulang Core |
 | `compile_arith.nula` | Bytecode compiler for arithmetic (prints VM instructions) |
 | `compile_hex.nula` | Hex-output bytecode compiler (u32 words as 8-char hex) |
+| `fixup_hex.py` | Patch Jmp/JmpF/JmpT offsets and ConstU indices |
+| `hex2nbc.py` | Convert hex text to .nbc binary |
 | `self_test.nula` | Core conformance target (fib(10) = 55) |
 | `spill_bug_repro.nula` | Minimal repro for spill temp clobbering bug (fixed) |
 
@@ -42,10 +47,22 @@ echo "1 + 2 * 3" | nulang bootstrap/compile_arith.nula
 #   Halt
 # ; result in r10
 
+# Hex bytecode compiler (piped through fixup):
+echo "1 + 2 * 3" | nulang bootstrap/compile_hex.nula | python3 bootstrap/fixup_hex.py
+
+# Full .nbc pipeline:
+echo "1 + 2 * 3" | nulang bootstrap/compile_hex.nula | python3 bootstrap/fixup_hex.py | python3 bootstrap/hex2nbc.py > out.nbc
+nulang out.nbc
+# → 7
+
+# Hex compiler self-test (when stdin is empty, compiles "1 < 2 and 2 < 3"):
+nulang bootstrap/compile_hex.nula < /dev/null
+
 # Self-test (when stdin is empty):
 nulang bootstrap/compiler_core.nula < /dev/null
 # Expected: 42, 7, 9, 43
 ```
+
 
 ## What's implemented
 
@@ -82,12 +99,15 @@ nulang bootstrap/compiler_core.nula < /dev/null
 - **if/then/else:** JmpF/Jmp with position-based labels (L0e/L0x).
 - Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `Move`, `ICmp*`, `JmpF` (short-circuit), `Jmp`, `JmpF`, `Jmp`, `Halt`.
 
-### Stage 10 — Hex bytecode output (2026-07-28)
+### Stage 10 — Hex bytecode output + .nbc pipeline (2026-07-28)
 - **compile_hex.nula:** emits u32 instruction words as 8-char hex (one per line).
 - Adds `hex_digit` helper and `emit_hex` for hex formatting.
 - Works around Nulang string-var concatenation bug using `""` prefix trick.
-- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `ICmp*`, `Move`, `JmpF`, `Jmp`, `Halt`.
-- Pipeline: nulang bootstrap/compile_hex.nula | python3 bootstrap/fixup_hex.py
+- **fixup_hex.py:** patches Jmp/JmpF/JmpT offsets and ConstU indices in a two-pass fixup.
+- **hex2nbc.py:** converts corrected hex text to `.nbc` binary (NLBC magic, header, JSON metadata).
+- **Bool/Int conversion:** comparisons return Bool-tagged values (bit 39); `and`/`or`/`if` convert Int→Bool via `ICmpEq+Not` when needed. `!=` lowered to `ICmpEq+Not`.
+- Full pipeline: `compile_hex.nula | fixup_hex.py | hex2nbc.py > out.nbc`
+- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `ICmp*`, `Not`, `Move`, `JmpF`, `JmpT`, `Jmp`, `Halt`.
 
 ## What remains
 
