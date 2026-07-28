@@ -1,8 +1,8 @@
-// bootstrap/compiler_core.nula — Stage 6: 4-slot env, 1-capture closures
+// bootstrap/compiler_core.nula — Stage 8: comparisons, booleans, 4-slot env
 // Return: (value << 16) | pos.  Entry: (hash << 32) + value.
 // Closure encoding (32-bit): flag(bit30) | (ph<<23) | (bs<<16) | (cap_h<<8) | cap_v
-// flag = 1 << 30 = 1073741824. Position is clean source pos.
-// Env: e0..e3 with elen 0..4. let pushes to next slot. Closures capture most recent.
+// flag = 1 << 30 = 1073741824.
+// Precedence: or=0 and=1 cmp=3 +-=4 */=5
 
 fn is_digit(c: Int) -> Bool { c >= 48 and c <= 57 }
 fn is_alpha(c: Int) -> Bool { (c >= 65 and c <= 90) or (c >= 97 and c <= 122) }
@@ -39,7 +39,6 @@ fn read_ident(src: String, pos: Int, len: Int, h: Int) -> Int {
 fn env_lookup(e0: Int, e1: Int, e2: Int, e3: Int, elen: Int, h: Int) -> Int {
     if elen <= 0 then 0
     else {
-        // Check most recent slot first
         let slot = if elen >= 4 then e3
         else if elen >= 3 then e2
         else if elen >= 2 then e1
@@ -50,54 +49,53 @@ fn env_lookup(e0: Int, e1: Int, e2: Int, e3: Int, elen: Int, h: Int) -> Int {
     }
 }
 
+// Precedence: or=0, and=1, cmp=3, +-=4, */=5
 fn prec_of(c: Int) -> Int {
     if c == 43 then 4 else if c == 45 then 4
     else if c == 42 then 5 else if c == 47 then 5
     else 0
 }
 
+// Parse a 2-char comparison operator at p. Returns (prec, opcode, consumed) or (0,0,0).
+// Opcodes: 1=EQ, 2=NE, 3=LT, 4=GT, 5=LE, 6=GE.
 fn parse_cmp(src: String, p: Int, len: Int) -> Int {
     if p >= len then 0
     else {
         let c = perform String.charAt(src, p);
-        if c == 60 then {
+        if c == 61 and p + 1 < len then {
+            let c2 = perform String.charAt(src, p + 1);
+            if c2 == 61 then (3 << 16) + (1 << 8) + 2  // prec=3, op=EQ, len=2
+            else 0
+        } else if c == 33 and p + 1 < len then {
+            let c2 = perform String.charAt(src, p + 1);
+            if c2 == 61 then (3 << 16) + (2 << 8) + 2  // prec=3, op=NE, len=2
+            else 0
+        } else if c == 60 then {
             if p + 1 < len then {
                 let c2 = perform String.charAt(src, p + 1);
-                if c2 == 61 then (3 << 16) + (5 << 8) + 2
-                else (3 << 16) + (3 << 8) + 1
+                if c2 == 61 then (3 << 16) + (5 << 8) + 2  // prec=3, op=LE, len=2
+                else (3 << 16) + (3 << 8) + 1  // prec=3, op=LT, len=1
             } else (3 << 16) + (3 << 8) + 1
         } else if c == 62 then {
             if p + 1 < len then {
                 let c2 = perform String.charAt(src, p + 1);
-                if c2 == 61 then (3 << 16) + (6 << 8) + 2
-                else (3 << 16) + (4 << 8) + 1
+                if c2 == 61 then (3 << 16) + (6 << 8) + 2  // prec=3, op=GE, len=2
+                else (3 << 16) + (4 << 8) + 1  // prec=3, op=GT, len=1
             } else (3 << 16) + (4 << 8) + 1
-        } else if c == 61 then {
-            if p + 1 < len then {
-                let c2 = perform String.charAt(src, p + 1);
-                if c2 == 61 then (3 << 16) + (1 << 8) + 2
-                else 0
-            } else 0
-        } else if c == 33 then {
-            if p + 1 < len then {
-                let c2 = perform String.charAt(src, p + 1);
-                if c2 == 61 then (3 << 16) + (2 << 8) + 2
-                else 0
-            } else 0
         } else 0
     }
 }
 
+// Apply comparison opcode to two values.
 fn cmp_op(op: Int, a: Int, b: Int) -> Int {
-    if op == 1 then if a == b then 1 else 0
-    else if op == 2 then if a != b then 1 else 0
-    else if op == 3 then if a < b then 1 else 0
-    else if op == 4 then if a > b then 1 else 0
-    else if op == 5 then if a <= b then 1 else 0
-    else if op == 6 then if a >= b then 1 else 0
+    if op == 1 then { if a == b then 1 else 0 }
+    else if op == 2 then { if a != b then 1 else 0 }
+    else if op == 3 then { if a < b then 1 else 0 }
+    else if op == 4 then { if a > b then 1 else 0 }
+    else if op == 5 then { if a <= b then 1 else 0 }
+    else if op == 6 then { if a >= b then 1 else 0 }
     else 0
 }
-
 
 fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: Int, e1: Int, e2: Int, e3: Int, elen: Int) -> Int {
     let no_left = 1 << 40;
@@ -228,10 +226,13 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                         } else (0 << 16) + p
                     } else (0 << 16) + p
                 } else if h == 18036 then {
+                    // "true" literal
                     (1 << 16) + q
                 } else if h == 79251 then {
+                    // "false" literal
                     (0 << 16) + q
                 } else if h == 3421 then {
+                    // "not" prefix operator
                     let inner = parse_pratt(src, q, len, no_left, 0, e0, e1, e2, e3, elen);
                     let iv = inner >> 16;
                     let ip = inner & 0xFFFF;
@@ -254,6 +255,7 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
     else {
         let c = perform String.charAt(src, p);
         if c == 40 then {
+            // Function application
             let arg = parse_pratt(src, p + 1, len, no_left, 0, e0, e1, e2, e3, elen);
             let av = arg >> 16;
             let ap = arg & 0xFFFF;
@@ -280,30 +282,8 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                     parse_pratt(src, ap2 + 1, len, rv, min_prec, e0, e1, e2, e3, elen)
                 } else pair
             } else pair
-        } else if is_alpha(c) then {
-            let ident = read_ident(src, p, len, 0);
-            let kw = ident >> 16;
-            let q = ident & 0xFFFF;
-            if kw == 3075 then {
-                if 1 < min_prec then pair
-                else {
-                    let rhs = parse_pratt(src, q, len, no_left, 1, e0, e1, e2, e3, elen);
-                    let rv = rhs >> 16;
-                    let rp = rhs & 0xFFFF;
-                    let result = if lv != 0 then if rv != 0 then 1 else 0 else 0;
-                    parse_pratt(src, rp, len, result, min_prec, e0, e1, e2, e3, elen)
-                }
-            } else if kw == 669 then {
-                if 0 < min_prec then pair
-                else {
-                    let rhs = parse_pratt(src, q, len, no_left, 0, e0, e1, e2, e3, elen);
-                    let rv = rhs >> 16;
-                    let rp = rhs & 0xFFFF;
-                    let result = if lv != 0 then 1 else if rv != 0 then 1 else 0;
-                    parse_pratt(src, rp, len, result, min_prec, e0, e1, e2, e3, elen)
-                }
-            } else pair
         } else if c == 61 or c == 33 or c == 60 or c == 62 then {
+            // Comparison operators
             let cmp = parse_cmp(src, p, len);
             if cmp == 0 then pair
             else {
@@ -319,6 +299,32 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                     parse_pratt(src, rp, len, result, min_prec, e0, e1, e2, e3, elen)
                 }
             }
+        } else if is_alpha(c) then {
+            // Boolean operators: "and" / "or"
+            let ident = read_ident(src, p, len, 0);
+            let kw = ident >> 16;
+            let q = ident & 0xFFFF;
+            if kw == 3075 then {
+                // "and" — prec 1
+                if 1 < min_prec then pair
+                else {
+                    let rhs = parse_pratt(src, q, len, no_left, 1, e0, e1, e2, e3, elen);
+                    let rv = rhs >> 16;
+                    let rp = rhs & 0xFFFF;
+                    let result = if lv != 0 then { if rv != 0 then 1 else 0 } else 0;
+                    parse_pratt(src, rp, len, result, min_prec, e0, e1, e2, e3, elen)
+                }
+            } else if kw == 669 then {
+                // "or" — prec 0
+                if 0 < min_prec then pair
+                else {
+                    let rhs = parse_pratt(src, q, len, no_left, 0, e0, e1, e2, e3, elen);
+                    let rv = rhs >> 16;
+                    let rp = rhs & 0xFFFF;
+                    let result = if lv != 0 then 1 else { if rv != 0 then 1 else 0 };
+                    parse_pratt(src, rp, len, result, min_prec, e0, e1, e2, e3, elen)
+                }
+            } else pair
         } else {
             let prec = prec_of(c);
             if prec == 0 or prec < min_prec then pair
@@ -361,6 +367,7 @@ fn main() {
     perform IO.print(parse("if 0 then 42 else 99"))
     perform IO.print(parse("if 1 + 1 then 10 else 20"))
     perform IO.print(parse("let x = 5 in if x then x + 1 else 0"))
+    // Comparison tests
     perform IO.print(parse("1 < 2"))
     perform IO.print(parse("2 < 1"))
     perform IO.print(parse("3 == 3"))
@@ -373,6 +380,7 @@ fn main() {
     perform IO.print(parse("3 >= 5"))
     perform IO.print(parse("3 <= 3"))
     perform IO.print(parse("5 <= 3"))
+    // Boolean tests
     perform IO.print(parse("true"))
     perform IO.print(parse("false"))
     perform IO.print(parse("not true"))
@@ -383,6 +391,7 @@ fn main() {
     perform IO.print(parse("1 or 0"))
     perform IO.print(parse("0 or 0"))
     perform IO.print(parse("0 or 1"))
+    // Combined tests
     perform IO.print(parse("1 < 2 and 2 < 3"))
     perform IO.print(parse("1 < 0 or 2 < 3"))
     perform IO.print(parse("let x = 5 in if x > 3 then 100 else 0"))
