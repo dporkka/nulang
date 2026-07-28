@@ -132,7 +132,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                 emit_const(num, nr);
                 (nr << 16) + q
             } else if c == 40 then {
-                let inner = comp(src, p + 1, len, no_left, 0, nr, e0, e1, e2, e3, elen);
+                let inner = comp(src, p + 1, len, no_left, -1, nr, e0, e1, e2, e3, elen);
                 let rv = inner >> 16;
                 let rp = inner & 0xFFFF;
                 let q2 = skip_ws(src, rp, len);
@@ -155,7 +155,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                     if q4 < len then {
                         let c3 = perform String.charAt(src, q4);
                         if c3 == 61 then {
-                            let bound = comp(src, q4 + 1, len, no_left, 0, nr, e0, e1, e2, e3, elen);
+                            let bound = comp(src, q4 + 1, len, no_left, -1, nr, e0, e1, e2, e3, elen);
                             let vr = bound >> 16;
                             let vp = bound & 0xFFFF;
                             let vp2 = skip_ws(src, vp, len);
@@ -175,7 +175,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                     } else (nr << 16) + p
                 } else if h == 627 then {
                     // "if" keyword
-                    let cond = comp(src, q, len, no_left, 0, nr, e0, e1, e2, e3, elen);
+                    let cond = comp(src, q, len, no_left, -1, nr, e0, e1, e2, e3, elen);
                     let cr = cond >> 16;
                     let cp = cond & 0xFFFF;
                     let cnext = nr + 1;
@@ -185,7 +185,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                     let tp = then_id & 0xFFFF;
                     if th == 17715 then {
                         perform IO.print("  JmpF r" + perform Int.to_string(cr) + " L" + perform Int.to_string(p) + "e");
-                        let then_body = comp(src, tp, len, no_left, 0, cnext, e0, e1, e2, e3, elen);
+                        let then_body = comp(src, tp, len, no_left, -1, cnext, e0, e1, e2, e3, elen);
                         let tr = then_body >> 16;
                         let tbp = then_body & 0xFFFF;
                         perform IO.print("  Jmp L" + perform Int.to_string(p) + "x");
@@ -195,7 +195,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                         let eh = else_id >> 16;
                         let ep = else_id & 0xFFFF;
                         if eh == 16001 then {
-                            let else_body = comp(src, ep, len, no_left, 0, cnext, e0, e1, e2, e3, elen);
+                            let else_body = comp(src, ep, len, no_left, -1, cnext, e0, e1, e2, e3, elen);
                             let er = else_body >> 16;
                             let ebp = else_body & 0xFFFF;
                             perform IO.print("L" + perform Int.to_string(p) + "x:");
@@ -239,9 +239,40 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                     let dr = nr + 2;
                     let cname = cmp_name(cop);
                     perform IO.print("  " + cname + " r" + perform Int.to_string(lr) + " r" + perform Int.to_string(rr) + " r" + perform Int.to_string(dr));
-                    (dr << 16) + rp
+                    comp(src, rp, len, dr, min_prec, dr + 1, e0, e1, e2, e3, elen)
                 }
             }
+        } else if is_alpha(c) then {
+            let ident = read_ident(src, p, len, 0);
+            let kw = ident >> 16;
+            let q = ident & 0xFFFF;
+            if kw == 3075 then {
+                // "and" — precedence 0, short-circuit
+                if 0 < min_prec then pair
+                else {
+                    perform IO.print("  JmpF r" + perform Int.to_string(lr) + " L" + perform Int.to_string(p) + "a");
+                    let rhs = comp(src, q, len, no_left, 0, nr + 1, e0, e1, e2, e3, elen);
+                    let rr = rhs >> 16;
+                    let rp = rhs & 0xFFFF;
+                    perform IO.print("L" + perform Int.to_string(p) + "a:");
+                    comp(src, rp, len, rr, min_prec, rr + 1, e0, e1, e2, e3, elen)
+                }
+            } else if kw == 669 then {
+                // "or" — precedence 0, short-circuit
+                if 0 < min_prec then pair
+                else {
+                    perform IO.print("  JmpF r" + perform Int.to_string(lr) + " L" + perform Int.to_string(p) + "o");
+                    let dr = nr + 1;
+                    emit_const(1, dr);
+                    perform IO.print("  Jmp L" + perform Int.to_string(p) + "x");
+                    perform IO.print("L" + perform Int.to_string(p) + "o:");
+                    let rhs = comp(src, q, len, no_left, 0, dr + 1, e0, e1, e2, e3, elen);
+                    let rr = rhs >> 16;
+                    let rp = rhs & 0xFFFF;
+                    perform IO.print("L" + perform Int.to_string(p) + "x:");
+                    comp(src, rp, len, rr, min_prec, rr + 1, e0, e1, e2, e3, elen)
+                }
+            } else pair
         } else {
             let prec = prec_of(c);
             if prec == 0 or prec < min_prec then pair
@@ -252,7 +283,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
             let dr = nr + 2;
             let opcode = opcode_of(c);
             emit_binop(opcode, lr, rr, dr);
-            (dr << 16) + rp
+            comp(src, rp, len, dr, min_prec, dr + 1, e0, e1, e2, e3, elen)
             }
         }
     }
@@ -261,7 +292,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
 fn compile(src: String) {
     let len = perform String.length(src);
     perform IO.print("; " + src);
-    let result = comp(src, 0, len, 1 << 40, 0, 8, 0, 0, 0, 0, 0);
+    let result = comp(src, 0, len, 1 << 40, -1, 8, 0, 0, 0, 0, 0);
     perform IO.print("  Halt");
     let reg = result >> 16;
     perform IO.print("; result in r" + perform Int.to_string(reg))
@@ -270,7 +301,7 @@ fn compile(src: String) {
 fn main() {
     let input = perform IO.read();
     if input == "" then {
-        compile("let x = 5 in if x > 3 then 100 else 0")
+        compile("1 < 2 and 2 < 3")
     } else {
         compile(input)
     }

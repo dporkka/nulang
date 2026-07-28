@@ -79,7 +79,7 @@ nulang bootstrap/compiler_core.nula < /dev/null
 - Register allocation: starts at r8, linear assignment per subexpression.
 - **let bindings:** scoped variables via env (hash|reg), 4 slots. Variable refs emit Move.
 - **if/then/else:** JmpF/Jmp with position-based labels (L0e/L0x).
-- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `Move`, `ICmp*`, `JmpF`, `Jmp`, `Halt`.
+- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `Move`, `ICmp*`, `JmpF` (short-circuit), `Jmp`, `Halt`.
 
 ## What remains
 
