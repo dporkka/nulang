@@ -1,0 +1,121 @@
+// bootstrap/compile_arith.nula — Compile arithmetic to VM bytecode text.
+// Single-function compiler, modeled after parse_pratt.
+// Run: echo "1 + 2 * 3" | nulang bootstrap/compile_arith.nula
+
+fn is_digit(c: Int) -> Bool { c >= 48 and c <= 57 }
+fn is_space(c: Int) -> Bool { c == 32 or c == 10 or c == 13 or c == 9 }
+
+fn skip_ws(src: String, pos: Int, len: Int) -> Int {
+    if pos >= len then pos
+    else if is_space(perform String.charAt(src, pos)) then skip_ws(src, pos + 1, len)
+    else pos
+}
+
+fn read_int(src: String, pos: Int, len: Int, acc: Int) -> Int {
+    if pos >= len then (acc << 16) + pos
+    else {
+        let c = perform String.charAt(src, pos);
+        if is_digit(c) then read_int(src, pos + 1, len, acc * 10 + (c - 48))
+        else (acc << 16) + pos
+    }
+}
+
+fn prec_of(c: Int) -> Int {
+    if c == 43 then 1 else if c == 45 then 1
+    else if c == 42 then 2 else if c == 47 then 2
+    else 0
+}
+
+fn opcode_of(c: Int) -> Int {
+    if c == 43 then 0x20 else if c == 45 then 0x21
+    else if c == 42 then 0x22 else if c == 47 then 0x23
+    else 0
+}
+
+fn op_name(op: Int) -> String {
+    if op == 0x20 then "IAdd" else if op == 0x21 then "ISub"
+    else if op == 0x22 then "IMul" else if op == 0x23 then "IDiv"
+    else if op == 0x01 then "Halt" else "Const"
+}
+
+fn emit_const(num: Int, reg: Int) {
+    if num == 0 then perform IO.print("  Const0 r" + perform Int.to_string(reg))
+    else if num == 1 then perform IO.print("  Const1 r" + perform Int.to_string(reg))
+    else if num == 2 then perform IO.print("  Const2 r" + perform Int.to_string(reg))
+    else if num == -1 then perform IO.print("  ConstM1 r" + perform Int.to_string(reg))
+    else perform IO.print("  ConstU r" + perform Int.to_string(reg) + " # " + perform Int.to_string(num))
+}
+
+fn emit_binop(opcode: Int, lr: Int, rr: Int, dr: Int) {
+    let name = op_name(opcode);
+    perform IO.print("  " + name + " r" + perform Int.to_string(lr) + " r" + perform Int.to_string(rr) + " r" + perform Int.to_string(dr))
+}
+
+// Single-pass compiler. Returns (result_reg << 16) | pos.
+fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int) -> Int {
+    let no_left = 1 << 40;
+    let pair = if left == no_left then {
+        let p = skip_ws(src, pos, len);
+        if p >= len then (nr << 16) + p
+        else {
+            let c = perform String.charAt(src, p);
+            if is_digit(c) then {
+                let packed = read_int(src, p, len, 0);
+                let num = packed >> 16;
+                let q = packed & 0xFFFF;
+                emit_const(num, nr);
+                (nr << 16) + q
+            } else if c == 40 then {
+                let inner = comp(src, p + 1, len, no_left, 0, nr);
+                let rv = inner >> 16;
+                let rp = inner & 0xFFFF;
+                let q2 = skip_ws(src, rp, len);
+                if q2 < len then {
+                    let c2 = perform String.charAt(src, q2);
+                    if c2 == 41 then (rv << 16) + (q2 + 1)
+                    else (rv << 16) + q2
+                } else (rv << 16) + q2
+            } else {
+                (nr << 16) + p
+            }
+        }
+    } else (left << 16) + pos;
+
+    let lr = pair >> 16;
+    let lp = pair & 0xFFFF;
+
+    let p = skip_ws(src, lp, len);
+    if p >= len then pair
+    else {
+        let c = perform String.charAt(src, p);
+        let prec = prec_of(c);
+        if prec == 0 or prec < min_prec then pair
+        else {
+            let rhs = comp(src, p + 1, len, no_left, prec, nr + 1);
+            let rr = rhs >> 16;
+            let rp = rhs & 0xFFFF;
+            let dr = nr + 2;
+            let opcode = opcode_of(c);
+            emit_binop(opcode, lr, rr, dr);
+            (dr << 16) + rp
+        }
+    }
+}
+
+fn compile(src: String) {
+    let len = perform String.length(src);
+    perform IO.print("; " + src);
+    let result = comp(src, 0, len, 1 << 40, 0, 8);
+    perform IO.print("  Halt");
+    let reg = result >> 16;
+    perform IO.print("; result in r" + perform Int.to_string(reg))
+}
+
+fn main() {
+    let input = perform IO.read();
+    if input == "" then {
+        compile("1 + 2 * 3")
+    } else {
+        compile(input)
+    }
+}

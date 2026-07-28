@@ -1,6 +1,6 @@
 # Nulang Self-Hosting Bootstrap
 
-> **Status:** Stage 8 — stdin REPL, comparisons, booleans, if/then/else, 4-slot env.
+> **Status:** Stage 9 — bytecode compiler for arithmetic, stdin REPL.
 > **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
 > that targets the `.nbc` format (RFC 0001).
 
@@ -19,15 +19,27 @@ source.nula
 |------|---------|
 | `host.nula` | Host shim |
 | `compiler_core.nula` | Lexer + Pratt parser + evaluator in Nulang Core |
+| `compile_arith.nula` | Bytecode compiler for arithmetic (prints VM instructions) |
 | `self_test.nula` | Core conformance target (fib(10) = 55) |
 | `spill_bug_repro.nula` | Minimal repro for spill temp clobbering bug (fixed) |
 
 ## Running
 
 ```bash
-# Interactive: evaluate an expression from stdin
+# Interactive evaluator (stdin):
 echo "1 + 2 * 3" | nulang bootstrap/compiler_core.nula
 # → 7
+
+# Bytecode compiler (stdin):
+echo "1 + 2 * 3" | nulang bootstrap/compile_arith.nula
+# ; 1 + 2 * 3
+#   Const1 r8
+#   Const2 r9
+#   ConstU r10 # 3
+#   IMul r9 r10 r11
+#   IAdd r8 r11 r10
+#   Halt
+# ; result in r10
 
 # Self-test (when stdin is empty):
 nulang bootstrap/compiler_core.nula < /dev/null
@@ -57,12 +69,15 @@ nulang bootstrap/compiler_core.nula < /dev/null
 
 ### Stage 8 — Comparisons + booleans + stdin (2026-07-28)
 - **Comparisons:** `==`, `!=`, `<`, `>`, `<=`, `>=` — all return 1 (true) or 0 (false).
-  Precedence 3 (between `and`/`or` and arithmetic).
-- **Boolean operators:** `and` (prec 1), `or` (prec 0) — return 1 or 0.
+- **Boolean operators:** `and` (prec 1), `or` (prec 0), `not` (prefix).
 - **Boolean literals:** `true` → 1, `false` → 0.
-- **Prefix `not`:** `not x` → 1 if x is 0, else 0.
-- **Precedence levels:** `or`(0) < `and`(1) < comparisons(3) < `+`/`-`(4) < `*`/`/`(5).
-- **Stdin REPL:** reads expression from stdin and evaluates it. Falls back to self-tests on empty input.
+- **Stdin REPL:** reads expression from stdin, evaluates, prints result.
+
+### Stage 9 — Bytecode compiler for arithmetic (2026-07-28)
+- **compile_arith.nula:** single-pass Pratt compiler emits VM instructions as text.
+- Supports integer literals, `+`, `-`, `*`, `/`, and parenthesized expressions.
+- Register allocation: starts at r8, linear assignment per subexpression.
+- Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `Halt`.
 
 ## What remains
 
