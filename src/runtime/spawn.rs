@@ -47,7 +47,7 @@ pub(crate) fn spawn_actor_with_models(
                     .copied()
                     .unwrap_or(StateModel::Local);
                 if model.is_persistent() {
-                    state.push(PersistedValue::from_value(value));
+                    state.push(PersistedValue::from_value_resolved(value, actor.bytecode_module.as_ref()));
                 }
             }
             state

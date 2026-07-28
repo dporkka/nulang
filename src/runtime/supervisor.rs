@@ -330,7 +330,8 @@ impl Supervisor {
 
         if let Some(ref snap) = snapshot {
             for (name, value) in &snap.state {
-                new_actor.set_state_field(name.clone(), value.to_value());
+                let v = value.to_value_on_heap(&mut new_actor);
+                new_actor.set_state_field(name.clone(), v);
             }
             for (name, value) in &template.state_data {
                 if !snap.state.contains_key(name) {

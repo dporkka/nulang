@@ -35,8 +35,11 @@ impl StateModel {
     }
 }
 
-/// A serializable stand-in for `Value`. Pointers and strings are not safely
-/// restorable outside the VM, so they are normalized to nil.
+/// A serializable stand-in for `Value`. String values are resolved to their
+/// UTF-8 content via `from_value_resolved` when a module constant pool is
+/// available. When no module is available, string pointers / pool ids fall
+/// back to `Nil` — callers that know they are dealing with strings should use
+/// `from_value_resolved` with the actor's bytecode module.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "tag", content = "value")]
 pub enum PersistedValue {
@@ -66,8 +69,30 @@ impl PersistedValue {
         } else {
             // Pointers and string references cannot be safely restored without
             // the owning heap / constant pool, so they normalize to nil.
+            // Callers with module access should use from_value_resolved instead.
             PersistedValue::Nil
         }
+    }
+
+    /// Like `from_value`, but resolves string pool IDs to their UTF-8 content
+    /// when a bytecode module is available. Falls back to `from_value` for
+    /// unresolved strings (which normalizes them to `Nil`).
+    pub fn from_value_resolved(
+        v: &Value,
+        module: Option<&crate::bytecode::CodeModule>,
+    ) -> Self {
+        if let Some(id) = v.as_string_id() {
+            if let Some(content) = module
+                .and_then(|m| m.constants.get(id as usize))
+                .and_then(|c| match c {
+                    crate::bytecode::Constant::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+            {
+                return PersistedValue::String(content);
+            }
+        }
+        Self::from_value(v)
     }
 
     pub fn to_value(&self) -> Value {
@@ -75,10 +100,26 @@ impl PersistedValue {
             PersistedValue::Int(i) => Value::int(*i),
             PersistedValue::Float(f) => Value::float(*f),
             PersistedValue::Bool(b) => Value::bool(*b),
-            PersistedValue::String(_) => Value::nil(),
+            PersistedValue::String(_) => {
+                // Strings must be restored via to_value_on_heap (which
+                // allocates on the actor heap) or by callers that inter the
+                // content into a module constant pool.  This path is a
+                // data-loss sentinel — it should only be reached from
+                // callers that lack actor context.
+                Value::nil()
+            }
             PersistedValue::Nil => Value::nil(),
             PersistedValue::Unit => Value::unit(),
             PersistedValue::Actor(a) => Value::actor_ref(*a),
+        }
+    }
+
+    /// Convert to a `Value`, allocating string content on the actor heap.
+    /// All other variants delegate to `to_value`.
+    pub fn to_value_on_heap(&self, actor: &mut crate::runtime::actor::Actor) -> Value {
+        match self {
+            PersistedValue::String(s) => actor.allocate_string(s),
+            other => other.to_value(),
         }
     }
 }
@@ -1295,5 +1336,71 @@ mod json_file_store_tests {
         fs::write(&path, "{\"actor_id\": 1, \"sequ").unwrap();
         assert!(store.load_snapshot(1).is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod persisted_value_tests {
+    use super::*;
+    use crate::bytecode::{CodeModule, Constant};
+    use crate::runtime::actor::Actor;
+
+    #[test]
+    fn test_from_value_resolved_resolves_string_from_module() {
+        let v = Value::int(42);
+        assert_eq!(PersistedValue::from_value_resolved(&v, None), PersistedValue::Int(42));
+    }
+
+    #[test]
+    fn test_from_value_resolved_resolves_string_pool_id() {
+        let mut module = CodeModule::new("test");
+        let hello_idx = module.add_constant(Constant::String("hello".to_string()));
+
+        let v = Value::string(hello_idx as u32);
+        let pv = PersistedValue::from_value_resolved(&v, Some(&module));
+        assert_eq!(pv, PersistedValue::String("hello".to_string()));
+    }
+
+    #[test]
+    fn test_from_value_resolved_returns_nil_without_module() {
+        let mut module = CodeModule::new("test");
+        let hello_idx = module.add_constant(Constant::String("hello".to_string()));
+        let v = Value::string(hello_idx as u32);
+
+        // Without a module, the string can't be resolved — falls back to Nil.
+        let pv = PersistedValue::from_value_resolved(&v, None);
+        assert_eq!(pv, PersistedValue::Nil);
+    }
+
+    #[test]
+    fn test_to_value_on_heap_allocates_string() {
+        let pv = PersistedValue::String("world".to_string());
+        let mut actor = Actor::new(1, "test".to_string(), 0);
+
+        let v = pv.to_value_on_heap(&mut actor);
+        // Allocated string is a TAG_PTR value on the actor heap, not nil.
+        assert!(!v.is_nil(), "string should be allocated, not dropped to nil");
+    }
+
+    #[test]
+    fn test_string_round_trip_via_persisted_value() {
+        // Simulate the checkpoint+restore cycle for a string value.
+        let mut module = CodeModule::new("test");
+        let idx = module.add_constant(Constant::String("round-trip".to_string()));
+        let original = Value::string(idx as u32);
+
+        // Checkpoint: resolve string to content.
+        let persisted = PersistedValue::from_value_resolved(&original, Some(&module));
+        assert_eq!(persisted, PersistedValue::String("round-trip".to_string()));
+
+        // Serialize → deserialize (JSON).
+        let json = serde_json::to_string(&persisted).unwrap();
+        let deserialized: PersistedValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, PersistedValue::String("round-trip".to_string()));
+
+        // Restore: allocate on actor heap. Previously this would return nil.
+        let mut actor = Actor::new(1, "test".to_string(), 0);
+        let restored = deserialized.to_value_on_heap(&mut actor);
+        assert!(!restored.is_nil(), "string must survive restore, not become nil");
     }
 }

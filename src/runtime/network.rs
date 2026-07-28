@@ -50,6 +50,166 @@ use crate::vm::Value;
 use tracing::warn;
 
 // ---------------------------------------------------------------------------
+// TLS configuration
+// ---------------------------------------------------------------------------
+
+/// TLS configuration for the NUL0 wire protocol.
+///
+/// When `Some`, every TCP connection is upgraded to TLS immediately after
+/// the TCP connect/accept but *before* the NUL0 versioned handshake.
+///
+/// `SelfSigned` uses `rcgen` to generate a self-signed certificate;
+/// this is suitable for development and testing.
+#[derive(Clone)]
+pub enum TlsConfig {
+    /// Use a self-signed certificate generated via rcgen.
+    SelfSigned,
+}
+
+impl TlsConfig {
+    /// Build a rustls ServerConfig for accepting TLS connections.
+    fn server_config(&self) -> io::Result<rustls::ServerConfig> {
+        match self {
+            TlsConfig::SelfSigned => {
+                let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                let cert_der: Vec<rustls::pki_types::CertificateDer<'static>> = vec![cert.cert.into()];
+                let key_der = rustls::pki_types::PrivateKeyDer::from(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
+                );
+                rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(cert_der, key_der)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            }
+        }
+    }
+
+    /// Build a rustls ClientConfig for initiating TLS connections.
+    /// Self-signed certs skip verification (dev-only).
+    fn client_config(&self) -> io::Result<rustls::ClientConfig> {
+        use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use rustls::{DigitallySignedStruct, SignatureScheme};
+
+        #[derive(Debug)]
+        struct NoVerification;
+        impl ServerCertVerifier for NoVerification {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &CertificateDer<'_>,
+                _intermediates: &[CertificateDer<'_>],
+                _server_name: &ServerName<'_>,
+                _ocsp_response: &[u8],
+                _now: UnixTime,
+            ) -> Result<ServerCertVerified, rustls::Error> {
+                Ok(ServerCertVerified::assertion())
+            }
+            fn verify_tls12_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            fn verify_tls13_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                vec![
+                    SignatureScheme::RSA_PKCS1_SHA256,
+                    SignatureScheme::ECDSA_NISTP256_SHA256,
+                    SignatureScheme::ED25519,
+                ]
+            }
+        }
+
+        let config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoVerification))
+            .with_no_client_auth();
+        Ok(config)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TransportStream — abstracts over raw TCP and TLS-wrapped streams
+// ---------------------------------------------------------------------------
+
+/// A duplex transport stream that can be either a plain `TcpStream` or a
+/// TLS-wrapped connection.  TLS streams are shared behind `Arc<Mutex<>>`
+/// because `rustls::StreamOwned` cannot be cloned the way `TcpStream` can.
+pub(crate) enum TransportStream {
+    Raw(TcpStream),
+    TlsServer(std::sync::Arc<std::sync::Mutex<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>>),
+    TlsClient(std::sync::Arc<std::sync::Mutex<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>>),
+}
+
+impl TransportStream {
+    /// Configure TCP socket options on the underlying stream.
+
+    /// Create a clone suitable for the reader half of a duplex connection.
+    /// For raw TCP this duplicates the file descriptor; for TLS this clones
+    /// the `Arc` so reader and writer share the same TLS session.
+    fn try_clone(&self) -> io::Result<TransportStream> {
+        match self {
+            TransportStream::Raw(s) => Ok(TransportStream::Raw(s.try_clone()?)),
+            TransportStream::TlsServer(s) => Ok(TransportStream::TlsServer(s.clone())),
+            TransportStream::TlsClient(s) => Ok(TransportStream::TlsClient(s.clone())),
+        }
+    }
+
+    fn shutdown(&self) -> io::Result<()> {
+        match self {
+            TransportStream::Raw(s) => s.shutdown(std::net::Shutdown::Both),
+            TransportStream::TlsServer(s) => {
+                // Send TLS close_notify then shut down TCP.
+                let mut locked = s.lock().unwrap();
+                let _ = locked.conn.send_close_notify();
+                locked.get_ref().shutdown(std::net::Shutdown::Both)
+            }
+            TransportStream::TlsClient(s) => {
+                let mut locked = s.lock().unwrap();
+                let _ = locked.conn.send_close_notify();
+                locked.get_ref().shutdown(std::net::Shutdown::Both)
+            }
+        }
+    }
+}
+
+impl Read for TransportStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            TransportStream::Raw(s) => s.read(buf),
+            TransportStream::TlsServer(s) => s.lock().unwrap().read(buf),
+            TransportStream::TlsClient(s) => s.lock().unwrap().read(buf),
+        }
+    }
+}
+
+impl Write for TransportStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            TransportStream::Raw(s) => s.write(buf),
+            TransportStream::TlsServer(s) => s.lock().unwrap().write(buf),
+            TransportStream::TlsClient(s) => s.lock().unwrap().write(buf),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            TransportStream::Raw(s) => s.flush(),
+            TransportStream::TlsServer(s) => s.lock().unwrap().flush(),
+            TransportStream::TlsClient(s) => s.lock().unwrap().flush(),
+        }
+    }
+}
+// ---------------------------------------------------------------------------
 // TransportAddr — network address for TCP or Unix domain sockets
 // ---------------------------------------------------------------------------
 
@@ -891,11 +1051,12 @@ fn read_i64(bytes: &[u8], offset: usize) -> Option<i64> {
     let arr: [u8; 8] = slice.try_into().ok()?;
     Some(i64::from_be_bytes(arr))
 }
-
-fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    let slice = bytes.get(offset..offset + 4)?;
-    let arr: [u8; 4] = slice.try_into().ok()?;
-    Some(u32::from_be_bytes(arr))
+/// A single TCP connection to a remote node.
+pub(crate) struct TcpConnection {
+    pub(crate) node_id: NodeId,
+    pub(crate) addr: SocketAddr,
+    pub(crate) stream: TransportStream,
+    pub(crate) last_activity: Instant,
 }
 
 /// Acquire a mutex, recovering the guard even if a previous holder panicked.
@@ -915,10 +1076,9 @@ fn lock_ignore_poison<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub struct TcpConnection {
     pub node_id: NodeId,
     pub addr: SocketAddr,
-    pub stream: TcpStream,
+    pub stream: TransportStream,
     pub last_activity: Instant,
 }
-
 impl TcpConnection {
     /// Write a framed packet (length-prefixed) to the stream.
     fn send_packet(&mut self, packet_bytes: &[u8]) -> io::Result<()> {
@@ -1022,6 +1182,9 @@ pub struct TcpTransport {
     next_seq: AtomicU64,
     /// Flag used to ask background threads to shut down.
     shutdown_flag: Arc<AtomicBool>,
+    /// Optional TLS configuration. When `Some`, connections are upgraded
+    /// to TLS after TCP connect/accept and before the NUL0 handshake.
+    tls_config: Option<TlsConfig>,
 }
 
 impl TcpTransport {
@@ -1034,7 +1197,7 @@ impl TcpTransport {
     /// Two background threads are started:
     /// 1. **Listener** – accepts incoming TCP connections.
     /// 2. **Sender** – drains the outgoing queue and writes to TCP streams.
-    pub fn bind(addr: SocketAddr) -> io::Result<Self> {
+    pub fn bind(addr: SocketAddr, tls_config: Option<TlsConfig>) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let listen_addr = listener.local_addr()?;
         let node_id = NodeId::new(&listen_addr);
@@ -1056,10 +1219,11 @@ impl TcpTransport {
             let in_tx = incoming_tx.clone();
             let conns = Arc::clone(&connections);
             let local_id = node_id;
+            let tls = tls_config.clone();
             let handle = thread::Builder::new()
                 .name("nulang-net-listener".into())
                 .spawn(move || {
-                    listener_thread(listener, in_tx, conns, flag, local_id);
+                    listener_thread(listener, in_tx, conns, flag, local_id, tls);
                 })?;
             handles.push(handle);
         }
@@ -1072,10 +1236,11 @@ impl TcpTransport {
             let conns = Arc::clone(&connections);
             let local_id = node_id;
             let in_tx = incoming_tx.clone();
+            let tls = tls_config.clone();
             let handle = thread::Builder::new()
                 .name("nulang-net-sender".into())
                 .spawn(move || {
-                    sender_thread(outgoing_rx, conns, flag, local_id, in_tx);
+                    sender_thread(outgoing_rx, conns, flag, local_id, in_tx, tls);
                 })?;
             handles.push(handle);
         }
@@ -1090,6 +1255,7 @@ impl TcpTransport {
             threads: Arc::new(Mutex::new(handles)),
             next_seq: AtomicU64::new(1),
             shutdown_flag,
+            tls_config,
         })
     }
 
@@ -1109,12 +1275,25 @@ impl TcpTransport {
         // Bound the connect so one unreachable peer cannot stall this node:
         // `TcpStream::connect` would wait out the OS default (~2 min for a
         // blackholed peer).
-        let mut stream = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
-        stream.set_read_timeout(Some(IO_TIMEOUT))?;
-        stream.set_write_timeout(Some(IO_TIMEOUT))?;
-        stream.set_nodelay(true)?;
+        let tcp = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
+        tcp.set_read_timeout(Some(IO_TIMEOUT))?;
+        tcp.set_write_timeout(Some(IO_TIMEOUT))?;
+        tcp.set_nodelay(true)?;
 
-        // Handshake: send our versioned node_id, read theirs.
+        // Optionally upgrade to TLS before the NUL0 handshake.
+        let mut stream = if let Some(ref tls) = self.tls_config {
+            let client_cfg = tls.client_config()?;
+            let server_name = rustls::pki_types::ServerName::try_from("localhost")
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            let conn = rustls::ClientConnection::new(std::sync::Arc::new(client_cfg), server_name)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            let tls_stream = rustls::StreamOwned::new(conn, tcp);
+            TransportStream::TlsClient(std::sync::Arc::new(std::sync::Mutex::new(tls_stream)))
+        } else {
+            TransportStream::Raw(tcp)
+        };
+
+        // NUL0 handshake (encrypted when TLS is active).
         write_handshake(&mut stream, self.node_id)?;
         let peer_id = read_handshake(&mut stream)?;
 
@@ -1239,7 +1418,7 @@ impl TcpTransport {
     pub fn disconnect(&mut self, node_id: NodeId) {
         let mut conns = lock_ignore_poison(&self.connections);
         if let Some(conn) = conns.remove(&node_id) {
-            let _ = conn.stream.shutdown(Shutdown::Both);
+            let _ = conn.stream.shutdown();
         }
     }
 
@@ -1258,7 +1437,7 @@ impl TcpTransport {
         {
             let conns = lock_ignore_poison(&self.connections);
             for (_, conn) in conns.iter() {
-                let _ = conn.stream.shutdown(Shutdown::Both);
+                let _ = conn.stream.shutdown();
             }
         }
 
@@ -1306,6 +1485,7 @@ fn listener_thread(
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
     shutdown_flag: Arc<AtomicBool>,
     local_node_id: NodeId,
+    tls_config: Option<TlsConfig>,
 ) {
     // Set a small accept timeout so we periodically check the shutdown flag.
     let _ = listener.set_nonblocking(true);
@@ -1320,10 +1500,11 @@ fn listener_thread(
                 let in_tx = incoming_tx.clone();
                 let conns = Arc::clone(&connections);
                 let flag = Arc::clone(&shutdown_flag);
+                let tls = tls_config.clone();
                 let _ = thread::Builder::new()
                     .name(format!("nulang-net-reader-{}", addr.port()))
                     .spawn(move || {
-                        connection_reader(stream, addr, in_tx, conns, flag, local_node_id);
+                        connection_reader(stream, addr, in_tx, conns, flag, local_node_id, tls);
                     });
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -1344,19 +1525,46 @@ fn listener_thread(
 /// 3. Registers the connection.
 /// 4. Reads framed packets in a loop until disconnect or shutdown.
 fn connection_reader(
-    mut stream: TcpStream,
+    tcp: TcpStream,
     addr: SocketAddr,
     incoming_tx: mpsc::SyncSender<IncomingPacket>,
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
     shutdown_flag: Arc<AtomicBool>,
     local_node_id: NodeId,
+    tls_config: Option<TlsConfig>,
 ) {
-    // Set timeouts.
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_nodelay(true);
+    // Configure TCP socket options.
+    let _ = tcp.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = tcp.set_write_timeout(Some(IO_TIMEOUT));
+    let _ = tcp.set_nodelay(true);
 
-    // --- Handshake: send local node_id, read remote node_id ---------------
+    // Optionally upgrade to TLS before the NUL0 handshake.
+    let mut stream = if let Some(ref tls) = tls_config {
+        match tls.server_config() {
+            Ok(server_cfg) => {
+                let conn = rustls::ServerConnection::new(std::sync::Arc::new(server_cfg))
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+                match conn {
+                    Ok(c) => {
+                        let tls_stream = rustls::StreamOwned::new(c, tcp);
+                        TransportStream::TlsServer(std::sync::Arc::new(std::sync::Mutex::new(tls_stream)))
+                    }
+                    Err(e) => {
+                        warn!("TLS handshake init failed for {}: {}", addr, e);
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("TLS server config failed for {}: {}", addr, e);
+                return;
+            }
+        }
+    } else {
+        TransportStream::Raw(tcp)
+    };
+
+    // NUL0 handshake (encrypted when TLS is active).
     if write_handshake(&mut stream, local_node_id).is_err() {
         return;
     }
@@ -1374,9 +1582,7 @@ fn connection_reader(
             TcpConnection {
                 node_id: peer_id,
                 addr,
-                stream: stream
-                    .try_clone()
-                    .expect("TcpStream::try_clone should succeed"),
+                stream: stream.try_clone().expect("try_clone should succeed"),
                 last_activity: Instant::now(),
             },
         );
@@ -1392,7 +1598,7 @@ fn connection_reader(
 /// the reader spawned for dialled outbound connections, so every TCP
 /// link is read exactly once regardless of which side initiated it.
 fn connection_read_loop(
-    mut stream: TcpStream,
+    mut stream: TransportStream,
     peer_id: NodeId,
     incoming_tx: mpsc::SyncSender<IncomingPacket>,
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
@@ -1447,7 +1653,7 @@ fn connection_read_loop(
         let mut conns = lock_ignore_poison(&connections);
         conns.remove(&peer_id);
     }
-    let _ = stream.shutdown(Shutdown::Both);
+    let _ = stream.shutdown();
 }
 
 /// Sender thread entry point.
@@ -1460,6 +1666,7 @@ fn sender_thread(
     shutdown_flag: Arc<AtomicBool>,
     local_node_id: NodeId,
     incoming_tx: mpsc::SyncSender<IncomingPacket>,
+    tls_config: Option<TlsConfig>,
 ) {
     // We keep a local sequence counter so we can embed it into the bytes.
     let mut next_seq: u64 = 1;
@@ -1493,6 +1700,7 @@ fn sender_thread(
                 local_node_id,
                 outgoing.to_node,
                 outgoing.to_addr,
+                &tls_config,
             ) {
                 warn!(
                     "[nulang-net] Failed to connect to {:?} at {}: {}",
@@ -1525,7 +1733,7 @@ fn sender_thread(
             );
             let mut conns = lock_ignore_poison(&connections);
             if let Some(conn) = conns.remove(&outgoing.to_node) {
-                let _ = conn.stream.shutdown(Shutdown::Both);
+                let _ = conn.stream.shutdown();
             }
         }
     }
@@ -1545,16 +1753,30 @@ fn connect_in_sender(
     local_node_id: NodeId,
     node_id: NodeId,
     addr: SocketAddr,
+    tls_config: &Option<TlsConfig>,
 ) -> io::Result<()> {
     // Bound the connect: the single sender thread serialises every peer's
     // traffic, so an unreachable peer must not block all sends for the OS
     // default timeout (~2 min).
-    let mut stream = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    stream.set_nodelay(true)?;
+    let tcp = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
+    tcp.set_read_timeout(Some(IO_TIMEOUT))?;
+    tcp.set_write_timeout(Some(IO_TIMEOUT))?;
+    tcp.set_nodelay(true)?;
 
-    // Handshake.
+    // Optionally upgrade to TLS before the NUL0 handshake.
+    let mut stream = if let Some(ref tls) = tls_config {
+        let client_cfg = tls.client_config()?;
+        let server_name = rustls::pki_types::ServerName::try_from("localhost")
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let conn = rustls::ClientConnection::new(std::sync::Arc::new(client_cfg), server_name)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let tls_stream = rustls::StreamOwned::new(conn, tcp);
+        TransportStream::TlsClient(std::sync::Arc::new(std::sync::Mutex::new(tls_stream)))
+    } else {
+        TransportStream::Raw(tcp)
+    };
+
+    // NUL0 handshake (encrypted when TLS is active).
     write_handshake(&mut stream, local_node_id)?;
     let peer_id = read_handshake(&mut stream)?;
 
@@ -1586,7 +1808,6 @@ fn connect_in_sender(
         .spawn(move || connection_read_loop(read_stream, node_id, in_tx, conns, flag));
     Ok(())
 }
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1895,7 +2116,7 @@ mod tests {
     #[test]
     fn test_transport_bind() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport = TcpTransport::bind(addr).expect("bind failed");
+        let mut transport = TcpTransport::bind(addr, None).expect("bind failed");
 
         assert_eq!(
             transport.listen_addr().ip(),
@@ -1918,10 +2139,10 @@ mod tests {
     #[test]
     fn test_transport_connect() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -1954,10 +2175,10 @@ mod tests {
     #[test]
     fn test_transport_send_receive() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2079,9 +2300,9 @@ mod tests {
     #[test]
     fn test_transport_send_rejects_dangling_string_payload() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2123,9 +2344,9 @@ mod tests {
     #[test]
     fn test_transport_send_delivers_string_payload_with_table() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2168,9 +2389,9 @@ mod tests {
     #[test]
     fn test_transport_send_delivers_scalar_payload() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2216,10 +2437,10 @@ mod tests {
     #[test]
     fn test_transport_sequence_numbers() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2308,10 +2529,10 @@ mod tests {
     #[test]
     fn test_transport_disconnect() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let node_b_id = transport_b.node_id();
 

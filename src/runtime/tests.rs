@@ -1333,6 +1333,50 @@ fn test_persistent_actor_recovers_from_snapshot() {
 }
 
 #[test]
+fn test_persistent_string_state_survives_checkpoint_and_recovery() {
+    use crate::bytecode::{CodeModule, Constant};
+
+    let mut rt = Runtime::new();
+    let mut models = HashMap::new();
+    models.insert("greeting".to_string(), StateModel::Durable);
+    let actor_id = rt.spawn_persistent_actor(
+        Box::new(|| vec![("greeting".to_string(), Value::int(0))]),
+        models,
+    );
+
+    // Set up a module with a string constant so from_value_resolved can resolve it.
+    let mut module = CodeModule::new("test");
+    let hello_idx = module.add_constant(Constant::String("hello world".to_string()));
+    let string_val = Value::string(hello_idx as u32);
+
+    // Set the string value and module on the actor.
+    {
+        let actor = rt.actors.get_mut(&actor_id).unwrap();
+        actor.set_state_field("greeting", string_val);
+        actor.bytecode_module = Some(module);
+    }
+
+    // Force a checkpoint.
+    rt.checkpoint_actor(actor_id);
+
+    // Verify the snapshot contains the string, not nil.
+    let snapshot = rt.persistence.load_snapshot(actor_id).unwrap();
+    assert_eq!(
+        snapshot.state.get("greeting"),
+        Some(&PersistedValue::String("hello world".to_string())),
+        "string state must be preserved as PersistedValue::String, not Nil"
+    );
+
+    // Simulate node death and recovery.
+    rt.actors.remove(&actor_id);
+    rt.recover_actor(actor_id).unwrap();
+
+    // After recovery, the string value should be restored on the actor heap.
+    let actor = rt.actors.get(&actor_id).unwrap();
+    let restored = actor.get_state_field("greeting").unwrap();
+    assert!(!restored.is_nil(), "restored string must not be nil");
+}
+#[test]
 fn test_local_state_is_not_persisted() {
     let mut rt = Runtime::new();
     let mut models = HashMap::new();
