@@ -1296,7 +1296,7 @@ impl NulangLanguageServer {
         let tokens = match Lexer::new(source).lex() {
             Ok(t) => t,
             Err(e) => {
-                diagnostics.push(nu_error_to_diagnostic(e));
+                diagnostics.extend(nu_error_to_diagnostic(e));
                 return (diagnostics, HashMap::new());
             }
         };
@@ -1305,14 +1305,14 @@ impl NulangLanguageServer {
         let ast = match Parser::new(tokens).parse_module() {
             Ok(a) => a,
             Err(e) => {
-                diagnostics.push(nu_error_to_diagnostic(e));
+                diagnostics.extend(nu_error_to_diagnostic(e));
                 return (diagnostics, HashMap::new());
             }
         };
 
         // Type check
         if let Err(e) = TypeChecker::new().check_module(&ast) {
-            diagnostics.push(nu_error_to_diagnostic(e));
+            diagnostics.extend(nu_error_to_diagnostic(e));
             return (diagnostics, HashMap::new());
         }
 
@@ -1323,7 +1323,7 @@ impl NulangLanguageServer {
         // (pass 2). Stops at the first fatal error.
         let mut effect_checker = EffectChecker::new();
         if let Err(e) = effect_checker.check_module(&ast.decls) {
-            diagnostics.push(nu_error_to_diagnostic(e));
+            diagnostics.extend(nu_error_to_diagnostic(e));
         }
         for msg in &effect_checker.diagnostics {
             diagnostics.push(Diagnostic {
@@ -1347,7 +1347,7 @@ impl NulangLanguageServer {
         for decl in crate::effect_checker::flatten_decls(&ast.decls) {
             if let crate::ast::Decl::Function { body, .. } = decl {
                 if let Err(e) = cap_analyzer.infer_cap(&cap_ctx, body) {
-                    diagnostics.push(nu_error_to_diagnostic(e));
+                    diagnostics.extend(nu_error_to_diagnostic(e));
                 }
             }
         }
@@ -1652,8 +1652,23 @@ impl NulangLanguageServer {
     }
 }
 
-/// Convert a `NuError` into an LSP `Diagnostic`.
-fn nu_error_to_diagnostic(err: NuError) -> Diagnostic {
+/// Convert a `NuError` into zero or more LSP `Diagnostic`s.
+/// For `NuError::Multiple`, each sub-error becomes its own diagnostic.
+fn nu_error_to_diagnostic(err: NuError) -> Vec<Diagnostic> {
+    match err {
+        NuError::Multiple(errors) => {
+            let mut diags = Vec::new();
+            for err in errors {
+                diags.extend(nu_error_to_diagnostic(err));
+            }
+            diags
+        }
+        other => vec![single_diagnostic(other)],
+    }
+}
+
+/// Build a single LSP Diagnostic from a non-Multiple NuError.
+fn single_diagnostic(err: NuError) -> Diagnostic {
     let (message, start_line, start_col, end_line, end_col) = match err {
         NuError::LexError { msg, span }
         | NuError::ParseError { msg, span }
@@ -1679,22 +1694,9 @@ fn nu_error_to_diagnostic(err: NuError) -> Diagnostic {
             span.end_column(),
         ),
         NuError::Suspended(kind) => (format!("VM suspended: {}", kind), 1, 1, 1, 1),
-        NuError::Multiple(errors) => {
-            // Emit one diagnostic per accumulated error.
-            let mut diags = Vec::new();
-            for err in errors {
-                diags.push(nu_error_to_diagnostic(err));
-            }
-            // Return first; the caller should handle Multiple specially.
-            // FIXME: return multiple diagnostics instead of just the first.
-            if let Some(first) = diags.into_iter().next() {
-                return first;
-            }
-            ("Multiple parse errors".to_string(), 1, 1, 1, 1)
-        }
+        NuError::Multiple(_) => unreachable!("Multiple handled by caller"),
     };
 
-    // Lines/columns in the Span are 1-based; LSP uses 0-based.
     let start = Position::new(
         start_line.saturating_sub(1) as u32,
         start_col.saturating_sub(1) as u32,
