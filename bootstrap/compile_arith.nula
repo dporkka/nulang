@@ -202,6 +202,24 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                             (er << 16) + ebp
                         } else (nr << 16) + p
                     } else (nr << 16) + p
+                } else if h == 18036 then {
+                    // "true" literal
+                    emit_const(1, nr);
+                    (nr << 16) + q
+                } else if h == 79251 then {
+                    // "false" literal
+                    emit_const(0, nr);
+                    (nr << 16) + q
+                } else if h == 3421 then {
+                    // "not" prefix: ICmpEq arg, 0, result
+                    let inner = comp(src, q, len, no_left, -1, nr, e0, e1, e2, e3, elen);
+                    let iv = inner >> 16;
+                    let ip = inner & 0xFFFF;
+                    let dr = nr + 1;
+                    emit_const(0, dr);
+                    let dr2 = nr + 2;
+                    perform IO.print("  ICmpEq r" + perform Int.to_string(iv) + " r" + perform Int.to_string(dr) + " r" + perform Int.to_string(dr2));
+                    (dr2 << 16) + ip
                 } else {
                     // Variable reference: look up in env, copy to current register
                     let reg = env_lookup(e0, e1, e2, e3, elen, h);
@@ -301,7 +319,7 @@ fn compile(src: String) {
 fn main() {
     let input = perform IO.read();
     if input == "" then {
-        compile("1 < 2 and 2 < 3")
+        compile("not (1 == 2)")
     } else {
         compile(input)
     }
