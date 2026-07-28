@@ -1,3 +1,2 @@
-let t = (1, 2, 3);
-let (a, b, c) = t;
-perform IO.print(a + b + c)
+let t = {a: 1, b: 2, c: 3};
+perform IO.print(t.a + t.b + t.c)

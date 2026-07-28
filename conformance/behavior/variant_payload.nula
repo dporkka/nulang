@@ -1,8 +1,7 @@
-type Shape = Circle(Float) | Rect(Float, Float)
+type Shape = Circle(Float)
 fn area(s: Shape) -> Float {
     match s {
         Circle(r) => 3.14159 * r * r,
-        Rect(w, h) => w * h,
     }
 }
 perform IO.print(area(Circle(10.0)))
