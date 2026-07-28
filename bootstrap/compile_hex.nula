@@ -176,8 +176,11 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                     let th = then_id >> 16;
                     let tp = then_id & 0xFFFF;
                     if th == 17715 then {
-                        remark("JmpF -> else");
-                        emit_hex(instr(0x52, cr, 0, 0));
+                        emit_hex(instr(0x03, cnext, 0, 0));
+                        let tmp = cnext + 1;
+                        emit_hex(instr(0x40, cr, cnext, tmp));
+                        remark("JmpT -> else");
+                        emit_hex(instr(0x51, tmp, 0, 0));
                         remark("then:");
                         let then_body = comp(src, tp, len, no_left, -1, cnext, e0, e1, e2, e3, elen);
                         let tr = then_body >> 16;
@@ -251,8 +254,11 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
             let q = ident & 0xFFFF;
             if kw == 3075 then {
                 if 0 < min_prec then pair else {
-                    remark("JmpF -> and_end");
-                    emit_hex(instr(0x52, lr, 0, 0));
+                    emit_hex(instr(0x03, nr, 0, 0));
+                    let tmp = nr + 1;
+                    emit_hex(instr(0x40, lr, nr, tmp));
+                    remark("JmpT -> and_end");
+                    emit_hex(instr(0x51, tmp, 0, 0));
                     let rhs = comp(src, q, len, no_left, 0, nr + 1, e0, e1, e2, e3, elen);
                     let rr = rhs >> 16;
                     let rp = rhs & 0xFFFF;
@@ -261,9 +267,12 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                 }
             } else if kw == 669 then {
                 if 0 < min_prec then pair else {
-                    remark("JmpF -> or_right");
-                    emit_hex(instr(0x52, lr, 0, 0));
-                    let dr = nr + 1;
+                    emit_hex(instr(0x03, nr, 0, 0));
+                    let tmp = nr + 1;
+                    emit_hex(instr(0x40, lr, nr, tmp));
+                    remark("JmpT -> or_right");
+                    emit_hex(instr(0x51, tmp, 0, 0));
+                    let dr = nr + 2;
                     emit_hex(instr(0x04, dr, 0, 0));
                     remark("Jmp -> or_end");
                     emit_hex(instr(0x50, 0, 0, 0));
@@ -295,6 +304,8 @@ fn compile(src: String) {
     let len = perform String.length(src);
     perform IO.print("; " + src);
     let result = comp(src, 0, len, 1 << 40, -1, 8, 0, 0, 0, 0, 0);
+    let reg = result >> 16;
+    emit_hex(instr(0x12, reg, 0, 0));
     emit_hex(instr(0x01, 0, 0, 0));
     perform IO.print("; result in r" + perform Int.to_string(result >> 16))
 }
