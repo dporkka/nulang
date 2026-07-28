@@ -48,8 +48,8 @@ fn env_lookup(e0: Int, e1: Int, e2: Int, e3: Int, elen: Int, h: Int) -> Int {
 }
 
 fn prec_of(c: Int) -> Int {
-    if c == 43 then 1 else if c == 45 then 1
-    else if c == 42 then 2 else if c == 47 then 2
+    if c == 43 then 2 else if c == 45 then 2
+    else if c == 42 then 3 else if c == 47 then 3
     else 0
 }
 
@@ -63,6 +63,41 @@ fn op_name(op: Int) -> String {
     if op == 0x20 then "IAdd" else if op == 0x21 then "ISub"
     else if op == 0x22 then "IMul" else if op == 0x23 then "IDiv"
     else if op == 0x01 then "Halt" else "Const"
+}
+
+// Parse comparison operator. Returns (prec<<16)|(opcode<<8)|len or 0.
+// Opcodes: ICmpEq=0x40, ICmpNe=0x41, ICmpLt=0x42, ICmpGt=0x43, ICmpLe=0x44, ICmpGe=0x45
+fn parse_cmp(src: String, p: Int, len: Int) -> Int {
+    if p >= len then 0
+    else {
+        let c = perform String.charAt(src, p);
+        if c == 61 and p + 1 < len then {
+            let c2 = perform String.charAt(src, p + 1);
+            if c2 == 61 then (1 << 16) + (0x40 << 8) + 2 else 0
+        } else if c == 33 and p + 1 < len then {
+            let c2 = perform String.charAt(src, p + 1);
+            if c2 == 61 then (1 << 16) + (0x41 << 8) + 2 else 0
+        } else if c == 60 then {
+            if p + 1 < len then {
+                let c2 = perform String.charAt(src, p + 1);
+                if c2 == 61 then (1 << 16) + (0x44 << 8) + 2
+                else (1 << 16) + (0x42 << 8) + 1
+            } else (1 << 16) + (0x42 << 8) + 1
+        } else if c == 62 then {
+            if p + 1 < len then {
+                let c2 = perform String.charAt(src, p + 1);
+                if c2 == 61 then (1 << 16) + (0x45 << 8) + 2
+                else (1 << 16) + (0x43 << 8) + 1
+            } else (1 << 16) + (0x43 << 8) + 1
+        } else 0
+    }
+}
+
+fn cmp_name(op: Int) -> String {
+    if op == 0x40 then "ICmpEq" else if op == 0x41 then "ICmpNe"
+    else if op == 0x42 then "ICmpLt" else if op == 0x43 then "ICmpGt"
+    else if op == 0x44 then "ICmpLe" else if op == 0x45 then "ICmpGe"
+    else "???"
 }
 
 fn emit_const(num: Int, reg: Int) {
@@ -189,9 +224,28 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
     if p >= len then pair
     else {
         let c = perform String.charAt(src, p);
-        let prec = prec_of(c);
-        if prec == 0 or prec < min_prec then pair
-        else {
+        if c == 61 or c == 33 or c == 60 or c == 62 then {
+            let cmp = parse_cmp(src, p, len);
+            if cmp == 0 then pair
+            else {
+                let cprec = cmp >> 16;
+                let cop = (cmp >> 8) & 0xFF;
+                let clen = cmp & 0xFF;
+                if cprec < min_prec then pair
+                else {
+                    let rhs = comp(src, p + clen, len, no_left, cprec, nr + 1, e0, e1, e2, e3, elen);
+                    let rr = rhs >> 16;
+                    let rp = rhs & 0xFFFF;
+                    let dr = nr + 2;
+                    let cname = cmp_name(cop);
+                    perform IO.print("  " + cname + " r" + perform Int.to_string(lr) + " r" + perform Int.to_string(rr) + " r" + perform Int.to_string(dr));
+                    (dr << 16) + rp
+                }
+            }
+        } else {
+            let prec = prec_of(c);
+            if prec == 0 or prec < min_prec then pair
+            else {
             let rhs = comp(src, p + 1, len, no_left, prec, nr + 1, e0, e1, e2, e3, elen);
             let rr = rhs >> 16;
             let rp = rhs & 0xFFFF;
@@ -199,6 +253,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
             let opcode = opcode_of(c);
             emit_binop(opcode, lr, rr, dr);
             (dr << 16) + rp
+            }
         }
     }
 }
@@ -215,7 +270,7 @@ fn compile(src: String) {
 fn main() {
     let input = perform IO.read();
     if input == "" then {
-        compile("let x = 5 in x + 1")
+        compile("let x = 5 in if x > 3 then 100 else 0")
     } else {
         compile(input)
     }
