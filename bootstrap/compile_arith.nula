@@ -1,6 +1,6 @@
 // bootstrap/compile_arith.nula — Compile expressions to VM bytecode text.
-// Single-function compiler. Supports arithmetic + if/then/else.
-// Run: echo "if 1 then 42 else 0" | nulang bootstrap/compile_arith.nula
+// Single-function compiler. Supports arithmetic, if/then/else, let bindings.
+// Run: echo "let x = 5 in x + 1" | nulang bootstrap/compile_arith.nula
 
 fn is_digit(c: Int) -> Bool { c >= 48 and c <= 57 }
 fn is_alpha(c: Int) -> Bool { (c >= 65 and c <= 90) or (c >= 97 and c <= 122) }
@@ -30,6 +30,20 @@ fn read_ident(src: String, pos: Int, len: Int, h: Int) -> Int {
             let nh = h * 5 + c;
             read_ident(src, pos + 1, len, nh)
         } else (h << 16) + pos
+    }
+}
+
+// Env entry: (hash << 32) | reg. Lookup returns register, or 0 if not found.
+fn env_lookup(e0: Int, e1: Int, e2: Int, e3: Int, elen: Int, h: Int) -> Int {
+    if elen <= 0 then 0
+    else {
+        let slot = if elen >= 4 then e3
+        else if elen >= 3 then e2
+        else if elen >= 2 then e1
+        else e0;
+        let sh = slot >> 32;
+        if sh == h then slot & 0xFFFFFFFF
+        else env_lookup(e0, e1, e2, 0, elen - 1, h)
     }
 }
 
@@ -64,8 +78,12 @@ fn emit_binop(opcode: Int, lr: Int, rr: Int, dr: Int) {
     perform IO.print("  " + name + " r" + perform Int.to_string(lr) + " r" + perform Int.to_string(rr) + " r" + perform Int.to_string(dr))
 }
 
-// Single-pass compiler. Returns (result_reg << 16) | pos.
-fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int) -> Int {
+fn emit_copy(src_reg: Int, dst_reg: Int) {
+    perform IO.print("  Move r" + perform Int.to_string(src_reg) + " r" + perform Int.to_string(dst_reg))
+}
+
+// Returns (result_reg << 16) | pos.
+fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: Int, e1: Int, e2: Int, e3: Int, elen: Int) {
     let no_left = 1 << 40;
     let pair = if left == no_left then {
         let p = skip_ws(src, pos, len);
@@ -79,7 +97,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int) -> I
                 emit_const(num, nr);
                 (nr << 16) + q
             } else if c == 40 then {
-                let inner = comp(src, p + 1, len, no_left, 0, nr);
+                let inner = comp(src, p + 1, len, no_left, 0, nr, e0, e1, e2, e3, elen);
                 let rv = inner >> 16;
                 let rp = inner & 0xFFFF;
                 let q2 = skip_ws(src, rp, len);
@@ -92,9 +110,37 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int) -> I
                 let ident = read_ident(src, p, len, 0);
                 let h = ident >> 16;
                 let q = ident & 0xFFFF;
-                if h == 627 then {
-                    // "if" keyword: if <cond> then <a> else <b>
-                    let cond = comp(src, q, len, no_left, 0, nr);
+                if h == 3321 then {
+                    // "let" keyword: let <var> = <value> in <body>
+                    let q2 = skip_ws(src, q, len);
+                    let var_id = read_ident(src, q2, len, 0);
+                    let vh = var_id >> 16;
+                    let q3 = var_id & 0xFFFF;
+                    let q4 = skip_ws(src, q3, len);
+                    if q4 < len then {
+                        let c3 = perform String.charAt(src, q4);
+                        if c3 == 61 then {
+                            let bound = comp(src, q4 + 1, len, no_left, 0, nr, e0, e1, e2, e3, elen);
+                            let vr = bound >> 16;
+                            let vp = bound & 0xFFFF;
+                            let vp2 = skip_ws(src, vp, len);
+                            if vp2 + 1 < len then {
+                                let ci = perform String.charAt(src, vp2);
+                                let cn = perform String.charAt(src, vp2 + 1);
+                                if ci == 105 and cn == 110 then {
+                                    let entry = (vh << 32) + vr;
+                                    let nxt = nr + 1;
+                                    if elen == 0 then comp(src, vp2 + 2, len, no_left, 0, nxt, entry, 0, 0, 0, 1)
+                                    else if elen == 1 then comp(src, vp2 + 2, len, no_left, 0, nxt, e0, entry, 0, 0, 2)
+                                    else if elen == 2 then comp(src, vp2 + 2, len, no_left, 0, nxt, e0, e1, entry, 0, 3)
+                                    else comp(src, vp2 + 2, len, no_left, 0, nxt, e0, e1, e2, entry, 4)
+                                } else (vr << 16) + vp2
+                            } else (vr << 16) + vp2
+                        } else (nr << 16) + p
+                    } else (nr << 16) + p
+                } else if h == 627 then {
+                    // "if" keyword
+                    let cond = comp(src, q, len, no_left, 0, nr, e0, e1, e2, e3, elen);
                     let cr = cond >> 16;
                     let cp = cond & 0xFFFF;
                     let cnext = nr + 1;
@@ -104,7 +150,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int) -> I
                     let tp = then_id & 0xFFFF;
                     if th == 17715 then {
                         perform IO.print("  JmpF r" + perform Int.to_string(cr) + " L" + perform Int.to_string(p) + "e");
-                        let then_body = comp(src, tp, len, no_left, 0, cnext);
+                        let then_body = comp(src, tp, len, no_left, 0, cnext, e0, e1, e2, e3, elen);
                         let tr = then_body >> 16;
                         let tbp = then_body & 0xFFFF;
                         perform IO.print("  Jmp L" + perform Int.to_string(p) + "x");
@@ -114,7 +160,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int) -> I
                         let eh = else_id >> 16;
                         let ep = else_id & 0xFFFF;
                         if eh == 16001 then {
-                            let else_body = comp(src, ep, len, no_left, 0, cnext);
+                            let else_body = comp(src, ep, len, no_left, 0, cnext, e0, e1, e2, e3, elen);
                             let er = else_body >> 16;
                             let ebp = else_body & 0xFFFF;
                             perform IO.print("L" + perform Int.to_string(p) + "x:");
@@ -122,7 +168,13 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int) -> I
                         } else (nr << 16) + p
                     } else (nr << 16) + p
                 } else {
-                    (nr << 16) + p
+                    // Variable reference: look up in env, copy to current register
+                    let reg = env_lookup(e0, e1, e2, e3, elen, h);
+                    if reg == 0 then (nr << 16) + p
+                    else {
+                        emit_copy(reg, nr);
+                        (nr << 16) + q
+                    }
                 }
             } else {
                 (nr << 16) + p
@@ -140,7 +192,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int) -> I
         let prec = prec_of(c);
         if prec == 0 or prec < min_prec then pair
         else {
-            let rhs = comp(src, p + 1, len, no_left, prec, nr + 1);
+            let rhs = comp(src, p + 1, len, no_left, prec, nr + 1, e0, e1, e2, e3, elen);
             let rr = rhs >> 16;
             let rp = rhs & 0xFFFF;
             let dr = nr + 2;
@@ -154,7 +206,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int) -> I
 fn compile(src: String) {
     let len = perform String.length(src);
     perform IO.print("; " + src);
-    let result = comp(src, 0, len, 1 << 40, 0, 8);
+    let result = comp(src, 0, len, 1 << 40, 0, 8, 0, 0, 0, 0, 0);
     perform IO.print("  Halt");
     let reg = result >> 16;
     perform IO.print("; result in r" + perform Int.to_string(reg))
@@ -163,7 +215,7 @@ fn compile(src: String) {
 fn main() {
     let input = perform IO.read();
     if input == "" then {
-        compile("if 1 then 42 else 0")
+        compile("let x = 5 in x + 1")
     } else {
         compile(input)
     }
