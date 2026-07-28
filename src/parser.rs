@@ -102,16 +102,10 @@ impl Parser {
                 Err(e) => {
                     let consumed = self.pos - decl_start;
                     // Rewind any tokens a failed declaration parse consumed.
-                    self.pos = decl_start;
                     if consumed > 0 {
-                        // Declaration started but failed mid-way: record the
-                        // error and synchronize to the next top-level keyword.
-                        self.diagnostics.push(e);
-                        self.error_sync();
-                        if !self.is_at_end() {
-                            self.advance(); // skip past the sync token to avoid re-parsing the same broken decl
-                        }
-                        continue;
+                        // A failed declaration is authoritative: do not retry
+                        // its remaining tokens as a top-level expression.
+                        return Err(e);
                     }
                     // Not a declaration — this must be the top-level script body.
                     // Parse all remaining tokens as a block of expressions,
@@ -149,35 +143,6 @@ impl Parser {
             name: "main".to_string(),
             decls,
         })
-    }
-
-    /// Discard tokens until a top-level declaration keyword, block closer, or EOF.
-    /// This is the error-recovery synchronization point — after a failed
-    /// declaration we skip to the next construct we can reliably re-parse.
-    fn error_sync(&mut self) {
-        while !self.is_at_end() {
-            match self.peek_kind() {
-                TokenKind::Fn
-                | TokenKind::Actor
-                | TokenKind::Persistent
-                | TokenKind::Entity
-                | TokenKind::Organization
-                | TokenKind::StateMachine
-                | TokenKind::Agent
-                | TokenKind::Workflow
-                | TokenKind::Database
-                | TokenKind::Type
-                | TokenKind::Effect
-                | TokenKind::Extern
-                | TokenKind::Import
-                | TokenKind::Module
-                | TokenKind::Let => return,
-                TokenKind::RBrace | TokenKind::RBracket | TokenKind::RParen => return,
-                _ => {
-                    self.advance();
-                }
-            }
-        }
     }
 
     /// Consume and return all diagnostics accumulated during error-recovery
