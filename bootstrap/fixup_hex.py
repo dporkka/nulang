@@ -62,7 +62,7 @@ def fixup(lines: list[str]) -> list[str]:
     jmp_info = []   # (line_idx, ic)
     
     for li, marker in sorted(markers.items()):
-        if "JmpF" in marker or "JmpT" in marker:
+        if "JmpF" in marker:
             for check_li in range(li + 1, len(lines)):
                 if check_li in line_to_ic:
                     jmpf_info.append((check_li, line_to_ic[check_li]))
@@ -117,10 +117,7 @@ def fixup(lines: list[str]) -> list[str]:
         if target_ic is not None:
             offset = target_ic - jf_ic
             old_word = [w for li, w in instr_lines if li == jf_li][0]
-            if ((old_word >> 24) & 0xFF) == 0x51:
-                patched[jf_li] = instr(0x51, (old_word >> 16) & 0xFF, (offset >> 8) & 0xFF, offset & 0xFF)
-            else:
-                patched[jf_li] = patch_jmpf(old_word, offset)
+            patched[jf_li] = patch_jmpf(old_word, offset)
     
     # Patch Jmp offsets (check ; end: then ; or_end: then ; else: then end of list)
     for jp_li, jp_ic in reversed(jmp_info):
