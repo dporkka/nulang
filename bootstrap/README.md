@@ -87,7 +87,7 @@ nulang bootstrap/compiler_core.nula < /dev/null
 - Adds `hex_digit` helper and `emit_hex` for hex formatting.
 - Works around Nulang string-var concatenation bug using `""` prefix trick.
 - Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `ICmp*`, `Move`, `JmpF`, `Jmp`, `Halt`.
-- Limitation: ConstU needs constant pool; JmpF/Jmp use placeholder offset 0 (need post-processing).
+- Pipeline: nulang bootstrap/compile_hex.nula | python3 bootstrap/fixup_hex.py
 
 ## What remains
 

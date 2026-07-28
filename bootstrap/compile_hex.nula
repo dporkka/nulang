@@ -82,6 +82,10 @@ fn hex_digit(n: Int) -> String {
 }
 
 // Print a u32 as 8-char hex. Start with "" to work around string-var concat bug.
+fn remark(msg: String) {
+    perform IO.print("; " + msg)
+}
+
 fn emit_hex(w: Int) {
     perform IO.print("" +
         hex_digit((w >> 28) & 0xF) +
@@ -169,11 +173,15 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                     let th = then_id >> 16;
                     let tp = then_id & 0xFFFF;
                     if th == 17715 then {
+                        remark("JmpF -> else");
                         emit_hex(instr(0x52, cr, 0, 0));
+                        remark("then:");
                         let then_body = comp(src, tp, len, no_left, -1, cnext, e0, e1, e2, e3, elen);
                         let tr = then_body >> 16;
                         let tbp = then_body & 0xFFFF;
+                        remark("Jmp -> end");
                         emit_hex(instr(0x50, 0, 0, 0));
+                        remark("else:");
                         let tbp2 = skip_ws(src, tbp, len);
                         let else_id = read_ident(src, tbp2, len, 0);
                         let eh = else_id >> 16;
@@ -182,6 +190,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                             let else_body = comp(src, ep, len, no_left, -1, cnext, e0, e1, e2, e3, elen);
                             let er = else_body >> 16;
                             let ebp = else_body & 0xFFFF;
+                            remark("end:");
                             (er << 16) + ebp
                         } else (nr << 16) + p
                     } else (nr << 16) + p
