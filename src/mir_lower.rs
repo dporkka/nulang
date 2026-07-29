@@ -1275,6 +1275,7 @@ impl<'c> FnLowerer<'c> {
                 actor,
                 behavior,
                 args,
+                remote,
                 ..
             } => {
                 let actor_hint = operand_name_hint(actor);
@@ -1290,6 +1291,7 @@ impl<'c> FnLowerer<'c> {
                         actor: actor_id,
                         behavior_idx: idx,
                         args: arg_ids,
+                        remote: *remote,
                     },
                 );
                 Ok(())
@@ -1298,6 +1300,8 @@ impl<'c> FnLowerer<'c> {
                 actor,
                 behavior,
                 args,
+                remote,
+                timeout_ms,
                 ..
             } => {
                 let actor_hint = operand_name_hint(actor);
@@ -1313,6 +1317,8 @@ impl<'c> FnLowerer<'c> {
                         actor: actor_id,
                         behavior_idx: idx,
                         args: arg_ids,
+                        remote: *remote,
+                        timeout_ms: *timeout_ms,
                     },
                 );
                 Ok(())

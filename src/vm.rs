@@ -3560,8 +3560,9 @@ impl VM {
                     .unwrap_or(0) as u64;
                 let behavior_const_idx = instr.op2 as usize;
                 let behavior = self.module_const_string(module_idx, behavior_const_idx);
+                let timeout_ms = self.frames[frame_idx].regs[12].as_int().unwrap_or(5_000) as u64;
                 let result = if let Some(ref mut cb) = self.distributed_callbacks {
-                    cb.remote_ask(target_actor, &behavior, &[], 5_000)
+                    cb.remote_ask(target_actor, &behavior, &[], timeout_ms)
                 } else {
                     Value::nil()
                 };

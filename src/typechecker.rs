@@ -836,11 +836,21 @@ impl TypeChecker {
                 name,
                 params,
                 ret_type,
+                error_type,
                 effect,
                 body,
                 span,
                 ..
             } => {
+                // When `! ErrorType` syntax is used, wrap the declared return
+                // type with `Result[ret_type, error_type]`.
+                let ret_type: Option<Type> = match (ret_type, error_type) {
+                    (Some(ok_ty), Some(err_ty)) => Some(Type::Variant(vec![
+                        ("Ok".to_string(), Some(ok_ty.clone())),
+                        ("Error".to_string(), Some(err_ty.clone())),
+                    ])),
+                    _ => ret_type.clone(),
+                };
                 // Create fresh type variables for parameters
                 let mut param_types = vec![];
                 for (_param_name, param_ty) in params {
@@ -885,7 +895,7 @@ impl TypeChecker {
                 let s1 = compose_subst(&s_rec, &s1);
 
                 // Unify with declared return type if present
-                let s2 = match ret_type {
+                let s2 = match &ret_type {
                     Some(rt) => {
                         let body_subst = apply_subst(&body_ty, &s1);
                         let rt_subst = apply_subst(rt, &s1);
@@ -1128,6 +1138,7 @@ impl TypeChecker {
                 behavior: _,
                 args: _,
                 span,
+                ..
             } => self.infer_ask(ctx, actor, *span),
 
             // Receive
@@ -3348,6 +3359,7 @@ mod tests {
                 type_params: vec![],
                 params: vec![("x".to_string(), Some(Type::int()))],
                 ret_type: Some(Type::int()),
+                error_type: None,
                 effect: None,
                 cap: None,
                 body: bin(BinOp::Add, var("x"), int_lit(1)),
@@ -3382,6 +3394,7 @@ mod tests {
                         type_params: vec![],
                         params: vec![],
                         ret_type: Some(Type::int()),
+                        error_type: None,
                         effect: None,
                         cap: None,
                         body: int_lit(42),
@@ -3396,6 +3409,7 @@ mod tests {
                     type_params: vec![],
                     params: vec![],
                     ret_type: None,
+                    error_type: None,
                     effect: None,
                     cap: None,
                     body: Expr::App {
@@ -3436,6 +3450,7 @@ mod tests {
                         type_params: vec![],
                         params: vec![],
                         ret_type: Some(Type::int()),
+                        error_type: None,
                         effect: None,
                         cap: None,
                         body: int_lit(42),
@@ -3448,6 +3463,7 @@ mod tests {
                         type_params: vec![],
                         params: vec![],
                         ret_type: None,
+                        error_type: None,
                         effect: None,
                         cap: None,
                         body: Expr::App {
@@ -3575,6 +3591,7 @@ mod tests {
                 type_params: vec![],
                 params: vec![("x".to_string(), Some(Type::int()))],
                 ret_type: Some(Type::int()),
+                error_type: None,
                 effect: Some(EffectRow::Closed(vec![Effect::IO])),
                 cap: None,
                 body: bin(BinOp::Add, var("x"), int_lit(1)),
@@ -3644,6 +3661,7 @@ mod tests {
                     type_params: vec![],
                     params: vec![],
                     ret_type: None,
+                    error_type: None,
                     effect: None,
                     cap: None,
                     body: Expr::App {

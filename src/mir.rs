@@ -295,12 +295,15 @@ pub enum RValue {
         actor: LocalId,
         behavior_idx: usize,
         args: Vec<LocalId>,
+        remote: bool,
     },
     /// `ask actor behavior(args...)`. Evaluates to the behavior's result.
     Ask {
         actor: LocalId,
         behavior_idx: usize,
         args: Vec<LocalId>,
+        remote: bool,
+        timeout_ms: Option<u64>,
     },
 }
 
@@ -586,11 +589,14 @@ mod tests {
             actor: LocalId(0),
             behavior_idx: 0,
             args: vec![LocalId(0)],
+            remote: false,
         };
         let _ = RValue::Ask {
             actor: LocalId(0),
             behavior_idx: 0,
             args: vec![LocalId(0)],
+            remote: false,
+            timeout_ms: None,
         };
     }
 

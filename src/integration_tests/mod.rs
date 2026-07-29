@@ -8069,4 +8069,75 @@ match { a: 2, b: 9 } with {
             response
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Error handling: catch, fail, T ! E syntax
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_catch_bare_expr_on_ok() {
+        assert_int(
+            r#"
+            type Result[Ok,Err] = Ok(Ok) | Error(Err)
+            fn ok_val() -> Result[Int, String] { Ok(42) }
+            ok_val() catch 0
+            "#,
+            42,
+        );
+    }
+
+    #[test]
+    fn test_catch_bare_expr_on_error() {
+        assert_int(
+            r#"
+            type Result[Ok,Err] = Ok(Ok) | Error(Err)
+            fn err_val() -> Result[Int, String] { Error("fail") }
+            err_val() catch 0
+            "#,
+            0,
+        );
+    }
+
+    #[test]
+    fn test_fail_returns_early() {
+        assert_int(
+            r#"
+            fn early_return(x: Int) -> Int {
+                if x < 0 then fail 0
+                else x
+            }
+            early_return(42)
+            "#,
+            42,
+        );
+    }
+
+    #[test]
+    fn test_fail_returns_early_negative() {
+        assert_int(
+            r#"
+            fn early_return(x: Int) -> Int {
+                if x < 0 then fail 0
+                else x
+            }
+            early_return(-5)
+            "#,
+            0,
+        );
+    }
+
+    #[test]
+    fn test_bang_error_type_wraps_return_with_result() {
+        assert_int(
+            r#"
+            type Result[Ok,Err] = Ok(Ok) | Error(Err)
+            fn div(a: Int, b: Int) -> Int ! String {
+                if b == 0 then fail Error("div by zero")
+                else Ok(a / b)
+            }
+            div(10, 2)?
+            "#,
+            5,
+        );
+    }
 }

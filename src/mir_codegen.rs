@@ -968,15 +968,14 @@ impl MirCodegen {
                 actor,
                 behavior_idx,
                 args,
+                remote,
             } => {
-                // Protect the actor value in a register outside the 0..15
-                // staging zone before staging args, mirroring the Call/
-                // FUNC_VALUE_REG pattern.
                 let _ractor = self.local_reg(*actor);
                 self.emit(Instruction::new2(OpCode::Move, _ractor, FUNC_VALUE_REG));
                 self.stage_args(args)?;
+                let opcode = if *remote { OpCode::RSend } else { OpCode::Send };
                 self.emit(Instruction::new3(
-                    OpCode::Send,
+                    opcode,
                     FUNC_VALUE_REG,
                     ((*behavior_idx >> 8) & 0xFF) as u8,
                     (*behavior_idx & 0xFF) as u8,
@@ -988,17 +987,30 @@ impl MirCodegen {
                 actor,
                 behavior_idx,
                 args,
+                remote,
+                timeout_ms,
             } => {
                 let _ractor = self.local_reg(*actor);
                 self.emit(Instruction::new2(OpCode::Move, _ractor, FUNC_VALUE_REG));
                 self.stage_args(args)?;
+                // If timeout is specified, stage it into r0 for the VM to read
+                let opcode = if *remote { OpCode::RAsk } else { OpCode::Ask };
+                if let Some(ms) = timeout_ms {
+                    let timeout_idx = self.module.add_constant(Constant::Int(*ms as i64));
+                    self.emit(Instruction::new3(
+                        OpCode::ConstU,
+                        12, // r12 — timeout register (past staging area r0..r11)
+                        ((timeout_idx >> 8) & 0xFF) as u8,
+                        (timeout_idx & 0xFF) as u8,
+                    ));
+                }
                 self.emit(Instruction::new3(
-                    OpCode::Ask,
+                    opcode,
                     FUNC_VALUE_REG,
                     ((*behavior_idx >> 8) & 0xFF) as u8,
                     (*behavior_idx & 0xFF) as u8,
                 ));
-                // Ask writes its result back into its own op1 register.
+                // Ask writes its result back into op1 register; move to dst.
                 self.emit(Instruction::new2(OpCode::Move, FUNC_VALUE_REG, dst));
             }
         }

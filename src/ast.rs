@@ -149,6 +149,8 @@ pub enum Expr {
         actor: Box<Expr>,
         behavior: String,
         args: Vec<Expr>,
+        remote: bool,
+        timeout_ms: Option<u64>,
         span: Span,
     },
     /// Receive: receive { | Behavior(params) => expr } [after ms => timeout_expr]
@@ -414,6 +416,7 @@ pub enum Decl {
         type_params: Vec<String>,
         params: Vec<(String, Option<Type>)>,
         ret_type: Option<Type>,
+        error_type: Option<Type>,
         effect: Option<EffectRow>,
         cap: Option<Capability>,
         body: Expr,

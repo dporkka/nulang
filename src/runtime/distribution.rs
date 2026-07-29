@@ -14,9 +14,10 @@ use crate::runtime::{
 pub(crate) fn enable_distribution(
     rt: &mut Runtime,
     bind_addr: std::net::SocketAddr,
+    tls_config: Option<crate::runtime::network::TlsConfig>,
 ) -> std::io::Result<()> {
     let transport = Box::new(crate::runtime::network::TcpTransport::bind(
-        bind_addr, None,
+        bind_addr, tls_config,
     )?);
     let listen_addr = transport.listen_addr();
     let node_id = NodeId(transport.node_id().0);

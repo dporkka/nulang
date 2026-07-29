@@ -2161,6 +2161,8 @@ mod tests {
             actor: Box::new(Expr::Var("a".to_string(), s())),
             behavior: "foo".to_string(),
             args: vec![],
+            remote: false,
+            timeout_ms: None,
             span: s(),
         };
         let row = checker.infer_effects(&ctx, &ask).unwrap();

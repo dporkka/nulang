@@ -127,6 +127,7 @@ impl Parser {
                         type_params: vec![],
                         params: vec![],
                         ret_type: None,
+                        error_type: None,
                         effect: None,
                         cap: None,
                         body: final_expr,
@@ -325,15 +326,40 @@ impl Parser {
         } else {
             None
         };
-
-        // Effect annotation
-        let effect = if self.consume_if(&TokenKind::Bang) || self.consume_if(&TokenKind::Throws) {
-            Some(self.parse_effect_row()?)
+        // Error type and/or effect annotation.
+        // `! { ... }` → effect row.  `! Type` → error type.
+        let error_type;
+        let effect;
+        if self.consume_if(&TokenKind::Bang) {
+            if self.peek_kind() == &TokenKind::LBrace {
+                error_type = None;
+                effect = Some(self.parse_effect_row()?);
+            } else {
+                error_type = Some(self.parse_type()?);
+                effect = if self.consume_if(&TokenKind::Bang) || self.consume_if(&TokenKind::Throws)
+                {
+                    Some(self.parse_effect_row()?)
+                } else {
+                    None
+                };
+            }
+        } else if self.consume_if(&TokenKind::Throws) {
+            if self.peek_kind() == &TokenKind::LBrace {
+                error_type = None;
+                effect = Some(self.parse_effect_row()?);
+            } else {
+                error_type = Some(self.parse_type()?);
+                effect = if self.consume_if(&TokenKind::Bang) || self.consume_if(&TokenKind::Throws)
+                {
+                    Some(self.parse_effect_row()?)
+                } else {
+                    None
+                };
+            }
         } else {
-            None
-        };
-
-        // Capability annotation
+            error_type = None;
+            effect = None;
+        }
         let cap = if self.consume_if(&TokenKind::Colon) {
             Some(self.parse_capability()?)
         } else {
@@ -346,6 +372,7 @@ impl Parser {
             type_params,
             params,
             ret_type,
+            error_type,
             effect,
             cap,
             body,
@@ -2154,6 +2181,16 @@ impl Parser {
                             Ok(Expr::Return(None, self.current_span()))
                         }
                     }
+                    TokenKind::Fail => {
+                        self.advance();
+                        // fail is sugar for return; same semantics
+                        if self.is_expr_start() {
+                            let val = self.parse_expr()?;
+                            Ok(Expr::Return(Some(Box::new(val)), self.current_span()))
+                        } else {
+                            Ok(Expr::Return(None, self.current_span()))
+                        }
+                    }
                     TokenKind::Break => {
                         self.advance();
                         if self.is_expr_start() {
@@ -2693,6 +2730,7 @@ impl Parser {
     fn parse_ask(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
         self.advance(); // consume 'ask'
+        let remote = self.consume_if(&TokenKind::Remote);
         let actor = self.parse_expr()?;
         // Allow the behavior name to be `ask` itself so agent actors can expose
         // an `ask(prompt)` behavior callable as `ask a ask("...")`.
@@ -2705,10 +2743,29 @@ impl Parser {
         };
         self.expect(TokenKind::LParen)?;
         let args = self.parse_arg_list()?;
+        // Optional transport modifiers: `timeout <int>`
+        let timeout_ms = if let TokenKind::Ident(ref s) = self.peek_kind() {
+            if s == "timeout" {
+                self.advance(); // consume 'timeout'
+                let ms = self.parse_expr()?;
+                // Evaluate timeout at compile time if it's a literal int
+                if let Expr::Literal(Literal::Int(n), _) = &ms {
+                    Some(*n as u64)
+                } else {
+                    None // dynamic timeout not yet supported
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         Ok(Expr::Ask {
             actor: Box::new(actor),
             behavior,
             args,
+            remote,
+            timeout_ms,
             span,
         })
     }
@@ -2998,6 +3055,7 @@ impl Parser {
                 | TokenKind::While
                 | TokenKind::Until
                 | TokenKind::Migrate
+                | TokenKind::Fail
                 | TokenKind::Return
                 | TokenKind::Break
                 | TokenKind::SelfKw

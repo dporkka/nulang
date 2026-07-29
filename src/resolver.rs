@@ -121,6 +121,7 @@ mod tests {
             type_params: vec![],
             params: vec![],
             ret_type: None,
+            error_type: None,
             effect: None,
             cap: None,
             body: Expr::Literal(Literal::Int(0), sp()),

@@ -298,6 +298,9 @@ pub struct Runtime {
     // HTTP server state (v0.7+).
     pub http_server: Option<HttpServerState>,
     pub test_handlers: HashMap<String, Box<dyn Fn(&[Value]) -> Option<Value>>>,
+    /// Cryptographic provider (hashing, random, signing).
+    /// Defaults to [`crate::backends::DefaultCryptoProvider`].
+    pub crypto: Box<dyn crate::backends::CryptoProvider>,
 
     // -- Multi-threaded scheduler sharding --
     /// This shard's index (0-based). Always 0 for a single-shard runtime.
@@ -354,12 +357,23 @@ impl Runtime {
             pending_spawn_responses: HashMap::new(),
             dlq_actor_id: None,
             http_server: None,
+            crypto: Box::new(crate::backends::DefaultCryptoProvider::new()),
             test_handlers: HashMap::new(),
             shard_idx: 0,
             shard_count: 1,
             cross_shard_tx: None,
             cross_shard_rx: None,
         }
+    }
+
+    /// Compute the BLAKE3 hash of `data` using the configured [`CryptoProvider`].
+    pub fn hash_bytes(&self, data: &[u8]) -> [u8; 32] {
+        self.crypto.hash(data)
+    }
+
+    /// Fill `buf` with cryptographically secure random bytes.
+    pub fn random_bytes(&self, buf: &mut [u8]) {
+        self.crypto.random_bytes(buf)
     }
 
     /// Create a shard Runtime. Private — use [`Runtime::new_sharded`] to
@@ -4338,8 +4352,12 @@ impl Runtime {
     ///
     // -- Distributed Actor System --
 
-    pub fn enable_distribution(&mut self, bind_addr: std::net::SocketAddr) -> std::io::Result<()> {
-        distribution::enable_distribution(self, bind_addr)
+    pub fn enable_distribution(
+        &mut self,
+        bind_addr: std::net::SocketAddr,
+        tls_config: Option<crate::runtime::network::TlsConfig>,
+    ) -> std::io::Result<()> {
+        distribution::enable_distribution(self, bind_addr, tls_config)
     }
 
     pub fn join_cluster(&mut self, seed_addr: std::net::SocketAddr) {
@@ -5782,11 +5800,22 @@ impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
     fn migrate(&mut self, _actor_id: u64, _target_node_id: u64) {}
     fn remote_ask(
         &mut self,
-        _target_actor: u64,
-        _behavior: &str,
-        _args: &[crate::vm::Value],
+        target_actor: u64,
+        behavior: &str,
+        args: &[crate::vm::Value],
         _timeout_ms: u64,
     ) -> crate::vm::Value {
+        // Send the ask request over the network. The reply is expected to
+        // arrive via the normal message path (the target actor sends back
+        // a response message). The caller should use `receive` to collect
+        // the reply. Full suspend/resume support (RFC 0007) would block
+        // the actor until the reply or timeout.
+        unsafe {
+            let rt = &mut *self.runtime;
+            let node_id = rt.distributed.node_id.map(|n| n.0).unwrap_or(0);
+            let target = ActorAddress::remote(crate::runtime::NodeId(node_id), target_actor);
+            rt.send_distributed(target, behavior, args);
+        }
         crate::vm::Value::nil()
     }
     fn gossip(&mut self, _message: &str) -> crate::vm::Value {

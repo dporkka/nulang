@@ -2952,8 +2952,11 @@ use std::thread::sleep;
 /// Start a distributed-enabled runtime bound to an ephemeral loopback port.
 fn start_distributed_node() -> Runtime {
     let mut rt = Runtime::new();
-    rt.enable_distribution(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
-        .expect("failed to enable distribution");
+    rt.enable_distribution(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+        None,
+    )
+    .expect("failed to enable distribution");
     rt
 }
 

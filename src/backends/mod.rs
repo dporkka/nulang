@@ -22,8 +22,9 @@
 //!   uses the trait.  **Wired.**
 //! - [`Transport`] — blanket-impl'd over [`crate::runtime::NetworkTransport`].
 //!   **Wired.**
-//! - [`CryptoProvider`] — implemented by [`DefaultCryptoProvider`]; not yet
-//!   routed through the runtime (identity + TLS still use ed25519 directly).
+//! - [`CryptoProvider`] — implemented by [`DefaultCryptoProvider`]; field
+//!   on [`crate::runtime::Runtime`] with `hash_bytes`/`random_bytes` helpers.
+//!   **Wired.** (identity.rs uses direct ed25519 for ActorId key generation.)
 //! - [`HttpProvider`] — implemented by [`ReqwestHttpProvider`]; not yet
 //!   routed through the AI runtime.
 //! - [`ForeignInterop`] — implemented by [`DefaultForeignInterop`] (PyO3,

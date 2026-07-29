@@ -93,6 +93,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             type_params,
             params,
             ret_type,
+            error_type: _,
             effect,
             cap,
             body,
@@ -1214,6 +1215,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             actor,
             behavior,
             args,
+            remote,
             span,
             ..
         } => {
@@ -1228,6 +1230,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                     actor: aop,
                     behavior: behavior.clone(),
                     args: aops,
+                    remote: *remote,
                     ty: ty.clone(),
                 },
                 span: *span,
@@ -1238,6 +1241,8 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             actor,
             behavior,
             args,
+            remote,
+            timeout_ms,
             span,
         } => {
             let aop = lower_expr(actor, body);
@@ -1251,6 +1256,8 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                     actor: aop,
                     behavior: behavior.clone(),
                     args: aops,
+                    remote: *remote,
+                    timeout_ms: *timeout_ms,
                     ty: ty.clone(),
                 },
                 span: *span,
@@ -1764,6 +1771,7 @@ mod tests {
                 type_params: vec![],
                 params: vec![],
                 ret_type: Some(Type::int()),
+                error_type: None,
                 effect: None,
                 cap: None,
                 body: Expr::Literal(Literal::Int(42), Span::default()),
@@ -1891,6 +1899,8 @@ mod tests {
             actor: Box::new(var("a")),
             behavior: "beh".to_string(),
             args: vec![var("k")],
+            remote: false,
+            timeout_ms: None,
             span,
         };
         let ask_vars = used(&ask);
