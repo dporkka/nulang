@@ -34,3 +34,137 @@ pub fn length(s: String) -> Int { String.length(s) }
 
 /// Check if the string is empty.
 pub fn is_empty(s: String) -> Bool { String.length(s) == 0 }
+
+// ── Extended string operations ────────────────────────────────────────────
+
+/// Split a string by a delimiter character. Returns an array of substrings.
+pub fn split(s: String, delim: Int) -> [String] {
+    let result = [];
+    let mut current = "";
+    let mut i = 0;
+    let len = String.length(s);
+    while i < len {
+        let c = String.charAt(s, i);
+        if c == delim then {
+            result.push(current);
+            current = "";
+        } else {
+            current = current + c;
+        };
+        i = i + 1;
+    };
+    result.push(current);
+    result
+}
+
+/// Join an array of strings with a separator.
+pub fn join(parts: [String], sep: String) -> String {
+    let mut result = "";
+    let mut i = 0;
+    let len = parts.len();
+    while i < len {
+        if i > 0 then { result = result + sep; } else { };
+        result = result + parts[i];
+        i = i + 1;
+    };
+    result
+}
+
+/// Replace all occurrences of `from` with `to` in a string.
+pub fn replace(s: String, from: String, to: String) -> String {
+    let mut result = "";
+    let mut i = 0;
+    let slen = String.length(s);
+    let flen = String.length(from);
+    while i < slen {
+        // Simple check: does the substring starting at i match `from`?
+        let mut match = flen > 0 && i + flen <= slen;
+        let mut j = 0;
+        while j < flen && match {
+            if String.charAt(s, i + j) != String.charAt(from, j) then { match = false; } else { };
+            j = j + 1;
+        };
+        if match then {
+            result = result + to;
+            i = i + flen;
+        } else {
+            result = result + String.charAt(s, i);
+            i = i + 1;
+        };
+    };
+    result
+}
+
+/// Convert a string to uppercase (ASCII letters only).
+pub fn to_upper(s: String) -> String {
+    let mut result = "";
+    let mut i = 0;
+    let len = String.length(s);
+    while i < len {
+        let c = String.charAt(s, i);
+        if c >= 97 && c <= 122 then { result = result + (c - 32); }
+        else { result = result + c; };
+        i = i + 1;
+    };
+    result
+}
+
+/// Convert a string to lowercase (ASCII letters only).
+pub fn to_lower(s: String) -> String {
+    let mut result = "";
+    let mut i = 0;
+    let len = String.length(s);
+    while i < len {
+        let c = String.charAt(s, i);
+        if c >= 65 && c <= 90 then { result = result + (c + 32); }
+        else { result = result + c; };
+        i = i + 1;
+    };
+    result
+}
+
+/// Check whether `s` contains the substring `sub`.
+pub fn contains(s: String, sub: String) -> Bool {
+    let slen = String.length(s);
+    let sublen = String.length(sub);
+    if sublen == 0 then { return true; } else { };
+    let mut i = 0;
+    while i + sublen <= slen {
+        let mut match = true;
+        let mut j = 0;
+        while j < sublen {
+            if String.charAt(s, i + j) != String.charAt(sub, j) then { match = false; } else { };
+            j = j + 1;
+        };
+        if match then { return true; } else { };
+        i = i + 1;
+    };
+    false
+}
+
+/// Check whether `s` starts with `prefix`.
+pub fn starts_with(s: String, prefix: String) -> Bool {
+    let plen = String.length(prefix);
+    let slen = String.length(s);
+    if plen > slen then { return false; } else { };
+    let mut i = 0;
+    while i < plen {
+        if String.charAt(s, i) != String.charAt(prefix, i) then { return false; } else { };
+        i = i + 1;
+    };
+    true
+}
+
+/// Check whether `s` ends with `suffix`.
+pub fn ends_with(s: String, suffix: String) -> Bool {
+    let sulen = String.length(suffix);
+    let slen = String.length(s);
+    if sulen > slen then { return false; } else { };
+    let offset = slen - sulen;
+    let mut i = 0;
+    while i < sulen {
+        if String.charAt(s, offset + i) != String.charAt(suffix, i) then { return false; } else { };
+        i = i + 1;
+    };
+    true
+}

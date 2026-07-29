@@ -1,0 +1,20 @@
+// Nulang standard library — HTTP client via built-in Http effect.
+// Import: `import std.http`
+//
+// The `Http` effect is wired into the runtime host (not the standalone VM).
+// Operations: `perform Http.get(url)` and `perform Http.post(url, body)`.
+
+/// Error type for HTTP operations.
+pub type HttpError = Timeout | ConnectionRefused | BadStatus(Int) | Other(String)
+
+/// Perform an HTTP GET request. Returns the response body as a String.
+/// Requires the runtime host (not available in standalone VM).
+pub fn get(url: String) -> String ! {Http} {
+    perform Http.get(url)
+}
+
+/// Perform an HTTP POST request with a body. Returns the response body as a String.
+/// Requires the runtime host (not available in standalone VM).
+pub fn post(url: String, body: String) -> String ! {Http} {
+    perform Http.post(url, body)
+}

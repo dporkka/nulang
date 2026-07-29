@@ -659,8 +659,22 @@ fn instantiate(ty: &Type) -> Type {
 // TypeChecker
 // ---------------------------------------------------------------------------
 
+/// Metadata for a registered typeclass.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct ClassInfo {
+    pub type_params: Vec<String>,
+    pub super_classes: Vec<String>,
+    pub methods: Vec<ClassMethod>,
+}
+
 /// Hindley-Milner type checker implementing Algorithm W.
-pub struct TypeChecker {}
+pub struct TypeChecker {
+    /// Registered typeclass declarations.
+    pub class_table: FxHashMap<String, ClassInfo>,
+    /// Registered instance declarations: (class_name, type_name) → methods.
+    pub instance_table: FxHashMap<(String, String), Vec<ImplMethod>>,
+}
 
 /// Recursively splice any `Decl::Module { decls, .. }` in place with its own
 /// contents, in source order, leaving every other declaration untouched.
@@ -683,7 +697,10 @@ fn flatten_decls(decls: &[Decl]) -> Vec<&Decl> {
 impl TypeChecker {
     /// Create a new type checker with an empty context.
     pub fn new() -> Self {
-        TypeChecker {}
+        TypeChecker {
+            class_table: FxHashMap::default(),
+            instance_table: FxHashMap::default(),
+        }
     }
 
     /// Type-check an entire module, returning the type of the last declaration.
@@ -694,7 +711,44 @@ impl TypeChecker {
     /// contents in the same flat, unqualified namespace as top-level decls).
     /// So declarations are flattened before checking, which both exports
     /// nested-module bindings to the enclosing scope and lets sibling decls
-    /// within the same nested module see each other.
+    /// Register class and instance declarations from a module into the
+    /// typechecker's tables. Call before `check_module` or as a separate
+    /// pass to populate the class/instance tables for later resolution.
+    pub fn register_class_decls(&mut self, module: &AstModule) {
+        for decl in flatten_decls(&module.decls) {
+            match decl {
+                Decl::Class {
+                    name,
+                    type_params,
+                    super_classes,
+                    methods,
+                    ..
+                } => {
+                    self.class_table.insert(
+                        name.clone(),
+                        ClassInfo {
+                            type_params: type_params.clone(),
+                            super_classes: super_classes.clone(),
+                            methods: methods.clone(),
+                        },
+                    );
+                }
+                Decl::Impl {
+                    class_name,
+                    for_type,
+                    methods,
+                    ..
+                } => {
+                    let type_key = format!("{}", for_type);
+                    self.instance_table
+                        .insert((class_name.clone(), type_key), methods.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Type-check an entire module, returning the type of the last declaration.
     pub fn check_module(&mut self, module: &AstModule) -> NuResult<Type> {
         let mut ctx = TypeContext::new();
         let mut last_type = Type::unit();
@@ -1030,6 +1084,8 @@ impl TypeChecker {
             }
             Decl::Import { .. } => Ok((vec![], Type::unit())),
             Decl::Database { .. } => Ok((vec![], Type::unit())),
+            Decl::Class { .. } => Ok((vec![], Type::unit())),
+            Decl::Impl { .. } => Ok((vec![], Type::unit())),
         }
     }
 

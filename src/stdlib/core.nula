@@ -112,3 +112,34 @@ pub fn compose[A, B, C](f: fn(B) -> C, g: fn(A) -> B) -> fn(A) -> C {
 
 /// Constant function: always returns the same value.
 pub fn const_fn[T, U](x: T, _y: U) -> T { x }
+
+// ── Extended Result combinators ───────────────────────────────────────────
+
+/// Unwrap a Result, panicking with the given message on Error.
+/// Unwrap a Result, printing an error message on Error and returning a default.
+pub fn expect[T, E](r: Result[T, E], msg: String, default: T) -> T {
+    match r {
+        Ok(x) => x,
+        Error(_) => { perform IO.print(msg); default },
+    }
+}
+pub fn or_else[T, E](r: Result[T, E], fallback: fn(E) -> T) -> T {
+    match r {
+        Ok(x) => x,
+        Error(e) => fallback(e),
+    }
+}
+
+/// Convert an Option to a Result, using a default error on None.
+pub fn ok_or[T, E](opt: Option[T], err: E) -> Result[T, E] {
+    match opt {
+        Some(x) => Ok(x),
+        None => Error(err),
+    }
+}
+
+/// Apply a fallible function if the Result is Ok, otherwise propagate the error.
+/// Shorter alias for `and_then_result`.
+pub fn flat_map[T, U, E](r: Result[T, E], f: fn(T) -> Result[U, E]) -> Result[U, E] {
+    and_then_result(r, f)
+}

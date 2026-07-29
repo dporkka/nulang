@@ -404,7 +404,23 @@ pub struct AgentRetryConfig {
     pub backoff: AgentBackoff,
 }
 
-// ---------------------------------------------------------------------------
+/// A method signature in a typeclass declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassMethod {
+    pub name: String,
+    pub params: Vec<(String, Type)>,
+    pub return_type: Type,
+    pub default_body: Option<Expr>,
+}
+
+/// A method implementation in an `impl` block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplMethod {
+    pub name: String,
+    pub params: Vec<(String, Type)>,
+    pub return_type: Type,
+    pub body: Expr,
+}
 // Declarations
 // ---------------------------------------------------------------------------
 
@@ -546,6 +562,22 @@ pub enum Decl {
     NamedHandler {
         name: String,
         handlers: Vec<EffectHandler>,
+        span: Span,
+    },
+    /// Typeclass declaration: `class Eq[T] { fn eq(self: T, other: T) -> Bool }`
+    Class {
+        name: String,
+        type_params: Vec<String>,
+        super_classes: Vec<String>,
+        methods: Vec<ClassMethod>,
+        span: Span,
+    },
+    /// Typeclass instance: `impl Eq[Int] { fn eq(self, other) = self == other }`
+    Impl {
+        class_name: String,
+        type_params: Vec<String>,
+        for_type: Type,
+        methods: Vec<ImplMethod>,
         span: Span,
     },
 }

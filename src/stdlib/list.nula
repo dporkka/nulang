@@ -103,3 +103,93 @@ pub fn all[T](arr: [T], pred: fn(T) -> Bool) -> Bool {
     };
     true
 }
+
+// ── Extended list operations ──────────────────────────────────────────────
+
+/// Sort an array using insertion sort (stable, O(n²)).
+pub fn sort[T](arr: [T]) -> [T] {
+    let result = [];
+    let mut i = 0;
+    let len = arr.len();
+    while i < len {
+        let val = arr[i];
+        let mut j = 0;
+        let rlen = result.len();
+        let mut inserted = false;
+        while j < rlen {
+            if !inserted && val < result[j] then {
+                result.push(val);
+                inserted = true;
+            } else { };
+            result.push(result[j]);
+            j = j + 1;
+        };
+        // Trim the old elements we just copied
+        let mut k = 0;
+        while k < rlen { result.remove(0); k = k + 1; };
+        if !inserted then { result.push(val); } else { };
+        i = i + 1;
+    };
+    result
+}
+
+/// Zip two arrays into an array of pairs. Stops at the shorter length.
+pub fn zip[T, U](left: [T], right: [U]) -> [(T, U)] {
+    let result = [];
+    let mut i = 0;
+    let len = if left.len() < right.len() then left.len() else right.len();
+    while i < len { result.push((left[i], right[i])); i = i + 1; };
+    result
+}
+
+/// Pair each element with its index: [(0, arr[0]), (1, arr[1]), ...].
+pub fn enumerate[T](arr: [T]) -> [(Int, T)] {
+    let result = [];
+    let mut i = 0;
+    let len = arr.len();
+    while i < len { result.push((i, arr[i])); i = i + 1; };
+    result
+}
+
+/// Generate an array of integers from `start` (inclusive) to `end` (exclusive).
+pub fn range(start: Int, end: Int) -> [Int] {
+    let result = [];
+    let mut i = start;
+    while i < end { result.push(i); i = i + 1; };
+    result
+}
+
+/// Group elements by a key function. Returns an array of (key, group) pairs.
+pub fn group_by[T, K](arr: [T], key_fn: fn(T) -> K) -> [(K, [T])] {
+    let result = [];
+    let mut i = 0;
+    let len = arr.len();
+    while i < len {
+        let item = arr[i];
+        let k = key_fn(item);
+        let mut found = false;
+        let mut j = 0;
+        let rlen = result.len();
+        while j < rlen {
+            let (rk, _) = result[j];
+            if rk == k then { found = true; } else { };
+            j = j + 1;
+        };
+        if found then {
+            // Append to existing group — rebuild the pair
+            let mut new_result = [];
+            let mut j2 = 0;
+            while j2 < rlen {
+                let (rk, rg) = result[j2];
+                if rk == k then { new_result.push((rk, append(rg, [item]))); }
+                else { new_result.push((rk, rg)); };
+                j2 = j2 + 1;
+            };
+            result = new_result;
+        } else {
+            result.push((k, [item]));
+        };
+        i = i + 1;
+    };
+    result
+}

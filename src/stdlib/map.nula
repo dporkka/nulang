@@ -1,0 +1,65 @@
+// Nulang standard library — Int→Int Map operations.
+// Import: `import stdlib::map`
+
+/// An empty map.
+pub fn empty() -> [(Int, Int)] { [] }
+
+/// Insert a key-value pair.
+pub fn insert(map: [(Int, Int)], key: Int, v: Int) -> [(Int, Int)] {
+    let result = &[];
+    let i = &0;
+    let inserted = &false;
+    let len = map.len();
+    while *i < len {
+        let (k, old_v) = map[*i];
+        if k == key then {
+            result.push((key, v));
+            inserted = true;
+        } else if !(*inserted) && key < k then {
+            result.push((key, v));
+            result.push((k, old_v));
+            inserted = true;
+        } else {
+            result.push((k, old_v));
+        };
+        i = *i + 1;
+    };
+    if !(*inserted) then { result.push((key, v)); } else { };
+    *result
+}
+
+/// Look up a key.
+pub fn get(map: [(Int, Int)], key: Int) -> Option[Int] {
+    let i = &0;
+    let len = map.len();
+    while *i < len {
+        let (k, v) = map[*i];
+        if k == key then { return Some(v); } else { };
+        i = *i + 1;
+    };
+    None
+}
+
+/// Remove a key.
+pub fn remove(map: [(Int, Int)], key: Int) -> [(Int, Int)] {
+    let result = &[];
+    let i = &0;
+    let len = map.len();
+    while *i < len {
+        let (k, v) = map[*i];
+        if k != key then { result.push((k, v)); } else { };
+        i = *i + 1;
+    };
+    *result
+}
+
+/// Check whether a key is present.
+pub fn contains(map: [(Int, Int)], key: Int) -> Bool {
+    match get(map, key) {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Number of key-value pairs.
+pub fn size(map: [(Int, Int)]) -> Int { map.len() }

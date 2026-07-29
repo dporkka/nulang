@@ -8103,8 +8103,7 @@ match { a: 2, b: 9 } with {
         assert_int(
             r#"
             fn early_return(x: Int) -> Int {
-                if x < 0 then fail 0
-                else x
+                if x < 0 then fail 0 else x
             }
             early_return(42)
             "#,
@@ -8117,8 +8116,7 @@ match { a: 2, b: 9 } with {
         assert_int(
             r#"
             fn early_return(x: Int) -> Int {
-                if x < 0 then fail 0
-                else x
+                if x < 0 then fail 0 else x
             }
             early_return(-5)
             "#,
@@ -8132,8 +8130,7 @@ match { a: 2, b: 9 } with {
             r#"
             type Result[Ok,Err] = Ok(Ok) | Error(Err)
             fn div(a: Int, b: Int) -> Int ! String {
-                if b == 0 then fail Error("div by zero")
-                else Ok(a / b)
+                if b == 0 then fail Error("div by zero") else Ok(a / b)
             }
             div(10, 2)?
             "#,
@@ -8159,5 +8156,79 @@ match { a: 2, b: 9 } with {
             "#,
             10,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Typeclass declarations (Phase 4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_class_declaration_parses() {
+        // Verify that class declarations parse without errors
+        let result = check_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            42
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "class declaration should parse: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_impl_declaration_parses() {
+        // Verify that impl declarations parse without errors
+        let result = check_source(
+            r#"
+            impl Eq Int {
+                fn eq(self, other) = self == other
+            }
+            42
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "impl declaration should parse: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_class_and_impl_together_parse() {
+        let result = check_source(
+            r#"
+            class Show[T] {
+                fn show(self: T) -> String
+            }
+            impl Show Int {
+                fn show(self) = "Int"
+            }
+            42
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "class+impl should parse: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_class_with_superclass_parses() {
+        let result = check_source(
+            r#"
+            class Eq[T] { fn eq(self: T, other: T) -> Bool }
+            class Ord[T]: Eq {
+                fn cmp(self: T, other: T) -> Int
+            }
+            42
+            "#,
+        );
+        assert!(result.is_ok(), "class with superclass: {:?}", result.err());
     }
 }

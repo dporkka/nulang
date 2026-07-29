@@ -1,0 +1,52 @@
+// Nulang standard library — Int Set operations.
+// Import: `import stdlib::set`
+
+/// An empty set.
+pub fn empty() -> [Int] { [] }
+
+/// Check whether a value is in the set.
+pub fn contains(set: [Int], value: Int) -> Bool {
+    let i = &0;
+    let len = set.len();
+    while *i < len {
+        if set[*i] == value then { return true; } else { };
+        i = *i + 1;
+    };
+    false
+}
+
+/// Insert a value into the set.
+pub fn insert(set: [Int], value: Int) -> [Int] {
+    if contains(set, value) then set
+    else {
+        let result = &[];
+        let i = &0;
+        let inserted = &false;
+        let len = set.len();
+        while *i < len {
+            if !(*inserted) && value < set[*i] then {
+                result.push(value);
+                inserted = true;
+            } else { };
+            result.push(set[*i]);
+            i = *i + 1;
+        };
+        if !(*inserted) then { result.push(value); } else { };
+        *result
+    }
+}
+
+/// Remove a value from the set.
+pub fn remove(set: [Int], value: Int) -> [Int] {
+    let result = &[];
+    let i = &0;
+    let len = set.len();
+    while *i < len {
+        if set[*i] != value then { result.push(set[*i]); } else { };
+        i = *i + 1;
+    };
+    *result
+}
+
+/// Number of elements in the set.
+pub fn size(set: [Int]) -> Int { set.len() }

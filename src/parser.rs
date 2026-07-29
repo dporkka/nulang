@@ -219,6 +219,8 @@ impl Parser {
                     span: self.current_span(),
                 })
             }
+            TokenKind::Class => self.parse_class(),
+            TokenKind::Impl => self.parse_impl(),
             TokenKind::Eof => Err(NuError::ParseError {
                 msg: "Unexpected end of file in declaration".to_string(),
                 span: self.current_span(),
@@ -1670,10 +1672,130 @@ impl Parser {
         })
     }
 
+    fn parse_class(&mut self) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance(); // consume 'class'
+        let name = self.expect_ident("class name")?;
+        // Type parameters [T, U]
+        let type_params = self.parse_type_params()?;
+        // Optional superclass: `class Ord[T]: Eq[T]`
+        let super_classes = if self.consume_if(&TokenKind::Colon) {
+            let mut supers = Vec::new();
+            supers.push(self.expect_ident("superclass name")?);
+            while self.consume_if(&TokenKind::Plus) {
+                supers.push(self.expect_ident("superclass name")?);
+            }
+            supers
+        } else {
+            Vec::new()
+        };
+        self.expect(TokenKind::LBrace)?;
+        self.skip_newlines();
+        let mut methods = Vec::new();
+        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.match_token(&TokenKind::RBrace) {
+                break;
+            }
+            // Method: `fn name(self: T, x: U) -> R` or `fn name(self: T, x: U) -> R = body`
+            self.expect(TokenKind::Fn)?;
+            let method_name = self.expect_ident("method name")?;
+            self.expect(TokenKind::LParen)?;
+            // Parse method params, accepting `self` as a special parameter name
+            let params = self.parse_method_params()?;
+            self.expect(TokenKind::RParen)?;
+            let return_type = if self.consume_if(&TokenKind::Arrow) {
+                self.parse_type()?
+            } else {
+                Type::unit()
+            };
+            // Optional default body: `= expr`
+            let default_body = if self.consume_if(&TokenKind::Assign) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            let typed_params: Vec<(String, Type)> = params
+                .iter()
+                .map(|(n, t)| (n.clone(), t.clone().unwrap_or(Type::unit())))
+                .collect();
+            methods.push(ClassMethod {
+                name: method_name,
+                params: typed_params,
+                return_type,
+                default_body,
+            });
+            self.skip_newlines_semicolons();
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Decl::Class {
+            name,
+            type_params,
+            super_classes,
+            methods,
+            span,
+        })
+    }
+
+    fn parse_impl(&mut self) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance(); // consume 'impl'
+        let class_name = self.expect_ident("class name")?;
+        // Type parameters [T, U]
+        let type_params = self.parse_type_params()?;
+        let for_type = self.parse_type()?;
+        self.expect(TokenKind::LBrace)?;
+        self.skip_newlines();
+        let mut methods = Vec::new();
+        while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.match_token(&TokenKind::RBrace) {
+                break;
+            }
+            // Method: `fn name(self, x) = expr`
+            self.expect(TokenKind::Fn)?;
+            let method_name = self.expect_ident("method name")?;
+            self.expect(TokenKind::LParen)?;
+            let params = self.parse_method_params()?;
+            self.expect(TokenKind::RParen)?;
+            let return_type = if self.consume_if(&TokenKind::Arrow) {
+                self.parse_type()?
+            } else {
+                Type::unit()
+            };
+            self.expect(TokenKind::Assign)?;
+            let body = self.parse_expr()?;
+            let typed_params: Vec<(String, Type)> = params
+                .iter()
+                .map(|(n, t)| (n.clone(), t.clone().unwrap_or(Type::unit())))
+                .collect();
+            methods.push(ImplMethod {
+                name: method_name,
+                params: typed_params,
+                return_type,
+                body,
+            });
+            self.skip_newlines_semicolons();
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Decl::Impl {
+            class_name,
+            type_params,
+            for_type,
+            methods,
+            span,
+        })
+    }
+
     fn parse_import(&mut self) -> NuResult<Decl> {
         let span = self.current_span();
         self.advance(); // consume 'import'
-        let path = self.expect_ident("import path")?;
+                        // Parse import path: ident | ident :: ident | ident :: ident :: ident ...
+        let mut path = self.expect_ident("import path")?;
+        while self.consume_if(&TokenKind::DoubleColon) {
+            path.push_str("::");
+            path.push_str(&self.expect_ident("module name")?);
+        }
         let items = Vec::new();
         self.skip_newlines_semicolons();
         Ok(Decl::Import { path, items, span })
@@ -3534,6 +3656,12 @@ impl Parser {
                     inner: Box::new(inner),
                 })
             }
+            TokenKind::LBracket => {
+                self.advance(); // consume '['
+                let inner = self.parse_type()?;
+                self.expect(TokenKind::RBracket)?;
+                Ok(Type::Array(Box::new(inner)))
+            }
             _ => Err(NuError::ParseError {
                 msg: format!("Expected type, found {}", current_kind),
                 span: self.current_span(),
@@ -4017,6 +4145,34 @@ impl Parser {
         self.skip_newlines();
         while self.peek_kind() != &TokenKind::RParen && !self.is_at_end() {
             let name = self.expect_ident("parameter name")?;
+            let ty = if self.consume_if(&TokenKind::Colon) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            params.push((name, ty));
+            self.skip_newlines();
+            if !self.consume_if(&TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        Ok(params)
+    }
+
+    /// Parse method parameters for class/impl methods. Accepts `self` keyword
+    /// as a parameter name in addition to regular identifiers.
+    fn parse_method_params(&mut self) -> NuResult<Vec<(String, Option<Type>)>> {
+        let mut params = Vec::new();
+        self.skip_newlines();
+        while self.peek_kind() != &TokenKind::RParen && !self.is_at_end() {
+            let name = match self.peek_kind() {
+                TokenKind::SelfKw => {
+                    self.advance();
+                    "self".to_string()
+                }
+                _ => self.expect_ident("parameter name")?,
+            };
             let ty = if self.consume_if(&TokenKind::Colon) {
                 Some(self.parse_type()?)
             } else {

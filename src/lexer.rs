@@ -88,6 +88,8 @@ pub enum TokenKind {
     Catch,
     Fail,
     Throws,
+    Class,
+    Impl,
     As,
 
     // Identifiers
@@ -227,6 +229,8 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Catch => write!(f, "catch"),
             TokenKind::Fail => write!(f, "fail"),
             TokenKind::Initial => write!(f, "initial"),
+            TokenKind::Class => write!(f, "class"),
+            TokenKind::Impl => write!(f, "impl"),
             TokenKind::As => write!(f, "as"),
             TokenKind::Throws => write!(f, "throws"),
             // Identifiers
@@ -969,8 +973,10 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "not" => Some(TokenKind::Not),
         "catch" => Some(TokenKind::Catch),
         "fail" => Some(TokenKind::Fail),
-        "unit" => Some(TokenKind::UnitLit),
+        "class" => Some(TokenKind::Class),
+        "impl" => Some(TokenKind::Impl),
         "throws" => Some(TokenKind::Throws),
+        "unit" => Some(TokenKind::UnitLit),
         "tool" => Some(TokenKind::Tool),
         "handler" => Some(TokenKind::Handler),
         "consume" => Some(TokenKind::Consume),

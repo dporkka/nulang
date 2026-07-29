@@ -25,7 +25,10 @@ pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
     let mut module = hir::Module::new(&ast.name);
     let tools = collect_tool_schemas(&ast.decls);
     for decl in &ast.decls {
-        if matches!(decl, Decl::NamedHandler { .. }) {
+        if matches!(
+            decl,
+            Decl::NamedHandler { .. } | Decl::Class { .. } | Decl::Impl { .. }
+        ) {
             continue;
         }
         module.decls.push(lower_decl(decl, &tools));
@@ -265,6 +268,11 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
                 &ast::desugar_state_machine(name, states, events, entry_hooks, exit_hooks, *span),
                 tools,
             )
+        }
+        Decl::Class { .. } | Decl::Impl { .. } => {
+            // Class/Impl are filtered out in lower_module before reaching
+            // lower_decl; this arm exists only for exhaustiveness.
+            unreachable!("Class/Impl should be filtered by lower_module")
         }
         Decl::Agent {
             name,

@@ -66,6 +66,34 @@ pub fn resolve_imports(
 }
 
 fn resolve_path(base: &Path, import: &str) -> PathBuf {
+    // stdlib::set → resolve to STDLIB_DIR/set.nula or dev fallback
+    if let Some(module) = import.strip_prefix("stdlib::") {
+        // Try NULANG_STDLIB env var first
+        if let Ok(dir) = std::env::var("NULANG_STDLIB") {
+            return PathBuf::from(dir).join(format!("{}.nula", module));
+        }
+        // Try relative to executable
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let candidate = exe_dir.join("stdlib").join(format!("{}.nula", module));
+                if candidate.exists() {
+                    return candidate;
+                }
+            }
+        }
+        // Development fallback: src/stdlib/ relative to CWD
+        if let Ok(cwd) = std::env::current_dir() {
+            let dev_path = cwd
+                .join("src")
+                .join("stdlib")
+                .join(format!("{}.nula", module));
+            if dev_path.exists() {
+                return dev_path;
+            }
+        }
+        // Last resort: relative to CWD
+        return PathBuf::from(format!("src/stdlib/{}.nula", module));
+    }
     let p = Path::new(import);
     let resolved = if p.is_absolute() {
         p.to_path_buf()
@@ -92,7 +120,11 @@ fn decl_name(decl: &Decl) -> Option<&str> {
         | Decl::Agent { name, .. }
         | Decl::Database { name, .. } => Some(name.as_str()),
         Decl::NamedHandler { name, .. } => Some(name.as_str()),
-        Decl::Extern { .. } | Decl::Workflow { .. } | Decl::Import { .. } => None,
+        Decl::Extern { .. }
+        | Decl::Workflow { .. }
+        | Decl::Import { .. }
+        | Decl::Class { .. }
+        | Decl::Impl { .. } => None,
     }
 }
 
