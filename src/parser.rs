@@ -3321,9 +3321,9 @@ impl Parser {
             else_branch: Some(Box::new(else_block)),
             span,
         };
-        let loop_body = Expr::LetRec {
+        let loop_body = Expr::Let {
             name: loop_fn.clone(),
-            params: vec![],
+            ty: None,
             value: Box::new(Expr::Lambda {
                 params: vec![],
                 ret_type: None,
@@ -5569,15 +5569,15 @@ mod tests {
     fn test_parse_until_desugars_to_polling_loop() {
         let source = "until x > 0 => 42";
         let expr = parse_expr(source).unwrap();
-        // Should desugar to: let __until_poll = 100 in let rec __until_loop = fn() { ... } in __until_loop()
+        // Should desugar to: let __until_poll = 100 in let __until_loop = fn() { ... } in __until_loop()
         match expr {
             Expr::Let { name, body, .. } => {
                 assert_eq!(name, "__until_poll");
                 match body.as_ref() {
-                    Expr::LetRec { name, .. } => {
+                    Expr::Let { name, .. } => {
                         assert_eq!(name, "__until_loop");
                     }
-                    _ => panic!("Expected LetRec for __until_loop"),
+                    _ => panic!("Expected Let for __until_loop, got {:?}", body),
                 }
             }
             _ => panic!("Expected Let for __until_poll, got {:?}", expr),
