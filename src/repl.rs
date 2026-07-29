@@ -246,7 +246,7 @@ fn color_for_token(kind: &crate::lexer::TokenKind) -> &'static str {
         | Compensate | Agent | Database | Receive | Effect | Perform | Handle | Resume | Extern
         | Module | Import | Pub | Migrate | Monitor | Link | Exit | For | While | Break
         | Return | Type | Alias | Iso | Trn | Ref | Val | Box | Tag | True | False | Unit
-        | Tool | Initial | Throws | As => "\x1b[1;33m",
+        | Tool | Handler | Consume | Initial | Throws | As => "\x1b[1;33m",
         // String literals — green
         StringLit(_) => "\x1b[32m",
         // Numeric literals — magenta

@@ -1819,7 +1819,7 @@ impl VM {
     }
 
     /// Execute a single bytecode instruction.
-
+    ///
     /// Execute the FFICall opcode — foreign function interface dispatch.
     fn step_fficall(
         &mut self,

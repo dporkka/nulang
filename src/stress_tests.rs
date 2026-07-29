@@ -570,7 +570,7 @@ fn stress_orphaned_actor_cleanup() {
     // Remaining count should be consistent
     let actual_remaining = rt.actors.len();
     assert!(
-        actual_remaining <= N - 1,
+        actual_remaining < N,
         "some actors should remain after cleanup, got {}",
         actual_remaining
     );
