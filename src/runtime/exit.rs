@@ -6,6 +6,7 @@ use crate::runtime::{
     ActorState, ExitReason, Message, MessagePriority, Runtime, Supervisor, SupervisorAction,
 };
 use crate::vm::Value;
+use std::sync::Arc;
 
 /// Exit an actor with the given reason, then run the full exit protocol:
 /// reap the actor (notify monitors, propagate links, release ORCA holds,
@@ -124,7 +125,10 @@ pub(crate) fn reap_living_actor(rt: &mut Runtime, actor_id: u64, reason: ExitRea
             if traps {
                 let exit_msg = Message {
                     behavior_id: 0,
-                    payload: vec![Value::int(actor_id as i64), Value::int(linked_id as i64)],
+                    payload: Arc::new(vec![
+                        Value::int(actor_id as i64),
+                        Value::int(linked_id as i64),
+                    ]),
                     sender: actor_id,
                     priority: MessagePriority::System,
                 };
@@ -206,7 +210,7 @@ pub(crate) fn send_down_message(
     let reason_str = reason.tag();
     let down_msg = Message {
         behavior_id: 0,
-        payload: vec![
+        payload: Arc::new(vec![
             Value::int(target_id as i64),
             Value::int(watcher_id as i64),
             Value::int(match reason {
@@ -217,7 +221,7 @@ pub(crate) fn send_down_message(
                 ExitReason::Shutdown(_) => 4,
                 ExitReason::Custom(_) => 5,
             }),
-        ],
+        ]),
         sender: target_id,
         priority: MessagePriority::System,
     };

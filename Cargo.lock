@@ -2305,7 +2305,6 @@ dependencies = [
  "crossbeam",
  "ed25519-dalek",
  "hex",
- "httparse",
  "libloading",
  "libsql",
  "mimalloc",

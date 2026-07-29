@@ -14,11 +14,16 @@
 use crate::vm::Value;
 use crossbeam::queue::SegQueue;
 use std::collections::VecDeque;
+use std::sync::Arc;
+
 /// Message sent between actors.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub behavior_id: u16,
-    pub payload: Vec<Value>,
+    /// Payload values, shared via `Arc` to avoid cloning on every
+    /// `receive_match` scan. The VM never mutates incoming payloads,
+    /// so `Arc` is safe.
+    pub payload: Arc<Vec<Value>>,
     pub sender: u64, // Actor ID of sender
     pub priority: MessagePriority,
 }
@@ -39,27 +44,26 @@ pub enum MessagePriority {
 /// When `capacity > 0`, `push` rejects `Normal` and `Bulk` messages once
 /// the total message count reaches the limit.  `System` messages always
 /// succeed, preserving BEAM/OTP reliability guarantees.
+///
+/// All methods that access the skip-buffer take `&mut self` because they
+/// run exclusively on the single scheduler thread — no `RefCell` needed.
 pub struct Mailbox {
     system_queue: SegQueue<Message>,
     normal_queue: SegQueue<Message>,
     capacity: usize,
     /// Skip-buffer for non-matching normal messages drained during selective
-    /// receive (`receive_match`).  Messages popped from `normal_queue` during
-    /// a scan that do not match any candidate behavior id stay here in FIFO
-    /// order until a later `receive_match` finds a match, `pop` retrieves
-    /// them, or `flush_skip_buffer` returns them to `normal_queue` at the end
-    /// of the actor's turn.  System messages are NOT placed here — they are
-    /// scanned directly from `system_queue` to preserve priority ordering.
+    /// receive (`receive_match`). Messages stay here in FIFO order until a
+    /// later `receive_match` finds a match. System messages are NOT placed
+    /// here — they are scanned directly from `system_queue`.
     skip_buffer: VecDeque<(Message, bool)>,
 }
 
-// SAFETY: `Mailbox` is `Sync` because the only `!Sync` field,
-// `skip_buffer: VecDeque<(Message, bool)>`, is accessed exclusively from
-// the scheduler thread (all `receive_match`/`pop`/`flush_skip_buffer` calls
-// happen within `step_actor` or the VM's `ReceiveMatch` handler, both of
-// which run on the single scheduler thread).  The `SegQueue` fields are
-// already `Sync` (lock-free concurrent queues) and may be safely pushed
-// from multiple threads — this is what `test_concurrent_push` exercises.
+// SAFETY: `Mailbox` is `Sync` because all mutable state (`skip_buffer`)
+// is accessed exclusively from the scheduler thread (all `receive_match`/
+// `pop`/`flush_skip_buffer` calls happen within `step_actor` or the VM's
+// `ReceiveMatch` handler, both running on the single scheduler thread).
+// The `SegQueue` fields are already `Sync` (lock-free concurrent queues)
+// and may be safely pushed from multiple threads.
 unsafe impl Sync for Mailbox {}
 
 impl Mailbox {
@@ -115,7 +119,7 @@ impl Mailbox {
     /// scanned; non-matching messages stay in the buffer so the next call
     /// does not re-drain the concurrent queue.  This makes repeated
     /// selective receive O(skipped) amortized instead of O(N) per call.
-    pub fn receive_match(&mut self, behavior_ids: &[u16]) -> Option<(usize, Vec<Value>)> {
+    pub fn receive_match(&mut self, behavior_ids: &[u16]) -> Option<(usize, Arc<Vec<Value>>)> {
         // Scan system queue first (small, rare — drain-scan-requeue is fine).
         if let Some(result) = Self::scan_queue(&self.system_queue, behavior_ids) {
             return Some(result);
@@ -124,26 +128,25 @@ impl Mailbox {
         // behavior id matches. Mark it "tried" and return a clone of its
         // payload. The message stays in the buffer until `commit_receive_match`
         // removes it or `reset_receive_match` clears the tried flag.
-        let buf = &mut self.skip_buffer;
-        for i in 0..buf.len() {
-            let (tried, bid) = (buf[i].1, buf[i].0.behavior_id);
+        for i in 0..self.skip_buffer.len() {
+            let (tried, bid) = (self.skip_buffer[i].1, self.skip_buffer[i].0.behavior_id);
             if !tried {
                 if let Some(pos) = behavior_ids.iter().position(|&id| id == bid) {
-                    buf[i].1 = true; // mark tried
-                    return Some((pos, buf[i].0.payload.clone()));
+                    self.skip_buffer[i].1 = true; // mark tried
+                    return Some((pos, Arc::clone(&self.skip_buffer[i].0.payload)));
                 }
             }
         }
         // Drain the normal queue into the buffer, then scan again.
         while let Some(msg) = self.normal_queue.pop() {
-            buf.push_back((msg, false));
+            self.skip_buffer.push_back((msg, false));
         }
-        for i in 0..buf.len() {
-            let (tried, bid) = (buf[i].1, buf[i].0.behavior_id);
+        for i in 0..self.skip_buffer.len() {
+            let (tried, bid) = (self.skip_buffer[i].1, self.skip_buffer[i].0.behavior_id);
             if !tried {
                 if let Some(pos) = behavior_ids.iter().position(|&id| id == bid) {
-                    buf[i].1 = true; // mark tried
-                    return Some((pos, buf[i].0.payload.clone()));
+                    self.skip_buffer[i].1 = true; // mark tried
+                    return Some((pos, Arc::clone(&self.skip_buffer[i].0.payload)));
                 }
             }
         }
@@ -152,7 +155,10 @@ impl Mailbox {
 
     /// Drain and scan a single queue for a matching message.  Used for the
     /// system queue only (small, rare); the normal queue uses the skip-buffer.
-    fn scan_queue(queue: &SegQueue<Message>, behavior_ids: &[u16]) -> Option<(usize, Vec<Value>)> {
+    fn scan_queue(
+        queue: &SegQueue<Message>,
+        behavior_ids: &[u16],
+    ) -> Option<(usize, Arc<Vec<Value>>)> {
         let mut drained: Vec<Message> = Vec::new();
         while let Some(msg) = queue.pop() {
             drained.push(msg);
@@ -212,9 +218,7 @@ impl Mailbox {
         snapshot
     }
 
-    /// Return all skip-buffer messages to `normal_queue`, then clear the
-    /// buffer. Called at the end of each actor turn so `is_empty()`
-    /// correctly reflects pending messages.
+    /// Return all skip-buffer messages to `normal_queue`, then clear the buffer.
     pub fn flush_skip_buffer(&mut self) {
         while let Some((msg, _)) = self.skip_buffer.pop_front() {
             self.normal_queue.push(msg);
@@ -230,13 +234,12 @@ impl Mailbox {
     /// the skip-buffer and clear remaining "tried" flags. Called after a
     /// pattern+guard check succeeds.
     pub fn commit_receive_match(&mut self) {
-        let buf = &mut self.skip_buffer;
         // Remove the first tried entry.
-        if let Some(idx) = buf.iter().position(|(_, tried)| *tried) {
-            buf.remove(idx);
+        if let Some(idx) = self.skip_buffer.iter().position(|(_, tried)| *tried) {
+            self.skip_buffer.remove(idx);
         }
         // Clear remaining tried flags.
-        for (_, tried) in buf.iter_mut() {
+        for (_, tried) in self.skip_buffer.iter_mut() {
             *tried = false;
         }
     }
@@ -245,8 +248,7 @@ impl Mailbox {
     /// `receive_match` returns `None`, preparing the buffer for the next
     /// receive expression.
     pub fn reset_receive_match(&mut self) {
-        let buf = &mut self.skip_buffer;
-        for (_, tried) in buf.iter_mut() {
+        for (_, tried) in self.skip_buffer.iter_mut() {
             *tried = false;
         }
     }
@@ -264,7 +266,7 @@ mod tests {
     fn make_msg(behavior_id: u16, sender: u64) -> Message {
         Message {
             behavior_id,
-            payload: vec![Value::int(42)],
+            payload: Arc::new(vec![Value::int(42)]),
             sender,
             priority: MessagePriority::Normal,
         }
@@ -286,7 +288,7 @@ mod tests {
         let popped = mb.pop().unwrap();
         assert_eq!(popped.behavior_id, 1);
         assert_eq!(popped.sender, 100);
-        assert_eq!(popped.payload, vec![Value::int(42)]);
+        assert_eq!(*popped.payload, vec![Value::int(42)]);
 
         assert!(mb.is_empty());
         assert_eq!(mb.pop(), None);
@@ -315,7 +317,6 @@ mod tests {
         assert!(mb.is_empty());
     }
 
-    // Test 3: Supervisor signals never dropped.
     #[test]
     fn test_supervisor_signals_never_dropped() {
         let mut mb = Mailbox::new(4);
@@ -324,7 +325,7 @@ mod tests {
         for i in 0..1000 {
             let signal = Message {
                 behavior_id: 0, // System message
-                payload: vec![Value::int(i)],
+                payload: Arc::new(vec![Value::int(i)]),
                 sender: i as u64,
                 priority: MessagePriority::System,
             };
@@ -365,7 +366,6 @@ mod tests {
         assert!(mb.is_empty());
         assert_eq!(mb.len(), 0);
     }
-
     // Test 5: drain returns a cloned snapshot without removing messages.
     #[test]
     fn test_drain_snapshot() {
@@ -386,14 +386,12 @@ mod tests {
         assert_eq!(mb.pop().unwrap().behavior_id, 2);
         assert_eq!(mb.pop().unwrap().behavior_id, 3);
     }
-
-    // Test 6: Concurrent push from multiple threads.
     #[test]
     fn test_concurrent_push() {
         use std::sync::Arc;
         use std::thread;
 
-        let mut mb = Arc::new(Mailbox::new(0)); // 0 = unbounded for concurrent test
+        let mb = Arc::new(Mailbox::new(0)); // 0 = unbounded for concurrent test
         let mut handles = Vec::new();
 
         for t in 0..4 {
@@ -414,14 +412,14 @@ mod tests {
         // All 400 messages should be present
         assert_eq!(mb.len(), 400);
 
-        let mb = Arc::get_mut(&mut mb).expect("only reference after join");
+        // Recover the owned Mailbox so we can call &mut self methods.
+        let mut mb = Arc::try_unwrap(mb).unwrap_or_else(|_| panic!("Arc still has live clones"));
         let mut count = 0;
         while mb.pop().is_some() {
             count += 1;
         }
         assert_eq!(count, 400);
     }
-
     // Test 7: receive_match preserves the relative FIFO order of ALL
     // non-matched messages, including those queued behind the match.
     #[test]
@@ -432,7 +430,7 @@ mod tests {
         mb.push(make_msg(3, 300)).unwrap(); // C: queued behind the match
 
         let found = mb.receive_match(&[2]);
-        assert_eq!(found, Some((0, vec![Value::int(42)])));
+        assert_eq!(found, Some((0, Arc::new(vec![Value::int(42)]))));
         // Commit: remove the matched ("tried") message from the skip-buffer.
         mb.commit_receive_match();
 

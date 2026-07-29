@@ -369,6 +369,13 @@ impl Parser {
         // so existing behavior is unchanged; `entity` is the durable-first form.
         let name = self.expect_ident("actor name")?;
         let type_params = self.parse_type_params()?;
+        let implements = match self.peek_kind() {
+            TokenKind::Ident(s) if s == "implements" => {
+                self.advance();
+                Some(self.expect_ident("contract name")?)
+            }
+            _ => None,
+        };
         self.expect(TokenKind::LBrace)?;
 
         let mut state_fields = Vec::new();
@@ -489,6 +496,7 @@ impl Parser {
             apply_handlers,
             migrations,
             is_organization: is_org,
+            implements,
             span,
         })
     }

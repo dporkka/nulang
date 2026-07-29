@@ -51,7 +51,9 @@ pub(crate) fn checkpoint_actor(rt: &mut Runtime, actor_id: u64) {
             let persisted = if name == "semantic_memory" || name == "procedural_memory" {
                 vm_value_to_string_in_actor(value, actor)
                     .map(PersistedValue::String)
-                    .unwrap_or_else(|| PersistedValue::from_value_resolved(value, actor.bytecode_module.as_ref()))
+                    .unwrap_or_else(|| {
+                        PersistedValue::from_value_resolved(value, actor.bytecode_module.as_ref())
+                    })
             } else {
                 PersistedValue::from_value_resolved(value, actor.bytecode_module.as_ref())
             };
@@ -117,8 +119,10 @@ pub(crate) fn emit_event(rt: &mut Runtime, actor_id: u64, event: &str, args: &[V
         // Persist events for EventSourced fields (non-workflow actors).
         if !is_workflow && !event_sourced_names.is_empty() {
             let module = actor.bytecode_module.as_ref();
-            let persisted_args: Vec<PersistedValue> =
-                args.iter().map(|v| PersistedValue::from_value_resolved(v, module)).collect();
+            let persisted_args: Vec<PersistedValue> = args
+                .iter()
+                .map(|v| PersistedValue::from_value_resolved(v, module))
+                .collect();
             for name in &event_sourced_names {
                 let entry = EventEntry {
                     sequence: seq,
@@ -155,9 +159,14 @@ pub(crate) fn emit_event(rt: &mut Runtime, actor_id: u64, event: &str, args: &[V
                 actor.set_state_field("parallel_progress", Value::int(current + 1));
             }
         } else {
-            let module = rt.actors.get(&actor_id).and_then(|a| a.bytecode_module.as_ref());
-            let payload: Vec<PersistedValue> =
-                args.iter().map(|v| PersistedValue::from_value_resolved(v, module)).collect();
+            let module = rt
+                .actors
+                .get(&actor_id)
+                .and_then(|a| a.bytecode_module.as_ref());
+            let payload: Vec<PersistedValue> = args
+                .iter()
+                .map(|v| PersistedValue::from_value_resolved(v, module))
+                .collect();
             let _ = rt.persistence.append_workflow_event(
                 actor_id,
                 WorkflowEvent::Custom {

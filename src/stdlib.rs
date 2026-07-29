@@ -385,6 +385,43 @@ pub fn stdlib_docs() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Behavior contracts
+// ---------------------------------------------------------------------------
+
+/// A behavior contract that an actor can declare it implements.
+/// The compiler verifies that the actor has all required handler behaviors
+/// with compatible signatures.
+#[derive(Debug, Clone)]
+pub struct BehaviorContract {
+    /// Contract name (e.g. "StatefulService").
+    pub name: &'static str,
+    /// Required handler behaviors. Each entry is `(handler_name, param_count)`.
+    /// The compiler checks that the actor declares a behavior with matching
+    /// name and compatible parameter count.
+    pub required_handlers: &'static [(&'static str, usize)],
+    /// Human-readable description.
+    pub description: &'static str,
+}
+
+/// Built-in behavior contracts that the compiler knows about.
+pub const BUILTIN_CONTRACTS: &[BehaviorContract] = &[BehaviorContract {
+    name: "StatefulService",
+    required_handlers: &[
+        ("init", 1),
+        ("handle_call", 2),
+        ("handle_cast", 1),
+        ("handle_info", 1),
+        ("terminate", 1),
+    ],
+    description:
+        "Erlang/OTP gen_server-style stateful service with init/call/cast/info/terminate handlers.",
+}];
+
+/// Look up a built-in behavior contract by name.
+pub fn lookup_contract(name: &str) -> Option<&'static BehaviorContract> {
+    BUILTIN_CONTRACTS.iter().find(|c| c.name == name)
+}
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

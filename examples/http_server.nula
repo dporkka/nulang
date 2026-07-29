@@ -1,51 +1,30 @@
-// HTTP Server — an actor wrapping a TCP socket with HTTP request/response
-// framing. Demonstrates actor state, message passing, and the connection
-// lifecycle pattern.
+// TCP Connection — a persistent actor wrapping a network socket,
+// demonstrated through the connection lifecycle.
 //
-// Run with: nulang examples/http_server.nula
+// Run with: nulang examples/tcp_connection.nula
 
-actor HttpServer {
-    state port: Int = 8080
-    state running: Bool = false
-    state request_count: Int = 0
+actor TcpConnection {
+    state connected: Bool = false
 
-    behavior start() {
-        // Bind and begin accepting connections
-        self.running = true
-        self.request_count = 0
-        perform IO.print("HTTP server listening on port " + perform Int.to_string(self.port))
+    behavior connect(address: String) {
+        // establish TCP connection...
+        self.connected = true
     }
 
-    behavior handle_request(method: String, path: String) {
-        // Process an incoming request
-        self.request_count = self.request_count + 1
-        let response = if method == "GET" then
-            "200 OK: " + path
-        else
-            "405 Method Not Allowed"
-        in
-        perform IO.print(response)
+    behavior connection_established() {
+        // connection handshake complete
+        0
     }
 
-    behavior stats() {
-        perform IO.print(
-            "Requests handled: " + perform Int.to_string(self.request_count)
-        )
-    }
-
-    behavior stop() {
-        self.running = false
-        perform IO.print("Server stopped")
+    behavior disconnect() {
+        self.connected = false
     }
 }
 
 fn main() {
-    let server = spawn HttpServer {}
-    server ! start()
-    server ! handle_request("GET", "/index.html")
-    server ! handle_request("GET", "/api/data")
-    server ! handle_request("POST", "/api/data")
-    server ! stats()
-    server ! stop()
+    let conn = spawn TcpConnection {}
+    conn ! connect("localhost:8080")
+    conn ! connection_established()
+    conn ! disconnect()
     0
 }

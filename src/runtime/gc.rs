@@ -577,8 +577,8 @@ impl OrcaGc {
     // Internal helpers
     // ------------------------------------------------------------------
 
-    /// Remove `header` from the deferred-decrement list.  Avoids that a
-    /// later `process_deferred` pass does not touch freed memory.
+    /// Remove `header` from the deferred-decrement list.
+    ///
     pub fn remove_deferred(&mut self, header: *mut OrcaHeader) {
         if let Some(pos) = self.deferred_decrements.iter().position(|&h| h == header) {
             self.deferred_decrements.swap_remove(pos);
@@ -633,7 +633,7 @@ impl OrcaGc {
         // A recursive child release above may have freed objects that were
         // still queued here; never let the deferred list point at freed
         // memory (process_deferred drains one entry at a time for the same
-        // reason).
+        // reason). Linear scan + swap_remove avoids Vec::retain's full copy.
         if let Some(pos) = self
             .deferred_decrements
             .iter()

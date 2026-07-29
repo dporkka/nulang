@@ -769,7 +769,64 @@ impl TypeChecker {
             }
             last_type = final_ty;
         }
+        // Verify behavior contracts for actors with `implements` clauses.
+        self.verify_behavior_contracts(module)?;
         Ok(last_type)
+    }
+
+    /// Verify that every actor declaring `implements <contract>` actually
+    /// provides all required handler behaviors with compatible signatures.
+    fn verify_behavior_contracts(&self, module: &AstModule) -> NuResult<()> {
+        for decl in &module.decls {
+            self.verify_decl_contracts(decl)?;
+        }
+        Ok(())
+    }
+
+    fn verify_decl_contracts(&self, decl: &Decl) -> NuResult<()> {
+        match decl {
+            Decl::Actor {
+                name,
+                behaviors,
+                implements,
+                span,
+                ..
+            } => {
+                if let Some(contract_name) = implements {
+                    let contract = crate::stdlib::lookup_contract(contract_name);
+                    match contract {
+                        Some(c) => {
+                            for &(handler_name, param_count) in c.required_handlers {
+                                let found = behaviors.iter().any(|b| {
+                                    b.name == handler_name && b.params.len() == param_count
+                                });
+                                if !found {
+                                    let msg = format!(
+                                        "actor '{}' declares it implements '{}' but is missing required handler '{}' (expects {} parameter(s))",
+                                        name, contract_name, handler_name, param_count
+                                    );
+                                    return Err(NuError::TypeError { msg, span: *span });
+                                }
+                            }
+                        }
+                        None => {
+                            let msg = format!(
+                                "unknown behavior contract '{}' in actor '{}'",
+                                contract_name, name
+                            );
+                            return Err(NuError::TypeError { msg, span: *span });
+                        }
+                    }
+                }
+            }
+            Decl::Module { decls, .. } => {
+                for d in decls {
+                    self.verify_decl_contracts(d)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Infer the type of a declaration.
@@ -916,7 +973,12 @@ impl TypeChecker {
                 }
                 Ok((all_subst, last))
             }
-            Decl::Import { .. } => Ok((vec![], Type::unit())),
+            Decl::NamedHandler { .. } => {
+                // NamedHandler declarations are resolved at parse time
+                // (handlers inlined into handle expressions). They carry
+                // no runtime type and produce no code.
+                Ok((vec![], Type::unit()))
+            }
             Decl::Workflow {
                 name: _,
                 input,
@@ -956,6 +1018,7 @@ impl TypeChecker {
                 };
                 Ok((vec![], workflow_ty))
             }
+            Decl::Import { .. } => Ok((vec![], Type::unit())),
             Decl::Database { .. } => Ok((vec![], Type::unit())),
         }
     }
@@ -3487,7 +3550,7 @@ mod tests {
         let mut tc = TypeChecker::new();
         let ctx = TypeContext::new();
         let lam = Expr::Lambda {
-                ret_type: None,
+            ret_type: None,
             params: vec![("x".to_string(), Some(Type::int()))],
             body: Box::new(var("x")),
             effect: Some(EffectRow::Closed(vec![Effect::IO])),

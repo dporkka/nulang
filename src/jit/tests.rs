@@ -812,7 +812,7 @@ fn test_infer_reg_types_conservative() {
     assert!(
         meta2.is_empty(),
         "unmodeled opcodes must clobber all register types, got {:?}",
-        meta2
+        meta2.regs
     );
 }
 

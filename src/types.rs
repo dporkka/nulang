@@ -17,7 +17,7 @@ pub struct TypeVar(pub u64);
 
 impl std::fmt::Display for TypeVar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "'t{}", self.0)
+        write!(f, "'_")
     }
 }
 
@@ -398,7 +398,7 @@ pub enum Type {
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Type::Var(v) => write!(f, "'t{}", v.0),
+            Type::Var(v) => write!(f, "{}", v),
             Type::Primitive(p) => match p {
                 PrimitiveType::Int => write!(f, "Int"),
                 PrimitiveType::Float => write!(f, "Float"),

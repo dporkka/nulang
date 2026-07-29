@@ -31,7 +31,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -48,6 +48,183 @@ use super::NodeId;
 use crate::vm::Value;
 
 use tracing::warn;
+
+// ---------------------------------------------------------------------------
+// TLS configuration
+// ---------------------------------------------------------------------------
+
+/// TLS configuration for the NUL0 wire protocol.
+///
+/// When `Some`, every TCP connection is upgraded to TLS immediately after
+/// the TCP connect/accept but *before* the NUL0 versioned handshake.
+///
+/// `SelfSigned` uses `rcgen` to generate a self-signed certificate;
+/// this is suitable for development and testing.
+#[derive(Clone)]
+pub enum TlsConfig {
+    /// Use a self-signed certificate generated via rcgen.
+    SelfSigned,
+}
+
+impl TlsConfig {
+    fn server_config(&self) -> io::Result<rustls::ServerConfig> {
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let cert_der =
+            rustls::pki_types::CertificateDer::from(cert.cert.der().clone().into_owned());
+        let key_der = rustls::pki_types::PrivateKeyDer::from(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
+        );
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+
+    fn client_config(&self) -> io::Result<rustls::ClientConfig> {
+        use rustls::client::danger::{
+            HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+        };
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use rustls::{DigitallySignedStruct, SignatureScheme};
+
+        #[derive(Debug)]
+        struct NoVerification;
+        impl ServerCertVerifier for NoVerification {
+            fn verify_server_cert(
+                &self,
+                _end_entity: &CertificateDer<'_>,
+                _intermediates: &[CertificateDer<'_>],
+                _server_name: &ServerName<'_>,
+                _ocsp_response: &[u8],
+                _now: UnixTime,
+            ) -> Result<ServerCertVerified, rustls::Error> {
+                Ok(ServerCertVerified::assertion())
+            }
+            fn verify_tls12_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            fn verify_tls13_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                vec![
+                    SignatureScheme::RSA_PKCS1_SHA256,
+                    SignatureScheme::ECDSA_NISTP256_SHA256,
+                    SignatureScheme::ED25519,
+                ]
+            }
+        }
+
+        Ok(rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoVerification))
+            .with_no_client_auth())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TransportStream — abstracts over raw TCP and TLS-wrapped streams
+// ---------------------------------------------------------------------------
+
+/// A duplex transport stream that can be either a plain `TcpStream` or a
+/// TLS-wrapped connection.  TLS streams are shared behind `Arc<Mutex<>>`
+/// because `rustls::StreamOwned` cannot be cloned the way `TcpStream` can.
+pub(crate) enum TransportStream {
+    Raw(TcpStream),
+    TlsServer(
+        std::sync::Arc<std::sync::Mutex<rustls::StreamOwned<rustls::ServerConnection, TcpStream>>>,
+    ),
+    TlsClient(
+        std::sync::Arc<std::sync::Mutex<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>>,
+    ),
+}
+
+impl TransportStream {
+    /// Create a clone suitable for the reader half of a duplex connection.
+    /// For raw TCP this duplicates the file descriptor; for TLS this clones
+    /// the `Arc` so reader and writer share the same TLS session.
+    fn try_clone(&self) -> io::Result<TransportStream> {
+        match self {
+            TransportStream::Raw(s) => Ok(TransportStream::Raw(s.try_clone()?)),
+            TransportStream::TlsServer(s) => Ok(TransportStream::TlsServer(s.clone())),
+            TransportStream::TlsClient(s) => Ok(TransportStream::TlsClient(s.clone())),
+        }
+    }
+
+    fn shutdown(&self) -> io::Result<()> {
+        match self {
+            TransportStream::Raw(s) => s.shutdown(std::net::Shutdown::Both),
+            TransportStream::TlsServer(s) => {
+                let mut locked = s.lock().unwrap();
+                let _ = locked.conn.send_close_notify();
+                locked.get_ref().shutdown(std::net::Shutdown::Both)
+            }
+            TransportStream::TlsClient(s) => {
+                let mut locked = s.lock().unwrap();
+                let _ = locked.conn.send_close_notify();
+                locked.get_ref().shutdown(std::net::Shutdown::Both)
+            }
+        }
+    }
+}
+
+impl Read for TransportStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            TransportStream::Raw(s) => s.read(buf),
+            TransportStream::TlsServer(s) => s.lock().unwrap().read(buf),
+            TransportStream::TlsClient(s) => s.lock().unwrap().read(buf),
+        }
+    }
+}
+
+impl Write for TransportStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            TransportStream::Raw(s) => s.write(buf),
+            TransportStream::TlsServer(s) => s.lock().unwrap().write(buf),
+            TransportStream::TlsClient(s) => s.lock().unwrap().write(buf),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            TransportStream::Raw(s) => s.flush(),
+            TransportStream::TlsServer(s) => s.lock().unwrap().flush(),
+            TransportStream::TlsClient(s) => s.lock().unwrap().flush(),
+        }
+    }
+}
+
+fn tls_wrap_server(tcp: TcpStream, config: &TlsConfig) -> io::Result<TransportStream> {
+    let cfg = config.server_config()?;
+    let conn = rustls::ServerConnection::new(std::sync::Arc::new(cfg))
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    Ok(TransportStream::TlsServer(std::sync::Arc::new(
+        std::sync::Mutex::new(rustls::StreamOwned::new(conn, tcp)),
+    )))
+}
+
+fn tls_wrap_client(tcp: TcpStream, config: &TlsConfig) -> io::Result<TransportStream> {
+    let cfg = config.client_config()?;
+    let name = rustls::pki_types::ServerName::try_from("localhost")
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let conn = rustls::ClientConnection::new(std::sync::Arc::new(cfg), name)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    Ok(TransportStream::TlsClient(std::sync::Arc::new(
+        std::sync::Mutex::new(rustls::StreamOwned::new(conn, tcp)),
+    )))
+}
 
 // ---------------------------------------------------------------------------
 // TransportAddr — network address for TCP or Unix domain sockets
@@ -161,6 +338,8 @@ const TYPE_SPAWN_RESPONSE: u8 = 4;
 const TYPE_CRDT_SYNC: u8 = 5;
 const TYPE_GOSSIP: u8 = 6;
 const TYPE_CRDT_DELTA_SYNC: u8 = 7;
+const TYPE_FETCH_BEHAVIOR_REQUEST: u8 = 8;
+const TYPE_FETCH_BEHAVIOR_RESPONSE: u8 = 9;
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -251,6 +430,27 @@ pub enum Packet {
     /// transitive propagation: a node relays what it knows, so a chain of
     /// pairwise seeds still converges to a full mesh.
     Gossip { members: Vec<NodeGossip> },
+
+    /// Request bytecode for a behavior identified by its BLAKE3 content hash.
+    ///
+    /// Sent by a node that receives a message for a behavior it doesn't have.
+    /// The sender replies with `FetchBehaviorResponse` containing the compiled
+    /// bytecode (as an NBC blob — see `src/format/nbc.rs`).
+    FetchBehaviorRequest {
+        /// The BLAKE3 content hash of the behavior being requested.
+        content_hash: [u8; 32],
+    },
+
+    /// Response to a `FetchBehaviorRequest`, carrying the compiled bytecode.
+    FetchBehaviorResponse {
+        /// Echoes the content hash from the request for correlation.
+        content_hash: [u8; 32],
+        /// Behavior name (for the receiver's behavior table).
+        behavior_name: String,
+        /// Compiled NBC bytecode blob. `None` if the requested behavior
+        /// is not known to the responding node.
+        nbc_bytes: Option<Vec<u8>>,
+    },
 }
 
 impl Packet {
@@ -296,7 +496,6 @@ impl Packet {
         let seq = u64::from_be_bytes([
             bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12],
         ]);
-
         let payload = &bytes[PACKET_HEADER_LEN..];
         let packet = match discriminant {
             TYPE_ACTOR_MESSAGE => Self::read_actor_message(payload)?,
@@ -307,6 +506,8 @@ impl Packet {
             TYPE_CRDT_SYNC => Self::read_crdt_sync(payload)?,
             TYPE_CRDT_DELTA_SYNC => Self::read_crdt_delta_sync(payload)?,
             TYPE_GOSSIP => Self::read_gossip(payload)?,
+            TYPE_FETCH_BEHAVIOR_REQUEST => Self::read_fetch_behavior_request(payload)?,
+            TYPE_FETCH_BEHAVIOR_RESPONSE => Self::read_fetch_behavior_response(payload)?,
             _ => return None,
         };
 
@@ -315,8 +516,6 @@ impl Packet {
 
     // ------------------------------------------------------------------
     // Internal helpers
-    // ------------------------------------------------------------------
-
     fn discriminant(&self) -> u8 {
         match self {
             Packet::ActorMessage { .. } => TYPE_ACTOR_MESSAGE,
@@ -327,6 +526,8 @@ impl Packet {
             Packet::CrdtSync { .. } => TYPE_CRDT_SYNC,
             Packet::CrdtDeltaSync { .. } => TYPE_CRDT_DELTA_SYNC,
             Packet::Gossip { .. } => TYPE_GOSSIP,
+            Packet::FetchBehaviorRequest { .. } => TYPE_FETCH_BEHAVIOR_REQUEST,
+            Packet::FetchBehaviorResponse { .. } => TYPE_FETCH_BEHAVIOR_RESPONSE,
         }
     }
 
@@ -422,6 +623,26 @@ impl Packet {
                     write_addr(buf, &m.address);
                     buf.push(status_to_u8(m.status));
                     buf.extend_from_slice(&m.incarnation.to_be_bytes());
+                }
+            }
+            Packet::FetchBehaviorRequest { content_hash } => {
+                buf.extend_from_slice(content_hash);
+            }
+            Packet::FetchBehaviorResponse {
+                content_hash,
+                behavior_name,
+                nbc_bytes,
+            } => {
+                buf.extend_from_slice(content_hash);
+                write_string(buf, behavior_name);
+                match nbc_bytes {
+                    Some(bytes) => {
+                        buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                        buf.extend_from_slice(bytes);
+                    }
+                    None => {
+                        buf.extend_from_slice(&0u32.to_be_bytes());
+                    }
                 }
             }
         }
@@ -643,6 +864,48 @@ impl Packet {
             });
         }
         Some(Packet::Gossip { members })
+    }
+
+    fn read_fetch_behavior_request(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 32 {
+            return None;
+        }
+        let mut content_hash = [0u8; 32];
+        content_hash.copy_from_slice(&payload[..32]);
+        Some(Packet::FetchBehaviorRequest { content_hash })
+    }
+
+    fn read_fetch_behavior_response(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 34 {
+            return None;
+        }
+        let mut content_hash = [0u8; 32];
+        content_hash.copy_from_slice(&payload[..32]);
+        let (behavior_name, name_len) = read_string(payload, 32)?;
+        let off = 32 + name_len;
+        if payload.len() < off + 4 {
+            return None;
+        }
+        let byte_len = u32::from_be_bytes([
+            payload[off],
+            payload[off + 1],
+            payload[off + 2],
+            payload[off + 3],
+        ]) as usize;
+        let nbc_bytes = if byte_len == 0 {
+            None
+        } else {
+            let start = off + 4;
+            if payload.len() < start + byte_len {
+                return None;
+            }
+            Some(payload[start..start + byte_len].to_vec())
+        };
+        Some(Packet::FetchBehaviorResponse {
+            content_hash,
+            behavior_name,
+            nbc_bytes,
+        })
     }
 }
 // ---------------------------------------------------------------------------
@@ -912,11 +1175,12 @@ fn lock_ignore_poison<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 // ---------------------------------------------------------------------------
 
 /// A single TCP connection to a remote node.
-pub struct TcpConnection {
-    pub node_id: NodeId,
-    pub addr: SocketAddr,
-    pub stream: TcpStream,
-    pub last_activity: Instant,
+pub(crate) struct TcpConnection {
+    #[allow(dead_code)]
+    pub(crate) node_id: NodeId,
+    pub(crate) addr: SocketAddr,
+    pub(crate) stream: TransportStream,
+    pub(crate) last_activity: Instant,
 }
 
 impl TcpConnection {
@@ -1022,6 +1286,9 @@ pub struct TcpTransport {
     next_seq: AtomicU64,
     /// Flag used to ask background threads to shut down.
     shutdown_flag: Arc<AtomicBool>,
+    /// Optional TLS configuration. When `Some`, connections are upgraded
+    /// to TLS after TCP connect/accept and before the NUL0 handshake.
+    tls_config: Option<TlsConfig>,
 }
 
 impl TcpTransport {
@@ -1034,7 +1301,7 @@ impl TcpTransport {
     /// Two background threads are started:
     /// 1. **Listener** – accepts incoming TCP connections.
     /// 2. **Sender** – drains the outgoing queue and writes to TCP streams.
-    pub fn bind(addr: SocketAddr) -> io::Result<Self> {
+    pub fn bind(addr: SocketAddr, tls_config: Option<TlsConfig>) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let listen_addr = listener.local_addr()?;
         let node_id = NodeId::new(&listen_addr);
@@ -1056,10 +1323,11 @@ impl TcpTransport {
             let in_tx = incoming_tx.clone();
             let conns = Arc::clone(&connections);
             let local_id = node_id;
+            let tls = tls_config.clone();
             let handle = thread::Builder::new()
                 .name("nulang-net-listener".into())
                 .spawn(move || {
-                    listener_thread(listener, in_tx, conns, flag, local_id);
+                    listener_thread(listener, in_tx, conns, flag, local_id, tls);
                 })?;
             handles.push(handle);
         }
@@ -1072,10 +1340,11 @@ impl TcpTransport {
             let conns = Arc::clone(&connections);
             let local_id = node_id;
             let in_tx = incoming_tx.clone();
+            let tls = tls_config.clone();
             let handle = thread::Builder::new()
                 .name("nulang-net-sender".into())
                 .spawn(move || {
-                    sender_thread(outgoing_rx, conns, flag, local_id, in_tx);
+                    sender_thread(outgoing_rx, conns, flag, local_id, in_tx, tls);
                 })?;
             handles.push(handle);
         }
@@ -1090,6 +1359,7 @@ impl TcpTransport {
             threads: Arc::new(Mutex::new(handles)),
             next_seq: AtomicU64::new(1),
             shutdown_flag,
+            tls_config,
         })
     }
 
@@ -1098,7 +1368,6 @@ impl TcpTransport {
     /// Establishes a TCP connection, performs the 8-byte node-id handshake,
     /// and registers the connection in the connection pool.
     pub fn connect(&mut self, node_id: NodeId, addr: SocketAddr) -> io::Result<()> {
-        // Check if we already have a connection.
         {
             let conns = lock_ignore_poison(&self.connections);
             if conns.contains_key(&node_id) {
@@ -1106,19 +1375,20 @@ impl TcpTransport {
             }
         }
 
-        // Bound the connect so one unreachable peer cannot stall this node:
-        // `TcpStream::connect` would wait out the OS default (~2 min for a
-        // blackholed peer).
-        let mut stream = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
-        stream.set_read_timeout(Some(IO_TIMEOUT))?;
-        stream.set_write_timeout(Some(IO_TIMEOUT))?;
-        stream.set_nodelay(true)?;
+        let tcp = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
+        tcp.set_read_timeout(Some(IO_TIMEOUT))?;
+        tcp.set_write_timeout(Some(IO_TIMEOUT))?;
+        tcp.set_nodelay(true)?;
 
-        // Handshake: send our versioned node_id, read theirs.
+        let mut stream = if let Some(ref tls) = self.tls_config {
+            tls_wrap_client(tcp, tls)?
+        } else {
+            TransportStream::Raw(tcp)
+        };
+
         write_handshake(&mut stream, self.node_id)?;
         let peer_id = read_handshake(&mut stream)?;
 
-        // The peer should identify itself with the expected node_id.
         if peer_id != node_id {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1136,9 +1406,6 @@ impl TcpTransport {
             last_activity: Instant::now(),
         };
 
-        // Spawn a reader on a cloned handle so the link is fully duplex:
-        // packets the peer writes to this socket (e.g. heartbeat replies)
-        // are delivered just like packets on accepted inbound connections.
         let read_stream = conn.stream.try_clone()?;
         {
             let mut conns = lock_ignore_poison(&self.connections);
@@ -1239,7 +1506,7 @@ impl TcpTransport {
     pub fn disconnect(&mut self, node_id: NodeId) {
         let mut conns = lock_ignore_poison(&self.connections);
         if let Some(conn) = conns.remove(&node_id) {
-            let _ = conn.stream.shutdown(Shutdown::Both);
+            let _ = conn.stream.shutdown();
         }
     }
 
@@ -1258,7 +1525,7 @@ impl TcpTransport {
         {
             let conns = lock_ignore_poison(&self.connections);
             for (_, conn) in conns.iter() {
-                let _ = conn.stream.shutdown(Shutdown::Both);
+                let _ = conn.stream.shutdown();
             }
         }
 
@@ -1306,6 +1573,7 @@ fn listener_thread(
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
     shutdown_flag: Arc<AtomicBool>,
     local_node_id: NodeId,
+    tls_config: Option<TlsConfig>,
 ) {
     // Set a small accept timeout so we periodically check the shutdown flag.
     let _ = listener.set_nonblocking(true);
@@ -1320,10 +1588,11 @@ fn listener_thread(
                 let in_tx = incoming_tx.clone();
                 let conns = Arc::clone(&connections);
                 let flag = Arc::clone(&shutdown_flag);
+                let tls = tls_config.clone();
                 let _ = thread::Builder::new()
                     .name(format!("nulang-net-reader-{}", addr.port()))
                     .spawn(move || {
-                        connection_reader(stream, addr, in_tx, conns, flag, local_node_id);
+                        connection_reader(stream, addr, in_tx, conns, flag, local_node_id, tls);
                     });
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -1344,19 +1613,30 @@ fn listener_thread(
 /// 3. Registers the connection.
 /// 4. Reads framed packets in a loop until disconnect or shutdown.
 fn connection_reader(
-    mut stream: TcpStream,
+    tcp: TcpStream,
     addr: SocketAddr,
     incoming_tx: mpsc::SyncSender<IncomingPacket>,
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
     shutdown_flag: Arc<AtomicBool>,
     local_node_id: NodeId,
+    tls_config: Option<TlsConfig>,
 ) {
-    // Set timeouts.
-    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let _ = stream.set_nodelay(true);
+    let _ = tcp.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = tcp.set_write_timeout(Some(IO_TIMEOUT));
+    let _ = tcp.set_nodelay(true);
 
-    // --- Handshake: send local node_id, read remote node_id ---------------
+    let mut stream = if let Some(ref tls) = tls_config {
+        match tls_wrap_server(tcp, tls) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("TLS accept failed for {}: {}", addr, e);
+                return;
+            }
+        }
+    } else {
+        TransportStream::Raw(tcp)
+    };
+
     if write_handshake(&mut stream, local_node_id).is_err() {
         return;
     }
@@ -1366,7 +1646,6 @@ fn connection_reader(
         Err(_) => return,
     };
 
-    // Register the connection.
     {
         let mut conns = lock_ignore_poison(&connections);
         conns.insert(
@@ -1374,9 +1653,7 @@ fn connection_reader(
             TcpConnection {
                 node_id: peer_id,
                 addr,
-                stream: stream
-                    .try_clone()
-                    .expect("TcpStream::try_clone should succeed"),
+                stream: stream.try_clone().expect("try_clone should succeed"),
                 last_activity: Instant::now(),
             },
         );
@@ -1392,7 +1669,7 @@ fn connection_reader(
 /// the reader spawned for dialled outbound connections, so every TCP
 /// link is read exactly once regardless of which side initiated it.
 fn connection_read_loop(
-    mut stream: TcpStream,
+    mut stream: TransportStream,
     peer_id: NodeId,
     incoming_tx: mpsc::SyncSender<IncomingPacket>,
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
@@ -1447,7 +1724,7 @@ fn connection_read_loop(
         let mut conns = lock_ignore_poison(&connections);
         conns.remove(&peer_id);
     }
-    let _ = stream.shutdown(Shutdown::Both);
+    let _ = stream.shutdown();
 }
 
 /// Sender thread entry point.
@@ -1460,6 +1737,7 @@ fn sender_thread(
     shutdown_flag: Arc<AtomicBool>,
     local_node_id: NodeId,
     incoming_tx: mpsc::SyncSender<IncomingPacket>,
+    tls_config: Option<TlsConfig>,
 ) {
     // We keep a local sequence counter so we can embed it into the bytes.
     let mut next_seq: u64 = 1;
@@ -1493,6 +1771,7 @@ fn sender_thread(
                 local_node_id,
                 outgoing.to_node,
                 outgoing.to_addr,
+                &tls_config,
             ) {
                 warn!(
                     "[nulang-net] Failed to connect to {:?} at {}: {}",
@@ -1525,7 +1804,7 @@ fn sender_thread(
             );
             let mut conns = lock_ignore_poison(&connections);
             if let Some(conn) = conns.remove(&outgoing.to_node) {
-                let _ = conn.stream.shutdown(Shutdown::Both);
+                let _ = conn.stream.shutdown();
             }
         }
     }
@@ -1545,16 +1824,19 @@ fn connect_in_sender(
     local_node_id: NodeId,
     node_id: NodeId,
     addr: SocketAddr,
+    tls_config: &Option<TlsConfig>,
 ) -> io::Result<()> {
-    // Bound the connect: the single sender thread serialises every peer's
-    // traffic, so an unreachable peer must not block all sends for the OS
-    // default timeout (~2 min).
-    let mut stream = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    stream.set_nodelay(true)?;
+    let tcp = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
+    tcp.set_read_timeout(Some(IO_TIMEOUT))?;
+    tcp.set_write_timeout(Some(IO_TIMEOUT))?;
+    tcp.set_nodelay(true)?;
 
-    // Handshake.
+    let mut stream = if let Some(ref tls) = tls_config {
+        tls_wrap_client(tcp, tls)?
+    } else {
+        TransportStream::Raw(tcp)
+    };
+
     write_handshake(&mut stream, local_node_id)?;
     let peer_id = read_handshake(&mut stream)?;
 
@@ -1895,7 +2177,7 @@ mod tests {
     #[test]
     fn test_transport_bind() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport = TcpTransport::bind(addr).expect("bind failed");
+        let mut transport = TcpTransport::bind(addr, None).expect("bind failed");
 
         assert_eq!(
             transport.listen_addr().ip(),
@@ -1918,10 +2200,10 @@ mod tests {
     #[test]
     fn test_transport_connect() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -1954,10 +2236,10 @@ mod tests {
     #[test]
     fn test_transport_send_receive() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2079,9 +2361,9 @@ mod tests {
     #[test]
     fn test_transport_send_rejects_dangling_string_payload() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2123,9 +2405,9 @@ mod tests {
     #[test]
     fn test_transport_send_delivers_string_payload_with_table() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2168,9 +2450,9 @@ mod tests {
     #[test]
     fn test_transport_send_delivers_scalar_payload() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2216,10 +2498,10 @@ mod tests {
     #[test]
     fn test_transport_sequence_numbers() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2308,10 +2590,10 @@ mod tests {
     #[test]
     fn test_transport_disconnect() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a).unwrap();
+        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b).unwrap();
+        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
 
         let node_b_id = transport_b.node_id();
 

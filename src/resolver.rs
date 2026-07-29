@@ -91,6 +91,7 @@ fn decl_name(decl: &Decl) -> Option<&str> {
         | Decl::Module { name, .. }
         | Decl::Agent { name, .. }
         | Decl::Database { name, .. } => Some(name.as_str()),
+        Decl::NamedHandler { name, .. } => Some(name.as_str()),
         Decl::Extern { .. } | Decl::Workflow { .. } | Decl::Import { .. } => None,
     }
 }

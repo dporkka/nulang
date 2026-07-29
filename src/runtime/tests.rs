@@ -7,6 +7,7 @@ use super::*;
 use crate::runtime::gc::OrcaGc;
 use crate::runtime::heap::{ActorHeap, TypeTag};
 use crate::vm::Frame;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // ========================================================================
@@ -38,7 +39,7 @@ fn test_mailbox_push_pop() {
     let mut mb = Mailbox::new(4);
     let msg = Message {
         behavior_id: 0,
-        payload: vec![Value::int(42)],
+        payload: Arc::new(vec![Value::int(42)]),
         sender: 1,
         priority: MessagePriority::Normal,
     };

@@ -7,28 +7,29 @@
 //! Shared between the JIT (`src/jit/typed_compiler.rs`) and the AOT
 //! compiler (`src/aot/`).
 
-/// Number of registers / value slots tracked.
-pub const REG_COUNT: usize = 256;
-
 /// The static type of a value known at compile time.
 ///
 /// - `Int`: NaN-tagged integer → strip tag, use direct i64 ops.
 /// - `Float`: Raw f64 bits → use direct f64 ops.
 /// - `Bool`: NaN-tagged boolean → compare directly against tagged constants.
 /// - `Unknown`: Fall back to runtime helpers / boxed representation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KnownType {
+    #[default]
+    Unknown,
     Int,
     Float,
     Bool,
-    Unknown,
 }
 
-/// Static type information for a set of values (registers or MIR locals).
+/// Number of registers in the VM frame.
+pub const REG_COUNT: usize = 256;
+
+/// Static type information for the 256 VM registers.
 ///
-/// Uses a flat `[KnownType; 256]` array for O(1) access with no hashing.
-/// When a type is known, backends can emit optimized native code instead of
-/// calling NaN-tag-aware runtime helpers.
+/// A flat `[KnownType; 256]` array replaces the previous `HashMap<usize, KnownType>`
+/// for deterministic O(1) access with no hashing overhead. Unknown slots are
+/// represented by `KnownType::Unknown` (the default).
 ///
 /// # Example
 /// ```
@@ -38,30 +39,16 @@ pub enum KnownType {
 /// meta.set_type(0, KnownType::Int);   // R0 is known Int
 /// meta.set_type(1, KnownType::Float); // R1 is known Float
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeMetadata {
-    /// Per-register known type. Index ≥ `REG_COUNT` is a programmer error.
-    pub reg_types: [KnownType; REG_COUNT],
+    pub regs: [KnownType; REG_COUNT],
 }
 
 impl Default for TypeMetadata {
     fn default() -> Self {
         Self {
-            reg_types: [KnownType::Unknown; REG_COUNT],
+            regs: [KnownType::Unknown; REG_COUNT],
         }
-    }
-}
-
-impl std::ops::Index<usize> for TypeMetadata {
-    type Output = KnownType;
-    fn index(&self, index: usize) -> &KnownType {
-        &self.reg_types[index]
-    }
-}
-
-impl std::ops::IndexMut<usize> for TypeMetadata {
-    fn index_mut(&mut self, index: usize) -> &mut KnownType {
-        &mut self.reg_types[index]
     }
 }
 
@@ -82,58 +69,47 @@ pub fn type_to_known_type(ty: &crate::types::Type) -> KnownType {
 }
 
 impl TypeMetadata {
-    /// Create an empty type metadata map (all values are Unknown).
+    /// Create a new TypeMetadata with all registers Unknown.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set the known type for a value index.
-    /// Silently ignores indices beyond REG_COUNT (defense against MIR overflow).
+    /// Set the known type for a register index.
     pub fn set_type(&mut self, reg: usize, ty: KnownType) {
-        if reg < REG_COUNT {
-            self.reg_types[reg] = ty;
-        }
+        self.regs[reg] = ty;
     }
 
-    /// Get the known type for a value index, defaulting to `Unknown`.
+    /// Get the known type for a register index.
     pub fn get_type(&self, reg: usize) -> KnownType {
-        self.reg_types
-            .get(reg)
-            .copied()
-            .unwrap_or(KnownType::Unknown)
+        self.regs[reg]
     }
 
     /// Check whether both operands have the same known type.
     pub fn both_known(&self, r1: usize, r2: usize, expected: KnownType) -> bool {
-        self.get_type(r1) == expected && self.get_type(r2) == expected
+        self.regs[r1] == expected && self.regs[r2] == expected
     }
 
     /// Check whether a single value has the expected known type.
     pub fn is_known(&self, reg: usize, expected: KnownType) -> bool {
-        self.get_type(reg) == expected
+        self.regs[reg] == expected
     }
 
-    /// Propagate type from operand register to destination register.
+    /// Mark the destination as having a known type after an operation.
+    ///
+    /// For arithmetic: the result type is the same as the operand type.
+    /// For comparisons: the result is always Bool.
     pub fn propagate_result(&mut self, dst: usize, operand_reg: usize) {
-        if operand_reg >= REG_COUNT || dst >= REG_COUNT {
-            return;
-        }
-        let ty = self.reg_types[operand_reg];
-        if ty != KnownType::Unknown {
-            self.reg_types[dst] = ty;
-        }
+        self.regs[dst] = self.regs[operand_reg];
     }
 
-    /// Mark a destination register as Bool.
+    /// Mark the destination as Bool (used after comparisons).
     pub fn set_bool_result(&mut self, dst: usize) {
-        if dst < REG_COUNT {
-            self.reg_types[dst] = KnownType::Bool;
-        }
+        self.regs[dst] = KnownType::Bool;
     }
 
-    /// Returns true if no value has a known type.
+    /// Returns true if no register has a known type (all Unknown).
     pub fn is_empty(&self) -> bool {
-        self.reg_types.iter().all(|&t| t == KnownType::Unknown)
+        self.regs.iter().all(|&t| t == KnownType::Unknown)
     }
 
     /// Build TypeMetadata from an iterator of (register_index, Type) pairs.
@@ -146,9 +122,6 @@ impl TypeMetadata {
     ) -> Self {
         let mut meta = TypeMetadata::new();
         for (reg, ty) in locals {
-            if reg >= REG_COUNT {
-                continue; // MIR locals beyond frame register capacity — skip type tracking
-            }
             let known = type_to_known_type(ty);
             if known != KnownType::Unknown {
                 meta.set_type(reg, known);

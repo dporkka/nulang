@@ -437,7 +437,7 @@ fn stress_mailbox_never_drops_system_messages() {
     for i in 0..1_000 {
         let msg = Message {
             behavior_id: 1,
-            payload: vec![Value::int(i)],
+            payload: Arc::new(vec![Value::int(i)]),
             sender: 0,
             priority: MessagePriority::Normal,
         };
@@ -450,7 +450,7 @@ fn stress_mailbox_never_drops_system_messages() {
     for i in 0..100 {
         let msg = Message {
             behavior_id: 0,
-            payload: vec![Value::int(1000 + i)],
+            payload: Arc::new(vec![Value::int(1000 + i)]),
             sender: 0,
             priority: MessagePriority::System,
         };
@@ -463,7 +463,7 @@ fn stress_mailbox_never_drops_system_messages() {
     for i in 0..50 {
         let msg = Message {
             behavior_id: 2,
-            payload: vec![Value::int(2000 + i)],
+            payload: Arc::new(vec![Value::int(2000 + i)]),
             sender: 0,
             priority: MessagePriority::Bulk,
         };
@@ -1343,7 +1343,7 @@ fn stress_mailbox_system_priority_preservation() {
     for i in 0..1_000 {
         let msg = Message {
             behavior_id: 1,
-            payload: vec![Value::int(i)],
+            payload: Arc::new(vec![Value::int(i)]),
             sender: 0,
             priority: MessagePriority::Normal,
         };
@@ -1355,7 +1355,7 @@ fn stress_mailbox_system_priority_preservation() {
     for i in 0..10 {
         let msg = Message {
             behavior_id: 0,
-            payload: vec![Value::int(1000 + i)],
+            payload: Arc::new(vec![Value::int(1000 + i)]),
             sender: 0,
             priority: MessagePriority::System,
         };

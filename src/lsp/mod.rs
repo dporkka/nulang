@@ -135,6 +135,10 @@ impl LanguageServer for NulangLanguageServer {
                     prepare_provider: Some(true),
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 })),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                }),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
@@ -249,11 +253,18 @@ impl LanguageServer for NulangLanguageServer {
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let docs = self.documents.lock().unwrap();
-        let source = match docs.get(&params.text_document_position.text_document.uri) {
-            Some(doc) => doc.source.clone(),
+        let doc = match docs.get(&params.text_document_position.text_document.uri) {
+            Some(d) => d,
             None => return Ok(None),
         };
-        let engine = CompletionEngine::new(&source);
+        let source = doc.source.clone();
+        let ast = doc.ast.clone();
+        drop(docs);
+
+        let mut engine = CompletionEngine::new(&source);
+        if let Some(ref a) = ast {
+            engine.set_ast_info(a);
+        }
         let items = engine.complete(params.text_document_position.position);
         Ok(Some(CompletionResponse::Array(items)))
     }
@@ -463,6 +474,59 @@ impl LanguageServer for NulangLanguageServer {
         };
         drop(docs);
         Ok(Self::code_actions(&source))
+    }
+
+    async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
+        let docs = self.documents.lock().unwrap();
+        let source = match docs.get(&params.text_document.uri) {
+            Some(doc) => doc.source.clone(),
+            None => return Ok(None),
+        };
+        drop(docs);
+        Ok(Some(Self::compute_folding_ranges(&source)))
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let docs = self.documents.lock().unwrap();
+        let doc = match docs.get(&params.text_document.uri) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let source = doc.source.clone();
+        let ast = doc.ast.clone();
+        drop(docs);
+
+        let uri = params.text_document.uri;
+        let mut lenses = Vec::new();
+
+        if let Some(ref ast) = ast {
+            for decl in &ast.decls {
+                let (_name, line) = match decl {
+                    crate::ast::Decl::Function { name, span, .. } => (name, span.line() as u32),
+                    crate::ast::Decl::Actor { name, span, .. } => (name, span.line() as u32),
+                    crate::ast::Decl::VariantType { name, span, .. } => (name, span.line() as u32),
+                    crate::ast::Decl::TypeAlias { name, span, .. } => (name, span.line() as u32),
+                    _ => continue,
+                };
+                let refs = self.find_refs(&source, Position::new(line.saturating_sub(1), 0), &uri);
+                if !refs.is_empty() {
+                    lenses.push(CodeLens {
+                        range: Range {
+                            start: Position::new(line - 1, 0),
+                            end: Position::new(line - 1, 0),
+                        },
+                        command: Some(Command {
+                            title: format!("{} references", refs.len()),
+                            command: "nulang.showReferences".to_string(),
+                            arguments: None,
+                        }),
+                        data: None,
+                    });
+                }
+            }
+        }
+
+        Ok(Some(lenses))
     }
 }
 
@@ -1288,6 +1352,71 @@ impl NulangLanguageServer {
         } else {
             Some(actions)
         }
+    }
+
+    /// Compute folding ranges by tracking brace depth line-by-line.
+    fn compute_folding_ranges(source: &str) -> Vec<FoldingRange> {
+        let mut ranges = Vec::new();
+        let mut stack: Vec<(u32, u32)> = Vec::new();
+        let lines: Vec<&str> = source.lines().collect();
+
+        for (li, line) in lines.iter().enumerate() {
+            let line_num = li as u32;
+            let mut opens = 0i32;
+            let mut closes = 0i32;
+            let mut in_string = false;
+            let bytes = line.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if in_string {
+                    if c == b'"' && (i == 0 || bytes[i - 1] != b'\\') {
+                        in_string = false;
+                    }
+                } else if c == b'"' {
+                    in_string = true;
+                } else if c == b'{' {
+                    opens += 1;
+                } else if c == b'}' {
+                    closes += 1;
+                }
+                i += 1;
+            }
+
+            for _ in 0..closes {
+                if let Some((start, _)) = stack.pop() {
+                    if start < line_num {
+                        ranges.push(FoldingRange {
+                            start_line: start,
+                            end_line: line_num,
+                            start_character: None,
+                            end_character: None,
+                            kind: Some(FoldingRangeKind::Region),
+                            collapsed_text: None,
+                        });
+                    }
+                }
+            }
+            for _ in 0..opens {
+                stack.push((line_num, stack.len() as u32));
+            }
+        }
+
+        let eof_line = lines.len().saturating_sub(1) as u32;
+        while let Some((start, _)) = stack.pop() {
+            if start < eof_line {
+                ranges.push(FoldingRange {
+                    start_line: start,
+                    end_line: eof_line,
+                    start_character: None,
+                    end_character: None,
+                    kind: Some(FoldingRangeKind::Region),
+                    collapsed_text: None,
+                });
+            }
+        }
+
+        ranges
     }
     fn compute_diagnostics(source: &str) -> (Vec<Diagnostic>, HashMap<usize, String>) {
         let mut diagnostics = Vec::new();

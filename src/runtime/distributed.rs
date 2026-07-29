@@ -36,6 +36,7 @@
 //! - [`DistributedRuntime`] — trait extending [`Runtime`] with distributed ops.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -509,7 +510,7 @@ impl AddressResolver {
 
                 let msg = Message {
                     behavior_id: 0, // resolved from behavior_name at delivery
-                    payload,
+                    payload: Arc::new(payload),
                     sender: sender_actor,
                     priority,
                 };
@@ -556,7 +557,7 @@ impl AddressResolver {
 /// use nulang_runtime::distributed::{ActorAddress, DistributedRuntimeImpl};
 ///
 /// let mut runtime = Runtime::new();
-/// let mut transport = crate::runtime::network::TcpTransport::bind(addr).unwrap();
+/// let mut transport = crate::runtime::network::TcpTransport::bind(addr, None).unwrap();
 /// let mut cluster = ClusterState::new(local_node, addr);
 /// let mut resolver = AddressResolver::new(local_node);
 ///
@@ -1026,7 +1027,10 @@ pub fn process_network_packets(
                     // string table; a message whose strings cannot be
                     // interned is dropped rather than delivered with
                     // dangling pool ids.
-                    if !intern_wire_strings(runtime, target_actor, &mut msg.payload, &string_table)
+                    // Clone the Arc payload into a mutable Vec, intern the
+                    // strings, then wrap the result back into a fresh Arc.
+                    let mut payload_vec = (*msg.payload).clone();
+                    if !intern_wire_strings(runtime, target_actor, &mut payload_vec, &string_table)
                     {
                         warn!(
                             "nulang-net: dropping message to actor {}: string payload cannot be interned (target actor missing or has no module pool)",
@@ -1038,6 +1042,7 @@ pub fn process_network_packets(
                             "string intern failed on receiver",
                         );
                     }
+                    msg.payload = Arc::new(payload_vec);
                     if let Some(actor) = runtime.actors.get_mut(&target_actor) {
                         let _ = actor.mailbox.push(msg);
                         runtime.scheduler.enqueue(target_actor);
@@ -1555,7 +1560,7 @@ mod tests {
         let mut resolver = AddressResolver::new(local_node);
 
         // Create a transport — bind to port 0 to get an ephemeral port.
-        let transport = crate::runtime::network::TcpTransport::bind(addr(0));
+        let transport = crate::runtime::network::TcpTransport::bind(addr(0), None);
         if let Ok(mut transport) = transport {
             let mut dist = DistributedRuntimeImpl::new(&mut runtime);
 
@@ -1691,8 +1696,8 @@ mod tests {
             });
         }
 
-        let mut transport_a = crate::runtime::network::TcpTransport::bind(addr(0)).unwrap();
-        let mut transport_b = crate::runtime::network::TcpTransport::bind(addr(0)).unwrap();
+        let mut transport_a = crate::runtime::network::TcpTransport::bind(addr(0), None).unwrap();
+        let mut transport_b = crate::runtime::network::TcpTransport::bind(addr(0), None).unwrap();
         let node_b = transport_b.node_id();
         let addr_b = transport_b.listen_addr();
 
@@ -1953,8 +1958,8 @@ mod tests {
             });
         }
 
-        let mut transport_a = crate::runtime::network::TcpTransport::bind(addr(0)).unwrap();
-        let mut transport_b = crate::runtime::network::TcpTransport::bind(addr(0)).unwrap();
+        let mut transport_a = crate::runtime::network::TcpTransport::bind(addr(0), None).unwrap();
+        let mut transport_b = crate::runtime::network::TcpTransport::bind(addr(0), None).unwrap();
         let node_b = transport_b.node_id();
         let addr_b = transport_b.listen_addr();
 

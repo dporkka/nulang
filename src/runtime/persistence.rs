@@ -77,10 +77,7 @@ impl PersistedValue {
     /// Like `from_value`, but resolves string pool IDs to their UTF-8 content
     /// when a bytecode module is available. Falls back to `from_value` for
     /// unresolved strings (which normalizes them to `Nil`).
-    pub fn from_value_resolved(
-        v: &Value,
-        module: Option<&crate::bytecode::CodeModule>,
-    ) -> Self {
+    pub fn from_value_resolved(v: &Value, module: Option<&crate::bytecode::CodeModule>) -> Self {
         if let Some(id) = v.as_string_id() {
             if let Some(content) = module
                 .and_then(|m| m.constants.get(id as usize))
@@ -1348,7 +1345,10 @@ mod persisted_value_tests {
     #[test]
     fn test_from_value_resolved_resolves_string_from_module() {
         let v = Value::int(42);
-        assert_eq!(PersistedValue::from_value_resolved(&v, None), PersistedValue::Int(42));
+        assert_eq!(
+            PersistedValue::from_value_resolved(&v, None),
+            PersistedValue::Int(42)
+        );
     }
 
     #[test]
@@ -1379,7 +1379,10 @@ mod persisted_value_tests {
 
         let v = pv.to_value_on_heap(&mut actor);
         // Allocated string is a TAG_PTR value on the actor heap, not nil.
-        assert!(!v.is_nil(), "string should be allocated, not dropped to nil");
+        assert!(
+            !v.is_nil(),
+            "string should be allocated, not dropped to nil"
+        );
     }
 
     #[test]
@@ -1396,11 +1399,17 @@ mod persisted_value_tests {
         // Serialize → deserialize (JSON).
         let json = serde_json::to_string(&persisted).unwrap();
         let deserialized: PersistedValue = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, PersistedValue::String("round-trip".to_string()));
+        assert_eq!(
+            deserialized,
+            PersistedValue::String("round-trip".to_string())
+        );
 
         // Restore: allocate on actor heap. Previously this would return nil.
         let mut actor = Actor::new(1, "test".to_string(), 0);
         let restored = deserialized.to_value_on_heap(&mut actor);
-        assert!(!restored.is_nil(), "string must survive restore, not become nil");
+        assert!(
+            !restored.is_nil(),
+            "string must survive restore, not become nil"
+        );
     }
 }

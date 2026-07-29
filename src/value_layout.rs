@@ -142,18 +142,24 @@ pub fn tag_closure(payload: u64) -> u64 {
 // Float detection
 // ---------------------------------------------------------------------------
 
+/// Mask for the IEEE 754 NaN exponent (bits 52–62). Any NaN or infinity
+/// has these bits set to 0x7FF; non-NaN/non-infinity floats do not.
+const EXPONENT_MASK: u64 = 0x7FF0_0000_0000_0000;
+/// Mantissa bits (0–51). A NaN has exponent = 0x7FF and non-zero mantissa;
+/// infinity has exponent = 0x7FF and zero mantissa.
+const MANTISSA_MASK: u64 = 0x000F_FFFF_FFFF_FFFF;
+
 /// True when `raw` represents a real IEEE-754 float (any bit pattern that is
-/// not a NaN).
+/// not a NaN). Infinity is a valid float, so it returns true.
 ///
-/// All tagged values (0x7FF6–0x7FFE) occupy the quiet-NaN range, so this check
-/// is equivalent to `!f64::from_bits(raw).is_nan()`. The VM interpreter
-/// (`Value::as_float`) and JIT runtime helpers use the same semantics.
+/// All tagged values (0x7FF6–0x7FFE) occupy the quiet-NaN range, so this
+/// integer bitmask test is equivalent to `!f64::from_bits(raw).is_nan()` but
+/// avoids the FPU domain-crossing penalty of `vmovq` + `ucomisd`.
 #[inline]
 pub fn is_float_raw(raw: u64) -> bool {
-    // Integer-only NaN detection: exponent != 0x7FF (not a NaN) OR mantissa == 0 (infinity).
-    // Equivalent to !f64::from_bits(raw).is_nan() but stays in integer domain,
-    // avoiding FPU register pressure and domain-crossing penalties.
-    (raw & 0x7FF0_0000_0000_0000) != 0x7FF0_0000_0000_0000 || (raw & 0x000F_FFFF_FFFF_FFFF) == 0
+    // NaN: exponent all 1s AND mantissa non-zero.
+    // Infinity: exponent all 1s AND mantissa zero → it IS a float.
+    (raw & EXPONENT_MASK) != EXPONENT_MASK || (raw & MANTISSA_MASK) == 0
 }
 
 // ---------------------------------------------------------------------------

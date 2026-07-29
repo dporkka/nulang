@@ -15,7 +15,9 @@ pub(crate) fn enable_distribution(
     rt: &mut Runtime,
     bind_addr: std::net::SocketAddr,
 ) -> std::io::Result<()> {
-    let transport = Box::new(crate::runtime::network::TcpTransport::bind(bind_addr)?);
+    let transport = Box::new(crate::runtime::network::TcpTransport::bind(
+        bind_addr, None,
+    )?);
     let listen_addr = transport.listen_addr();
     let node_id = NodeId(transport.node_id().0);
     let cluster = ClusterState::new(node_id, listen_addr);

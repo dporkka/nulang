@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 
 use tracing::warn;
 
@@ -19,7 +20,6 @@ pub use heap_serialize::*;
 mod cluster;
 mod distributed;
 mod distributed_context;
-mod http_server;
 mod network;
 mod orca_cycle;
 #[cfg(feature = "quic-experimental")]
@@ -158,6 +158,7 @@ fn actor_exit_reason(value: Option<&Value>, constants: &[crate::bytecode::Consta
 // ---------------------------------------------------------------------------
 // Runtime
 // ---------------------------------------------------------------------------
+
 // ---------------------------------------------------------------------------
 // Cross-shard message type for multi-threaded scheduler
 // ---------------------------------------------------------------------------
@@ -221,11 +222,6 @@ pub struct Runtime {
     // LLM subsystem (v0.9 AI Runtime): client, worker thread, token budget,
     // completion channel, and non-blocking suspension state.
     pub llm: llm::LlmState,
-    // HTTP client provider (v0.13). Filled in at startup when a concrete
-    // HttpProvider impl is available (reqwest behind ai-runtime/http-client).
-    pub http_provider: Option<std::sync::Arc<dyn crate::backends::HttpProvider>>,
-    // HTTP server (v0.14). Set by `perform Http.serve(port, handler)`.
-    pub http_server: Option<crate::runtime::http_server::HttpServerState>,
 
     // Actor name registry (v0.7)
     pub registry: ActorRegistry,
@@ -285,6 +281,9 @@ pub struct Runtime {
     /// The embedder (e.g. NLC guest agent) wires this to host signaling.
     pub idle_callback: Option<Box<dyn FnMut()>>,
     // Test effect handlers — installed via `install_test_handler` to
+    // intercept `perform Effect.op` calls in tests.  Key is the qualified
+    // name (e.g. "IO.print", "DB.write").  A handler returns `Some(value)`
+    // to mock the effect or `None` to fall through to real dispatch.
     pub test_handlers: HashMap<String, Box<dyn Fn(&[Value]) -> Option<Value>>>,
 
     // -- Multi-threaded scheduler sharding --
@@ -330,8 +329,6 @@ impl Runtime {
             persistence: Box::new(MemoryStore::new()),
             vm: None,
             llm: llm::LlmState::new(),
-            http_provider: None,
-            http_server: None,
             pending_receive_wakes: Vec::new(),
             draining_receive_wakes: false,
             idle_callback: None,
@@ -1475,6 +1472,98 @@ impl Runtime {
         self.scheduler.enqueue_with_priority(actor_id, priority);
     }
 
+    // -- Cross-shard message handling --
+
+    /// Deliver a message that arrived from another shard.  No ORCA
+    /// reference-counting is performed because cross-shard payloads are
+    /// restricted to value types (ints, strings, bools, unit, nil).
+    fn deliver_cross_shard_message(
+        &mut self,
+        target_id: u64,
+        behavior_id: u16,
+        payload: Vec<Value>,
+        sender: u64,
+    ) {
+        let msg = Message {
+            behavior_id,
+            payload: Arc::new(payload),
+            sender,
+            priority: MessagePriority::Normal,
+        };
+        if let Some(actor) = self.actors.get_mut(&target_id) {
+            if let Err(_dropped) = actor.mailbox.push(msg) {
+                self.route_to_dlq(
+                    &Message {
+                        behavior_id,
+                        payload: Arc::new(Vec::new()),
+                        sender,
+                        priority: MessagePriority::System,
+                    },
+                    "mailbox full (cross-shard)",
+                );
+            }
+        } else {
+            self.route_to_dlq(
+                &Message {
+                    behavior_id,
+                    payload: Arc::new(Vec::new()),
+                    sender,
+                    priority: MessagePriority::System,
+                },
+                "target actor not found (cross-shard)",
+            );
+        }
+        self.enqueue_actor(target_id);
+        // Wake an actor suspended in a timed selective receive (same as
+        // local path, but without the deferred-wake machinery since
+        // cross-shard messages arrive between steps, never mid-VM-exec).
+        let wake_for_receive = self
+            .actors
+            .get(&target_id)
+            .map(|a| {
+                a.suspended_execution.is_some()
+                    && a.receive_wait.map(|w| !w.timed_out).unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if wake_for_receive {
+            self.resume_suspended_receive_wait(target_id);
+        }
+    }
+
+    /// Drain all pending cross-shard messages into local mailboxes. Called
+    /// at the top of every scheduler-loop iteration before dequeuing work.
+    fn drain_cross_shard_messages(&mut self) {
+        let mut pending: Vec<CrossShardMsg> = Vec::new();
+        {
+            let rx = match self.cross_shard_rx.as_ref() {
+                Some(rx) => rx,
+                None => return,
+            };
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => pending.push(msg),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+        for msg in pending {
+            match msg {
+                CrossShardMsg::DeliverMessage {
+                    target_id,
+                    behavior_id,
+                    payload,
+                    sender,
+                } => {
+                    self.deliver_cross_shard_message(target_id, behavior_id, payload, sender);
+                }
+                CrossShardMsg::EnqueueActor { actor_id, priority } => {
+                    self.scheduler.enqueue_with_priority(actor_id, priority);
+                }
+            }
+        }
+    }
+
     /// Mark the start of a call into the shared runtime VM. While the
     /// depth is non-zero, receive-wait wakes are deferred onto
     /// `pending_receive_wakes` (see `send_message_by_id`).
@@ -1864,8 +1953,6 @@ impl Runtime {
             if target_shard != self.shard_idx {
                 // Reject payloads that carry heap pointers, actor refs, or
                 // closures — same restriction as the NUL0 wire protocol.
-                // Strings are fine (they travel by content through the
-                // sender's module pool).
                 for arg in args {
                     if arg.is_ptr() || arg.is_actor_ref() || arg.is_closure() {
                         tracing::warn!(
@@ -1888,7 +1975,7 @@ impl Runtime {
         }
         let msg = Message {
             behavior_id,
-            payload: args.to_vec(),
+            payload: Arc::new(args.to_vec()),
             sender: self.current_actor.unwrap_or(0),
             priority: MessagePriority::Normal,
         };
@@ -1901,7 +1988,7 @@ impl Runtime {
                 self.route_to_dlq(
                     &Message {
                         behavior_id,
-                        payload: args.to_vec(),
+                        payload: Arc::new(args.to_vec()),
                         sender: self.current_actor.unwrap_or(0),
                         priority: MessagePriority::System,
                     },
@@ -1912,7 +1999,7 @@ impl Runtime {
             self.route_to_dlq(
                 &Message {
                     behavior_id,
-                    payload: args.to_vec(),
+                    payload: Arc::new(args.to_vec()),
                     sender: self.current_actor.unwrap_or(0),
                     priority: MessagePriority::System,
                 },
@@ -2000,101 +2087,6 @@ impl Runtime {
                 }
             } else {
                 self.resume_suspended_receive_wait(target_id);
-            }
-        }
-    }
-
-    // -- Cross-shard message handling --
-
-    /// Deliver a message that arrived from another shard.  No ORCA
-    /// reference-counting is performed because cross-shard payloads are
-    /// restricted to value types (ints, strings, bools, unit, nil).
-    fn deliver_cross_shard_message(
-        &mut self,
-        target_id: u64,
-        behavior_id: u16,
-        payload: Vec<Value>,
-        sender: u64,
-    ) {
-        let msg = Message {
-            behavior_id,
-            payload,
-            sender,
-            priority: MessagePriority::Normal,
-        };
-        if let Some(actor) = self.actors.get_mut(&target_id) {
-            if let Err(_dropped) = actor.mailbox.push(msg) {
-                self.route_to_dlq(
-                    &Message {
-                        behavior_id,
-                        payload: Vec::new(),
-                        sender,
-                        priority: MessagePriority::System,
-                    },
-                    "mailbox full (cross-shard)",
-                );
-            }
-        } else {
-            self.route_to_dlq(
-                &Message {
-                    behavior_id,
-                    payload: Vec::new(),
-                    sender,
-                    priority: MessagePriority::System,
-                },
-                "target actor not found (cross-shard)",
-            );
-        }
-        self.enqueue_actor(target_id);
-        // Wake an actor suspended in a timed selective receive (same as
-        // local path, but without the deferred-wake machinery since
-        // cross-shard messages arrive between steps, never mid-VM-exec).
-        let wake_for_receive = self
-            .actors
-            .get(&target_id)
-            .map(|a| {
-                a.suspended_execution.is_some()
-                    && a.receive_wait.map(|w| !w.timed_out).unwrap_or(false)
-            })
-            .unwrap_or(false);
-        if wake_for_receive {
-            // We're not inside a VM call here (drain runs between steps),
-            // so resume directly.
-            self.resume_suspended_receive_wait(target_id);
-        }
-    }
-
-    /// Drain all pending cross-shard messages into local mailboxes. Called
-    /// at the top of every scheduler-loop iteration before dequeuing work.
-    fn drain_cross_shard_messages(&mut self) {
-        // Collect messages first (releasing the rx borrow), then process.
-        let mut pending: Vec<CrossShardMsg> = Vec::new();
-        {
-            let rx = match self.cross_shard_rx.as_ref() {
-                Some(rx) => rx,
-                None => return,
-            };
-            loop {
-                match rx.try_recv() {
-                    Ok(msg) => pending.push(msg),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => break,
-                }
-            }
-        }
-        for msg in pending {
-            match msg {
-                CrossShardMsg::DeliverMessage {
-                    target_id,
-                    behavior_id,
-                    payload,
-                    sender,
-                } => {
-                    self.deliver_cross_shard_message(target_id, behavior_id, payload, sender);
-                }
-                CrossShardMsg::EnqueueActor { actor_id, priority } => {
-                    self.scheduler.enqueue_with_priority(actor_id, priority);
-                }
             }
         }
     }
@@ -2215,8 +2207,8 @@ impl Runtime {
         if let Some(actor) = self.actors.get_mut(&dlq_id) {
             let _ = actor.mailbox.push(Message {
                 behavior_id: 0,
-                payload: vec![Value::int(1)],
-                sender: 0,
+                payload: Arc::new(vec![Value::int(1)]),
+                sender: 0, // DLQ system message has no sender
                 priority: MessagePriority::System,
             });
         }
@@ -3710,11 +3702,17 @@ impl Runtime {
         actor.sequence = snapshot.sequence;
         actor.waiting_signal = snapshot.waiting_signal;
         for (name, value) in snapshot.state {
-            // to_value_on_heap allocates string content on the actor heap
-            // so runtime helpers (semantic_memory, procedural_memory, etc.)
-            // can read them as pointer values.
-            let v = value.to_value_on_heap(&mut actor);
-            actor.set_state_field(name, v);
+            // Rehydrate the semantic_memory and procedural_memory JSON strings
+            // by allocating them on the actor heap so runtime helpers can read
+            // them as pointer values.
+            if name == "semantic_memory" || name == "procedural_memory" {
+                if let PersistedValue::String(json) = &value {
+                    let ptr = actor.allocate_string(json);
+                    actor.set_state_field(name, ptr);
+                    continue;
+                }
+            }
+            actor.set_state_field(name, value.to_value());
         }
         // Parse cached retry/fallback configs from restored state for agents.
         if is_agent {
@@ -3849,24 +3847,18 @@ impl Runtime {
                 .collect();
             for entry in entries_to_replay {
                 let behavior_idx = entry.behavior_id as usize;
-                let native_handler = self
-                    .actors
-                    .get(&actor_id)
-                    .and_then(|a| a.behavior_table.get(behavior_idx))
-                    .and_then(|b| if !b.name.is_empty() { Some(b.handler_fn) } else { None });
-                let is_bytecode = self.has_bytecode_handler(actor_id, behavior_idx);
-
-                if let Some(handler) = native_handler {
+                let payload: Vec<Value> = entry.payload.iter().map(|p| p.to_value()).collect();
+                if self.has_native_handler(actor_id, behavior_idx) {
+                    let handler = self
+                        .actors
+                        .get(&actor_id)
+                        .and_then(|a| a.behavior_table.get(behavior_idx))
+                        .map(|b| b.handler_fn)?;
                     if let Some(actor) = self.actors.get_mut(&actor_id) {
-                        let payload: Vec<Value> = entry.payload.iter().map(|p| p.to_value_on_heap(actor)).collect();
                         handler(actor, &payload);
                         actor.sequence = entry.sequence;
                     }
-                } else if is_bytecode {
-                    let payload: Vec<Value> = {
-                        let actor = self.actors.get_mut(&actor_id)?;
-                        entry.payload.iter().map(|p| p.to_value_on_heap(actor)).collect()
-                    };
+                } else if self.has_bytecode_handler(actor_id, behavior_idx) {
                     self.current_actor = Some(actor_id);
                     let _ = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
                     self.current_actor = None;
@@ -3918,12 +3910,19 @@ impl Runtime {
                 actor.set_state_field("parallel_progress", Value::int(current + 1));
             }
             WorkflowEvent::Custom { name, args, .. } => {
-                let values: Vec<Value> = args.iter().map(|a| a.to_value_on_heap(actor)).collect();
+                let values: Vec<Value> = args.iter().map(|a| a.to_value()).collect();
                 actor.event_log.push((name.clone(), values));
             }
         }
     }
 
+    fn has_native_handler(&self, actor_id: u64, behavior_idx: usize) -> bool {
+        self.actors
+            .get(&actor_id)
+            .and_then(|a| a.behavior_table.get(behavior_idx))
+            .map(|e| !e.name.is_empty())
+            .unwrap_or(false)
+    }
 
     // -- Fault Tolerance: Links --
 
@@ -4319,6 +4318,7 @@ impl Runtime {
     ///
     /// The `supervisor` value is passed in because callers remove it from
     /// `self.supervisors` before deciding to shut it down — looking it up in
+
     // -- Distributed Actor System --
 
     pub fn enable_distribution(&mut self, bind_addr: std::net::SocketAddr) -> std::io::Result<()> {
@@ -4414,7 +4414,7 @@ impl Runtime {
 /// Round 1 is full; rounds 2..=N are delta; round N+1 is full again.
 const CRDT_FULL_SYNC_INTERVAL: u64 = 16;
 
-// True when the given 1-based sync round should ship full state.
+/// True when the given 1-based sync round should ship full state.
 
 // ---------------------------------------------------------------------------
 // CycleRuntime implementation
@@ -4719,44 +4719,6 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             }
             return Some(crate::vm::Value::int(s.as_bytes()[idx as usize] as i64));
         }
-        if effect_name == "Http" {
-            match op_name {
-                Some("get") => {
-                    let url = crate::vm::resolve_value_string(constants, *regs.first()?);
-                    let mut rt = self.runtime.borrow_mut();
-                    let result = rt
-                        .http_provider
-                        .as_ref()
-                        .map(|p| p.get(&url))
-                        .unwrap_or(Err("no HTTP provider configured".to_string()));
-                    return Some(match result {
-                        Ok(body) => match &mut rt.vm {
-                            Some(vm) => vm.allocate_string(&body),
-                            None => Value::nil(),
-                        },
-                        Err(_e) => Value::nil(),
-                    });
-                }
-                Some("post") => {
-                    let url = crate::vm::resolve_value_string(constants, *regs.first()?);
-                    let body = crate::vm::resolve_value_string(constants, *regs.get(1)?);
-                    let mut rt = self.runtime.borrow_mut();
-                    let result = rt
-                        .http_provider
-                        .as_ref()
-                        .map(|p| p.post_json(&url, &body))
-                        .unwrap_or(Err("no HTTP provider configured".to_string()));
-                    return Some(match result {
-                        Ok(resp_body) => match &mut rt.vm {
-                            Some(vm) => vm.allocate_string(&resp_body),
-                            None => Value::nil(),
-                        },
-                        Err(_e) => Value::nil(),
-                    });
-                }
-                _ => return None,
-            }
-        }
         if effect_name == "Provider" && op_name == Some("ask") {
             // General runtime-registered provider dispatch. The first arg is
             // the provider name (string); the second is the prompt/request
@@ -4853,37 +4815,6 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         if effect_name == "Otp" {
             let mut rt = self.runtime.borrow_mut();
             return rt.perform_otp_builtin(op_name, module, regs);
-        }
-        if effect_name == "Http" && op_name == Some("serve") {
-            let port = regs
-                .first()
-                .and_then(|v| v.as_int().map(|n| n as u16))
-                .unwrap_or(0);
-            let handler_val = regs.get(1).copied().unwrap_or(crate::vm::Value::nil());
-            let handler_func_idx = if handler_val.is_closure() {
-                (handler_val.as_raw() & crate::value_layout::PAYLOAD_MASK) as usize
-            } else if let Some(idx) = handler_val.as_int() {
-                idx as usize
-            } else {
-                return Some(crate::vm::Value::nil());
-            };
-
-            match crate::runtime::http_server::HttpServerState::bind(
-                port,
-                module.clone(),
-                handler_func_idx,
-            ) {
-                Ok(server) => {
-                    let actual_port = server.port;
-                    let mut rt = self.runtime.borrow_mut();
-                    rt.http_server = Some(server);
-                    return Some(crate::vm::Value::int(actual_port as i64));
-                }
-                Err(e) => {
-                    eprintln!("Http.serve: failed to bind port {}: {}", port, e);
-                    return Some(crate::vm::Value::nil());
-                }
-            }
         }
         self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
     }
@@ -5006,13 +4937,13 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
         let mut rt = self.runtime.borrow_mut();
         let actor_id = rt.current_actor?;
-        let msg = { rt.actors.get_mut(&actor_id)?.mailbox.pop()? };
+        let msg = rt.actors.get_mut(&actor_id)?.mailbox.pop()?;
         // ORCA receiver protocol: hold heap pointers carried by the message.
-        rt.hold_payload_refs(actor_id, &msg.payload);
+        rt.hold_payload_refs(actor_id, &*msg.payload);
         let val = msg
             .payload
-            .into_iter()
-            .next()
+            .first()
+            .cloned()
             .unwrap_or(crate::vm::Value::unit());
         Some((msg.behavior_id, val))
     }
@@ -5023,15 +4954,17 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
     ) -> Option<(usize, Vec<crate::vm::Value>)> {
         let mut rt = self.runtime.borrow_mut();
         let actor_id = rt.current_actor?;
-        let (pos, payload) = {
-            rt.actors
-                .get_mut(&actor_id)?
-                .mailbox
-                .receive_match(behavior_ids)?
-        };
+        let (pos, payload) = rt
+            .actors
+            .get_mut(&actor_id)?
+            .mailbox
+            .receive_match(behavior_ids)?;
         // ORCA receiver protocol: hold heap pointers carried by the message.
-        rt.hold_payload_refs(actor_id, &payload);
-        Some((pos, payload))
+        rt.hold_payload_refs(actor_id, &*payload);
+        Some((
+            pos,
+            Arc::try_unwrap(payload).unwrap_or_else(|arc| (*arc).clone()),
+        ))
     }
 
     fn commit_receive_match(&mut self) {
@@ -5363,44 +5296,6 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 }
                 return Some(crate::vm::Value::int(s.as_bytes()[idx as usize] as i64));
             }
-            if effect_name == "Http" {
-                match op_name {
-                    Some("get") => {
-                        let url = crate::vm::resolve_value_string(constants, *regs.first()?);
-                        let rt = &mut *self.runtime;
-                        let result = rt
-                            .http_provider
-                            .as_ref()
-                            .map(|p| p.get(&url))
-                            .unwrap_or(Err("no HTTP provider configured".to_string()));
-                        return Some(match result {
-                            Ok(body) => match &mut rt.vm {
-                                Some(vm) => vm.allocate_string(&body),
-                                None => Value::nil(),
-                            },
-                            Err(_e) => Value::nil(),
-                        });
-                    }
-                    Some("post") => {
-                        let url = crate::vm::resolve_value_string(constants, *regs.first()?);
-                        let body = crate::vm::resolve_value_string(constants, *regs.get(1)?);
-                        let rt = &mut *self.runtime;
-                        let result = rt
-                            .http_provider
-                            .as_ref()
-                            .map(|p| p.post_json(&url, &body))
-                            .unwrap_or(Err("no HTTP provider configured".to_string()));
-                        return Some(match result {
-                            Ok(resp_body) => match &mut rt.vm {
-                                Some(vm) => vm.allocate_string(&resp_body),
-                                None => Value::nil(),
-                            },
-                            Err(_e) => Value::nil(),
-                        });
-                    }
-                    _ => return None,
-                }
-            }
             if effect_name == "Provider" && op_name == Some("ask") {
                 // General runtime-registered provider dispatch (actor path).
                 // Mirrors RuntimeVmCallbacks::perform_builtin_effect's Provider
@@ -5470,37 +5365,6 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             }
             if effect_name == "Otp" {
                 return (*self.runtime).perform_otp_builtin(op_name, module, regs);
-            }
-            if effect_name == "Http" && op_name == Some("serve") {
-                let port = regs
-                    .first()
-                    .and_then(|v| v.as_int().map(|n| n as u16))
-                    .unwrap_or(0);
-                let handler_val = regs.get(1).copied().unwrap_or(crate::vm::Value::nil());
-                let handler_func_idx = if handler_val.is_closure() {
-                    (handler_val.as_raw() & crate::value_layout::PAYLOAD_MASK) as usize
-                } else if let Some(idx) = handler_val.as_int() {
-                    idx as usize
-                } else {
-                    return Some(crate::vm::Value::nil());
-                };
-
-                match crate::runtime::http_server::HttpServerState::bind(
-                    port,
-                    module.clone(),
-                    handler_func_idx,
-                ) {
-                    Ok(server) => {
-                        let actual_port = server.port;
-                        let rt = &mut *self.runtime;
-                        rt.http_server = Some(server);
-                        return Some(crate::vm::Value::int(actual_port as i64));
-                    }
-                    Err(e) => {
-                        eprintln!("Http.serve: failed to bind port {}: {}", port, e);
-                        return Some(crate::vm::Value::nil());
-                    }
-                }
             }
             self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
         }
@@ -5706,18 +5570,15 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
     fn try_receive(&mut self) -> Option<(u16, crate::vm::Value)> {
         unsafe {
             let msg = {
-                (*self.runtime)
-                    .actors
-                    .get_mut(&self.actor_id)?
-                    .mailbox
-                    .pop()?
+                let actor = (*self.runtime).actors.get_mut(&self.actor_id)?;
+                actor.mailbox.pop()?
             };
             // ORCA receiver protocol: hold heap pointers carried by the message.
-            (*self.runtime).hold_payload_refs(self.actor_id, &msg.payload);
+            (*self.runtime).hold_payload_refs(self.actor_id, &*msg.payload);
             let val = msg
                 .payload
-                .into_iter()
-                .next()
+                .first()
+                .cloned()
                 .unwrap_or(crate::vm::Value::unit());
             Some((msg.behavior_id, val))
         }
@@ -5729,15 +5590,15 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
     ) -> Option<(usize, Vec<crate::vm::Value>)> {
         unsafe {
             let (pos, payload) = {
-                (*self.runtime)
-                    .actors
-                    .get_mut(&self.actor_id)?
-                    .mailbox
-                    .receive_match(behavior_ids)?
+                let actor = (*self.runtime).actors.get_mut(&self.actor_id)?;
+                actor.mailbox.receive_match(behavior_ids)?
             };
             // ORCA receiver protocol: hold heap pointers carried by the message.
-            (*self.runtime).hold_payload_refs(self.actor_id, &payload);
-            Some((pos, payload))
+            (*self.runtime).hold_payload_refs(self.actor_id, &*payload);
+            Some((
+                pos,
+                Arc::try_unwrap(payload).unwrap_or_else(|arc| (*arc).clone()),
+            ))
         }
     }
 

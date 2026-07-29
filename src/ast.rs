@@ -443,6 +443,7 @@ pub enum Decl {
         /// Migration contracts from a `migration` block (entity only, RFC 0008).
         migrations: Vec<MigrationDecl>,
         is_organization: bool,
+        implements: Option<String>,
         span: Span,
     },
     /// State machine declaration (BEAM_PRIMITIVES §4.2 gen_statem adaptation):
@@ -536,6 +537,12 @@ pub enum Decl {
     Database {
         name: String,
         tables: Vec<DatabaseTable>,
+        span: Span,
+    },
+    /// Named handler declaration: `handler name = { | Effect.op(params) resume => body, ... }`
+    NamedHandler {
+        name: String,
+        handlers: Vec<EffectHandler>,
         span: Span,
     },
 }
@@ -758,6 +765,7 @@ pub fn desugar_state_machine(
         version: 1,
         migrations: vec![],
         is_organization: false,
+        implements: None,
         span,
     }
 }

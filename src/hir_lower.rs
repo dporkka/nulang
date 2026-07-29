@@ -25,6 +25,9 @@ pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
     let mut module = hir::Module::new(&ast.name);
     let tools = collect_tool_schemas(&ast.decls);
     for decl in &ast.decls {
+        if matches!(decl, Decl::NamedHandler { .. }) {
+            continue;
+        }
         module.decls.push(lower_decl(decl, &tools));
     }
     module
@@ -288,6 +291,11 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             tools,
             *span,
         ),
+        Decl::NamedHandler { .. } => {
+            // NamedHandler is filtered out in lower_module before reaching
+            // lower_decl; this arm exists only for exhaustiveness.
+            unreachable!("NamedHandler should be filtered by lower_module")
+        }
         Decl::Database { name, tables, span } => hir::Decl::Database {
             name: name.clone(),
             tables: tables.clone(),

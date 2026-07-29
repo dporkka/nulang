@@ -5,7 +5,6 @@ members = ["crates/nulang-ai"]
 name = "nulang"
 version = "0.13.0-alpha.1"
 edition = "2021"
-autobenches = false
 authors = ["David Porkka"]
 license = "Apache-2.0"
 description = "Nulang - Distributed Actor-Based Programming Language with AI Agent Support"
@@ -30,11 +29,14 @@ default = ["python", "sqlite", "lsp", "ai-runtime"]
 python = ["dep:pyo3"]
 sqlite = ["dep:libsql"]
 lsp = ["dep:tower-lsp", "dep:tokio"]
-wasm-backend = ["dep:wasm-encoder", "dep:wasmtime"]
-wit-bindgen = []
 ai-runtime = ["dep:nulang-ai", "dep:reqwest", "dep:tokio"]
-http-client = ["dep:reqwest"]
-# Experimental QUIC transport (wire up in progress — requires quinn feature flags).
+wasm-backend = ["dep:wasm-encoder", "dep:wasmtime"]
+http-client = ["dep:reqwest", "dep:tokio"]
+
+# baked trip count, find_trip_count_hint always returns None). ~2700 lines of
+# dead weight in production builds.
+simd-experimental = []
+# Experimental QUIC transport (disabled: empty stubs, panics in bind()).
 quic-experimental = []
 
 [dependencies]
@@ -81,7 +83,6 @@ wasm-encoder = { version = "0.220", optional = true }
 wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow", "component-model", "wat"] }
 blake3 = "1.8"
 quinn = "0.11"
-httparse = "1.9"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
 rcgen = "0.14"
 multihash = "0.19.1"
@@ -105,9 +106,9 @@ codegen-units = 1
 
 [profile.dev]
 opt-level = 0
+debug = true
 incremental = true
 split-debuginfo = "unpacked"
-debug = true
 
 [profile.dev.package."*"]
 opt-level = 1

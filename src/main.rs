@@ -995,12 +995,6 @@ fn run_with_runtime(
         vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
             runtime.clone(),
         )));
-        #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
-        {
-            runtime.borrow_mut().http_provider = Some(std::sync::Arc::new(
-                nulang::backends::ReqwestHttpProvider::new(),
-            ));
-        }
         let value = vm.run()?;
         // Drop the VM (and its callback box, which holds an Rc clone) so
         // we can unwrap the Rc below.
@@ -1028,12 +1022,6 @@ fn run_with_runtime(
         vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
             runtime.clone(),
         )));
-        #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
-        {
-            runtime.borrow_mut().http_provider = Some(std::sync::Arc::new(
-                nulang::backends::ReqwestHttpProvider::new(),
-            ));
-        }
         let value = vm.run()?;
         runtime.borrow_mut().run_scheduler();
         Ok((value, runtime))

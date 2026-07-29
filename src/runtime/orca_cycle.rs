@@ -728,50 +728,46 @@ impl CycleDetector {
         let key = (actor_id, object as usize);
 
         // If the node is not in our graph, dead end.
-        let node = self.graph.get_mut(&key)?;
+        let edge_targets: Vec<(u64, *mut OrcaHeader)> = {
+            let node = self.graph.get_mut(&key)?;
 
-        match node.color {
-            NodeColor::Black => {
-                // Already fully explored, no cycle through here.
-                return None;
+            match node.color {
+                NodeColor::Black => {
+                    return None;
+                }
+                NodeColor::Gray => {
+                    let cycle_start = path
+                        .iter()
+                        .position(|(a, o)| *a == actor_id && *o == object)?;
+                    let cycle = path[cycle_start..].to_vec();
+                    return Some(cycle);
+                }
+                NodeColor::White => {
+                    node.color = NodeColor::Gray;
+                }
             }
-            NodeColor::Gray => {
-                // Cycle detected! Extract the cycle from the path.
-                // Find where in the path this node appears.
-                let cycle_start = path
-                    .iter()
-                    .position(|(a, o)| *a == actor_id && *o == object)?;
-                let cycle = path[cycle_start..].to_vec();
-                return Some(cycle);
-            }
-            NodeColor::White => {
-                // First visit — mark Gray and explore children.
-                node.color = NodeColor::Gray;
-            }
-        }
+
+            // Collect edge targets before recursing — avoids cloning the
+            // full ForeignEdge vec (which includes ref_count, unused here).
+            node.foreign_refs
+                .iter()
+                .map(|e| (e.target_actor, e.target_object))
+                .collect()
+        };
+        // `node` borrow is dropped; safe to borrow `self.graph` again below.
 
         // Push current node onto the path.
         path.push((actor_id, object));
 
-        // Clone the outgoing edges to avoid borrow issues.
-        let edges: Vec<ForeignEdge> = node.foreign_refs.clone();
-
         // Explore each outgoing edge.
-        for edge in &edges {
-            // Do not follow edges to remote actors when restricted to intra-node.
-            if !self.is_local(edge.target_actor) {
+        for &(target_actor, target_object) in &edge_targets {
+            if !self.is_local(target_actor) {
                 continue;
             }
-            let child_key = (edge.target_actor, edge.target_object as usize);
+            let child_key = (target_actor, target_object as usize);
 
-            // Check if the child node exists in our graph.
             if self.graph.contains_key(&child_key) {
-                // SAFETY: We checked the child key exists in the graph, so
-                // the node (and its header pointer) is valid at this point.
-                // We also verify liveness inside the recursive call.
-                if let Some(cycle) =
-                    self.dfs_find_cycle(edge.target_actor, edge.target_object, path)
-                {
+                if let Some(cycle) = self.dfs_find_cycle(target_actor, target_object, path) {
                     return Some(cycle);
                 }
             }

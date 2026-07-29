@@ -213,7 +213,13 @@ impl JitSession {
             return Some(std::mem::transmute(ptr));
         }
 
-        let has_known_types = type_metadata.map(|m| !m.is_empty()).unwrap_or(false);
+        let has_known_types = type_metadata
+            .map(|m| {
+                m.regs
+                    .iter()
+                    .any(|&t| t != crate::jit::typed_compiler::KnownType::Unknown)
+            })
+            .unwrap_or(false);
 
         if has_known_types {
             let func_name = format!("nulang_tjit_{}_{}", module_idx, start_offset);
@@ -481,19 +487,11 @@ impl crate::backends::JitBackend for JitSession {
             if region_len >= 3 {
                 let meta = typed_compiler::infer_reg_types(module, pc);
                 let meta_ref = if meta.is_empty() { None } else { Some(&meta) };
-                // Try typed compilation first
                 if let Some(func) = unsafe {
                     self.compile_region_typed(module_idx, pc, region_len, instructions, meta_ref)
                 } {
                     func(regs.as_mut_ptr(), constants.as_ptr());
                     return crate::backends::TieredAction::RanJit;
-                }
-                // Try SIMD vectorization
-                if let Some(func) = unsafe {
-                    self.compile_region_simd(module_idx, pc, region_len, instructions, meta_ref)
-                } {
-                    func(regs.as_mut_ptr(), constants.as_ptr());
-                    return crate::backends::TieredAction::CompiledSimdAndRan;
                 }
             }
         }
