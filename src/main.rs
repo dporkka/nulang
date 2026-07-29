@@ -534,7 +534,7 @@ fn print_help() {
     println!("       nulang --eval <CODE>");
     println!("       nulang --check <FILE>");
     println!("       nulang --lsp");
-    println!("       nulang nula <new|build|test|run>");
+    println!("       nulang nula <new|build|build-wasm|test|run>");
     println!("       nulang --doc");
     println!();
     println!("Options:");

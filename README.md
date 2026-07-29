@@ -183,12 +183,13 @@ cargo run -- --doc
 # Generate per-effect stdlib docs
 cargo run -- --emit-stdlib-docs docs/stdlib/
 
-# Package manager
-cargo run -- nula new my-app
-cargo run -- nula build my-app
-cargo run -- nula test my-app
-cargo run -- nula run my-app
-cargo run -- nula build-wasm my-app   # WASM AOT build
+# Package manager (operates on current directory)
+cargo run -- nula new my-app        # scaffold a new package
+cd my-app
+cargo run -- nula build             # resolve deps + type-check
+cargo run -- nula test              # run tests/ directory
+cargo run -- nula run               # build and run entry point
+cargo run -- nula build-wasm        # WASM + AOT .cwasm build
 ```
 
 ### Examples
