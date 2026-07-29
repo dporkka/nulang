@@ -2069,6 +2069,7 @@ impl Parser {
                     TokenKind::Receive => self.parse_receive(),
                     TokenKind::For => self.parse_for(),
                     TokenKind::While => self.parse_while(),
+                    TokenKind::Until => self.parse_until(),
                     TokenKind::Migrate => self.parse_migrate(),
                     TokenKind::With => self.parse_with_block(),
                     TokenKind::Consume => self.parse_consume_expr(),
@@ -2923,6 +2924,7 @@ impl Parser {
                 | TokenKind::Receive
                 | TokenKind::For
                 | TokenKind::While
+                | TokenKind::Until
                 | TokenKind::Migrate
                 | TokenKind::Return
                 | TokenKind::Break
@@ -3140,6 +3142,77 @@ impl Parser {
         Ok(Expr::While {
             cond: Box::new(cond),
             body: Box::new(body),
+            span,
+        })
+    }
+
+    /// Parse `until <condition> [poll <interval>] => <body>`.
+    /// Desugars to a polling loop with `Timer.sleep`.
+    fn parse_until(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.expect(TokenKind::Until)?;
+        let condition = self.parse_expr()?;
+        // Optional `poll <interval>` clause
+        let poll_ms = if matches!(self.peek_kind(), TokenKind::Ident(s) if s == "poll") {
+            self.advance(); // consume 'poll'
+            self.parse_expr()?
+        } else {
+            Expr::Literal(Literal::Int(100), span)
+        };
+        self.expect(TokenKind::FatArrow)?;
+        let body = self.parse_expr()?;
+
+        // Desugar:
+        //   let __until_poll = <poll_ms> in
+        //   let rec __until_loop = fn() {
+        //       if <condition> then <body>
+        //       else { perform Timer.sleep(__until_poll); __until_loop() }
+        //   } in __until_loop()
+        let poll_var = "__until_poll".to_string();
+        let loop_fn = "__until_loop".to_string();
+        let sleep_expr = Expr::Perform {
+            effect: "Timer".to_string(),
+            op: "sleep".to_string(),
+            args: vec![Expr::Var(poll_var.clone(), span)],
+            span,
+        };
+        let recurse_expr = Expr::App {
+            func: Box::new(Expr::Var(loop_fn.clone(), span)),
+            args: vec![],
+            span,
+        };
+        let else_block = Expr::Block {
+            exprs: vec![sleep_expr, recurse_expr],
+            span,
+        };
+        let if_expr = Expr::If {
+            cond: Box::new(condition),
+            then_branch: Box::new(body),
+            else_branch: Some(Box::new(else_block)),
+            span,
+        };
+        let loop_body = Expr::LetRec {
+            name: loop_fn.clone(),
+            params: vec![],
+            value: Box::new(Expr::Lambda {
+                params: vec![],
+                ret_type: None,
+                body: Box::new(if_expr),
+                effect: None,
+                span,
+            }),
+            body: Box::new(Expr::App {
+                func: Box::new(Expr::Var(loop_fn, span)),
+                args: vec![],
+                span,
+            }),
+            span,
+        };
+        Ok(Expr::Let {
+            name: poll_var,
+            ty: None,
+            value: Box::new(poll_ms),
+            body: Box::new(loop_body),
             span,
         })
     }
@@ -4404,8 +4477,8 @@ mod tests {
         match expr {
             Expr::Handle { handlers, .. } => {
                 assert_eq!(handlers.len(), 1);
-                assert_eq!(handlers[0].effect_name, "E");
-                assert_eq!(handlers[0].op_name, "op");
+                assert_eq!(handlers[0].effect, "E");
+                assert_eq!(handlers[0].op, "op");
                 assert!(handlers[0].resume);
             }
             _ => panic!("Expected handle expression"),
@@ -5243,6 +5316,119 @@ mod tests {
                 msg
             ),
             _ => panic!("Expected ParseError"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Named handler declaration: handler name = { | Effect.op(params) resume => body }
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_parse_named_handler_declaration() {
+        let source = r#"
+            handler my_io = {
+                | IO.print(msg) => 42
+                | IO.read() resume => 99
+            }
+        "#;
+        let ast = parse(source).unwrap();
+        assert_eq!(ast.decls.len(), 1);
+        match &ast.decls[0] {
+            Decl::NamedHandler { name, handlers, .. } => {
+                assert_eq!(name, "my_io");
+                assert_eq!(handlers.len(), 2);
+                assert_eq!(handlers[0].effect, "IO");
+                assert_eq!(handlers[0].op, "print");
+                assert_eq!(handlers[0].params, vec!["msg"]);
+                assert!(!handlers[0].resume);
+                assert_eq!(handlers[1].effect_name, "IO");
+                assert_eq!(handlers[1].op_name, "read");
+                assert!(handlers[1].params.is_empty());
+                assert!(handlers[1].resume);
+            }
+            _ => panic!("Expected NamedHandler declaration, got {:?}", ast.decls[0]),
+        }
+    }
+
+    #[test]
+    fn test_parse_named_handler_without_resume() {
+        let source = r#"
+            handler simple = {
+                | E.op() => 1
+            }
+        "#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::NamedHandler { name, handlers, .. } => {
+                assert_eq!(name, "simple");
+                assert_eq!(handlers.len(), 1);
+                assert!(!handlers[0].resume);
+            }
+            _ => panic!("Expected NamedHandler"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // With block: with handler_name { body_expr }
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_parse_with_block_resolves_named_handler() {
+        // Declare a handler and use it via `with`.
+        let source = r#"
+            handler h = { | E.op() => 42 }
+            with h { perform E.op() }
+        "#;
+        let ast = parse(source).unwrap();
+        assert_eq!(ast.decls.len(), 2);
+        // First decl is the handler
+        assert!(matches!(ast.decls[0], Decl::NamedHandler { .. }));
+        // Second decl is __main containing the with expression
+        match &ast.decls[1] {
+            Decl::Function { name: _, body, .. } => match body {
+                Expr::Handle { handlers, .. } => {
+                    assert_eq!(handlers.len(), 1);
+                    assert_eq!(handlers[0].effect, "E");
+                    assert_eq!(handlers[0].op, "op");
+                }
+                _ => panic!("Expected Handle expression, got {:?}", body),
+            },
+            _ => panic!("Expected __main function, got {:?}", ast.decls[1]),
+        }
+    }
+
+    #[test]
+    fn test_parse_with_block_undefined_handler_errors() {
+        let source = r#"
+            with nonexistent { 42 }
+        "#;
+        let err = parse(source).unwrap_err();
+        match err {
+            NuError::ParseError { msg, .. } => {
+                assert!(
+                    msg.contains("undefined handler"),
+                    "expected 'undefined handler' error, got: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected ParseError, got {:?}", err),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Consume expression: consume var
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_parse_consume_expr() {
+        let source = "let x = 42 in consume x";
+        let expr = parse_expr(source).unwrap();
+        match expr {
+            Expr::Let { body, .. } => match body.as_ref() {
+                Expr::CapAnnotate { expr, cap, .. } => {
+                    assert_eq!(*cap, Capability::Val);
+                    assert!(matches!(expr.as_ref(), Expr::Var(name, _) if name == "x"));
+                }
+                _ => panic!("Expected CapAnnotate in body, got {:?}", body),
+            },
+            _ => panic!("Expected Let expression, got {:?}", expr),
         }
     }
 }

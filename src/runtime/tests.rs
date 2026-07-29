@@ -3160,6 +3160,116 @@ fn test_three_node_remote_actor_message_delivery() {
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c]);
 }
 
+/// Content hash mismatch triggers bytecode fetch; the retry queue holds
+/// the message until the FetchBehaviorResponse arrives, then delivers it.
+#[test]
+fn test_message_retry_after_bytecode_fetch() {
+    use crate::bytecode::{BehaviorTableEntry, CodeModule};
+    use crate::runtime::network::Packet;
+
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.distributed.node_id.unwrap();
+    let node_b = rt_b.distributed.node_id.unwrap();
+    rt_b.join_cluster(addr_a);
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
+
+    // Build a module with a BehaviorTableEntry that has a content_hash.
+    // The entry sits at index 0, matching the native handler registered below.
+    let module = {
+        let mut m = CodeModule::new("test_fetch");
+        m.behaviors.push(BehaviorTableEntry {
+            name: "store".to_string(),
+            param_count: 1,
+            code_offset: 0,
+            local_count: 0,
+            effect_mask: 0,
+            compensate_offset: None,
+            content_hash: Some([0xAB; 32]),
+            source_location: None,
+            parallel_branches: None,
+        });
+        m
+    };
+
+    // Node B caches the "correct" module (different hash = [0xCD; 32]).
+    // When A fetches this, the retried message's behavior lookup will succeed
+    // because hot_reload_behavior replaces A's module with this one.
+    let correct_module = {
+        let mut m = module.clone();
+        m.behaviors[0].content_hash = Some([0xCD; 32]);
+        // The hash we use for cache key must match what A will look up.
+        m
+    };
+    let correct_hash: [u8; 32] = [0xCD; 32];
+    rt_b.behavior_cache
+        .insert(correct_hash, correct_module.clone());
+
+    // Spawn an actor on A with the module (hash [0xAB; 32]) and a native handler.
+    let actor_id = rt_a.spawn_actor(Box::new(|| vec![("received".to_string(), Value::int(0))]));
+    {
+        let actor = rt_a.actors.get_mut(&actor_id).unwrap();
+        actor.bytecode_module = Some(module);
+        actor.bytecode_offsets = vec![0];
+        actor.register_behavior("store", |actor, args| {
+            let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+            actor.set_state_field("received", Value::int(n));
+        });
+    }
+
+    // Send a message from B to A with correct_hash. A's verify_behavior_hash
+    // compares correct_hash against the module's entry (which has [0xAB; 32]).
+    // They differ, so A checks its behavior_cache (miss), then sends a
+    // FetchBehaviorRequest to B. B has the module cached under correct_hash.
+    let packet = Packet::ActorMessage {
+        target_actor: actor_id,
+        behavior_name: "store".to_string(),
+        content_hash: Some(correct_hash),
+        payload: vec![Value::int(42)],
+        string_table: vec![],
+        sender_actor: 0,
+        sender_node: node_b,
+        priority: crate::runtime::mailbox::MessagePriority::Normal,
+    };
+    rt_b.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .send(node_a, addr_a, packet);
+
+    // Pump both nodes until the message is delivered via retry.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let delivered = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        rt_a.run_scheduler();
+        let got = rt_a
+            .actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(42) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "message should be retried and delivered after bytecode fetch"
+    );
+    assert!(
+        rt_a.pending_fetched_messages.is_empty(),
+        "pending_fetched_messages should be drained after retry"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
+}
+
 /// Gossip relay convergence: three nodes seeded only as a chain
 /// (B joins A, C joins B — C never contacts A directly) must still
 /// converge to a full membership view via gossip relayed by B.

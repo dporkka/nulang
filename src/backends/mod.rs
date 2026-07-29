@@ -15,13 +15,19 @@
 //!
 //! # Current status
 //!
-//! - [`StorageBackend`] aliases the existing [`crate::runtime::PersistenceStore`]
-//!   trait — storage was already behind a trait. This module makes the
-//!   boundary explicit and discoverable.
-//! - [`JitBackend`], [`WasmBackend`], [`Transport`] are defined here as the
-//!   target interfaces. The existing concrete impls (`src/jit/`,
-//!   `src/mir_wasm.rs` + `src/wasm_runtime.rs`, `src/runtime/network.rs`)
-//!   will be wired behind these traits incrementally (RFC 0003, item 6).
+//! - [`StorageBackend`] — blanket-impl'd over [`crate::runtime::PersistenceStore`].
+//! - [`JitBackend`] — implemented by [`crate::jit::JitSession`]; the VM
+//!   holds `Option<Box<dyn JitBackend>>`.  **Wired.**
+//! - [`WasmBackend`] — implemented by [`DefaultWasmBackend`]; `main.rs`
+//!   uses the trait.  **Wired.**
+//! - [`Transport`] — blanket-impl'd over [`crate::runtime::NetworkTransport`].
+//!   **Wired.**
+//! - [`CryptoProvider`] — implemented by [`DefaultCryptoProvider`]; not yet
+//!   routed through the runtime (identity + TLS still use ed25519 directly).
+//! - [`HttpProvider`] — implemented by [`ReqwestHttpProvider`]; not yet
+//!   routed through the AI runtime.
+//! - [`ForeignInterop`] — implemented by [`DefaultForeignInterop`] (PyO3,
+//!   feature `python`).  **Wired.**
 
 use crate::bytecode::CodeModule;
 use crate::mir::Module as MirModule;
@@ -268,6 +274,113 @@ pub trait ForeignInterop: Send {
     fn import(&mut self, name: &str) -> Result<(), String>;
 }
 
+// ---------------------------------------------------------------------------
+// Default Foreign-interop impl — Python via PyO3
+// ---------------------------------------------------------------------------
+
+/// The default foreign-interop backend: Python via PyO3 (`src/python/`,
+/// feature `python`).
+#[cfg(feature = "python")]
+pub struct DefaultForeignInterop {
+    bridge: crate::python::PyBridge,
+    /// Cached module names → Python object ids, for `call` lookups.
+    modules: std::collections::HashMap<String, crate::python::PythonObjectId>,
+}
+
+#[cfg(feature = "python")]
+impl DefaultForeignInterop {
+    pub fn new() -> Result<Self, String> {
+        let bridge = crate::python::PyBridge::new();
+        bridge.initialize()?;
+        Ok(DefaultForeignInterop {
+            bridge,
+            modules: std::collections::HashMap::new(),
+        })
+    }
+}
+
+#[cfg(feature = "python")]
+impl ForeignInterop for DefaultForeignInterop {
+    fn import(&mut self, name: &str) -> Result<(), String> {
+        let id = self.bridge.import_module(name)?;
+        self.modules.insert(name.to_string(), id);
+        Ok(())
+    }
+
+    fn call(&mut self, module: &str, function: &str, args: &[Value]) -> Result<Value, String> {
+        let module_id = *self
+            .modules
+            .get(module)
+            .ok_or_else(|| format!("module '{}' not imported", module))?;
+        let func_id = self.bridge.get_attr(module_id, function)?;
+        let py_args: Result<Vec<_>, String> = args
+            .iter()
+            .map(|v| crate::python::value_to_python_object_id(*v))
+            .collect();
+        let result_id = self.bridge.call(func_id, py_args?)?;
+        crate::python::python_object_id_to_value(result_id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default Crypto provider impl — BLAKE3 + Ed25519
+// ---------------------------------------------------------------------------
+
+/// The default crypto provider: BLAKE3 hashing, `getrandom` CSPRNG,
+/// and Ed25519 signatures via `ed25519-dalek`.
+pub struct DefaultCryptoProvider {
+    signing_key: Option<ed25519_dalek::SigningKey>,
+}
+
+impl DefaultCryptoProvider {
+    /// Create a provider with no signing key.  `sign()` will return `None`.
+    pub fn new() -> Self {
+        DefaultCryptoProvider { signing_key: None }
+    }
+
+    /// Create a provider with an Ed25519 signing key for `sign()`.
+    pub fn with_signing_key(key: ed25519_dalek::SigningKey) -> Self {
+        DefaultCryptoProvider {
+            signing_key: Some(key),
+        }
+    }
+}
+
+impl Default for DefaultCryptoProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CryptoProvider for DefaultCryptoProvider {
+    fn hash(&self, data: &[u8]) -> [u8; 32] {
+        *blake3::hash(data).as_bytes()
+    }
+
+    fn random_bytes(&self, buf: &mut [u8]) {
+        use rand_core::RngCore;
+        rand_core::OsRng.fill_bytes(buf);
+    }
+
+    fn sign(&self, message: &[u8]) -> Option<[u8; 64]> {
+        let key = self.signing_key.as_ref()?;
+        use ed25519_dalek::Signer;
+        let sig = key.sign(message);
+        let mut out = [0u8; 64];
+        out.copy_from_slice(&sig.to_bytes());
+        Some(out)
+    }
+
+    fn verify(&self, public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        let vk = match VerifyingKey::from_bytes(public_key) {
+            Ok(k) => k,
+            Err(_) => return false,
+        };
+        let sig = Signature::from_bytes(signature);
+        vk.verify(message, &sig).is_ok()
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +411,64 @@ mod tests {
         }
         let provider = ReqwestHttpProvider::new();
         accepts_http(&provider);
+    }
+
+    #[test]
+    fn test_default_crypto_provider_hash_and_random() {
+        let cp = DefaultCryptoProvider::new();
+        // hash is deterministic
+        let h1 = cp.hash(b"hello");
+        let h2 = cp.hash(b"hello");
+        assert_eq!(h1, h2);
+        assert_ne!(h1, cp.hash(b"world"));
+        // random_bytes fills the buffer
+        let mut buf = [0u8; 32];
+        cp.random_bytes(&mut buf);
+        assert!(
+            buf.iter().any(|&b| b != 0),
+            "random bytes should not be all zero"
+        );
+        // sign returns None without a key
+        assert!(cp.sign(b"message").is_none());
+    }
+
+    #[test]
+    fn test_default_crypto_provider_sign_verify() {
+        use ed25519_dalek::SigningKey;
+        use rand_core::OsRng;
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let verifying_key = signing_key.verifying_key();
+        let cp = DefaultCryptoProvider::with_signing_key(signing_key);
+
+        let msg = b"nulang test message";
+        let sig = cp.sign(msg).expect("sign should succeed with key");
+        let pk: [u8; 32] = verifying_key.to_bytes();
+        assert!(cp.verify(&pk, msg, &sig));
+        assert!(!cp.verify(&pk, b"wrong message", &sig));
+    }
+
+    #[cfg(feature = "python")]
+    #[test]
+    fn test_foreign_interop_python_roundtrip() {
+        // Ensure Python is initialized (auto-initialize feature handles this).
+        let _ = pyo3::Python::attach(|_py| ());
+
+        let mut fi = DefaultForeignInterop::new().expect("failed to create DefaultForeignInterop");
+        // Import the builtins module
+        fi.import("builtins").expect("failed to import builtins");
+        // Call abs(-42) → 42
+        let result = fi
+            .call("builtins", "abs", &[Value::int(-42)])
+            .expect("failed to call abs");
+        assert_eq!(result.as_int(), Some(42), "abs(-42) should return 42");
+        // Call without importing first should fail
+        let err = fi
+            .call("nonexistent", "fn", &[])
+            .expect_err("call without import should fail");
+        assert!(
+            err.contains("not imported"),
+            "expected 'not imported' error"
+        );
     }
 }
