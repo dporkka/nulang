@@ -1048,12 +1048,100 @@ pub fn process_network_packets(
                     match crate::bytecode::CodeModule::from_nbc(&bytes) {
                         Ok(artifact) => {
                             runtime.behavior_cache.insert(content_hash, artifact.module);
+                            // Retry any messages that were waiting for this bytecode
+                            let pending = runtime.pending_fetched_messages.remove(&content_hash);
+                            if let Some(messages) = pending {
+                                for (target_actor, behavior_name, mut msg, string_table) in messages
+                                {
+                                    // Hot-reload the newly cached module into the target actor
+                                    let cached = match runtime.behavior_cache.get(&content_hash) {
+                                        Some(c) => c.clone(),
+                                        None => {
+                                            notify_delivery_failed(
+                                                runtime,
+                                                msg.sender,
+                                                "bytecode fetch succeeded but cache miss on retry",
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    hot_reload_behavior(
+                                        runtime,
+                                        target_actor,
+                                        &cached,
+                                        &behavior_name,
+                                    );
+                                    // Resolve behavior_id against the updated module
+                                    msg.behavior_id = runtime
+                                        .behavior_id_for(target_actor, &behavior_name)
+                                        .unwrap_or(0);
+                                    // Verify the hash now matches
+                                    if !verify_behavior_hash(
+                                        runtime,
+                                        target_actor,
+                                        msg.behavior_id,
+                                        &content_hash,
+                                    ) {
+                                        notify_delivery_failed(
+                                            runtime,
+                                            msg.sender,
+                                            "behavior content hash still mismatched after fetch",
+                                        );
+                                        continue;
+                                    }
+                                    // Intern string payloads and deliver
+                                    let mut payload_vec = (*msg.payload).clone();
+                                    if !intern_wire_strings(
+                                        runtime,
+                                        target_actor,
+                                        &mut payload_vec,
+                                        &string_table,
+                                    ) {
+                                        notify_delivery_failed(
+                                            runtime,
+                                            msg.sender,
+                                            "string intern failed on retry",
+                                        );
+                                        continue;
+                                    }
+                                    msg.payload = Arc::new(payload_vec);
+                                    if let Some(actor) = runtime.actors.get_mut(&target_actor) {
+                                        let _ = actor.mailbox.push(msg);
+                                        runtime.scheduler.enqueue(target_actor);
+                                    } else {
+                                        notify_delivery_failed(
+                                            runtime,
+                                            msg.sender,
+                                            "target actor not found on retry",
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             warn!(
                                 "nulang-net: failed to deserialize fetched bytecode for '{}': {}",
                                 behavior_name, e
                             );
+                            // Drop pending messages for this hash on deserialize failure
+                            let pending = runtime.pending_fetched_messages.remove(&content_hash);
+                            if let Some(messages) = pending {
+                                for (_, _, msg, _) in messages {
+                                    notify_delivery_failed(
+                                        runtime,
+                                        msg.sender,
+                                        "bytecode fetch failed: deserialization error",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Sender didn't have the requested bytecode; drain and notify
+                    let pending = runtime.pending_fetched_messages.remove(&content_hash);
+                    if let Some(messages) = pending {
+                        for (_, _, msg, _) in messages {
+                            notify_delivery_failed(runtime, msg.sender, "bytecode fetch failed: sender does not have the requested behavior");
                         }
                     }
                 }
@@ -1106,14 +1194,17 @@ pub fn process_network_packets(
                                 if let Some(addr) = request_addr {
                                     transport.send(from, addr, request);
                                 }
-                                // Queue message for retry after fetch completes
-                                // (MVP: drop with notification; full implementation
-                                // would enqueue for retry)
-                                notify_delivery_failed(
-                                    runtime,
-                                    msg.sender,
-                                    "behavior content hash mismatch; bytecode fetch requested",
-                                );
+                                // Enqueue message for retry after fetch completes
+                                runtime
+                                    .pending_fetched_messages
+                                    .entry(sender_hash)
+                                    .or_default()
+                                    .push((
+                                        target_actor,
+                                        behavior_name.clone(),
+                                        msg.clone(),
+                                        string_table.clone(),
+                                    ));
                                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
                                 continue;
                             }

@@ -266,6 +266,11 @@ pub struct Runtime {
     /// When a node receives a message for an unknown content hash, it can
     /// request the bytecode from the sender and cache it here keyed by hash.
     pub behavior_cache: HashMap<[u8; 32], crate::bytecode::CodeModule>,
+    /// Messages pending retry after a bytecode fetch completes.
+    /// Keyed by content hash; drained when the matching FetchBehaviorResponse
+    /// arrives and the module is cached.
+    pub(crate) pending_fetched_messages:
+        HashMap<[u8; 32], Vec<(u64, String, Message, Vec<String>)>>,
     // Pipelines and debates (v0.9 AI Runtime) — extracted into a registry so
     // the god-object shrinks and the subsystems can evolve independently.
     pub ai: ai_registry::AiRuntimeRegistry,
@@ -334,6 +339,7 @@ impl Runtime {
             timer_wheel: TimerWheel::new(),
             registry: ActorRegistry::new(),
             process_groups: ProcessGroups::new(),
+            pending_fetched_messages: HashMap::new(),
             persistence: Box::new(MemoryStore::new()),
             vm: None,
             llm: llm::LlmState::new(),

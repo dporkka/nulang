@@ -1097,6 +1097,10 @@ pub struct CapabilityAnalyzer {
     /// Spans of LinearIso/Linear variable references that were consumed
     /// during analysis (for LSP capability visualization).
     pub consumed_spans: Vec<Span>,
+    /// Per-binding record of the FIRST consumption span. When a linear
+    /// binding is used a second time, the error message includes both
+    /// the first-use location (from this map) and the second-use location.
+    pub first_consumed: FxHashMap<String, Span>,
 }
 
 impl CapabilityAnalyzer {
@@ -1105,6 +1109,7 @@ impl CapabilityAnalyzer {
         CapabilityAnalyzer {
             diagnostics: Vec::new(),
             consumed_spans: Vec::new(),
+            first_consumed: FxHashMap::default(),
         }
     }
 
@@ -1136,13 +1141,20 @@ impl CapabilityAnalyzer {
         // Record the span for LSP visualization regardless of error.
         self.consumed_spans.push(span);
         if !consumed.insert(name.to_string()) {
-            let msg = format!(
-                "linear value `{}` used after being consumed (linear/lineariso bindings may be used at most once)",
-                name
-            );
+            let first_span = self.first_consumed.get(name);
+            let mut msg = format!("linear value `{}` used after being consumed", name);
+            if let Some(fs) = first_span {
+                msg.push_str(&format!(
+                    " (first consumed at line {}:{})",
+                    fs.start, fs.end
+                ));
+            }
+            msg.push_str("\nhelp: linear/lineariso bindings may be used at most once");
+            msg.push_str(&format!("\nhelp: use `consume {}` to explicitly discharge the linear obligation on the first use, or restructure to avoid the second use", name));
             self.diagnostics.push(msg.clone());
             return Err(NuError::CapError { msg, span });
         }
+        self.first_consumed.insert(name.to_string(), span);
         Ok(())
     }
 
@@ -1700,7 +1712,10 @@ impl CapabilityAnalyzer {
         if sub.is_subtype_of(sup) {
             Ok(())
         } else {
-            let msg = format!("capability {} is not a subtype of {}", sub, sup);
+            let mut msg = format!("capability {} is not a subtype of {}", sub, sup);
+            if sub == Capability::LinearIso && sup == Capability::Iso {
+                msg.push_str("\nhelp: use `consume <binding>` to discharge the linear obligation and obtain an Iso reference");
+            }
             self.diagnostics.push(msg.clone());
             Err(NuError::CapError { msg, span })
         }

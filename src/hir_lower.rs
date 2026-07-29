@@ -28,9 +28,6 @@ pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
         if matches!(decl, Decl::NamedHandler { .. }) {
             continue;
         }
-        if matches!(decl, Decl::NamedHandler { .. }) {
-            continue;
-        }
         module.decls.push(lower_decl(decl, &tools));
     }
     module
