@@ -5386,10 +5386,9 @@ mod tests {
             Decl::Function { name: _, body, .. } => match body {
                 Expr::Handle { handlers, .. } => {
                     assert_eq!(handlers.len(), 1);
-                    assert_eq!(handlers[0].effect, "E");
-                    assert_eq!(handlers[0].op, "op");
+                    assert_eq!(handlers[0].effect_name, "E");
+                    assert_eq!(handlers[0].op_name, "op");
                 }
-                _ => panic!("Expected Handle expression, got {:?}", body),
             },
             _ => panic!("Expected __main function, got {:?}", ast.decls[1]),
         }
@@ -5429,6 +5428,42 @@ mod tests {
                 _ => panic!("Expected CapAnnotate in body, got {:?}", body),
             },
             _ => panic!("Expected Let expression, got {:?}", expr),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Until expression: until <condition> => <body>  (polling loop sugar)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_parse_until_desugars_to_polling_loop() {
+        let source = "until x > 0 => 42";
+        let expr = parse_expr(source).unwrap();
+        // Should desugar to: let __until_poll = 100 in let rec __until_loop = fn() { ... } in __until_loop()
+        match expr {
+            Expr::Let { name, body, .. } => {
+                assert_eq!(name, "__until_poll");
+                match body.as_ref() {
+                    Expr::LetRec { name, .. } => {
+                        assert_eq!(name, "__until_loop");
+                    }
+                    _ => panic!("Expected LetRec for __until_loop"),
+                }
+            }
+            _ => panic!("Expected Let for __until_poll, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_until_with_poll_clause() {
+        let source = "until done poll 50 => perform IO.print(\"ok\")";
+        let expr = parse_expr(source).unwrap();
+        match expr {
+            Expr::Let { name, value, .. } => {
+                assert_eq!(name, "__until_poll");
+                // The poll value should be 50
+                assert!(matches!(value.as_ref(), Expr::Literal(Literal::Int(50), _)));
+            }
+            _ => panic!("Expected Let for __until_poll"),
         }
     }
 }
