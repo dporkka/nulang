@@ -237,6 +237,9 @@ pub struct Actor {
     /// ms =>`), from the first suspension until the wait resolves (match,
     /// timeout, or the behavior ends). `None` when no receive-wait is live.
     pub receive_wait: Option<ReceiveWaitState>,
+    /// True when a TimerSleepWake has fired for this actor.  The re-executed
+    /// PerformAsync checks this flag and returns Ready to complete the sleep.
+    pub timer_sleep_fired: bool,
     /// Cached parsed retry configuration for agent actors.
     pub retry_config: Option<crate::ast::AgentRetryConfig>,
     /// Cached parsed fallback configuration for agent actors.
@@ -329,6 +332,7 @@ impl Actor {
             dirty_fields: HashSet::new(),
             llm_completed: None,
             receive_wait: None,
+            timer_sleep_fired: false,
             retry_config: None,
             flight_recorder: FlightRecorder::new(1000),
             fallback_config: Vec::new(),

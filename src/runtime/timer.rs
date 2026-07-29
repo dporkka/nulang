@@ -45,6 +45,9 @@ pub enum TimerMessage {
     /// Retry an LLM call for the target actor. The runtime re-dispatches
     /// the in-flight request on fire.
     LlmRetry,
+    /// Wake an actor suspended by `Timer.sleep(ms)`. The runtime resumes
+    /// the suspended behavior, which re-executes the PerformAsync yielding Ready.
+    TimerSleepWake,
 }
 
 // -- Virtual clock for deterministic testing ---------------------------
@@ -260,6 +263,24 @@ impl TimerWheel {
             timers.push(entry);
         }
 
+        id
+    }
+
+    /// Schedule a `TimerSleepWake` message to fire after `delay`, resuming
+    /// an actor suspended on `Timer.sleep`.
+    pub fn timer_sleep_wake(&self, delay: Duration, target_actor: u64) -> TimerId {
+        let id = TimerId(self.next_id.fetch_add(1, Ordering::SeqCst));
+        let fire_at = Instant::now() + delay;
+        let entry = TimerEntry {
+            id,
+            target_actor,
+            message: TimerMessage::TimerSleepWake,
+            fire_at,
+            cancelled: AtomicBool::new(false),
+        };
+        if let Ok(mut timers) = self.timers.write() {
+            timers.push(entry);
+        }
         id
     }
 

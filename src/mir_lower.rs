@@ -1184,6 +1184,20 @@ impl<'c> FnLowerer<'c> {
                         }
                     }
                 }
+                // 1-arg Timer.sleep(ms) routes through PerformAsync for suspension.
+                // 2-arg Timer.sleep(name, ms) stays as Perform for workflow timers.
+                if effect == "Timer" && op == "sleep" && args.len() == 1 {
+                    let ms = self.lower_operand(&args[0])?;
+                    self.b.assign(
+                        dst,
+                        mir::RValue::PerformAsync {
+                            effect_op: format!("Timer.sleep"),
+                            args: vec![ms],
+                            resolved_handler: None,
+                        },
+                    );
+                    return Ok(());
+                }
                 if effect == "Signal" && op == "wait" {
                     if let Some(hir::Operand::Literal(crate::ast::Literal::String(name), _)) =
                         args.first()

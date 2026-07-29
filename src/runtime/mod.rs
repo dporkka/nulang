@@ -3243,6 +3243,18 @@ impl Runtime {
         self.resume_suspended_receive_wait(actor_id);
     }
 
+    /// A `Timer.sleep` timer fired: mark the actor and resume its
+    /// suspended PerformAsync behavior. On re-execution the callback
+    /// sees `timer_sleep_fired == true` and returns Ready.
+    fn fire_timer_sleep_wake(&mut self, actor_id: u64) {
+        if let Some(actor) = self.actors.get_mut(&actor_id) {
+            actor.timer_sleep_fired = true;
+        }
+        // Enqueue the actor; the scheduler will see suspended_execution
+        // and call resume_suspended_llm_step which handles PerformAsync resume.
+        self.scheduler.enqueue(actor_id);
+    }
+
     /// Resume an actor whose bytecode behavior suspended on a timed
     /// selective receive (`receive ... after ms =>`). Called when a message
     /// was pushed to the actor's mailbox (the re-scan may match) or when
@@ -3392,6 +3404,9 @@ impl Runtime {
                 }
                 TimerMessage::ReceiveWaitTimeout => {
                     self.fire_receive_wait_timeout(target_actor);
+                }
+                TimerMessage::TimerSleepWake => {
+                    self.fire_timer_sleep_wake(target_actor);
                 }
                 TimerMessage::LlmRetry => {
                     self.handle_llm_retry_timer(target_actor);
@@ -4891,6 +4906,22 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 let result = self.complete_llm("", &prompt);
                 crate::vm::PerformAsyncResult::Ready(result)
             }
+            "Timer.sleep" => {
+                let ms = args.first().and_then(|v| v.as_int()).unwrap_or(0) as u64;
+                let mut rt = self.runtime.borrow_mut();
+                let actor_id = rt.current_actor.unwrap_or(0);
+                if let Some(actor) = rt.actors.get_mut(&actor_id) {
+                    if actor.timer_sleep_fired {
+                        actor.timer_sleep_fired = false;
+                        return crate::vm::PerformAsyncResult::Ready(None);
+                    }
+                }
+                if ms > 0 {
+                    rt.timer_wheel
+                        .timer_sleep_wake(std::time::Duration::from_millis(ms), actor_id);
+                }
+                crate::vm::PerformAsyncResult::Pending
+            }
             "Pipeline.new" => {
                 let id = self.runtime.borrow_mut().pipeline_new();
                 crate::vm::PerformAsyncResult::Ready(Some(id.to_string()))
@@ -5583,6 +5614,23 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             "Inference.ask" | "LLM.ask" => {
                 let prompt = resolve_first_string(constants, args);
                 self.llm_ask("", &prompt)
+            }
+            "Timer.sleep" => {
+                let ms = args.first().and_then(|v| v.as_int()).unwrap_or(0) as u64;
+                unsafe {
+                    let rt = &mut *self.runtime;
+                    if let Some(actor) = rt.actors.get_mut(&self.actor_id) {
+                        if actor.timer_sleep_fired {
+                            actor.timer_sleep_fired = false;
+                            return PerformAsyncResult::Ready(None);
+                        }
+                    }
+                    if ms > 0 {
+                        rt.timer_wheel
+                            .timer_sleep_wake(std::time::Duration::from_millis(ms), self.actor_id);
+                    }
+                }
+                PerformAsyncResult::Pending
             }
             "Pipeline.new" => {
                 let id = unsafe { (*self.runtime).pipeline_new() };
