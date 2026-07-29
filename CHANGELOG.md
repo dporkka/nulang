@@ -59,7 +59,7 @@ in this version; they are recorded here to establish their tier.
 - CRDT operations and merge semantics (`src/runtime/crdt.rs`,
   `src/runtime/crdt_reg.rs`).
 
-### Added since 1.0.0-frozen — 2026-07-23
+### Added since 1.0.0-frozen — 2026-07-29
 
 - **RFC 0005/0007 — `entity` keyword and event sourcing.** `entity` desugars
   to `persistent actor` with `event_sourced` default state model. `events`
@@ -96,6 +96,20 @@ in this version; they are recorded here to establish their tier.
   `join_assoc`, `join_comm`, `join_idem`, `cap_sendable`, `discharge_sendable`.
   The core HM soundness theorems (`types.lean`) remain open.
 
+- **Error handling syntax.** `catch expr => body`, `fail expr`
+  (structured short-circuit return), and `T ! E` return-type syntax
+  (`fn div(a: Int, b: Int) -> Int ! String`). Errors propagate through
+  `?` operator — `expr?` is sugar for `catch expr => |e| fail e`.
+  Desugaring, type inference, and codegen wired in `src/parser.rs`,
+  `src/typechecker.rs`, `src/hir_lower.rs`, `src/mir_lower.rs`, and
+  `src/mir_codegen.rs`.
+- **Transport resilience.** `send remote` and `ask remote` keywords
+  enforce network-sendable (`val`/`tag`) capability constraints at the
+  call site. `ask remote actor behavior(args) timeout N` accepts an
+  optional `timeout` clause for request-response with deadline semantics.
+  Capability enforcement lives in `src/effect_checker.rs`; transport
+  modifiers parsed in `src/parser.rs`.
+
 ## Experimental tier
 
 *No stability promise. May change or be removed in any release. Behind a
@@ -122,6 +136,35 @@ feature flag or explicitly marked experimental.*
   `Provider.ask` under the hood.
 - AOT native backend (`src/aot/`), JIT tiering (`src/jit/`), QUIC transport
   (`src/runtime/quic_transport.rs`).
+
+- **Stdlib modules.** Standard library modules provide reusable generic
+  data structures and operations: `stdlib::core` (base utilities),
+  `stdlib::list` (map/filter/fold/reverse), `stdlib::string`
+  (split/join/trim/replace), `stdlib::set` (add/remove/contains/union/
+  intersect), `stdlib::map` (insert/get/remove/keys/values), and
+  `stdlib::http` (get/post request builders). Modules live under
+  `src/stdlib/` and are resolved via `NULANG_STDLIB`, the executable-
+  relative path, or the dev-fallback `src/stdlib/`.
+- **Typeclass declarations (Phase 4).** `class` and `impl`
+  keyword support: `class Eq[T] { fn eq(self: T, other: T) -> Bool }`
+  declares a typeclass with optional superclasses (`class Ord[T]: Eq`).
+  `impl Eq Int { fn eq(self: Int, other: Int) = self == other }` registers
+  a concrete instance. Class/instance tables in `TypeChecker`
+  (`src/typechecker.rs`). Typechecker integration (dictionary-passing
+  transform): method calls on concrete types (`1.eq(2)`) resolve through
+  the instance table and type-check against the impl dictionary; missing
+  instances (`"hi".eq("there")` with no `impl Eq String`) produce
+  compile-time errors. HIR lowering for runtime dictionary construction
+  is deferred.
+- **RFC 0003 — Content-addressed functions.** Proposal document
+  (`RFC/0003-content-addressing.md`): defines a deterministic
+  content-hash-based code identity scheme for distributed code
+  deployment, cache invalidation, and reproducible builds across
+  heterogeneous Nulang runtimes. Not yet implemented.
+- **`::` import resolution.** Module imports now support `::`-delimited
+  paths: `import stdlib::set`, `import mypkg::utils::math`. The resolver
+  (`src/resolver.rs`) maps `stdlib::*` prefixes to the standard library
+  directory and general `::` paths to filesystem-relative module files.
 
 ---
 

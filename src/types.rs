@@ -4,6 +4,9 @@ use crate::type_ir::NtirNode;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+// Fast hashing for compiler-internal maps (keys are not attacker-controlled).
+type FxHashMap<K, V> =
+    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
 // ---------------------------------------------------------------------------
 // Type Variables & Regions
@@ -723,6 +726,11 @@ pub struct TypeContext {
     /// typechecker to validate `emit EventName(args)` calls. Stored as
     /// `(event_name, [(param_name, param_type)])`.
     pub entity_events: Option<Vec<(String, Vec<(String, Type)>)>>,
+    /// Typeclass constraints on type variables: maps each type variable to
+    /// the list of class names it must satisfy. Populated when a function
+    /// signature declares `fn f[T: Eq, Ord](...)` or through `where` clauses.
+    /// Checked by instance-lookup (B.4) when a concrete type is substituted.
+    pub constraints: FxHashMap<TypeVar, Vec<String>>,
 }
 
 impl TypeContext {
@@ -751,6 +759,20 @@ impl TypeContext {
     /// Set the entity event declarations for emit validation.
     pub fn set_entity_events(&mut self, events: Vec<(String, Vec<(String, Type)>)>) {
         self.entity_events = Some(events);
+    }
+
+    /// Record that a type variable must satisfy a class constraint.
+    /// Multiple constraints on the same variable are accumulated.
+    pub fn add_constraint(&mut self, tv: TypeVar, class_name: &str) {
+        self.constraints
+            .entry(tv)
+            .or_default()
+            .push(class_name.to_string());
+    }
+
+    /// Look up the constraints on a type variable, if any.
+    pub fn get_constraints(&self, tv: &TypeVar) -> Option<&Vec<String>> {
+        self.constraints.get(tv)
     }
 
     /// Iterate over all bindings as `(name, (type, capability))` pairs.

@@ -8231,4 +8231,126 @@ match { a: 2, b: 9 } with {
         );
         assert!(result.is_ok(), "class with superclass: {:?}", result.err());
     }
+
+    // -----------------------------------------------------------------------
+    // Typeclass typechecker integration (Phase 4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_class_method_resolves_with_impl() {
+        // Method call on a concrete type with a matching impl resolves
+        // via the instance dictionary.
+        let result = check_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            impl Eq Int {
+                fn eq(self: Int, other: Int) = self == other
+            }
+            1.eq(2)
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "1.eq(2) with impl Eq Int should type-check: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_class_method_errors_without_impl() {
+        // Method call on a concrete type without a matching impl is an error.
+        let result = check_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            "hello".eq("world")
+            "#,
+        );
+        assert!(result.is_err(), "no impl Eq[String] should be an error");
+        let err = result.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("no impl Eq[String]"),
+            "error should mention missing impl: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_class_method_with_two_param_impl() {
+        // Method call with additional parameters resolves correctly.
+        let result = check_source(
+            r#"
+            class Ord[T] {
+                fn cmp(self: T, other: T) -> Int
+            }
+            impl Ord Int {
+                fn cmp(self: Int, other: Int) = self - other
+            }
+            5.cmp(3)
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "5.cmp(3) with impl Ord Int should type-check: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_method_on_type_var_falls_through_to_record() {
+        // Method call on a type variable without constraints falls through
+        // to open-record handling (works for any type).
+        let result = check_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            fn generic_id[T](x: T) -> T { x }
+            generic_id
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "generic function without method calls should check: {:?}",
+            result.err()
+        );
+    }
+    #[test]
+    fn test_unknown_method_falls_through_to_record() {
+        // A method call whose name doesn't match any class method
+        // falls through to open-record handling for type variables.
+        let result = check_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            fn id[T](x: T) -> T { x }
+            id
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "generic function with no method calls should check: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_record_field_access_still_works() {
+        // Record field access should still work alongside typeclass resolution.
+        let result = check_source(
+            r#"
+            { x: 1, y: 2 }.x
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "record field access should work: {:?}",
+            result.err()
+        );
+    }
 }

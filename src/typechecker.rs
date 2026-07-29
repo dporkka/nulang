@@ -108,10 +108,42 @@ fn apply_subst_to_ctx(ctx: &TypeContext, subst: &Substitution) -> TypeContext {
         return ctx.clone();
     }
     let mut result = TypeContext::new();
+    result.entity_events = ctx.entity_events.clone();
     for (name, (ty, cap)) in ctx.iter() {
         result.bind(name.clone(), apply_subst(ty, subst), *cap);
     }
+    // Propagate constraints through substitution: if a constrained type
+    // variable is substituted to another variable, transfer the constraints.
+    for (tv, class_names) in &ctx.constraints {
+        let resolved = apply_subst(&Type::Var(*tv), subst);
+        match resolved {
+            Type::Var(tv2) => {
+                for cn in class_names {
+                    result.add_constraint(tv2, cn);
+                }
+            }
+            // If substituted to a concrete type, drop the constraint — it
+            // is resolved by the instance-lookup in B.4 when the caller
+            // checks for a matching instance.
+            _ => {}
+        }
+    }
     result
+}
+
+/// Strip the first (self) parameter from a function parameter type.
+/// `fn(Self, A) -> Ret` becomes `fn(A) -> Ret`.
+/// `fn(Self, A, B) -> Ret` becomes `fn((A, B)) -> Ret`.
+/// `fn(Self) -> Ret` becomes `fn(Unit) -> Ret` (nullary after self removal).
+fn strip_first_param(param: &Type) -> Type {
+    match param {
+        Type::Tuple(params) if params.len() > 2 => Type::Tuple(params[1..].to_vec()),
+        Type::Tuple(params) if params.len() == 2 => {
+            params[1].clone() // single remaining param, unwrapped
+        }
+        Type::Tuple(_) => Type::unit(), // only self, nullary
+        _ => Type::unit(),
+    }
 }
 
 /// Compose two substitutions: s2 after s1.
@@ -750,6 +782,7 @@ impl TypeChecker {
 
     /// Type-check an entire module, returning the type of the last declaration.
     pub fn check_module(&mut self, module: &AstModule) -> NuResult<Type> {
+        self.register_class_decls(module);
         let mut ctx = TypeContext::new();
         let mut last_type = Type::unit();
         for decl in flatten_decls(&module.decls) {
@@ -817,6 +850,23 @@ impl TypeChecker {
                         let gen_ty = self.do_generalize(&ctx, &ctor_ty);
                         ctx.bind(ctor_name.clone(), gen_ty, Capability::Ref);
                     }
+                }
+
+                Decl::Class { name, .. } => {
+                    // Bind class name as a type-level marker; runtime value
+                    // is unit — classes constrain type variables at compile
+                    // time and have no runtime representation.
+                    ctx.bind(name.clone(), Type::unit(), Capability::Ref);
+                }
+                Decl::Impl {
+                    class_name,
+                    for_type,
+                    ..
+                } => {
+                    // Bind the instance dictionary under a synthetic name
+                    // so instance-lookup can resolve it at call sites.
+                    let dict_name = format!("_impl_{}_{}", class_name, for_type);
+                    ctx.bind(dict_name, final_ty.clone(), Capability::Ref);
                 }
 
                 _ => {}
@@ -1085,7 +1135,41 @@ impl TypeChecker {
             Decl::Import { .. } => Ok((vec![], Type::unit())),
             Decl::Database { .. } => Ok((vec![], Type::unit())),
             Decl::Class { .. } => Ok((vec![], Type::unit())),
-            Decl::Impl { .. } => Ok((vec![], Type::unit())),
+            Decl::Impl {
+                class_name: _,
+                for_type,
+                methods,
+                ..
+            } => {
+                // Build a dictionary record type from method signatures.
+                // Each method becomes a field whose type is
+                //   fn(for_type, declared_params...) -> declared_return_type.
+                // Method body type-checking is deferred; the dictionary
+                // record is bound into scope at its synthetic name so
+                // instance-lookup (B.4) can resolve it.
+                let mut field_types: Vec<(String, Type)> = Vec::new();
+                for method in methods {
+                    let mut param_types = vec![for_type.clone()]; // self
+                                                                  // Skip the first param (self) — it is already
+                                                                  // covered by for_type above.
+                    for (_, pty) in &method.params[1..] {
+                        param_types.push(pty.clone());
+                    }
+                    let param_ty = if param_types.len() == 1 {
+                        param_types[0].clone()
+                    } else {
+                        Type::Tuple(param_types)
+                    };
+                    let func_ty = Type::Function {
+                        param: Box::new(param_ty),
+                        ret: Box::new(method.return_type.clone()),
+                        effect: EffectRow::empty(),
+                        cap: Capability::Ref,
+                    };
+                    field_types.push((method.name.clone(), func_ty));
+                }
+                Ok((vec![], Type::Record(field_types)))
+            }
         }
     }
 
@@ -2108,9 +2192,67 @@ impl TypeChecker {
                 })
             }
             _ => {
-                // Unknown receiver shape: require an open record carrying the
-                // demanded field, leaving the rest of the row to be inferred
-                // from other accesses or the call site.
+                // Typeclass method resolution: if the receiver type is
+                // concrete and there is a matching instance for a class
+                // that defines `field`, resolve through the instance
+                // dictionary. The returned type drops the `self` parameter
+                // so `App` can apply the remaining arguments naturally.
+                let concrete = !matches!(&record_ty_resolved, Type::Var(_));
+                if concrete {
+                    let type_key = format!("{}", record_ty_resolved);
+                    let class_table = self.class_table.clone();
+                    let instance_table = self.instance_table.clone();
+                    for (class_name, class_info) in &class_table {
+                        if class_info.methods.iter().any(|m| m.name == field) {
+                            let key = (class_name.clone(), type_key.clone());
+                            if instance_table.contains_key(&key) {
+                                let dict_name = format!("_impl_{}_{}", class_name, type_key);
+                                if let Some((dict_ty, _)) = ctx.lookup(&dict_name) {
+                                    if let Type::Record(fields) = dict_ty {
+                                        if let Some((_, field_ty)) =
+                                            fields.iter().find(|(n, _)| n == field)
+                                        {
+                                            if let Type::Function {
+                                                param,
+                                                ret,
+                                                effect,
+                                                cap,
+                                            } = field_ty
+                                            {
+                                                let remaining = strip_first_param(param);
+                                                return Ok((
+                                                    s1.clone(),
+                                                    Type::Function {
+                                                        param: Box::new(remaining),
+                                                        ret: ret.clone(),
+                                                        effect: effect.clone(),
+                                                        cap: *cap,
+                                                    },
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                                // Instance registered but dict not in
+                                // context (should not happen).
+                                return Err(NuError::TypeError {
+                                    msg: format!("internal: dict '{}' not in scope", dict_name),
+                                    span,
+                                });
+                            }
+                            // Class defines this method, but no instance
+                            // exists for this concrete type.
+                            return Err(NuError::TypeError {
+                                msg: format!("no impl {}[{}]", class_name, record_ty_resolved),
+                                span,
+                            });
+                        }
+                    }
+                }
+                // Unknown receiver shape or no class defines this method:
+                // require an open record carrying the demanded field,
+                // leaving the rest of the row to be inferred from other
+                // accesses or the call site.
                 let field_var = Type::Var(TypeVar::fresh());
                 let expected = Type::record_open(
                     vec![(field.to_string(), field_var.clone())],
