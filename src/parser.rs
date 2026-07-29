@@ -1915,12 +1915,18 @@ impl Parser {
                         scrutinee: Box::new(left),
                         arms: vec![
                             (
-                                Pattern::Variant("Ok".to_string(), Some(Box::new(Pattern::Var(x.clone())))),
+                                Pattern::Variant(
+                                    "Ok".to_string(),
+                                    Some(Box::new(Pattern::Var(x.clone()))),
+                                ),
                                 None,
                                 Expr::Var(x, span),
                             ),
                             (
-                                Pattern::Variant("Error".to_string(), Some(Box::new(Pattern::Wild))),
+                                Pattern::Variant(
+                                    "Error".to_string(),
+                                    Some(Box::new(Pattern::Wild)),
+                                ),
                                 None,
                                 fallback,
                             ),

@@ -4628,7 +4628,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         let mut rt = self.runtime.borrow_mut();
         let actor_id = rt.current_actor?;
         if !rt.actor_is_workflow(actor_id) {
-            return None;
+            return Some(crate::vm::Value::unit());
         }
         let name = {
             let vm = rt.vm.as_mut()?;
@@ -4706,12 +4706,6 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                     }
                 }
             }
-            return Some(crate::vm::Value::unit());
-        }
-        if effect_name == "Timer" && op_name == Some("sleep") {
-            // Timer.sleep(duration_ms) — returns Unit immediately.
-            // Full durable-sleep support (suspend + timer-wheel resume)
-            // is tracked in RFC 0006.
             return Some(crate::vm::Value::unit());
         }
         if effect_name == "Int" && op_name == Some("to_string") {
@@ -5232,7 +5226,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             }
             let actor = (*self.runtime).actors.get(&self.actor_id)?;
             if !actor.is_workflow {
-                return None;
+                return Some(crate::vm::Value::unit());
             }
             let vm = (*self.runtime).vm.as_mut()?;
             let module_idx = vm.current_module_idx()?;
@@ -5315,9 +5309,6 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                         }
                     }
                 }
-                return Some(crate::vm::Value::unit());
-            }
-            if effect_name == "Timer" && op_name == Some("sleep") {
                 return Some(crate::vm::Value::unit());
             }
             if effect_name == "Int" && op_name == Some("to_string") {
