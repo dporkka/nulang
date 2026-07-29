@@ -8140,4 +8140,24 @@ match { a: 2, b: 9 } with {
             5,
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Until expression: until <condition> => <body>
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_until_true_returns_body() {
+        assert_int("until true => 42", 42);
+    }
+
+    #[test]
+    fn test_until_with_var_true_condition() {
+        assert_int(
+            r#"
+            let x = 10 in
+            until x > 5 => x
+            "#,
+            10,
+        );
+    }
 }
