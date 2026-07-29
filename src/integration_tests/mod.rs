@@ -8353,4 +8353,99 @@ match { a: 2, b: 9 } with {
             result.err()
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Typeclass dictionary lowering tests (Phase 4, B.6)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_impl_dict_lowering_typechecks() {
+        // Verify that an impl block with a method body type-checks and
+        // the synthetic dict name is bound into scope.
+        let result = check_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            impl Eq Int {
+                fn eq(self: Int, other: Int) = self == other
+            }
+            _impl_Eq_Int
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "impl dict should be bound in scope: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_impl_dict_lowering_compiles_to_bytecode() {
+        // Verify that an impl block lowers through HIR/MIR to bytecode
+        // without errors. The dict constant is compiled but not called
+        // by __main — we just verify the pipeline succeeds.
+        let result = run_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            impl Eq Int {
+                fn eq(self: Int, other: Int) = self == other
+            }
+            42
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "impl dict lowering should produce valid bytecode: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_class_method_call_at_runtime() {
+        // Full end-to-end: class + impl + method call at runtime.
+        // 1.eq(1) → Bool(true), verified via as_bool().
+        let result = run_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            impl Eq Int {
+                fn eq(self: Int, other: Int) = self == other
+            }
+            1.eq(1)
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "1.eq(1) should compile and run: {:?}",
+            result.err()
+        );
+        let (value, _ty) = result.unwrap();
+        assert_eq!(value.as_bool(), Some(true), "1.eq(1) should be true");
+    }
+
+    #[test]
+    fn test_class_method_call_false_at_runtime() {
+        let result = run_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            impl Eq Int {
+                fn eq(self: Int, other: Int) = self == other
+            }
+            1.eq(2)
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "1.eq(2) should compile and run: {:?}",
+            result.err()
+        );
+        let (value, _ty) = result.unwrap();
+        assert_eq!(value.as_bool(), Some(false), "1.eq(2) should be false");
+    }
 }

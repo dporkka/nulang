@@ -155,12 +155,21 @@ feature flag or explicitly marked experimental.*
   the instance table and type-check against the impl dictionary; missing
   instances (`"hi".eq("there")` with no `impl Eq String`) produce
   compile-time errors. HIR lowering for runtime dictionary construction
-  is deferred.
+  is implemented: `Decl::Impl` lowers to `hir::Decl::Constant`, producing
+  a module-level function that evaluates to a record of method closures.
+  Field access routing through the dictionary at call sites is
+  implemented: method calls on concrete types (`1.eq(1)`) lower to
+  dict-constant calls, field accesses, and method invocations at the
+  HIR level, producing correct runtime results. Full end-to-end
+  verified with integration tests.
 - **RFC 0003 — Content-addressed functions.** Proposal document
   (`RFC/0003-content-addressing.md`): defines a deterministic
   content-hash-based code identity scheme for distributed code
   deployment, cache invalidation, and reproducible builds across
-  heterogeneous Nulang runtimes. Not yet implemented.
+  heterogeneous Nulang runtimes. Status: Draft. Content hashing
+  infrastructure (BLAKE3 `source_hash` in `.nbc` artifacts) is
+  available per RFC 0001; full code-identity registry and
+  content-addressed deployment are not yet implemented.
 - **`::` import resolution.** Module imports now support `::`-delimited
   paths: `import stdlib::set`, `import mypkg::utils::math`. The resolver
   (`src/resolver.rs`) maps `stdlib::*` prefixes to the standard library

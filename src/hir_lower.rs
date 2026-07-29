@@ -24,15 +24,27 @@ type FxHashMap<K, V> =
 pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
     let mut module = hir::Module::new(&ast.name);
     let tools = collect_tool_schemas(&ast.decls);
+
+    // Build class/instance tables and make them available to lower_expr
+    // via thread-local so typeclass method calls (e.g. 1.eq(2)) can
+    // resolve through instance dictionaries.
+    let class_tables = crate::typechecker::build_class_tables(ast);
+    CURRENT_CLASS_TABLES.with(|cell| {
+        *cell.borrow_mut() = Some(class_tables);
+    });
+
     for decl in &ast.decls {
-        if matches!(
-            decl,
-            Decl::NamedHandler { .. } | Decl::Class { .. } | Decl::Impl { .. }
-        ) {
+        if matches!(decl, Decl::NamedHandler { .. } | Decl::Class { .. }) {
             continue;
         }
         module.decls.push(lower_decl(decl, &tools));
     }
+
+    // Clear the tables so they don't leak to the next module.
+    CURRENT_CLASS_TABLES.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+
     module
 }
 
@@ -269,10 +281,51 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
                 tools,
             )
         }
-        Decl::Class { .. } | Decl::Impl { .. } => {
-            // Class/Impl are filtered out in lower_module before reaching
+        Decl::Impl {
+            class_name,
+            for_type,
+            methods,
+            ..
+        } => {
+            let mut body = hir::Body::new();
+            let mut fields: Vec<(String, hir::Operand)> = Vec::new();
+            for method in methods {
+                let lambda_params: Vec<(String, Option<Type>)> = method
+                    .params
+                    .iter()
+                    .map(|(n, t)| (n.clone(), Some(t.clone())))
+                    .collect();
+                let lambda = Expr::Lambda {
+                    params: lambda_params,
+                    ret_type: Some(method.return_type.clone()),
+                    effect: None,
+                    body: Box::new(method.body.clone()),
+                    span: Span::default(),
+                };
+                let op = lower_expr(&lambda, &mut body);
+                fields.push((method.name.clone(), op));
+            }
+            let temp = fresh_temp_name();
+            body.push(hir::Stmt::Let {
+                name: temp.clone(),
+                ty: Type::unit(),
+                value: hir::RValue::Record(fields, Type::unit()),
+                span: Span::default(),
+            });
+            body.set_terminator(hir::Terminator::FnReturn(Some(hir::Operand::Var(
+                temp,
+                Type::unit(),
+            ))));
+            let dict_name = format!("_impl_{}_{}", class_name, for_type);
+            hir::Decl::Constant {
+                name: dict_name,
+                body,
+            }
+        }
+        Decl::Class { .. } => {
+            // Class is filtered out in lower_module before reaching
             // lower_decl; this arm exists only for exhaustiveness.
-            unreachable!("Class/Impl should be filtered by lower_module")
+            unreachable!("Class should be filtered by lower_module")
         }
         Decl::Agent {
             name,
@@ -927,6 +980,61 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                     span: *span,
                 });
                 return hir::Operand::Var(temp, ty);
+            }
+
+            // Typeclass method resolution: FieldAccess on a concrete type
+            // with a matching impl → route through the instance dictionary.
+            if let Expr::FieldAccess {
+                expr: receiver_expr,
+                field: method_name,
+                ..
+            } = func.as_ref()
+            {
+                if let Some(dict_name) = try_resolve_typeclass_dict(receiver_expr, method_name) {
+                    let receiver = lower_expr(receiver_expr, body);
+                    let mut aops = vec![receiver];
+                    for a in args {
+                        aops.push(lower_expr(a, body));
+                    }
+                    let ty = Type::unit();
+                    // Step 1: call dict constant fn to get the record
+                    let dict_temp = fresh_temp_name();
+                    body.push(hir::Stmt::Let {
+                        name: dict_temp.clone(),
+                        ty: ty.clone(),
+                        value: hir::RValue::Call {
+                            func: hir::Operand::Var(dict_name.clone(), ty.clone()),
+                            args: vec![],
+                            ty: ty.clone(),
+                        },
+                        span: *span,
+                    });
+                    // Step 2: access the method field on the dict record
+                    let method_temp = fresh_temp_name();
+                    body.push(hir::Stmt::Let {
+                        name: method_temp.clone(),
+                        ty: ty.clone(),
+                        value: hir::RValue::FieldAccess {
+                            base: hir::Operand::Var(dict_temp, ty.clone()),
+                            field: method_name.clone(),
+                            ty: ty.clone(),
+                        },
+                        span: *span,
+                    });
+                    // Step 3: call the method with receiver + args
+                    let call_temp = fresh_temp_name();
+                    body.push(hir::Stmt::Let {
+                        name: call_temp.clone(),
+                        ty: ty.clone(),
+                        value: hir::RValue::Call {
+                            func: hir::Operand::Var(method_temp, ty.clone()),
+                            args: aops,
+                            ty: ty.clone(),
+                        },
+                        span: *span,
+                    });
+                    return hir::Operand::Var(call_temp, ty);
+                }
             }
 
             let fop = lower_expr(func, body);
@@ -1749,6 +1857,38 @@ fn actor_name_from_expr(expr: &Expr) -> Option<String> {
     }
 }
 
+/// Try to resolve a typeclass method call through the instance dictionary.
+///
+/// Given `receiver.method_name(...)`, checks if the receiver is a literal
+/// with a concrete type that has a matching `impl` for any class defining
+/// `method_name`. Returns the synthetic dict constant name if found.
+fn try_resolve_typeclass_dict(receiver: &Expr, method_name: &str) -> Option<String> {
+    // Only resolve on literal receivers for now (concrete type is known).
+    let type_name = match receiver {
+        Expr::Literal(Literal::Int(_), _) => "Int",
+        Expr::Literal(Literal::Float(_), _) => "Float",
+        Expr::Literal(Literal::Bool(_), _) => "Bool",
+        Expr::Literal(Literal::String(_), _) => "String",
+        _ => return None,
+    };
+
+    CURRENT_CLASS_TABLES.with(|cell| {
+        let tables = cell.borrow();
+        let tables = tables.as_ref()?;
+
+        for (class_name, class_info) in &tables.class_table {
+            if class_info.methods.iter().any(|m| m.name == method_name) {
+                let key = (class_name.clone(), type_name.to_string());
+                if tables.instance_table.contains_key(&key) {
+                    let dict_name = format!("_impl_{}_{}", class_name, type_name);
+                    return Some(dict_name);
+                }
+            }
+        }
+        None
+    })
+}
+
 static TEMP_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 fn fresh_temp_name() -> String {
@@ -1763,6 +1903,14 @@ fn fresh_temp_name() -> String {
 use std::cell::RefCell;
 thread_local! {
     static CURRENT_APPLY_HANDLERS: RefCell<Option<Vec<ast::ApplyHandler>>> = RefCell::new(None);
+}
+
+// Thread-local class/instance tables for the module currently being lowered.
+// Set by `lower_module` before lowering declarations, cleared afterwards.
+// `lower_expr` checks this to resolve typeclass method calls through
+// instance dictionaries.
+thread_local! {
+    static CURRENT_CLASS_TABLES: RefCell<Option<crate::typechecker::ClassTables>> = RefCell::new(None);
 }
 
 #[cfg(test)]

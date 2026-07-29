@@ -165,6 +165,10 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
                 ctx.ctor_map.insert(ctor_name.clone(), payload.is_some());
             }
         }
+        hir::Decl::Constant { name, .. } => {
+            let idx = ctx.reserve_function(name);
+            ctx.func_map.insert(name.clone(), idx);
+        }
         // Type-level declarations produce no code.
         hir::Decl::TypeAlias { .. }
         | hir::Decl::RecordType { .. }
@@ -223,6 +227,13 @@ fn lower_decl_bodies(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
             for d in decls {
                 lower_decl_bodies(ctx, d)?;
             }
+        }
+        hir::Decl::Constant { name, body } => {
+            let idx = ctx.func_map[name];
+            let mut lowerer = FnLowerer::new(ctx, name, None);
+            lowerer.lower_body_top(body)?;
+            let func = lowerer.b.build();
+            ctx.fill_function(idx, func);
         }
         _ => {}
     }

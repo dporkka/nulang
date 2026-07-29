@@ -708,6 +708,55 @@ pub struct TypeChecker {
     pub instance_table: FxHashMap<(String, String), Vec<ImplMethod>>,
 }
 
+/// Pre-computed class and instance tables extracted from an AST module.
+/// Shared between the typechecker and HIR lowering so both can resolve
+/// typeclass method calls.
+#[derive(Debug, Clone, Default)]
+pub struct ClassTables {
+    pub class_table: FxHashMap<String, ClassInfo>,
+    pub instance_table: FxHashMap<(String, String), Vec<ImplMethod>>,
+}
+
+/// Build class and instance tables by scanning a module's declarations.
+/// This is the shared extraction logic — `TypeChecker::register_class_decls`
+/// delegates to it, and `hir_lower::lower_module` calls it independently.
+pub fn build_class_tables(module: &AstModule) -> ClassTables {
+    let mut tables = ClassTables::default();
+    for decl in flatten_decls(&module.decls) {
+        match decl {
+            Decl::Class {
+                name,
+                type_params,
+                super_classes,
+                methods,
+                ..
+            } => {
+                tables.class_table.insert(
+                    name.clone(),
+                    ClassInfo {
+                        type_params: type_params.clone(),
+                        super_classes: super_classes.clone(),
+                        methods: methods.clone(),
+                    },
+                );
+            }
+            Decl::Impl {
+                class_name,
+                for_type,
+                methods,
+                ..
+            } => {
+                let type_key = format!("{}", for_type);
+                tables
+                    .instance_table
+                    .insert((class_name.clone(), type_key), methods.clone());
+            }
+            _ => {}
+        }
+    }
+    tables
+}
+
 /// Recursively splice any `Decl::Module { decls, .. }` in place with its own
 /// contents, in source order, leaving every other declaration untouched.
 ///
@@ -737,47 +786,10 @@ impl TypeChecker {
 
     /// Type-check an entire module, returning the type of the last declaration.
     ///
-    /// Nested `module { ... }` blocks are purely a namespacing construct with
-    /// no enforced visibility (mirroring the stable compiler's `collect_functions`/
-    /// `compile_decl`, which recurse into `Decl::Module` and register its
-    /// contents in the same flat, unqualified namespace as top-level decls).
-    /// So declarations are flattened before checking, which both exports
-    /// nested-module bindings to the enclosing scope and lets sibling decls
-    /// Register class and instance declarations from a module into the
-    /// typechecker's tables. Call before `check_module` or as a separate
-    /// pass to populate the class/instance tables for later resolution.
     pub fn register_class_decls(&mut self, module: &AstModule) {
-        for decl in flatten_decls(&module.decls) {
-            match decl {
-                Decl::Class {
-                    name,
-                    type_params,
-                    super_classes,
-                    methods,
-                    ..
-                } => {
-                    self.class_table.insert(
-                        name.clone(),
-                        ClassInfo {
-                            type_params: type_params.clone(),
-                            super_classes: super_classes.clone(),
-                            methods: methods.clone(),
-                        },
-                    );
-                }
-                Decl::Impl {
-                    class_name,
-                    for_type,
-                    methods,
-                    ..
-                } => {
-                    let type_key = format!("{}", for_type);
-                    self.instance_table
-                        .insert((class_name.clone(), type_key), methods.clone());
-                }
-                _ => {}
-            }
-        }
+        let tables = build_class_tables(module);
+        self.class_table = tables.class_table;
+        self.instance_table = tables.instance_table;
     }
 
     /// Type-check an entire module, returning the type of the last declaration.

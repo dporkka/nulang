@@ -82,6 +82,10 @@ pub enum Decl {
         name: String,
         span: Span,
     },
+    Constant {
+        name: String,
+        body: Body,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
