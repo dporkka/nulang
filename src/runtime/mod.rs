@@ -4708,6 +4708,12 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             }
             return Some(crate::vm::Value::unit());
         }
+        if effect_name == "Timer" && op_name == Some("sleep") {
+            // Timer.sleep(duration_ms) — returns Unit immediately.
+            // Full durable-sleep support (suspend + timer-wheel resume)
+            // is tracked in RFC 0006.
+            return Some(crate::vm::Value::unit());
+        }
         if effect_name == "Int" && op_name == Some("to_string") {
             let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
             let s = format!("{}", n);
@@ -5309,6 +5315,9 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                         }
                     }
                 }
+                return Some(crate::vm::Value::unit());
+            }
+            if effect_name == "Timer" && op_name == Some("sleep") {
                 return Some(crate::vm::Value::unit());
             }
             if effect_name == "Int" && op_name == Some("to_string") {

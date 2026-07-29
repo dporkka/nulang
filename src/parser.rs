@@ -1864,6 +1864,72 @@ impl Parser {
                 };
                 continue;
             }
+
+            // Catch expression: expr catch fallback_expr
+            // Desugars to match expr { Ok(x) => x, Error(_) => fallback }
+            if self.consume_if(&TokenKind::Catch) {
+                let span = self.current_span();
+                if self.consume_if(&TokenKind::LBrace) {
+                    // Block form: expr catch { | pat => body, ... }
+                    let mut arms = Vec::new();
+                    let x = "__catch_x".to_string();
+                    // Ok arm: unwrap the success value
+                    arms.push((
+                        Pattern::Variant("Ok".to_string(), Some(Box::new(Pattern::Var(x.clone())))),
+                        None,
+                        Expr::Var(x, span),
+                    ));
+                    // Parse user-provided Error arms
+                    self.skip_newlines();
+                    while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                        self.skip_newlines();
+                        if self.match_token(&TokenKind::RBrace) {
+                            break;
+                        }
+                        // Optional leading `|` before each arm
+                        self.consume_if(&TokenKind::Pipe);
+                        self.skip_newlines();
+                        let pat = self.parse_pattern()?;
+                        let guard = if self.consume_if(&TokenKind::If) {
+                            Some(self.parse_expr()?)
+                        } else {
+                            None
+                        };
+                        self.expect(TokenKind::FatArrow)?;
+                        let body = self.parse_expr()?;
+                        arms.push((pat, guard, body));
+                        self.skip_newlines_semicolons();
+                        self.consume_if(&TokenKind::Comma);
+                    }
+                    self.expect(TokenKind::RBrace)?;
+                    left = Expr::Match {
+                        scrutinee: Box::new(left),
+                        arms,
+                        span,
+                    };
+                } else {
+                    // Bare form: expr catch fallback_expr
+                    let fallback = self.parse_expr()?;
+                    let x = "__catch_x".to_string();
+                    left = Expr::Match {
+                        scrutinee: Box::new(left),
+                        arms: vec![
+                            (
+                                Pattern::Variant("Ok".to_string(), Some(Box::new(Pattern::Var(x.clone())))),
+                                None,
+                                Expr::Var(x, span),
+                            ),
+                            (
+                                Pattern::Variant("Error".to_string(), Some(Box::new(Pattern::Wild))),
+                                None,
+                                fallback,
+                            ),
+                        ],
+                        span,
+                    };
+                }
+                continue;
+            }
             if self.consume_if(&TokenKind::LBracket) {
                 // Array index: arr[idx]
                 let idx = self.parse_expr()?;
