@@ -3595,3 +3595,27 @@ fn test_sync_crdts_full_then_delta_converges_two_nodes() {
 
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
 }
+
+#[test]
+fn test_crypto_provider_hash_bytes() {
+    let rt = Runtime::new();
+    let h1 = rt.hash_bytes(b"hello");
+    let h2 = rt.hash_bytes(b"hello");
+    assert_eq!(h1, h2, "hash should be deterministic");
+    assert_ne!(
+        h1,
+        rt.hash_bytes(b"world"),
+        "different input, different hash"
+    );
+}
+
+#[test]
+fn test_crypto_provider_random_bytes() {
+    let rt = Runtime::new();
+    let mut buf = [0u8; 32];
+    rt.random_bytes(&mut buf);
+    assert!(
+        buf.iter().any(|&b| b != 0),
+        "random bytes should not be all zero"
+    );
+}
