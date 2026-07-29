@@ -987,6 +987,78 @@ pub fn process_network_packets(
             Packet::Ack { packet_seq } => {
                 runtime.acked_packets.insert(packet_seq);
             }
+            Packet::FetchBehaviorRequest { content_hash } => {
+                let mut nbc_bytes: Option<Vec<u8>> = None;
+                let mut behavior_name = String::new();
+                // Search recovery modules for a matching content hash
+                for (_, (module, _, _)) in &runtime.recovery_modules {
+                    for entry in &module.behaviors {
+                        if entry.content_hash == Some(content_hash) {
+                            match module.to_nbc(None) {
+                                Ok(bytes) => {
+                                    nbc_bytes = Some(bytes);
+                                    behavior_name = entry.name.clone();
+                                }
+                                Err(_) => {}
+                            }
+                            break;
+                        }
+                    }
+                    if nbc_bytes.is_some() {
+                        break;
+                    }
+                }
+                // Also check the behavior cache
+                if nbc_bytes.is_none() {
+                    if let Some(cached) = runtime.behavior_cache.get(&content_hash) {
+                        match cached.to_nbc(None) {
+                            Ok(bytes) => {
+                                nbc_bytes = Some(bytes);
+                                behavior_name = cached
+                                    .behaviors
+                                    .first()
+                                    .map(|b| b.name.clone())
+                                    .unwrap_or_default();
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+                let reply = Packet::FetchBehaviorResponse {
+                    content_hash,
+                    behavior_name,
+                    nbc_bytes,
+                };
+                let from = incoming.from_node;
+                let reply_addr = cluster
+                    .get_node(from)
+                    .map(|info| info.address)
+                    .or_else(|| transport.connection_addr(from));
+                if let Some(addr) = reply_addr {
+                    transport.send(from, addr, reply);
+                }
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+            }
+            Packet::FetchBehaviorResponse {
+                content_hash,
+                behavior_name,
+                nbc_bytes,
+            } => {
+                if let Some(bytes) = nbc_bytes {
+                    match crate::bytecode::CodeModule::from_nbc(&bytes) {
+                        Ok(artifact) => {
+                            runtime.behavior_cache.insert(content_hash, artifact.module);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "nulang-net: failed to deserialize fetched bytecode for '{}': {}",
+                                behavior_name, e
+                            );
+                        }
+                    }
+                }
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+            }
             _ => {
                 if let Some((target_actor, behavior_name, mut msg, string_table, content_hash)) =
                     resolver.parse_packet(incoming.packet)
@@ -1008,17 +1080,43 @@ pub fn process_network_packets(
                             msg.behavior_id,
                             &sender_hash,
                         ) {
-                            warn!(
-                                "nulang-net: dropping message to actor {}: behavior '{}' content hash mismatch (possible version skew)",
-                                target_actor, behavior_name
-                            );
-                            notify_delivery_failed(
-                                runtime,
-                                msg.sender,
-                                "behavior content hash mismatch",
-                            );
-                            ack_packet(transport, cluster, incoming.from_node, incoming.seq);
-                            continue;
+                            // Check if we already have the correct bytecode cached
+                            let cached_module = runtime.behavior_cache.get(&sender_hash).cloned();
+                            if let Some(cached) = cached_module {
+                                // Hot-reload: install the cached module
+                                hot_reload_behavior(runtime, target_actor, &cached, &behavior_name);
+                                // Retry resolution after hot-reload
+                                msg.behavior_id = runtime
+                                    .behavior_id_for(target_actor, &behavior_name)
+                                    .unwrap_or(0);
+                            } else {
+                                // Request the bytecode from the sender
+                                warn!(
+                                    "nulang-net: behavior '{}' content hash mismatch for actor {}; requesting bytecode from sender",
+                                    behavior_name, target_actor
+                                );
+                                let request = Packet::FetchBehaviorRequest {
+                                    content_hash: sender_hash,
+                                };
+                                let from = incoming.from_node;
+                                let request_addr = cluster
+                                    .get_node(from)
+                                    .map(|info| info.address)
+                                    .or_else(|| transport.connection_addr(from));
+                                if let Some(addr) = request_addr {
+                                    transport.send(from, addr, request);
+                                }
+                                // Queue message for retry after fetch completes
+                                // (MVP: drop with notification; full implementation
+                                // would enqueue for retry)
+                                notify_delivery_failed(
+                                    runtime,
+                                    msg.sender,
+                                    "behavior content hash mismatch; bytecode fetch requested",
+                                );
+                                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+                                continue;
+                            }
                         }
                     }
                     // Intern string payloads into the TARGET actor's module
@@ -1056,6 +1154,34 @@ pub fn process_network_packets(
     }
 }
 
+/// Hot-reload a cached `CodeModule` into a target actor's bytecode module.
+///
+/// Called when a previously-fetched module matches the sender's content hash.
+/// The actor's `bytecode_module` and `bytecode_offsets` are replaced so
+/// subsequent `behavior_id_for` lookups resolve against the updated module.
+fn hot_reload_behavior(
+    runtime: &mut Runtime,
+    actor_id: u64,
+    module: &crate::bytecode::CodeModule,
+    _behavior_name: &str,
+) {
+    let actor = match runtime.actors.get_mut(&actor_id) {
+        Some(a) => a,
+        None => return,
+    };
+    // Rebuild bytecode offsets from the cached module
+    let mut offsets = Vec::with_capacity(module.behaviors.len());
+    for entry in &module.behaviors {
+        offsets.push(entry.code_offset);
+    }
+    actor.bytecode_module = Some(module.clone());
+    actor.bytecode_offsets = offsets;
+    warn!(
+        "nulang-net: hot-reloaded bytecode module for actor {} ({} behaviors)",
+        actor_id,
+        module.behaviors.len()
+    );
+}
 /// Broadcast delta-state CRDT sync ops to all healthy cluster members.
 ///
 /// This is the delta-state counterpart of `Runtime::sync_crdts`: entries

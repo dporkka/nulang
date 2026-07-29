@@ -43,6 +43,7 @@ quic-experimental = []
 # Memory & concurrency
 mimalloc = "0.1"
 crossbeam = "0.8"
+httparse = "1"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

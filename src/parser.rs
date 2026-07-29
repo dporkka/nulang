@@ -72,6 +72,8 @@ pub struct Parser {
     /// Accumulated parse errors from error-recovery. Callers that want
     /// all errors (not just the first) call `consumed_diagnostics()`.
     diagnostics: Vec<NuError>,
+    /// Module-level named handler registry.
+    handler_registry: FxHashMap<String, Vec<EffectHandler>>,
 }
 
 impl Parser {
@@ -82,6 +84,7 @@ impl Parser {
             local_type_params: FxHashMap::default(),
             global_type_constructors: FxHashMap::default(),
             diagnostics: Vec::new(),
+            handler_registry: FxHashMap::default(),
         }
     }
     #[tracing::instrument(level = "debug", skip(self))]
@@ -189,6 +192,7 @@ impl Parser {
                     }
                 }
             }
+            TokenKind::Handler => self.parse_named_handler(),
             TokenKind::Effect => self.parse_effect_decl(),
             TokenKind::Extern => self.parse_extern(public),
             TokenKind::Import => self.parse_import(),
@@ -1593,6 +1597,52 @@ impl Parser {
         Ok(Decl::EffectDecl { name, ops, span })
     }
 
+    fn parse_named_handler(&mut self) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance();
+        let name = self.expect_ident("handler name")?;
+        self.expect(TokenKind::Assign)?;
+        self.expect(TokenKind::LBrace)?;
+        let mut handlers = Vec::new();
+        self.skip_newlines();
+        while self.peek_kind() != &TokenKind::RBrace && !self.is_at_end() {
+            self.consume_if(&TokenKind::Pipe);
+            let effect_name = self.expect_ident("effect name")?;
+            self.expect(TokenKind::Dot)?;
+            let op_name = self.expect_ident("operation name")?;
+            self.expect(TokenKind::LParen)?;
+            let mut params = Vec::new();
+            self.skip_newlines();
+            while self.peek_kind() != &TokenKind::RParen && !self.is_at_end() {
+                params.push(self.expect_ident("param name")?);
+                self.skip_newlines();
+                if !self.consume_if(&TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines();
+            }
+            self.expect(TokenKind::RParen)?;
+            let has_resume = self.consume_if(&TokenKind::Resume);
+            self.expect(TokenKind::FatArrow)?;
+            let handler_body = self.parse_expr()?;
+            handlers.push(EffectHandler {
+                effect_name,
+                op_name,
+                params,
+                body: handler_body,
+                resume: has_resume,
+            });
+            self.skip_newlines_semicolons();
+        }
+        self.expect(TokenKind::RBrace)?;
+        self.handler_registry.insert(name.clone(), handlers.clone());
+        Ok(Decl::NamedHandler {
+            name,
+            handlers,
+            span,
+        })
+    }
+
     fn parse_import(&mut self) -> NuResult<Decl> {
         let span = self.current_span();
         self.advance(); // consume 'import'
@@ -2020,6 +2070,8 @@ impl Parser {
                     TokenKind::For => self.parse_for(),
                     TokenKind::While => self.parse_while(),
                     TokenKind::Migrate => self.parse_migrate(),
+                    TokenKind::With => self.parse_with_block(),
+                    TokenKind::Consume => self.parse_consume_expr(),
                     TokenKind::Return => {
                         self.advance();
                         if self.is_expr_start() {
@@ -2866,6 +2918,9 @@ impl Parser {
                 | TokenKind::Perform
                 | TokenKind::Emit
                 | TokenKind::Handle
+                | TokenKind::With
+                | TokenKind::Consume
+                | TokenKind::Receive
                 | TokenKind::For
                 | TokenKind::While
                 | TokenKind::Migrate
@@ -2942,9 +2997,35 @@ impl Parser {
         let span = self.current_span();
         self.expect(TokenKind::Handle)?;
         let body = self.parse_expr()?;
-        self.consume_if(&TokenKind::With);
-        self.expect(TokenKind::LBrace)?;
         let mut handlers = Vec::new();
+        if self.consume_if(&TokenKind::With) {
+            if self.peek_kind() == &TokenKind::LBrace {
+                // inline handlers below
+            } else if let TokenKind::Ident(_) = self.peek_kind() {
+                let handler_name = self.expect_ident("handler name")?;
+                let resolved = self.handler_registry.get(&handler_name).cloned();
+                match resolved {
+                    Some(h) => handlers.extend(h),
+                    None => return Err(NuError::ParseError {
+                        msg: format!("undefined handler '{}' -- handler declarations must appear before their use", handler_name),
+                        span: self.current_span(),
+                    }),
+                }
+                if self.peek_kind() != &TokenKind::LBrace {
+                    return Ok(Expr::Handle {
+                        body: Box::new(body),
+                        handlers,
+                        span,
+                    });
+                }
+            } else {
+                return Err(NuError::ParseError {
+                    msg: "expected '{' or handler name after 'with'".to_string(),
+                    span: self.current_span(),
+                });
+            }
+        }
+        self.expect(TokenKind::LBrace)?;
         self.skip_newlines();
         while self.peek_kind() != &TokenKind::RBrace && !self.is_at_end() {
             self.consume_if(&TokenKind::Pipe);
@@ -3078,6 +3159,39 @@ impl Parser {
         Ok(Expr::Migrate {
             actor: Box::new(actor),
             node: Box::new(node),
+            span,
+        })
+    }
+
+    fn parse_with_block(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.advance();
+        let handler_name = self.expect_ident("handler name")?;
+        let body = self.parse_expr()?;
+        let resolved = self.handler_registry.get(&handler_name).cloned();
+        match resolved {
+            Some(handlers) => Ok(Expr::Handle {
+                body: Box::new(body),
+                handlers,
+                span,
+            }),
+            None => Err(NuError::ParseError {
+                msg: format!(
+                    "undefined handler '{}' -- handler declarations must appear before their use",
+                    handler_name
+                ),
+                span: self.current_span(),
+            }),
+        }
+    }
+
+    fn parse_consume_expr(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.advance();
+        let name = self.expect_ident("variable name")?;
+        Ok(Expr::CapAnnotate {
+            expr: Box::new(Expr::Var(name, span)),
+            cap: Capability::Val,
             span,
         })
     }

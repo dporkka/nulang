@@ -34,6 +34,7 @@ mod crdt_manager;
 mod crdt_reg;
 mod distribution;
 mod exit;
+mod http_server;
 mod llm;
 mod persistence;
 mod process_groups;
@@ -53,6 +54,7 @@ pub use crdt_reg::{LWWRegister, MVRegister, RGAElement, RGA};
 pub use distributed::*;
 pub use gc::{ForeignRefOp, GcStats, OrcaCoordinator, OrcaGc, OrcaHeap};
 pub use heap::*;
+use http_server::HttpServerState;
 pub use mailbox::*;
 pub use network::*;
 pub use orca_cycle::*;
@@ -260,6 +262,10 @@ pub struct Runtime {
     // compensation_offsets).
     pub(crate) recovery_modules:
         HashMap<u64, (crate::bytecode::CodeModule, Vec<usize>, Vec<Option<usize>>)>,
+    /// Content-addressed bytecode cache for fetch-on-demand.
+    /// When a node receives a message for an unknown content hash, it can
+    /// request the bytecode from the sender and cache it here keyed by hash.
+    pub behavior_cache: HashMap<[u8; 32], crate::bytecode::CodeModule>,
     // Pipelines and debates (v0.9 AI Runtime) — extracted into a registry so
     // the god-object shrinks and the subsystems can evolve independently.
     pub ai: ai_registry::AiRuntimeRegistry,
@@ -284,6 +290,8 @@ pub struct Runtime {
     // intercept `perform Effect.op` calls in tests.  Key is the qualified
     // name (e.g. "IO.print", "DB.write").  A handler returns `Some(value)`
     // to mock the effect or `None` to fall through to real dispatch.
+    // HTTP server state (v0.7+).
+    pub http_server: Option<HttpServerState>,
     pub test_handlers: HashMap<String, Box<dyn Fn(&[Value]) -> Option<Value>>>,
 
     // -- Multi-threaded scheduler sharding --
@@ -329,6 +337,7 @@ impl Runtime {
             persistence: Box::new(MemoryStore::new()),
             vm: None,
             llm: llm::LlmState::new(),
+            behavior_cache: HashMap::new(),
             pending_receive_wakes: Vec::new(),
             draining_receive_wakes: false,
             idle_callback: None,
@@ -338,6 +347,7 @@ impl Runtime {
             spawnable_behaviors: HashMap::new(),
             pending_spawn_responses: HashMap::new(),
             dlq_actor_id: None,
+            http_server: None,
             test_handlers: HashMap::new(),
             shard_idx: 0,
             shard_count: 1,
@@ -3712,7 +3722,8 @@ impl Runtime {
                     continue;
                 }
             }
-            actor.set_state_field(name, value.to_value());
+            let v = value.to_value_on_heap(&mut actor);
+            actor.set_state_field(name, v);
         }
         // Parse cached retry/fallback configs from restored state for agents.
         if is_agent {
@@ -4816,6 +4827,31 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             let mut rt = self.runtime.borrow_mut();
             return rt.perform_otp_builtin(op_name, module, regs);
         }
+        if effect_name == "Http" && op_name == Some("serve") {
+            let port = regs.first().and_then(|v| v.as_int()).unwrap_or(0) as u16;
+            let func_idx = match regs.get(1) {
+                Some(v) if v.is_closure() => {
+                    let payload = v.as_raw() & crate::value_layout::PAYLOAD_MASK;
+                    if payload & crate::vm::CLOSURE_ENV_FLAG != 0 {
+                        return Some(crate::vm::Value::nil());
+                    }
+                    payload as usize
+                }
+                Some(v) => {
+                    // Function index passed as raw Int (from func_map lookup).
+                    v.as_int().unwrap_or(0) as usize
+                }
+                None => return Some(crate::vm::Value::nil()),
+            };
+            return match HttpServerState::bind(port, module.clone(), func_idx) {
+                Ok(server) => {
+                    let actual_port = server.port;
+                    self.runtime.borrow_mut().http_server = Some(server);
+                    Some(crate::vm::Value::int(actual_port as i64))
+                }
+                Err(_) => Some(crate::vm::Value::nil()),
+            };
+        }
         self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
     }
 
@@ -5365,6 +5401,28 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             }
             if effect_name == "Otp" {
                 return (*self.runtime).perform_otp_builtin(op_name, module, regs);
+            }
+            if effect_name == "Http" && op_name == Some("serve") {
+                let port = regs.first().and_then(|v| v.as_int()).unwrap_or(0) as u16;
+                let func_idx = match regs.get(1) {
+                    Some(v) if v.is_closure() => {
+                        let payload = v.as_raw() & crate::value_layout::PAYLOAD_MASK;
+                        if payload & crate::vm::CLOSURE_ENV_FLAG != 0 {
+                            return Some(crate::vm::Value::nil());
+                        }
+                        payload as usize
+                    }
+                    Some(v) => v.as_int().unwrap_or(0) as usize,
+                    None => return Some(crate::vm::Value::nil()),
+                };
+                return match HttpServerState::bind(port, module.clone(), func_idx) {
+                    Ok(server) => {
+                        let actual_port = server.port;
+                        (*self.runtime).http_server = Some(server);
+                        Some(crate::vm::Value::int(actual_port as i64))
+                    }
+                    Err(_) => Some(crate::vm::Value::nil()),
+                };
             }
             self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
         }
