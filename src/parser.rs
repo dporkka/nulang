@@ -4477,8 +4477,8 @@ mod tests {
         match expr {
             Expr::Handle { handlers, .. } => {
                 assert_eq!(handlers.len(), 1);
-                assert_eq!(handlers[0].effect, "E");
-                assert_eq!(handlers[0].op, "op");
+                assert_eq!(handlers[0].effect_name, "E");
+                assert_eq!(handlers[0].op_name, "op");
                 assert!(handlers[0].resume);
             }
             _ => panic!("Expected handle expression"),
@@ -5336,8 +5336,8 @@ mod tests {
             Decl::NamedHandler { name, handlers, .. } => {
                 assert_eq!(name, "my_io");
                 assert_eq!(handlers.len(), 2);
-                assert_eq!(handlers[0].effect, "IO");
-                assert_eq!(handlers[0].op, "print");
+                assert_eq!(handlers[0].effect_name, "IO");
+                assert_eq!(handlers[0].op_name, "print");
                 assert_eq!(handlers[0].params, vec!["msg"]);
                 assert!(!handlers[0].resume);
                 assert_eq!(handlers[1].effect_name, "IO");
@@ -5389,6 +5389,7 @@ mod tests {
                     assert_eq!(handlers[0].effect_name, "E");
                     assert_eq!(handlers[0].op_name, "op");
                 }
+                _ => panic!("Expected Handle expression, got {:?}", body),
             },
             _ => panic!("Expected __main function, got {:?}", ast.decls[1]),
         }
