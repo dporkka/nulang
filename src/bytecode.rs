@@ -649,6 +649,7 @@ pub struct CodeModule {
     /// Spawn-site init field overrides.  Maps `Spawn` instruction byte-offset
     /// to per-field constant values that should override declared state defaults.
     /// Populated by MIR codegen; consumed by the VM's `step_spawn`.
+    #[serde(default)]
     pub spawn_init_overrides: Vec<(usize, Vec<(String, Constant)>)>,
 }
 

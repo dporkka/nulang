@@ -315,4 +315,29 @@ mod tests {
         let err = m.to_nbc(None).unwrap_err();
         assert!(matches!(err, FormatError::BadConstant(_)));
     }
+
+    #[test]
+    fn test_spawn_init_overrides_serde_default() {
+        // A .nbc produced by an older build lacks `spawn_init_overrides`.
+        // serde(default) must fill it with an empty Vec, not error.
+        let json = r#"{
+            "name": "test",
+            "constants": [],
+            "instructions": [],
+            "behaviors": [],
+            "function_table": [],
+            "exports": [],
+            "entry_point": null,
+            "handler_tables": [],
+            "actor_metadata": [],
+            "foreign_functions": [],
+            "tools": []
+        }"#;
+        let module: crate::bytecode::CodeModule =
+            serde_json::from_str(json).expect("old-format .nbc metadata must deserialize");
+        assert!(
+            module.spawn_init_overrides.is_empty(),
+            "missing field must default to empty Vec"
+        );
+    }
 }
