@@ -97,6 +97,7 @@ impl LanguageServer for NulangLanguageServer {
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 signature_help_provider: Some(SignatureHelpOptions {
                     trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
                     retrigger_characters: None,
@@ -445,7 +446,32 @@ impl LanguageServer for NulangLanguageServer {
             None => return Ok(None),
         };
         drop(docs);
-        Ok(self.doc_syms(&source).map(DocumentSymbolResponse::Flat))
+        Ok(
+            Self::doc_syms_uri(&source, &params.text_document.uri)
+                .map(DocumentSymbolResponse::Flat),
+        )
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        let docs = self.documents.lock().unwrap();
+        let query = params.query.to_lowercase();
+        let mut all_syms = Vec::new();
+        for (uri, doc) in docs.iter() {
+            if let Some(syms) = Self::doc_syms_uri(&doc.source, uri) {
+                if query.is_empty() {
+                    all_syms.extend(syms);
+                } else {
+                    all_syms.extend(
+                        syms.into_iter()
+                            .filter(|s| s.name.to_lowercase().contains(&query)),
+                    );
+                }
+            }
+        }
+        Ok(Some(all_syms))
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
@@ -941,19 +967,19 @@ impl NulangLanguageServer {
         }
     }
 
-    fn doc_syms(&self, source: &str) -> Option<Vec<SymbolInformation>> {
+    fn doc_syms_uri(source: &str, uri: &Url) -> Option<Vec<SymbolInformation>> {
         let tokens = Lexer::new(source).lex().ok()?;
         let ast = Parser::new(tokens).parse_module().ok()?;
         let mut syms = Vec::new();
         for decl in &ast.decls {
-            self.collect_syms(decl, &mut syms);
+            Self::collect_syms_uri(decl, &mut syms, uri);
         }
         Some(syms)
     }
     // `deprecated` is a required-but-deprecated field in lsp-types; we always
     // pass `None` (no symbols are marked deprecated), so silence the lint here.
     #[allow(deprecated)]
-    fn collect_syms(&self, decl: &crate::ast::Decl, syms: &mut Vec<SymbolInformation>) {
+    fn collect_syms_uri(decl: &crate::ast::Decl, syms: &mut Vec<SymbolInformation>, uri: &Url) {
         use crate::ast::Decl;
         let si = |name: &str, kind: SymbolKind, span: &crate::types::Span| SymbolInformation {
             name: name.to_string(),
@@ -961,7 +987,7 @@ impl NulangLanguageServer {
             tags: None,
             deprecated: None,
             location: Location {
-                uri: Url::parse("file:///current.nula").unwrap(),
+                uri: uri.clone(),
                 range: Range {
                     start: Position::new(
                         span.line().saturating_sub(1) as u32,
@@ -1007,12 +1033,14 @@ impl NulangLanguageServer {
                 }
             }
             Decl::TypeAlias { name, span, .. } => syms.push(si(name, SymbolKind::STRUCT, span)),
+            Decl::RecordType { name, span, .. } => syms.push(si(name, SymbolKind::STRUCT, span)),
+            Decl::VariantType { name, span, .. } => syms.push(si(name, SymbolKind::ENUM, span)),
             Decl::Module {
                 name, decls, span, ..
             } => {
                 syms.push(si(name, SymbolKind::NAMESPACE, span));
                 for d in decls {
-                    self.collect_syms(d, syms);
+                    Self::collect_syms_uri(d, syms, uri);
                 }
             }
             Decl::EffectDecl { name, span, .. } => syms.push(si(name, SymbolKind::INTERFACE, span)),
@@ -2279,23 +2307,23 @@ impl<'a> CompletionEngine<'a> {
         ("unit", "Unit value (void)."),
     ];
 
-    /// Built-in effect names.
-    const EFFECTS: &'static [&'static str] = &[
-        "IO",
-        "Net",
-        "FS",
-        "Spawn",
-        "Send",
-        "Receive",
-        "Migrate",
-        "STM",
-        "Async",
-        "Inference",
-        "Cost",
-        "Rand",
-        "Time",
-        "Actor",
-        "Provider",
+    /// Built-in effect names with markdown documentation.
+    const EFFECTS: &'static [(&'static str, &'static str)] = &[
+        ("IO", "Input/Output operations.\n\n```nulang\neffect IO {\n  print(s: String) -> Unit\n  read() -> String\n}\n```"),
+        ("Net", "Network operations.\n\n```nulang\neffect Net {\n  get(url: String) -> String\n  post(url: String, body: String) -> String\n}\n```"),
+        ("FS", "File system operations.\n\n```nulang\neffect FS {\n  read(path: String) -> String\n  write(path: String, content: String) -> Unit\n}\n```"),
+        ("Spawn", "Spawn a new concurrent task.\n\n```nulang\neffect Spawn {\n  spawn(f: () -> T) -> T\n}\n```"),
+        ("Send", "Send a message to an actor.\n\n```nulang\neffect Send {\n  send(target: ActorId, msg: T) -> Unit\n}\n```"),
+        ("Receive", "Receive a message from an actor mailbox.\n\n```nulang\neffect Receive {\n  receive() -> T\n}\n```"),
+        ("Migrate", "Migrate an actor to another node.\n\n```nulang\neffect Migrate {\n  migrate(target: NodeId) -> Unit\n}\n```"),
+        ("STM", "Software transactional memory operations.\n\n```nulang\neffect STM {\n  atomically(f: () -> T) -> T\n}\n```"),
+        ("Async", "Asynchronous operation scheduling.\n\n```nulang\neffect Async {\n  delay(ms: Int) -> Unit\n  await(future: Future[T]) -> T\n}\n```"),
+        ("Inference", "AI inference operations.\n\n```nulang\neffect Inference {\n  infer(prompt: String) -> String\n}\n```"),
+        ("Cost", "Resource consumption tracking.\n\n```nulang\neffect Cost {\n  track(operation: String) -> Int\n}\n```"),
+        ("Rand", "Random value generation.\n\n```nulang\neffect Rand {\n  int(min: Int, max: Int) -> Int\n  float() -> Float\n}\n```"),
+        ("Time", "Time-related operations.\n\n```nulang\neffect Time {\n  now() -> Int\n  sleep(ms: Int) -> Unit\n}\n```"),
+        ("Actor", "Actor system operations.\n\n```nulang\neffect Actor {\n  self() -> ActorId\n  spawn(behavior: () -> T) -> ActorId\n}\n```"),
+        ("Provider", "Service provider discovery.\n\n```nulang\neffect Provider {\n  resolve(service: String) -> Url\n}\n```"),
     ];
 
     /// Known stdlib modules for import path completion.
@@ -2473,14 +2501,18 @@ impl<'a> CompletionEngine<'a> {
             }
         }
 
-        // Built-in effects (sort "5").
-        for &eff in Self::EFFECTS {
+        // Built-in effects — with markdown documentation (sort "5").
+        for &(eff, doc) in Self::EFFECTS {
             let eff_lower = eff.to_lowercase();
             if eff_lower.starts_with(prefix_lower.as_str()) {
                 items.push(CompletionItem {
                     label: eff.to_string(),
                     kind: Some(CompletionItemKind::ENUM_MEMBER),
                     detail: Some("built-in effect".to_string()),
+                    documentation: Some(Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: doc.to_string(),
+                    })),
                     sort_text: Some(format!("5_{}", eff)),
                     ..CompletionItem::default()
                 });
@@ -3215,6 +3247,98 @@ mod lsp_tests {
         assert!(
             type_map.values().any(|v| v == "String"),
             "should have String type"
+        );
+    }
+
+    // -- Workspace symbol tests --
+
+    #[test]
+    fn test_workspace_symbol_extracts_top_level_decls() {
+        let source = "fn add(x: Int, y: Int) -> Int { x + y }\n\
+                      actor Counter { state count = 0\n  behavior inc() { self.count = self.count + 1 } }\n\
+                      type Point = { x: Int, y: Int }";
+        let uri = Url::parse("file:///test.nula").unwrap();
+        let syms = NulangLanguageServer::doc_syms_uri(source, &uri).unwrap();
+
+        // Find each expected symbol by name.
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"add"),
+            "should find function 'add', got: {:?}",
+            names
+        );
+        assert!(names.contains(&"Counter"), "should find actor 'Counter'");
+        assert!(
+            names.contains(&"Counter.inc"),
+            "should find behavior 'Counter.inc'"
+        );
+        assert!(names.contains(&"Point"), "should find type 'Point'");
+
+        // Verify URIs are correct.
+        for s in &syms {
+            assert_eq!(
+                s.location.uri, uri,
+                "all symbols should reference the document URI"
+            );
+        }
+    }
+
+    #[test]
+    fn test_workspace_symbol_filtering_empty_query_returns_all() {
+        let source = "fn foo() { unit }\nfn bar() { unit }\nfn baz() { unit }";
+        let uri = Url::parse("file:///test.nula").unwrap();
+        let syms = NulangLanguageServer::doc_syms_uri(source, &uri).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        // Empty query returns all — we verify all three functions present.
+        assert_eq!(syms.len(), 3, "empty query should return all symbols");
+        assert!(names.contains(&"foo") && names.contains(&"bar") && names.contains(&"baz"));
+    }
+
+    #[test]
+    fn test_workspace_symbol_case_insensitive_filtering() {
+        let source = "fn myFunc() { unit }\nfn myOTHER() { unit }\nfn unrelated() { unit }";
+        let uri = Url::parse("file:///test.nula").unwrap();
+        let syms = NulangLanguageServer::doc_syms_uri(source, &uri).unwrap();
+
+        // Case-insensitive contains match on "my".
+        let matched: Vec<&str> = syms
+            .iter()
+            .filter(|s| s.name.to_lowercase().contains("my"))
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(matched.contains(&"myFunc"));
+        assert!(matched.contains(&"myOTHER"));
+        assert!(!matched.contains(&"unrelated"));
+        assert_eq!(matched.len(), 2);
+    }
+
+    #[test]
+    fn test_workspace_symbol_nested_module_decls() {
+        let source = "module M { fn inner() { unit } }";
+        let uri = Url::parse("file:///test.nula").unwrap();
+        let syms = NulangLanguageServer::doc_syms_uri(source, &uri).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"M"), "should find module 'M'");
+        assert!(
+            names.contains(&"inner"),
+            "should find nested function 'inner'"
+        );
+    }
+
+    #[test]
+    fn test_workspace_symbol_variant_and_record_types() {
+        let source = "type Option[T] = Some(T) | None\n\
+                      type Person = { name: String, age: Int }";
+        let uri = Url::parse("file:///test.nula").unwrap();
+        let syms = NulangLanguageServer::doc_syms_uri(source, &uri).unwrap();
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"Option"),
+            "should find variant type 'Option'"
+        );
+        assert!(
+            names.contains(&"Person"),
+            "should find record type 'Person'"
         );
     }
 }
