@@ -534,7 +534,7 @@ fn print_help() {
     println!("       nulang --eval <CODE>");
     println!("       nulang --check <FILE>");
     println!("       nulang --lsp");
-    println!("       nulang nula <new|build|build-wasm|test|run|add|remove|watch>");
+    println!("       nulang nula <new|build|build-wasm|test|run|add|remove|watch|doc>");
     println!("       nulang --doc");
     println!();
     println!("Options:");
@@ -559,7 +559,7 @@ fn print_help() {
         "  --verify <src>   When running a .nbc artifact, verify its source hash against <src>"
     );
     println!(
-        "  nula <cmd>       Package manager (new, init, build, build-wasm, test, run, add, remove, watch, list, clean)"
+        "  nula <cmd>       Package manager (new, init, build, build-wasm, test, run, add, remove, watch, doc, list, clean)"
     );
     println!("  --version, -V    Print version and exit");
     println!("  init <name>      Scaffold experiment");
@@ -1109,10 +1109,10 @@ fn run_nbc_file(path: &str, verify_source: Option<&str>) -> NuResult<()> {
             Some(h) => {
                 return Err(nulang::types::NuError::VMError {
                     msg: format!(
-                    "source hash mismatch: artifact recorded {} but source {src_path} hashes to {}",
-                    hex::encode(h),
-                    hex::encode(computed.as_bytes()),
-                ),
+                        "source hash mismatch: artifact recorded {} but source {src_path} hashes to {}",
+                        hex::encode(h),
+                        hex::encode(computed.as_bytes()),
+                    ),
                     span: Span::default(),
                 });
             }

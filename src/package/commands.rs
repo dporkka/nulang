@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::package::lockfile::{Lockfile, LOCKFILE_FILE};
-use crate::package::manifest::{Dependency, DependencyDetail, Manifest, MANIFEST_FILE};
+use crate::package::lockfile::{LOCKFILE_FILE, Lockfile};
+use crate::package::manifest::{Dependency, DependencyDetail, MANIFEST_FILE, Manifest};
 use crate::package::resolver::resolve;
 use crate::types::{NuError, NuResult, Span};
 
@@ -77,13 +77,17 @@ pub fn run(args: &[String]) -> NuResult<()> {
         Some("remove") => cmd_remove(args.get(1).map(String::as_str)),
         Some("list") => cmd_list(),
         Some("clean") => cmd_clean(),
+        Some("doc") => {
+            let open = args.get(1).map(String::as_str) == Some("--open");
+            cmd_doc(open)
+        }
         Some("--help") | Some("-h") => {
             print_usage();
             Ok(())
         }
         Some(other) => Err(NuError::PackageError {
             msg: format!(
-                "unknown nula subcommand '{}' (expected new, init, build, build-wasm, test, run, add, remove, watch, list, or clean)",
+                "unknown nula subcommand '{}' (expected new, init, build, build-wasm, test, run, add, remove, watch, doc, list, or clean)",
                 other
             ),
             span: Span::default(),
@@ -113,6 +117,7 @@ fn print_usage() {
     println!("  remove <name> Remove a dependency from Nulang.toml");
     println!("  list          List resolved dependencies from Nulang.lock");
     println!("  clean         Remove build artifacts (.nbc files)");
+    println!("  doc [--open]  Generate Markdown API docs (docs/api.md)");
 }
 
 /// `nula new <name>`: scaffold a package directory.
@@ -503,6 +508,38 @@ fn cmd_clean() -> NuResult<()> {
         println!("No build artifacts found.");
     } else {
         println!("Removed {} build artifact(s).", removed);
+    }
+    Ok(())
+}
+
+/// `nula doc [--open]`: generate Markdown API docs for the package.
+///
+/// Scans all `.nula` files under `src/`, extracts doc comments (`///` and
+/// `//!`) and declarations (`fn`, `actor`, `type`, `workflow`), and writes
+/// a combined `docs/api.md`. With `--open`, spawns `xdg-open` on the
+/// output file (best-effort).
+fn cmd_doc(open: bool) -> NuResult<()> {
+    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })?;
+    let manifest_path = root.join(MANIFEST_FILE);
+    if !manifest_path.exists() {
+        return Err(NuError::PackageError {
+            msg: format!(
+                "no {} found in {} — run 'nulang nula init' first",
+                MANIFEST_FILE,
+                root.display()
+            ),
+            span: Span::default(),
+        });
+    }
+    let out_path = crate::docgen::write_package_docs(&root)?;
+    println!("Wrote {}", out_path.display());
+    if open {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(out_path.to_string_lossy().as_ref())
+            .spawn();
     }
     Ok(())
 }
@@ -935,6 +972,70 @@ mod tests {
 
         let err = cmd_add(None, Some("./foo"), None, None).expect_err("missing name should fail");
         assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cmd_doc_generates_api_md() {
+        let _cwd = cwd_guard();
+        let dir = std::env::temp_dir().join(format!("nulang_doc_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = ChangeDir::new(&dir);
+
+        scaffold_package(&dir, "doc-pkg").expect("scaffold should succeed");
+
+        // Add a documented function to src/main.nula
+        let main_path = dir.join("src").join("main.nula");
+        std::fs::write(
+            &main_path,
+            "/// Adds two numbers.\nfn add(a: Int, b: Int) -> Int { a + b }\n",
+        )
+        .expect("write main.nula");
+
+        let result = cmd_doc(false);
+        assert!(result.is_ok(), "cmd_doc should succeed: {:?}", result.err());
+
+        let api_md = dir.join("docs").join("api.md");
+        assert!(api_md.exists(), "docs/api.md should exist");
+
+        let content = std::fs::read_to_string(&api_md).expect("read api.md");
+        assert!(
+            content.contains("`main`"),
+            "should contain module heading: {}",
+            content
+        );
+        assert!(
+            content.contains("`add`"),
+            "should contain function name: {}",
+            content
+        );
+        assert!(
+            content.contains("Adds two numbers"),
+            "should contain doc comment: {}",
+            content
+        );
+        assert!(
+            content.contains("nulang nula doc"),
+            "should contain attribution: {}",
+            content
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cmd_doc_fails_outside_package() {
+        let _cwd = cwd_guard();
+        let dir =
+            std::env::temp_dir().join(format!("nulang_doc_no_pkg_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = ChangeDir::new(&dir);
+
+        let result = cmd_doc(false);
+        assert!(result.is_err(), "doc outside package should fail");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
