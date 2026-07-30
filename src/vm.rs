@@ -605,6 +605,162 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 _ => return None,
             }
         }
+        if effect_name == "Array" {
+            match op_name {
+                Some("length") => {
+                    let arr_ptr = regs
+                        .first()
+                        .and_then(|v| v.as_ptr())
+                        .unwrap_or(std::ptr::null_mut());
+                    let len = if !arr_ptr.is_null() {
+                        self.array_len(arr_ptr).unwrap_or(0) as i64
+                    } else {
+                        0
+                    };
+                    return Some(Value::int(len));
+                }
+                Some("push") => {
+                    let arr_ptr = regs
+                        .first()
+                        .and_then(|v| v.as_ptr())
+                        .unwrap_or(std::ptr::null_mut());
+                    let elem = regs.get(1).copied().unwrap_or(Value::nil());
+                    let len = if !arr_ptr.is_null() {
+                        self.array_len(arr_ptr).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let new_len = len + 1;
+                    let size = new_len
+                        .checked_mul(std::mem::size_of::<Value>())
+                        .unwrap_or(0);
+                    if let Some(new_ptr) = self.heap.alloc(size, HeapTypeTag::Array) {
+                        unsafe {
+                            let new_slots =
+                                std::slice::from_raw_parts_mut(new_ptr as *mut Value, new_len);
+                            // Copy existing elements, retaining heap refs.
+                            if !arr_ptr.is_null() {
+                                let old_slots =
+                                    std::slice::from_raw_parts(arr_ptr as *const Value, len);
+                                for (i, slot) in old_slots.iter().enumerate() {
+                                    new_slots[i] = *slot;
+                                    if let Some(ptr) = slot.as_ptr() {
+                                        self.gc.local_ref(&self.heap, ptr);
+                                    }
+                                }
+                            }
+                            // Store new element, retaining if heap value.
+                            new_slots[len] = elem;
+                            if let Some(ptr) = elem.as_ptr() {
+                                self.gc.local_ref(&self.heap, ptr);
+                            }
+                        }
+                        return Some(Value::ptr(new_ptr));
+                    }
+                    return Some(Value::nil());
+                }
+                Some("new") => {
+                    let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+                    if n < 0 {
+                        return Some(Value::nil());
+                    }
+                    let n = n as usize;
+                    let init = regs.get(1).copied().unwrap_or(Value::nil());
+                    let size = n.checked_mul(std::mem::size_of::<Value>()).unwrap_or(0);
+                    if let Some(new_ptr) = self.heap.alloc(size, HeapTypeTag::Array) {
+                        unsafe {
+                            let slots = std::slice::from_raw_parts_mut(new_ptr as *mut Value, n);
+                            for slot in slots.iter_mut() {
+                                *slot = init;
+                                if let Some(ptr) = init.as_ptr() {
+                                    self.gc.local_ref(&self.heap, ptr);
+                                }
+                            }
+                        }
+                        return Some(Value::ptr(new_ptr));
+                    }
+                    return Some(Value::nil());
+                }
+                Some("set") => {
+                    let arr_ptr = regs
+                        .first()
+                        .and_then(|v| v.as_ptr())
+                        .unwrap_or(std::ptr::null_mut());
+                    let idx = regs.get(1).and_then(|v| v.as_int()).unwrap_or(-1);
+                    let val = regs.get(2).copied().unwrap_or(Value::nil());
+                    if arr_ptr.is_null() || idx < 0 {
+                        return Some(Value::nil());
+                    }
+                    let idx = idx as usize;
+                    let len = self.array_len(arr_ptr).unwrap_or(0);
+                    if idx >= len {
+                        return Some(Value::nil());
+                    }
+                    let size = len.checked_mul(std::mem::size_of::<Value>()).unwrap_or(0);
+                    if let Some(new_ptr) = self.heap.alloc(size, HeapTypeTag::Array) {
+                        unsafe {
+                            let new_slots =
+                                std::slice::from_raw_parts_mut(new_ptr as *mut Value, len);
+                            let old_slots =
+                                std::slice::from_raw_parts(arr_ptr as *const Value, len);
+                            for i in 0..len {
+                                let src = if i == idx { val } else { old_slots[i] };
+                                new_slots[i] = src;
+                                if let Some(ptr) = src.as_ptr() {
+                                    self.gc.local_ref(&self.heap, ptr);
+                                }
+                            }
+                        }
+                        return Some(Value::ptr(new_ptr));
+                    }
+                    return Some(Value::nil());
+                }
+                Some("slice") => {
+                    let arr_ptr = regs
+                        .first()
+                        .and_then(|v| v.as_ptr())
+                        .unwrap_or(std::ptr::null_mut());
+                    let start = regs.get(1).and_then(|v| v.as_int()).unwrap_or(0);
+                    let end = regs.get(2).and_then(|v| v.as_int()).unwrap_or(-1);
+                    let len = if !arr_ptr.is_null() {
+                        self.array_len(arr_ptr).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let start = start.max(0) as usize;
+                    let end = if end < 0 || end as usize > len {
+                        len
+                    } else {
+                        end as usize
+                    };
+                    if start > end {
+                        return Some(Value::nil());
+                    }
+                    let new_len = end - start;
+                    let size = new_len
+                        .checked_mul(std::mem::size_of::<Value>())
+                        .unwrap_or(0);
+                    if let Some(new_ptr) = self.heap.alloc(size, HeapTypeTag::Array) {
+                        unsafe {
+                            let new_slots =
+                                std::slice::from_raw_parts_mut(new_ptr as *mut Value, new_len);
+                            let old_slots =
+                                std::slice::from_raw_parts(arr_ptr as *const Value, len);
+                            for i in 0..new_len {
+                                let src = old_slots[start + i];
+                                new_slots[i] = src;
+                                if let Some(ptr) = src.as_ptr() {
+                                    self.gc.local_ref(&self.heap, ptr);
+                                }
+                            }
+                        }
+                        return Some(Value::ptr(new_ptr));
+                    }
+                    return Some(Value::nil());
+                }
+                _ => return None,
+            }
+        }
         if effect_name != "IO" {
             return None;
         }

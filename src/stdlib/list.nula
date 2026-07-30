@@ -1,10 +1,8 @@
 // Nulang standard library — list operations over native arrays.
 // Language version: 2.0.0-alpha
 //
-// Currently only supports traversal/reduction functions.
-// Array-producing functions (map, filter, reverse, take, drop, range)
-// are NOT feasible because there is no built-in for dynamic array
-// construction (no Array.push / Array.new / array concat at surface level).
+// Built on `perform Array.push` / `perform Array.new` / `perform Array.length`
+// primitives (added 2026-07-30). Array-producing functions are now feasible.
 
 /// Number of elements in the array.
 pub fn length(xs: [Int]) -> Int {
@@ -89,4 +87,72 @@ pub fn min_of(xs: [Int]) -> Int {
         }
     };
     best
+}
+
+// ---------------------------------------------------------------------------
+// Array-producing functions (require `perform Array.*` builtins)
+// ---------------------------------------------------------------------------
+
+/// Map: apply f to each element, return new array.
+pub fn map(f, xs) {
+    var result = [];
+    for x in xs {
+        result = perform Array.push(result, f(x))
+    };
+    result
+}
+
+/// Filter: keep elements where pred returns true.
+pub fn filter(pred, xs) {
+    var result = [];
+    for x in xs {
+        if pred(x) then { result = perform Array.push(result, x) } else {}
+    };
+    result
+}
+
+/// Reverse: return new array with elements in reverse order.
+pub fn reverse(xs) {
+    var result = [];
+    var i = perform Array.length(xs) - 1;
+    while i >= 0 {
+        result = perform Array.push(result, xs[i]);
+        i = i - 1
+    };
+    result
+}
+
+/// Take first n elements.
+pub fn take(n, xs) {
+    var result = [];
+    var i = 0;
+    var len = perform Array.length(xs);
+    while i < n && i < len {
+        result = perform Array.push(result, xs[i]);
+        i = i + 1
+    };
+    result
+}
+
+/// Drop first n elements.
+pub fn drop(n, xs) {
+    var result = [];
+    var i = n;
+    var len = perform Array.length(xs);
+    while i < len {
+        result = perform Array.push(result, xs[i]);
+        i = i + 1
+    };
+    result
+}
+
+/// Range: array of [0, 1, ..., n-1].
+pub fn range(n) {
+    var result = [];
+    var i = 0;
+    while i < n {
+        result = perform Array.push(result, i);
+        i = i + 1
+    };
+    result
 }

@@ -8801,4 +8801,106 @@ match { a: 2, b: 9 } with {
             err
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Test: Array built-in effects (length, push, new, set, slice)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_array_builtin_length() {
+        // perform Array.length([1,2,3]) → 3
+        assert_int("perform Array.length([1,2,3])", 3);
+        assert_int("perform Array.length([])", 0);
+        // Length of a push result
+        assert_int(
+            "let a = [1,2] in let b = perform Array.push(a, 3) in perform Array.length(b)",
+            3,
+        );
+    }
+
+    #[test]
+    fn test_array_builtin_push_value_semantics() {
+        // Original array unchanged
+        let source = r#"
+            let a = [1,2];
+            let b = perform Array.push(a, 3);
+            // Original still length 2
+            perform Array.length(a)
+        "#;
+        assert_int(source, 2);
+        // New array has element appended
+        assert_int(
+            "let a = [1,2] in let b = perform Array.push(a, 3) in b[2]",
+            3,
+        );
+        // First element preserved
+        assert_int(
+            "let a = [1,2] in let b = perform Array.push(a, 3) in b[0]",
+            1,
+        );
+    }
+
+    #[test]
+    fn test_array_builtin_new() {
+        assert_int("perform Array.length(perform Array.new(3, 7))", 3);
+        assert_int("(perform Array.new(3, 7))[0]", 7);
+        assert_int("(perform Array.new(3, 7))[1]", 7);
+        assert_int("(perform Array.new(3, 7))[2]", 7);
+        assert_int("perform Array.length(perform Array.new(0, 42))", 0);
+    }
+
+    #[test]
+    fn test_array_builtin_set_value_semantics() {
+        // b has modified element
+        assert_int(
+            "let a = [10,20,30] in let b = perform Array.set(a, 1, 99) in b[1]",
+            99,
+        );
+        // Original a unchanged
+        assert_int(
+            "let a = [10,20,30] in let b = perform Array.set(a, 1, 99) in a[1]",
+            20,
+        );
+    }
+
+    #[test]
+    fn test_array_builtin_slice() {
+        let source = r#"
+            let xs = [10,20,30,40,50];
+            let sub = perform Array.slice(xs, 1, 4);
+            // Length: 4-1 = 3
+            perform Array.length(sub)
+        "#;
+        assert_int(source, 3);
+        assert_int("(perform Array.slice([10,20,30,40,50], 1, 4))[0]", 20);
+        assert_int("(perform Array.slice([10,20,30,40,50], 1, 4))[1]", 30);
+        assert_int("(perform Array.slice([10,20,30,40,50], 1, 4))[2]", 40);
+    }
+
+    #[test]
+    fn test_array_builtin_accumulate_in_loop() {
+        // Build an array by pushing in a loop
+        let source = r#"
+            var acc = [];
+            for i in [1,2,3,4,5] {
+                acc = perform Array.push(acc, i * i)
+            };
+            acc[2] + acc[4]
+        "#;
+        // acc = [1,4,9,16,25]; acc[2] + acc[4] = 9 + 25 = 34
+        assert_int(source, 34);
+    }
+
+    #[test]
+    fn test_array_builtin_on_empty() {
+        // Push on empty array
+        assert_int(
+            "let a = [] in let b = perform Array.push(a, 42) in b[0]",
+            42,
+        );
+        assert_int(
+            "let a = [] in let b = perform Array.push(a, 42) in perform Array.length(b)",
+            1,
+        );
+    }
 }
