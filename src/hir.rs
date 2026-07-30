@@ -307,6 +307,10 @@ pub enum RValue {
         body: Box<Body>,
         span: Span,
     },
+    /// Scoped block: evaluates `body` in a fresh scope so that bindings
+    /// inside `body` do not leak to the surrounding expression. The body
+    /// yields its result via a `Yield` terminator.
+    Block(Box<Body>),
     Spawn {
         actor_type: String,
         init: Vec<(String, Operand)>,
@@ -483,6 +487,7 @@ impl RValue {
             RValue::Match { ty, .. } => ty.clone(),
             RValue::For { .. } => Type::unit(),
             RValue::While { .. } => Type::unit(),
+            RValue::Block(..) => Type::unit(),
             RValue::Spawn { ty, .. } => ty.clone(),
             RValue::Send { ty, .. } => ty.clone(),
             RValue::Ask { ty, .. } => ty.clone(),

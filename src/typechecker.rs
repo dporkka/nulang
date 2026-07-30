@@ -1213,6 +1213,7 @@ impl TypeChecker {
                 body,
                 mutable,
                 span,
+                let_in: _,
             } => self.infer_let(ctx, name, ty.as_ref(), value, body, *mutable, *span),
 
             // Let-rec: recursive binding
@@ -3006,6 +3007,7 @@ mod tests {
             body: Box::new(body),
             mutable: false,
             span: sp(),
+            let_in: false,
         }
     }
 

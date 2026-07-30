@@ -1679,6 +1679,7 @@ impl NulangLanguageServer {
                 body,
                 mutable: _,
                 span,
+                let_in: _,
             } => {
                 if let Some(ref t) = ty {
                     if let Some(pos) = Self::find_ident_position(source, span.start as usize, name)

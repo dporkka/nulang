@@ -1956,6 +1956,9 @@ fn rvalue_is_single_shot(rv: &crate::hir::RValue) -> bool {
         | crate::hir::RValue::Closure { .. }
         | crate::hir::RValue::RecClosure { .. } => false,
 
+        // Scoped block: check the inner body.
+        crate::hir::RValue::Block(body) => body_is_single_shot(body),
+
         // Branches: check each arm.  Both branches ending in a resume is
         // fine — only one executes.
         crate::hir::RValue::If {
@@ -2247,6 +2250,7 @@ mod tests {
                 span: s(),
             }),
             mutable: false,
+            let_in: false,
             span: s(),
         };
         let row = checker.infer_effects(&ctx, &let_expr).unwrap();
@@ -2966,6 +2970,7 @@ mod tests {
             }),
             mutable: false,
             span: s(),
+            let_in: false,
         };
         assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
     }
@@ -3258,6 +3263,7 @@ mod tests {
             body: Box::new(call("do_io")),
             mutable: false,
             span: s(),
+            let_in: false,
         };
         assert!(
             checker

@@ -8765,9 +8765,23 @@ match { a: 2, b: 9 } with {
     }
 
     #[test]
-    fn test_var_unchanged_by_let_shadow() {
-        // var x = 1; let x = 10 in 0; x — let shadows in block, so x = 10
-        let source = "var x = 1 in { let x = 10 in 0; x }";
+    fn test_let_in_scoped_to_body_only() {
+        // let x = 10 in 0 scopes x to 0 only; the ; x sees the outer x=1
+        let source = "let x = 1 in { let x = 10 in 0; x }";
+        assert_int(source, 1);
+    }
+
+    #[test]
+    fn test_let_in_different_name_does_not_shadow() {
+        // Different variable name -> x still resolves to outer binding
+        let source = "let x = 1 in { let y = 10 in 0; x }";
+        assert_int(source, 1);
+    }
+
+    #[test]
+    fn test_chained_let_in_correctly_scoped() {
+        // Nested let-in: inner x scoped to inner body only
+        let source = "let x = 1 in let x = 10 in x";
         assert_int(source, 10);
     }
 

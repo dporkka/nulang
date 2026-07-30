@@ -2422,13 +2422,16 @@ impl Parser {
 
         self.expect(TokenKind::Assign)?;
         let value = self.parse_expr()?;
-        let body = if self.consume_if(&TokenKind::In) {
-            self.parse_expr()?
+        let (body, let_in) = if self.consume_if(&TokenKind::In) {
+            (self.parse_expr()?, true)
         } else {
-            Expr::Block {
-                exprs: vec![],
-                span: Span::default(),
-            }
+            (
+                Expr::Block {
+                    exprs: vec![],
+                    span: Span::default(),
+                },
+                false,
+            )
         };
         Ok(Expr::Let {
             name,
@@ -2436,6 +2439,7 @@ impl Parser {
             value: Box::new(value),
             body: Box::new(body),
             mutable,
+            let_in,
             span,
         })
     }
@@ -2707,6 +2711,7 @@ impl Parser {
                             value,
                             mutable,
                             body: Box::new(body),
+                            let_in: false,
                             span,
                         },
                         Expr::LetRec {
@@ -2880,6 +2885,7 @@ impl Parser {
                     }),
                     mutable: false,
                     span,
+                    let_in: false,
                 }
             }
         })
@@ -3600,6 +3606,7 @@ impl Parser {
             }),
             mutable: false,
             span,
+            let_in: false,
         };
         Ok(Expr::Let {
             name: poll_var,
@@ -3608,6 +3615,7 @@ impl Parser {
             body: Box::new(loop_body),
             mutable: false,
             span,
+            let_in: false,
         })
     }
 

@@ -1169,6 +1169,14 @@ impl<'c> FnLowerer<'c> {
                 body,
             } => self.lower_for(dst, var, iterable, body),
             hir::RValue::While { cond, body, .. } => self.lower_while(dst, cond, body),
+            hir::RValue::Block(body) => {
+                let join = self.b.create_block();
+                self.push_scope();
+                self.lower_body_into(body, dst, join)?;
+                self.pop_scope();
+                self.b.switch_to(join);
+                Ok(())
+            }
             hir::RValue::Perform {
                 effect, op, args, ..
             } => {
@@ -2573,6 +2581,7 @@ fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
     match rv {
         hir::RValue::Use(op) => walk_hir_operand(op, acc),
         hir::RValue::Literal(_, _) | hir::RValue::SelfRef(_) => {}
+        hir::RValue::Block(body) => walk_hir_body(body, acc),
         hir::RValue::Binary(_, l, r, _) => {
             walk_hir_operand(l, acc);
             walk_hir_operand(r, acc);

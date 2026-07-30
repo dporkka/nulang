@@ -56,13 +56,17 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
-    /// Let binding: let x [: T] = e1 in e2
+    /// Let binding: let x [: T] = e1 in e2.
+    /// `let_in` is true when the body is an explicit `in`-expression
+    /// (scoped to just the body); false for statement-let where the parser
+    /// folds subsequent block expressions into the body.
     Let {
         name: String,
         ty: Option<Type>,
         value: Box<Expr>,
         body: Box<Expr>,
         mutable: bool,
+        let_in: bool,
         span: Span,
     },
     /// Let-rec: let rec f = e1 in e2

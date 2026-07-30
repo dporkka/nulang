@@ -1127,44 +1127,104 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             value,
             body: b,
             span,
+            let_in,
             ..
         } => {
-            // Let-bound lambdas may reference themselves (`let fac = fn(n) ...
-            // fac(n-1)`); lower them like `let rec` so the self-reference
-            // resolves. Non-self-referencing lambdas stay ordinary closures so
-            // they can capture the enclosing scope.
-            if let Expr::Lambda {
-                params,
-                body: lam_body,
-                ..
-            } = value.as_ref()
-            {
-                if lambda_references(name, params, lam_body) {
-                    let func_body = lower_body(lam_body);
-                    body.push(hir::Stmt::Let {
-                        name: name.clone(),
-                        ty: Type::unit(),
-                        value: hir::RValue::RecClosure {
+            // When the let has an explicit `in`-body (let_in == true),
+            // the binding must be scoped to the body only — it must not
+            // leak to subsequent expressions in the enclosing block.
+            // We accomplish this by lowering the let-in into a fresh
+            // HIR body and wrapping it in an RValue::Block, which the
+            // MIR lower translates into a push/pop scope pair.
+            if *let_in {
+                // Let-bound lambdas may reference themselves within a
+                // let-in body just as in a statement-let.
+                if let Expr::Lambda {
+                    params,
+                    body: lam_body,
+                    ..
+                } = value.as_ref()
+                {
+                    if lambda_references(name, params, lam_body) {
+                        let func_body = lower_body(lam_body);
+                        let mut inner_body = hir::Body::new();
+                        inner_body.push(hir::Stmt::Let {
                             name: name.clone(),
-                            params: params
-                                .iter()
-                                .map(|(n, t)| (n.clone(), resolve_type(t)))
-                                .collect(),
-                            body: Box::new(func_body),
                             ty: Type::unit(),
-                        },
-                        span: *span,
-                    });
-                    // Process any chained lets iteratively.
-                    return lower_let_chain(b, body);
+                            value: hir::RValue::RecClosure {
+                                name: name.clone(),
+                                params: params
+                                    .iter()
+                                    .map(|(n, t)| (n.clone(), resolve_type(t)))
+                                    .collect(),
+                                body: Box::new(func_body),
+                                ty: Type::unit(),
+                            },
+                            span: *span,
+                        });
+                        let op = lower_let_chain(b, &mut inner_body);
+                        if !inner_body.is_terminated() {
+                            inner_body.set_terminator(hir::Terminator::Yield(op));
+                        }
+                        let temp = fresh_temp_name();
+                        body.push(hir::Stmt::Let {
+                            name: temp.clone(),
+                            ty: Type::unit(),
+                            value: hir::RValue::Block(Box::new(inner_body)),
+                            span: *span,
+                        });
+                        return hir::Operand::Var(temp, Type::unit());
+                    }
                 }
+                // Standard let-in: lower into a scoped body.
+                let mut inner_body = hir::Body::new();
+                lower_let_value(name, value, *span, &mut inner_body);
+                let op = lower_let_chain(b, &mut inner_body);
+                if !inner_body.is_terminated() {
+                    inner_body.set_terminator(hir::Terminator::Yield(op));
+                }
+                let temp = fresh_temp_name();
+                body.push(hir::Stmt::Let {
+                    name: temp.clone(),
+                    ty: Type::unit(),
+                    value: hir::RValue::Block(Box::new(inner_body)),
+                    span: *span,
+                });
+                hir::Operand::Var(temp, Type::unit())
+            } else {
+                // Statement-let: let-bound lambdas may reference themselves.
+                if let Expr::Lambda {
+                    params,
+                    body: lam_body,
+                    ..
+                } = value.as_ref()
+                {
+                    if lambda_references(name, params, lam_body) {
+                        let func_body = lower_body(lam_body);
+                        body.push(hir::Stmt::Let {
+                            name: name.clone(),
+                            ty: Type::unit(),
+                            value: hir::RValue::RecClosure {
+                                name: name.clone(),
+                                params: params
+                                    .iter()
+                                    .map(|(n, t)| (n.clone(), resolve_type(t)))
+                                    .collect(),
+                                body: Box::new(func_body),
+                                ty: Type::unit(),
+                            },
+                            span: *span,
+                        });
+                        return lower_let_chain(b, body);
+                    }
+                }
+                // Standard let binding: lower the value, push the HIR stmt,
+                // then process the body — and any chained lets — iteratively
+                // to keep stack depth bounded regardless of how many sequential
+                // let-statements the parser spliced into the AST.
+                lower_let_value(name, value, *span, body);
+                lower_let_chain(b, body)
             }
-            // Standard let binding: lower the value, push the HIR stmt,
-            // then process the body — and any chained lets — iteratively
-            // to keep stack depth bounded regardless of how many sequential
-            // let-statements the parser spliced into the AST.
-            lower_let_value(name, value, *span, body);
-            lower_let_chain(b, body)
         }
         Expr::LetRec {
             name,
@@ -2044,6 +2104,7 @@ mod tests {
             body: Box::new(Expr::Var("x".to_string(), Span::default())),
             mutable: false,
             span: Span::default(),
+            let_in: false,
         };
         let body = lower_body(&source_body);
         // The if lowers to a Let stmt with an RValue::If, then x's Let, and
