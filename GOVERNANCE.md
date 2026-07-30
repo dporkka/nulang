@@ -60,10 +60,12 @@ The following rules govern keyword introduction, reservation, and removal:
 1. **A keyword, once added to the Frozen or Stable tier, is permanent.**
    Its removal requires an RFC, a deprecation cycle (≥2 major versions),
 2. **A reserved-but-unwired keyword has no tier.** As of language version
-   1.0.0-frozen, six formerly-reserved keywords (`where`, `priv`, `loop`,
-   `node`, `await`, `subworkflow`) have been removed from the lexer per
-   RFC 0010 §C.6 and now lex as plain identifiers. They may be re-added
-   with proper RFCs when their features are implemented.
+   1.0.0-frozen, five formerly-reserved keywords (`where`, `priv`, `loop`,
+   `node`, `subworkflow`) have been removed from the lexer per RFC 0010 §C.6
+   and now lex as plain identifiers. `await` has been **re-reserved** (July
+   2026) for future async/await support and cannot be used as an identifier.
+   Any keyword may be re-added with a proper RFC when its feature is
+   implemented.
 
 3. **New keyword introduction** requires an RFC specifying:
    - Which tier (Frozen, Stable, Experimental) the keyword occupies.

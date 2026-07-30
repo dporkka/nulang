@@ -119,9 +119,10 @@ in this version; they are recorded here to establish their tier.
     `src/stdlib.rs`).
   - **Keyword lifecycle governance:** `GOVERNANCE.md` §2a defines keyword
     introduction, reservation, deprecation, and removal rules.
-  - **Keyword namespace cleanup:** Six formerly-reserved keywords
-    (`where`, `priv`, `loop`, `node`, `await`, `subworkflow`) removed
-    from the lexer and now lex as plain identifiers (`src/lexer.rs`).
+  - **Keyword namespace cleanup:** Five formerly-reserved keywords
+    (`where`, `priv`, `loop`, `node`, `subworkflow`) removed from the
+    lexer and now lex as plain identifiers. `await` re-reserved (July
+    2026) for future async/await support (`src/lexer.rs`).
   - **Keyword inventory documented** in `SPEC2.md` §Implementation Status
     and verified against the implementation.
 

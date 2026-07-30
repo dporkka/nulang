@@ -74,9 +74,11 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - Authority capabilities (`capability` declarations on actors, delegation, revocation, auditing — Sections 1.5 and 5.3–5.6), `config` blocks, the `tool` declaration form inside actors, `virtual` actors, `select`, `await`, `await_human`, `sleep_until`, and `retry` blocks.
 - The deployment manifest (`nulang.toml`), `nulang migrate`, and `nulang shell` (Chapter 15, Appendix D).
 
-Six keywords formerly reserved (`where`, `priv`, `loop`, `node`, `await`,
-`subworkflow`) have been removed from the lexer per RFC 0010 and now lex as
-plain identifiers. `link`, `monitor`, and `exit` are wired into
+Five keywords formerly reserved (`where`, `priv`, `loop`, `node`,
+`subworkflow`) have been removed from the lexer per RFC 0010 and now lex
+as plain identifiers. `await` has been **re-reserved** (July 2026) as a
+keyword for future async/await support; it is a reserved word that cannot
+be used as an identifier. `link`, `monitor`, and `exit` are wired into
 `spawn link/monitor` and `Actor.exit` syntax. `case` is accepted as an
 optional match-arm prefix.
 

@@ -91,6 +91,7 @@ pub enum TokenKind {
     Class,
     Impl,
     As,
+    Await,
 
     // Identifiers
     Ident(String),
@@ -232,6 +233,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Class => write!(f, "class"),
             TokenKind::Impl => write!(f, "impl"),
             TokenKind::As => write!(f, "as"),
+            TokenKind::Await => write!(f, "await"),
             TokenKind::Throws => write!(f, "throws"),
             // Identifiers
             TokenKind::Ident(s) => write!(f, "identifier `{}`", s),
@@ -917,6 +919,7 @@ fn keyword(s: &str) -> Option<TokenKind> {
         "match" => Some(TokenKind::Match),
         "with" => Some(TokenKind::With),
         "case" => Some(TokenKind::Case),
+        "await" => Some(TokenKind::Await),
         "as" => Some(TokenKind::As),
         "actor" => Some(TokenKind::Actor),
         "entity" => Some(TokenKind::Entity),
@@ -1250,14 +1253,22 @@ mod tests {
 
     #[test]
     fn test_former_keywords_now_identifiers() {
-        // await, subworkflow, priv, node, loop, where were reserved but unwired;
+        // subworkflow, priv, node, loop, where were reserved but unwired;
         // they now lex as plain identifiers.
-        for word in &["await", "subworkflow", "priv", "node", "loop", "where"] {
+        for word in &["subworkflow", "priv", "node", "loop", "where"] {
             let mut lexer = Lexer::new(word);
             let tokens = lexer.lex().unwrap();
             assert_eq!(tokens.len(), 2); // ident + eof
             assert!(matches!(tokens[0].kind, TokenKind::Ident(_)));
         }
+    }
+
+    #[test]
+    fn test_await_is_reserved_keyword() {
+        let mut lexer = Lexer::new("await");
+        let tokens = lexer.lex().unwrap();
+        assert_eq!(tokens.len(), 2); // keyword + eof
+        assert!(matches!(tokens[0].kind, TokenKind::Await));
     }
 
     #[test]
