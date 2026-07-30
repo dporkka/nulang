@@ -7,7 +7,7 @@
 //! | Feature | Description |
 //! |---------|-------------|
 //! | `textDocument/diagnostic` | Parse/type/effect/capability diagnostics |
-//! | `textDocument/hover` | Function signatures, types, keywords, effects |
+//! | `textDocument/hover` | Function signatures, effects, types, doc comments |
 //! | `textDocument/definition` | Go to definition for all declaration types |
 //! | `textDocument/references` | Find all usages of a symbol |
 //! | `textDocument/documentSymbol` | Structured outline (functions, actors, etc.) |
@@ -18,6 +18,8 @@
 //! | `textDocument/codeAction` | Quick fixes (add type annotations) |
 //! | `textDocument/inlayHint` | Show inferred types after bindings |
 //! | `textDocument/completion` | Keyword/effect/function completion |
+//! | `textDocument/codeLens` | Reference counts on top-level declarations |
+//! | `textDocument/documentLink` | Clickable import paths to stdlib/files |
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -137,6 +139,10 @@ impl LanguageServer for NulangLanguageServer {
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 })),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+                document_link_provider: Some(DocumentLinkOptions {
+                    resolve_provider: None,
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                }),
                 code_lens_provider: Some(CodeLensOptions {
                     resolve_provider: Some(false),
                 }),
@@ -332,7 +338,10 @@ impl LanguageServer for NulangLanguageServer {
             }
         }
 
-        Ok(self.hover_at(&source, params.text_document_position_params.position))
+        Ok(Self::hover_at(
+            &source,
+            params.text_document_position_params.position,
+        ))
     }
 
     async fn goto_definition(
@@ -365,7 +374,7 @@ impl LanguageServer for NulangLanguageServer {
         let col = params.text_document_position_params.position.character as usize;
         if let Some(target_line) = source.lines().nth(line) {
             let byte_col = utf16_col_to_byte(target_line, col);
-            if let Some(word) = self.word_at(target_line, byte_col) {
+            if let Some(word) = Self::word_at(target_line, byte_col) {
                 if let Some(ref a) = ast {
                     if let Some(loc) = self.goto_def_cross_file(&uri, word, a) {
                         return Ok(Some(GotoDefinitionResponse::Scalar(loc)));
@@ -556,37 +565,81 @@ impl LanguageServer for NulangLanguageServer {
         let ast = doc.ast.clone();
         drop(docs);
 
-        let uri = params.text_document.uri;
         let mut lenses = Vec::new();
 
         if let Some(ref ast) = ast {
+            // Build reference counts by scanning identifier tokens
+            let refs = Self::count_all_refs(&source);
             for decl in &ast.decls {
-                let (_name, line) = match decl {
-                    crate::ast::Decl::Function { name, span, .. } => (name, span.line() as u32),
-                    crate::ast::Decl::Actor { name, span, .. } => (name, span.line() as u32),
-                    crate::ast::Decl::VariantType { name, span, .. } => (name, span.line() as u32),
-                    crate::ast::Decl::TypeAlias { name, span, .. } => (name, span.line() as u32),
+                let (name, line) = match decl {
+                    crate::ast::Decl::Function { name, span, .. } => {
+                        (name.as_str(), span.line() as u32)
+                    }
+                    crate::ast::Decl::Actor { name, span, .. } => {
+                        (name.as_str(), span.line() as u32)
+                    }
+                    crate::ast::Decl::Agent { name, span, .. } => {
+                        (name.as_str(), span.line() as u32)
+                    }
+                    crate::ast::Decl::Workflow { name, span, .. } => {
+                        (name.as_str(), span.line() as u32)
+                    }
+                    crate::ast::Decl::StateMachine { name, span, .. } => {
+                        (name.as_str(), span.line() as u32)
+                    }
+                    crate::ast::Decl::TypeAlias { name, span, .. } => {
+                        (name.as_str(), span.line() as u32)
+                    }
+                    crate::ast::Decl::VariantType { name, span, .. } => {
+                        (name.as_str(), span.line() as u32)
+                    }
+                    crate::ast::Decl::RecordType { name, span, .. } => {
+                        (name.as_str(), span.line() as u32)
+                    }
+                    crate::ast::Decl::Class { name, span, .. } => {
+                        (name.as_str(), span.line() as u32)
+                    }
+                    crate::ast::Decl::NamedHandler { name, span, .. } => {
+                        (name.as_str(), span.line() as u32)
+                    }
                     _ => continue,
                 };
-                let refs = self.find_refs(&source, Position::new(line.saturating_sub(1), 0), &uri);
-                if !refs.is_empty() {
-                    lenses.push(CodeLens {
-                        range: Range {
-                            start: Position::new(line - 1, 0),
-                            end: Position::new(line - 1, 0),
+                let count = refs.get(name).copied().unwrap_or(0);
+                // Subtract 1 for the declaration itself
+                let ref_count = count.saturating_sub(1);
+                lenses.push(CodeLens {
+                    range: Range {
+                        start: Position::new(line.saturating_sub(1), 0),
+                        end: Position::new(line.saturating_sub(1), 0),
+                    },
+                    command: Some(Command {
+                        title: if ref_count == 0 {
+                            "▶ references".to_string()
+                        } else {
+                            format!("▶ {} references", ref_count)
                         },
-                        command: Some(Command {
-                            title: format!("{} references", refs.len()),
-                            command: "nulang.showReferences".to_string(),
-                            arguments: None,
-                        }),
-                        data: None,
-                    });
-                }
+                        command: "nulang.showReferences".to_string(),
+                        arguments: None,
+                    }),
+                    data: None,
+                });
             }
         }
 
         Ok(Some(lenses))
+    }
+
+    async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
+        let docs = self.documents.lock().unwrap();
+        let doc = match docs.get(&params.text_document.uri) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+        let source = doc.source.clone();
+        drop(docs);
+
+        let links = Self::extract_document_links(&source, &params.text_document.uri);
+        Ok(Some(links))
     }
 }
 
@@ -596,13 +649,11 @@ impl NulangLanguageServer {
     /// This is intentionally tolerant: each stage is tried in order, and the
     /// first fatal error in a stage is reported. Effect and capability checks
     /// also report accumulated warnings from their internal diagnostic lists.
-    fn hover_at(&self, source: &str, position: Position) -> Option<Hover> {
+    fn hover_at(source: &str, position: Position) -> Option<Hover> {
         let line = position.line as usize;
         let col = position.character as usize;
         let target_line = source.lines().nth(line)?;
-        // LSP columns are UTF-16 code units; map to a byte offset on a char
-        // boundary before touching the line's bytes.
-        let word = self.word_at(target_line, utf16_col_to_byte(target_line, col))?;
+        let word = Self::word_at(target_line, utf16_col_to_byte(target_line, col))?;
         let tokens = Lexer::new(source).lex().ok()?;
         let ast = Parser::new(tokens).parse_module().ok()?;
         let mut tc = TypeChecker::new();
@@ -612,6 +663,8 @@ impl NulangLanguageServer {
                 name,
                 params,
                 ret_type,
+                effect,
+                span,
                 ..
             } = decl
             {
@@ -633,34 +686,52 @@ impl NulangLanguageServer {
                         .as_ref()
                         .map(|ty| format!("{:?}", ty))
                         .unwrap_or_else(|| "?".into());
+                    let mut hover_text = format!("fn {}({}) -> {}", name, p, r);
+                    // Append effects if present
+                    if let Some(ref eff) = effect {
+                        use std::fmt::Write;
+                        let _ = write!(hover_text, "\n\neffects: {}", eff);
+                    }
+                    // Append doc comment if present
+                    let decl_line = span.line().saturating_sub(1);
+                    if let Some(doc) = Self::extract_doc_comment(source, decl_line) {
+                        hover_text.push_str("\n\n---\n");
+                        hover_text.push_str(&doc);
+                    }
                     return Some(Hover {
-                        contents: HoverContents::Scalar(MarkedString::String(format!(
-                            "fn {}({}) -> {}",
-                            name, p, r
-                        ))),
+                        contents: HoverContents::Scalar(MarkedString::String(hover_text)),
                         range: None,
                     });
                 }
             }
-            if let crate::ast::Decl::Actor { name, .. } = decl {
+            if let crate::ast::Decl::Actor { name, span, .. } = decl {
                 if name == word {
+                    let mut hover_text = format!("actor {}", name);
+                    let decl_line = span.line().saturating_sub(1);
+                    if let Some(doc) = Self::extract_doc_comment(source, decl_line) {
+                        hover_text.push_str("\n\n---\n");
+                        hover_text.push_str(&doc);
+                    }
                     return Some(Hover {
-                        contents: HoverContents::Scalar(MarkedString::String(format!(
-                            "actor {}",
-                            name
-                        ))),
+                        contents: HoverContents::Scalar(MarkedString::String(hover_text)),
                         range: None,
                     });
                 }
             }
-            if let crate::ast::Decl::StateMachine { name, states, .. } = decl {
+            if let crate::ast::Decl::StateMachine {
+                name, states, span, ..
+            } = decl
+            {
                 if name == word {
+                    let mut hover_text =
+                        format!("state_machine {} (states: {})", name, states.join(", "));
+                    let decl_line = span.line().saturating_sub(1);
+                    if let Some(doc) = Self::extract_doc_comment(source, decl_line) {
+                        hover_text.push_str("\n\n---\n");
+                        hover_text.push_str(&doc);
+                    }
                     return Some(Hover {
-                        contents: HoverContents::Scalar(MarkedString::String(format!(
-                            "state_machine {} (states: {})",
-                            name,
-                            states.join(", ")
-                        ))),
+                        contents: HoverContents::Scalar(MarkedString::String(hover_text)),
                         range: None,
                     });
                 }
@@ -686,7 +757,7 @@ impl NulangLanguageServer {
         })
     }
 
-    fn word_at<'a>(&self, line: &'a str, col: usize) -> Option<&'a str> {
+    fn word_at(line: &str, col: usize) -> Option<&str> {
         if col >= line.len() {
             return None;
         }
@@ -709,7 +780,7 @@ impl NulangLanguageServer {
         let line = position.line as usize;
         let col = position.character as usize;
         let target_line = source.lines().nth(line)?;
-        let word = self.word_at(target_line, utf16_col_to_byte(target_line, col))?;
+        let word = Self::word_at(target_line, utf16_col_to_byte(target_line, col))?;
         let tokens = Lexer::new(source).lex().ok()?;
         let ast = Parser::new(tokens).parse_module().ok()?;
         let _ = TypeChecker::new().check_module(&ast).ok()?;
@@ -802,7 +873,7 @@ impl NulangLanguageServer {
             Some(l) => l,
             None => return vec![],
         };
-        let word = match self.word_at(target_line, utf16_col_to_byte(target_line, col)) {
+        let word = match Self::word_at(target_line, utf16_col_to_byte(target_line, col)) {
             Some(w) => w.to_string(),
             None => return vec![],
         };
@@ -1913,6 +1984,110 @@ impl NulangLanguageServer {
             .filter(|(&k, _)| k <= offset)
             .max_by_key(|(&k, _)| k)
             .map(|(_, v)| v)
+    }
+
+    /// Scan all identifier tokens in the source and return a map from
+    /// identifier name to occurrence count. Used by code-lens for
+    /// reference counting.
+    fn count_all_refs(source: &str) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        let tokens = match Lexer::new(source).lex() {
+            Ok(t) => t,
+            Err(_) => return counts,
+        };
+        for tok in &tokens {
+            let name = match &tok.kind {
+                crate::lexer::TokenKind::Ident(s) | crate::lexer::TokenKind::UpperIdent(s) => s,
+                _ => continue,
+            };
+            *counts.entry(name.clone()).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    /// Extract document links from import declarations in the source.
+    /// Handles `import stdlib::<mod>` (→ file://<repo>/src/stdlib/<mod>.nula)
+    /// and `import "<path>"` (→ resolved relative to the document URI).
+    fn extract_document_links(source: &str, doc_uri: &Url) -> Vec<DocumentLink> {
+        let mut links = Vec::new();
+
+        for (line_idx, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            let path_str = if let Some(rest) = trimmed.strip_prefix("import stdlib::") {
+                let mod_name = rest.split_whitespace().next().unwrap_or(rest);
+                let mod_name = mod_name.trim_end_matches(';');
+                let repo_root = env!("CARGO_MANIFEST_DIR");
+                format!("file://{}/src/stdlib/{}.nula", repo_root, mod_name)
+            } else if let Some(rest) = trimmed.strip_prefix("import \"") {
+                // Extract the path up to the closing quote
+                let path = rest.split('"').next().unwrap_or(rest);
+                let path = path.trim_end_matches(';');
+                // Resolve relative to document URI
+                if let Ok(mut base) = doc_uri.to_file_path() {
+                    base.pop(); // remove filename
+                    base.push(path);
+                    if let Ok(resolved) = Url::from_file_path(&base) {
+                        resolved.to_string()
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            };
+
+            let target = match Url::parse(&path_str) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+
+            // Compute range for the import keyword
+            let start_col = line.find("import").unwrap_or(0) as u32;
+            let end_col = line.len() as u32;
+            links.push(DocumentLink {
+                range: Range {
+                    start: Position::new(line_idx as u32, start_col),
+                    end: Position::new(line_idx as u32, end_col),
+                },
+                target: Some(target),
+                tooltip: None,
+                data: None,
+            });
+        }
+
+        links
+    }
+
+    /// Extract a `///` doc comment immediately preceding a given source line.
+    /// Returns the concatenated comment text with `///` prefixes stripped,
+    /// or None if there is no doc comment.
+    fn extract_doc_comment(source: &str, decl_line_0: usize) -> Option<String> {
+        let lines: Vec<&str> = source.lines().collect();
+        if decl_line_0 == 0 {
+            return None;
+        }
+        let mut doc_lines = Vec::new();
+        let mut idx = decl_line_0.saturating_sub(1);
+        loop {
+            let line = lines.get(idx)?;
+            let trimmed = line.trim();
+            if let Some(doc) = trimmed.strip_prefix("///") {
+                doc_lines.push(if doc.starts_with(' ') { &doc[1..] } else { doc });
+            } else {
+                break;
+            }
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+        }
+        if doc_lines.is_empty() {
+            return None;
+        }
+        doc_lines.reverse();
+        Some(doc_lines.join("\n"))
     }
 }
 
@@ -3340,5 +3515,158 @@ mod lsp_tests {
             names.contains(&"Person"),
             "should find record type 'Person'"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // count_all_refs tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_count_all_refs_basic() {
+        let source = "fn foo(x: Int) -> Int { foo(1) }\nfn bar() { foo(2); bar() }";
+        let counts = NulangLanguageServer::count_all_refs(source);
+        assert_eq!(counts.get("foo").copied().unwrap_or(0), 3); // decl + 2 calls
+        assert_eq!(counts.get("bar").copied().unwrap_or(0), 2); // decl + 1 call
+    }
+
+    #[test]
+    fn test_count_all_refs_empty() {
+        let source = "";
+        let counts = NulangLanguageServer::count_all_refs(source);
+        assert!(counts.is_empty());
+    }
+
+    #[test]
+    fn test_count_all_refs_ignores_keywords() {
+        let source = "fn foo() { let x = 1; if true { foo() } }";
+        let counts = NulangLanguageServer::count_all_refs(source);
+        // 'let', 'if' are keywords, not identifiers
+        assert!(!counts.contains_key("let"));
+        assert!(!counts.contains_key("if"));
+        assert!(counts.contains_key("foo"));
+        assert!(counts.contains_key("x"));
+    }
+
+    // -----------------------------------------------------------------
+    // extract_doc_comment tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_extract_doc_comment_single_line() {
+        let source = "/// This is a doc comment\nfn foo() { }";
+        let doc = NulangLanguageServer::extract_doc_comment(source, 1);
+        assert_eq!(doc, Some("This is a doc comment".to_string()));
+    }
+
+    #[test]
+    fn test_extract_doc_comment_multi_line() {
+        let source = "/// First line\n/// Second line\nfn foo() { }";
+        let doc = NulangLanguageServer::extract_doc_comment(source, 2);
+        assert_eq!(doc, Some("First line\nSecond line".to_string()));
+    }
+
+    #[test]
+    fn test_extract_doc_comment_none() {
+        let source = "fn foo() { }";
+        let doc = NulangLanguageServer::extract_doc_comment(source, 0);
+        assert_eq!(doc, None);
+    }
+
+    #[test]
+    fn test_extract_doc_comment_with_leading_space() {
+        let source = "/// Hello world\nfn foo() { }";
+        let doc = NulangLanguageServer::extract_doc_comment(source, 1);
+        assert_eq!(doc, Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn test_extract_doc_comment_not_at_top_of_file() {
+        // Only extracts when there's a blank/non-doc line before
+        let source = "import stdlib::core\n\n/// Doc comment\nfn foo() { }";
+        let doc = NulangLanguageServer::extract_doc_comment(source, 3);
+        assert_eq!(doc, Some("Doc comment".to_string()));
+    }
+
+    // -----------------------------------------------------------------
+    // extract_document_links tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_document_links_stdlib_import() {
+        let source = "import stdlib::json\nimport stdlib::math";
+        let uri = Url::parse("file:///test.nula").unwrap();
+        let links = NulangLanguageServer::extract_document_links(source, &uri);
+        assert_eq!(links.len(), 2);
+        assert!(links[0].target.is_some());
+        assert!(links[1].target.is_some());
+    }
+
+    #[test]
+    fn test_document_links_relative_import() {
+        let source = "import \"./other.nula\"";
+        let uri = Url::parse("file:///project/main.nula").unwrap();
+        let links = NulangLanguageServer::extract_document_links(source, &uri);
+        assert_eq!(links.len(), 1);
+        assert!(links[0].target.is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // enriched hover tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_hover_includes_effects() {
+        let source = "fn io_func() -> Unit ! {IO} { perform IO.print(\"x\") }";
+        let hover = NulangLanguageServer::hover_at(source, Position::new(0, 3));
+        assert!(hover.is_some());
+        let text = match &hover.unwrap().contents {
+            HoverContents::Scalar(MarkedString::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        assert!(
+            text.contains("effects:"),
+            "hover should include effects: {}",
+            text
+        );
+        assert!(text.contains("IO"), "hover should mention IO: {}", text);
+    }
+
+    #[test]
+    fn test_hover_includes_doc_comment() {
+        let source = "/// Squares a number\n/// Returns x * x\nfn square(x: Int) -> Int { x * x }";
+        let hover = NulangLanguageServer::hover_at(source, Position::new(2, 3));
+        assert!(hover.is_some());
+        let text = match &hover.unwrap().contents {
+            HoverContents::Scalar(MarkedString::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        assert!(
+            text.contains("Squares a number"),
+            "hover should include doc: {}",
+            text
+        );
+        assert!(
+            text.contains("Returns x * x"),
+            "hover should include second doc line: {}",
+            text
+        );
+        assert!(
+            text.contains("---"),
+            "hover should have separator: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_hover_function_without_effects() {
+        let source = "fn pure(x: Int) -> Int { x }";
+        let hover = NulangLanguageServer::hover_at(source, Position::new(0, 3));
+        assert!(hover.is_some());
+        let text = match &hover.unwrap().contents {
+            HoverContents::Scalar(MarkedString::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        assert!(text.starts_with("fn pure"), "basic sig: {}", text);
+        assert!(!text.contains("effects:"), "no effects section: {}", text);
     }
 }
