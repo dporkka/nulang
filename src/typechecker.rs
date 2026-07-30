@@ -1977,6 +1977,21 @@ impl TypeChecker {
                 Ok((final_subst, Type::unit()))
             }
 
+            // Range: Int -> Int -> Array[Int]
+            Range => {
+                let (s1, left_ty) = self.infer_expr(ctx, left)?;
+                let s_left = mgu(&left_ty, &Type::int(), span)?;
+                let s1 = compose_subst(&s_left, &s1);
+
+                let ctx1 = apply_subst_to_ctx(ctx, &s1);
+                let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
+                let combined = compose_subst(&s2, &s1);
+                let s_right = mgu(&apply_subst(&right_ty, &combined), &Type::int(), span)?;
+                let final_subst = compose_subst(&s_right, &combined);
+
+                Ok((final_subst, Type::Array(Box::new(Type::int()))))
+            }
+
             // Pipe (should be handled in Pipe expr)
             Pipe => {
                 let (s1, left_ty) = self.infer_expr(ctx, left)?;
@@ -4509,5 +4524,34 @@ mod tests {
             "error must mention arg count: {}",
             err
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Range expression typechecking
+    #[test]
+    fn test_range_has_array_type() {
+        // 0 .. 5 : Array[Int]
+        let mut tc = TypeChecker::new();
+        let expr = bin(BinOp::Range, int_lit(0), int_lit(5));
+        let (s, ty) = tc.infer_expr(&TypeContext::new(), &expr).unwrap();
+        assert_eq!(apply_subst(&ty, &s), Type::Array(Box::new(Type::int())));
+    }
+
+    #[test]
+    fn test_range_rejects_non_int_left() {
+        // true .. 5 should fail
+        let mut tc = TypeChecker::new();
+        let expr = bin(BinOp::Range, bool_lit(true), int_lit(5));
+        let result = tc.infer_expr(&TypeContext::new(), &expr);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_range_rejects_non_int_right() {
+        // 0 .. "hello" should fail
+        let mut tc = TypeChecker::new();
+        let expr = bin(BinOp::Range, int_lit(0), string_lit("hello"));
+        let result = tc.infer_expr(&TypeContext::new(), &expr);
+        assert!(result.is_err());
     }
 }

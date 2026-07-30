@@ -1414,6 +1414,30 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             right,
             span,
         } => lower_assign_to(left, right, *span, body),
+        // Range: a .. b lowers to perform Array.range(a, b)
+        Expr::Binary {
+            op: BinOp::Range,
+            left,
+            right,
+            span,
+        } => {
+            let l = lower_expr(left, body);
+            let r = lower_expr(right, body);
+            let ty = Type::Array(Box::new(Type::int()));
+            let temp = fresh_temp_name();
+            body.push(hir::Stmt::Let {
+                name: temp.clone(),
+                ty: ty.clone(),
+                value: hir::RValue::Perform {
+                    effect: "Array".to_string(),
+                    op: "range".to_string(),
+                    args: vec![l, r],
+                    ty: ty.clone(),
+                },
+                span: *span,
+            });
+            hir::Operand::Var(temp, ty)
+        }
         Expr::Binary {
             op,
             left,
@@ -1869,6 +1893,7 @@ fn binary_type(op: &ast::BinOp, l: &hir::Operand, r: &hir::Operand) -> Type {
                 Type::Primitive(PrimitiveType::Int)
             }
         }
+        BinOp::Range => Type::Array(Box::new(Type::int())),
         _ => Type::Primitive(PrimitiveType::Int),
     }
 }

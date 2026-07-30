@@ -268,6 +268,7 @@ pub enum BinOp {
     Shr,
     Pow,
     Assign,
+    Range,
     Pipe,
 }
 

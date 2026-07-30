@@ -813,6 +813,26 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                     }
                     return Some(Value::nil());
                 }
+                Some("range") => {
+                    let start = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+                    let end = regs.get(1).and_then(|v| v.as_int()).unwrap_or(0);
+                    let len = if end > start {
+                        (end - start) as usize
+                    } else {
+                        0
+                    };
+                    let size = len.checked_mul(std::mem::size_of::<Value>()).unwrap_or(0);
+                    if let Some(new_ptr) = self.heap.alloc(size, HeapTypeTag::Array) {
+                        unsafe {
+                            let slots = std::slice::from_raw_parts_mut(new_ptr as *mut Value, len);
+                            for i in 0..len {
+                                slots[i] = Value::int(start + i as i64);
+                            }
+                        }
+                        return Some(Value::ptr(new_ptr));
+                    }
+                    return Some(Value::nil());
+                }
                 _ => return None,
             }
         }

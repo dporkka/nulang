@@ -18,18 +18,19 @@ type FxHashMap<K, V> =
 const PREC_LOWEST: u8 = 0;
 const PREC_ASSIGN: u8 = 1; // = += -=
 const PREC_PIPE: u8 = 2; // |>
-const PREC_OR: u8 = 3; // ||
-const PREC_AND: u8 = 4; // &&
-const PREC_EQ: u8 = 5; // == !=
-const PREC_CMP: u8 = 6; // < <= > >=
-const PREC_TERM: u8 = 7; // + -
-const PREC_FACTOR: u8 = 8; // * / %
-const PREC_SHIFT: u8 = 9; // << >>
-const PREC_BITAND: u8 = 10; // &
-const PREC_BITXOR: u8 = 11; // ^
-const PREC_BITOR: u8 = 12; // |
-const PREC_EXP: u8 = 13; // ** (power, right-associative, tighter than unary -)
-const PREC_PREFIX: u8 = 10; // ! - & (prefix)
+const PREC_RANGE: u8 = 3; // .. (inclusive-exclusive range, between pipe and or)
+const PREC_OR: u8 = 4; // ||
+const PREC_AND: u8 = 5; // &&
+const PREC_EQ: u8 = 6; // == !=
+const PREC_CMP: u8 = 7; // < <= > >=
+const PREC_TERM: u8 = 8; // + -
+const PREC_FACTOR: u8 = 9; // * / %
+const PREC_SHIFT: u8 = 10; // << >>
+const PREC_BITAND: u8 = 11; // &
+const PREC_BITXOR: u8 = 12; // ^
+const PREC_BITOR: u8 = 13; // |
+const PREC_EXP: u8 = 14; // ** (power, right-associative, tighter than unary -)
+const PREC_PREFIX: u8 = 11; // ! - & (prefix)
 
 fn prefix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
     match op {
@@ -44,6 +45,7 @@ fn infix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
     let (prec, right_assoc) = match op {
         TokenKind::Assign | TokenKind::PlusAssign | TokenKind::MinusAssign => (PREC_ASSIGN, true),
         TokenKind::PipeOp => (PREC_PIPE, false),
+        TokenKind::DotDot => (PREC_RANGE, false),
         TokenKind::Or => (PREC_OR, false),
         TokenKind::And => (PREC_AND, false),
         TokenKind::Eq | TokenKind::Ne => (PREC_EQ, false),
@@ -2296,20 +2298,52 @@ impl Parser {
                     TokenKind::Match => self.parse_match(),
                     TokenKind::LBrace => {
                         // Disambiguation: { expr .. field = val } (record-update)
+                        // vs { expr .. expr } (block containing a range expression)
                         // vs { ident : val } (record literal) vs { stmt; ... } (block).
                         //
-                        // Approach: save position, try to parse an expression, and
-                        // if followed by `..` (DotDot), commit to record-update.
-                        // Otherwise restore and fall through to the existing
-                        // record-literal / block logic. `..` is never consumed by
-                        // `parse_expr` (no prefix/infix handler for it), so the
-                        // speculative parse is safe and side-effect-free beyond
-                        // occasional diagnostic noise.
+                        // `..` has precedence PREC_RANGE (3). We call
+                        // parse_expr_with_prec(PREC_RANGE+1) so the Pratt loop
+                        // does NOT consume `..`, letting us check manually
+                        // whether the next token after the right operand is `=`
+                        // (record-update) or something else (range in block).
                         let saved = self.pos;
                         self.advance(); // consume '{'
-                        if let Ok(base) = self.parse_expr() {
+                        self.skip_newlines();
+                        if let Ok(expr) = self.parse_expr_with_prec(PREC_RANGE + 1) {
+                            self.skip_newlines();
                             if self.consume_if(&TokenKind::DotDot) {
-                                return self.parse_record_update(base);
+                                // Peek: record-update is `{ base .. field = val }`
+                                // Range-in-block is `{ base .. expr }` (no `=` after right side).
+                                // Try parsing just a field name; if followed by `=`,
+                                // it's record-update. Otherwise fall through to block.
+                                let after_dotdot = self.pos;
+                                if let Ok(field_name) = self.expect_ident("field name") {
+                                    self.skip_newlines();
+                                    if self.peek_kind() == &TokenKind::Assign {
+                                        // Record-update: { base .. field = value, ... }
+                                        self.advance(); // consume '='
+                                        let val = self.parse_expr()?;
+                                        let mut fields = vec![(field_name, val)];
+                                        self.skip_newlines();
+                                        while self.consume_if(&TokenKind::Comma) {
+                                            self.skip_newlines();
+                                            let field = self.expect_ident("field name")?;
+                                            self.expect(TokenKind::Assign)?;
+                                            let val = self.parse_expr()?;
+                                            fields.push((field, val));
+                                            self.skip_newlines();
+                                        }
+                                        self.expect(TokenKind::RBrace)?;
+                                        return Ok(Expr::RecordUpdate {
+                                            base: Box::new(expr),
+                                            fields,
+                                            span,
+                                        });
+                                    }
+                                }
+                                // Not record-update: restore to just after `..`
+                                // and fall through to block parsing.
+                                self.pos = after_dotdot;
                             }
                         }
                         // Not a record-update — restore and fall through
@@ -3335,6 +3369,7 @@ impl Parser {
 
     /// Parse a record-update expression: `{ base .. field = val, ... }`.
     /// `base` has already been parsed and `..` has been consumed by the caller.
+    #[allow(dead_code)]
     fn parse_record_update(&mut self, base: Expr) -> NuResult<Expr> {
         let span = self.current_span();
         let mut fields = Vec::new();
@@ -4413,6 +4448,7 @@ impl Parser {
 
 fn token_to_binop(kind: &TokenKind) -> Option<BinOp> {
     match kind {
+        TokenKind::DotDot => Some(BinOp::Range),
         TokenKind::Plus => Some(BinOp::Add),
         TokenKind::Minus => Some(BinOp::Sub),
         TokenKind::Star2 => Some(BinOp::Pow),
@@ -5974,6 +6010,102 @@ mod tests {
                 assert!(matches!(value.as_ref(), Expr::Literal(Literal::Int(50), _)));
             }
             _ => panic!("Expected Let for __until_poll"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Range expressions (..)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_range_simple() {
+        let expr = parse_expr("0 .. 5").unwrap();
+        match expr {
+            Expr::Binary {
+                op: BinOp::Range,
+                left,
+                right,
+                ..
+            } => {
+                assert!(matches!(left.as_ref(), Expr::Literal(Literal::Int(0), _)));
+                assert!(matches!(right.as_ref(), Expr::Literal(Literal::Int(5), _)));
+            }
+            _ => panic!("Expected Range binary, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_range_with_arithmetic() {
+        // a + b .. c + d should parse as (a + b) .. (c + d)
+        let expr = parse_expr("a + b .. c + d").unwrap();
+        match expr {
+            Expr::Binary {
+                op: BinOp::Range,
+                left,
+                right,
+                ..
+            } => {
+                assert!(matches!(left.as_ref(), Expr::Binary { op: BinOp::Add, .. }));
+                assert!(matches!(
+                    right.as_ref(),
+                    Expr::Binary { op: BinOp::Add, .. }
+                ));
+            }
+            _ => panic!("Expected Range binary, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_record_update_still_works() {
+        let source = "{ p .. y = 9 }";
+        let expr = parse_expr(source).unwrap();
+        match expr {
+            Expr::RecordUpdate { base, fields, .. } => {
+                assert!(matches!(base.as_ref(), Expr::Var(name, _) if name == "p"));
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0, "y");
+                assert!(matches!(fields[0].1, Expr::Literal(Literal::Int(9), _)));
+            }
+            _ => panic!("Expected RecordUpdate, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_block_with_range() {
+        // { a .. b } should parse as a block containing a range expression
+        let source = "{ a .. b }";
+        let expr = parse_expr(source).unwrap();
+        match expr {
+            Expr::Block { exprs, .. } => {
+                assert_eq!(exprs.len(), 1);
+                assert!(matches!(
+                    &exprs[0],
+                    Expr::Binary {
+                        op: BinOp::Range,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("Expected Block with range, got {:?}", expr),
+        }
+    }
+
+    #[test]
+    fn test_parse_for_in_range() {
+        let source = "for i in 0 .. 5 { i }";
+        let expr = parse_expr(source).unwrap();
+        match expr {
+            Expr::For { var, iterable, .. } => {
+                assert_eq!(var, "i");
+                assert!(matches!(
+                    iterable.as_ref(),
+                    Expr::Binary {
+                        op: BinOp::Range,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("Expected For with range, got {:?}", expr),
         }
     }
 }

@@ -337,6 +337,7 @@ fn op_sym(op: BinOp) -> &'static str {
         BinOp::Shl => "<<",
         BinOp::Shr => ">>",
         BinOp::Assign => "=",
+        BinOp::Range => "..",
         BinOp::Pipe => "|>",
     }
 }

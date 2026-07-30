@@ -615,11 +615,18 @@ impl EffectChecker {
                 Ok(effect_row_union(&r1, &r2))
             }
 
-            // Binary: union of left and right.
-            Expr::Binary { left, right, .. } => {
+            // Binary: union of left and right. Range op additionally
+            // introduces the Array effect (range desugars to array allocation).
+            Expr::Binary {
+                op, left, right, ..
+            } => {
                 let r1 = self.infer_effects(ctx, left)?;
                 let r2 = self.infer_effects(ctx, right)?;
-                Ok(effect_row_union(&r1, &r2))
+                let mut r = effect_row_union(&r1, &r2);
+                if *op == BinOp::Range {
+                    r = effect_row_union(&r, &EffectRow::singleton(Effect::Array));
+                }
+                Ok(r)
             }
 
             // Unary: effects of the operand.
