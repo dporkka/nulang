@@ -1275,6 +1275,35 @@ impl std::fmt::Display for NuError {
 }
 
 impl NuError {
+    /// Construct a ParseError.
+    pub fn parse_error(msg: String, span: Span) -> Self {
+        NuError::ParseError { msg, span, expected: None, found: None }
+    }
+
+    /// Construct a CapError.
+    pub fn cap_error(msg: String, span: Span) -> Self {
+        NuError::CapError { msg, span, explanation: None }
+    }
+
+    /// Construct an EffectError.
+    pub fn effect_error(msg: String, span: Span) -> Self {
+        NuError::EffectError { msg, span, missing_effects: None, allowed_effects: None }
+    }
+
+    /// Construct a RuntimeError.
+    pub fn runtime_error(msg: String, span: Span) -> Self {
+        NuError::RuntimeError { msg, span }
+    }
+
+    /// Construct a VMError.
+    pub fn vm_error(msg: String, span: Span) -> Self {
+        NuError::VMError { msg, span }
+    }
+
+    /// Construct an FFIError.
+    pub fn ffi_error(msg: String, span: Span) -> Self {
+        NuError::FFIError { msg, span }
+    }
     /// Produce a colorized, multi-line error message with source excerpts and
     /// carets. Uses ANSI escape codes; callers should gate on `is_terminal()`
     /// if they support plain-text fallback.
@@ -1665,6 +1694,11 @@ impl NuError {
     // -----------------------------------------------------------------------
 
     /// Create a type-mismatch error with explicit expected/found types.
+    /// Construct a TypeError with a simple message.
+    pub fn type_error(msg: String, span: Span) -> Self {
+        NuError::TypeError { msg, span, expected_type: None, found_type: None, similar_names: None }
+    }
+
     pub fn type_mismatch(expected: impl Into<String>, found: impl Into<String>, span: Span) -> Self {
         let exp = expected.into();
         let fnd = found.into();

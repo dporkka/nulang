@@ -563,7 +563,7 @@ fn unify_open_records(
 }
 
 /// Unify a list of type variable / type pairs (common sub-structures).
-fn unify_many_app(types1: &[Type], types2: &[Type], Span) -> NuResult<Substitution> {
+fn unify_many_app(types1: &[Type], types2: &[Type], span: Span) -> NuResult<Substitution> {
     if types1.len() != types2.len() {
         return Err(NuError::type_mismatch(
             format!("type list of length {)", types1.len()),
@@ -580,7 +580,7 @@ fn unify_many_app(types1: &[Type], types2: &[Type], Span) -> NuResult<Substituti
 }
 
 /// Unify two lists of types pairwise.
-fn unify_many(types1: &[Type], types2: &[Type], Span) -> NuResult<Substitution> {
+fn unify_many(types1: &[Type], types2: &[Type], span: Span) -> NuResult<Substitution> {
     if types1.len() != types2.len() {
         return Err(NuError::type_mismatch(
             format!("list of {) types", types1.len()),
@@ -894,7 +894,7 @@ impl TypeChecker {
                                         "actor '{}' declares it implements '{}' but is missing required handler '{}' (expects {} parameter(s))",
                                         name, contract_name, handler_name, param_count
                                     );
-                                    return Err(NuError::TypeError { msg, *span, expected_type: None, found_type: None, similar_names: None });
+                                    return Err(NuError::TypeError { msg, span: *span, expected_type: None, found_type: None, similar_names: None });
                                 }
                             }
                         }
@@ -1663,7 +1663,7 @@ impl TypeChecker {
             let mut s_combined = compose_subst(&s2, &s1);
             // An explicit annotation must unify with the inferred value type.
             if let Some(ann_ty) = ann {
-                let s_ann = mgu(&apply_subst(&val_ty, &s_combined), ann_ty, span)?;
+                let s_ann = mgu(&apply_subst(&val_ty, &s_combined), ann_ty, Span::default())?;
                 s_combined = compose_subst(&s_ann, &s_combined);
             }
             let gen_ty = self.do_generalize(ctx, &apply_subst(&val_ty, &s_combined));
@@ -1678,7 +1678,7 @@ impl TypeChecker {
 
         // An explicit annotation must unify with the inferred value type.
         let s1 = if let Some(ann_ty) = ann {
-            let s_ann = mgu(&apply_subst(&val_ty, &s1), ann_ty, span)?;
+            let s_ann = mgu(&apply_subst(&val_ty, &s1), ann_ty, Span::default())?;
             compose_subst(&s_ann, &s1)
         } else {
             s1
@@ -2342,7 +2342,7 @@ impl TypeChecker {
         let (s2, idx_ty) = self.infer_expr(&ctx1, idx)?;
 
         // Index must be Int
-        let s_idx = mgu(&apply_subst(&idx_ty, &s2), &Type::int(), span)?;
+        let s_idx = mgu(&apply_subst(&idx_ty, &s2), &Type::int(), Span::default())?;
         let s_combined = compose_subst(&s_idx, &compose_subst(&s2, &s1));
 
         // Array type
@@ -2350,7 +2350,7 @@ impl TypeChecker {
         let s_arr = mgu(
             &apply_subst(&arr_ty, &s_combined),
             &Type::Array(Box::new(elem_var.clone())),
-            span,
+            Span::default(),
         )?;
         let final_subst = compose_subst(&s_arr, &s_combined);
 
