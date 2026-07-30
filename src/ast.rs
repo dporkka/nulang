@@ -62,6 +62,7 @@ pub enum Expr {
         ty: Option<Type>,
         value: Box<Expr>,
         body: Box<Expr>,
+        mutable: bool,
         span: Span,
     },
     /// Let-rec: let rec f = e1 in e2

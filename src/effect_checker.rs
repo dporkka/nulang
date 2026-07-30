@@ -2246,6 +2246,7 @@ mod tests {
                 args: vec![],
                 span: s(),
             }),
+            mutable: false,
             span: s(),
         };
         let row = checker.infer_effects(&ctx, &let_expr).unwrap();
@@ -2963,6 +2964,7 @@ mod tests {
                 exprs: vec![call1("f", lvar("x")), call1("g", lvar("x"))],
                 span: s(),
             }),
+            mutable: false,
             span: s(),
         };
         assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
@@ -3254,6 +3256,7 @@ mod tests {
             ty: None,
             value: Box::new(pure_lambda),
             body: Box::new(call("do_io")),
+            mutable: false,
             span: s(),
         };
         assert!(

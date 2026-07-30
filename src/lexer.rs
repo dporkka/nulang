@@ -21,6 +21,7 @@ pub enum TokenKind {
     // Keywords
     Fn,
     Let,
+    Var,
     Rec,
     In,
     If,
@@ -165,6 +166,7 @@ impl std::fmt::Display for TokenKind {
             // Keywords
             TokenKind::Fn => write!(f, "fn"),
             TokenKind::Let => write!(f, "let"),
+            TokenKind::Var => write!(f, "var"),
             TokenKind::Rec => write!(f, "rec"),
             TokenKind::In => write!(f, "in"),
             TokenKind::If => write!(f, "if"),
@@ -1124,6 +1126,7 @@ impl<'a> Lexer<'a> {
 
 fn keyword(s: &str) -> Option<TokenKind> {
     match s {
+        "var" => Some(TokenKind::Var),
         "fn" => Some(TokenKind::Fn),
         "let" => Some(TokenKind::Let),
         "rec" => Some(TokenKind::Rec),

@@ -2251,8 +2251,14 @@ impl Parser {
                         if self.peek_kind() == &TokenKind::LParen {
                             self.parse_let_rec_named(name)
                         } else {
-                            self.parse_let_named(name)
+                            self.parse_let_named(name, false)
                         }
+                    }
+                    TokenKind::Var => {
+                        self.advance();
+                        self.skip_newlines();
+                        let name = self.expect_ident("variable name")?;
+                        self.parse_let_named(name, true)
                     }
                     TokenKind::If => self.parse_if(),
                     TokenKind::Match => self.parse_match(),
@@ -2404,7 +2410,7 @@ impl Parser {
         })
     }
 
-    fn parse_let_named(&mut self, name: String) -> NuResult<Expr> {
+    fn parse_let_named(&mut self, name: String, mutable: bool) -> NuResult<Expr> {
         let span = self.current_span();
 
         // Optional type annotation
@@ -2429,6 +2435,7 @@ impl Parser {
             ty,
             value: Box::new(value),
             body: Box::new(body),
+            mutable,
             span,
         })
     }
@@ -2691,12 +2698,14 @@ impl Parser {
                             name,
                             ty,
                             value,
+                            mutable,
                             span,
                             ..
                         } => Expr::Let {
                             name,
                             ty,
                             value,
+                            mutable,
                             body: Box::new(body),
                             span,
                         },
@@ -2869,6 +2878,7 @@ impl Parser {
                         ],
                         span,
                     }),
+                    mutable: false,
                     span,
                 }
             }
@@ -3588,6 +3598,7 @@ impl Parser {
                 args: vec![],
                 span,
             }),
+            mutable: false,
             span,
         };
         Ok(Expr::Let {
@@ -3595,6 +3606,7 @@ impl Parser {
             ty: None,
             value: Box::new(poll_ms),
             body: Box::new(loop_body),
+            mutable: false,
             span,
         })
     }

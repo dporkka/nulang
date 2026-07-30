@@ -724,7 +724,7 @@ impl Type {
 /// analyzer (`CapabilityAnalyzer` in `src/effect_checker.rs`), not here.
 #[derive(Debug, Clone, Default)]
 pub struct TypeContext {
-    bindings: HashMap<String, (Type, Capability)>,
+    bindings: HashMap<String, (Type, Capability, bool)>,
     /// Event declarations from the enclosing entity (if any). Used by the
     /// typechecker to validate `emit EventName(args)` calls. Stored as
     /// `(event_name, [(param_name, param_type)])`.
@@ -741,21 +741,27 @@ impl TypeContext {
         Self::default()
     }
 
-    /// Bind a variable name to a type and capability.
-    pub fn bind(&mut self, name: impl Into<String>, ty: Type, cap: Capability) {
+    /// Bind a variable name to a type, capability, and mutability.
+    pub fn bind(&mut self, name: impl Into<String>, ty: Type, cap: Capability, mutable: bool) {
         let name = name.into();
-        self.bindings.insert(name, (ty, cap));
+        self.bindings.insert(name, (ty, cap, mutable));
     }
 
-    /// Look up a variable's type and capability.
-    pub fn lookup(&self, name: &str) -> Option<&(Type, Capability)> {
+    /// Look up a variable's type, capability, and mutability.
+    pub fn lookup(&self, name: &str) -> Option<&(Type, Capability, bool)> {
         self.bindings.get(name)
     }
 
     /// Create an extended context with an additional binding.
-    pub fn extend(&self, name: impl Into<String>, ty: Type, cap: Capability) -> Self {
+    pub fn extend(
+        &self,
+        name: impl Into<String>,
+        ty: Type,
+        cap: Capability,
+        mutable: bool,
+    ) -> Self {
         let mut ctx = self.clone();
-        ctx.bind(name, ty, cap);
+        ctx.bind(name, ty, cap, mutable);
         ctx
     }
 
@@ -778,15 +784,15 @@ impl TypeContext {
         self.constraints.get(tv)
     }
 
-    /// Iterate over all bindings as `(name, (type, capability))` pairs.
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &(Type, Capability))> {
+    /// Iterate over all bindings as `(name, (type, capability, mutable))` tuples.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &(Type, Capability, bool))> {
         self.bindings.iter()
     }
 
     /// Free type variables occurring in any binding in the context.
     pub fn free_vars(&self) -> Vec<TypeVar> {
         let mut vars = vec![];
-        for (ty, _) in self.bindings.values() {
+        for (ty, _, _) in self.bindings.values() {
             vars.extend(ty.free_vars());
         }
         vars.sort_by_key(|v| v.0);

@@ -1677,6 +1677,7 @@ impl NulangLanguageServer {
                 ty,
                 value,
                 body,
+                mutable: _,
                 span,
             } => {
                 if let Some(ref t) = ty {

@@ -8727,4 +8727,64 @@ match { a: 2, b: 9 } with {
         let (value, _ty) = result.unwrap();
         assert_eq!(value.as_int(), Some(42), "10 + 2 + 30 = 42");
     }
+
+    // -----------------------------------------------------------------------
+    // var bindings — mutable local variables (SPEC2 §2.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_var_simple_reassign() {
+        // var x = 0; x = x + 1; x = x + 1; x  →  2
+        let source = "var x = 0 in { x = x + 1; x = x + 1; x }";
+        assert_int(source, 2);
+    }
+
+    #[test]
+    fn test_var_multiple_bindings() {
+        // var i = 0; var sum = 0; i = i+1; sum = sum+i; i = i+1; sum = sum+i; sum
+        let source = "var i = 0 in var sum = 0 in { i = i + 1; sum = sum + i; i = i + 1; sum = sum + i; sum }";
+        assert_int(source, 3);
+    }
+
+    #[test]
+    fn test_var_in_block() {
+        let source = r#"
+        var total = 0
+        total = total + 5
+        total = total * 2
+        total
+        "#;
+        assert_int(source, 10);
+    }
+
+    #[test]
+    fn test_var_let_mix() {
+        // var mutates; let shadows without affecting var
+        let source = "var x = 1 in let x = 10 in x";
+        assert_int(source, 10);
+    }
+
+    #[test]
+    fn test_var_unchanged_by_let_shadow() {
+        // var x = 1; let x = 10 in 0; x — let shadows in block, so x = 10
+        let source = "var x = 1 in { let x = 10 in 0; x }";
+        assert_int(source, 10);
+    }
+
+    #[test]
+    fn test_let_immutable_error() {
+        // Reassigning let binding should still error
+        let source = r#"
+        let y = 0
+        y = 1
+        "#;
+        let result = run_source(source);
+        assert!(result.is_err(), "reassigning immutable let should error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("cannot assign to immutable binding"),
+            "error should mention immutable binding, got: {}",
+            err
+        );
+    }
 }

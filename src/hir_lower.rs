@@ -2042,6 +2042,7 @@ mod tests {
                 span: Span::default(),
             }),
             body: Box::new(Expr::Var("x".to_string(), Span::default())),
+            mutable: false,
             span: Span::default(),
         };
         let body = lower_body(&source_body);

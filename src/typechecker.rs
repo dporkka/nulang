@@ -109,8 +109,8 @@ fn apply_subst_to_ctx(ctx: &TypeContext, subst: &Substitution) -> TypeContext {
     }
     let mut result = TypeContext::new();
     result.entity_events = ctx.entity_events.clone();
-    for (name, (ty, cap)) in ctx.iter() {
-        result.bind(name.clone(), apply_subst(ty, subst), *cap);
+    for (name, (ty, cap, mutable)) in ctx.iter() {
+        result.bind(name.clone(), apply_subst(ty, subst), *cap, *mutable);
     }
     // Propagate constraints through substitution: if a constrained type
     // variable is substituted to another variable, transfer the constraints.
@@ -785,13 +785,13 @@ impl TypeChecker {
                     // variables — without this the substitution threads
                     // through the context and monomorphizes every later use.
                     let gen_ty = self.do_generalize(&ctx, &final_ty);
-                    ctx.bind(name.clone(), gen_ty, Capability::Ref);
+                    ctx.bind(name.clone(), gen_ty, Capability::Ref, false);
                 }
                 Decl::Actor { name, .. } => {
-                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref, false);
                 }
                 Decl::StateMachine { name, .. } => {
-                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref, false);
                 }
                 Decl::Extern { funcs, .. } => {
                     for func in funcs {
@@ -808,14 +808,14 @@ impl TypeChecker {
                             effect: EffectRow::singleton(Effect::FFI),
                             cap: Capability::Ref,
                         };
-                        ctx.bind(func.name.clone(), func_ty, Capability::Ref);
+                        ctx.bind(func.name.clone(), func_ty, Capability::Ref, false);
                     }
                 }
                 Decl::Workflow { name, .. } => {
-                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref, false);
                 }
                 Decl::Agent { name, .. } => {
-                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref);
+                    ctx.bind(name.clone(), final_ty.clone(), Capability::Ref, false);
                 }
                 Decl::VariantType { variants, .. } => {
                     // Bind each constructor (SPEC2 §3.4.1): a constructor with
@@ -837,7 +837,7 @@ impl TypeChecker {
                             None => variant_ty.clone(),
                         };
                         let gen_ty = self.do_generalize(&ctx, &ctor_ty);
-                        ctx.bind(ctor_name.clone(), gen_ty, Capability::Ref);
+                        ctx.bind(ctor_name.clone(), gen_ty, Capability::Ref, false);
                     }
                 }
 
@@ -845,7 +845,7 @@ impl TypeChecker {
                     // Bind class name as a type-level marker; runtime value
                     // is unit — classes constrain type variables at compile
                     // time and have no runtime representation.
-                    ctx.bind(name.clone(), Type::unit(), Capability::Ref);
+                    ctx.bind(name.clone(), Type::unit(), Capability::Ref, false);
                 }
                 Decl::Impl {
                     class_name,
@@ -855,7 +855,7 @@ impl TypeChecker {
                     // Bind the instance dictionary under a synthetic name
                     // so instance-lookup can resolve it at call sites.
                     let dict_name = format!("_impl_{}_{}", class_name, for_type);
-                    ctx.bind(dict_name, final_ty.clone(), Capability::Ref);
+                    ctx.bind(dict_name, final_ty.clone(), Capability::Ref, false);
                 }
 
                 _ => {}
@@ -987,10 +987,10 @@ impl TypeChecker {
 
                 let mut new_ctx = ctx.clone();
                 // Bind the function name so recursive calls resolve.
-                new_ctx.bind(name.clone(), recursive_func_ty, Capability::Ref);
+                new_ctx.bind(name.clone(), recursive_func_ty, Capability::Ref, false);
                 // Bind parameters
                 for (param_name, pty) in params.iter().zip(param_types.iter()) {
-                    new_ctx.bind(param_name.0.clone(), pty.clone(), Capability::Ref);
+                    new_ctx.bind(param_name.0.clone(), pty.clone(), Capability::Ref, false);
                 }
 
                 // Inject typeclass constraints from type parameter annotations
@@ -1115,7 +1115,7 @@ impl TypeChecker {
                 // extended with the workflow input, if one is declared.
                 let mut workflow_ctx = ctx.clone();
                 if let Some((input_name, input_ty)) = input {
-                    workflow_ctx.bind(input_name.clone(), input_ty.clone(), Capability::Ref);
+                    workflow_ctx.bind(input_name.clone(), input_ty.clone(), Capability::Ref, false);
                 }
                 for item in items {
                     match item {
@@ -1211,8 +1211,9 @@ impl TypeChecker {
                 ty,
                 value,
                 body,
+                mutable,
                 span,
-            } => self.infer_let(ctx, name, ty.as_ref(), value, body, *span),
+            } => self.infer_let(ctx, name, ty.as_ref(), value, body, *mutable, *span),
 
             // Let-rec: recursive binding
             Expr::LetRec {
@@ -1484,12 +1485,28 @@ impl TypeChecker {
                 Ok((vec![], fresh))
             }
 
-            // Assignment: target must be a reference
+            // Assignment: target must be a reference, OR a mutable local
             Expr::Assign {
                 target,
                 value,
                 span,
             } => {
+                // Check for mutable local variable reassignment first:
+                // `var x = 0; x = 5` reassigns the mutable binding `x`.
+                if let Expr::Var(name, _) = target.as_ref() {
+                    if let Some((binding_ty, _cap, is_mutable)) = ctx.lookup(name) {
+                        if *is_mutable {
+                            let binding_ty = instantiate(binding_ty);
+                            let (s1, value_ty) = self.infer_expr(ctx, value)?;
+                            // Unify value type with binding type directly (no Ref wrapper)
+                            let s2 = mgu(&apply_subst(&value_ty, &s1), &binding_ty, *span)?;
+                            let final_subst = compose_subst(&s2, &s1);
+                            return Ok((final_subst, Type::unit()));
+                        }
+                    }
+                    // Not a mutable binding — fall through to error below.
+                }
+
                 let (s1, target_ty) = self.infer_expr(ctx, target)?;
                 let ctx1 = apply_subst_to_ctx(ctx, &s1);
                 let (s2, value_ty) = self.infer_expr(&ctx1, value)?;
@@ -1507,9 +1524,9 @@ impl TypeChecker {
                             return Err(NuError::type_error(
                                 format!(
                                     "cannot assign to immutable binding `{}`; \
-                                     mutable locals (`var`) are not yet supported. \
-                                     Use `let {} = <new value> in ...` to shadow the binding.",
-                                    name, name
+                                     use `var {} = ...` for a mutable local, \
+                                     or `let {} = <new value> in ...` to shadow the binding.",
+                                    name, name, name
                                 ),
                                 *span,
                             ));
@@ -1549,7 +1566,7 @@ impl TypeChecker {
         span: Span,
     ) -> NuResult<(Substitution, Type)> {
         match ctx.lookup(name) {
-            Some((ty, _cap)) => {
+            Some((ty, _cap, _mutable)) => {
                 let instantiated = instantiate(ty);
                 Ok((vec![], instantiated))
             }
@@ -1576,7 +1593,7 @@ impl TypeChecker {
                 Some(t) => t.clone(),
                 None => Type::Var(TypeVar::fresh()),
             };
-            new_ctx.bind(param_name.clone(), pty.clone(), Capability::Ref);
+            new_ctx.bind(param_name.clone(), pty.clone(), Capability::Ref, false);
             param_types.push(pty);
         }
 
@@ -1682,6 +1699,7 @@ impl TypeChecker {
         ann: Option<&Type>,
         value: &Expr,
         body: &Expr,
+        mutable: bool,
         _span: Span,
     ) -> NuResult<(Substitution, Type)> {
         // For let-bound lambdas that reference themselves (e.g.
@@ -1689,7 +1707,8 @@ impl TypeChecker {
         // available inside the lambda body with a fresh type variable.
         if matches!(value, Expr::Lambda { .. }) {
             let rec_var = Type::Var(TypeVar::fresh());
-            let ctx_with_rec = ctx.extend(name.to_string(), rec_var.clone(), Capability::Ref);
+            let ctx_with_rec =
+                ctx.extend(name.to_string(), rec_var.clone(), Capability::Ref, mutable);
             let (s1, val_ty) = self.infer_expr(&ctx_with_rec, value)?;
             let s2 = mgu(
                 &apply_subst(&rec_var, &s1),
@@ -1703,7 +1722,7 @@ impl TypeChecker {
                 s_combined = compose_subst(&s_ann, &s_combined);
             }
             let gen_ty = self.do_generalize(ctx, &apply_subst(&val_ty, &s_combined));
-            let new_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref);
+            let new_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref, mutable);
             let (s3, body_ty) = self.infer_expr(&new_ctx, body)?;
             let final_subst = compose_subst(&s3, &s_combined);
             return Ok((final_subst.clone(), apply_subst(&body_ty, &final_subst)));
@@ -1724,7 +1743,7 @@ impl TypeChecker {
         let gen_ty = self.do_generalize(ctx, &apply_subst(&val_ty, &s1));
 
         // Extend context with generalized type
-        let new_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref);
+        let new_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref, mutable);
 
         // Infer body with extended context
         let (s2, body_ty) = self.infer_expr(&new_ctx, body)?;
@@ -1745,7 +1764,7 @@ impl TypeChecker {
     ) -> NuResult<(Substitution, Type)> {
         // Create a fresh type variable for the recursive function
         let rec_var = Type::Var(TypeVar::fresh());
-        let ctx_with_rec = ctx.extend(name.to_string(), rec_var.clone(), Capability::Ref);
+        let ctx_with_rec = ctx.extend(name.to_string(), rec_var.clone(), Capability::Ref, false);
 
         // Infer the value with the recursive binding in scope
         let mut new_ctx = ctx_with_rec.clone();
@@ -1755,7 +1774,7 @@ impl TypeChecker {
                 Some(t) => t.clone(),
                 None => Type::Var(TypeVar::fresh()),
             };
-            new_ctx.bind(param_name.clone(), pty.clone(), Capability::Ref);
+            new_ctx.bind(param_name.clone(), pty.clone(), Capability::Ref, false);
             param_types.push(pty);
         }
 
@@ -1789,7 +1808,7 @@ impl TypeChecker {
 
         // Generalize
         let gen_ty = self.do_generalize(ctx, &apply_subst(&func_ty, &s_combined));
-        let final_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref);
+        let final_ctx = ctx.extend(name.to_string(), gen_ty, Capability::Ref, false);
 
         // Infer body
         let (s3, body_ty) = self.infer_expr(&final_ctx, body)?;
@@ -2299,7 +2318,7 @@ impl TypeChecker {
                             let key = (class_name.clone(), type_key.clone());
                             if instance_table.contains_key(&key) {
                                 let dict_name = format!("_impl_{}_{}", class_name, type_key);
-                                if let Some((dict_ty, _)) = ctx.lookup(&dict_name) {
+                                if let Some((dict_ty, _, _)) = ctx.lookup(&dict_name) {
                                     if let Type::Record(fields) = dict_ty {
                                         if let Some((_, field_ty)) =
                                             fields.iter().find(|(n, _)| n == field)
@@ -2522,7 +2541,9 @@ impl TypeChecker {
     ) -> NuResult<TypeContext> {
         match pattern {
             Pattern::Wild => Ok(ctx.clone()),
-            Pattern::Var(name) => Ok(ctx.extend(name.clone(), scrut_ty.clone(), Capability::Ref)),
+            Pattern::Var(name) => {
+                Ok(ctx.extend(name.clone(), scrut_ty.clone(), Capability::Ref, false))
+            }
             Pattern::Lit(lit) => {
                 let lit_ty = match lit {
                     Literal::Int(_) => Type::int(),
@@ -2599,7 +2620,8 @@ impl TypeChecker {
                 }
             },
             Pattern::Alias(name, pat) => {
-                let mut new_ctx = ctx.extend(name.clone(), scrut_ty.clone(), Capability::Ref);
+                let mut new_ctx =
+                    ctx.extend(name.clone(), scrut_ty.clone(), Capability::Ref, false);
                 new_ctx = self.bind_pattern(&new_ctx, pat, scrut_ty)?;
                 Ok(new_ctx)
             }
@@ -2645,7 +2667,7 @@ impl TypeChecker {
                     Some(t) => t.clone(),
                     None => Type::Var(TypeVar::fresh()),
                 };
-                behavior_ctx.bind(param_name.clone(), pty.clone(), behavior.cap);
+                behavior_ctx.bind(param_name.clone(), pty.clone(), behavior.cap, false);
                 param_types.push(pty);
             }
             if !events.is_empty() {
@@ -2785,7 +2807,12 @@ impl TypeChecker {
         for h in handlers {
             let mut handler_ctx = apply_subst_to_ctx(ctx, &subst);
             for p in &h.params {
-                handler_ctx.bind(p.clone(), Type::Var(TypeVar::fresh()), Capability::Ref);
+                handler_ctx.bind(
+                    p.clone(),
+                    Type::Var(TypeVar::fresh()),
+                    Capability::Ref,
+                    false,
+                );
             }
             let (s, handler_ty) = self.infer_expr(&handler_ctx, &h.body)?;
             let handler_ty_subst = apply_subst(&handler_ty, &s);
@@ -2842,6 +2869,7 @@ impl TypeChecker {
             var.to_string(),
             apply_subst(&elem_var, &s_combined),
             Capability::Ref,
+            false,
         );
 
         // Infer body
@@ -2976,6 +3004,7 @@ mod tests {
             ty: None,
             value: Box::new(value),
             body: Box::new(body),
+            mutable: false,
             span: sp(),
         }
     }
@@ -3028,7 +3057,7 @@ mod tests {
     // Helper to set up context with a typed binding
     fn ctx_with(name: &str, ty: Type) -> TypeContext {
         let mut ctx = TypeContext::new();
-        ctx.bind(name.to_string(), ty, Capability::Ref);
+        ctx.bind(name.to_string(), ty, Capability::Ref, false);
         ctx
     }
 
@@ -4035,7 +4064,7 @@ mod tests {
             effect: EffectRow::singleton(Effect::FFI),
             cap: Capability::Ref,
         };
-        ctx.bind("sqrt", extern_ty, Capability::Ref);
+        ctx.bind("sqrt", extern_ty, Capability::Ref, false);
         let (_s, ty) = tc.infer_expr(&ctx, &var("sqrt")).unwrap();
         match ty {
             Type::Function { effect, .. } => {
@@ -4124,7 +4153,7 @@ mod tests {
         let subst = vec![(v, Type::int())];
         let updated = apply_subst_to_ctx(&ctx, &subst);
         match updated.lookup("x") {
-            Some((ty, _)) => assert_eq!(*ty, Type::int()),
+            Some((ty, _, _)) => assert_eq!(*ty, Type::int()),
             None => panic!("binding for x lost"),
         }
     }
