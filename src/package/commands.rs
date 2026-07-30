@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::package::lockfile::{LOCKFILE_FILE, Lockfile};
-use crate::package::manifest::{Dependency, DependencyDetail, MANIFEST_FILE, Manifest};
+use crate::package::lockfile::{Lockfile, LOCKFILE_FILE};
+use crate::package::manifest::{Dependency, DependencyDetail, Manifest, MANIFEST_FILE};
 use crate::package::resolver::resolve;
 use crate::types::{NuError, NuResult, Span};
 
