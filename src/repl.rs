@@ -294,9 +294,7 @@ impl rustyline::completion::Completer for ReplHelper {
         // Merge static keywords with dynamic user-defined names, deduplicate.
         let mut seen: HashSet<&str> = HashSet::new();
         let mut matches: Vec<String> = Vec::new();
-        for kw in self.keywords.iter().chain(
-            self.user_names.borrow().iter()
-        ) {
+        for kw in self.keywords.iter().chain(self.user_names.borrow().iter()) {
             if kw.to_lowercase().starts_with(&prefix_lower) && seen.insert(kw.as_str()) {
                 matches.push(kw.clone());
             }
@@ -786,7 +784,12 @@ impl Repl {
 
     /// Load and evaluate a .nula file in the REPL context.
     fn load_file(&mut self, path: &str) -> NuResult<()> {
-        let source = std::fs::read_to_string(path).map_err(|e| NuError::parse_error(format!("Cannot read file '{}': {}", path, e), Span::default(),))?;
+        let source = std::fs::read_to_string(path).map_err(|e| {
+            NuError::parse_error(
+                format!("Cannot read file '{}': {}", path, e),
+                Span::default(),
+            )
+        })?;
         println!("Loaded '{}' ({} bytes)", path, source.len());
         self.evaluate(&source)
     }
@@ -908,7 +911,10 @@ fn extract_main_expr(ast: &AstModule) -> NuResult<Expr> {
             }
         }
     }
-    Err(NuError::parse_error("Expected an expression".to_string(), Span::default(),))
+    Err(NuError::parse_error(
+        "Expected an expression".to_string(),
+        Span::default(),
+    ))
 }
 
 /// Convert a runtime Value to a pretty display string.

@@ -1971,7 +1971,10 @@ impl VM {
             if let Some(result) = result {
                 self.frames[frame_idx].regs[dst_reg as usize] = result;
             } else {
-                return Err(NuError::effect_error(format!("Unhandled effect: '{}'", qualified_name), Span::default()));
+                return Err(NuError::effect_error(
+                    format!("Unhandled effect: '{}'", qualified_name),
+                    Span::default(),
+                ));
             }
             // PC already advanced by the main loop (line 1516);
             // fall through to the next instruction.
@@ -2049,7 +2052,10 @@ impl VM {
             if let Some(result) = result {
                 self.frames[frame_idx].regs[dst_reg as usize] = result;
             } else {
-                return Err(NuError::effect_error(format!("Unhandled effect: '{}'", qualified_name), Span::default()));
+                return Err(NuError::effect_error(
+                    format!("Unhandled effect: '{}'", qualified_name),
+                    Span::default(),
+                ));
             }
         }
 

@@ -913,6 +913,74 @@ pub fn lower_body(expr: &Expr) -> hir::Body {
 
 /// Lower an expression into a sequence of statements in `body`, returning an
 /// operand that represents the expression's value.
+
+/// Lower a single let-binding's value and emit the matching HIR `Stmt::Let`.
+/// For ordinary values this lowers the expression and stores the result via
+/// `RValue::Use`.  Self-referencing lambdas are NOT handled here — the
+/// caller must check for them and emit a `RecClosure` before calling this.
+fn lower_let_value(name: &str, value: &Expr, span: Span, body: &mut hir::Body) {
+    let vop = lower_expr(value, body);
+    let ty = vop.ty();
+    body.push(hir::Stmt::Let {
+        name: name.to_string(),
+        ty: ty.clone(),
+        value: hir::RValue::Use(vop),
+        span,
+    });
+}
+
+/// Process a chain of `Let` nodes iteratively, lowering each value and
+/// pushing the HIR `Stmt::Let`, then lowering the final non-Let body.
+/// Keeps stack depth bounded regardless of how many sequential
+/// let-statements the parser spliced into the AST.
+fn lower_let_chain(first_body: &Expr, body: &mut hir::Body) -> hir::Operand {
+    let mut cur: &Expr = first_body;
+    loop {
+        match cur {
+            Expr::Let {
+                name,
+                value,
+                body: inner,
+                span,
+                ..
+            } => {
+                // Self-referencing lambda check — same logic as the
+                // top-level Let arm so that `let rec`-style chains work
+                // inside iterative processing.
+                if let Expr::Lambda {
+                    params,
+                    body: lam_body,
+                    ..
+                } = value.as_ref()
+                {
+                    if lambda_references(name, params, lam_body) {
+                        let func_body = lower_body(lam_body);
+                        body.push(hir::Stmt::Let {
+                            name: name.clone(),
+                            ty: Type::unit(),
+                            value: hir::RValue::RecClosure {
+                                name: name.clone(),
+                                params: params
+                                    .iter()
+                                    .map(|(n, t)| (n.clone(), resolve_type(t)))
+                                    .collect(),
+                                body: Box::new(func_body),
+                                ty: Type::unit(),
+                            },
+                            span: *span,
+                        });
+                        cur = inner;
+                        continue;
+                    }
+                }
+                lower_let_value(name, value, *span, body);
+                cur = inner;
+            }
+            _ => return lower_expr(cur, body),
+        }
+    }
+}
+
 pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
     if body.is_terminated() {
         // Dead code after an explicit `return`/`break`: don't lower it.
@@ -1088,66 +1156,15 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                         span: *span,
                     });
                     // Process any chained lets iteratively.
-                    let mut cur: &Expr = b;
-                    loop {
-                        match cur {
-                            Expr::Let {
-                                name,
-                                value,
-                                body: inner,
-                                span: inner_span,
-                                ..
-                            } => {
-                                let vop = lower_expr(value, body);
-                                let ty = vop.ty();
-                                body.push(hir::Stmt::Let {
-                                    name: name.clone(),
-                                    ty: ty.clone(),
-                                    value: hir::RValue::Use(vop),
-                                    span: *inner_span,
-                                });
-                                cur = inner;
-                            }
-                            _ => return lower_expr(cur, body),
-                        }
-                    }
+                    return lower_let_chain(b, body);
                 }
             }
             // Standard let binding: lower the value, push the HIR stmt,
             // then process the body — and any chained lets — iteratively
             // to keep stack depth bounded regardless of how many sequential
             // let-statements the parser spliced into the AST.
-            let vop = lower_expr(value, body);
-            let ty = vop.ty();
-            body.push(hir::Stmt::Let {
-                name: name.clone(),
-                ty: ty.clone(),
-                value: hir::RValue::Use(vop),
-                span: *span,
-            });
-            let mut cur: &Expr = b;
-            loop {
-                match cur {
-                    Expr::Let {
-                        name,
-                        value,
-                        body: inner,
-                        span: inner_span,
-                        ..
-                    } => {
-                        let vop = lower_expr(value, body);
-                        let ty = vop.ty();
-                        body.push(hir::Stmt::Let {
-                            name: name.clone(),
-                            ty: ty.clone(),
-                            value: hir::RValue::Use(vop),
-                            span: *inner_span,
-                        });
-                        cur = inner;
-                    }
-                    _ => return lower_expr(cur, body),
-                }
-            }
+            lower_let_value(name, value, *span, body);
+            lower_let_chain(b, body)
         }
         Expr::LetRec {
             name,
@@ -1171,30 +1188,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                 },
                 span: *span,
             });
-            // Process chained lets iteratively.
-            let mut cur: &Expr = b;
-            loop {
-                match cur {
-                    Expr::Let {
-                        name,
-                        value,
-                        body: inner,
-                        span: inner_span,
-                        ..
-                    } => {
-                        let vop = lower_expr(value, body);
-                        let ty = vop.ty();
-                        body.push(hir::Stmt::Let {
-                            name: name.clone(),
-                            ty: ty.clone(),
-                            value: hir::RValue::Use(vop),
-                            span: *inner_span,
-                        });
-                        cur = inner;
-                    }
-                    _ => return lower_expr(cur, body),
-                }
-            }
+            lower_let_chain(b, body)
         }
         Expr::If {
             cond,

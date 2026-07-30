@@ -1271,7 +1271,7 @@ impl NulangLanguageServer {
     /// consumed linear/lineariso variable references.
     fn find_consumed_spans(&self, source: &str) -> Vec<(usize, usize)> {
         use crate::ast::Decl;
-        use crate::effect_checker::{CapContext, CapabilityAnalyzer, flatten_decls};
+        use crate::effect_checker::{flatten_decls, CapContext, CapabilityAnalyzer};
 
         let mut lexer = crate::lexer::Lexer::new(source);
         let tokens = match lexer.lex() {
@@ -3043,23 +3043,19 @@ mod lsp_tests {
         // A half-typed `let` line with no `=` (e.g. `let x y`) must not
         // panic the code action provider; no quick fix can be offered
         // without a right-hand side.
-        assert!(
-            NulangLanguageServer::code_actions(
-                "let x y",
-                None,
-                &Url::parse("file:///test.nula").unwrap(),
-            )
-            .is_none()
-        );
+        assert!(NulangLanguageServer::code_actions(
+            "let x y",
+            None,
+            &Url::parse("file:///test.nula").unwrap(),
+        )
+        .is_none());
         // A well-formed binding still produces a quick fix.
-        assert!(
-            NulangLanguageServer::code_actions(
-                "let x = 42",
-                None,
-                &Url::parse("file:///test.nula").unwrap(),
-            )
-            .is_some()
-        );
+        assert!(NulangLanguageServer::code_actions(
+            "let x = 42",
+            None,
+            &Url::parse("file:///test.nula").unwrap(),
+        )
+        .is_some());
     }
 
     #[test]

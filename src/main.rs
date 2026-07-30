@@ -558,7 +558,9 @@ fn print_help() {
     println!(
         "  --verify <src>   When running a .nbc artifact, verify its source hash against <src>"
     );
-    println!("  nula <cmd>       Package manager (new, init, build, build-wasm, test, run, list, clean)");
+    println!(
+        "  nula <cmd>       Package manager (new, init, build, build-wasm, test, run, list, clean)"
+    );
     println!("  --version, -V    Print version and exit");
     println!("  init <name>      Scaffold experiment");
     println!("  --watch <file>   Re-run on changes");

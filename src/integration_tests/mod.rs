@@ -4656,8 +4656,8 @@ match { a: 2, b: 9 } with {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
             .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
-        let v =
-            run_source_new_with_runtime("fn main() { perform Inference.ask(\"hello\") }", rt).unwrap();
+        let v = run_source_new_with_runtime("fn main() { perform Inference.ask(\"hello\") }", rt)
+            .unwrap();
         assert!(!v.is_nil());
     }
 

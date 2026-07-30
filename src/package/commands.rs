@@ -392,6 +392,7 @@ fn remove_nbc_files(dir: &Path, count: &mut u64) {
 mod tests {
     use super::*;
     use crate::package::manifest::DEFAULT_ENTRY;
+    #[test]
     fn test_scaffold_package_creates_valid_manifest() {
         let dir = std::env::temp_dir().join(format!("nulang_nula_new_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

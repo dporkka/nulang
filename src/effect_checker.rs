@@ -709,7 +709,10 @@ impl EffectChecker {
 
                 // Validate that the operation name is sensible (basic check).
                 if op.is_empty() {
-                    return Err(NuError::effect_error(format!("perform of effect '{}' has empty operation name", effect), *span));
+                    return Err(NuError::effect_error(
+                        format!("perform of effect '{}' has empty operation name", effect),
+                        *span,
+                    ));
                 }
 
                 let mut row = if is_handled {
@@ -861,7 +864,11 @@ impl EffectChecker {
             Err(NuError::EffectError {
                 msg,
                 span,
-                missing_effects: if offending.is_empty() { None } else { Some(offending) },
+                missing_effects: if offending.is_empty() {
+                    None
+                } else {
+                    Some(offending)
+                },
                 allowed_effects: Some(format_row(allowed)),
             })
         } else {

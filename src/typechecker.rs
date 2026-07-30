@@ -511,10 +511,12 @@ fn unify_open_records(
                 if extras1.is_empty() && extras2.is_empty() {
                     return Ok(subst);
                 }
-                return Err(NuError::type_error("Incompatible record types: both sides require additional fields \
+                return Err(NuError::type_error(
+                    "Incompatible record types: both sides require additional fields \
                           that cannot be reconciled"
                         .to_string(),
-                    span));
+                    span,
+                ));
             }
             let fresh_row = TypeVar::fresh();
             let s = mgu(
@@ -534,7 +536,11 @@ fn unify_open_records(
         (Some(Type::Var(r)), None) => {
             if let Some((missing, _)) = extras1.first() {
                 let available: Vec<String> = fields2.iter().map(|(n, _)| n.clone()).collect();
-                return Err(NuError::field_not_found(missing.clone(), span, Some(available)));
+                return Err(NuError::field_not_found(
+                    missing.clone(),
+                    span,
+                    Some(available),
+                ));
             }
             let s = mgu(&Type::Var(*r), &Type::record(extras2), span)?;
             Ok(compose_subst(&s, &subst))
@@ -542,15 +548,21 @@ fn unify_open_records(
         (None, Some(Type::Var(r))) => {
             if let Some((missing, _)) = extras2.first() {
                 let available: Vec<String> = fields1.iter().map(|(n, _)| n.clone()).collect();
-                return Err(NuError::field_not_found(missing.clone(), span, Some(available)));
+                return Err(NuError::field_not_found(
+                    missing.clone(),
+                    span,
+                    Some(available),
+                ));
             }
             let s = mgu(&Type::Var(*r), &Type::record(extras1), span)?;
             Ok(compose_subst(&s, &subst))
         }
         // Row tails are always fresh type variables by construction; a
         // residual non-variable tail cannot absorb fields.
-        _ => Err(NuError::type_error("Incompatible record types: the rows cannot be unified".to_string(),
-            span)),
+        _ => Err(NuError::type_error(
+            "Incompatible record types: the rows cannot be unified".to_string(),
+            span,
+        )),
     }
 }
 
@@ -886,7 +898,13 @@ impl TypeChecker {
                                         "actor '{}' declares it implements '{}' but is missing required handler '{}' (expects {} parameter(s))",
                                         name, contract_name, handler_name, param_count
                                     );
-                                    return Err(NuError::TypeError { msg, span: *span, expected_type: None, found_type: None, similar_names: None });
+                                    return Err(NuError::TypeError {
+                                        msg,
+                                        span: *span,
+                                        expected_type: None,
+                                        found_type: None,
+                                        similar_names: None,
+                                    });
                                 }
                             }
                         }
@@ -895,7 +913,13 @@ impl TypeChecker {
                                 "unknown behavior contract '{}' in actor '{}'",
                                 contract_name, name
                             );
-                            return Err(NuError::TypeError { msg, span: *span, expected_type: None, found_type: None, similar_names: None });
+                            return Err(NuError::TypeError {
+                                msg,
+                                span: *span,
+                                expected_type: None,
+                                found_type: None,
+                                similar_names: None,
+                            });
                         }
                     }
                 }
@@ -1304,7 +1328,8 @@ impl TypeChecker {
                         None => {
                             let available: Vec<_> =
                                 entity_events.iter().map(|(n, _)| n.as_str()).collect();
-                            return Err(NuError::type_error(format!(
+                            return Err(NuError::type_error(
+                                format!(
                                     "Unknown event '{}'. Available events: {}",
                                     event,
                                     if available.is_empty() {
@@ -1312,16 +1337,21 @@ impl TypeChecker {
                                     } else {
                                         available.join(", ")
                                     }
-                                ), *span));
+                                ),
+                                *span,
+                            ));
                         }
                         Some(params) => {
                             if args.len() != params.1.len() {
-                                return Err(NuError::type_error(format!(
+                                return Err(NuError::type_error(
+                                    format!(
                                         "Event '{}' expects {} argument(s), got {}",
                                         event,
                                         params.1.len(),
                                         args.len()
-                                    ), *span));
+                                    ),
+                                    *span,
+                                ));
                             }
                         }
                     }
@@ -1579,12 +1609,14 @@ impl TypeChecker {
                 _ => 1,
             };
             if arg_types.len() != expected_count {
-                return Err(NuError::type_error(format!(
+                return Err(NuError::type_error(
+                    format!(
                         "wrong number of arguments: expected {}, got {}",
                         expected_count,
                         arg_types.len()
                     ),
-                    span));
+                    span,
+                ));
             }
         }
 
@@ -1628,7 +1660,8 @@ impl TypeChecker {
         name: &str,
         ann: Option<&Type>,
         value: &Expr,
-        body: &Expr, span: Span,
+        body: &Expr,
+        _span: Span,
     ) -> NuResult<(Substitution, Type)> {
         // For let-bound lambdas that reference themselves (e.g.
         // `let fac = fn(n) ... fac(n-1) ... in ...`), make the binding name
@@ -2163,7 +2196,7 @@ impl TypeChecker {
                     return Ok((compose_subst(&s2, &s1), field_var));
                 }
                 let available: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-                Err(NuError::field_not_found(field.clone(), span, Some(available)))
+                Err(NuError::field_not_found(field, span, Some(available)))
             }
             _ => {
                 // Typeclass method resolution: if the receiver type is
@@ -2317,7 +2350,8 @@ impl TypeChecker {
         &mut self,
         ctx: &TypeContext,
         arr: &Expr,
-        idx: &Expr, span: Span,
+        idx: &Expr,
+        _span: Span,
     ) -> NuResult<(Substitution, Type)> {
         let (s1, arr_ty) = self.infer_expr(ctx, arr)?;
         let ctx1 = apply_subst_to_ctx(ctx, &s1);
@@ -2344,7 +2378,8 @@ impl TypeChecker {
         &mut self,
         ctx: &TypeContext,
         scrutinee: &Expr,
-        arms: &[(Pattern, Option<Expr>, Expr)], span: Span,
+        arms: &[(Pattern, Option<Expr>, Expr)],
+        span: Span,
     ) -> NuResult<(Substitution, Type)> {
         // Infer scrutinee type
         let (s1, scrut_ty) = self.infer_expr(ctx, scrutinee)?;
@@ -2372,8 +2407,10 @@ impl TypeChecker {
             arm_types.push(arm_ty);
         }
         if arm_types.is_empty() {
-            return Err(NuError::type_error("Match expression with no arms".to_string(),
-                span));
+            return Err(NuError::type_error(
+                "Match expression with no arms".to_string(),
+                span,
+            ));
         }
 
         // Unify all arm types
@@ -2557,7 +2594,8 @@ impl TypeChecker {
     fn infer_spawn(
         &mut self,
         ctx: &TypeContext,
-        actor_type: &Expr, span: Span,
+        actor_type: &Expr,
+        span: Span,
     ) -> NuResult<(Substitution, Type)> {
         let (s, actor_ty) = self.infer_expr(ctx, actor_type)?;
         match &actor_ty {

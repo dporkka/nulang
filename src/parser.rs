@@ -222,8 +222,14 @@ impl Parser {
             }
             TokenKind::Class => self.parse_class(),
             TokenKind::Impl => self.parse_impl(),
-            TokenKind::Eof => Err(NuError::parse_error("Unexpected end of file in declaration".to_string(), self.current_span())),
-            other => Err(NuError::parse_error(format!("Unexpected token in declaration: {}", other), self.current_span())),
+            TokenKind::Eof => Err(NuError::parse_error(
+                "Unexpected end of file in declaration".to_string(),
+                self.current_span(),
+            )),
+            other => Err(NuError::parse_error(
+                format!("Unexpected token in declaration: {}", other),
+                self.current_span(),
+            )),
         }
     }
 
@@ -241,7 +247,10 @@ impl Parser {
                     s
                 }
                 other => {
-                    return Err(NuError::parse_error(format!("Expected annotation name, found {}", other), self.current_span()));
+                    return Err(NuError::parse_error(
+                        format!("Expected annotation name, found {}", other),
+                        self.current_span(),
+                    ));
                 }
             };
             self.expect(TokenKind::LParen)?;
@@ -276,16 +285,19 @@ impl Parser {
                         "native" => crate::ast::ActorBackendKind::Native,
                         "wasm" => crate::ast::ActorBackendKind::WasmComponent,
                         other => {
-                            return Err(NuError::parse_error(format!(
-                                    "Unknown backend '{}'; expected 'native' or 'wasm'",
-                                    other
-                                ), self.current_span()))
+                            return Err(NuError::parse_error(
+                                format!("Unknown backend '{}'; expected 'native' or 'wasm'", other),
+                                self.current_span(),
+                            ))
                         }
                     };
                     annotations.push(FunctionAnnotation::Backend { kind });
                 }
                 _ => {
-                    return Err(NuError::parse_error(format!("Unknown function annotation: @{}", name), self.current_span()));
+                    return Err(NuError::parse_error(
+                        format!("Unknown function annotation: @{}", name),
+                        self.current_span(),
+                    ));
                 }
             }
         }
@@ -432,7 +444,10 @@ impl Parser {
                 }
                 TokenKind::Initial => {
                     if initializer.is_some() {
-                        return Err(NuError::parse_error("Duplicate 'initial' block in actor".to_string(), self.current_span()));
+                        return Err(NuError::parse_error(
+                            "Duplicate 'initial' block in actor".to_string(),
+                            self.current_span(),
+                        ));
                     }
                     self.advance(); // consume 'initial'
                     let init_name = self.expect_ident("initializer name")?;
@@ -450,7 +465,10 @@ impl Parser {
                     let v_lit = match &v {
                         Expr::Literal(Literal::Int(n), _) => *n as u32,
                         _ => {
-                            return Err(NuError::parse_error("Expected integer literal for version".to_string(), self.current_span()));
+                            return Err(NuError::parse_error(
+                                "Expected integer literal for version".to_string(),
+                                self.current_span(),
+                            ));
                         }
                     };
                     version = v_lit;
@@ -459,7 +477,10 @@ impl Parser {
                 TokenKind::Ident(ref s) if s == "events" => {
                     self.advance(); // consume 'events'
                     if !events.is_empty() {
-                        return Err(NuError::parse_error("Duplicate 'events' block in actor".to_string(), self.current_span()));
+                        return Err(NuError::parse_error(
+                            "Duplicate 'events' block in actor".to_string(),
+                            self.current_span(),
+                        ));
                     }
                     events = self.parse_events_body()?;
                 }
@@ -467,7 +488,10 @@ impl Parser {
                 TokenKind::Ident(ref s) if s == "apply" => {
                     self.advance(); // consume 'apply'
                     if !apply_handlers.is_empty() {
-                        return Err(NuError::parse_error("Duplicate 'apply' block in actor".to_string(), self.current_span()));
+                        return Err(NuError::parse_error(
+                            "Duplicate 'apply' block in actor".to_string(),
+                            self.current_span(),
+                        ));
                     }
                     apply_handlers = self.parse_apply_body()?;
                 }
@@ -529,7 +553,10 @@ impl Parser {
             self.skip_newlines();
         }
         if decls.is_empty() {
-            return Err(NuError::parse_error("Expected at least one event declaration after 'events'".to_string(), self.current_span()));
+            return Err(NuError::parse_error(
+                "Expected at least one event declaration after 'events'".to_string(),
+                self.current_span(),
+            ));
         }
         Ok(decls)
     }
@@ -565,7 +592,10 @@ impl Parser {
             self.skip_newlines();
         }
         if handlers.is_empty() {
-            return Err(NuError::parse_error("Expected at least one apply handler after 'apply'".to_string(), self.current_span()));
+            return Err(NuError::parse_error(
+                "Expected at least one apply handler after 'apply'".to_string(),
+                self.current_span(),
+            ));
         }
         Ok(handlers)
     }
@@ -585,24 +615,36 @@ impl Parser {
         let span = self.current_span();
         let from_name = self.expect_ident("'from' keyword")?;
         if from_name != "from" {
-            return Err(NuError::parse_error(format!("Expected 'from', got '{}'", from_name), self.current_span()));
+            return Err(NuError::parse_error(
+                format!("Expected 'from', got '{}'", from_name),
+                self.current_span(),
+            ));
         }
         let from_v = self.parse_expr()?;
         let from_version = match &from_v {
             Expr::Literal(Literal::Int(n), _) => *n as u32,
             _ => {
-                return Err(NuError::parse_error("Expected integer literal for migration 'from' version".to_string(), self.current_span()));
+                return Err(NuError::parse_error(
+                    "Expected integer literal for migration 'from' version".to_string(),
+                    self.current_span(),
+                ));
             }
         };
         let to_name = self.expect_ident("'to' keyword")?;
         if to_name != "to" {
-            return Err(NuError::parse_error(format!("Expected 'to', got '{}'", to_name), self.current_span()));
+            return Err(NuError::parse_error(
+                format!("Expected 'to', got '{}'", to_name),
+                self.current_span(),
+            ));
         }
         let to_v = self.parse_expr()?;
         let to_version = match &to_v {
             Expr::Literal(Literal::Int(n), _) => *n as u32,
             _ => {
-                return Err(NuError::parse_error("Expected integer literal for migration 'to' version".to_string(), self.current_span()));
+                return Err(NuError::parse_error(
+                    "Expected integer literal for migration 'to' version".to_string(),
+                    self.current_span(),
+                ));
             }
         };
         self.expect(TokenKind::LBrace)?;
@@ -646,10 +688,13 @@ impl Parser {
                     }
                     self.expect(TokenKind::RBrace)?;
                 } else {
-                    return Err(NuError::parse_error(format!(
+                    return Err(NuError::parse_error(
+                        format!(
                             "Expected 'state' or 'events' in migration body, got '{}'",
                             ident
-                        ), self.current_span()));
+                        ),
+                        self.current_span(),
+                    ));
                 }
             }
             self.skip_newlines();
@@ -801,17 +846,23 @@ impl Parser {
         }
         for (i, state) in states.iter().enumerate() {
             if states[..i].contains(state) {
-                return Err(NuError::parse_error(format!("duplicate state '{}' in state_machine '{}'", state, name), span));
+                return Err(NuError::parse_error(
+                    format!("duplicate state '{}' in state_machine '{}'", state, name),
+                    span,
+                ));
             }
         }
         let state_list = states.join(", ");
         let declared = |state: &str| states.iter().any(|s| s == state);
         for (i, event) in events.iter().enumerate() {
             if events[..i].iter().any(|e| e.name == event.name) {
-                return Err(NuError::parse_error(format!(
+                return Err(NuError::parse_error(
+                    format!(
                         "duplicate event '{}' in state_machine '{}'",
                         event.name, name
-                    ), event.span));
+                    ),
+                    event.span,
+                ));
             }
             if !declared(&event.target) {
                 return Err(NuError::parse_error(format!(
@@ -829,10 +880,13 @@ impl Parser {
                         ), span));
                 }
                 if hooks[..i].iter().any(|(s, _)| s == state) {
-                    return Err(NuError::parse_error(format!(
+                    return Err(NuError::parse_error(
+                        format!(
                             "duplicate {} hook for state '{}' in state_machine '{}'",
                             kind, state, name
-                        ), span));
+                        ),
+                        span,
+                    ));
                 }
             }
         }
@@ -913,7 +967,10 @@ impl Parser {
                                 max_turns = Some(n as usize);
                             }
                             other => {
-                                return Err(NuError::parse_error(format!("Unknown memory field: {}", other), self.current_span()));
+                                return Err(NuError::parse_error(
+                                    format!("Unknown memory field: {}", other),
+                                    self.current_span(),
+                                ));
                             }
                         }
                         self.skip_newlines();
@@ -944,7 +1001,10 @@ impl Parser {
                                 dimensions = Some(n as usize);
                             }
                             other => {
-                                return Err(NuError::parse_error(format!("Unknown semantic_memory field: {}", other), self.current_span()));
+                                return Err(NuError::parse_error(
+                                    format!("Unknown semantic_memory field: {}", other),
+                                    self.current_span(),
+                                ));
                             }
                         }
                         self.skip_newlines();
@@ -974,7 +1034,10 @@ impl Parser {
                                 namespace = Some(self.expect_string("namespace")?);
                             }
                             other => {
-                                return Err(NuError::parse_error(format!("Unknown procedural_memory field: {}", other), self.current_span()));
+                                return Err(NuError::parse_error(
+                                    format!("Unknown procedural_memory field: {}", other),
+                                    self.current_span(),
+                                ));
                             }
                         }
                         self.skip_newlines();
@@ -1008,7 +1071,10 @@ impl Parser {
                                 output_cost = Some(self.expect_float("pricing output")?);
                             }
                             other => {
-                                return Err(NuError::parse_error(format!("Unknown pricing field: {}", other), self.current_span()));
+                                return Err(NuError::parse_error(
+                                    format!("Unknown pricing field: {}", other),
+                                    self.current_span(),
+                                ));
                             }
                         }
                         self.skip_newlines();
@@ -1071,7 +1137,10 @@ impl Parser {
                                     fb_max_tokens = Some(n as usize);
                                 }
                                 other => {
-                                    return Err(NuError::parse_error(format!("Unknown fallback field: {}", other), self.current_span()));
+                                    return Err(NuError::parse_error(
+                                        format!("Unknown fallback field: {}", other),
+                                        self.current_span(),
+                                    ));
                                 }
                             }
                             self.skip_newlines();
@@ -1143,10 +1212,13 @@ impl Parser {
                                                         Some(self.expect_int("max_ms")? as u64);
                                                 }
                                                 other => {
-                                                    return Err(NuError::parse_error(format!(
+                                                    return Err(NuError::parse_error(
+                                                        format!(
                                                             "Unknown Exponential backoff field: {}",
                                                             other
-                                                        ), self.current_span()));
+                                                        ),
+                                                        self.current_span(),
+                                                    ));
                                                 }
                                             }
                                             self.skip_newlines();
@@ -1179,10 +1251,13 @@ impl Parser {
                                                 delay_ms =
                                                     Some(self.expect_int("delay_ms")? as u64);
                                             } else {
-                                                return Err(NuError::parse_error(format!(
+                                                return Err(NuError::parse_error(
+                                                    format!(
                                                         "Unknown Fixed backoff field: {}",
                                                         field
-                                                    ), self.current_span()));
+                                                    ),
+                                                    self.current_span(),
+                                                ));
                                             }
                                             self.skip_newlines();
                                             if !self.consume_if(&TokenKind::Comma) {
@@ -1196,12 +1271,18 @@ impl Parser {
                                         });
                                     }
                                     other => {
-                                        return Err(NuError::parse_error(format!("Unknown backoff strategy: {}", other), self.current_span()));
+                                        return Err(NuError::parse_error(
+                                            format!("Unknown backoff strategy: {}", other),
+                                            self.current_span(),
+                                        ));
                                     }
                                 }
                             }
                             other => {
-                                return Err(NuError::parse_error(format!("Unknown retry field: {}", other), self.current_span()));
+                                return Err(NuError::parse_error(
+                                    format!("Unknown retry field: {}", other),
+                                    self.current_span(),
+                                ));
                             }
                         }
                         self.skip_newlines();
@@ -1221,7 +1302,10 @@ impl Parser {
                     });
                 }
                 other => {
-                    return Err(NuError::parse_error(format!("Unknown agent field: {}", other), self.current_span()));
+                    return Err(NuError::parse_error(
+                        format!("Unknown agent field: {}", other),
+                        self.current_span(),
+                    ));
                 }
             }
             self.skip_newlines();
@@ -1232,7 +1316,12 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace)?;
 
-        let model = model.ok_or_else(|| NuError::parse_error("Agent declaration requires a 'model' field".to_string(), span))?;
+        let model = model.ok_or_else(|| {
+            NuError::parse_error(
+                "Agent declaration requires a 'model' field".to_string(),
+                span,
+            )
+        })?;
 
         Ok(Decl::Agent {
             name,
@@ -1377,10 +1466,13 @@ impl Parser {
                     self.skip_newlines_semicolons();
                 }
                 _ => {
-                    return Err(NuError::parse_error(format!(
+                    return Err(NuError::parse_error(
+                        format!(
                             "Expected 'step', 'parallel', or 'compensate' in workflow body, got {}",
                             self.peek_kind()
-                        ), self.current_span()));
+                        ),
+                        self.current_span(),
+                    ));
                 }
             }
         }
@@ -1704,10 +1796,13 @@ impl Parser {
                 s
             }
             other => {
-                return Err(NuError::parse_error(format!(
+                return Err(NuError::parse_error(
+                    format!(
                         "Expected string literal for library path, found {:?}",
                         other
-                    ), self.current_span()))
+                    ),
+                    self.current_span(),
+                ))
             }
         };
 
@@ -1734,10 +1829,13 @@ impl Parser {
                 match param_ty {
                     Some(ty) => params.push((param_name, ty)),
                     None => {
-                        return Err(NuError::parse_error(format!(
+                        return Err(NuError::parse_error(
+                            format!(
                                 "Extern function '{}' parameter '{}' requires an explicit type",
                                 name, param_name
-                            ), func_span))
+                            ),
+                            func_span,
+                        ))
                     }
                 }
             }
@@ -2034,7 +2132,9 @@ impl Parser {
                 continue;
             }
 
-            let bin_op = token_to_binop(&op).ok_or_else(|| NuError::parse_error(format!("Not a binary operator: {:?}", op), span.clone()))?;
+            let bin_op = token_to_binop(&op).ok_or_else(|| {
+                NuError::parse_error(format!("Not a binary operator: {:?}", op), span.clone())
+            })?;
 
             left = Expr::Binary {
                 op: bin_op,
@@ -2052,7 +2152,10 @@ impl Parser {
         let span = self.current_span();
 
         match self.peek_kind().clone() {
-            TokenKind::Eof => Err(NuError::parse_error("Unexpected end of file in expression".to_string(), span)),
+            TokenKind::Eof => Err(NuError::parse_error(
+                "Unexpected end of file in expression".to_string(),
+                span,
+            )),
             kind => {
                 // Check for prefix operators
                 if let Some((prec, _)) = prefix_precedence(&kind) {
@@ -2204,7 +2307,10 @@ impl Parser {
                     }
                     TokenKind::SelfKw => self.parse_self_ref(),
 
-                    _ => Err(NuError::parse_error(format!("Unexpected token in expression: {}", kind), span)),
+                    _ => Err(NuError::parse_error(
+                        format!("Unexpected token in expression: {}", kind),
+                        span,
+                    )),
                 }
             }
         }
@@ -2335,7 +2441,10 @@ impl Parser {
                 }
             }
             if depth != 0 {
-                return Err(NuError::parse_error("Unterminated interpolation: missing '}'".to_string(), span));
+                return Err(NuError::parse_error(
+                    "Unterminated interpolation: missing '}'".to_string(),
+                    span,
+                ));
             }
             let expr_content = &expr_str[..expr_end];
             let expr = self.parse_inline_expr(expr_content, span)?;
@@ -2362,7 +2471,9 @@ impl Parser {
 
     fn parse_inline_expr(&self, source: &str, span: Span) -> NuResult<Expr> {
         let mut lexer = crate::lexer::Lexer::new(source);
-        let tokens = lexer.lex().map_err(|e| NuError::parse_error(format!("Invalid interpolation expression: {}", e), span))?;
+        let tokens = lexer.lex().map_err(|e| {
+            NuError::parse_error(format!("Invalid interpolation expression: {}", e), span)
+        })?;
         let mut sub_parser = Parser::new(tokens);
         sub_parser.parse_expr()
     }
@@ -2495,7 +2606,7 @@ impl Parser {
                     break;
                 }
             }
-            let mut expr = self.parse_expr()?;
+            let expr = self.parse_expr()?;
             self.skip_newlines_semicolons();
 
             let is_incomplete = matches!(&expr, Expr::Let { body, .. } | Expr::LetRec { body, .. } if matches!(body.as_ref(), Expr::Block { exprs, span } if exprs.is_empty() && span.start == 0 && span.end == 0));
@@ -2503,9 +2614,11 @@ impl Parser {
             if is_incomplete {
                 // Collect consecutive incomplete lets iteratively to avoid
                 // deep recursion for blocks with many sequential let-statements
-                // (e.g. 40 let bindings produce 40 AST levels).  Instead
-                // of recursing, accumulate pending lets and parse the rest
-                // in a loop, then fold the chain right-to-left.
+                // (e.g. 40 let bindings produce 40 AST levels).  Once the chain
+                // of consecutive lets ends, recurse *once* to collect the rest
+                // (which may itself start another chain).  This keeps recursion
+                // depth proportional to the number of let-*chains*, not the
+                // number of individual let-statements.
                 let mut pending: Vec<Expr> = vec![expr];
                 let final_body = loop {
                     if let Some(ref end) = end_token {
@@ -2533,7 +2646,20 @@ impl Parser {
                     if next_incomplete {
                         pending.push(next);
                     } else {
-                        break next;
+                        // First complete expression: collect the rest
+                        // (including any trailing lets) via one recursive
+                        // call so they are properly nested.
+                        let mut rest = vec![next];
+                        rest.extend(self.collect_block_exprs(end_token.clone())?);
+                        let body = if rest.len() == 1 {
+                            rest.into_iter().next().unwrap()
+                        } else {
+                            Expr::Block {
+                                exprs: rest,
+                                span: Span::default(),
+                            }
+                        };
+                        break body;
                     }
                 };
                 // Fold: Let(a0, 0, Let(a1, 1, ... final_body))
@@ -2638,7 +2764,10 @@ impl Parser {
                 s
             }
             _ => {
-                return Err(NuError::parse_error(format!("Expected actor name in spawn, got {}", self.peek_kind()), self.current_span()))
+                return Err(NuError::parse_error(
+                    format!("Expected actor name in spawn, got {}", self.peek_kind()),
+                    self.current_span(),
+                ))
             }
         };
         let actor_type = Expr::Var(actor_name, span);
@@ -2938,7 +3067,10 @@ impl Parser {
         if current_kind == &kind {
             Ok(self.advance_token())
         } else {
-            Err(NuError::parse_error(format!("Expected {}", kind), self.current_span()))
+            Err(NuError::parse_error(
+                format!("Expected {}", kind),
+                self.current_span(),
+            ))
         }
     }
 
@@ -2956,7 +3088,10 @@ impl Parser {
                 self.advance();
                 Ok("ask".to_string())
             }
-            _ => Err(NuError::parse_error(format!("Expected {}, found {}", msg, current_kind), self.current_span())),
+            _ => Err(NuError::parse_error(
+                format!("Expected {}, found {}", msg, current_kind),
+                self.current_span(),
+            )),
         }
     }
 
@@ -2968,7 +3103,10 @@ impl Parser {
                 self.advance();
                 Ok(s)
             }
-            _ => Err(NuError::parse_error(format!("Expected {}, found {}", msg, current_kind), self.current_span())),
+            _ => Err(NuError::parse_error(
+                format!("Expected {}, found {}", msg, current_kind),
+                self.current_span(),
+            )),
         }
     }
 
@@ -2980,7 +3118,10 @@ impl Parser {
                 self.advance();
                 Ok(n)
             }
-            _ => Err(NuError::parse_error(format!("Expected integer {}, found {}", msg, current_kind), self.current_span())),
+            _ => Err(NuError::parse_error(
+                format!("Expected integer {}, found {}", msg, current_kind),
+                self.current_span(),
+            )),
         }
     }
 
@@ -2992,7 +3133,10 @@ impl Parser {
                 self.advance();
                 Ok(f)
             }
-            _ => Err(NuError::parse_error(format!("Expected float {}, found {}", msg, current_kind), self.current_span())),
+            _ => Err(NuError::parse_error(
+                format!("Expected float {}, found {}", msg, current_kind),
+                self.current_span(),
+            )),
         }
     }
 
@@ -3148,7 +3292,9 @@ impl Parser {
                     });
                 }
             } else {
-                return Err(NuError::parse_error("expected '{' or handler name after 'with'".to_string(), self.current_span(),
+                return Err(NuError::parse_error(
+                    "expected '{' or handler name after 'with'".to_string(),
+                    self.current_span(),
                 ));
             }
         }
@@ -3348,7 +3494,10 @@ impl Parser {
         let actor = self.parse_expr()?;
         let to_ident = self.expect_ident("to")?;
         if to_ident != "to" {
-            return Err(NuError::parse_error(format!("Expected 'to', found '{}'", to_ident), self.current_span()));
+            return Err(NuError::parse_error(
+                format!("Expected 'to', found '{}'", to_ident),
+                self.current_span(),
+            ));
         }
         let node = self.parse_expr()?;
         Ok(Expr::Migrate {
@@ -3370,10 +3519,13 @@ impl Parser {
                 handlers,
                 span,
             }),
-            None => Err(NuError::parse_error(format!(
+            None => Err(NuError::parse_error(
+                format!(
                     "undefined handler '{}' -- handler declarations must appear before their use",
                     handler_name
-                ), self.current_span())),
+                ),
+                self.current_span(),
+            )),
         }
     }
 
@@ -3529,7 +3681,10 @@ impl Parser {
                 self.expect(TokenKind::RBracket)?;
                 Ok(Type::Array(Box::new(inner)))
             }
-            _ => Err(NuError::parse_error(format!("Expected type, found {}", current_kind), self.current_span())),
+            _ => Err(NuError::parse_error(
+                format!("Expected type, found {}", current_kind),
+                self.current_span(),
+            )),
         }
     }
 
@@ -3543,7 +3698,10 @@ impl Parser {
         let decl_pos = match self.find_type_decl(name) {
             Some(pos) => pos,
             None => {
-                return Err(NuError::parse_error(format!("Unknown type name: '{}'", name), span));
+                return Err(NuError::parse_error(
+                    format!("Unknown type name: '{}'", name),
+                    span,
+                ));
             }
         };
 
@@ -3585,12 +3743,15 @@ impl Parser {
                 _ => unreachable!("find_type_decl only matches type declarations"),
             };
             if !args.is_empty() && args.len() != type_params.len() {
-                return Err(NuError::parse_error(format!(
+                return Err(NuError::parse_error(
+                    format!(
                         "Type '{}' expects {} type argument(s), got {}",
                         name,
                         type_params.len(),
                         args.len()
-                    ), span));
+                    ),
+                    span,
+                ));
             }
             // Snapshot the declared parameters' variables before the local
             // map is restored, then splice the use-site arguments in.
@@ -3801,7 +3962,10 @@ impl Parser {
                 let sub = self.parse_pattern()?;
                 Ok(Pattern::Alias(name, Box::new(sub)))
             } else {
-                Err(NuError::parse_error("Left side of '@' alias must be a variable".to_string(), self.current_span()))
+                Err(NuError::parse_error(
+                    "Left side of '@' alias must be a variable".to_string(),
+                    self.current_span(),
+                ))
             }
         } else {
             Ok(pat)
@@ -3908,7 +4072,10 @@ impl Parser {
                 self.advance();
                 Ok(Pattern::Lit(Literal::Unit))
             }
-            _ => Err(NuError::parse_error(format!("Expected pattern, found {}", current_kind), self.current_span())),
+            _ => Err(NuError::parse_error(
+                format!("Expected pattern, found {}", current_kind),
+                self.current_span(),
+            )),
         }
     }
 
