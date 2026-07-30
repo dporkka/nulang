@@ -88,7 +88,7 @@ impl LanguageServer for NulangLanguageServer {
                 ))),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
-                    trigger_characters: None,
+                    trigger_characters: Some(vec![".".into(), ":".into()]),
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                     all_commit_characters: None,
                     completion_item: None,
@@ -145,9 +145,9 @@ impl LanguageServer for NulangLanguageServer {
                         change: Some(TextDocumentSyncKind::FULL),
                         will_save: None,
                         will_save_wait_until: None,
-                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(
-                            SaveOptions::default(),
-                        )),
+                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                            include_text: Some(false),
+                        })),
                     },
                 )),
                 diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
@@ -236,6 +236,31 @@ impl LanguageServer for NulangLanguageServer {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let mut docs = self.documents.lock().unwrap();
         docs.remove(&params.text_document.uri);
+    }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
+        let uri = params.text_document.uri.clone();
+
+        let (source, version) = {
+            let docs = self.documents.lock().unwrap();
+            match docs.get(&uri) {
+                Some(doc) => (doc.source.clone(), doc.version),
+                None => return,
+            }
+        };
+
+        let (diagnostics, type_map) = Self::compute_diagnostics(&source);
+
+        {
+            let mut docs = self.documents.lock().unwrap();
+            if let Some(doc) = docs.get_mut(&uri) {
+                doc.type_map = Some(type_map);
+            }
+        }
+
+        self.client
+            .publish_diagnostics(uri, diagnostics, Some(version))
+            .await;
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
