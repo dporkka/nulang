@@ -2025,6 +2025,78 @@ impl VM {
             Some((effect, op)) => (effect.to_string(), Some(op.to_string())),
             None => (qualified_name.clone(), None),
         };
+        // ---- Test effect: assertion primitives ----
+        // Handled inline so assertion failures produce RuntimeError.
+        if effect_name == "Test" {
+            match op_name.as_deref() {
+                Some("assert") => {
+                    let cond = self.frames[frame_idx]
+                        .regs
+                        .first()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let msg_val = self.frames[frame_idx]
+                        .regs
+                        .get(1)
+                        .copied()
+                        .unwrap_or(Value::nil());
+                    let msg = if cond {
+                        String::new()
+                    } else {
+                        self.value_to_string(module_idx, msg_val)
+                    };
+                    if !cond {
+                        return Err(NuError::runtime_error(
+                            format!("assertion failed: {}", msg),
+                            Span::default(),
+                        ));
+                    }
+                    self.frames[frame_idx].regs[dst_reg as usize] = Value::unit();
+                    return Ok(());
+                }
+                Some("assert_eq") => {
+                    let a = self.frames[frame_idx]
+                        .regs
+                        .first()
+                        .and_then(|v| v.as_int())
+                        .unwrap_or(0);
+                    let b = self.frames[frame_idx]
+                        .regs
+                        .get(1)
+                        .and_then(|v| v.as_int())
+                        .unwrap_or(0);
+                    if a != b {
+                        return Err(NuError::runtime_error(
+                            format!("assertion failed: expected {}, got {}", b, a),
+                            Span::default(),
+                        ));
+                    }
+                    self.frames[frame_idx].regs[dst_reg as usize] = Value::unit();
+                    return Ok(());
+                }
+                Some("assert_true") => {
+                    let cond = self.frames[frame_idx]
+                        .regs
+                        .first()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !cond {
+                        return Err(NuError::runtime_error(
+                            "assertion failed".to_string(),
+                            Span::default(),
+                        ));
+                    }
+                    self.frames[frame_idx].regs[dst_reg as usize] = Value::unit();
+                    return Ok(());
+                }
+                _ => {
+                    return Err(NuError::effect_error(
+                        format!("Unknown Test operation: '{}'", qualified_name),
+                        Span::default(),
+                    ));
+                }
+            }
+        }
         // Fast path: no user handlers installed — skip the
         // rposition walk and dispatch directly to the built-in
         // effect callback.  This is the common case for Actor.* builtins in

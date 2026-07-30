@@ -230,6 +230,7 @@ pub enum Effect {
     Cost,
     Event,
     FFI,
+    Test,
     DB,
     UserDefined(String),
 }
@@ -252,6 +253,7 @@ impl std::fmt::Display for Effect {
             Effect::Cost => write!(f, "Cost"),
             Effect::Event => write!(f, "Event"),
             Effect::FFI => write!(f, "FFI"),
+            Effect::Test => write!(f, "Test"),
             Effect::DB => write!(f, "DB"),
             Effect::UserDefined(s) => write!(f, "{}", s),
         }

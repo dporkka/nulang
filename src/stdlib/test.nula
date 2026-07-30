@@ -1,39 +1,39 @@
-// Nulang standard library — testing primitives.
+// Nulang standard library — testing primitives via built-in Test effect.
 // Language version: 2.0.0-alpha
 //
+// The `Test` effect is wired into the standalone VM. Assertion failures
+// produce runtime errors that abort execution and are reported by the
+// `nula test` runner.
+//
 // Usage:
-//   import test
+//   import std.test
 //   fn my_tests() {
+//       test.assert(1 + 1 == 2, "basic arithmetic failed")
 //       test.assert_eq(add(1, 2), 3)
 //       test.assert_true(meaning_of_life() == 42)
 //   }
 
-/// Assert that two values are equal. Prints a message and exits with
-/// an error if they differ.
-pub fn assert_eq[T](actual: T, expected: T) {
-    if actual != expected then
-        perform IO.print("FAIL: assert_eq failed")
-    else
-        ()
+/// Assert that a boolean condition is true.
+/// On failure, produces a runtime error: `assertion failed: {msg}`.
+pub fn assert(cond: Bool, msg: String) -> Unit ! {Test} {
+    perform Test.assert(cond, msg)
+}
+
+/// Assert that two integers are equal.
+/// On failure, produces a runtime error: `assertion failed: expected {b}, got {a}`.
+/// `a` is the actual value, `b` is the expected value.
+pub fn assert_eq(a: Int, b: Int) -> Unit ! {Test} {
+    perform Test.assert_eq(a, b)
 }
 
 /// Assert that a boolean condition is true.
-pub fn assert_true(condition: Bool) {
-    if condition then
-        ()
-    else
-        perform IO.print("FAIL: assert_true failed")
-}
-
-/// Assert that a boolean condition is false.
-pub fn assert_false(condition: Bool) {
-    if condition then
-        perform IO.print("FAIL: assert_false failed")
-    else
-        ()
+/// On failure, produces a runtime error: `assertion failed`.
+pub fn assert_true(cond: Bool) -> Unit ! {Test} {
+    perform Test.assert_true(cond)
 }
 
 /// Fail unconditionally with a message.
-pub fn fail(message: String) {
-    perform IO.print("FAIL: " + message)
+/// Produces a runtime error: `assertion failed: {message}`.
+pub fn fail_with(message: String) -> Unit ! {Test} {
+    perform Test.assert(false, message)
 }

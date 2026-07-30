@@ -21,7 +21,14 @@ pub fn run(args: &[String]) -> NuResult<()> {
         Some("init") => cmd_init(),
         Some("build") => cmd_build(),
         Some("build-wasm") => cmd_build_wasm(),
-        Some("test") => cmd_test(),
+        Some("test") => {
+            let filter = if args.get(1).map(String::as_str) == Some("--filter") {
+                args.get(2).map(String::as_str)
+            } else {
+                None
+            };
+            cmd_test(filter)
+        }
         Some("run") => {
             if args.get(1).map(String::as_str) == Some("--watch") {
                 cmd_run_watch()
@@ -98,7 +105,7 @@ fn print_usage() {
     println!("  init          Scaffold a new package in the current directory");
     println!("  build         Resolve dependencies and type-check the package");
     println!("  build-wasm    Build package to .wasm + .cwasm (AOT, requires wasmtime)");
-    println!("  test          Run every .nula file in the package's tests/ directory");
+    println!("  test [--filter <substr>]  Run .nula test files (optionally filtered by name)");
     println!("  run           Build and run the package entry point");
     println!("  run --watch   Build and re-run on source changes");
     println!("  watch         Alias for 'run --watch'");
@@ -273,13 +280,22 @@ fn nulang_exe(args: &[&str]) -> NuResult<()> {
         msg: format!("cannot locate nulang executable: {}", e),
         span: Span::default(),
     })?;
-    let status = Command::new(&exe)
-        .args(args)
-        .status()
-        .map_err(|e| NuError::PackageError {
-            msg: format!("failed to run nulang ({}): {}", exe.display(), e),
-            span: Span::default(),
-        })?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(args);
+    // Auto-detect the stdlib directory relative to the executable so
+    // that `import stdlib::*` works without setting NULANG_STDLIB.
+    if std::env::var_os("NULANG_STDLIB").is_none() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join("stdlib");
+            if candidate.is_dir() {
+                cmd.env("NULANG_STDLIB", &candidate);
+            }
+        }
+    }
+    let status = cmd.status().map_err(|e| NuError::PackageError {
+        msg: format!("failed to run nulang ({}): {}", exe.display(), e),
+        span: Span::default(),
+    })?;
     if !status.success() {
         return Err(NuError::PackageError {
             msg: format!("nulang {} exited with {}", args.join(" "), status),
@@ -383,8 +399,14 @@ fn collect_mtimes_recursive(dir: &Path, out: &mut Vec<(PathBuf, std::time::Syste
     }
 }
 
-/// `nula test`: run every `.nula` file under the package's `tests/` directory.
-fn cmd_test() -> NuResult<()> {
+/// `nula test [--filter <substr>]`: discover and run `.nula` test files
+/// under the package's `tests/` directory, reporting pass/fail.
+///
+/// Each test file is executed via the `nulang` exe in the current package
+/// (same process as `nula run`). A test PASSes if it runs to completion
+/// without error; any compile or runtime error (including assertion
+/// failures from the `Test` effect) is a FAIL.
+fn cmd_test(filter: Option<&str>) -> NuResult<()> {
     eprintln!("Preparing package...");
     let _entry = prepare_package()?;
     let tests_dir = std::env::current_dir()
@@ -397,18 +419,22 @@ fn cmd_test() -> NuResult<()> {
         Ok(entries) => entries
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|ext| ext == "nula"))
+            .filter(|p| {
+                filter.map_or(true, |f| {
+                    p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map_or(false, |s| s.contains(f))
+                })
+            })
             .collect(),
         Err(_) => Vec::new(),
     };
     test_files.sort();
     if test_files.is_empty() {
-        println!(
-            "No tests found ({} does not exist or has no .nula files).",
-            tests_dir.display()
-        );
+        println!("No tests found in {}", tests_dir.display());
         return Ok(());
     }
-    eprintln!("Running {} test(s)...", test_files.len());
+    eprintln!("running {} tests", test_files.len());
     let mut failed = 0;
     for file in &test_files {
         let file_str = file.to_string_lossy().into_owned();
@@ -416,19 +442,24 @@ fn cmd_test() -> NuResult<()> {
             .strip_prefix(&tests_dir.parent().unwrap_or(&tests_dir))
             .unwrap_or(file);
         match nulang_exe(&[&file_str]) {
-            Ok(()) => println!("  ok   {}", relative.display()),
+            Ok(()) => println!("test {} ... ok", relative.display()),
             Err(e) => {
                 failed += 1;
-                println!("  FAIL {} ({})", relative.display(), e);
+                let msg = e.to_string();
+                // Extract the actual runtime error message from the NuError display
+                // which includes span info; show the meaningful part.
+                println!("test {} ... FAILED", relative.display());
+                eprintln!("{}", msg);
             }
         }
     }
-    println!("{} passed, {} failed", test_files.len() - failed, failed);
+    println!(
+        "\ntest result: {} passed; {} failed",
+        test_files.len() - failed,
+        failed
+    );
     if failed > 0 {
-        return Err(NuError::PackageError {
-            msg: format!("{} test(s) failed", failed),
-            span: Span::default(),
-        });
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -742,7 +773,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let _guard = ChangeDir::new(&dir);
 
-        let result = cmd_test();
+        let result = cmd_test(None);
         assert!(result.is_err(), "test outside package should fail");
 
         let _ = std::fs::remove_dir_all(&dir);

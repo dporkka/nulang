@@ -74,6 +74,7 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "IO" => Effect::IO,
         "Net" | "Http" => Effect::Net,
         "FS" => Effect::FS,
+        "Test" => Effect::Test,
         "Rand" => Effect::Rand,
         "Time" => Effect::Time,
         "Spawn" => Effect::Spawn,
@@ -2062,6 +2063,7 @@ mod tests {
         assert_eq!(parse_effect_name("IO"), Effect::IO);
         assert_eq!(parse_effect_name("Net"), Effect::Net);
         assert_eq!(parse_effect_name("FS"), Effect::FS);
+        assert_eq!(parse_effect_name("Test"), Effect::Test);
         assert_eq!(parse_effect_name("Spawn"), Effect::Spawn);
         assert_eq!(parse_effect_name("Http"), Effect::Net);
         assert_eq!(parse_effect_name("Async"), Effect::Async);
