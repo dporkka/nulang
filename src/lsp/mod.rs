@@ -272,10 +272,7 @@ impl LanguageServer for NulangLanguageServer {
             .to_file_path()
             .ok()
             .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-        let items = engine.complete(
-            params.text_document_position.position,
-            doc_dir.as_deref(),
-        );
+        let items = engine.complete(params.text_document_position.position, doc_dir.as_deref());
         Ok(Some(CompletionResponse::Array(items)))
     }
 
@@ -1274,7 +1271,7 @@ impl NulangLanguageServer {
     /// consumed linear/lineariso variable references.
     fn find_consumed_spans(&self, source: &str) -> Vec<(usize, usize)> {
         use crate::ast::Decl;
-        use crate::effect_checker::{flatten_decls, CapContext, CapabilityAnalyzer};
+        use crate::effect_checker::{CapContext, CapabilityAnalyzer, flatten_decls};
 
         let mut lexer = crate::lexer::Lexer::new(source);
         let tokens = match lexer.lex() {
@@ -1308,11 +1305,7 @@ impl NulangLanguageServer {
             .collect()
     }
 
-    fn code_actions(
-        source: &str,
-        range: Option<Range>,
-        uri: &Url,
-    ) -> Option<CodeActionResponse> {
+    fn code_actions(source: &str, range: Option<Range>, uri: &Url) -> Option<CodeActionResponse> {
         let mut actions = Vec::new();
 
         // Extract variable — only when a non-empty selection range is given.
@@ -1427,24 +1420,12 @@ impl NulangLanguageServer {
 
     /// Extract the text covered by an LSP range from the source.
     fn extract_selected_text(source: &str, range: &Range) -> Option<String> {
-        let start = Self::position_to_byte_offset_offset(source, &range.start)?;
-        let end = Self::position_to_byte_offset_offset(source, &range.end)?;
+        let start = Self::position_to_byte_offset(source, &range.start)?;
+        let end = Self::position_to_byte_offset(source, &range.end)?;
         if start >= end {
             return None;
         }
         Some(source[start..end].to_string())
-    }
-
-    /// Convert an LSP Position to a byte offset in the full source.
-    fn position_to_byte_offset_offset(source: &str, pos: &Position) -> Option<usize> {
-        let mut offset = 0usize;
-        for (line_idx, line) in source.lines().enumerate() {
-            if line_idx as u32 == pos.line {
-                return Some(offset + utf16_col_to_byte(line, pos.character as usize));
-            }
-            offset += line.len() + 1; // +1 for newline
-        }
-        None
     }
 
     /// Compute folding ranges by tracking brace depth line-by-line.
@@ -1893,10 +1874,10 @@ fn nu_error_to_diagnostic(err: NuError) -> Vec<Diagnostic> {
 fn single_diagnostic(err: NuError) -> Diagnostic {
     let (message, start_line, start_col, end_line, end_col) = match err {
         NuError::LexError { msg, span }
-        | NuError::ParseError { msg, span }
-        | NuError::TypeError { msg, span }
-        | NuError::EffectError { msg, span }
-        | NuError::CapError { msg, span }
+        | NuError::ParseError { msg, span, .. }
+        | NuError::TypeError { msg, span, .. }
+        | NuError::EffectError { msg, span, .. }
+        | NuError::CapError { msg, span, .. }
         | NuError::FFIError { msg, span }
         | NuError::NotYetImplemented { feature: msg, span } => (
             msg,
@@ -2199,21 +2180,66 @@ pub struct CompletionEngine<'a> {
 impl<'a> CompletionEngine<'a> {
     /// Nulang language keywords with markdown documentation.
     const KEYWORDS: &'static [(&'static str, &'static str)] = &[
-        ("fn", "Declare a function.\n\n```nulang\nfn add(x: Int, y: Int) -> Int { x + y }\n```"),
-        ("let", "Bind a value to a name.\n\n```nulang\nlet x = 42\nlet y: Int = x + 1\n```"),
-        ("if", "Conditional expression.\n\n```nulang\nif x > 0 { \"positive\" } else { \"non-positive\" }\n```"),
-        ("else", "Else branch of a conditional.\n\n```nulang\nif x > 0 { \"positive\" } else { \"non-positive\" }\n```"),
-        ("match", "Pattern match expression.\n\n```nulang\nmatch x {\n  | Some(v) => v\n  | None => 0\n}\n```"),
-        ("effect", "Declare an effect.\n\n```nulang\neffect MyEffect {\n  op1: Int -> String\n}\n```"),
-        ("actor", "Declare an actor.\n\n```nulang\nactor Counter {\n  state count = 0\n  behavior inc() { self.count = self.count + 1 }\n}\n```"),
-        ("state_machine", "Declare a state machine.\n\n```nulang\nstate_machine Door {\n  state Closed\n  event open(): Open\n}\n```"),
-        ("type", "Declare a type alias, record, or variant.\n\n```nulang\ntype Point = { x: Int, y: Int }\ntype Option[T] = Some(T) | None\n```"),
-        ("module", "Declare a module.\n\n```nulang\nmodule MyModule {\n  fn foo() { 42 }\n}\n```"),
-        ("import", "Import a module.\n\n```nulang\nimport \"path/to/file.nula\"\nimport stdlib::json\n```"),
-        ("handle", "Handle effects.\n\n```nulang\nhandle perform IO.print(\"x\") with {\n  | IO.print(s) => { /* custom logic */ }\n  | return(x) => x\n}\n```"),
-        ("perform", "Perform an effect operation.\n\n```nulang\nperform IO.print(\"Hello\")\nperform Http.get(\"https://example.com\")\n```"),
-        ("resume", "Resume a handled effect continuation.\n\n```nulang\nhandle perform MyEffect.op() with {\n  | MyEffect.op() => resume(\"result\")\n}\n```"),
-        ("return", "Return a value from a function.\n\n```nulang\nfn foo() -> Int { return 42 }\n```"),
+        (
+            "fn",
+            "Declare a function.\n\n```nulang\nfn add(x: Int, y: Int) -> Int { x + y }\n```",
+        ),
+        (
+            "let",
+            "Bind a value to a name.\n\n```nulang\nlet x = 42\nlet y: Int = x + 1\n```",
+        ),
+        (
+            "if",
+            "Conditional expression.\n\n```nulang\nif x > 0 { \"positive\" } else { \"non-positive\" }\n```",
+        ),
+        (
+            "else",
+            "Else branch of a conditional.\n\n```nulang\nif x > 0 { \"positive\" } else { \"non-positive\" }\n```",
+        ),
+        (
+            "match",
+            "Pattern match expression.\n\n```nulang\nmatch x {\n  | Some(v) => v\n  | None => 0\n}\n```",
+        ),
+        (
+            "effect",
+            "Declare an effect.\n\n```nulang\neffect MyEffect {\n  op1: Int -> String\n}\n```",
+        ),
+        (
+            "actor",
+            "Declare an actor.\n\n```nulang\nactor Counter {\n  state count = 0\n  behavior inc() { self.count = self.count + 1 }\n}\n```",
+        ),
+        (
+            "state_machine",
+            "Declare a state machine.\n\n```nulang\nstate_machine Door {\n  state Closed\n  event open(): Open\n}\n```",
+        ),
+        (
+            "type",
+            "Declare a type alias, record, or variant.\n\n```nulang\ntype Point = { x: Int, y: Int }\ntype Option[T] = Some(T) | None\n```",
+        ),
+        (
+            "module",
+            "Declare a module.\n\n```nulang\nmodule MyModule {\n  fn foo() { 42 }\n}\n```",
+        ),
+        (
+            "import",
+            "Import a module.\n\n```nulang\nimport \"path/to/file.nula\"\nimport stdlib::json\n```",
+        ),
+        (
+            "handle",
+            "Handle effects.\n\n```nulang\nhandle perform IO.print(\"x\") with {\n  | IO.print(s) => { /* custom logic */ }\n  | return(x) => x\n}\n```",
+        ),
+        (
+            "perform",
+            "Perform an effect operation.\n\n```nulang\nperform IO.print(\"Hello\")\nperform Http.get(\"https://example.com\")\n```",
+        ),
+        (
+            "resume",
+            "Resume a handled effect continuation.\n\n```nulang\nhandle perform MyEffect.op() with {\n  | MyEffect.op() => resume(\"result\")\n}\n```",
+        ),
+        (
+            "return",
+            "Return a value from a function.\n\n```nulang\nfn foo() -> Int { return 42 }\n```",
+        ),
         ("true", "Boolean `true` literal."),
         ("false", "Boolean `false` literal."),
         ("nil", "Nil / null value."),
@@ -2222,9 +2248,21 @@ impl<'a> CompletionEngine<'a> {
 
     /// Built-in effect names.
     const EFFECTS: &'static [&'static str] = &[
-        "IO", "Net", "FS", "Spawn", "Send", "Receive",
-        "Migrate", "STM", "Async", "Inference", "Cost", "Rand", "Time",
-        "Actor", "Provider",
+        "IO",
+        "Net",
+        "FS",
+        "Spawn",
+        "Send",
+        "Receive",
+        "Migrate",
+        "STM",
+        "Async",
+        "Inference",
+        "Cost",
+        "Rand",
+        "Time",
+        "Actor",
+        "Provider",
     ];
 
     /// Known stdlib modules for import path completion.
@@ -2249,14 +2287,10 @@ impl<'a> CompletionEngine<'a> {
     pub fn set_ast_info(&mut self, ast: &crate::ast::AstModule) {
         for decl in &ast.decls {
             match decl {
-                crate::ast::Decl::Function {
-                    name, params, ..
-                } => {
+                crate::ast::Decl::Function { name, params, .. } => {
                     self.function_names.push(name.clone());
-                    let param_names: Vec<String> =
-                        params.iter().map(|(n, _)| n.clone()).collect();
-                    self.function_params
-                        .push((name.clone(), param_names));
+                    let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                    self.function_params.push((name.clone(), param_names));
                 }
                 crate::ast::Decl::Actor {
                     name,
@@ -2267,19 +2301,15 @@ impl<'a> CompletionEngine<'a> {
                     self.type_names.push(name.clone());
                     let field_names: Vec<String> =
                         state_fields.iter().map(|(n, _, _, _)| n.clone()).collect();
-                    self.actor_state_fields
-                        .push((name.clone(), field_names));
+                    self.actor_state_fields.push((name.clone(), field_names));
                     for b in behaviors {
                         self.function_names.push(b.name.clone());
                         let bparams: Vec<String> =
                             b.params.iter().map(|(n, _)| n.clone()).collect();
-                        self.behavior_params
-                            .push((b.name.clone(), bparams));
+                        self.behavior_params.push((b.name.clone(), bparams));
                     }
                 }
-                crate::ast::Decl::VariantType {
-                    name, variants, ..
-                } => {
+                crate::ast::Decl::VariantType { name, variants, .. } => {
                     self.type_names.push(name.clone());
                     for (vname, _) in variants {
                         self.variant_names.push(vname.clone());
@@ -2288,14 +2318,10 @@ impl<'a> CompletionEngine<'a> {
                 crate::ast::Decl::TypeAlias { name, .. } => {
                     self.type_names.push(name.clone());
                 }
-                crate::ast::Decl::RecordType {
-                    name, fields, ..
-                } => {
+                crate::ast::Decl::RecordType { name, fields, .. } => {
                     self.type_names.push(name.clone());
-                    let rfields: Vec<String> =
-                        fields.iter().map(|(n, _)| n.clone()).collect();
-                    self.record_type_fields
-                        .push((name.clone(), rfields));
+                    let rfields: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                    self.record_type_fields.push((name.clone(), rfields));
                 }
                 _ => {}
             }
@@ -2307,11 +2333,7 @@ impl<'a> CompletionEngine<'a> {
     // ------------------------------------------------------------------
 
     /// Return completion items at the given LSP position.
-    pub fn complete(
-        &self,
-        position: Position,
-        document_dir: Option<&Path>,
-    ) -> Vec<CompletionItem> {
+    pub fn complete(&self, position: Position, document_dir: Option<&Path>) -> Vec<CompletionItem> {
         let offset = self.position_to_offset(position);
 
         // 1. Field access: `self.` or `expr.`
@@ -2439,11 +2461,7 @@ impl<'a> CompletionEngine<'a> {
     /// are known.
     fn make_function_item(&self, name: &str) -> CompletionItem {
         // Check behavior params first.
-        if let Some((_, bparams)) = self
-            .behavior_params
-            .iter()
-            .find(|(n, _)| n == name)
-        {
+        if let Some((_, bparams)) = self.behavior_params.iter().find(|(n, _)| n == name) {
             let snippet = if bparams.is_empty() {
                 name.to_string()
             } else {
@@ -2466,11 +2484,7 @@ impl<'a> CompletionEngine<'a> {
         }
 
         // Check function params.
-        if let Some((_, fparams)) = self
-            .function_params
-            .iter()
-            .find(|(n, _)| n == name)
-        {
+        if let Some((_, fparams)) = self.function_params.iter().find(|(n, _)| n == name) {
             let snippet = if fparams.is_empty() {
                 format!("{}()", name)
             } else {
@@ -2736,11 +2750,7 @@ impl<'a> CompletionEngine<'a> {
                     .next()
                 {
                     let name = name.trim();
-                    if !name.is_empty()
-                        && name
-                            .chars()
-                            .all(|c| c.is_alphanumeric() || c == '_')
-                    {
+                    if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
                         names.push(name.to_string());
                     }
                 }
@@ -3033,19 +3043,23 @@ mod lsp_tests {
         // A half-typed `let` line with no `=` (e.g. `let x y`) must not
         // panic the code action provider; no quick fix can be offered
         // without a right-hand side.
-        assert!(NulangLanguageServer::code_actions(
-            "let x y",
-            None,
-            &Url::parse("file:///test.nula").unwrap(),
-        )
-        .is_none());
+        assert!(
+            NulangLanguageServer::code_actions(
+                "let x y",
+                None,
+                &Url::parse("file:///test.nula").unwrap(),
+            )
+            .is_none()
+        );
         // A well-formed binding still produces a quick fix.
-        assert!(NulangLanguageServer::code_actions(
-            "let x = 42",
-            None,
-            &Url::parse("file:///test.nula").unwrap(),
-        )
-        .is_some());
+        assert!(
+            NulangLanguageServer::code_actions(
+                "let x = 42",
+                None,
+                &Url::parse("file:///test.nula").unwrap(),
+            )
+            .is_some()
+        );
     }
 
     #[test]

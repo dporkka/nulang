@@ -4649,6 +4649,18 @@ match { a: 2, b: 9 } with {
         assert!(!v.is_nil());
     }
 
+    /// MIR + Runtime + fn main() with Inference.ask (canonical name).
+    /// Regression: Inference.ask must work identically to the deprecated LLM.ask.
+    #[test]
+    fn test_mir_fn_main_with_runtime_inference_ask() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut()
+            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+        let v =
+            run_source_new_with_runtime("fn main() { perform Inference.ask(\"hello\") }", rt).unwrap();
+        assert!(!v.is_nil());
+    }
+
     /// MIR + Runtime + Pipeline through fn main().
     #[test]
     fn test_mir_pipeline_with_runtime() {
@@ -5677,7 +5689,30 @@ match { a: 2, b: 9 } with {
             .get_state_field("count")
             .and_then(|v| v.as_int())
             .unwrap_or(0);
+
         actor.set_state_field("count", Value::int(n + 1));
+    }
+
+    /// `perform Inference.ask` with a mock LLM client must return the response
+    /// identically to the deprecated `perform LLM.ask` (RFC 0010 synonym).
+    #[test]
+    fn test_inference_ask_mock_client() {
+        let source = r#"perform Inference.ask("hello")"#;
+        let (module, _ty) = compile_source(source).unwrap();
+
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        rt.borrow_mut()
+            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt)));
+
+        let result = vm.run().unwrap();
+        let string_id = result.as_string_id().expect("expected string result");
+        let module_idx = vm.modules.len() - 1;
+        let content = vm.constant_string(module_idx, string_id).unwrap();
+        assert_eq!(content, "world");
     }
 
     /// A bytecode behavior that performs `LLM.ask` suspends on the scheduler

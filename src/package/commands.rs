@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::package::lockfile::{Lockfile, LOCKFILE_FILE};
-use crate::package::manifest::{Manifest, MANIFEST_FILE, DEFAULT_ENTRY};
+use crate::package::manifest::{Manifest, MANIFEST_FILE};
 use crate::package::resolver::resolve;
 use crate::types::{NuError, NuResult, Span};
 
@@ -111,10 +111,7 @@ fn cmd_init() -> NuResult<()> {
     // Write a basic .gitignore
     let gitignore = dir.join(".gitignore");
     if !gitignore.exists() {
-        let _ = std::fs::write(
-            &gitignore,
-            "# Nulang build artifacts\n*.nbc\n.nula/\n",
-        );
+        let _ = std::fs::write(&gitignore, "# Nulang build artifacts\n*.nbc\n.nula/\n");
     }
     println!("Initialized package '{}' in '{}'", name, dir.display());
     Ok(())
@@ -198,10 +195,13 @@ fn prepare_package() -> NuResult<PathBuf> {
     })?;
 
     let lock_path = root.join(LOCKFILE_FILE);
-    resolution.to_lockfile().save(&root).map_err(|e| NuError::PackageError {
-        msg: format!("failed to write {}: {}", lock_path.display(), e),
-        span: Span::default(),
-    })?;
+    resolution
+        .to_lockfile()
+        .save(&root)
+        .map_err(|e| NuError::PackageError {
+            msg: format!("failed to write {}: {}", lock_path.display(), e),
+            span: Span::default(),
+        })?;
 
     let entry = root.join(&manifest.package.entry);
     if !entry.exists() {
@@ -228,11 +228,7 @@ fn nulang_exe(args: &[&str]) -> NuResult<()> {
         .args(args)
         .status()
         .map_err(|e| NuError::PackageError {
-            msg: format!(
-                "failed to run nulang ({}): {}",
-                exe.display(),
-                e
-            ),
+            msg: format!("failed to run nulang ({}): {}", exe.display(), e),
             span: Span::default(),
         })?;
     if !status.success() {
@@ -395,8 +391,7 @@ fn remove_nbc_files(dir: &Path, count: &mut u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
+    use crate::package::manifest::DEFAULT_ENTRY;
     fn test_scaffold_package_creates_valid_manifest() {
         let dir = std::env::temp_dir().join(format!("nulang_nula_new_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

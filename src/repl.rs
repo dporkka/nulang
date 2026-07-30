@@ -786,10 +786,7 @@ impl Repl {
 
     /// Load and evaluate a .nula file in the REPL context.
     fn load_file(&mut self, path: &str) -> NuResult<()> {
-        let source = std::fs::read_to_string(path).map_err(|e| NuError::ParseError {
-            msg: format!("Cannot read file '{}': {}", path, e),
-            span: Span::default(),
-        })?;
+        let source = std::fs::read_to_string(path).map_err(|e| NuError::parse_error(format!("Cannot read file '{}': {}", path, e), Span::default(),))?;
         println!("Loaded '{}' ({} bytes)", path, source.len());
         self.evaluate(&source)
     }
@@ -911,10 +908,7 @@ fn extract_main_expr(ast: &AstModule) -> NuResult<Expr> {
             }
         }
     }
-    Err(NuError::ParseError {
-        msg: "Expected an expression".to_string(),
-        span: Span::default(),
-    })
+    Err(NuError::parse_error("Expected an expression".to_string(), Span::default(),))
 }
 
 /// Convert a runtime Value to a pretty display string.
@@ -1104,6 +1098,8 @@ mod tests {
         let result = repl.execute("fn pure() -> Unit ! {} { do_io() }");
         assert!(
             matches!(result, Err(NuError::EffectError { .. })),
+            missing_effects: None,
+            allowed_effects: None,
             "pure function calling an IO function must be rejected, got {:?}",
             result
         );
@@ -1120,6 +1116,8 @@ mod tests {
         );
         assert!(
             matches!(result, Err(NuError::EffectError { .. })),
+            missing_effects: None,
+            allowed_effects: None,
             "pure function calling an IO function must be rejected, got {:?}",
             result
         );

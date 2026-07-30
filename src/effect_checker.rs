@@ -709,10 +709,7 @@ impl EffectChecker {
 
                 // Validate that the operation name is sensible (basic check).
                 if op.is_empty() {
-                    return Err(NuError::EffectError {
-                        msg: format!("perform of effect '{}' has empty operation name", effect),
-                        span: *span,
-                    });
+                    return Err(NuError::effect_error(format!("perform of effect '{}' has empty operation name", effect), *span));
                 }
 
                 let mut row = if is_handled {
@@ -861,7 +858,12 @@ impl EffectChecker {
                 )
             };
             self.diagnostics.push(msg.clone());
-            Err(NuError::EffectError { msg, span })
+            Err(NuError::EffectError {
+                msg,
+                span,
+                missing_effects: if offending.is_empty() { None } else { Some(offending) },
+                allowed_effects: Some(format_row(allowed)),
+            })
         } else {
             Ok(())
         }
@@ -1160,7 +1162,7 @@ impl CapabilityAnalyzer {
             msg.push_str("\nhelp: linear/lineariso bindings may be used at most once");
             msg.push_str(&format!("\nhelp: use `consume {}` to explicitly discharge the linear obligation on the first use, or restructure to avoid the second use", name));
             self.diagnostics.push(msg.clone());
-            return Err(NuError::CapError { msg, span });
+            return Err(NuError::cap_error(msg, span));
         }
         self.first_consumed.insert(name.to_string(), span);
         Ok(())
@@ -1472,13 +1474,10 @@ impl CapabilityAnalyzer {
                                 "remote send argument with capability {} is not network-sendable",
                                 arg_cap
                             ));
-                            return Err(NuError::CapError {
-                                msg: format!(
+                            return Err(NuError::cap_error(format!(
                                     "remote send argument must be val, tag, or linear (serializable), got {}",
                                     arg_cap
-                                ),
-                                span,
-                            });
+                                ), span));
                         }
                     } else {
                         if !arg_cap.is_sendable() {
@@ -1487,13 +1486,10 @@ impl CapabilityAnalyzer {
                                 "send argument with capability {} is not sendable",
                                 arg_cap
                             ));
-                            return Err(NuError::CapError {
-                                msg: format!(
+                            return Err(NuError::cap_error(format!(
                                     "send argument must be sendable (lineariso, iso, linear, val, or tag), got {}",
                                     arg_cap
-                                ),
-                                span,
-                            });
+                                ), span));
                         }
                     }
                 }
@@ -1635,7 +1631,7 @@ impl CapabilityAnalyzer {
                             inner_cap, cap
                         );
                         self.diagnostics.push(msg.clone());
-                        return Err(NuError::CapError { msg, span: *span });
+                        return Err(NuError::cap_error(msg, *span));
                     }
                 }
                 Ok(*cap)
@@ -1678,7 +1674,7 @@ impl CapabilityAnalyzer {
                         name
                     );
                     self.diagnostics.push(msg.clone());
-                    return Err(NuError::CapError { msg, span: *span });
+                    return Err(NuError::cap_error(msg, *span));
                 }
                 // The loop may also execute zero times, so body consumption
                 // does not propagate past the loop.
@@ -1699,7 +1695,7 @@ impl CapabilityAnalyzer {
                         name
                     );
                     self.diagnostics.push(msg.clone());
-                    return Err(NuError::CapError { msg, span: *span });
+                    return Err(NuError::cap_error(msg, *span));
                 }
                 *consumed = base;
                 Ok(body_cap)
@@ -1725,7 +1721,7 @@ impl CapabilityAnalyzer {
                 msg.push_str("\nhelp: use `consume <binding>` to discharge the linear obligation and obtain an Iso reference");
             }
             self.diagnostics.push(msg.clone());
-            Err(NuError::CapError { msg, span })
+            Err(NuError::cap_error(msg, span))
         }
     }
 
@@ -1741,7 +1737,7 @@ impl CapabilityAnalyzer {
                 cap
             );
             self.diagnostics.push(msg.clone());
-            Err(NuError::CapError { msg, span })
+            Err(NuError::cap_error(msg, span))
         }
     }
 

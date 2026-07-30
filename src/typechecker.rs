@@ -602,7 +602,8 @@ fn var_subst(v: TypeVar, t: &Type, span: Span) -> NuResult<Substitution> {
         Type::Var(v2) if *v2 == v => Ok(vec![]), // t = t
         t => {
             if occurs_in(v, t) {
-                return Err(NuError::type_error(format!(
+                return Err(NuError::TypeError {
+                    msg: format!(
                         "Infinite type: this expression's type references itself. \
                          This often happens with self-referential definitions \
                          (e.g., a record that contains itself, or `let f = f`). \
@@ -613,7 +614,7 @@ fn var_subst(v: TypeVar, t: &Type, span: Span) -> NuResult<Substitution> {
                     expected_type: None,
                     found_type: None,
                     similar_names: None,
-                ));
+                });
             }
             Ok(vec![(v, t.clone())])
         }
@@ -893,7 +894,7 @@ impl TypeChecker {
                                         "actor '{}' declares it implements '{}' but is missing required handler '{}' (expects {} parameter(s))",
                                         name, contract_name, handler_name, param_count
                                     );
-                                    return Err(NuError::TypeError { msg, *span, expected_type: None, found_type: None, similar_names: None }));
+                                    return Err(NuError::TypeError { msg, *span, expected_type: None, found_type: None, similar_names: None });
                                 }
                             }
                         }
@@ -1650,7 +1651,7 @@ impl TypeChecker {
         // For let-bound lambdas that reference themselves (e.g.
         // `let fac = fn(n) ... fac(n-1) ... in ...`), make the binding name
         // available inside the lambda body with a fresh type variable.
-        if matches!(value, Expr::Lambda { ..)) {
+        if matches!(value, Expr::Lambda { .. }) {
             let rec_var = Type::Var(TypeVar::fresh());
             let ctx_with_rec = ctx.extend(name.to_string(), rec_var.clone(), Capability::Ref);
             let (s1, val_ty) = self.infer_expr(&ctx_with_rec, value)?;
@@ -2226,19 +2227,21 @@ impl TypeChecker {
                                 }
                                 // Instance registered but dict not in
                                 // context (should not happen).
-                                return Err(NuError::type_error(format!("internal: dict '{}' not in scope", dict_name),
+                                return Err(NuError::TypeError {
+                                    msg: format!("internal: dict '{}' not in scope", dict_name),
                                     span,
                                     expected_type: None,
                                     found_type: None,
                                     similar_names: None,
-                                ));
+                                });
                             }
-                            return Err(NuError::type_error(format!("no impl {}[{}]", class_name, record_ty_resolved),
+                            return Err(NuError::TypeError {
+                                msg: format!("no impl {}[{}]", class_name, record_ty_resolved),
                                 span,
                                 expected_type: None,
                                 found_type: None,
                                 similar_names: None,
-                            ));
+                            });
                         }
                     }
                 }
@@ -2351,7 +2354,7 @@ impl TypeChecker {
         )?;
         let final_subst = compose_subst(&s_arr, &s_combined);
 
-        Ok((final_subst.clone(), apply_subst(&elem_var, &final_subst))))
+        Ok((final_subst.clone(), apply_subst(&elem_var, &final_subst)))
 
     /// Infer the type of a pattern match expression.
     fn infer_match(
@@ -2378,7 +2381,8 @@ impl TypeChecker {
                 let (s_guard, guard_ty) = self.infer_expr(&pattern_ctx, guard_expr)?;
                 let guard_subst = compose_subst(&s_guard, &subst);
                 let s_bool = mgu(&apply_subst(&guard_ty, &guard_subst), &Type::bool(), span)?;
-                subst = compose_subst(&s_bool, &guard_subst);)
+                subst = compose_subst(&s_bool, &guard_subst);
+            }
             let pattern_ctx = apply_subst_to_ctx(&pattern_ctx, &subst);
             let (s_arm, arm_ty) = self.infer_expr(&pattern_ctx, arm_expr)?;
             subst = compose_subst(&s_arm, &subst);
@@ -2578,7 +2582,7 @@ impl TypeChecker {
     ) -> NuResult<(Substitution, Type)> {
         let (s, actor_ty) = self.infer_expr(ctx, actor_type)?;
         match &actor_ty {
-            Type::Actor { ..) => Ok((s, actor_ty.clone())),
+            Type::Actor { .. } => Ok((s, actor_ty.clone())),
             _ => {
                 // Try to unify with Actor type
                 let fresh_actor = Type::Actor {
@@ -2759,7 +2763,8 @@ impl TypeChecker {
             | Type::Primitive(PrimitiveType::Bool)
             | Type::Primitive(PrimitiveType::String)
             | Type::Primitive(PrimitiveType::Unit) => Ok(()),
-            _ => Err(NuError::type_error(format!(
+            _ => Err(NuError::TypeError {
+                msg: format!(
                     "Unsupported FFI type: {}. Only Int, Float, Bool, String, and Unit are allowed in this MVP.",
                     ty
                 ),
@@ -2804,6 +2809,7 @@ impl TypeChecker {
     }
 }
 
+}
 impl Default for TypeChecker {
     fn default() -> Self {
         Self::new()
@@ -2849,7 +2855,9 @@ mod tests {
             ret_type: None,
             params: vec![(param.to_string(), None)],
             body: Box::new(body),
-            effect: None, sp(),)
+            effect: None,
+            span: sp(),
+        }
     }
 
     // Helper to create application
