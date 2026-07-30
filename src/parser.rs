@@ -2370,6 +2370,7 @@ impl Parser {
                     TokenKind::Migrate => self.parse_migrate(),
                     TokenKind::With => self.parse_with_block(),
                     TokenKind::Consume => self.parse_consume_expr(),
+                    TokenKind::Recover => self.parse_recover_expr(),
                     TokenKind::Return => {
                         self.advance();
                         if self.is_expr_start() {
@@ -3296,8 +3297,8 @@ impl Parser {
                 | TokenKind::Perform
                 | TokenKind::Emit
                 | TokenKind::Handle
-                | TokenKind::With
                 | TokenKind::Consume
+                | TokenKind::Recover
                 | TokenKind::Receive
                 | TokenKind::For
                 | TokenKind::While
@@ -3731,14 +3732,22 @@ impl Parser {
     fn parse_consume_expr(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
         self.advance();
-        let name = self.expect_ident("variable name")?;
-        Ok(Expr::CapAnnotate {
-            expr: Box::new(Expr::Var(name, span)),
-            cap: Capability::Val,
+        let expr = self.parse_expr()?;
+        Ok(Expr::Consume {
+            expr: Box::new(expr),
             span,
         })
     }
 
+    fn parse_recover_expr(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.advance(); // consume 'recover'
+        let body = self.parse_block()?;
+        Ok(Expr::Recover {
+            body: Box::new(body),
+            span,
+        })
+    }
     fn parse_type(&mut self) -> NuResult<Type> {
         self.parse_type_arrow()
     }
@@ -5967,16 +5976,14 @@ mod tests {
         let expr = parse_expr(source).unwrap();
         match expr {
             Expr::Let { body, .. } => match body.as_ref() {
-                Expr::CapAnnotate { expr, cap, .. } => {
-                    assert_eq!(*cap, Capability::Val);
-                    assert!(matches!(expr.as_ref(), Expr::Var(name, _) if name == "x"));
+                Expr::Consume { expr: inner, .. } => {
+                    assert!(matches!(inner.as_ref(), Expr::Var(name, _) if name == "x"));
                 }
-                _ => panic!("Expected CapAnnotate in body, got {:?}", body),
+                _ => panic!("Expected Consume in body, got {:?}", body),
             },
             _ => panic!("Expected Let expression, got {:?}", expr),
         }
     }
-
     // -----------------------------------------------------------------------
     // Until expression: until <condition> => <body>  (polling loop sugar)
     // -----------------------------------------------------------------------

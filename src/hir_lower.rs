@@ -1771,6 +1771,8 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             body.set_terminator(hir::Terminator::Break(op));
             hir::Operand::Unit
         }
+        Expr::Consume { expr, .. } => lower_expr(expr, body),
+        Expr::Recover { body: b, .. } => lower_expr(b, body),
     }
 }
 
@@ -2579,6 +2581,12 @@ fn free_vars(
         Expr::Migrate { actor, node, .. } => {
             free_vars(actor, bound, acc);
             free_vars(node, bound, acc);
+        }
+        Expr::Consume { expr, .. } => {
+            free_vars(expr, bound, acc);
+        }
+        Expr::Recover { body: b, .. } => {
+            free_vars(b, bound, acc);
         }
         _ => {}
     }

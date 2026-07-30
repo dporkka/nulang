@@ -1288,7 +1288,6 @@ impl NulangLanguageServer {
                     "let",
                     "fn",
                     "fun",
-                    "actor",
                     "agent",
                     "workflow",
                     "if",
@@ -1326,6 +1325,8 @@ impl NulangLanguageServer {
                     "and",
                     "or",
                     "not",
+                    "consume",
+                    "recover",
                 ];
                 let tt: u32 = if kw.contains(&word) { 0 } else { 2 };
                 // Apply READONLY modifier if this variable was consumed (linear).
@@ -1933,6 +1934,13 @@ impl NulangLanguageServer {
             }
             // Leaf nodes: no sub-expressions to walk
             Expr::Literal(..) | Expr::Var(..) | Expr::SelfRef(..) => {}
+            // Consume/recover: walk inner expression
+            Expr::Consume { expr, .. } => {
+                Self::extract_expr_types(expr, source, map);
+            }
+            Expr::Recover { body, .. } => {
+                Self::extract_expr_types(body, source, map);
+            }
         }
     }
     /// Find the byte offset of an identifier within the source, searching

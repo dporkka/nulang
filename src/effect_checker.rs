@@ -332,6 +332,12 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
         }
         Expr::Return(None, _) => {}
         Expr::Break(..) => {}
+        Expr::Consume { expr: e, .. } => {
+            free_vars(e, bound, acc);
+        }
+        Expr::Recover { body: b, .. } => {
+            free_vars(b, bound, acc);
+        }
     }
 }
 
@@ -848,6 +854,12 @@ impl EffectChecker {
 
             // Break: no effects (it transfers control, doesn't perform an effect).
             Expr::Break(..) => Ok(EffectRow::empty()),
+
+            // Consume: effects of the consumed expression.
+            Expr::Consume { expr: e, .. } => self.infer_effects(ctx, e),
+
+            // Recover: effects of the recovery body.
+            Expr::Recover { body: b, .. } => self.infer_effects(ctx, b),
         }
     }
 
@@ -1747,6 +1759,37 @@ impl CapabilityAnalyzer {
 
             // Break: never returns a value, use Tag.
             Expr::Break(..) => Ok(Capability::Tag),
+
+            // Consume: mark the variable as consumed, return its capability.
+            Expr::Consume {
+                expr: inner,
+                span: _,
+            } => {
+                // If consuming a variable, mark it as consumed in the linear tracker.
+                if let Expr::Var(name, var_span) = inner.as_ref() {
+                    // Mark consumed regardless of capability — consume x
+                    // means x is unavailable after this point.
+                    self.consume_linear(name, *var_span, consumed)?;
+                    Ok(ctx.lookup(name))
+                } else {
+                    // For non-variable expressions, just infer capability.
+                    self.infer_cap_tracked(ctx, inner, consumed)
+                }
+            }
+
+            // Recover: isolated scope — the body must produce a sendable result.
+            Expr::Recover { body, span } => {
+                let body_cap = self.infer_cap_tracked(ctx, body, consumed)?;
+                if !body_cap.is_sendable() {
+                    let msg = format!(
+                        "recover body must evaluate to a sendable value, but got {}",
+                        body_cap
+                    );
+                    self.diagnostics.push(msg.clone());
+                    return Err(NuError::cap_error(msg, *span));
+                }
+                Ok(body_cap)
+            }
         }
     }
 
@@ -1839,6 +1882,8 @@ fn expr_span(expr: &Expr) -> Span {
         Expr::While { span, .. } => *span,
         Expr::Return(_, s) => *s,
         Expr::Break(_, s) => *s,
+        Expr::Consume { span, .. } => *span,
+        Expr::Recover { span, .. } => *span,
     }
 }
 

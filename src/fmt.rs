@@ -280,6 +280,14 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize) {
             }
             out.push_str(" }");
         }
+        Expr::Consume { expr, .. } => {
+            out.push_str("consume ");
+            fmt_expr(out, expr, indent);
+        }
+        Expr::Recover { body, .. } => {
+            out.push_str("recover ");
+            fmt_expr(out, body, indent);
+        }
         _ => {
             out.push_str(&format!("/* {:?} */", expr));
         }

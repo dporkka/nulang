@@ -1416,6 +1416,11 @@ impl TypeChecker {
                 Ok((s, ref_ty))
             }
 
+            // Consume expression: consume x — explicit move, type is type of x
+            Expr::Consume { expr, .. } => self.infer_expr(ctx, expr),
+
+            // Recover expression: recover { body } — isolated scope
+            Expr::Recover { body, .. } => self.infer_expr(ctx, body),
             // Type annotation
             Expr::TypeAnnotate { expr, ty, span } => {
                 let (s1, inferred) = self.infer_expr(ctx, expr)?;

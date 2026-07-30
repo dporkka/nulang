@@ -244,6 +244,16 @@ pub enum Expr {
     Return(Option<Box<Expr>>, Span),
     /// Break from loop
     Break(Option<Box<Expr>>, Span),
+    /// Consume variable: consume x — moves ownership, marks source unavailable
+    Consume {
+        expr: Box<Expr>,
+        span: Span,
+    },
+    /// Recovery block: recover { body } — isolated scope for capability upgrade
+    Recover {
+        body: Box<Expr>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
