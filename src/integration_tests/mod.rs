@@ -2162,6 +2162,61 @@ match { a: 2, b: 9 } with {
         assert_string(r#""count: " + perform Int.to_string(42)"#, "count: 42");
     }
 
+    // -------------------------------------------------------------------
+    // Unicode \\u{...} escape tests (full pipeline)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_unicode_escape_via_char_at() {
+        // "\\u{41}" lexes as "A" → charAt(0) is 'A' (65).
+        assert_int(r#"perform String.charAt("\u{41}", 0)"#, 65);
+    }
+
+    #[test]
+    fn test_unicode_escape_multiple_via_length() {
+        // "\\u{48}\\u{49}" lexes as "HI" → length 2.
+        assert_int(r#"perform String.length("\u{48}\u{49}")"#, 2);
+    }
+
+    #[test]
+    fn test_unicode_escape_invalid_produces_lex_error() {
+        let result = run_source("\"\\u{D800}\"");
+        match result {
+            Err(NuError::LexError { msg, .. }) => {
+                assert!(
+                    msg.contains("surrogate"),
+                    "expected surrogate error, got: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected LexError, got {:?}", other),
+        }
+    }
+    #[test]
+    fn test_unicode_escape_emoji_via_length() {
+        // 😀 is U+1F600 (4-byte UTF-8).  String.length counts bytes in the
+        // current runtime, so verify we get a 4-byte string.
+        assert_int(r#"perform String.length("\u{1F600}")"#, 4);
+    }
+
+    // -------------------------------------------------------------------
+    // Triple-quoted multi-line string tests (full pipeline)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_triple_quoted_string_length() {
+        // "a\\nb" is 3 chars.
+        let source = "\"\"\"a\nb\"\"\"";
+        assert_int(&format!("perform String.length({})", source), 3);
+    }
+
+    #[test]
+    fn test_triple_quoted_with_unicode_escape() {
+        // """\\u{41}""" → "A" → length 1.
+        let source = "\"\"\"\\u{41}\"\"\"";
+        assert_int(&format!("perform String.length({})", source), 1);
+    }
+
     /// String.length and String.charAt via perform.
     #[test]
     fn test_string_length_and_char_at() {

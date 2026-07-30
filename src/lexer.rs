@@ -384,7 +384,16 @@ impl<'a> Lexer<'a> {
             b'a'..=b'z' | b'_' => self.read_identifier(),
             b'A'..=b'Z' => self.read_identifier(),
             b'0'..=b'9' => self.read_number()?,
-            b'"' => self.read_string()?,
+            b'"' => {
+                // Triple-quoted string?
+                if self.bytes.get(self.pos + 1) == Some(&b'"')
+                    && self.bytes.get(self.pos + 2) == Some(&b'"')
+                {
+                    self.read_triple_string()?
+                } else {
+                    self.read_string()?
+                }
+            }
             b'+' | b'-' | b'*' | b'%' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'^' | b'~'
             | b'.' | b':' | b'#' | b'?' => self.read_operator()?,
             b'(' => {
@@ -641,6 +650,10 @@ impl<'a> Lexer<'a> {
                         Some(b'"') => result.push('"'),
                         Some(b'r') => result.push('\r'),
                         Some(b'0') => result.push('\0'),
+                        Some(b'u') => {
+                            let c = self.read_unicode_escape(start)?;
+                            result.push(c);
+                        }
                         Some(other) => {
                             return Err(NuError::LexError {
                                 msg: format!("Unknown escape sequence: \\\\{}", other as char),
@@ -693,6 +706,200 @@ impl<'a> Lexer<'a> {
             kind: TokenKind::StringLit(result),
             span: Span::new(start as u32, self.pos as u32),
         })
+    }
+
+    /// Scan a triple-quoted multi-line string literal `"""..."""`.
+    /// Escape sequences (\\n, \\t, \\r, \\0, \\", \\\\, \\u{...}) are processed
+    /// identically to single-quoted strings.  Interpolation is not supported
+    /// inside triple-quoted strings.
+    fn read_triple_string(&mut self) -> NuResult<Token> {
+        let start = self.pos;
+
+        // Consume the three opening quotes.
+        self.advance(); // "
+        self.advance(); // "
+        self.advance(); // "
+
+        let mut result = String::new();
+        loop {
+            // Closing delimiter: three consecutive double-quotes.
+            if self.peek() == Some(b'"')
+                && self.bytes.get(self.pos + 1) == Some(&b'"')
+                && self.bytes.get(self.pos + 2) == Some(&b'"')
+            {
+                self.advance(); // "
+                self.advance(); // "
+                self.advance(); // "
+                break;
+            }
+
+            match self.peek() {
+                Some(b'\\') => {
+                    self.advance(); // backslash
+                    match self.advance() {
+                        Some(b'n') => result.push('\n'),
+                        Some(b't') => result.push('\t'),
+                        Some(b'\\') => result.push('\\'),
+                        Some(b'"') => result.push('"'),
+                        Some(b'r') => result.push('\r'),
+                        Some(b'0') => result.push('\0'),
+                        Some(b'u') => {
+                            let c = self.read_unicode_escape(start)?;
+                            result.push(c);
+                        }
+                        Some(other) => {
+                            return Err(NuError::LexError {
+                                msg: format!("Unknown escape sequence: \\\\{}", other as char),
+                                span: Span::new((self.pos - 1) as u32, self.pos as u32),
+                            })
+                        }
+                        None => {
+                            return Err(NuError::LexError {
+                                msg: "Unterminated string escape".to_string(),
+                                span: Span::new(start as u32, self.pos as u32),
+                            })
+                        }
+                    }
+                }
+                Some(_) => {
+                    // Any character — including quotes (single or double) and
+                    // newlines — is literal inside a triple-quoted string.
+                    match self.source[self.pos..].chars().next() {
+                        Some(c) => {
+                            result.push(c);
+                            for _ in 0..c.len_utf8() {
+                                self.advance();
+                            }
+                        }
+                        None => {
+                            return Err(NuError::LexError {
+                                msg: "Unterminated triple-quoted string literal".to_string(),
+                                span: Span::new(start as u32, self.pos as u32),
+                            })
+                        }
+                    }
+                }
+                None => {
+                    return Err(NuError::LexError {
+                        msg: "Unterminated triple-quoted string literal".to_string(),
+                        span: Span::new(start as u32, self.pos as u32),
+                    })
+                }
+            }
+        }
+
+        Ok(Token {
+            kind: TokenKind::StringLit(result),
+            span: Span::new(start as u32, self.pos as u32),
+        })
+    }
+
+    /// Called after consuming '\\' and then 'u' (the first char of a \\u{...}
+    /// escape).  The next byte MUST be '{', followed by 1–6 hex digits and a
+    /// closing '}'.  Validates that the scalar value is in range (≤ 0x10FFFF)
+    /// and not a surrogate (0xD800–0xDFFF).  Returns the decoded `char`.
+    fn read_unicode_escape(&mut self, string_start: usize) -> NuResult<char> {
+        let esc_start = self.pos - 2; // backslash position for error spans
+
+        // Expect '{' after 'u'.
+        match self.advance() {
+            Some(b'{') => {}
+            Some(other) => {
+                return Err(NuError::LexError {
+                    msg: format!("Expected '{{' after \\\\u, found '{}'", other as char),
+                    span: Span::new(esc_start as u32, self.pos as u32),
+                })
+            }
+            None => {
+                return Err(NuError::LexError {
+                    msg: "Unterminated \\\\u escape".to_string(),
+                    span: Span::new(esc_start as u32, self.pos as u32),
+                })
+            }
+        }
+
+        let hex_start = self.pos;
+        let mut hex_count = 0u32;
+        let mut scalar: u32 = 0;
+
+        loop {
+            let digit = match self.peek() {
+                Some(b'0'..=b'9') => {
+                    self.advance();
+                    self.bytes[self.pos - 1] - b'0'
+                }
+                Some(b'a'..=b'f') => {
+                    self.advance();
+                    self.bytes[self.pos - 1] - b'a' + 10
+                }
+                Some(b'A'..=b'F') => {
+                    self.advance();
+                    self.bytes[self.pos - 1] - b'A' + 10
+                }
+                _ => break,
+            };
+            hex_count += 1;
+            if hex_count > 6 {
+                return Err(NuError::LexError {
+                    msg: "Too many hex digits in \\\\u{{...}} escape (max 6)".to_string(),
+                    span: Span::new(string_start as u32, self.pos as u32),
+                });
+            }
+            scalar = scalar
+                .checked_mul(16)
+                .and_then(|v| v.checked_add(digit as u32))
+                .unwrap_or(0xFFFF_FFFF); // saturate; range check below catches
+        }
+
+        if hex_count == 0 {
+            return Err(NuError::LexError {
+                msg: "Expected hex digits in \\\\u{{...}} escape".to_string(),
+                span: Span::new(esc_start as u32, self.pos as u32),
+            });
+        }
+
+        // Expect closing '}'.
+        match self.advance() {
+            Some(b'}') => {}
+            Some(other) => {
+                return Err(NuError::LexError {
+                    msg: format!(
+                        "Expected '}}' after \\\\u{{...}} escape, found '{}'",
+                        other as char
+                    ),
+                    span: Span::new(esc_start as u32, self.pos as u32),
+                })
+            }
+            None => {
+                return Err(NuError::LexError {
+                    msg: "Unterminated \\\\u escape".to_string(),
+                    span: Span::new(esc_start as u32, self.pos as u32),
+                })
+            }
+        }
+
+        // Validate range: valid Unicode scalar (≤ 0x10FFFF, not surrogate).
+        if scalar > 0x10FFFF {
+            return Err(NuError::LexError {
+                msg: format!(
+                    "Unicode scalar value U+{:X} is out of range (max U+10FFFF)",
+                    scalar
+                ),
+                span: Span::new(hex_start as u32, self.pos as u32),
+            });
+        }
+        if (0xD800..=0xDFFF).contains(&scalar) {
+            return Err(NuError::LexError {
+                msg: format!(
+                    "Unicode scalar value U+{:X} is a surrogate (not a valid character)",
+                    scalar
+                ),
+                span: Span::new(hex_start as u32, self.pos as u32),
+            });
+        }
+
+        // Safety: we validated the range, so unwrap is fine.
+        Ok(char::from_u32(scalar).unwrap())
     }
 
     fn read_comment(&mut self) -> Token {
@@ -1352,5 +1559,206 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Triple-quoted string tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_triple_quoted_basic_multiline() {
+        let source = "\"\"\"Hello\nWorld\n\"\"\"";
+        let kinds = lex(source);
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::StringLit("Hello\nWorld\n".to_string()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_triple_quoted_empty() {
+        let kinds = lex("\"\"\"\"\"\"");
+        assert_eq!(
+            kinds,
+            vec![TokenKind::StringLit("".to_string()), TokenKind::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_triple_quoted_with_inner_quotes() {
+        // Single and double quotes inside triple-quoted string should be literal.
+        let source = "\"\"\"a\"b\"\"c\"\"\"";
+        let kinds = lex(source);
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::StringLit("a\"b\"\"c".to_string()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_triple_quoted_escapes() {
+        let source = "\"\"\"a\\nb\\tc\"\"\"";
+        let kinds = lex(source);
+        assert_eq!(
+            kinds,
+            vec![TokenKind::StringLit("a\nb\tc".to_string()), TokenKind::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_triple_quoted_unicode_escape() {
+        let kinds = lex("\"\"\"\\u{41}\\u{1F600}\"\"\"");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::StringLit("A\u{1F600}".to_string()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_triple_quoted_single_line() {
+        // Triple-quoted doesn't require multiple lines — it still works.
+        let kinds = lex("\"\"\"hello\"\"\"");
+        assert_eq!(
+            kinds,
+            vec![TokenKind::StringLit("hello".to_string()), TokenKind::Eof,]
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Unicode \\u{...} escape tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_unicode_escape_basic() {
+        let kinds = lex("\"\\u{41}\"");
+        assert_eq!(
+            kinds,
+            vec![TokenKind::StringLit("A".to_string()), TokenKind::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_unicode_escape_multiple() {
+        let kinds = lex("\"\\u{48}\\u{49}\"");
+        assert_eq!(
+            kinds,
+            vec![TokenKind::StringLit("HI".to_string()), TokenKind::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_unicode_escape_emoji() {
+        let kinds = lex("\"\\u{1F600}\"");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::StringLit("\u{1F600}".to_string()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_unicode_escape_lowercase() {
+        let kinds = lex("\"\\u{7a}\"");
+        assert_eq!(
+            kinds,
+            vec![TokenKind::StringLit("z".to_string()), TokenKind::Eof,]
+        );
+    }
+
+    #[test]
+    fn test_unicode_escape_max() {
+        // U+10FFFF is the maximum valid scalar.
+        let kinds = lex("\"\\u{10FFFF}\"");
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::StringLit("\u{10FFFF}".to_string()),
+                TokenKind::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn test_unicode_escape_surrogate_errors() {
+        let mut lexer = Lexer::new("\"\\u{D800}\"");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("surrogate"));
+            }
+            _ => panic!("Expected LexError for surrogate"),
+        }
+    }
+
+    #[test]
+    fn test_unicode_escape_out_of_range_errors() {
+        let mut lexer = Lexer::new("\"\\u{110000}\"");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("out of range"));
+            }
+            _ => panic!("Expected LexError for out-of-range"),
+        }
+    }
+
+    #[test]
+    fn test_unicode_escape_no_hex_errors() {
+        let mut lexer = Lexer::new("\"\\u{}\"");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("Expected hex digits"));
+            }
+            _ => panic!("Expected LexError for empty braces"),
+        }
+    }
+
+    #[test]
+    fn test_unicode_escape_no_close_brace_errors() {
+        let mut lexer = Lexer::new("\"\\u{41\"");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("Expected '}'"));
+            }
+            _ => panic!("Expected LexError for missing close brace"),
+        }
+    }
+
+    #[test]
+    fn test_unicode_escape_too_many_digits_errors() {
+        let mut lexer = Lexer::new("\"\\u{1234567}\"");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("Too many hex digits"));
+            }
+            _ => panic!("Expected LexError for too many digits"),
+        }
+    }
+
+    #[test]
+    fn test_unicode_escape_in_triple_quoted_errors() {
+        // Surrogate inside triple-quoted strings also errors.
+        let mut lexer = Lexer::new("\"\"\"\\u{D800}\"\"\"");
+        let err = lexer.lex().unwrap_err();
+        match err {
+            NuError::LexError { msg, .. } => {
+                assert!(msg.contains("surrogate"));
+            }
+            _ => panic!("Expected LexError for surrogate in triple-quoted"),
+        }
     }
 }
