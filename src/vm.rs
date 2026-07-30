@@ -2890,6 +2890,42 @@ impl VM {
         Ok(())
     }
 
+    /// Integer exponentiation using binary exponentiation (fast pow).
+    /// Uses wrapping_mul to match IMul behaviour (48-bit wrap).
+    /// Negative exponent returns nil (mirrors IDiv div-by-zero).
+    /// 0 ** 0 returns 1 (standard convention).
+    #[inline(never)]
+    fn step_ipow(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let a = self.frames[frame_idx].regs[instr.op1 as usize];
+        let b = self.frames[frame_idx].regs[instr.op2 as usize];
+        if a.is_float() && b.is_float() {
+            let af = a.as_float().unwrap();
+            let bf = b.as_float().unwrap();
+            self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(af.powf(bf));
+        } else {
+            let base = a.as_int().unwrap_or(0);
+            let exp = b.as_int().unwrap_or(0);
+            if exp < 0 {
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::nil();
+            } else {
+                // Binary exponentiation with wrapping_mul
+                let mut result: i64 = 1;
+                let mut base = base;
+                let mut exp = exp;
+                while exp > 0 {
+                    if exp & 1 != 0 {
+                        result = result.wrapping_mul(base);
+                    }
+                    exp >>= 1;
+                    if exp > 0 {
+                        base = base.wrapping_mul(base);
+                    }
+                }
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::int(result);
+            }
+        }
+        Ok(())
+    }
     fn enrich_error(&self, msg: String) -> String {
         let mut e = msg;
         e.push_str("\nStack trace:");
@@ -3229,6 +3265,9 @@ impl VM {
             OpCode::IMod => {
                 self.step_imod(frame_idx, instr)?;
             }
+            OpCode::IPow => {
+                self.step_ipow(frame_idx, instr)?;
+            }
             OpCode::Xor => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize]
                     .as_int()
@@ -3342,6 +3381,15 @@ impl VM {
                     Value::nil()
                 };
             }
+            OpCode::FPow => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize]
+                    .as_float()
+                    .unwrap_or(0.0);
+                let b = self.frames[frame_idx].regs[instr.op2 as usize]
+                    .as_float()
+                    .unwrap_or(0.0);
+                self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(a.powf(b));
+            }
             OpCode::FMod => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize]
                     .as_float()
@@ -3361,7 +3409,6 @@ impl VM {
                     .unwrap_or(0.0);
                 self.frames[frame_idx].regs[instr.op3 as usize] = Value::float(-a);
             }
-
             // -- Comparison --
             OpCode::ICmpEq => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize];

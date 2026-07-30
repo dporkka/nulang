@@ -1187,6 +1187,8 @@ fn binary_opcode(op: &crate::ast::BinOp, is_float: bool) -> NuResult<OpCode> {
         (BinOp::Sub, true) => Ok(OpCode::FSub),
         (BinOp::Mul, false) => Ok(OpCode::IMul),
         (BinOp::Mul, true) => Ok(OpCode::FMul),
+        (BinOp::Pow, false) => Ok(OpCode::IPow),
+        (BinOp::Pow, true) => Ok(OpCode::FPow),
         (BinOp::Div, false) => Ok(OpCode::IDiv),
         (BinOp::Div, true) => Ok(OpCode::FDiv),
         (BinOp::Mod, false) => Ok(OpCode::IMod),
@@ -1257,6 +1259,7 @@ fn float_locals(func: &mir::Function) -> Vec<bool> {
                                 | crate::ast::BinOp::Mul
                                 | crate::ast::BinOp::Div
                                 | crate::ast::BinOp::Mod
+                                | crate::ast::BinOp::Pow
                         ) =>
                     {
                         is_float[l.0 as usize] || is_float[r.0 as usize]

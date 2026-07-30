@@ -54,6 +54,7 @@ pub enum OpCode {
     IToF = 0x36, // Int to Float conversion
     FToI = 0x37, // Float to Int (truncate)
     FToS = 0x38, // Float to String
+    FPow = 0x39, // Float power
 
     // == Comparison & Logic (0x40-0x4F) ==
     ICmpEq = 0x40, // Int compare ==
@@ -272,6 +273,7 @@ impl OpCode {
             0x37 => Some(FToI),
             0x38 => Some(FToS),
             0x40 => Some(ICmpEq),
+            0x39 => Some(FPow),
             0x41 => Some(ICmpLt),
             0x42 => Some(ICmpGt),
             0x43 => Some(ICmpLe),
@@ -788,7 +790,7 @@ mod tests {
         let known: Vec<u8> = (0x00..=0x08)
             .chain(0x10..=0x15)
             .chain(0x20..=0x2D)
-            .chain(0x30..=0x38)
+            .chain(0x30..=0x39)
             .chain(0x40..=0x4B)
             .chain(0x50..=0x57)
             .chain(0x60..=0x64)

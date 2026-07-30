@@ -8567,4 +8567,46 @@ match { a: 2, b: 9 } with {
             result.err()
         );
     }
+    // -----------------------------------------------------------------------
+    // Exponentiation operator (**)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pow_basic() {
+        assert_int("2 ** 10", 1024);
+    }
+
+    #[test]
+    fn test_pow_right_assoc() {
+        // 2 ** 3 ** 2 = 2 ** (3 ** 2) = 2 ** 9 = 512
+        assert_int("2 ** 3 ** 2", 512);
+    }
+
+    #[test]
+    fn test_pow_precedence_over_mul() {
+        // 2 * 3 ** 2 = 2 * (3 ** 2) = 2 * 9 = 18
+        assert_int("2 * 3 ** 2", 18);
+    }
+
+    #[test]
+    fn test_pow_zero_exp() {
+        assert_int("2 ** 0", 1);
+    }
+
+    #[test]
+    fn test_pow_zero_base_zero_exp() {
+        assert_int("0 ** 0", 1);
+    }
+
+    #[test]
+    fn test_pow_neg_exp_returns_nil() {
+        let result = run_source("2 ** -1");
+        assert!(result.is_ok(), "should compile: {:?}", result.err());
+        let (value, _ty) = result.unwrap();
+        assert!(
+            value.is_nil(),
+            "negative exponent should return nil, got {:?}",
+            value
+        );
+    }
 }

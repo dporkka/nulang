@@ -1873,7 +1873,7 @@ impl TypeChecker {
             }
 
             // Other arithmetic: numeric -> numeric
-            Sub | Mul | Div | Mod => {
+            Sub | Mul | Div | Mod | Pow => {
                 let (s1, left_ty) = self.infer_expr(ctx, left)?;
                 let ctx1 = apply_subst_to_ctx(ctx, &s1);
                 let (s2, right_ty) = self.infer_expr(&ctx1, right)?;

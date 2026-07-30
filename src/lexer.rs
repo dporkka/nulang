@@ -101,8 +101,9 @@ pub enum TokenKind {
     Plus,
     Minus,
     Star,
+    Star2,
     Slash,
-    Percent, // + - * / %
+    Percent, // + - * ** / %
     Eq,
     Ne,
     Lt,
@@ -242,6 +243,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Plus => write!(f, "+"),
             TokenKind::Minus => write!(f, "-"),
             TokenKind::Star => write!(f, "*"),
+            TokenKind::Star2 => write!(f, "**"),
             TokenKind::Slash => write!(f, "/"),
             TokenKind::Percent => write!(f, "%"),
             TokenKind::Eq => write!(f, "=="),
@@ -791,7 +793,13 @@ impl<'a> Lexer<'a> {
                     TokenKind::Minus
                 }
             }
-            b'*' => TokenKind::Star,
+            b'*' => {
+                if self.match_char(b'*') {
+                    TokenKind::Star2
+                } else {
+                    TokenKind::Star
+                }
+            }
             b'/' => TokenKind::Slash,
             b'%' => TokenKind::Percent,
             b'=' => {

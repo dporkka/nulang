@@ -28,6 +28,7 @@ const PREC_SHIFT: u8 = 9; // << >>
 const PREC_BITAND: u8 = 10; // &
 const PREC_BITXOR: u8 = 11; // ^
 const PREC_BITOR: u8 = 12; // |
+const PREC_EXP: u8 = 13; // ** (power, right-associative, tighter than unary -)
 const PREC_PREFIX: u8 = 10; // ! - & (prefix)
 
 fn prefix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
@@ -52,6 +53,7 @@ fn infix_precedence(op: &TokenKind) -> Option<(u8, bool)> {
         TokenKind::Shl | TokenKind::Shr => (PREC_SHIFT, false),
         TokenKind::Ampersand => (PREC_BITAND, false),
         TokenKind::Caret => (PREC_BITXOR, false),
+        TokenKind::Star2 => (PREC_EXP, true), // right-associative power
         TokenKind::Pipe3 => (PREC_BITOR, false),
         // NOTE: single `|` is intentionally omitted. It is used as a match-arm
         // separator and function-type delimiter, so bitwise OR uses `|||`.
@@ -4318,6 +4320,7 @@ fn token_to_binop(kind: &TokenKind) -> Option<BinOp> {
     match kind {
         TokenKind::Plus => Some(BinOp::Add),
         TokenKind::Minus => Some(BinOp::Sub),
+        TokenKind::Star2 => Some(BinOp::Pow),
         TokenKind::Star => Some(BinOp::Mul),
         TokenKind::Slash => Some(BinOp::Div),
         TokenKind::Percent => Some(BinOp::Mod),

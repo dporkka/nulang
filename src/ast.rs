@@ -251,6 +251,7 @@ pub enum BinOp {
     BitXor,
     Shl,
     Shr,
+    Pow,
     Assign,
     Pipe,
 }

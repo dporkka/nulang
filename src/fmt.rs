@@ -309,6 +309,7 @@ fn op_sym(op: BinOp) -> &'static str {
         BinOp::Mul => "*",
         BinOp::Div => "/",
         BinOp::Mod => "%",
+        BinOp::Pow => "**",
         BinOp::Eq => "==",
         BinOp::Ne => "!=",
         BinOp::Lt => "<",
