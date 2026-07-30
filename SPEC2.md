@@ -38,6 +38,7 @@ This document is the design target for Nulang 2.0. The implementation in this re
 
 **Implemented and verified against the source tree:**
 
+- Triple-quoted multi-line strings (`\"\"\"...\"\"\"`) and `\u{...}` unicode escapes: standard escapes processed inside triple-quoted strings; interpolation not supported inside them; surrogate/out-of-range code points rejected with a `LexError` — `src/lexer.rs`. (Stable)
 - The core expression language: literals (`Int`, `Float`, `String`, `Bool`, `Unit`, `Nil`), `let` / `let rec` bindings with `in`, `fn` lambdas, tuples, records, arrays, `if`/`then`/`else`, `match` (wildcard, variable, literal, tuple, record, variant, and `@` alias patterns), blocks, the pipe operator `|>`, and the operator set of Chapter 2.
 - Top-level declarations: `fn` (with `[T]` type parameters, `->` return types, `!` effect rows, `: cap` capability annotations, and `@tool` annotations), `type` (alias, record, and variant forms), `effect`, `actor` / `persistent actor`, `entity`, `organization`, `agent`, `workflow`, `module`, `import`, and `extern` FFI blocks.
 - Hindley-Milner type inference (Algorithm W) over tuples, records, variants, arrays, function types carrying effect rows and capabilities, and `&cap T` reference types.
@@ -79,8 +80,7 @@ This document is the design target for Nulang 2.0. The implementation in this re
 **Planned (described in this specification, not implemented):**
 
 - The WebAssembly compilation target (Chapter 13): WASM compilation exists behind the `wasm-backend` feature flag via `--backend wasm|wasm-run|wasm-aot`. WIT interface generation and WASI worlds are not yet implemented.
-- Higher-kinded types, `Char` and `Decimal` primitives, character literals,
-  multi-line strings, and `\u{...}` escapes (Sections 2.4, 3.6).
+- Higher-kinded types, `Char` and `Decimal` primitives, character literals (Sections 2.4, 3.6).
 - `var` bindings, `consume` / `recover` expressions, record-update syntax
   `{ r .. f = v }`, ranges, `<-` message syntax, and
   indentation-based layout (Section 2.8).

@@ -194,6 +194,7 @@ in this version; they are recorded here to establish their tier.
   directory and general `::` paths to filesystem-relative module files.
 
 ### Added since 1.0.0-frozen — 2026-07-30
+- **Triple-quoted strings and `\u{...}` escapes.** Triple-quoted multi-line strings (`\"\"\"...\"\"\"`) and `\u{...}` unicode escape sequences implemented. Triple-quoted strings support standard escapes; interpolation is unsupported. Surrogate and out-of-range code points are rejected with a `LexError`. Implementation: `src/lexer.rs`. (Stable)
 
 - **`**` exponentiation operator.** Right-associative, precedence above `*`
   (Pratt level 13), tokenized as `Star2`. Wired through the full pipeline:
