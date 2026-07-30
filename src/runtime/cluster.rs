@@ -225,6 +225,10 @@ pub struct ClusterState {
     /// Timestamp of last heartbeat we sent.
     last_heartbeat_sent: Instant,
 
+    /// Optional virtual clock for deterministic testing.
+    /// When set, all time queries use this clock instead of wall time.
+    clock: Option<super::timer::VirtualClock>,
+
     /// Callback for membership change notifications.
     on_member_joined: Option<Box<dyn Fn(NodeId, SocketAddr) + Send>>,
     on_member_left: Option<Box<dyn Fn(NodeId) + Send>>,
@@ -253,16 +257,31 @@ impl ClusterState {
         ClusterState {
             local_node,
             members,
+            clock: None,
             failed_nodes: HashMap::new(),
+            on_member_joined: None,
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
             suspicion_duration: DEFAULT_SUSPICION_DURATION,
             incarnation: 1,
             last_heartbeat_sent: now,
-            on_member_joined: None,
             on_member_left: None,
             on_member_failed: None,
         }
+    }
+
+    /// Current time, using the virtual clock if one is configured.
+    fn now(&self) -> Instant {
+        match &self.clock {
+            Some(clock) => clock.now(),
+            None => Instant::now(),
+        }
+    }
+
+    /// Install a virtual clock for deterministic testing.
+    /// When set, all time queries use this clock instead of wall time.
+    pub fn set_clock(&mut self, clock: super::timer::VirtualClock) {
+        self.clock = Some(clock);
     }
 
     /// Join an existing cluster by contacting a seed node.
@@ -304,7 +323,7 @@ impl ClusterState {
     /// If the node was not previously known, it is added to the
     /// membership table.
     pub fn handle_heartbeat(&mut self, from: NodeId, addr: SocketAddr) {
-        let now = Instant::now();
+        let now = self.now();
 
         match self.members.get_mut(&from) {
             Some(info) => {
@@ -350,7 +369,7 @@ impl ClusterState {
     /// 3. Cleans up old failed nodes.
     /// 4. Returns a list of actions for the runtime to execute.
     pub fn tick(&mut self) -> Vec<ClusterAction> {
-        let now = Instant::now();
+        let now = self.now();
         let mut actions = Vec::new();
 
         // ------------------------------------------------------------------
@@ -528,6 +547,7 @@ impl ClusterState {
     pub fn merge_membership(&mut self, gossip: Vec<NodeGossip>) -> bool {
         let mut changed = false;
 
+        let now = self.now();
         for entry in gossip {
             // Never overwrite local node info from gossip.
             if entry.node_id == self.local_node {
@@ -550,7 +570,7 @@ impl ClusterState {
                     // the timestamp via `handle_heartbeat`.)
                     if entry.incarnation > stored_incarnation {
                         let old_status = existing.status;
-                        existing.last_heartbeat = Instant::now();
+                        existing.last_heartbeat = now;
                         existing.status = entry.status;
                         existing.address = entry.address;
                         existing
@@ -560,7 +580,7 @@ impl ClusterState {
                         if old_status != entry.status {
                             changed = true;
                             if entry.status == NodeStatus::Failed {
-                                self.failed_nodes.insert(entry.node_id, Instant::now());
+                                self.failed_nodes.insert(entry.node_id, now);
                             }
                         }
                     }
@@ -569,7 +589,7 @@ impl ClusterState {
                     // New node learned from gossip.
                     let mut info = NodeInfo::new(entry.node_id, entry.address);
                     info.status = entry.status;
-                    info.last_heartbeat = Instant::now();
+                    info.last_heartbeat = now;
                     info.metadata
                         .insert("_incarnation".to_string(), entry.incarnation.to_string());
                     self.members.insert(entry.node_id, info);

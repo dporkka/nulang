@@ -302,6 +302,11 @@ pub struct Runtime {
     /// Defaults to [`crate::backends::DefaultCryptoProvider`].
     pub crypto: Box<dyn crate::backends::CryptoProvider>,
 
+    /// HTTP provider for outbound requests (health checks, webhooks, etc.).
+    /// Defaults to [`crate::backends::ReqwestHttpProvider`].
+    #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
+    pub http: Box<dyn crate::backends::HttpProvider>,
+
     // -- Multi-threaded scheduler sharding --
     /// This shard's index (0-based). Always 0 for a single-shard runtime.
     pub shard_idx: u16,
@@ -353,11 +358,13 @@ impl Runtime {
             recovery_modules: HashMap::new(),
             ai: ai_registry::AiRuntimeRegistry::new(),
             supervisor_teams: SupervisorTeamRegistry::new(),
+            crypto: Box::new(crate::backends::DefaultCryptoProvider::new()),
+            #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
             spawnable_behaviors: HashMap::new(),
+            http: Box::new(crate::backends::ReqwestHttpProvider::new()),
             pending_spawn_responses: HashMap::new(),
             dlq_actor_id: None,
             http_server: None,
-            crypto: Box::new(crate::backends::DefaultCryptoProvider::new()),
             test_handlers: HashMap::new(),
             shard_idx: 0,
             shard_count: 1,
@@ -374,6 +381,20 @@ impl Runtime {
     /// Fill `buf` with cryptographically secure random bytes.
     pub fn random_bytes(&self, buf: &mut [u8]) {
         self.crypto.random_bytes(buf)
+    }
+
+    /// Make an HTTP POST request with a JSON body.
+    /// Delegates to the configured [`HttpProvider`](crate::backends::HttpProvider).
+    #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
+    pub fn http_post_json(&self, url: &str, body: &str) -> Result<String, String> {
+        self.http.post_json(url, body)
+    }
+
+    /// Make an HTTP GET request.
+    /// Delegates to the configured [`HttpProvider`](crate::backends::HttpProvider).
+    #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
+    pub fn http_get(&self, url: &str) -> Result<String, String> {
+        self.http.get(url)
     }
 
     /// Create a shard Runtime. Private — use [`Runtime::new_sharded`] to

@@ -8928,4 +8928,62 @@ match { a: 2, b: 9 } with {
             1,
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Tuple field access: positional field access with numeric indices (t.0, t.1, ...)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tuple_field_access_basic() {
+        assert_int("let t = (1, 2, 3) in t.0 + t.1 + t.2", 6);
+    }
+
+    #[test]
+    fn test_tuple_field_access_single() {
+        assert_int("let t = (42,) in t.0", 42);
+    }
+
+    #[test]
+    fn test_tuple_field_access_nested() {
+        // Direct chained access now works (no parens needed).
+        assert_int("let t = ((1, 2), 3) in t.0.0 + t.0.1 + t.1", 6);
+    }
+
+    #[test]
+    fn test_tuple_field_access_nested_chain() {
+        // Deeply nested tuple chain.
+        assert_int("let t = (((10, 20), 30), 40) in t.0.0.1", 20);
+    }
+
+    #[test]
+    fn test_tuple_field_access_out_of_range() {
+        // Out-of-range index produces a type error.
+        let err = run_source("let t = (1, 2) in t.5").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("out of range"),
+            "expected 'out of range' error, got: {}",
+            msg
+        );
+    }
+    #[test]
+    fn test_tuple_field_access_string_concat() {
+        // String tuple elements load correctly.
+        assert_string("let t = (\"a\", \"b\") in t.0 + t.1", "ab");
+    }
+    #[test]
+    fn test_tuple_field_access_expression() {
+        // Call a function that returns a tuple, then access its fields
+        assert_int(
+            "let f = fn(x) (x, x + 1, x + 2) in f(10).0 + f(10).1 + f(10).2",
+            33,
+        );
+    }
+
+    #[test]
+    fn test_tuple_field_access_record_and_tuple() {
+        // Record field access still works alongside tuple field access
+        assert_int("let r = { x: 1, y: 2 } in r.x + r.y", 3);
+        assert_int("let t = (10, 20) in t.0 + t.1", 30);
+    }
 }

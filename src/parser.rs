@@ -1946,20 +1946,52 @@ impl Parser {
             }
 
             if self.consume_if(&TokenKind::Dot) {
-                // Field access: expr.field or expr.0
-                let field = match self.peek_kind().clone() {
+                // Field access: expr.field, expr.0, expr.0.1
+                let span_start = self.current_span();
+                match self.peek_kind().clone() {
                     TokenKind::IntLit(n) => {
                         self.advance();
-                        format!("{}", n)
+                        left = Expr::FieldAccess {
+                            expr: Box::new(left),
+                            field: format!("{}", n),
+                            span: span_start,
+                        };
                     }
-                    _ => self.expect_ident("field name")?,
-                };
-                let span = self.current_span();
-                left = Expr::FieldAccess {
-                    expr: Box::new(left),
-                    field,
-                    span,
-                };
+                    TokenKind::FloatLit(_v) => {
+                        // For chained tuple access like p.0.1 or p.0.0,
+                        // the lexer produces e.g. 0.1 or 0.0 as a single
+                        // float token.  Advance and use the token span to
+                        // recover the original source text (format!("{}")
+                        // drops trailing zeros, losing the distinction
+                        // between 0.0 and 0).
+                        let tok = self.advance_token();
+                        let source_text =
+                            crate::types::source_slice_for_span(tok.span).unwrap_or_default();
+                        let parts: Vec<&str> = source_text.split('.').collect();
+                        if let Some((first, rest)) = parts.split_first() {
+                            left = Expr::FieldAccess {
+                                expr: Box::new(left),
+                                field: first.to_string(),
+                                span: span_start,
+                            };
+                            for part in rest {
+                                left = Expr::FieldAccess {
+                                    expr: Box::new(left),
+                                    field: part.to_string(),
+                                    span: span_start,
+                                };
+                            }
+                        }
+                    }
+                    _ => {
+                        let field = self.expect_ident("field name")?;
+                        left = Expr::FieldAccess {
+                            expr: Box::new(left),
+                            field,
+                            span: span_start,
+                        };
+                    }
+                }
                 continue;
             }
 

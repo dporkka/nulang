@@ -929,6 +929,18 @@ pub fn clear_source_map() {
     });
 }
 
+/// Return the source text for a byte-offset span using the thread-local
+/// SourceMap, if one is installed. Returns `None` when no SourceMap is set
+/// (e.g. in synthetic contexts) or the span extends beyond the source.
+pub fn source_slice_for_span(span: Span) -> Option<String> {
+    SOURCE_MAP.with(|slot| {
+        slot.borrow().as_ref().and_then(|sm| {
+            sm.source_slice(span.start, span.end.saturating_sub(span.start))
+                .map(|s| s.to_string())
+        })
+    })
+}
+
 /// Compact source span — just byte offsets.  Line/column are resolved on
 /// demand via the thread-local SourceMap (set by the lexer or test harness).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

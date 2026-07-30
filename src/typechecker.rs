@@ -2303,6 +2303,33 @@ impl TypeChecker {
                 let available: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
                 Err(NuError::field_not_found(field, span, Some(available)))
             }
+            Type::Tuple(ref elems) => {
+                // Numeric field access on a tuple: t.0, t.1, etc.
+                if let Ok(idx) = field.parse::<usize>() {
+                    if idx < elems.len() {
+                        return Ok((s1, elems[idx].clone()));
+                    }
+                    return Err(NuError::TypeError {
+                        msg: format!(
+                            "tuple index {} out of range for tuple of length {}",
+                            idx,
+                            elems.len()
+                        ),
+                        span,
+                        expected_type: None,
+                        found_type: None,
+                        similar_names: None,
+                    });
+                }
+                // Tuple with non-numeric field access: error.
+                Err(NuError::TypeError {
+                    msg: format!("tuple type does not have field '{}'", field),
+                    span,
+                    expected_type: None,
+                    found_type: None,
+                    similar_names: None,
+                })
+            }
             _ => {
                 // Typeclass method resolution: if the receiver type is
                 // concrete and there is a matching instance for a class

@@ -1115,13 +1115,19 @@ impl<'c> FnLowerer<'c> {
             }
             hir::RValue::FieldAccess { base, field, .. } => {
                 let obj = self.lower_operand(base)?;
-                self.b.assign(
-                    dst,
-                    mir::RValue::LoadFieldNamed {
-                        obj,
-                        field: field.clone(),
-                    },
-                );
+                // Numeric field access (t.0, t.1) → positional tuple load.
+                // Non-numeric (r.x) → named record field load.
+                if let Ok(index) = field.parse::<u8>() {
+                    self.b.assign(dst, mir::RValue::LoadFieldPos { obj, index });
+                } else {
+                    self.b.assign(
+                        dst,
+                        mir::RValue::LoadFieldNamed {
+                            obj,
+                            field: field.clone(),
+                        },
+                    );
+                }
                 Ok(())
             }
             hir::RValue::Index { base, idx, .. } => {
