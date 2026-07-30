@@ -1489,14 +1489,30 @@ impl TypeChecker {
                 let ctx1 = apply_subst_to_ctx(ctx, &s1);
                 let (s2, value_ty) = self.infer_expr(&ctx1, value)?;
                 // Unify target (should be a reference) with value
-                let s3 = mgu(
-                    &apply_subst(&target_ty, &compose_subst(&s2, &s1)),
-                    &Type::Reference {
-                        cap: Capability::Ref,
-                        inner: Box::new(apply_subst(&value_ty, &s2)),
-                    },
-                    *span,
-                )?;
+                let target_ty_resolved = apply_subst(&target_ty, &compose_subst(&s2, &s1));
+                let expected_ref = Type::Reference {
+                    cap: Capability::Ref,
+                    inner: Box::new(apply_subst(&value_ty, &s2)),
+                };
+                let s3 = match mgu(&target_ty_resolved, &expected_ref, *span) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        // Produce a clearer error for simple variable assignments
+                        if let Expr::Var(name, _) = target.as_ref() {
+                            return Err(NuError::type_error(
+                                format!(
+                                    "cannot assign to immutable binding `{}`; \
+                                     mutable locals (`var`) are not yet supported. \
+                                     Use `let {} = <new value> in ...` to shadow the binding.",
+                                    name, name
+                                ),
+                                *span,
+                            ));
+                        }
+                        // For field access, deref, etc., re-run mgu for its error
+                        return Err(mgu(&target_ty_resolved, &expected_ref, *span).unwrap_err());
+                    }
+                };
                 let final_subst = compose_subst(&s3, &compose_subst(&s2, &s1));
                 Ok((final_subst, Type::unit()))
             }

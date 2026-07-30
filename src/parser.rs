@@ -2267,6 +2267,7 @@ impl Parser {
                     TokenKind::Spawn => self.parse_spawn(),
                     TokenKind::Send => self.parse_send_keyword(),
                     TokenKind::Ask => self.parse_ask(),
+                    TokenKind::Catch => self.parse_catch_prefix(),
                     TokenKind::Perform => self.parse_perform(),
                     TokenKind::Handle => self.parse_handle(),
                     TokenKind::Emit => self.parse_emit(),
@@ -3335,6 +3336,72 @@ impl Parser {
             handlers,
             span,
         })
+    }
+
+    /// Prefix catch: `catch expr fallback` or `catch expr { | pat => body, ... }`
+    /// Desugars identically to postfix: `expr catch fallback`
+    fn parse_catch_prefix(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.advance(); // consume 'catch'
+        let expr = self.parse_expr()?;
+        if self.consume_if(&TokenKind::LBrace) {
+            // Block form: catch expr { | pat => body, ... }
+            let mut arms = Vec::new();
+            let x = "__catch_x".to_string();
+            // Ok arm: unwrap the success value
+            arms.push((
+                Pattern::Variant("Ok".to_string(), Some(Box::new(Pattern::Var(x.clone())))),
+                None,
+                Expr::Var(x, span),
+            ));
+            // Parse user-provided Error arms
+            self.skip_newlines();
+            while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                self.skip_newlines();
+                if self.match_token(&TokenKind::RBrace) {
+                    break;
+                }
+                self.consume_if(&TokenKind::Pipe);
+                self.skip_newlines();
+                let pat = self.parse_pattern()?;
+                let guard = if self.consume_if(&TokenKind::If) {
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                self.expect(TokenKind::FatArrow)?;
+                let body = self.parse_expr()?;
+                arms.push((pat, guard, body));
+                self.skip_newlines_semicolons();
+                self.consume_if(&TokenKind::Comma);
+            }
+            self.expect(TokenKind::RBrace)?;
+            Ok(Expr::Match {
+                scrutinee: Box::new(expr),
+                arms,
+                span,
+            })
+        } else {
+            // Bare form: catch expr fallback_expr
+            let fallback = self.parse_expr()?;
+            let x = "__catch_x".to_string();
+            Ok(Expr::Match {
+                scrutinee: Box::new(expr),
+                arms: vec![
+                    (
+                        Pattern::Variant("Ok".to_string(), Some(Box::new(Pattern::Var(x.clone())))),
+                        None,
+                        Expr::Var(x, span),
+                    ),
+                    (
+                        Pattern::Variant("Error".to_string(), Some(Box::new(Pattern::Wild))),
+                        None,
+                        fallback,
+                    ),
+                ],
+                span,
+            })
+        }
     }
 
     fn parse_receive(&mut self) -> NuResult<Expr> {
