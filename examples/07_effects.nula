@@ -1,0 +1,47 @@
+// 07_effects.nula - Algebraic effects
+// Demonstrates: perform, handle, effect composition, IO effects,
+//               string and int conversion effects
+//
+// Run: nulang examples/07_effects.nula
+
+// Basic effect handling: intercept a performed effect and return a value
+let answer = handle perform Math.getAnswer() with {
+    | Math.getAnswer() => 42
+}
+perform IO.print("The answer is " + perform Int.to_string(answer))
+
+// Handler with computed value
+let computed = handle perform Math.getAnswer() with {
+    | Math.getAnswer() => 6 * 7
+}
+perform IO.print("Computed answer: " + perform Int.to_string(computed))
+
+// Effect that returns a string
+let greeting = handle perform Math.getGreeting() with {
+    | Math.getGreeting() => "Hello from effects!"
+}
+perform IO.print(greeting)
+
+// Multiple performs in a block, single handler
+let result = handle {
+    let a = perform Math.getAnswer()
+    let b = perform Math.getAnswer()
+    a + b
+} with {
+    | Math.getAnswer() => 10
+}
+perform IO.print("Double answer: " + perform Int.to_string(result))
+
+// Built-in effects: IO.print works without explicit handler
+perform IO.print("IO.print is a built-in effect!")
+
+// String effects
+let len = perform String.length("Nulang")
+perform IO.print("Length of Nulang: " + perform Int.to_string(len))
+
+let ch = perform String.charAt("Nulang", 0)
+perform IO.print("First char code: " + perform Int.to_string(ch))
+
+// Int.to_string: convert int to string
+let s = perform Int.to_string(2024)
+perform IO.print("The year is " + s)

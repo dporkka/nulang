@@ -1,0 +1,42 @@
+// 05_records.nula - Records and nested data
+// Demonstrates: record construction, field access, nested records,
+//               record mutation, and functions over records
+//
+// Run: nulang examples/05_records.nula
+
+// Record construction and field access
+let point = { x: 3, y: 4 }
+perform IO.print("point.x = " + perform Int.to_string(point.x))
+perform IO.print("point.y = " + perform Int.to_string(point.y))
+
+// Computed from fields
+let dist = point.x + point.y
+perform IO.print("dist = " + perform Int.to_string(dist))
+
+// Record field mutation
+let counter = { value: 0 }
+counter.value = counter.value + 10
+perform IO.print("counter = " + perform Int.to_string(counter.value))
+
+// Nested records
+let rect = { pos: { x: 10, y: 20 }, w: 30, h: 40 }
+perform IO.print("rect.pos.x = " + perform Int.to_string(rect.pos.x))
+perform IO.print("rect.w = " + perform Int.to_string(rect.w))
+perform IO.print("rect.h = " + perform Int.to_string(rect.h))
+
+// Nested mutation
+rect.pos.x = 100
+perform IO.print("rect.pos.x after mutation = " + perform Int.to_string(rect.pos.x))
+
+// Function returning a record
+let make_person = fn(name, age) {
+    { name: name, age: age }
+}
+let alice = make_person("Alice", 30)
+perform IO.print(alice.name + " is " + perform Int.to_string(alice.age))
+
+// Record as function parameter
+let describe = fn(person) {
+    person.name + ", age " + perform Int.to_string(person.age)
+}
+perform IO.print(describe(alice))

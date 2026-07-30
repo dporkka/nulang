@@ -1,0 +1,56 @@
+// 10_pipe.nula - Pipe operator for data transformation
+// Demonstrates: |> chaining with named functions and closures,
+//               composing transformations, string processing
+//
+// Run: nulang examples/10_pipe.nula
+
+// Pipeline stages as named functions
+let double = fn(n) { n * 2 }
+let add_ten = fn(n) { n + 10 }
+let square = fn(n) { n * n }
+let is_even = fn(n) { n % 2 == 0 }
+
+// Arithmetic pipeline
+let result = 5
+    |> double
+    |> add_ten
+    |> double
+perform IO.print("5 |> double |> +10 |> double = " + perform Int.to_string(result))
+
+// Longer pipeline
+let result2 = 3
+    |> square
+    |> add_ten
+    |> double
+    |> square
+perform IO.print("3 |> sq |> +10 |> double |> sq = " + perform Int.to_string(result2))
+
+// Boolean pipeline
+let flag = 42 |> double |> is_even
+perform IO.print("42 |> double |> even = " + perform Int.to_string(if flag then 1 else 0))
+
+// String processing pipeline
+let shout = fn(s) { s + "!" }
+let greet = fn(name) { "Hello, " + name }
+
+let message = "Nulang"
+    |> greet
+    |> shout
+perform IO.print(message)
+
+// Anonymous closures in a pipeline
+let v = 41 |> fn(n) { n + 1 }
+perform IO.print("41 |> inc = " + perform Int.to_string(v))
+
+// Multi-step with closures
+let w = 2
+    |> fn(n) { n * 3 }
+    |> fn(n) { n * n }
+perform IO.print("2 |> *3 |> sq = " + perform Int.to_string(w))
+
+// Pipeline that converts and formats
+let output = 42
+    |> double
+    |> fn(n) { perform Int.to_string(n) }
+    |> fn(s) { "Result: " + s }
+perform IO.print(output)

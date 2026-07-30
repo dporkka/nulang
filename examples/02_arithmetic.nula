@@ -1,0 +1,44 @@
+// 02_arithmetic.nula - Values, bindings, and operators
+// Demonstrates: let, arithmetic, comparisons, booleans, strings
+//
+// Run: nulang examples/02_arithmetic.nula
+
+// Integer arithmetic
+let a = 40 + 2
+let b = 10 - 3
+let c = 6 * 7
+let d = 84 / 2
+let e = 85 % 42
+
+perform IO.print("42 = " + perform Int.to_string(a))
+perform IO.print("10-3 = " + perform Int.to_string(b))
+perform IO.print("6*7 = " + perform Int.to_string(c))
+perform IO.print("84/2 = " + perform Int.to_string(d))
+perform IO.print("85%42 = " + perform Int.to_string(e))
+
+// Comparisons
+let eq = 5 == 5
+let neq = 5 != 3
+let lt = 3 < 5
+let gt = 10 > 5
+
+perform IO.print("5==5: " + perform Int.to_string(if eq then 1 else 0))
+perform IO.print("5!=3: " + perform Int.to_string(if neq then 1 else 0))
+perform IO.print("3<5: " + perform Int.to_string(if lt then 1 else 0))
+perform IO.print("10>5: " + perform Int.to_string(if gt then 1 else 0))
+
+// Booleans
+let t = true
+let f = false
+perform IO.print("true and false: " + perform Int.to_string(if t and f then 1 else 0))
+perform IO.print("true or false: " + perform Int.to_string(if t or f then 1 else 0))
+perform IO.print("not false: " + perform Int.to_string(if not f then 1 else 0))
+
+// Strings
+let greeting = "Hello"
+let target = "Nulang"
+perform IO.print(greeting + ", " + target + "!")
+
+// Type annotations
+let pi: Int = 3
+perform IO.print("pi ~ " + perform Int.to_string(pi))

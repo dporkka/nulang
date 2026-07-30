@@ -1,0 +1,85 @@
+// 04_pattern_match.nula - Pattern matching
+// Demonstrates: match on literals, variables, wildcards, guards,
+//               variants, tuples, and record patterns
+//
+// Run: nulang examples/04_pattern_match.nula
+
+// Custom option type
+type Option[T] = Some(T) | None
+type Color = Red | Green | Blue
+
+// Literal matching
+let describe_int = fn(n) {
+    match n with {
+        | 0 => "zero"
+        | 1 => "one"
+        | 2 => "two"
+        | n => "other: " + perform Int.to_string(n)
+    }
+}
+perform IO.print(describe_int(0))
+perform IO.print(describe_int(2))
+perform IO.print(describe_int(42))
+
+// Variant matching with payload binding
+let unwrap_or = fn(opt, default) {
+    match opt with {
+        | Some(x) => x
+        | None => default
+    }
+}
+perform IO.print(perform Int.to_string(unwrap_or(Some(42), 0)))
+perform IO.print(perform Int.to_string(unwrap_or(None, 99)))
+
+// Guards
+let classify = fn(n) {
+    match n with {
+        | x if x < 0 => "negative"
+        | x if x == 0 => "zero"
+        | x if x < 10 => "small"
+        | _ => "large"
+    }
+}
+perform IO.print(classify(-5))
+perform IO.print(classify(0))
+perform IO.print(classify(7))
+perform IO.print(classify(100))
+
+// Tuple matching
+let sum_tuple = fn(t) {
+    match t with {
+        | (x, y) => x + y
+    }
+}
+perform IO.print("sum(1,2) = " + perform Int.to_string(sum_tuple((1, 2))))
+perform IO.print("sum(10,20) = " + perform Int.to_string(sum_tuple((10, 20))))
+
+// Record pattern matching
+let area = fn(rect) {
+    match rect with {
+        | { w: width, h: height } => width * height
+    }
+}
+let r = { x: 0, y: 0, w: 10, h: 5 }
+perform IO.print("area = " + perform Int.to_string(area(r)))
+
+// Enum matching
+let color_code = fn(c) {
+    match c with {
+        | Red => 1
+        | Green => 2
+        | Blue => 3
+    }
+}
+perform IO.print("Red = " + perform Int.to_string(color_code(Red)))
+perform IO.print("Blue = " + perform Int.to_string(color_code(Blue)))
+
+// Alias patterns
+let inspect = fn(opt) {
+    match opt with {
+        | s @ Some(x) => "Some(" + perform Int.to_string(x) + ")"
+        | None => "None"
+    }
+}
+perform IO.print(inspect(Some(7)))
+perform IO.print(inspect(None))

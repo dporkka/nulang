@@ -1,0 +1,63 @@
+// 11_arrays.nula - Array literals, indexing, and manipulation
+// Demonstrates: array creation, element access, mutation,
+//               array-based algorithms with mutable state
+//
+// Run: nulang examples/11_arrays.nula
+
+// Array literals and indexing
+let primes = [2, 3, 5, 7, 11]
+perform IO.print("primes[0] = " + perform Int.to_string(primes[0]))
+perform IO.print("primes[2] = " + perform Int.to_string(primes[2]))
+perform IO.print("primes[4] = " + perform Int.to_string(primes[4]))
+
+// Iterate with for loop
+perform IO.print("All primes:")
+for p in primes {
+    perform IO.print("  " + perform Int.to_string(p))
+}
+
+// Sum array with while loop (using array for mutable counter and total)
+let sum_array = fn(arr, n) {
+    let st = [0, 0]
+    while st[0] < n {
+        st[1] = st[1] + arr[st[0]]
+        st[0] = st[0] + 1
+    }
+    st[1]
+}
+perform IO.print("Sum of primes: " + perform Int.to_string(sum_array(primes, 5)))
+
+// Find max in array
+let find_max = fn(arr, n) {
+    let st = [1, arr[0]]
+    while st[0] < n {
+        if arr[st[0]] > st[1] then st[1] = arr[st[0]] else unit
+        st[0] = st[0] + 1
+    }
+    st[1]
+}
+let nums = [42, 17, 93, 8, 56]
+perform IO.print("Max of [42,17,93,8,56]: " + perform Int.to_string(find_max(nums, 5)))
+
+// Array element mutation
+let mutable_nums = [1, 2, 3, 4, 5]
+mutable_nums[0] = 99
+perform IO.print("After [0]=99: " + perform Int.to_string(mutable_nums[0]))
+
+// Array of strings
+let names = ["Alice", "Bob", "Carol"]
+perform IO.print("Second name: " + names[1])
+
+// Boolean array
+let flags = [true, false, true]
+perform IO.print("flags[0] = " + perform Int.to_string(if flags[0] then 1 else 0))
+perform IO.print("flags[1] = " + perform Int.to_string(if flags[1] then 1 else 0))
+
+// Build squares array
+let squares = [0, 0, 0, 0, 0]
+let si = [0]
+while si[0] < 5 {
+    squares[si[0]] = si[0] * si[0]
+    si[0] = si[0] + 1
+}
+perform IO.print("Squares: " + perform Int.to_string(squares[0]) + "," + perform Int.to_string(squares[1]) + "," + perform Int.to_string(squares[2]) + "," + perform Int.to_string(squares[3]) + "," + perform Int.to_string(squares[4]))

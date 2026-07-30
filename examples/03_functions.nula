@@ -1,0 +1,40 @@
+// 03_functions.nula - Functions, closures, and recursion
+// Demonstrates: fn, let rec, multi-arg closures, blocks
+//
+// Run: nulang examples/03_functions.nula
+
+// Simple closure
+let greet = fn(name) {
+    "Hello, " + name + "!"
+}
+perform IO.print(greet("Alice"))
+
+// Multi-argument closure
+let add = fn(x, y) { x + y }
+let multiply = fn(x, y) { x * y }
+
+let sum = add(40, 2)
+let product = multiply(6, 7)
+perform IO.print("40 + 2 = " + perform Int.to_string(sum))
+perform IO.print("6 * 7 = " + perform Int.to_string(product))
+
+// Block expression returning a value
+let result = {
+    let a = 10
+    let b = 20
+    a + b
+}
+perform IO.print("Block result: " + perform Int.to_string(result))
+
+// Recursive closure with let rec
+let rec factorial = fn(n) {
+    if n <= 1 then 1 else n * factorial(n - 1)
+}
+perform IO.print("5! = " + perform Int.to_string(factorial(5)))
+perform IO.print("10! = " + perform Int.to_string(factorial(10)))
+
+// Recursive Fibonacci
+let rec fib = fn(n) {
+    if n <= 1 then n else fib(n - 1) + fib(n - 2)
+}
+perform IO.print("fib(10) = " + perform Int.to_string(fib(10)))

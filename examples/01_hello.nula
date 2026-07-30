@@ -1,0 +1,12 @@
+// 01_hello.nula - Your first Nulang program
+// Demonstrates: IO.print, string literals, basic expressions
+//
+// Run: nulang examples/01_hello.nula
+
+perform IO.print("Hello, Nulang!")
+
+let name = "World"
+perform IO.print("Hello, " + name + "!")
+
+let answer = 42
+perform IO.print("The answer is " + perform Int.to_string(answer))

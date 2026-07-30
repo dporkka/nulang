@@ -1,0 +1,74 @@
+// 08_actors.nula - Actors: spawn, send, and behaviors
+// Demonstrates: actor declaration, state, behaviors, spawn,
+//               message passing with !, actors printing from behaviors
+//
+// Run: nulang examples/08_actors.nula
+
+// A counter actor that tracks and displays its count
+actor Counter {
+    state count: Int = 0
+
+    behavior increment(by: Int) {
+        self.count = self.count + by
+    }
+
+    behavior show() {
+        perform IO.print("  Counter value: " + perform Int.to_string(self.count))
+    }
+}
+
+// A greeter actor with configurable greeting and name
+actor Greeter {
+    state greeting: String = "Hello"
+    state name: String = "World"
+
+    behavior set_greeting(g: String) {
+        self.greeting = g
+    }
+
+    behavior set_name(n: String) {
+        self.name = n
+    }
+
+    behavior greet() {
+        perform IO.print("  " + self.greeting + ", " + self.name + "!")
+    }
+}
+
+// A calculator actor that prints results
+actor Calculator {
+    state last: Int = 0
+
+    behavior add(x: Int, y: Int) {
+        let result = x + y
+        self.last = result
+        perform IO.print("  " + perform Int.to_string(x) + " + " + perform Int.to_string(y) + " = " + perform Int.to_string(result))
+    }
+
+    behavior multiply(x: Int, y: Int) {
+        let result = x * y
+        self.last = result
+        perform IO.print("  " + perform Int.to_string(x) + " * " + perform Int.to_string(y) + " = " + perform Int.to_string(result))
+    }
+}
+
+fn main() {
+    perform IO.print("Counter actor:")
+    let counter = spawn Counter {}
+    counter ! increment(5)
+    counter ! increment(3)
+    counter ! show()
+
+    perform IO.print("Greeter actor:")
+    let greeter = spawn Greeter {}
+    greeter ! greet()
+    greeter ! set_name("Actor System")
+    greeter ! greet()
+
+    perform IO.print("Calculator actor:")
+    let calc = spawn Calculator {}
+    calc ! add(40, 2)
+    calc ! multiply(6, 7)
+
+    0
+}

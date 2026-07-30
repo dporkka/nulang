@@ -1,0 +1,56 @@
+// 09_loops.nula - Iteration: while and for loops
+// Demonstrates: while, for-in, break with and without values,
+//               loop-based algorithms using mutable state
+//
+// Run: nulang examples/09_loops.nula
+
+// While loop: count down using a mutable array cell
+let countdown = fn(n) {
+    let st = [n]
+    while st[0] > 0 {
+        perform IO.print("  " + perform Int.to_string(st[0]))
+        st[0] = st[0] - 1
+    }
+    perform IO.print("  Blast off!")
+}
+perform IO.print("Countdown from 5:")
+countdown(5)
+
+// While loop with break returning a value
+let find_first_even = fn(xs) {
+    let st = [0]
+    while st[0] < 5 {
+        if xs[st[0]] % 2 == 0 then break xs[st[0]] else unit
+        st[0] = st[0] + 1
+    }
+}
+let arr = [3, 7, 4, 9, 2]
+let ev = find_first_even(arr)
+perform IO.print("First even in [3,7,4,9,2]: " + perform Int.to_string(ev))
+
+// For loop over an array
+perform IO.print("Elements of [10,20,30,40,50]:")
+for x in [10, 20, 30, 40, 50] {
+    perform IO.print("  " + perform Int.to_string(x))
+}
+
+// For loop with break returning a value
+let sum_until = fn(limit) {
+    let st = [0]
+    for x in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] {
+        let new_total = st[0] + x
+        if new_total > limit then break st[0] else unit
+        st[0] = new_total
+    }
+}
+perform IO.print("Sum until > 12: " + perform Int.to_string(sum_until(12)))
+
+// Nested loops
+perform IO.print("Multiplication table (1-3):")
+for a in [1, 2, 3] {
+    let st = [1]
+    while st[0] <= 3 {
+        perform IO.print("  " + perform Int.to_string(a) + "x" + perform Int.to_string(st[0]) + "=" + perform Int.to_string(a * st[0]))
+        st[0] = st[0] + 1
+    }
+}
