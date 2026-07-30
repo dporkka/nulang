@@ -650,6 +650,15 @@ fn cmd_remove(name: Option<&str>) -> NuResult<()> {
 mod tests {
     use super::*;
     use crate::package::manifest::DEFAULT_ENTRY;
+    use std::sync::LazyLock;
+    use std::sync::Mutex;
+
+    /// Serialize tests that change the process CWD so they don't interfere
+    /// with one another during parallel execution.
+    static CWD_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    fn cwd_guard() -> std::sync::MutexGuard<'static, ()> {
+        CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
     #[test]
     fn test_scaffold_package_creates_valid_manifest() {
         let dir = std::env::temp_dir().join(format!("nulang_nula_new_test_{}", std::process::id()));
@@ -695,6 +704,7 @@ mod tests {
 
     #[test]
     fn test_cmd_init_creates_in_current_dir() {
+        let _cwd = cwd_guard();
         let dir = std::env::temp_dir().join(format!("nulang_init_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -725,8 +735,17 @@ mod tests {
 
     #[test]
     fn test_cmd_test_fails_in_non_package_dir() {
+        // Use a temp dir with no Nulang.toml so prepare_package fails.
+        let _cwd = cwd_guard();
+        let dir = std::env::temp_dir().join(format!("nulang_no_pkg_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = ChangeDir::new(&dir);
+
         let result = cmd_test();
         assert!(result.is_err(), "test outside package should fail");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Helper: temporarily change the current directory, restoring it on drop.
@@ -750,6 +769,7 @@ mod tests {
 
     #[test]
     fn test_cmd_add_and_remove_dependency() {
+        let _cwd = cwd_guard();
         let dir =
             std::env::temp_dir().join(format!("nulang_add_remove_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -793,6 +813,7 @@ mod tests {
     #[test]
     fn test_manifest_add_dependency_direct() {
         // Test manifest-level mutation directly (avoiding resolver for git/version deps)
+        let _cwd = cwd_guard();
         let dir =
             std::env::temp_dir().join(format!("nulang_manifest_dep_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -854,6 +875,7 @@ mod tests {
 
     #[test]
     fn test_cmd_add_rejects_invalid_name() {
+        let _cwd = cwd_guard();
         let dir =
             std::env::temp_dir().join(format!("nulang_add_invalid_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -871,6 +893,7 @@ mod tests {
 
     #[test]
     fn test_cmd_add_missing_name() {
+        let _cwd = cwd_guard();
         let dir =
             std::env::temp_dir().join(format!("nulang_add_no_name_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
