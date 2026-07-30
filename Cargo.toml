@@ -44,6 +44,8 @@ quic-experimental = []
 mimalloc = "0.1"
 crossbeam = "0.8"
 httparse = "1"
+# HTTP client (synchronous, for standalone VM)
+ureq = "2"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

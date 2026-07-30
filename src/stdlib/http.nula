@@ -1,7 +1,7 @@
 // Nulang standard library — HTTP client via built-in Http effect.
-// Import: `import std.http`
+// Import: `import stdlib::http`
 //
-// The `Http` effect is wired into the runtime host (not the standalone VM).
+// The `Http` effect is wired into both the standalone VM and the runtime host.
 // Operations: `perform Http.get(url)` and `perform Http.post(url, body)`.
 
 /// Error type for HTTP operations.

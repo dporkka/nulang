@@ -275,7 +275,7 @@ impl StdLib {
                     effect: "Http",
                     op: "get",
                     signature: "get(url: String) -> String",
-                    implemented_in: ImplSite::RuntimeHost,
+                    implemented_in: ImplSite::StandaloneVm,
                     description: "Perform an HTTP GET request to `url` and return the response body as a string on success, nil on error. Requires the `http-client` or `ai-runtime` feature for the reqwest provider.",
                 },
                 BuiltinOp {
@@ -283,7 +283,7 @@ impl StdLib {
                     effect: "Http",
                     op: "post",
                     signature: "post(url: String, body: String) -> String",
-                    implemented_in: ImplSite::RuntimeHost,
+                    implemented_in: ImplSite::StandaloneVm,
                     description: "Perform an HTTP POST request to `url` with a JSON body and return the response body as a string on success, nil on error. Requires the `http-client` or `ai-runtime` feature for the reqwest provider.",
                 },
                 BuiltinOp {
@@ -648,11 +648,11 @@ mod tests {
         );
         assert_eq!(
             lib.lookup("Http.get").unwrap().implemented_in,
-            ImplSite::RuntimeHost
+            ImplSite::StandaloneVm
         );
         assert_eq!(
             lib.lookup("Http.post").unwrap().implemented_in,
-            ImplSite::RuntimeHost
+            ImplSite::StandaloneVm
         );
     }
 

@@ -783,6 +783,73 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 _ => return None,
             }
         }
+        if effect_name == "Http" {
+            match op_name {
+                Some("get") => {
+                    let url = regs
+                        .first()
+                        .map(|v| resolve_value_string(constants, *v))
+                        .unwrap_or_default();
+                    match ureq::get(&url).call() {
+                        Ok(response) => match response.into_string() {
+                            Ok(body) => {
+                                let bytes = body.into_bytes();
+                                match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                                    Some(ptr) => {
+                                        unsafe {
+                                            std::ptr::copy_nonoverlapping(
+                                                bytes.as_ptr(),
+                                                ptr,
+                                                bytes.len(),
+                                            );
+                                            *ptr.add(bytes.len()) = 0;
+                                        }
+                                        return Some(Value::ptr(ptr));
+                                    }
+                                    None => return Some(Value::nil()),
+                                }
+                            }
+                            Err(_) => return Some(Value::nil()),
+                        },
+                        Err(_) => return Some(Value::nil()),
+                    }
+                }
+                Some("post") => {
+                    let url = regs
+                        .first()
+                        .map(|v| resolve_value_string(constants, *v))
+                        .unwrap_or_default();
+                    let body = regs
+                        .get(1)
+                        .map(|v| resolve_value_string(constants, *v))
+                        .unwrap_or_default();
+                    match ureq::post(&url).send_string(&body) {
+                        Ok(response) => match response.into_string() {
+                            Ok(body) => {
+                                let bytes = body.into_bytes();
+                                match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                                    Some(ptr) => {
+                                        unsafe {
+                                            std::ptr::copy_nonoverlapping(
+                                                bytes.as_ptr(),
+                                                ptr,
+                                                bytes.len(),
+                                            );
+                                            *ptr.add(bytes.len()) = 0;
+                                        }
+                                        return Some(Value::ptr(ptr));
+                                    }
+                                    None => return Some(Value::nil()),
+                                }
+                            }
+                            Err(_) => return Some(Value::nil()),
+                        },
+                        Err(_) => return Some(Value::nil()),
+                    }
+                }
+                _ => return None,
+            }
+        }
         if effect_name != "IO" {
             return None;
         }
@@ -5990,6 +6057,99 @@ mod vm_tests {
         );
         assert!(result.unwrap().is_unit(), "IO.print resumes with unit");
         assert_eq!(sink.borrow().as_slice(), &["hello".to_string()]);
+    }
+
+    /// Http.get and Http.post must be handled as built-in effects in the
+    /// standalone VM; they must not produce "Unhandled effect" errors.
+    #[test]
+    fn test_standalone_http_get_builtin() {
+        let mut module = CodeModule::new("test_http_get");
+        // URL "http://127.0.0.1:1" — will fail to connect (port 1 is privileged),
+        // but the effect must dispatch and return nil, not "Unhandled effect".
+        let url = "http://127.0.0.1:1";
+        let url_idx = module.add_constant(Constant::String(url.to_string()));
+        let eff_idx = module.add_constant(Constant::String("Http.get".to_string()));
+
+        // r0 = url; Perform Http.get -> r1
+        module.emit(Instruction::new3(
+            OpCode::ConstU,
+            ((url_idx >> 8) & 0xFF) as u8,
+            (url_idx & 0xFF) as u8,
+            0,
+        )); // 0
+        module.emit(Instruction::new3(
+            OpCode::Perform,
+            ((eff_idx >> 8) & 0xFF) as u8,
+            (eff_idx & 0xFF) as u8,
+            1,
+        )); // 1
+        module.emit(Instruction::new2(OpCode::Move, 1, 0)); // 2
+        module.emit(Instruction::new0(OpCode::Halt)); // 3
+        module.entry_point = Some(0);
+
+        let callbacks = StandaloneVmCallbacks::new();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(callbacks));
+        let result = vm.run();
+        assert!(
+            result.is_ok(),
+            "standalone Http.get must not error with 'Unhandled effect': {:?}",
+            result.err()
+        );
+        // On connection failure, the result should be nil (not a string body).
+        assert!(
+            result.unwrap().is_nil(),
+            "Http.get on non-connectable port should return nil"
+        );
+    }
+
+    /// Http.post must also dispatch in the standalone VM without error.
+    #[test]
+    fn test_standalone_http_post_builtin() {
+        let mut module = CodeModule::new("test_http_post");
+        let url = "http://127.0.0.1:1";
+        let url_idx = module.add_constant(Constant::String(url.to_string()));
+        let body_idx = module.add_constant(Constant::String("{}".to_string()));
+        let eff_idx = module.add_constant(Constant::String("Http.post".to_string()));
+
+        // r0 = url; r1 = body; Perform Http.post -> r2
+        module.emit(Instruction::new3(
+            OpCode::ConstU,
+            ((url_idx >> 8) & 0xFF) as u8,
+            (url_idx & 0xFF) as u8,
+            0,
+        )); // 0
+        module.emit(Instruction::new3(
+            OpCode::ConstU,
+            ((body_idx >> 8) & 0xFF) as u8,
+            (body_idx & 0xFF) as u8,
+            1,
+        )); // 1
+        module.emit(Instruction::new3(
+            OpCode::Perform,
+            ((eff_idx >> 8) & 0xFF) as u8,
+            (eff_idx & 0xFF) as u8,
+            2,
+        )); // 2
+        module.emit(Instruction::new2(OpCode::Move, 2, 0)); // 3
+        module.emit(Instruction::new0(OpCode::Halt)); // 4
+        module.entry_point = Some(0);
+
+        let callbacks = StandaloneVmCallbacks::new();
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(callbacks));
+        let result = vm.run();
+        assert!(
+            result.is_ok(),
+            "standalone Http.post must not error with 'Unhandled effect': {:?}",
+            result.err()
+        );
+        assert!(
+            result.unwrap().is_nil(),
+            "Http.post on non-connectable port should return nil"
+        );
     }
 
     /// Regression: effect dispatch must match on the (effect, op) pair —
