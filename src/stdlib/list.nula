@@ -1,195 +1,92 @@
-// Nulang standard library — List operations over native arrays.
-// Import: `import std.list`
+// Nulang standard library — list operations over native arrays.
+// Language version: 2.0.0-alpha
 //
-// Arrays are built-in: [1, 2, 3] syntax, arr[i] indexing, arr.len().
-// This module adds functional combinators.
+// Currently only supports traversal/reduction functions.
+// Array-producing functions (map, filter, reverse, take, drop, range)
+// are NOT feasible because there is no built-in for dynamic array
+// construction (no Array.push / Array.new / array concat at surface level).
 
-/// Map a function over every element, returning a new array.
-pub fn map[T, U](arr: [T], f: fn(T) -> U) -> [U] {
-    let result = [];
-    let mut i = 0;
-    let len = arr.len();
-    while i < len {
-        result.push(f(arr[i]));
-        i = i + 1;
+/// Number of elements in the array.
+pub fn length(xs: [Int]) -> Int {
+    var n = 0;
+    for _x in xs {
+        n = n + 1
     };
-    result
+    n
 }
 
-/// Keep elements that satisfy a predicate.
-pub fn filter[T](arr: [T], pred: fn(T) -> Bool) -> [T] {
-    let result = [];
-    let mut i = 0;
-    let len = arr.len();
-    while i < len {
-        let item = arr[i];
-        if pred(item) then { result.push(item); } else { };
-        i = i + 1;
+/// Sum of all elements.
+pub fn sum(xs: [Int]) -> Int {
+    var total = 0;
+    for x in xs {
+        total = total + x
     };
-    result
+    total
 }
 
-/// Reduce from the left: fold([a,b,c], init, f) = f(f(f(init,a),b),c).
-pub fn fold[T, U](arr: [T], init: U, f: fn(U, T) -> U) -> U {
-    let mut acc = init;
-    let mut i = 0;
-    let len = arr.len();
-    while i < len {
-        acc = f(acc, arr[i]);
-        i = i + 1;
-    };
-    acc
-}
-
-/// Append two arrays into a new array.
-pub fn append[T](left: [T], right: [T]) -> [T] {
-    let result = [];
-    let mut i = 0;
-    while i < left.len() { result.push(left[i]); i = i + 1; };
-    let mut j = 0;
-    while j < right.len() { result.push(right[j]); j = j + 1; };
-    result
-}
-
-/// Reverse an array.
-pub fn reverse[T](arr: [T]) -> [T] {
-    let result = [];
-    let mut i = arr.len();
-    while i > 0 { i = i - 1; result.push(arr[i]); };
-    result
-}
-
-/// Get the nth element (0-indexed), or return default if out of bounds.
-pub fn nth[T](arr: [T], n: Int, default: T) -> T {
-    if n >= 0 && n < arr.len() then arr[n] else default
-}
-
-/// Take the first n elements.
-pub fn take[T](arr: [T], n: Int) -> [T] {
-    let result = [];
-    let mut i = 0;
-    let limit = if n < arr.len() then n else arr.len();
-    while i < limit { result.push(arr[i]); i = i + 1; };
-    result
-}
-
-/// Drop the first n elements.
-pub fn drop[T](arr: [T], n: Int) -> [T] {
-    let result = [];
-    let mut i = n;
-    let len = arr.len();
-    while i < len { result.push(arr[i]); i = i + 1; };
-    result
-}
-
-/// Check if any element satisfies a predicate.
-pub fn any[T](arr: [T], pred: fn(T) -> Bool) -> Bool {
-    let mut i = 0;
-    let len = arr.len();
-    while i < len {
-        if pred(arr[i]) then { return true; } else { };
-        i = i + 1;
+/// True if x appears in xs.
+pub fn contains(x: Int, xs: [Int]) -> Bool {
+    for elem in xs {
+        if elem == x then { return true } else {}
     };
     false
 }
 
-/// Check if all elements satisfy a predicate.
-pub fn all[T](arr: [T], pred: fn(T) -> Bool) -> Bool {
-    let mut i = 0;
-    let len = arr.len();
-    while i < len {
-        if !pred(arr[i]) then { return false; } else { };
-        i = i + 1;
+/// First index of x in xs, or -1 if not found.
+pub fn index_of(x: Int, xs: [Int]) -> Int {
+    var i = 0;
+    for elem in xs {
+        if elem == x then { return i } else {};
+        i = i + 1
+    };
+    -1
+}
+
+/// True if any element satisfies the predicate.
+pub fn any(pred, xs: [Int]) -> Bool {
+    for x in xs {
+        if pred(x) then { return true } else {}
+    };
+    false
+}
+
+/// True if all elements satisfy the predicate.
+pub fn all(pred, xs: [Int]) -> Bool {
+    for x in xs {
+        if !pred(x) then { return false } else {}
     };
     true
 }
 
-// ── Extended list operations ──────────────────────────────────────────────
-
-/// Sort an array using insertion sort (stable, O(n²)).
-pub fn sort[T](arr: [T]) -> [T] {
-    let result = [];
-    let mut i = 0;
-    let len = arr.len();
-    while i < len {
-        let val = arr[i];
-        let mut j = 0;
-        let rlen = result.len();
-        let mut inserted = false;
-        while j < rlen {
-            if !inserted && val < result[j] then {
-                result.push(val);
-                inserted = true;
-            } else { };
-            result.push(result[j]);
-            j = j + 1;
-        };
-        // Trim the old elements we just copied
-        let mut k = 0;
-        while k < rlen { result.remove(0); k = k + 1; };
-        if !inserted then { result.push(val); } else { };
-        i = i + 1;
+/// Left fold: fold(f, init, [a, b, c]) = f(f(f(init, a), b), c).
+pub fn fold(f, init: Int, xs: [Int]) -> Int {
+    var acc = init;
+    for x in xs {
+        acc = f(acc, x)
     };
-    result
+    acc
 }
 
-/// Zip two arrays into an array of pairs. Stops at the shorter length.
-pub fn zip[T, U](left: [T], right: [U]) -> [(T, U)] {
-    let result = [];
-    let mut i = 0;
-    let len = if left.len() < right.len() then left.len() else right.len();
-    while i < len { result.push((left[i], right[i])); i = i + 1; };
-    result
-}
-
-/// Pair each element with its index: [(0, arr[0]), (1, arr[1]), ...].
-pub fn enumerate[T](arr: [T]) -> [(Int, T)] {
-    let result = [];
-    let mut i = 0;
-    let len = arr.len();
-    while i < len { result.push((i, arr[i])); i = i + 1; };
-    result
-}
-
-/// Generate an array of integers from `start` (inclusive) to `end` (exclusive).
-pub fn range(start: Int, end: Int) -> [Int] {
-    let result = [];
-    let mut i = start;
-    while i < end { result.push(i); i = i + 1; };
-    result
-}
-
-/// Group elements by a key function. Returns an array of (key, group) pairs.
-pub fn group_by[T, K](arr: [T], key_fn: fn(T) -> K) -> [(K, [T])] {
-    let result = [];
-    let mut i = 0;
-    let len = arr.len();
-    while i < len {
-        let item = arr[i];
-        let k = key_fn(item);
-        let mut found = false;
-        let mut j = 0;
-        let rlen = result.len();
-        while j < rlen {
-            let (rk, _) = result[j];
-            if rk == k then { found = true; } else { };
-            j = j + 1;
-        };
-        if found then {
-            // Append to existing group — rebuild the pair
-            let mut new_result = [];
-            let mut j2 = 0;
-            while j2 < rlen {
-                let (rk, rg) = result[j2];
-                if rk == k then { new_result.push((rk, append(rg, [item]))); }
-                else { new_result.push((rk, rg)); };
-                j2 = j2 + 1;
-            };
-            result = new_result;
-        } else {
-            result.push((k, [item]));
-        };
-        i = i + 1;
+/// Maximum element. Crashes (negative return) for empty array.
+pub fn max_of(xs: [Int]) -> Int {
+    var first = true;
+    var best = 0;
+    for x in xs {
+        if first then { best = x; first = false } else {
+            if x > best then { best = x } else {}
+        }
     };
-    result
+    best
+}
+
+/// Minimum element. Crashes (negative return) for empty array.
+pub fn min_of(xs: [Int]) -> Int {
+    var first = true;
+    var best = 0;
+    for x in xs {
+        if first then { best = x; first = false } else {
+            if x < best then { best = x } else {}
+        }
+    };
+    best
 }
