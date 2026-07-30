@@ -1,52 +1,65 @@
 // Nulang standard library — Int Set operations.
+// Language version: 2.0.0-alpha
 // Import: `import stdlib::set`
+//
+// Sets are represented as arrays of Int with no duplicates.
 
 /// An empty set.
-pub fn empty() -> [Int] { [] }
+pub fn empty() { [] }
 
 /// Check whether a value is in the set.
-pub fn contains(set: [Int], value: Int) -> Bool {
-    let i = &0;
-    let len = set.len();
-    while *i < len {
-        if set[*i] == value then { return true; } else { };
-        i = *i + 1;
+pub fn contains(set, value) {
+    for x in set {
+        if x == value then { return true } else {}
     };
     false
 }
 
-/// Insert a value into the set.
-pub fn insert(set: [Int], value: Int) -> [Int] {
+/// Add a value to the set (no-op if already present).
+/// Returns a new set; the original is unchanged.
+pub fn add(set, value) {
     if contains(set, value) then set
-    else {
-        let result = &[];
-        let i = &0;
-        let inserted = &false;
-        let len = set.len();
-        while *i < len {
-            if !(*inserted) && value < set[*i] then {
-                result.push(value);
-                inserted = true;
-            } else { };
-            result.push(set[*i]);
-            i = *i + 1;
-        };
-        if !(*inserted) then { result.push(value); } else { };
-        *result
-    }
+    else { perform Array.push(set, value) }
 }
 
-/// Remove a value from the set.
-pub fn remove(set: [Int], value: Int) -> [Int] {
-    let result = &[];
-    let i = &0;
-    let len = set.len();
-    while *i < len {
-        if set[*i] != value then { result.push(set[*i]); } else { };
-        i = *i + 1;
+/// Remove a value from the set. Returns a new set.
+pub fn remove(set, value) {
+    var result = [];
+    for x in set {
+        if x != value then { result = perform Array.push(result, x) } else {}
     };
-    *result
+    result
 }
 
 /// Number of elements in the set.
-pub fn size(set: [Int]) -> Int { set.len() }
+pub fn size(set) { perform Array.length(set) }
+
+/// True when the set is empty.
+pub fn is_empty(set) { perform Array.length(set) == 0 }
+
+/// Union: all elements in a or b (no duplicates).
+pub fn union(a, b) {
+    var result = a;
+    for x in b {
+        if contains(result, x) then {} else { result = perform Array.push(result, x) }
+    };
+    result
+}
+
+/// Intersection: elements present in both a and b.
+pub fn intersect(a, b) {
+    var result = [];
+    for x in a {
+        if contains(b, x) then { result = perform Array.push(result, x) } else {}
+    };
+    result
+}
+
+/// Difference: elements in a that are not in b.
+pub fn difference(a, b) {
+    var result = [];
+    for x in a {
+        if contains(b, x) then {} else { result = perform Array.push(result, x) }
+    };
+    result
+}

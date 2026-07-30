@@ -1,170 +1,215 @@
 // Nulang standard library — String operations.
-// Import: `import std.string`
+// Language version: 2.0.0-alpha
+// Import: `import stdlib::string`
 //
-// Strings are built-in: "..." syntax, s + t concatenation,
-// String.length(s), String.charAt(s, idx).
+// Built on primitives: String.length, String.charAt (→ Int code),
+// String.substring(s, start, length), String.concat(s1, s2).
+//
+// NOTE: `a + b` where both operands are non-literal strings returns 0
+// (VM bug). Use `perform String.concat(a, b)` for variable-to-variable
+// concatenation.
 
-/// Remove leading and trailing whitespace from a string.
-pub fn trim(s: String) -> String {
-    // Strip leading whitespace
-    let mut start = 0;
-    let len = String.length(s);
-    while start < len {
-        let c = String.charAt(s, start);
-        if c == 32 || c == 9 || c == 10 || c == 13 then { start = start + 1; } else { break; };
-    };
-    // Strip trailing whitespace
-    let mut end = len;
-    while end > start {
-        let c = String.charAt(s, end - 1);
-        if c == 32 || c == 9 || c == 10 || c == 13 then { end = end - 1; } else { break; };
-    };
-    // Manual substring
-    let mut result = "";
-    let mut i = start;
-    while i < end {
-        result = result + String.charAt(s, i);
-        i = i + 1;
-    };
-    result
+/// Length of the string in bytes.
+pub fn length(s) { perform String.length(s) }
+
+/// True when the string is empty.
+pub fn is_empty(s) { perform String.length(s) == 0 }
+
+/// Character at index i, returned as a 1-character string.
+/// Returns "" if i is out of bounds.
+pub fn char_at(s, i) {
+    let len = perform String.length(s);
+    if i >= 0 && i < len then { return perform String.substring(s, i, 1) } else { return "" }
 }
 
-/// Get the length of a string in bytes.
-pub fn length(s: String) -> Int { String.length(s) }
-
-/// Check if the string is empty.
-pub fn is_empty(s: String) -> Bool { String.length(s) == 0 }
-
-// ── Extended string operations ────────────────────────────────────────────
-
-/// Split a string by a delimiter character. Returns an array of substrings.
-pub fn split(s: String, delim: Int) -> [String] {
-    let result = [];
-    let mut current = "";
-    let mut i = 0;
-    let len = String.length(s);
-    while i < len {
-        let c = String.charAt(s, i);
-        if c == delim then {
-            result.push(current);
-            current = "";
-        } else {
-            current = current + c;
-        };
-        i = i + 1;
-    };
-    result.push(current);
-    result
+/// Character code at index i, or -1 if out of bounds.
+pub fn char_code_at(s, i) {
+    let len = perform String.length(s);
+    if i >= 0 && i < len then { return perform String.charAt(s, i) } else { return -1 }
 }
 
-/// Join an array of strings with a separator.
-pub fn join(parts: [String], sep: String) -> String {
-    let mut result = "";
-    let mut i = 0;
-    let len = parts.len();
-    while i < len {
-        if i > 0 then { result = result + sep; } else { };
-        result = result + parts[i];
-        i = i + 1;
+// ── Substring search ──────────────────────────────────────────────────────
+
+/// True when s starts with prefix.
+pub fn starts_with(s, prefix) {
+    let plen = perform String.length(prefix);
+    let slen = perform String.length(s);
+    if plen > slen then { return false } else {};
+    var i = 0;
+    while i < plen {
+        if perform String.charAt(s, i) != perform String.charAt(prefix, i) then { return false } else {};
+        i = i + 1
     };
-    result
+    true
 }
 
-/// Replace all occurrences of `from` with `to` in a string.
-pub fn replace(s: String, from: String, to: String) -> String {
-    let mut result = "";
-    let mut i = 0;
-    let slen = String.length(s);
-    let flen = String.length(from);
-    while i < slen {
-        // Simple check: does the substring starting at i match `from`?
-        let mut match = flen > 0 && i + flen <= slen;
-        let mut j = 0;
-        while j < flen && match {
-            if String.charAt(s, i + j) != String.charAt(from, j) then { match = false; } else { };
-            j = j + 1;
-        };
-        if match then {
-            result = result + to;
-            i = i + flen;
-        } else {
-            result = result + String.charAt(s, i);
-            i = i + 1;
-        };
+/// True when s ends with suffix.
+pub fn ends_with(s, suffix) {
+    let sulen = perform String.length(suffix);
+    let slen = perform String.length(s);
+    if sulen > slen then { return false } else {};
+    let offset = slen - sulen;
+    var i = 0;
+    while i < sulen {
+        if perform String.charAt(s, offset + i) != perform String.charAt(suffix, i) then { return false } else {};
+        i = i + 1
     };
-    result
+    true
 }
 
-/// Convert a string to uppercase (ASCII letters only).
-pub fn to_upper(s: String) -> String {
-    let mut result = "";
-    let mut i = 0;
-    let len = String.length(s);
-    while i < len {
-        let c = String.charAt(s, i);
-        if c >= 97 && c <= 122 then { result = result + (c - 32); }
-        else { result = result + c; };
-        i = i + 1;
-    };
-    result
-}
-
-/// Convert a string to lowercase (ASCII letters only).
-pub fn to_lower(s: String) -> String {
-    let mut result = "";
-    let mut i = 0;
-    let len = String.length(s);
-    while i < len {
-        let c = String.charAt(s, i);
-        if c >= 65 && c <= 90 then { result = result + (c + 32); }
-        else { result = result + c; };
-        i = i + 1;
-    };
-    result
-}
-
-/// Check whether `s` contains the substring `sub`.
-pub fn contains(s: String, sub: String) -> Bool {
-    let slen = String.length(s);
-    let sublen = String.length(sub);
-    if sublen == 0 then { return true; } else { };
-    let mut i = 0;
+/// True when s contains the substring sub.
+pub fn contains(s, sub) {
+    let slen = perform String.length(s);
+    let sublen = perform String.length(sub);
+    if sublen == 0 then { return true } else {};
+    if sublen > slen then { return false } else {};
+    var i = 0;
     while i + sublen <= slen {
-        let mut match = true;
-        let mut j = 0;
+        var found = true;
+        var j = 0;
         while j < sublen {
-            if String.charAt(s, i + j) != String.charAt(sub, j) then { match = false; } else { };
-            j = j + 1;
+            if perform String.charAt(s, i + j) != perform String.charAt(sub, j) then { found = false } else {};
+            j = j + 1
         };
-        if match then { return true; } else { };
-        i = i + 1;
+        if found then { return true } else {};
+        i = i + 1
     };
     false
 }
 
-/// Check whether `s` starts with `prefix`.
-pub fn starts_with(s: String, prefix: String) -> Bool {
-    let plen = String.length(prefix);
-    let slen = String.length(s);
-    if plen > slen then { return false; } else { };
-    let mut i = 0;
-    while i < plen {
-        if String.charAt(s, i) != String.charAt(prefix, i) then { return false; } else { };
-        i = i + 1;
+/// First index of substring ch in s, or -1 if not found.
+pub fn index_of(s, ch) {
+    let slen = perform String.length(s);
+    let chlen = perform String.length(ch);
+    if chlen == 0 then { return 0 } else {};
+    var i = 0;
+    while i + chlen <= slen {
+        var found = true;
+        var j = 0;
+        while j < chlen {
+            if perform String.charAt(s, i + j) != perform String.charAt(ch, j) then { found = false } else {};
+            j = j + 1
+        };
+        if found then { return i } else {};
+        i = i + 1
     };
-    true
+    -1
 }
 
-/// Check whether `s` ends with `suffix`.
-pub fn ends_with(s: String, suffix: String) -> Bool {
-    let sulen = String.length(suffix);
-    let slen = String.length(s);
-    if sulen > slen then { return false; } else { };
-    let offset = slen - sulen;
-    let mut i = 0;
-    while i < sulen {
-        if String.charAt(s, offset + i) != String.charAt(suffix, i) then { return false; } else { };
-        i = i + 1;
+// ── Building and repeating ────────────────────────────────────────────────
+
+/// Repeat string s n times.
+pub fn repeat(s, n) {
+    var result = "";
+    var i = 0;
+    while i < n {
+        result = perform String.concat(result, s);
+        i = i + 1
     };
-    true
+    result
 }
+
+// ── Whitespace trimming ───────────────────────────────────────────────────
+
+/// Remove leading and trailing whitespace (spaces, tabs, newlines, CR).
+pub fn trim(s) {
+    let len = perform String.length(s);
+
+    // Recursive helper to find first non-whitespace index.
+    let rec find_start = fn(i) {
+        if i >= len then i
+        else {
+            let c = perform String.charAt(s, i);
+            if c == 32 || c == 9 || c == 10 || c == 13 then find_start(i + 1)
+            else i
+        }
+    };
+
+    // Recursive helper to find one-past-last non-whitespace index.
+    let rec find_end = fn(i) {
+        if i <= 0 then 0
+        else {
+            let c = perform String.charAt(s, i - 1);
+            if c == 32 || c == 9 || c == 10 || c == 13 then find_end(i - 1)
+            else i
+        }
+    };
+
+    let start_idx = find_start(0);
+    let end_idx = find_end(len);
+
+    // Build trimmed string.
+    var result = "";
+    var i = start_idx;
+    while i < end_idx {
+        result = perform String.concat(result, perform String.substring(s, i, 1));
+        i = i + 1
+    };
+    result
+}
+
+// ── Split and join ────────────────────────────────────────────────────────
+
+/// Split string s by a delimiter character (a 1-char string).
+/// Returns an array of substrings.
+pub fn split(s, delim) {
+    var result = [];
+    var current = "";
+    var i = 0;
+    let len = perform String.length(s);
+    let dcode = perform String.charAt(delim, 0);
+    while i < len {
+        let c = perform String.charAt(s, i);
+        if c == dcode then {
+            result = perform Array.push(result, current);
+            current = ""
+        } else {
+            current = perform String.concat(current, perform String.substring(s, i, 1))
+        };
+        i = i + 1
+    };
+    perform Array.push(result, current)
+}
+
+/// Join an array of strings with a separator string.
+pub fn join(parts, sep) {
+    var result = "";
+    var i = 0;
+    let len = perform Array.length(parts);
+    while i < len {
+        if i > 0 then { result = perform String.concat(result, sep) } else {};
+        result = perform String.concat(result, parts[i]);
+        i = i + 1
+    };
+    result
+}
+
+// ── Replace ───────────────────────────────────────────────────────────────
+
+/// Replace all occurrences of substring `from` with `to` in s.
+pub fn replace(s, from, to) {
+    var result = "";
+    var i = 0;
+    let slen = perform String.length(s);
+    let flen = perform String.length(from);
+    while i < slen {
+        var found_match = flen > 0 && i + flen <= slen;
+        var j = 0;
+        while j < flen {
+            if perform String.charAt(s, i + j) != perform String.charAt(from, j) then { found_match = false } else {};
+            j = j + 1
+        };
+        if found_match then {
+            result = perform String.concat(result, to);
+            i = i + flen
+        } else {
+            result = perform String.concat(result, perform String.substring(s, i, 1));
+            i = i + 1
+        }
+    };
+    result
+}
+
+// ── SKIPPED (missing VM primitives) ───────────────────────────────────────
+// to_upper / to_lower — need String.from_char(code) to convert code to char.
+//   Int.to_string(65) gives "65", not "A". No chr/from_char primitive exists.

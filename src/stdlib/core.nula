@@ -1,145 +1,45 @@
-// Nulang standard library — core types and combinators.
-// Auto-loaded into every Nulang program as `import std.core`.
+// Nulang standard library — core combinators and utilities.
 // Language version: 2.0.0-alpha
+// Import: `import stdlib::core`
 
-// ── Option type ──────────────────────────────────────────────────────────
-
-/// Optional value: either Some(value) or None.
-pub type Option[T] = Some(T) | None
-
-/// Map a function over an Option.
-pub fn map[T, U](opt: Option[T], f: fn(T) -> U) -> Option[U] {
-    match opt {
-        Some(x) => Some(f(x)),
-        None => None,
-    }
-}
-
-/// Chain an Option-returning function.
-pub fn and_then[T, U](opt: Option[T], f: fn(T) -> Option[U]) -> Option[U] {
-    match opt {
-        Some(x) => f(x),
-        None => None,
-    }
-}
-
-/// Extract the value or return a default.
-pub fn unwrap_or[T](opt: Option[T], default: T) -> T {
-    match opt {
-        Some(x) => x,
-        None => default,
-    }
-}
-
-/// Returns true if the Option is Some.
-pub fn is_some[T](opt: Option[T]) -> Bool {
-    match opt {
-        Some(_) => true,
-        None => false,
-    }
-}
-
-/// Returns true if the Option is None.
-pub fn is_none[T](opt: Option[T]) -> Bool {
-    match opt {
-        Some(_) => false,
-        None => true,
-    }
-}
-
-// ── Result type ──────────────────────────────────────────────────────────
-
-/// Result of a fallible operation: either Ok(value) or Error(reason).
-pub type Result[T, E] = Ok(T) | Error(E)
-
-/// Map a function over a successful Result.
-pub fn map_result[T, U, E](r: Result[T, E], f: fn(T) -> U) -> Result[U, E] {
-    match r {
-        Ok(x) => Ok(f(x)),
-        Error(e) => Error(e),
-    }
-}
-
-/// Map a function over the error case.
-pub fn map_error[T, E, F](r: Result[T, E], f: fn(E) -> F) -> Result[T, F] {
-    match r {
-        Ok(x) => Ok(x),
-        Error(e) => Error(f(e)),
-    }
-}
-
-/// Chain a Result-returning function.
-pub fn and_then_result[T, U, E](r: Result[T, E], f: fn(T) -> Result[U, E]) -> Result[U, E] {
-    match r {
-        Ok(x) => f(x),
-        Error(e) => Error(e),
-    }
-}
-
-/// Extract the value or return a default.
-pub fn unwrap_or_result[T, E](r: Result[T, E], default: T) -> T {
-    match r {
-        Ok(x) => x,
-        Error(_) => default,
-    }
-}
-
-/// Returns true if the Result is Ok.
-pub fn is_ok[T, E](r: Result[T, E]) -> Bool {
-    match r {
-        Ok(_) => true,
-        Error(_) => false,
-    }
-}
-
-/// Returns true if the Result is Error.
-pub fn is_error[T, E](r: Result[T, E]) -> Bool {
-    match r {
-        Ok(_) => false,
-        Error(_) => true,
-    }
-}
-
-// ── Identity and composition ─────────────────────────────────────────────
+// ── Identity and constants ────────────────────────────────────────────────
 
 /// Identity function. Returns its argument unchanged.
-pub fn id[T](x: T) -> T { x }
+pub fn identity(x) { x }
 
-/// Function composition: (f ∘ g)(x) = f(g(x)).
-pub fn compose[A, B, C](f: fn(B) -> C, g: fn(A) -> B) -> fn(A) -> C {
-    fn(x: A) -> C { f(g(x)) }
+/// Constant function: always returns the first argument, ignoring the second.
+pub fn const_fn(x, _y) { x }
+
+/// Always: given a value, returns a function that ignores its input and returns that value.
+pub fn always(x) { fn(_y) { x } }
+
+// ── Function combinators ──────────────────────────────────────────────────
+
+/// Apply function f to argument x.
+pub fn apply(f, x) { f(x) }
+
+/// Function composition (3-arg form): (f ∘ g)(x) = f(g(x)).
+pub fn compose(f, g, x) { f(g(x)) }
+
+/// Returns a new function h(x) = f(g(x)).
+pub fn compose_fn(f, g) { fn(x) { f(g(x)) } }
+
+/// Flip argument order: flip(f, x, y) = f(y, x).
+pub fn flip(f, x, y) { f(y, x) }
+
+// ── Boolean combinators ───────────────────────────────────────────────────
+
+/// Logical negation.
+pub fn negate(b) { if b then false else true }
+
+// ── Comparison helpers ────────────────────────────────────────────────────
+
+/// Clamp x to the range [lo, hi].
+pub fn clamp(x, lo, hi) {
+    if x < lo then lo
+    else if x > hi then hi
+    else x
 }
 
-/// Constant function: always returns the same value.
-pub fn const_fn[T, U](x: T, _y: U) -> T { x }
-
-// ── Extended Result combinators ───────────────────────────────────────────
-
-/// Unwrap a Result, panicking with the given message on Error.
-/// Unwrap a Result, printing an error message on Error and returning a default.
-pub fn expect[T, E](r: Result[T, E], msg: String, default: T) -> T {
-    match r {
-        Ok(x) => x,
-        Error(_) => { perform IO.print(msg); default },
-    }
-}
-pub fn or_else[T, E](r: Result[T, E], fallback: fn(E) -> T) -> T {
-    match r {
-        Ok(x) => x,
-        Error(e) => fallback(e),
-    }
-}
-
-/// Convert an Option to a Result, using a default error on None.
-pub fn ok_or[T, E](opt: Option[T], err: E) -> Result[T, E] {
-    match opt {
-        Some(x) => Ok(x),
-        None => Error(err),
-    }
-}
-
-/// Apply a fallible function if the Result is Ok, otherwise propagate the error.
-/// Shorter alias for `and_then_result`.
-pub fn flat_map[T, U, E](r: Result[T, E], f: fn(T) -> Result[U, E]) -> Result[U, E] {
-    and_then_result(r, f)
-}
+/// True when x is between lo and hi (inclusive).
+pub fn between(lo, hi, x) { lo <= x && x <= hi }

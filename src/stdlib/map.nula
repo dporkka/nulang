@@ -1,65 +1,73 @@
 // Nulang standard library — Int→Int Map operations.
+// Language version: 2.0.0-alpha
 // Import: `import stdlib::map`
+//
+// Maps are arrays of {key: Int, value: Int} records.
+// Key lookup is O(n). get() returns -1 for missing keys.
 
 /// An empty map.
-pub fn empty() -> [(Int, Int)] { [] }
+pub fn empty() { [] }
 
-/// Insert a key-value pair.
-pub fn insert(map: [(Int, Int)], key: Int, v: Int) -> [(Int, Int)] {
-    let result = &[];
-    let i = &0;
-    let inserted = &false;
-    let len = map.len();
-    while *i < len {
-        let (k, old_v) = map[*i];
-        if k == key then {
-            result.push((key, v));
-            inserted = true;
-        } else if !(*inserted) && key < k then {
-            result.push((key, v));
-            result.push((k, old_v));
-            inserted = true;
+/// Insert or update a key-value pair. Returns a new map.
+pub fn insert(k, v, m) {
+    var found = false;
+    var result = [];
+    for r in m {
+        if r.key == k then {
+            result = perform Array.push(result, {key: k, value: v});
+            found = true
         } else {
-            result.push((k, old_v));
-        };
-        i = *i + 1;
+            result = perform Array.push(result, r)
+        }
     };
-    if !(*inserted) then { result.push((key, v)); } else { };
-    *result
+    if found then result else { perform Array.push(result, {key: k, value: v}) }
 }
 
-/// Look up a key.
-pub fn get(map: [(Int, Int)], key: Int) -> Option[Int] {
-    let i = &0;
-    let len = map.len();
-    while *i < len {
-        let (k, v) = map[*i];
-        if k == key then { return Some(v); } else { };
-        i = *i + 1;
+/// Look up a key. Returns the value, or -1 if not found.
+pub fn get(k, m) {
+    for r in m {
+        if r.key == k then { return r.value } else {}
     };
-    None
+    -1
 }
 
-/// Remove a key.
-pub fn remove(map: [(Int, Int)], key: Int) -> [(Int, Int)] {
-    let result = &[];
-    let i = &0;
-    let len = map.len();
-    while *i < len {
-        let (k, v) = map[*i];
-        if k != key then { result.push((k, v)); } else { };
-        i = *i + 1;
+/// True when the key is present.
+pub fn contains_key(k, m) {
+    for r in m {
+        if r.key == k then { return true } else {}
     };
-    *result
+    false
 }
 
-/// Check whether a key is present.
-pub fn contains(map: [(Int, Int)], key: Int) -> Bool {
-    match get(map, key) {
-        Some(_) => true,
-        None => false,
-    }
+/// Remove a key. Returns a new map.
+pub fn remove(k, m) {
+    var result = [];
+    for r in m {
+        if r.key != k then { result = perform Array.push(result, r) } else {}
+    };
+    result
 }
 
 /// Number of key-value pairs.
-pub fn size(map: [(Int, Int)]) -> Int { map.len() }
+pub fn size(m) { perform Array.length(m) }
+
+/// True when the map is empty.
+pub fn is_empty(m) { perform Array.length(m) == 0 }
+
+/// Return an array of all keys.
+pub fn keys(m) {
+    var result = [];
+    for r in m {
+        result = perform Array.push(result, r.key)
+    };
+    result
+}
+
+/// Return an array of all values.
+pub fn values(m) {
+    var result = [];
+    for r in m {
+        result = perform Array.push(result, r.value)
+    };
+    result
+}
