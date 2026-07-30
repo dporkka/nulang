@@ -1,5 +1,5 @@
 // Nulang standard library — DateTime type and operations.
-// Import: `import std.datetime`
+// Import: `import stdlib::datetime`
 
 /// A point in time represented as calendar fields.
 pub type DateTime = {
@@ -13,16 +13,11 @@ pub type DateTime = {
 
 /// Return the current system time.
 ///
-/// TODO: This requires FFI bindings to a system time function
-/// (e.g. `time()` from libc) which are not yet wired into the
-/// language. When FFI support is available, implement via:
-///   foreign fn system_time() -> Int  // unix timestamp
-/// then convert to DateTime fields.
-/// For now, this function is a stub that returns a zeroed DateTime.
-pub fn now() -> DateTime ! {IO} {
-    // TODO: Wire up FFI to get actual system time.
-    // When available, replace this stub with real time retrieval.
-    { year: 0, month: 0, day: 0, hour: 0, minute: 0, second: 0 }
+/// Currently returns a stub (1970-01-01 00:00:00). A real implementation
+/// requires an effect such as `perform Time.now()` which is not yet
+/// wired into the standalone VM.
+pub fn now() -> DateTime {
+    { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 }
 }
 
 /// Create a DateTime from individual fields.

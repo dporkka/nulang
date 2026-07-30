@@ -1,5 +1,5 @@
 // Nulang standard library — JSON encoding and decoding.
-// Import: `import std.json`
+// Import: `import stdlib::json`
 
 /// Represents a parsed JSON value.
 pub type JsonValue =
@@ -7,35 +7,55 @@ pub type JsonValue =
     | JsonBool(Bool)
     | JsonNumber(Float)
     | JsonString(String)
-    | JsonArray(List[JsonValue])
-    | JsonObject(List[(String, JsonValue)])
+    | JsonArray([JsonValue])
+    | JsonObject([(String, JsonValue)])
 
 /// Parse a JSON string into a JsonValue.
-/// Uses the built-in JSON.parse operation.
+///
+/// NOTE: The VM does not currently provide a `Json.parse` built-in effect.
+/// This function is a stub that always returns JsonNull.
+/// A real implementation requires either a `Json.parse` effect or a
+/// pure-Nulang recursive-descent parser (which also needs Float↔String
+/// conversion primitives not yet available).
 pub fn parse(json: String) -> JsonValue {
-    Json.parse(json)
+    // TODO: needs Json.parse effect or pure-Nulang parser
+    JsonNull
 }
 
 /// Convert a JsonValue back to a JSON string.
-/// Uses the built-in JSON.stringify operation.
+///
+/// NOTE: Limited implementation — the type checker cannot handle
+/// recursive functions over recursive types, so nested arrays and objects
+/// are rendered as placeholders. Float values also lack a to-string
+/// primitive and render as "0.0".
+/// Full fidelity requires a VM-level `Json.stringify` effect.
 pub fn stringify(value: JsonValue) -> String {
-    Json.stringify(value)
+    match value {
+        JsonNull => "null",
+        JsonBool(b) => if b then "true" else "false",
+        JsonNumber(_) => "0.0",
+        JsonString(s) => perform String.concat(perform String.concat("\"", s), "\""),
+        JsonArray(_) => "[]",
+        JsonObject(_) => "{}",
+    }
 }
+
 
 /// Get a string field from a JSON object, or return a default.
 pub fn get_string(obj: JsonValue, key: String, default: String) -> String {
     match obj {
         JsonObject(fields) => {
-            let i = 0;
-            while i < List.len(fields) {
-                let (k, v) = List.get(fields, i);
-                if k == key then {
-                    match v {
+            var i = 0;
+            var len = perform Array.length(fields);
+            while i < len {
+                let pair = fields[i];
+                if pair.0 == key then {
+                    match pair.1 {
                         JsonString(s) => return s,
                         _ => return default,
                     }
                 } else { };
-                i = i + 1;
+                i = i + 1
             };
             default
         },
@@ -47,16 +67,17 @@ pub fn get_string(obj: JsonValue, key: String, default: String) -> String {
 pub fn get_number(obj: JsonValue, key: String, default: Float) -> Float {
     match obj {
         JsonObject(fields) => {
-            let i = 0;
-            while i < List.len(fields) {
-                let (k, v) = List.get(fields, i);
-                if k == key then {
-                    match v {
+            var i = 0;
+            var len = perform Array.length(fields);
+            while i < len {
+                let pair = fields[i];
+                if pair.0 == key then {
+                    match pair.1 {
                         JsonNumber(n) => return n,
                         _ => return default,
                     }
                 } else { };
-                i = i + 1;
+                i = i + 1
             };
             default
         },
@@ -68,16 +89,17 @@ pub fn get_number(obj: JsonValue, key: String, default: Float) -> Float {
 pub fn get_bool(obj: JsonValue, key: String, default: Bool) -> Bool {
     match obj {
         JsonObject(fields) => {
-            let i = 0;
-            while i < List.len(fields) {
-                let (k, v) = List.get(fields, i);
-                if k == key then {
-                    match v {
+            var i = 0;
+            var len = perform Array.length(fields);
+            while i < len {
+                let pair = fields[i];
+                if pair.0 == key then {
+                    match pair.1 {
                         JsonBool(b) => return b,
                         _ => return default,
                     }
                 } else { };
-                i = i + 1;
+                i = i + 1
             };
             default
         },

@@ -1,23 +1,15 @@
 // Nulang standard library — Option combinators.
-// Import: `import std.option`
-//
-// The Option type is defined in std.core (auto-loaded):
-//   pub type Option[T] = Some(T) | None
-// This module adds convenience combinators beyond what core provides.
+// Import: `import stdlib::option`
+
+/// The Option type: represents a value that may or may not be present.
+pub type Option[T] = Some(T) | None
 
 /// Unwrap an Option, returning the Some value.
-///
-/// TODO: The language does not yet support user-triggered panics.
-/// On None, this prints a message and returns nil, which may not
-/// type-check as T. Use `unwrap_or` from std.core for a
-/// safe alternative that takes a default value.
+/// Panics (via Test.assert) on None.
 pub fn unwrap[T](opt: Option[T]) -> T {
     match opt {
         Some(x) => x,
-        None => {
-            perform IO.print("called `unwrap` on a None value");
-            nil  // TODO: should panic — language lacks user-accessible panic
-        },
+        None => perform Test.assert(false, "called `unwrap` on a None value"),
     }
 }
 
@@ -38,7 +30,7 @@ pub fn is_none[T](opt: Option[T]) -> Bool {
 }
 
 /// Map a function over an Option.
-pub fn map[T, U](opt: Option[T], f: fn(T) -> U) -> Option[U] {
+pub fn map[T, U](opt: Option[T], f) -> Option[U] {
     match opt {
         Some(x) => Some(f(x)),
         None => None,

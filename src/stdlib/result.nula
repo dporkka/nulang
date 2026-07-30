@@ -1,28 +1,20 @@
 // Nulang standard library — Result combinators.
-// Import: `import std.result`
-//
-// The Result type is defined in std.core (auto-loaded):
-//   pub type Result[T, E] = Ok(T) | Error(E)
-// This module adds convenience combinators beyond what core provides.
+// Import: `import stdlib::result`
+
+/// The Result type: represents either success (Ok) or failure (Error).
+pub type Result[T, E] = Ok(T) | Error(E)
 
 /// Unwrap a Result, returning the Ok value.
-///
-/// TODO: The language does not yet support user-triggered panics.
-/// On Error, this prints a message and returns nil, which may not
-/// type-check as T. Use `unwrap_or_result` from std.core for a
-/// safe alternative that takes a default value.
+/// Panics (via Test.assert) on Error.
 pub fn unwrap[T, E](r: Result[T, E]) -> T {
     match r {
         Ok(x) => x,
-        Error(_) => {
-            perform IO.print("called `unwrap` on an Error value");
-            nil  // TODO: should panic — language lacks user-accessible panic
-        },
+        Error(_) => perform Test.assert(false, "called `unwrap` on an Error value"),
     }
 }
 
-/// Map a function over a successful Result. Alias for `map_result` in std.core.
-pub fn map[T, U, E](r: Result[T, E], f: fn(T) -> U) -> Result[U, E] {
+/// Map a function over a successful Result.
+pub fn map[T, U, E](r: Result[T, E], f) -> Result[U, E] {
     match r {
         Ok(x) => Ok(f(x)),
         Error(e) => Error(e),
