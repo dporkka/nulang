@@ -4,7 +4,7 @@ A curated suite of self-contained Nulang programs demonstrating the language
 from basic to advanced. Each example is runnable and verified against the
 current compiler.
 
-**Verified against commit:** `0e8fd58`
+**Verified against commit:** `fd516ef`
 
 ## Running an example
 
@@ -27,16 +27,20 @@ nulang examples/NN_name.nula
 | 09 | `09_loops.nula` | While loops, for-in loops, break with/without values, nested loops | `nulang examples/09_loops.nula` |
 | 10 | `10_pipe.nula` | Pipe operator `|>`, chaining transformations, closures in pipelines | `nulang examples/10_pipe.nula` |
 | 11 | `11_arrays.nula` | Array literals, indexing, element mutation, array-based algorithms | `nulang examples/11_arrays.nula` |
+| 12 | `12_json.nula` | JSON parse + stringify round-trip, field access via get_string/get_number | `nulang examples/12_json.nula` |
+| 13 | `13_http.nula` | HTTP get and post requests via the Http built-in effect | `nulang examples/13_http.nula` |
+| 14 | `14_option_result.nula` | Option/Result types, map, unwrap, catch, pattern matching | `nulang examples/14_option_result.nula` |
+| 15 | `15_ranges.nula` | Range expressions, for-in-range loops, range with pipe/arithmetic | `nulang examples/15_ranges.nula` |
 
 ## Notes
 
 - Use `//` for line comments. `--` is NOT a standalone line comment (only valid
   after expressions on the same line, e.g. `let x = 1 -- inline`).
 - The em dash character `—` (U+2014) is NOT accepted by the lexer.
-- `let` bindings are immutable; use array slots or record fields for mutable
-  state in loops and algorithms.
+- `let` bindings are immutable; use `var` for mutable state in loops and
+  algorithms.
 - Actors must appear before `let` bindings at the top level.
-- `spawn Actor { ... }` field initializers are currently ignored; state always
-  uses declared defaults.
+- `spawn Actor { ... }` field initializers use `=` (e.g. `count = 42`) and
+  correctly override the actor's declared defaults.
 - Top-level `fn` declarations with `match` on variant types may fail
   exhaustiveness checking when an `actor` block is present in the same file.

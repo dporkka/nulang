@@ -26,11 +26,11 @@ import stdlib::list
 ```
 
 Available stdlib modules that parse and import correctly:
-`math`, `list`, `string`, `set`, `map`, `core`, `test`, `fs`
+`math`, `list`, `string`, `set`, `map`, `core`, `test`, `fs`,
+`option`, `result`, `datetime`, `json`, `http`
 
-Additional modules exist in `src/stdlib/` but they reference missing
-VM primitives or have unresolved syntax (experimental): `json`, `http`,
-`option`, `result`, `datetime`.
+All 13 modules have working VM primitives and are fully functional.
+The `json` module now includes a working `parse` + `stringify` pair.
 
 ---
 
@@ -355,11 +355,16 @@ f(10).1              // → 11
 ## Recently Fixed
 
 These used to be pitfalls but are now working correctly
-(commits `d91dcc6`, `8ca559c`, `3744b9d`, `6a55e0d`, `8f13bea`).
+(commits `fd516ef`, `cb6ac4c`, `fcd4741`, `d91dcc6`, `8ca559c`, `3744b9d`, `6a55e0d`, `8f13bea`).
 
 | Issue | Status | Notes |
 |-------|--------|-------|
+| Range expressions (`a .. b`) | ✅ Added | `for i in 0 .. 5 { … }`, bare `{ a .. b }` in blocks |
+| LSP: code lenses, document links, hover docs | ✅ Added | Reference counts, clickable imports, enriched hover with doc comments |
+| JSON parser (`parse` + `stringify`) | ✅ Added | Pure-Nulang recursive-descent; round-trips with full fidelity |
 | Tuple `.0`/`.1` field access | ✅ Fixed | `t.0`, `t.0.1` chain directly |
 | `a + b` with two `let`-bound strings | ✅ Fixed | Was returning `0`, now concatenates |
-| Stdlib modules parse/import | ✅ Fixed | `math`, `list`, `string`, `set`, `map`, `core`, `test`, `fs` all import |
-| `Array.push`/`Array.new`/`Array.length` | ✅ Added | Enables array-building functions in stdlib |
+| All 13 stdlib modules import | ✅ Fixed | `option`, `result`, `datetime`, `json`, `http` now all working |
+| `Array.push`/`Array.new`/`Array.length`/`Array.set`/`Array.slice` | ✅ Added | Full Array builtin with value semantics |
+| `String.from_char` | ✅ Added | Code point → 1-char string; used by JSON parser |
+| `var` bindings, record-update, ranges | ✅ Added | Mutable locals, `{ r .. f = v }` syntax, `a..b` expressions |

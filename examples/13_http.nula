@@ -1,0 +1,29 @@
+// 13_http.nula - HTTP client via the Http built-in effect
+// Demonstrates: Http.get, Http.post, response handling
+//
+// Run: nulang examples/13_http.nula
+// Requires network access (uses httpbin.org for testing)
+
+perform IO.print("HTTP client demo")
+perform IO.print("---")
+
+// HTTP GET request to httpbin.org
+let get_url = "https://httpbin.org/get"
+let get_response = perform Http.get(get_url)
+perform IO.print("GET " + get_url)
+perform IO.print("Response received (" + perform Int.to_string(perform String.length(get_response)) + " bytes)")
+
+// HTTP GET with query parameters
+let get_params = "https://httpbin.org/get?name=Nulang&version=1"
+let param_response = perform Http.get(get_params)
+perform IO.print("GET with params: received " + perform Int.to_string(perform String.length(param_response)) + " bytes")
+
+// HTTP POST request with a JSON body
+let post_url = "https://httpbin.org/post"
+let post_body = "{\"language\": \"Nulang\", \"features\": [\"actors\", \"effects\", \"capabilities\"]}"
+let post_response = perform Http.post(post_url, post_body)
+perform IO.print("POST " + post_url)
+perform IO.print("Response received (" + perform Int.to_string(perform String.length(post_response)) + " bytes)")
+
+perform IO.print("---")
+perform IO.print("HTTP demo complete!")

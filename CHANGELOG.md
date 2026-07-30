@@ -271,10 +271,77 @@ in this version; they are recorded here to establish their tier.
   `textDocument/didSave` handler that re-checks the file on save, and
   completion items sorted by category (locals > functions > types > variants
   > keywords > effects) via `sort_text` prefixes.
-- **Example programs.** 11 verified, runnable example programs under
+- **Example programs.** 15 verified, runnable example programs under
   `examples/` with `examples/README.md`: from basic IO and arithmetic
   through functions, pattern matching, records, higher-order functions,
-  algebraic effects, actors, loops, the pipe operator, and arrays.
+  algebraic effects, actors, loops, the pipe operator, arrays, JSON
+  parsing, HTTP requests, Option/Result combinators, and range expressions.
+
+- **`var` bindings** (Experimental). Mutable local variables via `var x = 0`
+  (declaration) and `x = x + 1` (reassignment). `var` bindings are tracked
+  separately from `let` in the typechecker and codegen, producing `Store`
+  and `Load` bytecode ops for mutation — `src/parser.rs`,
+  `src/typechecker.rs`, `src/mir_codegen.rs`.
+- **Record-update syntax** (Experimental). `{ base .. field = value }`
+  creates a new record with overridden fields. The `..` is parsed with
+  `PREC_RANGE` precedence; the parser disambiguates record-update from
+  range-in-block by checking for `=` after the right operand —
+  `src/parser.rs`.
+- **Tuple field access** (Stable). Numeric indices on tuples: `t.0`, `t.1`.
+  Chained access (`t.0.1`) works directly on nested tuples without
+  parenthesization — `src/parser.rs`, `src/hir_lower.rs`.
+- **Range expressions** (Experimental). `a .. b` produces an inclusive-
+  exclusive range at `PREC_RANGE` precedence (level 3, between pipe and
+  logical-or). Ranges work in `for` loops (`for i in 0 .. 5 { … }`) and
+  can appear bare in blocks (`{ a .. b }`) — `src/parser.rs`.
+- **Language correctness fixes** (all Stable, `src/`):
+  - *`else`-on-newline:* an `else` keyword following a newline after `}` is
+    now accepted in `if`/`else` chains — `src/parser.rs`.
+  - *`String.+` fix for variables:* `a + b` where both operands are
+    `let`-bound string variables now correctly concatenates instead of
+    returning `0` — `src/vm.rs`.
+  - *`let..in` scoping fix:* block-level `let x = V in BODY` now correctly
+    scopes `x` to `BODY` only, not to the remainder of the enclosing block
+    — `src/hir_lower.rs`.
+- **`String.from_char`** (Stable). `perform String.from_char(code)` creates
+  a single-character string from a Unicode code point; returns `nil` for
+  invalid code points (surrogates, out of range) — `src/stdlib.rs`,
+  `src/vm.rs`.
+
+- **`Http` builtin effect** (Experimental). `perform Http.get(url)` and
+  `perform Http.post(url, body)` wired into the standalone VM via `ureq`.
+  Returns the response body as a `String` on success, `nil` on error —
+  `src/stdlib.rs`, `src/vm.rs`.
+- **`Array` builtin effect** (Experimental). `perform Array.length(arr)`,
+  `perform Array.push(arr, elem)`, `perform Array.new(n, init)`,
+  `perform Array.set(arr, idx, val)`, and `perform Array.slice(arr, start, end)`
+  wired into the standalone VM with value semantics (all return new arrays) —
+  `src/stdlib.rs`, `src/vm.rs`.
+- **Numeric conversion primitives** (Experimental). `Int.to_float`,
+  `Float.to_int` (truncates toward zero), `Float.to_string`, `String.to_int`
+  (returns 0 for invalid input), and `String.to_float` (returns 0.0 for
+  invalid input) — `src/stdlib.rs`, `src/vm.rs`.
+
+- **JSON parser** (Experimental). Pure-Nulang recursive-descent JSON parser
+  in `stdlib::json`: `parse(json: String) -> JsonValue` handles all JSON
+  value types with proper escape processing, and `stringify(value: JsonValue)
+  -> String` produces valid JSON output. Uses `String.to_float`,
+  `Float.to_string`, `String.from_char`, and `Array.*` primitives —
+  `src/stdlib/json.nula`.
+- **All 13 stdlib modules functional** (Experimental). `core`, `list`,
+  `string`, `set`, `map`, `test`, `fs`, `option`, `result`, `datetime`,
+  `math`, `json`, and `http` all parse, import, and resolve correctly with
+  all VM primitives available — `src/stdlib/`.
+
+- **LSP: code lenses, document links, enriched hover** (Experimental,
+  `src/lsp/mod.rs`): `textDocument/codeLens` shows reference counts above
+  function/actor declarations; `textDocument/documentLink` creates
+  clickable links from `import` statements to resolved module files;
+  `textDocument/hover` now includes doc comments (extracted from preceding
+  `///` lines), effects, and formatted type signatures.
+- **LSP: completion documentation** (Experimental, `src/lsp/mod.rs`):
+  keyword and built-in effect completion items now carry markdown
+  documentation strings with code examples in their `documentation` field.
 
 ---
 

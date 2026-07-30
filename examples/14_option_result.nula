@@ -1,0 +1,129 @@
+// 14_option_result.nula - Option and Result combinators
+// Demonstrates: Option and Result types, map, unwrap, pattern matching,
+//               is_some, is_ok, catch expressions
+//
+// Run: nulang examples/14_option_result.nula
+
+// ── Types (defined inline, matching stdlib) ──────────────────────────────
+
+type Option[T] = Some(T) | None
+type Result[T, E] = Ok(T) | Error(E)
+
+// ── Option combinators ───────────────────────────────────────────────────
+
+let is_some = fn(opt) {
+    match opt {
+        | Some(_) => true
+        | None => false
+    }
+}
+
+let is_none = fn(opt) {
+    match opt {
+        | Some(_) => false
+        | None => true
+    }
+}
+
+let unwrap = fn(opt, default) {
+    match opt {
+        | Some(x) => x
+        | None => default
+    }
+}
+
+let map_option = fn(opt, f) {
+    match opt {
+        | Some(x) => Some(f(x))
+        | None => None
+    }
+}
+
+// ── Result combinators ───────────────────────────────────────────────────
+
+let is_ok = fn(r) {
+    match r {
+        | Ok(_) => true
+        | Error(_) => false
+    }
+}
+
+let is_err = fn(r) {
+    match r {
+        | Ok(_) => false
+        | Error(_) => true
+    }
+}
+
+let unwrap_result = fn(r, default) {
+    match r {
+        | Ok(x) => x
+        | Error(_) => default
+    }
+}
+
+// ── Demo ─────────────────────────────────────────────────────────────────
+
+perform IO.print("=== Option ===")
+
+let some_val = Some(42)
+let none_val = None
+
+perform IO.print("is_some Some(42): " + perform Int.to_string(if is_some(some_val) then 1 else 0))
+perform IO.print("is_some None:    " + perform Int.to_string(if is_some(none_val) then 1 else 0))
+perform IO.print("is_none None:    " + perform Int.to_string(if is_none(none_val) then 1 else 0))
+
+// map over Option
+let doubled = map_option(some_val, fn(x) { x * 2 })
+perform IO.print("map Some(42) *2: " + perform Int.to_string(unwrap(doubled, -1)))
+
+let mapped_none = map_option(none_val, fn(x) { x * 2 })
+perform IO.print("map None *2:     " + perform Int.to_string(if is_none(mapped_none) then 1 else 0))
+
+// unwrap
+perform IO.print("unwrap Some(99): " + perform Int.to_string(unwrap(Some(99), -1)))
+
+// Pattern match on Option
+let describe = fn(opt) {
+    match opt {
+        | Some(x) => "Some(" + perform Int.to_string(x) + ")"
+        | None => "None"
+    }
+}
+perform IO.print(describe(Some(7)))
+perform IO.print(describe(None))
+
+// ── Result ──────────────────────────────────────────────────────────────
+
+perform IO.print("=== Result ===")
+
+let ok_val = Ok(100)
+let err_val = Error("something went wrong")
+
+perform IO.print("is_ok Ok(100):  " + perform Int.to_string(if is_ok(ok_val) then 1 else 0))
+perform IO.print("is_ok Error(_): " + perform Int.to_string(if is_ok(err_val) then 1 else 0))
+perform IO.print("is_err Error(_):" + perform Int.to_string(if is_err(err_val) then 1 else 0))
+
+// unwrap
+perform IO.print("unwrap Ok(42):  " + perform Int.to_string(unwrap_result(Ok(42), -1)))
+
+// Pattern match on Result
+let result_desc = fn(r) {
+    match r {
+        | Ok(x) => "Ok(" + perform Int.to_string(x) + ")"
+        | Error(e) => "Error(" + e + ")"
+    }
+}
+perform IO.print(result_desc(Ok(200)))
+perform IO.print(result_desc(Error("not found")))
+
+// Safe division with Result + catch
+let safe_div = fn(a, b) {
+    if b == 0 then Error("div by zero") else Ok(a / b)
+}
+let r1 = safe_div(10, 2) catch Error("failed")
+perform IO.print(result_desc(r1))
+let r2 = safe_div(10, 0) catch Error("failed")
+perform IO.print(result_desc(r2))
+
+perform IO.print("Option/Result demo complete!")

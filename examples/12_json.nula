@@ -1,0 +1,50 @@
+// 12_json.nula - JSON parsing and serialization
+// Demonstrates: import stdlib::json, parse, stringify, field access,
+//               round-trip fidelity with get_string and get_number
+//
+// Run: nulang examples/12_json.nula
+
+import stdlib::json
+
+// Parse a JSON string into a JsonValue
+let input = """
+{
+  "name": "Nulang",
+  "version": 1,
+  "tags": ["fast", "safe", "expressive"],
+  "nested": { "key": "value" }
+}
+"""
+let parsed = parse(input)
+perform IO.print("Parsed JSON successfully")
+
+// Inspect parsed fields using get_string and get_number
+let name = get_string(parsed, "name", "unknown")
+perform IO.print("name = " + name)
+
+let version = get_number(parsed, "version", -1.0)
+perform IO.print("version = " + perform Float.to_string(version))
+
+// Round-trip: parse → stringify → parse again
+let json_str = stringify(parsed)
+let reparsed = parse(json_str)
+let name2 = get_string(reparsed, "name", "unknown")
+perform IO.print("Round-trip name = " + name2)
+
+// Parsing a JSON array
+let arr_input = "[10, 20, 30, 40]"
+let arr = parse(arr_input)
+let arr_str = stringify(arr)
+perform IO.print("Array round-trip: " + arr_str)
+
+// Parsing boolean and null values
+let values = parse("[true, false, null]")
+let values_str = stringify(values)
+perform IO.print("Bool/null round-trip: " + values_str)
+
+// Parse a nested object and access nested field
+let nested = parse("{\"outer\": {\"inner\": 42}}")
+let outer_str = stringify(nested)
+perform IO.print("Nested: " + outer_str)
+
+perform IO.print("All JSON round-trips successful!")

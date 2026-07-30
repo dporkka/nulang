@@ -1,0 +1,72 @@
+// 15_ranges.nula - Range expressions and for-in-range loops
+// Demonstrates: a .. b range syntax, for i in 0 .. N loops,
+//               ranges with pipe operator, arithmetic with ranges
+//
+// Run: nulang examples/15_ranges.nula
+
+perform IO.print("=== Range expressions ===")
+
+// Basic for-in-range loop
+perform IO.print("Count 0 to 4:")
+for i in 0 .. 5 {
+    perform IO.print("  " + perform Int.to_string(i))
+}
+
+// Sum over a range
+let sum_range = fn(lo, hi) {
+    let st = [0]
+    for i in lo .. hi {
+        st[0] = st[0] + i
+    }
+    st[0]
+}
+let s = sum_range(0, 10)
+perform IO.print("Sum 0..10 = " + perform Int.to_string(s))
+
+// Range with larger bounds
+let big_sum = sum_range(1, 6)
+perform IO.print("Sum 1..6 = " + perform Int.to_string(big_sum))
+
+// For loop with range and break
+let find_first_multiple = fn(lo, hi, m) {
+    for i in lo .. hi {
+        if i % m == 0 then break i else unit
+    }
+}
+let first = find_first_multiple(5, 20, 7)
+perform IO.print("First multiple of 7 in 5..20: " + perform Int.to_string(first))
+
+// Nested range loops
+perform IO.print("Small multiplication table:")
+for a in 1 .. 4 {
+    let st = [""]
+    for b in 1 .. 4 {
+        let prod = perform Int.to_string(a * b)
+        if b == 1 then { st[0] = prod }
+        else { st[0] = st[0] + " " + prod }
+    }
+    perform IO.print("  " + st[0])
+}
+
+// Range with arithmetic (precedence: arithmetic binds tighter than ..)
+let squares = fn(n) {
+    let st = [0]
+    for i in 0 .. n {
+        st[0] = st[0] + i * i
+    }
+    st[0]
+}
+perform IO.print("Sum of squares 0..5 = " + perform Int.to_string(squares(5)))
+
+// Pipe through a range
+let count_up = fn(n) {
+    let st = [0]
+    for i in 0 .. n {
+        st[0] = st[0] + 1
+    }
+    st[0]
+}
+let counted = count_up(7)
+perform IO.print("Counted 7 = " + perform Int.to_string(counted))
+
+perform IO.print("Range demo complete!")

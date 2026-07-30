@@ -75,14 +75,28 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - `FS` filesystem effect: `perform FS.read(path)` → `String`, `perform FS.write(path, content)` → `Unit`, `perform FS.append(path, content)` → `Unit`, `perform FS.exists(path)` → `Bool`; built-in effect wired into the standalone VM — `src/stdlib/fs.nula`, `src/stdlib.rs`, `src/vm.rs`. (Experimental)
 - `Test` assertion effect + `nula test [--filter <substr>]` runner: `perform Test.assert(cond, msg)`, `perform Test.assert_eq(a, b)`, `perform Test.assert_true(cond)`; the runner discovers `.nula` test files under `tests/`, reports pass/fail counts, supports name filtering — `src/stdlib/test.nula`, `src/package/commands.rs`. (Experimental)
 - LSP enhancements: `.` and `::` completion trigger characters, field-access completion (on `self.` fields, record fields, actor state), `textDocument/didSave` handler that re-checks the file on save, completion items sorted by category (locals > functions > types > variants > keywords > effects) — `src/lsp/mod.rs`. (Experimental)
-- 11 verified example programs under `examples/` with `examples/README.md` — from basic IO to actors, effects, loops, arrays, and pattern matching. (Experimental)
+- `var` bindings: mutable local variables via `var x = 0` declaration and `x = expr` reassignment; tracked separately from `let` in typechecker and codegen — `src/parser.rs`, `src/typechecker.rs`, `src/mir_codegen.rs`. (Experimental)
+- Record-update syntax: `{ base .. field = value }` creates a new record with overridden fields; parsed with `PREC_RANGE` precedence, disambiguated from range-in-block by checking for `=` — `src/parser.rs`. (Experimental)
+- Tuple `.0`/`.1` field access: numeric indices on tuples (`t.0`, `t.1`); chained access (`t.0.1`) on nested tuples without parenthesization — `src/parser.rs`, `src/hir_lower.rs`. (Stable)
+- Range expressions: `a .. b` inclusive-exclusive range at `PREC_RANGE` precedence (below pipe, above logical-or); works in `for` loops (`for i in 0 .. 5 { … }`) and bare in blocks (`{ a .. b }`) — `src/parser.rs`. (Experimental)
+- `String.from_char`: `perform String.from_char(code)` creates a single-character string from a Unicode code point; returns `nil` for invalid code points — `src/stdlib.rs`, `src/vm.rs`. (Stable)
+- `String.+` fix for let-bound variables: `a + b` where both operands are `let`-bound string variables now correctly concatenates — `src/vm.rs`. (Stable)
+- `else`-on-newline fix: an `else` keyword following a newline after `}` is accepted in `if`/`else` chains — `src/parser.rs`. (Stable)
+- `let..in` scoping fix: block-level `let x = V in BODY` correctly scopes `x` to `BODY` only — `src/hir_lower.rs`. (Stable)
+- `Http` builtin effect: `perform Http.get(url)` and `perform Http.post(url, body)` wired into the standalone VM via `ureq`; returns response body as `String` — `src/stdlib.rs`, `src/vm.rs`. (Experimental)
+- `Array` builtin effect: `perform Array.length(arr)`, `perform Array.push(arr, elem)`, `perform Array.new(n, init)`, `perform Array.set(arr, idx, val)`, `perform Array.slice(arr, start, end)` — value semantics, all return new arrays — `src/stdlib.rs`, `src/vm.rs`. (Experimental)
+- Numeric conversion primitives: `Int.to_float`, `Float.to_int` (truncates toward zero), `Float.to_string`, `String.to_int` (returns 0 for invalid), `String.to_float` (returns 0.0 for invalid) — `src/stdlib.rs`, `src/vm.rs`. (Experimental)
+- JSON parse + stringify: pure-Nulang recursive-descent parser in `stdlib::json` with `parse` and `stringify` functions; uses `String.to_float`, `Float.to_string`, `String.from_char`, and `Array.*` primitives — `src/stdlib/json.nula`. (Experimental)
+- All 13 stdlib modules functional: `core`, `list`, `string`, `set`, `map`, `test`, `fs`, `option`, `result`, `datetime`, `math`, `json`, `http` — all parse, import, and resolve with all VM primitives available — `src/stdlib/`. (Experimental)
+- LSP code lenses, document links, enriched hover: `textDocument/codeLens` shows reference counts; `textDocument/documentLink` creates clickable import links; `textDocument/hover` includes doc comments, effects, and type signatures — `src/lsp/mod.rs`. (Experimental)
+- LSP completion documentation: keyword and built-in effect completion items carry markdown documentation strings — `src/lsp/mod.rs`. (Experimental)
+- 15 verified example programs under `examples/` with `examples/README.md` — from basic IO to JSON, HTTP, Option/Result, and ranges. (Experimental)
 
 **Planned (described in this specification, not implemented):**
 
 - The WebAssembly compilation target (Chapter 13): WASM compilation exists behind the `wasm-backend` feature flag via `--backend wasm|wasm-run|wasm-aot`. WIT interface generation and WASI worlds are not yet implemented.
 - Higher-kinded types, `Char` and `Decimal` primitives, character literals (Sections 2.4, 3.6).
-- `var` bindings, `consume` / `recover` expressions, record-update syntax
-  `{ r .. f = v }`, ranges, `<-` message syntax, and
+- `consume` / `recover` expressions, `<-` message syntax, and
   indentation-based layout (Section 2.8).
 - Authority capabilities (`capability` declarations on actors, delegation, revocation, auditing — Sections 1.5 and 5.3–5.6), `config` blocks, the `tool` declaration form inside actors, `virtual` actors, `select`, `await`, `await_human`, `sleep_until`, and `retry` blocks.
 - The deployment manifest (`nulang.toml`), `nulang migrate`, and `nulang shell` (Chapter 15, Appendix D).
