@@ -193,6 +193,88 @@ in this version; they are recorded here to establish their tier.
   (`src/resolver.rs`) maps `stdlib::*` prefixes to the standard library
   directory and general `::` paths to filesystem-relative module files.
 
+### Added since 1.0.0-frozen — 2026-07-30
+
+- **`**` exponentiation operator.** Right-associative, precedence above `*`
+  (Pratt level 13), tokenized as `Star2`. Wired through the full pipeline:
+  lexer (`src/lexer.rs`), parser (Pratt `PREC_EXP`), typechecker, HIR
+  lowering, and bytecode. `a ** b ** c` parses as `a ** (b ** c)`.
+- **Structured error messages.** `NuError` enum in `src/types.rs` with
+  per-variant `expected`/`found` fields, `ErrorCode` classification,
+  automatic fix suggestions (`suggestion()`), and `format_rich()` for
+  colorized multi-line diagnostics with source excerpts and carets.
+  Constructor helpers (`type_mismatch`, `missing_effect`, etc.) produce
+  rich errors with minimal boilerplate at each call site.
+- **Language correctness fixes** (all Stable, `src/`):
+  - *Let-chain stack overflow:* long chains of consecutive `let` bindings are
+    now flattened iteratively in the parser (sequential `let`-statement
+    peeling) and HIR lowering (`lower_let_chain`), eliminating deep-recursion
+    overflow on blocks with 40+ lets (`src/parser.rs`, `src/hir_lower.rs`).
+  - *Spawn field-initializer overrides:* `spawn A { f = v }` now correctly
+    overrides the actor's declared default for field `f`. Overrides are
+    encoded in bytecode (`spawn_init_overrides` in `CodeModule`) and applied
+    at VM spawn time, replacing any matching default (`src/vm.rs`,
+    `src/mir_codegen.rs`, `src/bytecode.rs`). Backward-compatible: older
+    `.nbc` artifacts missing the field deserialize with an empty vec via
+    `serde(default)` (`src/format/nbc.rs`).
+  - *Clearer immutable-binding error:* the type error for reassigning a
+    `let` binding (`"cannot assign to immutable binding 'x'; mutable locals
+    (var) are not yet supported. Use 'let x = <new value> in ...' to shadow
+    the binding."`) now explains the constraint and suggests the shadowing
+    workaround (`src/typechecker.rs`).
+  - *Prefix `catch` syntax:* `catch expr fallback` is now accepted in
+    addition to the postfix form `expr catch fallback`; desugars identically
+    (`src/parser.rs`).
+- **Package manager subcommands** (Experimental, `src/package/commands.rs`):
+  `nula init` (scaffold a package with `Nulang.toml`, `src/main.nula`,
+  `.gitignore`), `nula list` (print locked dependencies), `nula clean`
+  (remove `.nbc` build artifacts), `nula add <name> [--path|--git|--version]`
+  (add/update a dependency and re-resolve the lockfile), `nula remove <name>`
+  (remove a dependency and update the lockfile), `nula run --watch` /
+  `nula watch` (build, run, and re-run on source changes via mtime polling),
+  and `nula doc [--open]` (generate Markdown API docs from doc comments and
+  declarations).
+- **REPL enhancements** (Experimental, `src/repl.rs`): `:help <topic>`
+  (topics: syntax, types, actors, effects, commands), `:load <file>` (load
+  and evaluate a `.nula` file), `:type <expr>` (show the inferred type
+  without evaluating), tab completion (identifiers, keywords, REPL
+  commands, stdlib modules), and automatic multi-line input when
+  braces/parens/brackets are unclosed (prompt changes to `.... `).
+- **New stdlib modules** (Experimental, `src/stdlib/`):
+  - `result`: Result combinators (`unwrap`, `map`, `flat_map`). The `Result`
+    type (`Ok(T) | Error(E)`) is defined in `stdlib::core` (auto-loaded).
+  - `option`: Option combinators. The `Option` type (`Some(T) | None`) is
+    defined in `stdlib::core`.
+  - `datetime`: `DateTime` record type with calendar fields.
+  - `math`: trigonometry (`sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
+    `atan2`), logarithms (`ln`, `log2`, `log10`), power/root (`pow`, `sqrt`),
+    rounding (`ceil`, `floor`, `round`, `trunc`), constants (`PI`, `E`).
+  - `fs`: wrapper functions around the `FS` built-in effect (see below).
+  - `test`: assertion helpers powered by the `Test` built-in effect (see below).
+- **`FS` filesystem effect** (Experimental). Built-in effect wired into the
+  standalone VM: `perform FS.read(path) -> String`, `perform FS.write(path,
+  content) -> Unit`, `perform FS.append(path, content) -> Unit`,
+  `perform FS.exists(path) -> Bool`. Effect-aware type signatures (`!
+  {FS}`) are enforced. Declared in `src/stdlib.rs`; wrapper functions in
+  `src/stdlib/fs.nula`.
+- **`Test` assertion effect + `nula test` runner** (Experimental).
+  `perform Test.assert(cond, msg)`, `perform Test.assert_eq(a, b)`,
+  `perform Test.assert_true(cond)`, and `fail_with(message)`. The test runner
+  (`nula test [--filter <substr>]`) discovers `.nula` test files under the
+  package's `tests/` directory, executes each, and reports pass/fail counts
+  with optional name filtering (`src/stdlib/test.nula`,
+  `src/package/commands.rs`).
+- **LSP enhancements** (Experimental, `src/lsp/mod.rs`): `.` and `::`
+  completion trigger characters for automatic invocation, field-access
+  completion (on `self.` fields, record fields, and actor state),
+  `textDocument/didSave` handler that re-checks the file on save, and
+  completion items sorted by category (locals > functions > types > variants
+  > keywords > effects) via `sort_text` prefixes.
+- **Example programs.** 11 verified, runnable example programs under
+  `examples/` with `examples/README.md`: from basic IO and arithmetic
+  through functions, pattern matching, records, higher-order functions,
+  algebraic effects, actors, loops, the pipe operator, and arrays.
+
 ---
 
 ## Pre-1.0 (crate version 0.13.0-alpha.1 and earlier)

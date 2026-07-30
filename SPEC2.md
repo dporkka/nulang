@@ -62,6 +62,19 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - Content-addressed lockfile: `Nulang.lock` carries BLAKE3 `content_hash` per pinned package (Experimental, RFC 0003 Item 11).
 - Self-hosting bootstrap compiler: Stage 10 — end-to-end hex → .nbc pipeline (`bootstrap/compiler_core.nula`, `compile_hex.nula`) supporting lexing, Pratt parsing, evaluation, arithmetic, let bindings, closures, `if`/`else`, comparisons, and booleans in Nulang Core. Remaining: HM type inference, MIR lowering, self-compilation.
 - Backend trait boundary (RFC 0003 Item 6): `JitBackend`, `WasmBackend`, `CryptoProvider`, `ForeignInterop`, `HttpProvider` traits in `src/backends/mod.rs` (Stable).
+- Structured error messages: `NuError` enum with error codes (`ErrorCode`), `expected`/`found` fields per variant, automatic fix suggestions via `error_code()` and `suggestion()`, and `format_rich()` for colorized multi-line diagnostics with source excerpts and carets — `src/types.rs`. (Stable)
+- `**` exponentiation operator: tokenized as `Star2`, right-associative, precedence above `*` (Pratt `PREC_EXP` level 13), wired through parser, typechecker, HIR lowering, and bytecode — `src/lexer.rs`, `src/parser.rs`. (Stable)
+- `catch` prefix syntax: `catch expr fallback` in addition to postfix `expr catch fallback` — `src/parser.rs`. (Stable)
+- Spawn field-initializer overrides: `spawn A { f = v }` now correctly overrides the actor's declared default for field `f`; overrides are encoded in bytecode and applied at VM spawn time — `src/vm.rs`, `src/mir_codegen.rs`, `src/bytecode.rs`. (Stable)
+- Clearer "cannot assign to immutable binding" diagnostic: the type error for reassigning a `let` binding now explains that mutable locals are not yet supported and suggests shadowing — `src/typechecker.rs`. (Stable)
+- Let-chain stack-overflow fix: long chains of consecutive `let` bindings are flattened iteratively in both the parser (sequential `let`-statement peeling) and HIR lowering (`lower_let_chain`), eliminating deep-recursion overflow on blocks with 40+ lets — `src/parser.rs`, `src/hir_lower.rs`. (Stable)
+- Package manager subcommands: `nula init` (scaffold a package), `nula list` (locked dependencies), `nula clean` (remove build artifacts), `nula add <name> [--path|--git|--version]`, `nula remove <name>`, `nula run --watch` / `nula watch` (re-run on source changes), and `nula doc [--open]` (generate Markdown API docs) — `src/package/commands.rs`. (Experimental)
+- REPL enhancements: `:help <topic>` (topics: syntax, types, actors, effects, commands), `:load <file>` (load and evaluate a `.nula` file), `:type <expr>` (show inferred type without evaluating), tab completion for identifiers and REPL commands, automatic multi-line input when braces/parens/brackets are unclosed — `src/repl.rs`. (Experimental)
+- New stdlib modules: `result` (Result combinators: `unwrap`, `map`, `flat_map`), `option` (Option combinators), `datetime` (DateTime record type), `math` (trigonometry, logarithms, rounding), `fs` (FS-effect wrapper), and `test` (Test-effect assertion helpers: `assert`, `assert_eq`, `assert_true`, `fail_with`) — `src/stdlib/`. (Experimental)
+- `FS` filesystem effect: `perform FS.read(path)` → `String`, `perform FS.write(path, content)` → `Unit`, `perform FS.append(path, content)` → `Unit`, `perform FS.exists(path)` → `Bool`; built-in effect wired into the standalone VM — `src/stdlib/fs.nula`, `src/stdlib.rs`, `src/vm.rs`. (Experimental)
+- `Test` assertion effect + `nula test [--filter <substr>]` runner: `perform Test.assert(cond, msg)`, `perform Test.assert_eq(a, b)`, `perform Test.assert_true(cond)`; the runner discovers `.nula` test files under `tests/`, reports pass/fail counts, supports name filtering — `src/stdlib/test.nula`, `src/package/commands.rs`. (Experimental)
+- LSP enhancements: `.` and `::` completion trigger characters, field-access completion (on `self.` fields, record fields, actor state), `textDocument/didSave` handler that re-checks the file on save, completion items sorted by category (locals > functions > types > variants > keywords > effects) — `src/lsp/mod.rs`. (Experimental)
+- 11 verified example programs under `examples/` with `examples/README.md` — from basic IO to actors, effects, loops, arrays, and pattern matching. (Experimental)
 
 **Planned (described in this specification, not implemented):**
 
@@ -69,7 +82,7 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - Higher-kinded types, `Char` and `Decimal` primitives, character literals,
   multi-line strings, and `\u{...}` escapes (Sections 2.4, 3.6).
 - `var` bindings, `consume` / `recover` expressions, record-update syntax
-  `{ r .. f = v }`, ranges, the `**` operator, `<-` message syntax, and
+  `{ r .. f = v }`, ranges, `<-` message syntax, and
   indentation-based layout (Section 2.8).
 - Authority capabilities (`capability` declarations on actors, delegation, revocation, auditing — Sections 1.5 and 5.3–5.6), `config` blocks, the `tool` declaration form inside actors, `virtual` actors, `select`, `await`, `await_human`, `sleep_until`, and `retry` blocks.
 - The deployment manifest (`nulang.toml`), `nulang migrate`, and `nulang shell` (Chapter 15, Appendix D).
