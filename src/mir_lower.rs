@@ -1284,16 +1284,29 @@ impl<'c> FnLowerer<'c> {
                 self.b.assign(dst, mir::RValue::FFICall { idx, args: ids });
                 Ok(())
             }
-            hir::RValue::Spawn { actor_type, .. } => {
-                // Spawn-site init argument values are compiled for side
-                // effects only and then discarded — hir_lower already
-                // materialized them as statements in the enclosing body when
-                // it lowered the AST's init exprs into Operands, so there is
-                // nothing left to do with them here. Only literal `state`
-                // field defaults (captured in ActorMeta) take effect at
-                // spawn time. This matches the stable compiler exactly.
+            hir::RValue::Spawn {
+                actor_type, init, ..
+            } => {
                 let idx = self.ctx.spawn_behavior_idx(actor_type);
-                self.b.assign(dst, mir::RValue::Spawn { behavior_idx: idx });
+                let init_rvs: Vec<(String, mir::RValue)> = init
+                    .iter()
+                    .map(|(name, op)| match op {
+                        hir::Operand::Literal(lit, _) => {
+                            (name.clone(), mir::RValue::Const(literal_to_constant(lit)))
+                        }
+                        _ => {
+                            let local = self.lower_operand(op).unwrap_or_else(|_| self.unit_temp());
+                            (name.clone(), mir::RValue::Load(local))
+                        }
+                    })
+                    .collect();
+                self.b.assign(
+                    dst,
+                    mir::RValue::Spawn {
+                        behavior_idx: idx,
+                        init: init_rvs,
+                    },
+                );
                 Ok(())
             }
             hir::RValue::Send {

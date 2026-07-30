@@ -646,6 +646,10 @@ pub struct CodeModule {
     pub foreign_functions: Vec<ForeignFunctionDef>,
     /// Tool schemas for functions annotated with `@tool(description: "...")`.
     pub tools: Vec<ToolSchema>,
+    /// Spawn-site init field overrides.  Maps `Spawn` instruction byte-offset
+    /// to per-field constant values that should override declared state defaults.
+    /// Populated by MIR codegen; consumed by the VM's `step_spawn`.
+    pub spawn_init_overrides: Vec<(usize, Vec<(String, Constant)>)>,
 }
 
 impl CodeModule {
@@ -658,6 +662,7 @@ impl CodeModule {
             function_table: Vec::new(),
             exports: Vec::new(),
             entry_point: None,
+            spawn_init_overrides: Vec::new(),
             handler_tables: Vec::new(),
             actor_metadata: Vec::new(),
             foreign_functions: Vec::new(),

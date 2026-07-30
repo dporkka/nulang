@@ -956,13 +956,27 @@ impl MirCodegen {
                     dst,
                 ));
             }
-            mir::RValue::Spawn { behavior_idx } => {
+            mir::RValue::Spawn { behavior_idx, init } => {
+                let pc = self.current_offset();
                 self.emit(Instruction::new3(
                     OpCode::Spawn,
                     ((*behavior_idx >> 8) & 0xFF) as u8,
                     (*behavior_idx & 0xFF) as u8,
                     dst,
                 ));
+                // Encode spawn-site init overrides for the VM
+                if !init.is_empty() {
+                    let overrides: Vec<(String, crate::bytecode::Constant)> = init
+                        .iter()
+                        .filter_map(|(name, rv)| match rv {
+                            mir::RValue::Const(c) => Some((name.clone(), c.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    if !overrides.is_empty() {
+                        self.module.spawn_init_overrides.push((pc, overrides));
+                    }
+                }
             }
             mir::RValue::Send {
                 actor,
@@ -1151,6 +1165,10 @@ impl MirCodegen {
 
     fn emit(&mut self, instr: Instruction) {
         self.module.instructions.push(instr);
+    }
+
+    fn current_offset(&self) -> usize {
+        self.module.instructions.len()
     }
 
     pub fn finish(self) -> CodeModule {

@@ -2606,7 +2606,8 @@ impl VM {
         instr: Instruction,
     ) -> NuResult<()> {
         let behavior_idx = instr.imm16() as usize;
-        let init: Vec<(String, Value)> = self
+        // Start with declared state defaults
+        let mut init: Vec<(String, Value)> = self
             .modules
             .get(module_idx)
             .and_then(|m| {
@@ -2621,6 +2622,20 @@ impl VM {
                     .collect()
             })
             .unwrap_or_default();
+        // Apply spawn-site init overrides (overwrite defaults)
+        let spawn_pc = self.frames[frame_idx].pc.saturating_sub(1);
+        if let Some(module) = self.modules.get(module_idx) {
+            for &(offset, ref overrides) in &module.spawn_init_overrides {
+                if offset == spawn_pc {
+                    for (name, c) in overrides {
+                        // Remove any existing default entry for this field
+                        init.retain(|(n, _)| n != name);
+                        init.push((name.clone(), constant_to_value(c)));
+                    }
+                    break;
+                }
+            }
+        }
         let result = if let Some(module) = self.modules.get(module_idx) {
             self.actor_callbacks.spawn_actor(module, behavior_idx, init)
         } else {

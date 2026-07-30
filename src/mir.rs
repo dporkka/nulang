@@ -284,11 +284,11 @@ pub enum RValue {
     /// `spawn ActorName { ... }`. `behavior_idx` is the actor's first
     /// behavior's index into `Module::behaviors` — the VM resolves the rest
     /// of the actor's behaviors and state defaults from there via
-    /// `ActorMeta`. Spawn-site init argument values are not passed through
-    /// (matching the stable compiler): only literal `state` field defaults
-    /// take effect.
+    /// `ActorMeta`. Spawn-site init overrides are carried in `init`; they
+    /// override the declared state defaults at spawn time.
     Spawn {
         behavior_idx: usize,
+        init: Vec<(String, RValue)>,
     },
     /// `send actor behavior(args...)`. Fire-and-forget; evaluates to 0.
     Send {
@@ -584,7 +584,10 @@ mod tests {
         let _ = RValue::SelfRef;
         let _ = RValue::CapabilityCheck { val: LocalId(0) };
         let _ = RValue::StateGet { field: "f".into() };
-        let _ = RValue::Spawn { behavior_idx: 0 };
+        let _ = RValue::Spawn {
+            behavior_idx: 0,
+            init: vec![],
+        };
         let _ = RValue::Send {
             actor: LocalId(0),
             behavior_idx: 0,
