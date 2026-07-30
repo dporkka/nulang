@@ -529,6 +529,82 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
             eprintln!("[{}] {} = {}", file, label, val.to_string_repr());
             return Some(val);
         }
+        if effect_name == "FS" {
+            match op_name {
+                Some("read") => {
+                    let path = regs
+                        .first()
+                        .map(|v| resolve_value_string(constants, *v))
+                        .unwrap_or_default();
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => {
+                            let bytes = content.into_bytes();
+                            match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                                Some(ptr) => {
+                                    unsafe {
+                                        std::ptr::copy_nonoverlapping(
+                                            bytes.as_ptr(),
+                                            ptr,
+                                            bytes.len(),
+                                        );
+                                        *ptr.add(bytes.len()) = 0;
+                                    }
+                                    return Some(Value::ptr(ptr));
+                                }
+                                None => return Some(Value::nil()),
+                            }
+                        }
+                        Err(_) => return Some(Value::nil()),
+                    }
+                }
+                Some("write") => {
+                    let path = regs
+                        .first()
+                        .map(|v| resolve_value_string(constants, *v))
+                        .unwrap_or_default();
+                    let content = regs
+                        .get(1)
+                        .map(|v| resolve_value_string(constants, *v))
+                        .unwrap_or_default();
+                    if std::fs::write(&path, &content).is_err() {
+                        return Some(Value::nil());
+                    }
+                    return Some(Value::unit());
+                }
+                Some("append") => {
+                    let path = regs
+                        .first()
+                        .map(|v| resolve_value_string(constants, *v))
+                        .unwrap_or_default();
+                    let content = regs
+                        .get(1)
+                        .map(|v| resolve_value_string(constants, *v))
+                        .unwrap_or_default();
+                    use std::io::Write;
+                    let mut file = match std::fs::OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(&path)
+                    {
+                        Ok(f) => f,
+                        Err(_) => return Some(Value::nil()),
+                    };
+                    if file.write_all(content.as_bytes()).is_err() {
+                        return Some(Value::nil());
+                    }
+                    return Some(Value::unit());
+                }
+                Some("exists") => {
+                    let path = regs
+                        .first()
+                        .map(|v| resolve_value_string(constants, *v))
+                        .unwrap_or_default();
+                    let exists = std::path::Path::new(&path).exists();
+                    return Some(Value::bool(exists));
+                }
+                _ => return None,
+            }
+        }
         if effect_name != "IO" {
             return None;
         }

@@ -21,6 +21,7 @@
 //! | `std.option` | `option.nula` | Extra Option combinators: `unwrap`, `map`, `is_some`, `is_none`. |
 //! | `std.datetime` | `datetime.nula` | DateTime record type and operations: `now` (stub), `new`, `is_valid`. |
 //! | `std.http` | `http.nula` | HTTP client via built-in `Http` effect: `get`, `post`. |
+//! | `std.fs` | `fs.nula` | Filesystem I/O via built-in `FS` effect: `read`, `write`, `append`, `exists`. |
 //! | `std.json` | `json.nula` | JSON parsing and serialization: `parse`, `stringify`, field accessors. |
 //! | `std.test` | `test.nula` | Testing primitives: `assert_eq`, `assert_true`, `assert_false`, `fail`. |
 //!
@@ -106,6 +107,38 @@ impl StdLib {
                 BuiltinOp { name: "IO.log", effect: "IO", op: "log", signature: "log(level: String, message: String) -> Unit", implemented_in: ImplSite::StandaloneVm, description: "Log a message at the given level to stderr.", },
                 BuiltinOp { name: "IO.log_error", effect: "IO", op: "log_error", signature: "log_error(message: String) -> Unit", implemented_in: ImplSite::StandaloneVm, description: "Log an error message to stderr.", },
                 BuiltinOp { name: "Debug.inspect", effect: "Debug", op: "inspect", signature: "inspect(label: String, value: a) -> a", implemented_in: ImplSite::StandaloneVm, description: "Print a labeled value to stderr and return it unchanged.", },
+                BuiltinOp {
+                    name: "FS.read",
+                    effect: "FS",
+                    op: "read",
+                    signature: "read(path: String) -> String",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Read the entire contents of a file into a string; returns nil on error.",
+                },
+                BuiltinOp {
+                    name: "FS.write",
+                    effect: "FS",
+                    op: "write",
+                    signature: "write(path: String, content: String) -> Unit",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Write a string to a file, overwriting any existing content; returns nil on error.",
+                },
+                BuiltinOp {
+                    name: "FS.append",
+                    effect: "FS",
+                    op: "append",
+                    signature: "append(path: String, content: String) -> Unit",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Append a string to the end of a file, creating it if it does not exist; returns nil on error.",
+                },
+                BuiltinOp {
+                    name: "FS.exists",
+                    effect: "FS",
+                    op: "exists",
+                    signature: "exists(path: String) -> Bool",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Check whether a file or directory exists at the given path.",
+                },
                 BuiltinOp {
                     name: "Int.to_string",
                     effect: "Int",
@@ -439,6 +472,10 @@ mod tests {
             "IO.println",
             "IO.read",
             "Timer.sleep",
+            "FS.read",
+            "FS.write",
+            "FS.append",
+            "FS.exists",
             "Signal.wait",
             "LLM.ask",
             "Actor.link",
@@ -502,6 +539,22 @@ mod tests {
             ImplSite::StandaloneVm
         );
         assert_eq!(
+            lib.lookup("FS.read").unwrap().implemented_in,
+            ImplSite::StandaloneVm
+        );
+        assert_eq!(
+            lib.lookup("FS.write").unwrap().implemented_in,
+            ImplSite::StandaloneVm
+        );
+        assert_eq!(
+            lib.lookup("FS.append").unwrap().implemented_in,
+            ImplSite::StandaloneVm
+        );
+        assert_eq!(
+            lib.lookup("FS.exists").unwrap().implemented_in,
+            ImplSite::StandaloneVm
+        );
+        assert_eq!(
             lib.lookup("Timer.sleep").unwrap().implemented_in,
             ImplSite::RuntimeHost
         );
@@ -539,6 +592,7 @@ mod tests {
             vec![
                 "IO",
                 "Debug",
+                "FS",
                 "Int",
                 "String",
                 "Timer",

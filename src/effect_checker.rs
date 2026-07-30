@@ -2135,6 +2135,24 @@ mod tests {
     }
 
     #[test]
+    fn test_infer_perform_fs() {
+        let mut checker = EffectChecker::new();
+        let ctx = EffectContext::empty();
+        let perform = Expr::Perform {
+            effect: "FS".to_string(),
+            op: "read".to_string(),
+            args: vec![Expr::Literal(
+                Literal::String("/tmp/test.txt".to_string()),
+                s(),
+            )],
+            span: s(),
+        };
+        let row = checker.infer_effects(&ctx, &perform).unwrap();
+        assert!(row.contains(&Effect::FS));
+        assert!(!row.contains(&Effect::IO));
+    }
+
+    #[test]
     fn test_infer_spawn_effect() {
         let mut checker = EffectChecker::new();
         let ctx = EffectContext::empty();
