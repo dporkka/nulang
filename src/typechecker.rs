@@ -1247,6 +1247,11 @@ impl TypeChecker {
             // Record literal: infer each field
             Expr::Record(fields, span) => self.infer_record(ctx, fields, *span),
 
+            // Record update: { base .. field = val, ... }
+            Expr::RecordUpdate { base, fields, span } => {
+                self.infer_record_update(ctx, base, fields, *span)
+            }
+
             // Field access: look up field in record type
             Expr::FieldAccess { expr, field, span } => {
                 self.infer_field_access(ctx, expr, field, *span)
@@ -2056,6 +2061,70 @@ impl TypeChecker {
             field_types.push((name.clone(), apply_subst(&ty, &subst)));
         }
         Ok((subst, Type::Record(field_types)))
+    }
+
+    /// Infer the type of a record-update expression: { base .. field = val, ... }
+    fn infer_record_update(
+        &mut self,
+        ctx: &TypeContext,
+        base: &Expr,
+        overrides: &[(String, Expr)],
+        span: Span,
+    ) -> NuResult<(Substitution, Type)> {
+        // Infer the base type — it must be a record.
+        let (s_base, base_ty) = self.infer_expr(ctx, base)?;
+        let base_ty = apply_subst(&base_ty, &s_base);
+        let base_fields = match &base_ty {
+            Type::Record(fs) => fs.clone(),
+            Type::Var(_) => {
+                // If the base type is a type variable, it's an unbound record —
+                // this happens if the base comes from a polymorphic function.
+                // We'll still type-check the overrides and return a fresh record type.
+                return Err(NuError::type_mismatch(
+                    format!("{}", Type::Record(vec![])),
+                    format!("{}", base_ty),
+                    span,
+                ));
+            }
+            other => {
+                return Err(NuError::type_mismatch(
+                    format!("{}", Type::Record(vec![])),
+                    format!("{}", other),
+                    span,
+                ));
+            }
+        };
+
+        // Check each override field exists in the base record type and
+        // unify the override value type with the field's type.
+        let mut subst = s_base;
+        let ctx = apply_subst_to_ctx(ctx, &subst);
+
+        for (field_name, override_expr) in overrides {
+            let base_field_ty = base_fields
+                .iter()
+                .find(|(n, _)| n == field_name)
+                .map(|(_, t)| t.clone());
+
+            match base_field_ty {
+                Some(expected_ty) => {
+                    let (s_ov, ov_ty) = self.infer_expr(&ctx, override_expr)?;
+                    subst = compose_subst(&s_ov, &subst);
+                    let expected = apply_subst(&expected_ty, &subst);
+                    let ov_ty = apply_subst(&ov_ty, &subst);
+                    let s_unify = mgu(&expected, &ov_ty, span)?;
+                    subst = compose_subst(&s_unify, &subst);
+                }
+                None => {
+                    let available: Vec<String> =
+                        base_fields.iter().map(|(n, _)| n.clone()).collect();
+                    return Err(NuError::field_not_found(field_name, span, Some(available)));
+                }
+            }
+        }
+
+        let result_ty = apply_subst(&base_ty, &subst);
+        Ok((subst, result_ty))
     }
 
     /// Infer the type of a field access expression.

@@ -2257,7 +2257,25 @@ impl Parser {
                     TokenKind::If => self.parse_if(),
                     TokenKind::Match => self.parse_match(),
                     TokenKind::LBrace => {
-                        // Look ahead to distinguish record literal from block
+                        // Disambiguation: { expr .. field = val } (record-update)
+                        // vs { ident : val } (record literal) vs { stmt; ... } (block).
+                        //
+                        // Approach: save position, try to parse an expression, and
+                        // if followed by `..` (DotDot), commit to record-update.
+                        // Otherwise restore and fall through to the existing
+                        // record-literal / block logic. `..` is never consumed by
+                        // `parse_expr` (no prefix/infix handler for it), so the
+                        // speculative parse is safe and side-effect-free beyond
+                        // occasional diagnostic noise.
+                        let saved = self.pos;
+                        self.advance(); // consume '{'
+                        if let Ok(base) = self.parse_expr() {
+                            if self.consume_if(&TokenKind::DotDot) {
+                                return self.parse_record_update(base);
+                            }
+                        }
+                        // Not a record-update — restore and fall through
+                        self.pos = saved;
                         if self.is_record_literal_ahead() {
                             self.parse_record_literal()
                         } else {
@@ -3266,6 +3284,30 @@ impl Parser {
         Ok(Expr::Record(fields, span))
     }
 
+    /// Parse a record-update expression: `{ base .. field = val, ... }`.
+    /// `base` has already been parsed and `..` has been consumed by the caller.
+    fn parse_record_update(&mut self, base: Expr) -> NuResult<Expr> {
+        let span = self.current_span();
+        let mut fields = Vec::new();
+        self.skip_newlines();
+        while self.peek_kind() != &TokenKind::RBrace && !self.is_at_end() {
+            let field = self.expect_ident("field name")?;
+            self.expect(TokenKind::Assign)?;
+            let val = self.parse_expr()?;
+            fields.push((field, val));
+            self.skip_newlines();
+            if !self.consume_if(&TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Expr::RecordUpdate {
+            base: Box::new(base),
+            fields,
+            span,
+        })
+    }
     fn parse_self_ref(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
         self.expect(TokenKind::SelfKw)?;

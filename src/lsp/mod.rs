@@ -1746,6 +1746,12 @@ impl NulangLanguageServer {
                     Self::extract_expr_types(e, source, map);
                 }
             }
+            Expr::RecordUpdate { base, fields, .. } => {
+                Self::extract_expr_types(base, source, map);
+                for (_, e) in fields {
+                    Self::extract_expr_types(e, source, map);
+                }
+            }
             Expr::FieldAccess { expr, .. } => {
                 Self::extract_expr_types(expr, source, map);
             }

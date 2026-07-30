@@ -1071,6 +1071,23 @@ impl<'c> FnLowerer<'c> {
                 self.b.assign(dst, mir::RValue::Record(fs));
                 Ok(())
             }
+            hir::RValue::RecordUpdate {
+                base, overrides, ..
+            } => {
+                let base_id = self.lower_operand(base)?;
+                let mut ov = Vec::with_capacity(overrides.len());
+                for (n, e) in overrides {
+                    ov.push((n.clone(), self.lower_operand(e)?));
+                }
+                self.b.assign(
+                    dst,
+                    mir::RValue::RecordUpdate {
+                        base: base_id,
+                        overrides: ov,
+                    },
+                );
+                Ok(())
+            }
             hir::RValue::Array(elems, _) => {
                 let mut ids = Vec::with_capacity(elems.len());
                 for e in elems {
@@ -2483,6 +2500,12 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
             out.push(*actor);
             out.extend(args.iter().copied());
         }
+        RecordUpdate { base, overrides } => {
+            out.push(*base);
+            for (_, v) in overrides {
+                out.push(*v);
+            }
+        }
     }
 }
 
@@ -2571,6 +2594,14 @@ fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
         }
         hir::RValue::Record(fields, _) => {
             for (_, op) in fields {
+                walk_hir_operand(op, acc);
+            }
+        }
+        hir::RValue::RecordUpdate {
+            base, overrides, ..
+        } => {
+            walk_hir_operand(base, acc);
+            for (_, op) in overrides {
                 walk_hir_operand(op, acc);
             }
         }

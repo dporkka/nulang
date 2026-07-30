@@ -208,6 +208,12 @@ pub enum RValue {
     },
     Tuple(Vec<LocalId>),
     Record(Vec<(String, LocalId)>),
+    /// Record update: { base .. field = val, ... }. Creates a shallow copy
+    /// of `base` with the listed field overrides applied.
+    RecordUpdate {
+        base: LocalId,
+        overrides: Vec<(String, LocalId)>,
+    },
     Perform {
         effect: String,
         op: String,

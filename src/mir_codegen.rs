@@ -814,6 +814,16 @@ impl MirCodegen {
                     self.emit(Instruction::new3(OpCode::RecS, dst, fid, _re));
                 }
             }
+            mir::RValue::RecordUpdate { base, overrides } => {
+                // Shallow copy the base record, then overwrite each override.
+                let _rbase = self.local_reg(*base);
+                self.emit(Instruction::new2(OpCode::RecCopy, _rbase, dst));
+                for (name, val_id) in overrides {
+                    let fid = self.field_id(name)?;
+                    let _rval = self.local_reg(*val_id);
+                    self.emit(Instruction::new3(OpCode::RecS, dst, fid, _rval));
+                }
+            }
             mir::RValue::Perform {
                 effect,
                 op,
@@ -831,7 +841,6 @@ impl MirCodegen {
                         dst,
                     ));
                 } else {
-                    // Dynamic dispatch via the handler_stack walk.
                     let eff_idx = self
                         .module
                         .add_constant(Constant::String(format!("{}.{}", effect, op)));
@@ -1363,6 +1372,7 @@ fn rvalue_is_owning(op: &mir::RValue) -> bool {
         op,
         mir::RValue::Tuple(_)
             | mir::RValue::Record(_)
+            | mir::RValue::RecordUpdate { .. }
             | mir::RValue::ArrayLit(_)
             | mir::RValue::Const(_)
     )
@@ -1438,6 +1448,12 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
         }
         Record(fields) => {
             for (_, e) in fields {
+                ret(&mut out, *e);
+            }
+        }
+        RecordUpdate { base, overrides } => {
+            ro(&mut out, *base);
+            for (_, e) in overrides {
                 ret(&mut out, *e);
             }
         }

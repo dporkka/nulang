@@ -260,6 +260,13 @@ pub enum RValue {
     },
     Tuple(Vec<Operand>, Type),
     Record(Vec<(String, Operand)>, Type),
+    /// Record update: { base .. field = val, ... }. Creates a shallow copy
+    /// of `base` with the listed field overrides applied.
+    RecordUpdate {
+        base: Operand,
+        overrides: Vec<(String, Operand)>,
+        ty: Type,
+    },
     Array(Vec<Operand>, Type),
     FieldAccess {
         base: Operand,
@@ -468,6 +475,7 @@ impl RValue {
             RValue::RecClosure { ty, .. } => ty.clone(),
             RValue::Tuple(_, ty) => ty.clone(),
             RValue::Record(_, ty) => ty.clone(),
+            RValue::RecordUpdate { ty, .. } => ty.clone(),
             RValue::Array(_, ty) => ty.clone(),
             RValue::FieldAccess { ty, .. } => ty.clone(),
             RValue::Index { ty, .. } => ty.clone(),

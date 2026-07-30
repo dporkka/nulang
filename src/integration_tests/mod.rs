@@ -8664,4 +8664,67 @@ match { a: 2, b: 9 } with {
             value
         );
     }
+
+    // ---------------------------------------------------------------
+    // Record update: { base .. field = val }
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_record_update_single_override() {
+        let source = r#"
+        let p = { x: 1, y: 2 } in
+        let q = { p .. y = 9 } in
+        q.y
+        "#;
+        let result = run_source(source);
+        assert!(result.is_ok(), "should compile: {:?}", result.err());
+        let (value, _ty) = result.unwrap();
+        assert_eq!(value.as_int(), Some(9), "q.y should be 9");
+    }
+
+    #[test]
+    fn test_record_update_base_unchanged() {
+        let source = r#"
+        let p = { x: 1, y: 2 } in
+        let q = { p .. y = 9 } in
+        q.x
+        "#;
+        let result = run_source(source);
+        assert!(result.is_ok(), "should compile: {:?}", result.err());
+        let (value, _ty) = result.unwrap();
+        assert_eq!(
+            value.as_int(),
+            Some(1),
+            "q.x should be 1 (unchanged from base)"
+        );
+    }
+
+    #[test]
+    fn test_record_update_base_not_mutated() {
+        let source = r#"
+        let p = { x: 1, y: 2 } in
+        let q = { p .. y = 9 } in
+        p.y
+        "#;
+        let result = run_source(source);
+        assert!(result.is_ok(), "should compile: {:?}", result.err());
+        let (value, _ty) = result.unwrap();
+        assert_eq!(value.as_int(), Some(2), "p.y should be 2 (base unchanged)");
+    }
+
+    #[test]
+    fn test_record_update_multiple_overrides() {
+        let source = r#"
+        let p = { x: 1, y: 2, z: 3 } in
+        let q = { p .. x = 10, z = 30 } in
+        let a = q.x in
+        let b = q.y in
+        let c = q.z in
+        a + b + c
+        "#;
+        let result = run_source(source);
+        assert!(result.is_ok(), "should compile: {:?}", result.err());
+        let (value, _ty) = result.unwrap();
+        assert_eq!(value.as_int(), Some(42), "10 + 2 + 30 = 42");
+    }
 }

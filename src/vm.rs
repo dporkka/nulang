@@ -2528,6 +2528,49 @@ impl VM {
         Ok(())
     }
 
+    /// Shallow copy a record: allocate a new record with the same slot count
+    /// as `src` and copy every field value, retaining each.
+    #[inline(never)]
+    fn step_reccopy(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
+        let src_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
+            .as_ptr()
+            .unwrap_or(std::ptr::null_mut());
+        let dst_reg = instr.op2 as usize;
+        if !src_ptr.is_null() {
+            unsafe {
+                let header = &*ActorHeap::header_of(src_ptr);
+                if header.type_tag == HeapTypeTag::Record {
+                    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+                    let slot_count = payload_size / std::mem::size_of::<Value>();
+                    if let Some(dst_ptr) = self
+                        .actor_callbacks
+                        .alloc(payload_size, HeapTypeTag::Record)
+                    {
+                        let src_slots =
+                            std::slice::from_raw_parts(src_ptr as *const Value, slot_count);
+                        let dst_slots =
+                            std::slice::from_raw_parts_mut(dst_ptr as *mut Value, slot_count);
+                        for i in 0..slot_count {
+                            let val = src_slots[i];
+                            if let Some(ptr) = val.as_ptr() {
+                                self.actor_callbacks.retain_ref(ptr);
+                            }
+                            dst_slots[i] = val;
+                        }
+                        self.frames[frame_idx].regs[dst_reg] = Value::ptr(dst_ptr);
+                    } else {
+                        self.frames[frame_idx].regs[dst_reg] = Value::nil();
+                    }
+                } else {
+                    self.frames[frame_idx].regs[dst_reg] = Value::nil();
+                }
+            }
+        } else {
+            self.frames[frame_idx].regs[dst_reg] = Value::nil();
+        }
+        Ok(())
+    }
+
     #[inline(never)]
     fn step_fields(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
         let tup_ptr = self.frames[frame_idx].regs[instr.op1 as usize]
@@ -3562,6 +3605,9 @@ impl VM {
                 self.step_recl(frame_idx, instr)?;
             }
 
+            OpCode::RecCopy => {
+                self.step_reccopy(frame_idx, instr)?;
+            }
             // -- Tuples (heap-backed fixed-size arrays) --
             OpCode::TupleMk => {
                 let count = instr.op1 as usize;

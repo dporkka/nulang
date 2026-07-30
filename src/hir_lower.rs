@@ -1278,6 +1278,26 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
+        Expr::RecordUpdate { base, fields, span } => {
+            let base_op = lower_expr(base, body);
+            let overrides: Vec<_> = fields
+                .iter()
+                .map(|(n, e)| (n.clone(), lower_expr(e, body)))
+                .collect();
+            let ty = Type::unit();
+            let temp = fresh_temp_name();
+            body.push(hir::Stmt::Let {
+                name: temp.clone(),
+                ty: ty.clone(),
+                value: hir::RValue::RecordUpdate {
+                    base: base_op,
+                    overrides,
+                    ty: ty.clone(),
+                },
+                span: *span,
+            });
+            hir::Operand::Var(temp, ty)
+        }
         Expr::FieldAccess { expr, field, span } => {
             let base = lower_expr(expr, body);
             let ty = Type::unit();
@@ -2373,6 +2393,12 @@ fn free_vars(
             }
         }
         Expr::Record(fields, _) => {
+            for (_, e) in fields {
+                free_vars(e, bound, acc);
+            }
+        }
+        Expr::RecordUpdate { base, fields, .. } => {
+            free_vars(base, bound, acc);
             for (_, e) in fields {
                 free_vars(e, bound, acc);
             }

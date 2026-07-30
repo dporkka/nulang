@@ -102,8 +102,11 @@ pub enum OpCode {
     RecS = 0x7B,     // Record field store
     IsTag = 0x7C,    // Variant tag check (val_reg, tag_id, dst)
     Unpack = 0x7D,   // Variant unpack (val_reg, dst)
-    Copy = 0x7E,     // Deep copy (ref_cap, src, dst)
-    Drop = 0x7F,     // Drop / deallocate (rc_dec or free)
+    /// Shallow copy a record: allocate a new record with the same slot count
+    /// and copy every field, retaining each. src_reg → dst_reg.
+    RecCopy = 0x9D,
+    Copy = 0x7E, // Deep copy (ref_cap, src, dst)
+    Drop = 0x7F, // Drop / deallocate (rc_dec or free)
 
     // == Actor & Concurrency (0x80-0x8F) ==
     Spawn = 0x80,        // Spawn actor (behavior_idx, init_reg, dst_addr)
@@ -342,6 +345,7 @@ impl OpCode {
             0x99 => Some(PyToNu),
             0x9A => Some(PyFromNu),
             0x9B => Some(PyRelease),
+            0x9D => Some(RecCopy),
             0x9C => Some(PerformDirect),
             0xA0 => Some(ReceiveWait),
             0xA1 => Some(ReceiveCommit),
@@ -798,7 +802,7 @@ mod tests {
             .chain(0x80..=0x8F)
             .chain(0x90..=0x93)
             .chain(0x94..=0x9B)
-            .chain(0x9C..=0x9C)
+            .chain(0x9C..=0x9D)
             .chain(0xA0..=0xA1)
             .chain(0xB0..=0xB0)
             .chain(0xC6..=0xC6)

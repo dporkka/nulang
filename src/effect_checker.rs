@@ -206,6 +206,12 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
                 free_vars(e, bound, acc);
             }
         }
+        Expr::RecordUpdate { base, fields, .. } => {
+            free_vars(base, bound, acc);
+            for (_, e) in fields {
+                free_vars(e, bound, acc);
+            }
+        }
         Expr::FieldAccess { expr: e, .. } => {
             free_vars(e, bound, acc);
         }
@@ -573,6 +579,15 @@ impl EffectChecker {
             // Record: union of field effects.
             Expr::Record(fields, _) => {
                 let mut row = EffectRow::empty();
+                for (_, e) in fields {
+                    row = effect_row_union(&row, &self.infer_effects(ctx, e)?);
+                }
+                Ok(row)
+            }
+
+            // Record update: effects of base plus override fields.
+            Expr::RecordUpdate { base, fields, .. } => {
+                let mut row = self.infer_effects(ctx, base)?;
                 for (_, e) in fields {
                     row = effect_row_union(&row, &self.infer_effects(ctx, e)?);
                 }
@@ -1405,6 +1420,15 @@ impl CapabilityAnalyzer {
                 Ok(cap)
             }
 
+            // Record update: join of base and override capabilities.
+            Expr::RecordUpdate { base, fields, .. } => {
+                let mut cap = self.infer_cap_tracked(ctx, base, consumed)?;
+                for (_, e) in fields {
+                    cap = cap.join(self.infer_cap_tracked(ctx, e, consumed)?);
+                }
+                Ok(cap)
+            }
+
             // Field access: same capability as the base expression.
             Expr::FieldAccess { expr: e, .. } => self.infer_cap_tracked(ctx, e, consumed),
 
@@ -1786,6 +1810,7 @@ fn expr_span(expr: &Expr) -> Span {
         Expr::FieldAccess { span, .. } => *span,
         Expr::Array(_, s) => *s,
         Expr::Index { span, .. } => *span,
+        Expr::RecordUpdate { span, .. } => *span,
         Expr::Binary { span, .. } => *span,
         Expr::Unary { span, .. } => *span,
         Expr::Assign { span, .. } => *span,
@@ -1917,6 +1942,7 @@ fn rvalue_is_single_shot(rv: &crate::hir::RValue) -> bool {
         | crate::hir::RValue::Unary(..)
         | crate::hir::RValue::Tuple(..)
         | crate::hir::RValue::Record(..)
+        | crate::hir::RValue::RecordUpdate { .. }
         | crate::hir::RValue::Array(..)
         | crate::hir::RValue::FieldAccess { .. }
         | crate::hir::RValue::Index { .. }

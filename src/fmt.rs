@@ -267,6 +267,19 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize) {
             }
             out.push_str(" }");
         }
+        Expr::RecordUpdate { base, fields, .. } => {
+            out.push_str("{ ");
+            fmt_expr(out, base, indent);
+            out.push_str(" .. ");
+            for (i, (nm, val)) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("{} = ", nm));
+                fmt_expr(out, val, indent);
+            }
+            out.push_str(" }");
+        }
         _ => {
             out.push_str(&format!("/* {:?} */", expr));
         }

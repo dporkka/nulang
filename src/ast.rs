@@ -88,7 +88,10 @@ pub enum Expr {
         span: Span,
     },
     /// Block expression: { e1; e2 }
-    Block { exprs: Vec<Expr>, span: Span },
+    Block {
+        exprs: Vec<Expr>,
+        span: Span,
+    },
     /// Tuple: (e1, e2)
     Tuple(Vec<Expr>, Span),
     /// Record literal: { a: e1, b: e2 }
@@ -99,7 +102,14 @@ pub enum Expr {
         field: String,
         span: Span,
     },
-    /// Array literal: [e1, e2]
+    /// Record update: { base .. field = val, ... }
+    /// Creates a new record by shallow-copying `base` and overriding the
+    /// listed fields.
+    RecordUpdate {
+        base: Box<Expr>,
+        fields: Vec<(String, Expr)>,
+        span: Span,
+    },
     Array(Vec<Expr>, Span),
     /// Array index: arr[i]
     Index {
