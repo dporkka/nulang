@@ -6,6 +6,9 @@ a one-line rule, a ❌ wrong snippet, and a ✅ correct one — all verified
 against `examples/`, `docs/GETTING_STARTED.md`, and the integration-test
 suite.
 
+> **Verified against commit `9dfeef5`.**  Several previously-listed
+> pitfalls have been fixed — see *Recently Fixed* at the bottom.
+
 ---
 
 ### 1. Imports use `::`, not `.`
@@ -22,8 +25,12 @@ import stdlib.list
 import stdlib::list
 ```
 
-Available stdlib modules: `list`, `string`, `test`, `fs`, `map`,
-`math`, `json`, `set`, `http`, `option`, `result`, `datetime`, `core`.
+Available stdlib modules that parse and import correctly:
+`math`, `list`, `string`, `set`, `map`, `core`, `test`, `fs`
+
+Additional modules exist in `src/stdlib/` but they reference missing
+VM primitives or have unresolved syntax (experimental): `json`, `http`,
+`option`, `result`, `datetime`.
 
 ---
 
@@ -274,6 +281,59 @@ fn div(a: Int, b: Int) -> Int ! String {
 
 ---
 
+### 15. `String.charAt` returns an Int code point, not a string
+
+The VM primitive `String.charAt` returns the integer character code
+(e.g. `104` for `'h'`), not a 1-character string.  The stdlib
+`string` module provides a `char_at` wrapper that returns a string
+via `String.substring`.
+
+```nula
+import stdlib::string
+
+// ❌ — charAt returns an Int
+let c = perform String.charAt("hello", 0)      // → 104
+
+// ✅ — stdlib char_at returns a 1-char string
+let ch = char_at("hello", 0)                   // → "h"
+
+// ✅ — use substring directly
+let s = perform String.substring("hello", 0, 1) // → "h"
+```
+
+> The stdlib `string` module also exports `char_code_at` if you
+> *want* the integer code point.  See `src/stdlib/string.nula`.
+
+---
+
+### 16. Tuple field access `.0` / `.1`
+
+Tuple fields are accessed with numeric indices: `t.0`, `t.1`, etc.
+Chained access (`t.0.1`) works directly — no parens required
+(fixed in commit `d91dcc6`).  If you hit an edge case, wrap with
+parens: `(t.0).1`.
+
+```nula
+let t = (10, 20)
+t.0                  // → 10
+t.1                  // → 20
+
+// Chained access on nested tuples
+let p = ((1, 2), 3)
+p.0.0                // → 1
+p.0.1                // → 2
+p.1                  // → 3
+
+// When calling a function that returns a tuple:
+let f = fn(x) (x, x + 1)
+f(10).1              // → 11
+```
+
+> Tuple destructuring via `match` still works and is the idiomatic way
+> to extract all fields at once: `match t with | (x, y) => x + y`.
+
+---
+
 ## Quick Idioms
 
 | Idiom | Snippet |
@@ -288,4 +348,18 @@ fn div(a: Int, b: Int) -> Int ! String {
 | For loop | `for i in [1, 2, 3] { perform IO.print(i) }` |
 | While loop | `while i < n { i = i + 1 }` |
 | Array literal | `[1, 2, 3]` — `.len()`, `[i]`, `.push(v)` |
-| Tuple | `(1, "hello")` |
+| Tuple | `(1, "hello")` — field access: `t.0`, `t.1`, `t.0.1` |
+
+---
+
+## Recently Fixed
+
+These used to be pitfalls but are now working correctly
+(commits `d91dcc6`, `8ca559c`, `3744b9d`, `6a55e0d`, `8f13bea`).
+
+| Issue | Status | Notes |
+|-------|--------|-------|
+| Tuple `.0`/`.1` field access | ✅ Fixed | `t.0`, `t.0.1` chain directly |
+| `a + b` with two `let`-bound strings | ✅ Fixed | Was returning `0`, now concatenates |
+| Stdlib modules parse/import | ✅ Fixed | `math`, `list`, `string`, `set`, `map`, `core`, `test`, `fs` all import |
+| `Array.push`/`Array.new`/`Array.length` | ✅ Added | Enables array-building functions in stdlib |
