@@ -15,7 +15,10 @@ use crate::types::{Capability, NuError, NuResult, Span, Type, TypeContext};
 use crate::vm::{Value, VM};
 use rustyline::error::ReadlineError;
 use rustyline::{history::DefaultHistory, Editor, Result as RlResult};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io::IsTerminal;
+use std::rc::Rc;
 /// REPL state that persists across evaluations.
 pub struct Repl {
     vm: VM,
@@ -29,13 +32,16 @@ pub struct Repl {
     last_bytecode: Option<String>,
     /// Last AST (for :ast command display)
     last_ast: Option<AstModule>,
+    /// Set of user-defined identifiers for tab completion (shared with ReplHelper).
+    user_names: Rc<RefCell<HashSet<String>>>,
 }
 struct ReplHelper {
     keywords: Vec<String>,
+    user_names: Rc<RefCell<HashSet<String>>>,
 }
 
 impl ReplHelper {
-    fn new() -> Self {
+    fn new(user_names: Rc<RefCell<HashSet<String>>>) -> Self {
         ReplHelper {
             keywords: vec![
                 // Keywords
@@ -143,10 +149,12 @@ impl ReplHelper {
                 ":reset",
                 ":version",
                 ":stats",
+                ":load",
             ]
             .into_iter()
             .map(|s| s.to_string())
             .collect(),
+            user_names,
         }
     }
 }
@@ -283,12 +291,16 @@ impl rustyline::completion::Completer for ReplHelper {
             return Ok((pos, vec![]));
         }
         let prefix_lower = prefix.to_lowercase();
-        let matches: Vec<String> = self
-            .keywords
-            .iter()
-            .filter(|kw| kw.to_lowercase().starts_with(&prefix_lower))
-            .cloned()
-            .collect();
+        // Merge static keywords with dynamic user-defined names, deduplicate.
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut matches: Vec<String> = Vec::new();
+        for kw in self.keywords.iter().chain(
+            self.user_names.borrow().iter()
+        ) {
+            if kw.to_lowercase().starts_with(&prefix_lower) && seen.insert(kw.as_str()) {
+                matches.push(kw.clone());
+            }
+        }
         Ok((start, matches))
     }
 }
@@ -302,6 +314,7 @@ impl Repl {
             type_checker: TypeChecker::new(),
             last_bytecode: None,
             last_ast: None,
+            user_names: Rc::new(RefCell::new(HashSet::new())),
         }
     }
 
@@ -324,7 +337,7 @@ impl Repl {
                 return;
             }
         };
-        editor.set_helper(Some(ReplHelper::new()));
+        editor.set_helper(Some(ReplHelper::new(Rc::clone(&self.user_names))));
         let history_path = std::env::var("HOME")
             .map(|h| format!("{}/.nulang_history", h))
             .unwrap_or_else(|_| ".nulang_history".to_string());
@@ -334,10 +347,10 @@ impl Repl {
         let mut brace_stack: Vec<char> = Vec::new();
 
         loop {
-            let prompt = if let Some(&c) = brace_stack.last() {
-                format!("... {} ", c)
-            } else {
+            let prompt = if brace_stack.is_empty() {
                 "nulang> ".to_string()
+            } else {
+                ".... ".to_string()
             };
 
             let line = match editor.readline(&prompt) {
@@ -372,11 +385,24 @@ impl Repl {
                         println!("Goodbye!");
                         break;
                     }
-                    "help" | "h" => self.print_help(),
+                    "help" | "h" => {
+                        if rest.is_empty() {
+                            self.print_help();
+                        } else {
+                            self.print_help_topic(rest);
+                        }
+                    }
                     "type" => {
                         if rest.is_empty() {
                             eprintln!("Usage: :type <expression>");
                         } else if let Err(e) = self.show_type(rest) {
+                            self.print_error(&e);
+                        }
+                    }
+                    "load" => {
+                        if rest.is_empty() {
+                            eprintln!("Usage: :load <file>");
+                        } else if let Err(e) = self.load_file(rest) {
                             self.print_error(&e);
                         }
                     }
@@ -398,6 +424,7 @@ impl Repl {
                         self.type_checker = TypeChecker::new();
                         self.last_bytecode = None;
                         self.last_ast = None;
+                        self.user_names.borrow_mut().clear();
                         println!("Environment reset.");
                     }
                     "version" | "ver" => {
@@ -411,7 +438,6 @@ impl Repl {
                         println!("Unknown command: :{}. Type :help for help.", unknown);
                     }
                 }
-                continue;
             }
 
             buffer.push_str(&line);
@@ -470,6 +496,7 @@ impl Repl {
             combined_decls.push(Decl::Function {
                 name: "__main".to_string(),
                 type_params: vec![],
+                type_param_constraints: vec![],
                 params: vec![],
                 ret_type: None,
                 error_type: None,
@@ -543,7 +570,29 @@ impl Repl {
         }
 
         // Update accumulated state with new declarations
-        self.accumulated_decls.extend(new_decls);
+        self.accumulated_decls.extend(new_decls.clone());
+
+        // Collect user-defined identifiers for tab completion.
+        for decl in &new_decls {
+            let name = match decl {
+                Decl::Function { name, .. } => Some(name.as_str()),
+                Decl::Actor { name, .. } => Some(name.as_str()),
+                Decl::StateMachine { name, .. } => Some(name.as_str()),
+                Decl::TypeAlias { name, .. } => Some(name.as_str()),
+                Decl::RecordType { name, .. } => Some(name.as_str()),
+                Decl::VariantType { name, .. } => Some(name.as_str()),
+                Decl::EffectDecl { name, .. } => Some(name.as_str()),
+                Decl::Workflow { name, .. } => Some(name.as_str()),
+                Decl::Agent { name, .. } => Some(name.as_str()),
+                Decl::Database { name, .. } => Some(name.as_str()),
+                Decl::NamedHandler { name, .. } => Some(name.as_str()),
+                Decl::Class { name, .. } => Some(name.as_str()),
+                _ => None,
+            };
+            if let Some(n) = name {
+                self.user_names.borrow_mut().insert(n.to_string());
+            }
+        }
 
         Ok(())
     }
@@ -567,6 +616,7 @@ impl Repl {
         combined_decls.push(Decl::Function {
             name: "__main".to_string(),
             type_params: vec![],
+            type_param_constraints: vec![],
             params: vec![],
             ret_type: None,
             error_type: None,
@@ -607,14 +657,141 @@ impl Repl {
     fn print_help(&self) {
         println!("Commands:");
         println!("  :quit, :q        Exit the REPL");
-        println!("  :help, :h        Show this help message");
+        println!("  :help, :h [t]    Show help (topics: syntax, types, actors, effects, commands)");
         println!("  :type <expr>     Show the inferred type of an expression");
+        println!("  :load <file>     Load and run a .nula file");
         println!("  :ast <expr>      Show the AST of an expression");
         println!("  :bytecode, :bc   Show bytecode for the last expression");
         println!("  :clear           Clear the screen");
         println!("  :reset           Reset the environment");
         println!("  :stats           Show runtime stats (--verbose mode only)");
         println!("  :version, :ver   Print version and exit (repl keeps running)");
+    }
+
+    fn print_help_topic(&self, topic: &str) {
+        match topic {
+            "syntax" => {
+                println!("Nulang Syntax Overview");
+                println!("======================");
+                println!();
+                println!("Basic expressions:");
+                println!("  1 + 2 * 3          -- arithmetic");
+                println!("  true && false       -- booleans");
+                println!("  \"hello\" ^ \" world\"  -- string concatenation");
+                println!();
+                println!("Let bindings:");
+                println!("  let x = 5 in x + 1");
+                println!("  let rec factorial = fn(n) { if n <= 1 then 1 else n * factorial(n - 1) } in factorial(5)");
+                println!();
+                println!("Functions:");
+                println!("  fn add(x, y) { x + y }");
+                println!("  fn add(x: Int, y: Int) -> Int { x + y }");
+                println!();
+                println!("Control flow:");
+                println!("  if condition then expr1 else expr2");
+                println!("  match expr {{ pattern1 => result1, pattern2 => result2 }}");
+            }
+            "types" => {
+                println!("Nulang Type System");
+                println!("==================");
+                println!();
+                println!("Primitive types: Int, Float, String, Bool, Unit, Nil");
+                println!("Compound types:");
+                println!("  (Int, String)      -- tuple");
+                println!("  {{ x: Int, y: Int }} -- record");
+                println!("  [Int]              -- array");
+                println!("  Int -> String      -- function");
+                println!("  Int -> String !{{IO}} -- function with effects");
+                println!();
+                println!("Type aliases:");
+                println!("  type Point = {{ x: Int, y: Int }}");
+                println!();
+                println!("Capabilities: val, ref, iso, trn, box, tag, linear");
+                println!("Use :type <expr> to see the inferred type of any expression.");
+            }
+            "actors" => {
+                println!("Nulang Actors");
+                println!("=============");
+                println!();
+                println!("Actors are the core concurrency primitive in Nulang.");
+                println!("Each actor has private state and communicates via message passing.");
+                println!();
+                println!("  actor Counter {{");
+                println!("      state: Int = 0;");
+                println!("      behavior inc {{ self.state <- self.state + 1 }}");
+                println!("      behavior get -> Int {{ self.state }}");
+                println!("  }}");
+                println!();
+                println!("  let counter = spawn Counter;");
+                println!("  send counter.inc;");
+                println!("  let v = ask counter.get;");
+                println!();
+                println!("Actor features:");
+                println!("  - Spawn/ask/send for message passing");
+                println!("  - Links and monitors for fault tolerance");
+                println!("  - Persistent actors with event sourcing");
+                println!("  - Workflows with steps, compensation, and signals");
+                println!("  - CRDT-based state for automatic conflict resolution");
+            }
+            "effects" => {
+                println!("Nulang Effect System");
+                println!("====================");
+                println!();
+                println!("Effects track side effects in the type system.");
+                println!();
+                println!("Built-in effects:");
+                println!("  IO      -- input/output (print, read, flush)");
+                println!("  Timer   -- sleep, now");
+                println!("  Signal  -- wait, notify");
+                println!("  Net     -- connect, listen");
+                println!("  LLM     -- AI inference");
+                println!();
+                println!("Function signatures declare effects:");
+                println!("  fn pure() -> Int !{{}}        {{ 42 }}           -- no effects");
+                println!("  fn io_fn() -> Unit !{{IO}}   {{ perform IO.print(\"x\") }}");
+                println!();
+                println!("Effects are checked interprocedurally — calling an IO function");
+                println!("requires the caller to declare IO in its effect row.");
+            }
+            "commands" => {
+                println!("REPL Commands");
+                println!("=============");
+                println!();
+                println!("All commands start with colon (:).");
+                println!();
+                println!("  :quit, :q        Exit the REPL");
+                println!("  :help, :h [t]    Show help (topics: syntax, types, actors, effects, commands)");
+                println!("  :type <expr>     Show the inferred type without evaluating");
+                println!("  :load <file>     Load and evaluate a .nula file");
+                println!("  :ast <expr>      Show the parsed AST");
+                println!("  :bytecode, :bc   Show the last evaluated expression's bytecode");
+                println!("  :clear           Clear the terminal screen");
+                println!("  :reset           Clear all accumulated definitions and types");
+                println!("  :stats           Show runtime statistics");
+                println!("  :version, :ver   Print the Nulang version");
+                println!();
+                println!("Multi-line input:");
+                println!("  The REPL automatically enters multi-line mode when it detects");
+                println!("  unclosed braces, parens, or brackets. The prompt changes to");
+                println!("  '.... ' until the expression is complete.");
+            }
+            _ => {
+                eprintln!(
+                    "Unknown help topic: '{}'. Topics: syntax, types, actors, effects, commands.",
+                    topic
+                );
+            }
+        }
+    }
+
+    /// Load and evaluate a .nula file in the REPL context.
+    fn load_file(&mut self, path: &str) -> NuResult<()> {
+        let source = std::fs::read_to_string(path).map_err(|e| NuError::ParseError {
+            msg: format!("Cannot read file '{}': {}", path, e),
+            span: Span::default(),
+        })?;
+        println!("Loaded '{}' ({} bytes)", path, source.len());
+        self.evaluate(&source)
     }
 
     fn print_error(&self, err: &NuError) {

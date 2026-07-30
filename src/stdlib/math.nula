@@ -46,3 +46,21 @@ pub fn gcd(a: Int, b: Int) -> Int {
     if b == 0 then abs(a)
     else gcd(b, a % b)
 }
+
+/// Square root via Newton's method. Returns -1.0 for negative input
+/// (the language lacks a panic mechanism for domain errors).
+pub fn sqrt(x: Float) -> Float {
+    if x < 0.0 then {
+        perform IO.print("sqrt: negative input");
+        -1.0
+    } else if x == 0.0 then 0.0
+    else {
+        let mut guess = x / 2.0;
+        let mut i = 0;
+        while i < 20 {
+            guess = (guess + x / guess) / 2.0;
+            i = i + 1;
+        };
+        guess
+    }
+}

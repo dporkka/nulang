@@ -248,23 +248,19 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             },
         ) => {
             if c1 != c2 {
-                return Err(NuError::TypeError {
-                    msg: format!(
-                        "Cannot unify functions with different capabilities: {} vs {}",
-                        c1, c2
-                    ),
+                return Err(NuError::type_mismatch(
+                    format!("function with capability {}", c1),
+                    format!("function with capability {}", c2),
                     span,
-                });
+                ));
             }
             // Check effect row compatibility
             if !effect_row_compatible(e1, e2) {
-                return Err(NuError::TypeError {
-                    msg: format!(
-                        "Cannot unify functions with incompatible effects: {} vs {}",
-                        e1, e2
-                    ),
+                return Err(NuError::type_mismatch(
+                    format!("function with effects {}", e1),
+                    format!("function with effects {}", e2),
                     span,
-                });
+                ));
             }
             let s1 = mgu(p1, p2, span)?;
             let s2 = mgu(&apply_subst(r1, &s1), &apply_subst(r2, &s1), span)?;
@@ -274,14 +270,11 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
         // Tuples
         (Type::Tuple(ts1), Type::Tuple(ts2)) => {
             if ts1.len() != ts2.len() {
-                return Err(NuError::TypeError {
-                    msg: format!(
-                        "Cannot unify tuples of different lengths: {} vs {}",
-                        ts1.len(),
-                        ts2.len()
-                    ),
+                return Err(NuError::type_mismatch(
+                    format!("tuple of {} elements", ts1.len()),
+                    format!("tuple of {} elements", ts2.len()),
                     span,
-                });
+                ));
             }
             unify_many(ts1, ts2, span)
         }
@@ -324,13 +317,11 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
         // Reference types
         (Type::Reference { cap: c1, inner: i1 }, Type::Reference { cap: c2, inner: i2 }) => {
             if c1 != c2 {
-                return Err(NuError::TypeError {
-                    msg: format!(
-                        "Cannot unify references with different capabilities: {:?} vs {:?}",
-                        c1, c2
-                    ),
+                return Err(NuError::type_mismatch(
+                    format!("reference with capability {}", c1),
+                    format!("reference with capability {}", c2),
                     span,
-                });
+                ));
             }
             mgu(i1, i2, span)
         }
@@ -358,14 +349,11 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
         // branches of `if b then Some(1) else None`.
         (Type::Variant(vs1), Type::Variant(vs2)) => {
             if vs1.len() != vs2.len() {
-                return Err(NuError::TypeError {
-                    msg: format!(
-                        "Cannot unify variants with different constructor counts: {} vs {}",
-                        vs1.len(),
-                        vs2.len()
-                    ),
+                return Err(NuError::type_mismatch(
+                    format!("variant type with {} constructors", vs1.len()),
+                    format!("variant type with {} constructors", vs2.len()),
                     span,
-                });
+                ));
             }
             // Sort by constructor name so declaration order does not matter.
             let mut sorted1 = vs1.clone();
@@ -375,13 +363,11 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             let mut subst = vec![];
             for ((n1, p1), (n2, p2)) in sorted1.iter().zip(sorted2.iter()) {
                 if n1 != n2 {
-                    return Err(NuError::TypeError {
-                        msg: format!(
-                            "Cannot unify variants with different constructors: '{}' vs '{}'",
-                            n1, n2
-                        ),
+                    return Err(NuError::type_mismatch(
+                        format!("constructor '{}'", n1),
+                        format!("constructor '{}'", n2),
                         span,
-                    });
+                    ));
                 }
                 let s = match (p1, p2) {
                     (None, None) => continue,
@@ -389,13 +375,11 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
                         mgu(&apply_subst(a, &subst), &apply_subst(b, &subst), span)?
                     }
                     _ => {
-                        return Err(NuError::TypeError {
-                            msg: format!(
-                                "Cannot unify variant constructor '{}' with mismatched payloads",
-                                n1
-                            ),
+                        return Err(NuError::type_mismatch(
+                            format!("constructor '{}' with payload", n1),
+                            format!("constructor '{}' without payload", n1),
                             span,
-                        });
+                        ));
                     }
                 };
                 subst = compose_subst(&s, &subst);
@@ -404,11 +388,11 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
         }
 
         // Anything else is a unification error
-        _ => Err(NuError::TypeError {
-            msg: format!("Cannot unify {} with {}", t1, t2),
+        _ => Err(NuError::type_mismatch(
+            format!("{}", t1),
+            format!("{}", t2),
             span,
-        }),
-    }
+        )),
 }
 
 /// Split a record type's field list into its real fields and its optional
@@ -445,14 +429,11 @@ fn unify_closed_records(
     span: Span,
 ) -> NuResult<Substitution> {
     if fs1.len() != fs2.len() {
-        return Err(NuError::TypeError {
-            msg: format!(
-                "Cannot unify records with different field counts: {} vs {}",
-                fs1.len(),
-                fs2.len()
-            ),
+        return Err(NuError::type_mismatch(
+            format!("record with {} fields", fs1.len()),
+            format!("record with {} fields", fs2.len()),
             span,
-        });
+        ));
     }
     // Sort by field name and unify corresponding fields
     let mut sorted1 = fs1.to_vec();
@@ -462,13 +443,11 @@ fn unify_closed_records(
     let mut subst = vec![];
     for ((n1, t1f), (n2, t2f)) in sorted1.iter().zip(sorted2.iter()) {
         if n1 != n2 {
-            return Err(NuError::TypeError {
-                msg: format!(
-                    "Cannot unify records with different field names: '{}' vs '{}'",
-                    n1, n2
-                ),
+            return Err(NuError::type_mismatch(
+                format!("record with field '{}'", n1),
+                format!("record with field '{}'", n2),
                 span,
-            });
+            ));
         }
         let s = mgu(&apply_subst(t1f, &subst), &apply_subst(t2f, &subst), span)?;
         subst = compose_subst(&s, &subst);
@@ -536,11 +515,10 @@ fn unify_open_records(
                           that cannot be reconciled"
                         .to_string(),
                     span,
+                    expected_type: None,
+                    found_type: None,
+                    similar_names: None,
                 });
-            }
-            if extras1.is_empty() && extras2.is_empty() {
-                let s = mgu(&Type::Var(*r1), &Type::Var(*r2), span)?;
-                return Ok(compose_subst(&s, &subst));
             }
             let fresh_row = TypeVar::fresh();
             let s = mgu(
@@ -559,20 +537,16 @@ fn unify_open_records(
         }
         (Some(Type::Var(r)), None) => {
             if let Some((missing, _)) = extras1.first() {
-                return Err(NuError::TypeError {
-                    msg: format!("Field '{}' not found in record type", missing),
-                    span,
-                });
+                let available: Vec<String> = fields2.iter().map(|(n, _)| n.clone()).collect();
+                return Err(NuError::field_not_found(missing.clone(), span, Some(available)));
             }
             let s = mgu(&Type::Var(*r), &Type::record(extras2), span)?;
             Ok(compose_subst(&s, &subst))
         }
         (None, Some(Type::Var(r))) => {
             if let Some((missing, _)) = extras2.first() {
-                return Err(NuError::TypeError {
-                    msg: format!("Field '{}' not found in record type", missing),
-                    span,
-                });
+                let available: Vec<String> = fields1.iter().map(|(n, _)| n.clone()).collect();
+                return Err(NuError::field_not_found(missing.clone(), span, Some(available)));
             }
             let s = mgu(&Type::Var(*r), &Type::record(extras1), span)?;
             Ok(compose_subst(&s, &subst))
@@ -582,6 +556,9 @@ fn unify_open_records(
         _ => Err(NuError::TypeError {
             msg: "Incompatible record types: the rows cannot be unified".to_string(),
             span,
+            expected_type: None,
+            found_type: None,
+            similar_names: None,
         }),
     }
 }
@@ -589,14 +566,11 @@ fn unify_open_records(
 /// Unify a list of type variable / type pairs (common sub-structures).
 fn unify_many_app(types1: &[Type], types2: &[Type], span: Span) -> NuResult<Substitution> {
     if types1.len() != types2.len() {
-        return Err(NuError::TypeError {
-            msg: format!(
-                "Cannot unify type lists of different lengths: {} vs {}",
-                types1.len(),
-                types2.len()
-            ),
+        return Err(NuError::type_mismatch(
+            format!("type list of length {}", types1.len()),
+            format!("type list of length {}", types2.len()),
             span,
-        });
+        ));
     }
     let mut subst = vec![];
     for (t1, t2) in types1.iter().zip(types2.iter()) {
@@ -609,14 +583,11 @@ fn unify_many_app(types1: &[Type], types2: &[Type], span: Span) -> NuResult<Subs
 /// Unify two lists of types pairwise.
 fn unify_many(types1: &[Type], types2: &[Type], span: Span) -> NuResult<Substitution> {
     if types1.len() != types2.len() {
-        return Err(NuError::TypeError {
-            msg: format!(
-                "Cannot unify lists of different lengths: {} vs {}",
-                types1.len(),
-                types2.len()
-            ),
+        return Err(NuError::type_mismatch(
+            format!("list of {} types", types1.len()),
+            format!("list of {} types", types2.len()),
             span,
-        });
+        ));
     }
     let mut subst = vec![];
     for (t1, t2) in types1.iter().zip(types2.iter()) {
@@ -641,6 +612,9 @@ fn var_subst(v: TypeVar, t: &Type, span: Span) -> NuResult<Substitution> {
                         v, t
                     ),
                     span,
+                    expected_type: None,
+                    found_type: None,
+                    similar_names: None,
                 });
             }
             Ok(vec![(v, t.clone())])
@@ -950,6 +924,7 @@ impl TypeChecker {
         match decl {
             Decl::Function {
                 name,
+                type_param_constraints,
                 params,
                 ret_type,
                 error_type,
@@ -1001,6 +976,14 @@ impl TypeChecker {
                 // Bind parameters
                 for (param_name, pty) in params.iter().zip(param_types.iter()) {
                     new_ctx.bind(param_name.0.clone(), pty.clone(), Capability::Ref);
+                }
+
+                // Inject typeclass constraints from type parameter annotations
+                // so method calls on constrained type vars resolve (B.3).
+                for (_, tv, class_names) in type_param_constraints {
+                    for cn in class_names {
+                        new_ctx.add_constraint(*tv, cn);
+                    }
                 }
 
                 // Infer body type
@@ -1534,10 +1517,10 @@ impl TypeChecker {
                 let instantiated = instantiate(ty);
                 Ok((vec![], instantiated))
             }
-            None => Err(NuError::TypeError {
-                msg: format!("Unbound variable: '{}'", name),
-                span,
-            }),
+            None => {
+                let in_scope: Vec<String> = ctx.iter().map(|(n, _)| n.clone()).collect();
+                Err(NuError::unbound_variable(name, span, Some(in_scope)))
+            }
         }
     }
 
@@ -1618,6 +1601,9 @@ impl TypeChecker {
                         arg_types.len()
                     ),
                     span,
+                    expected_type: None,
+                    found_type: None,
+                    similar_names: None,
                 });
             }
         }
@@ -2195,13 +2181,8 @@ impl TypeChecker {
                         TypeVar::fresh(),
                     );
                     let s2 = mgu(&Type::Var(row), &extension, span)?;
-                    let final_subst = compose_subst(&s2, &s1);
-                    return Ok((final_subst.clone(), apply_subst(&field_var, &final_subst)));
-                }
-                Err(NuError::TypeError {
-                    msg: format!("Field '{}' not found in record type", field),
-                    span,
-                })
+                let available: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                Err(NuError::field_not_found(field.clone(), span, Some(available)))
             }
             _ => {
                 // Typeclass method resolution: if the receiver type is
@@ -2258,6 +2239,42 @@ impl TypeChecker {
                                 msg: format!("no impl {}[{}]", class_name, record_ty_resolved),
                                 span,
                             });
+                        }
+                    }
+                }
+
+                // If the receiver is a type variable with class constraints,
+                // resolve the method through the constrained class's declaration.
+                if let Type::Var(tv) = &record_ty_resolved {
+                    if let Some(class_names) = ctx.get_constraints(tv) {
+                        for class_name in class_names {
+                            if let Some(class_info) = self.class_table.get(class_name) {
+                                if let Some(method) =
+                                    class_info.methods.iter().find(|m| m.name == field)
+                                {
+                                    // Build method type from the class declaration.
+                                    // After stripping self, remaining params get
+                                    // fresh type vars that unify at the call site.
+                                    let remaining_params: Vec<Type> = method.params[1..]
+                                        .iter()
+                                        .map(|_| Type::Var(TypeVar::fresh()))
+                                        .collect();
+                                    let remaining = if remaining_params.len() == 1 {
+                                        remaining_params[0].clone()
+                                    } else if remaining_params.is_empty() {
+                                        Type::unit()
+                                    } else {
+                                        Type::Tuple(remaining_params)
+                                    };
+                                    let func_ty = Type::Function {
+                                        param: Box::new(remaining),
+                                        ret: Box::new(method.return_type.clone()),
+                                        effect: EffectRow::empty(),
+                                        cap: Capability::Ref,
+                                    };
+                                    return Ok((s1.clone(), func_ty));
+                                }
+                            }
                         }
                     }
                 }
@@ -2369,13 +2386,13 @@ impl TypeChecker {
             let pattern_ctx = apply_subst_to_ctx(&pattern_ctx, &subst);
             let (s_arm, arm_ty) = self.infer_expr(&pattern_ctx, arm_expr)?;
             subst = compose_subst(&s_arm, &subst);
-            arm_types.push(apply_subst(&arm_ty, &subst));
-        }
-
         if arm_types.is_empty() {
             return Err(NuError::TypeError {
                 msg: "Match expression with no arms".to_string(),
                 span,
+                expected_type: None,
+                found_type: None,
+                similar_names: None,
             });
         }
 
@@ -3567,6 +3584,7 @@ mod tests {
             decls: vec![Decl::Function {
                 name: "add1".to_string(),
                 type_params: vec![],
+                type_param_constraints: vec![],
                 params: vec![("x".to_string(), Some(Type::int()))],
                 ret_type: Some(Type::int()),
                 error_type: None,
@@ -3602,6 +3620,7 @@ mod tests {
                     decls: vec![Decl::Function {
                         name: "bar".to_string(),
                         type_params: vec![],
+                        type_param_constraints: vec![],
                         params: vec![],
                         ret_type: Some(Type::int()),
                         error_type: None,
@@ -3617,6 +3636,7 @@ mod tests {
                 Decl::Function {
                     name: "main".to_string(),
                     type_params: vec![],
+                    type_param_constraints: vec![],
                     params: vec![],
                     ret_type: None,
                     error_type: None,
@@ -3658,6 +3678,7 @@ mod tests {
                     Decl::Function {
                         name: "bar".to_string(),
                         type_params: vec![],
+                        type_param_constraints: vec![],
                         params: vec![],
                         ret_type: Some(Type::int()),
                         error_type: None,
@@ -3671,6 +3692,7 @@ mod tests {
                     Decl::Function {
                         name: "baz".to_string(),
                         type_params: vec![],
+                        type_param_constraints: vec![],
                         params: vec![],
                         ret_type: None,
                         error_type: None,
@@ -3799,6 +3821,7 @@ mod tests {
             decls: vec![Decl::Function {
                 name: "io_fn".to_string(),
                 type_params: vec![],
+                type_param_constraints: vec![],
                 params: vec![("x".to_string(), Some(Type::int()))],
                 ret_type: Some(Type::int()),
                 error_type: None,
@@ -3869,6 +3892,7 @@ mod tests {
                 Decl::Function {
                     name: "use_sqrt".to_string(),
                     type_params: vec![],
+                    type_param_constraints: vec![],
                     params: vec![],
                     ret_type: None,
                     error_type: None,

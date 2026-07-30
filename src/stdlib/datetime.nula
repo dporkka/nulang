@@ -1,0 +1,42 @@
+// Nulang standard library — DateTime type and operations.
+// Import: `import std.datetime`
+
+/// A point in time represented as calendar fields.
+pub type DateTime = {
+    year: Int,
+    month: Int,
+    day: Int,
+    hour: Int,
+    minute: Int,
+    second: Int,
+}
+
+/// Return the current system time.
+///
+/// TODO: This requires FFI bindings to a system time function
+/// (e.g. `time()` from libc) which are not yet wired into the
+/// language. When FFI support is available, implement via:
+///   foreign fn system_time() -> Int  // unix timestamp
+/// then convert to DateTime fields.
+/// For now, this function is a stub that returns a zeroed DateTime.
+pub fn now() -> DateTime ! {IO} {
+    // TODO: Wire up FFI to get actual system time.
+    // When available, replace this stub with real time retrieval.
+    { year: 0, month: 0, day: 0, hour: 0, minute: 0, second: 0 }
+}
+
+/// Create a DateTime from individual fields.
+pub fn new(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) -> DateTime {
+    { year: year, month: month, day: day, hour: hour, minute: minute, second: second }
+}
+
+/// Check if a DateTime represents a valid calendar date.
+/// Does basic range validation on each field.
+pub fn is_valid(dt: DateTime) -> Bool {
+    dt.year >= 0 &&
+    dt.month >= 1 && dt.month <= 12 &&
+    dt.day >= 1 && dt.day <= 31 &&
+    dt.hour >= 0 && dt.hour <= 23 &&
+    dt.minute >= 0 && dt.minute <= 59 &&
+    dt.second >= 0 && dt.second <= 59
+}

@@ -125,6 +125,7 @@ impl Parser {
                     decls.push(Decl::Function {
                         name: "__main".to_string(),
                         type_params: vec![],
+                        type_param_constraints: vec![],
                         params: vec![],
                         ret_type: None,
                         error_type: None,
@@ -315,8 +316,8 @@ impl Parser {
         self.advance(); // consume 'fn'
         let name = self.expect_ident("function name")?;
 
-        // Type parameters [T, U]
-        let type_params = self.parse_type_params()?;
+        // Type parameters [T, U] or [T: Ord]
+        let (type_params, type_param_constraints) = self.parse_type_params_with_constraints()?;
 
         self.expect(TokenKind::LParen)?;
         let params = self.parse_params()?;
@@ -372,6 +373,7 @@ impl Parser {
         Ok(Decl::Function {
             name,
             type_params,
+            type_param_constraints,
             params,
             ret_type,
             error_type,
@@ -1676,8 +1678,8 @@ impl Parser {
         let span = self.current_span();
         self.advance(); // consume 'class'
         let name = self.expect_ident("class name")?;
-        // Type parameters [T, U]
-        let type_params = self.parse_type_params()?;
+        // Type parameters [T, U] or [T: Ord]
+        let (type_params, type_param_constraints) = self.parse_type_params_with_constraints()?;
         // Optional superclass: `class Ord[T]: Eq[T]`
         let super_classes = if self.consume_if(&TokenKind::Colon) {
             let mut supers = Vec::new();
@@ -1731,6 +1733,7 @@ impl Parser {
         Ok(Decl::Class {
             name,
             type_params,
+            type_param_constraints,
             super_classes,
             methods,
             span,
@@ -4138,6 +4141,48 @@ impl Parser {
             self.expect(TokenKind::RBracket)?;
         }
         Ok(params)
+    }
+
+    /// Parse type parameters with optional class constraints.
+    /// Returns (type_param_names, [(param_name, type_var, [class_names])]).
+    /// `[T]` → (["T"], [])
+    /// `[T: Ord]` → (["T"], [("T", tv, ["Ord"])])
+    /// `[T: Eq + Ord]` → (["T"], [("T", tv, ["Eq", "Ord"])])
+    fn parse_type_params_with_constraints(
+        &mut self,
+    ) -> NuResult<(Vec<String>, Vec<(String, TypeVar, Vec<String>)>)> {
+        let mut names = Vec::new();
+        let mut constraints: Vec<(String, TypeVar, Vec<String>)> = Vec::new();
+        if self.consume_if(&TokenKind::LBracket) {
+            self.skip_newlines();
+            while self.peek_kind() != &TokenKind::RBracket && !self.is_at_end() {
+                let name = self.expect_ident("type parameter name")?;
+                names.push(name.clone());
+                let tv = TypeVar::fresh();
+                self.local_type_params.insert(name.clone(), tv);
+                let mut class_names = Vec::new();
+                if self.consume_if(&TokenKind::Colon) {
+                    // Parse class constraint list: `Ord` or `Eq + Ord`
+                    loop {
+                        let cn = self.expect_ident("class name after ':'")?;
+                        class_names.push(cn);
+                        if !self.consume_if(&TokenKind::Plus) {
+                            break;
+                        }
+                    }
+                }
+                if !class_names.is_empty() {
+                    constraints.push((name.clone(), tv, class_names));
+                }
+                self.skip_newlines();
+                if !self.consume_if(&TokenKind::Comma) {
+                    break;
+                }
+                self.skip_newlines();
+            }
+            self.expect(TokenKind::RBracket)?;
+        }
+        Ok((names, constraints))
     }
 
     fn parse_params(&mut self) -> NuResult<Vec<(String, Option<Type>)>> {

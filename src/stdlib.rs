@@ -7,22 +7,24 @@
 //! `perform Effect.op(...)` call resolves to when no user handler is
 //! installed.
 //!
+//! ## Standard library modules (`.nula` files in `src/stdlib/`)
+//!
+//! | Module | File | Description |
+//! |--------|------|-------------|
+//! | `std.core` | `core.nula` | Core types (`Option[T]`, `Result[T, E]`) and combinators (auto-loaded). |
+//! | `std.math` | `math.nula` | Math functions: `abs`, `min`, `max`, `clamp`, `pow`, `factorial`, `gcd`, `sqrt`. |
+//! | `std.list` | `list.nula` | Functional list combinators: `map`, `filter`, `fold`, `append`, `reverse`, `sort`, etc. |
+//! | `std.string` | `string.nula` | String operations: `trim`, `split`, `join`, `replace`, `to_upper`, `to_lower`, etc. |
+//! | `std.map` | `map.nula` | Int→Int key-value map via sorted arrays: `insert`, `get`, `remove`, `contains`. |
+//! | `std.set` | `set.nula` | Int set via sorted arrays: `insert`, `contains`, `remove`. |
+//! | `std.result` | `result.nula` | Extra Result combinators: `unwrap`, `map`, `is_ok`, `is_err`. |
+//! | `std.option` | `option.nula` | Extra Option combinators: `unwrap`, `map`, `is_some`, `is_none`. |
+//! | `std.datetime` | `datetime.nula` | DateTime record type and operations: `now` (stub), `new`, `is_valid`. |
+//! | `std.http` | `http.nula` | HTTP client via built-in `Http` effect: `get`, `post`. |
+//! | `std.json` | `json.nula` | JSON parsing and serialization: `parse`, `stringify`, field accessors. |
+//! | `std.test` | `test.nula` | Testing primitives: `assert_eq`, `assert_true`, `assert_false`, `fail`. |
+//!
 //! The wiring itself lives elsewhere:
-//! - `IO.print` / `IO.println` / `IO.read`: `VM::perform_builtin_effect`
-//!   in `vm.rs` (standalone, actor-free scripts).
-//! - `Timer.sleep`: the runtime host's `perform_effect` callback in
-//!   `runtime/mod.rs` (workflow actors only).
-//! - `Signal.wait`: lowered to the `SignalWait` opcode in `mir_lower.rs`,
-//!   served by the host `wait_signal` callback.
-//! - `Inference.ask` (canonical) / `LLM.ask` (deprecated alias): lowered to the `PerformAsync` opcode
-//!   in `mir_lower.rs`, served by the host `perform_async` callback.
-//! - `Actor.*` (link/unlink/monitor/demonitor/trap_exit/exit/register/
-//!   unregister/whereis/set_priority): `Runtime::perform_actor_builtin` in
-//!   `runtime/mod.rs`, reached through both runtime host callback impls;
-//!   the standalone VM answers them with a nil no-op.
-//! - `Http.get` / `Http.post`: the runtime host's `perform_builtin_effect`
-//!   callback in `runtime/mod.rs`, dispatched through `HttpProvider` trait
-//!   (ReqwestHttpProvider behind `ai-runtime` / `http-client` feature).
 
 use crate::types::Span;
 use crate::types::{NuError, NuResult};

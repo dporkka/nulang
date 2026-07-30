@@ -1,6 +1,6 @@
 //! Abstract Syntax Tree definitions for Nulang.
 
-use crate::types::{Capability, EffectRow, Span, Type};
+use crate::types::{Capability, EffectRow, Span, Type, TypeVar};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -430,6 +430,10 @@ pub enum Decl {
     Function {
         name: String,
         type_params: Vec<String>,
+        /// Typeclass constraints on type parameters. Each entry is
+        /// (param_name, type_var, [class_names]). e.g. `[T: Eq + Ord]` →
+        /// [("T", tv, ["Eq", "Ord"])].  Empty when no constraints.
+        type_param_constraints: Vec<(String, TypeVar, Vec<String>)>,
         params: Vec<(String, Option<Type>)>,
         ret_type: Option<Type>,
         error_type: Option<Type>,
@@ -568,6 +572,8 @@ pub enum Decl {
     Class {
         name: String,
         type_params: Vec<String>,
+        /// Typeclass constraints on type parameters.
+        type_param_constraints: Vec<(String, TypeVar, Vec<String>)>,
         super_classes: Vec<String>,
         methods: Vec<ClassMethod>,
         span: Span,

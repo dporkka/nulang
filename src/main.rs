@@ -21,7 +21,7 @@
 //!   --emit-nbc               Compile <FILE> to a .nbc artifact; don't run
 //!   <FILE>.nbc               Run a pre-compiled .nbc artifact directly
 //!   --verify <src>           Verify .nbc source hash against <src>
-//!   nula <cmd>               Package manager (new, build, build-wasm, test, run)
+//!   nula <cmd>               Package manager (new, init, build, build-wasm, test, run, list, clean)
 //!   --version, -V            Print version and exit
 //!   -v, --verbose            Show bytecode and AST
 //!   --color auto|always|never  Colorize error output (default: auto)
@@ -558,7 +558,7 @@ fn print_help() {
     println!(
         "  --verify <src>   When running a .nbc artifact, verify its source hash against <src>"
     );
-    println!("  nula <cmd>       Package manager (new, build, test, run)");
+    println!("  nula <cmd>       Package manager (new, init, build, build-wasm, test, run, list, clean)");
     println!("  --version, -V    Print version and exit");
     println!("  init <name>      Scaffold experiment");
     println!("  --watch <file>   Re-run on changes");

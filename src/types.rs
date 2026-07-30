@@ -1,6 +1,7 @@
 //! Shared type definitions used across all Nulang compiler and runtime modules.
 
 use crate::type_ir::NtirNode;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -15,7 +16,7 @@ type FxHashMap<K, V> =
 static TYPE_VAR_COUNTER: AtomicU64 = AtomicU64::new(1);
 static REGION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TypeVar(pub u64);
 
 impl std::fmt::Display for TypeVar {
@@ -1066,6 +1067,12 @@ impl std::fmt::Display for ErrorCode {
     }
 }
 
+/// A compiler or runtime error with structured diagnostic information.
+///
+/// Each variant carries the core `msg` and `span` plus optional fields
+/// that power rich diagnostic output (expected/found types, missing effects,
+/// fix suggestions). Construction helpers (e.g. `NuError::type_mismatch`)
+/// should be preferred for common patterns.
 #[derive(Debug, Clone)]
 pub enum NuError {
     LexError {
@@ -1075,18 +1082,35 @@ pub enum NuError {
     ParseError {
         msg: String,
         span: Span,
+        /// What the parser expected (e.g. `"','"`, `"a pattern"`).
+        expected: Option<String>,
+        /// What the parser found instead.
+        found: Option<String>,
     },
     TypeError {
         msg: String,
         span: Span,
+        /// The type that was expected (lhs of unification failure).
+        expected_type: Option<String>,
+        /// The type that was found (rhs of unification failure).
+        found_type: Option<String>,
+        /// For unbound-variable errors: list of names in scope that might be
+        /// close (e.g. `"foo"` when `"fooo"` was typed).
+        similar_names: Option<Vec<String>>,
     },
     EffectError {
         msg: String,
         span: Span,
+        /// Effects that are produced but not declared in the function signature.
+        missing_effects: Option<Vec<String>>,
+        /// Effects currently allowed by the enclosing function annotation.
+        allowed_effects: Option<String>,
     },
     CapError {
         msg: String,
         span: Span,
+        /// A concise explanation of the capability rule that was violated.
+        explanation: Option<String>,
     },
     FFIError {
         msg: String,
@@ -1149,49 +1173,57 @@ impl std::fmt::Display for VmSuspension {
 impl std::fmt::Display for NuError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NuError::LexError { msg, span, .. } => {
+            NuError::LexError { msg, span } => {
                 write!(f, "Lex error at {}:{}: {}", span.line(), span.column(), msg)
             }
-            NuError::ParseError { msg, span, .. } => {
-                write!(
-                    f,
-                    "Parse error at {}:{}: {}",
-                    span.line(),
-                    span.column(),
-                    msg
-                )
+            NuError::ParseError { msg, span, expected, found } => {
+                write!(f, "Parse error at {}:{}: {}", span.line(), span.column(), msg)?;
+                if let Some(exp) = expected {
+                    write!(f, "\n  expected: {exp}")?;
+                }
+                if let Some(fnd) = found {
+                    write!(f, "\n  found: {fnd}")?;
+                }
+                Ok(())
             }
-            NuError::TypeError { msg, span, .. } => {
-                write!(
-                    f,
-                    "Type error at {}:{}: {}",
-                    span.line(),
-                    span.column(),
-                    msg
-                )
+            NuError::TypeError { msg, span, expected_type, found_type, similar_names } => {
+                write!(f, "Type error at {}:{}: {}", span.line(), span.column(), msg)?;
+                if let Some(exp) = expected_type {
+                    write!(f, "\n  expected type: {exp}")?;
+                }
+                if let Some(fnd) = found_type {
+                    write!(f, "\n  found type: {fnd}")?;
+                }
+                if let Some(names) = similar_names {
+                    if !names.is_empty() {
+                        write!(f, "\n  did you mean one of: {}?", names.join(", "))?;
+                    }
+                }
+                Ok(())
             }
-            NuError::EffectError { msg, span, .. } => {
-                write!(
-                    f,
-                    "Effect error at {}:{}: {}",
-                    span.line(),
-                    span.column(),
-                    msg
-                )
+            NuError::EffectError { msg, span, missing_effects, allowed_effects } => {
+                write!(f, "Effect error at {}:{}: {}", span.line(), span.column(), msg)?;
+                if let Some(missing) = missing_effects {
+                    if !missing.is_empty() {
+                        write!(f, "\n  missing effects: {}", missing.join(", "))?;
+                    }
+                }
+                if let Some(allowed) = allowed_effects {
+                    write!(f, "\n  allowed effects: {allowed}")?;
+                }
+                Ok(())
             }
-            NuError::CapError { msg, span, .. } => {
-                write!(
-                    f,
-                    "Capability error at {}:{}: {}",
-                    span.line(),
-                    span.column(),
-                    msg
-                )
+            NuError::CapError { msg, span, explanation } => {
+                write!(f, "Capability error at {}:{}: {}", span.line(), span.column(), msg)?;
+                if let Some(expl) = explanation {
+                    write!(f, "\n  note: {expl}")?;
+                }
+                Ok(())
             }
-            NuError::FFIError { msg, span, .. } => {
+            NuError::FFIError { msg, span } => {
                 write!(f, "FFI error at {}:{}: {}", span.line(), span.column(), msg)
             }
-            NuError::NotYetImplemented { feature, span, .. } => {
+            NuError::NotYetImplemented { feature, span } => {
                 write!(
                     f,
                     "Not yet implemented at {}:{}: {}",
@@ -1254,6 +1286,8 @@ impl NuError {
         const BOLD: &str = "\x1b[1m";
         const RESET: &str = "\x1b[0m";
         const DIM: &str = "\x1b[2m";
+        const GREEN: &str = "\x1b[32m";
+        const YELLOW: &str = "\x1b[33m";
 
         let mut out = String::new();
 
@@ -1263,41 +1297,37 @@ impl NuError {
             kind: &str,
             msg: &str,
             span: &Span,
+            code: Option<ErrorCode>,
             suggestion: Option<&str>,
+            extra_lines: &[String],
         ) {
             let line = span.line();
             let col = span.column();
             let file = span.file().unwrap_or_default();
 
-            // Header
-            write_header(out, kind, line, col, &file);
+            // Header with error code
+            write_header(out, kind, line, col, &file, code);
 
             // Source excerpt
             if let Some(src_line) = span.source_line() {
-                // Ensure col is 1-indexed within the line
                 let col_idx = col.saturating_sub(1).min(src_line.len());
                 let span_len = (span.end.saturating_sub(span.start) as usize)
                     .max(1)
                     .min(src_line.len().saturating_sub(col_idx));
 
-                // Line number gutter
                 let line_label = format!("{line}");
                 out.push_str(&format!("{DIM}{line_label:>4} {BLUE}|{RESET} "));
-                // The source line up to the error
                 out.push_str(&src_line[..col_idx]);
-                // The error span
                 out.push_str(RED);
                 let end = (col_idx + span_len).min(src_line.len());
                 out.push_str(&src_line[col_idx..end]);
                 out.push_str(RESET);
-                // Rest of line
                 out.push_str(&src_line[end..]);
                 out.push('\n');
 
                 // Caret line
                 let padding = format!("{:>4} {BLUE}|{RESET} ", "");
                 out.push_str(&padding);
-                // Space up to the error column
                 for _ in 0..col_idx {
                     out.push(' ');
                 }
@@ -1310,8 +1340,15 @@ impl NuError {
                 out.push_str(RESET);
                 out.push('\n');
             } else {
-                // No source line available — just print the message
                 out.push_str(&format!("  {msg}\n"));
+            }
+
+            // Extra diagnostic lines (expected/found types, missing effects, etc.)
+            for extra in extra_lines {
+                let padding = format!("{:>4} {BLUE}|{RESET} ", "");
+                out.push_str(&padding);
+                out.push_str(extra);
+                out.push('\n');
             }
 
             // Suggestion
@@ -1320,8 +1357,9 @@ impl NuError {
             }
         }
 
-        fn write_header(out: &mut String, kind: &str, line: usize, col: usize, file: &str) {
-            out.push_str(&format!("{RED}error{RESET}{BOLD}: {kind}{RESET}\n"));
+        fn write_header(out: &mut String, kind: &str, line: usize, col: usize, file: &str, code: Option<ErrorCode>) {
+            let code_str = code.map(|c| format!("[{}] ", c.code_str())).unwrap_or_default();
+            out.push_str(&format!("{RED}error{RESET}{BOLD}: {code_str}{kind}{RESET}\n"));
             if file.is_empty() {
                 out.push_str(&format!("  {BLUE}--> {RESET}{line}:{col}\n"));
             } else {
@@ -1330,24 +1368,58 @@ impl NuError {
             out.push_str(&format!(" {DIM}{line:>4} {CYAN}|{RESET}\n"));
         }
 
+        let code = self.error_code();
+
         match self {
             NuError::LexError { msg, span } => {
-                push_span_error(&mut out, "Lex error", msg, span, self.suggestion());
+                push_span_error(&mut out, "Lex error", msg, span, code, self.suggestion(), &[]);
             }
-            NuError::ParseError { msg, span } => {
-                push_span_error(&mut out, "Parse error", msg, span, self.suggestion());
+            NuError::ParseError { msg, span, expected, found } => {
+                let mut extras = Vec::new();
+                if let Some(exp) = expected {
+                    extras.push(format!("{GREEN}expected:{RESET} {exp}"));
+                }
+                if let Some(fnd) = found {
+                    extras.push(format!("{YELLOW}found:{RESET} {fnd}"));
+                }
+                push_span_error(&mut out, "Parse error", msg, span, code, self.suggestion(), &extras);
             }
-            NuError::TypeError { msg, span } => {
-                push_span_error(&mut out, "Type error", msg, span, self.suggestion());
+            NuError::TypeError { msg, span, expected_type, found_type, similar_names } => {
+                let mut extras = Vec::new();
+                if let Some(exp) = expected_type {
+                    extras.push(format!("{GREEN}expected type:{RESET} {exp}"));
+                }
+                if let Some(fnd) = found_type {
+                    extras.push(format!("{YELLOW}found type:{RESET} {fnd}"));
+                }
+                if let Some(names) = similar_names {
+                    if !names.is_empty() {
+                        extras.push(format!("{BLUE}did you mean:{RESET} {}?", names.join(", ")));
+                    }
+                }
+                push_span_error(&mut out, "Type error", msg, span, code, self.suggestion(), &extras);
             }
-            NuError::EffectError { msg, span } => {
-                push_span_error(&mut out, "Effect error", msg, span, self.suggestion());
+            NuError::EffectError { msg, span, missing_effects, allowed_effects } => {
+                let mut extras = Vec::new();
+                if let Some(missing) = missing_effects {
+                    if !missing.is_empty() {
+                        extras.push(format!("{RED}missing effects:{RESET} {}", missing.join(", ")));
+                    }
+                }
+                if let Some(allowed) = allowed_effects {
+                    extras.push(format!("{GREEN}allowed effects:{RESET} {allowed}"));
+                }
+                push_span_error(&mut out, "Effect error", msg, span, code, self.suggestion(), &extras);
             }
-            NuError::CapError { msg, span } => {
-                push_span_error(&mut out, "Capability error", msg, span, self.suggestion());
+            NuError::CapError { msg, span, explanation } => {
+                let mut extras = Vec::new();
+                if let Some(expl) = explanation {
+                    extras.push(format!("{BLUE}note:{RESET} {expl}"));
+                }
+                push_span_error(&mut out, "Capability error", msg, span, code, self.suggestion(), &extras);
             }
             NuError::FFIError { msg, span } => {
-                push_span_error(&mut out, "FFI error", msg, span, self.suggestion());
+                push_span_error(&mut out, "FFI error", msg, span, code, self.suggestion(), &[]);
             }
             NuError::NotYetImplemented { feature, span } => {
                 push_span_error(
@@ -1355,14 +1427,16 @@ impl NuError {
                     "Not yet implemented",
                     feature,
                     span,
+                    code,
                     self.suggestion(),
+                    &[],
                 );
             }
             NuError::RuntimeError { msg, span } => {
-                push_span_error(&mut out, "Runtime error", msg, span, self.suggestion());
+                push_span_error(&mut out, "Runtime error", msg, span, code, self.suggestion(), &[]);
             }
             NuError::VMError { msg, span } => {
-                push_span_error(&mut out, "VM error", msg, span, self.suggestion());
+                push_span_error(&mut out, "VM error", msg, span, code, self.suggestion(), &[]);
             }
             NuError::Suspended(kind) => {
                 out.push_str(&format!(
@@ -1370,10 +1444,10 @@ impl NuError {
                 ));
             }
             NuError::PythonError { msg, span } => {
-                push_span_error(&mut out, "Python error", msg, span, self.suggestion());
+                push_span_error(&mut out, "Python error", msg, span, code, self.suggestion(), &[]);
             }
             NuError::PackageError { msg, span } => {
-                push_span_error(&mut out, "Package error", msg, span, self.suggestion());
+                push_span_error(&mut out, "Package error", msg, span, code, self.suggestion(), &[]);
             }
             NuError::Multiple(errors) => {
                 for err in errors {
@@ -1385,30 +1459,47 @@ impl NuError {
         out
     }
 
-    /// Return a computed suggestion based on the error kind and message.
+    /// Return the canonical error code for this error, preferring structured
+    /// fields over message-pattern heuristics.
     pub fn error_code(&self) -> Option<ErrorCode> {
-        let msg = match self {
-            NuError::LexError { msg, .. } => msg,
-            NuError::ParseError { msg, .. } => msg,
-            NuError::TypeError { msg, .. } => msg,
-            NuError::EffectError { msg, .. } => msg,
-            NuError::CapError { msg, .. } => msg,
-            NuError::FFIError { msg, .. } => msg,
-            NuError::RuntimeError { msg, .. } => msg,
-            NuError::VMError { msg, .. } => msg,
-            NuError::PythonError { msg, .. } => msg,
-            NuError::PackageError { msg, .. } => msg,
-            NuError::Multiple(_) => return None,
-            NuError::NotYetImplemented { .. } => return None,
-            NuError::Suspended(_) => return None,
-        };
+        // Structured-field shortcuts (more reliable than string matching).
+        match self {
+            NuError::TypeError { expected_type: Some(_), found_type: Some(_), .. } => {
+                return Some(ErrorCode::E003TypeMismatch);
+            }
+            NuError::TypeError { similar_names: Some(_), .. } => {
+                let msg = self.msg_str();
+                if msg.contains("Unbound variable") {
+                    return Some(ErrorCode::E002UnboundVariable);
+                }
+            }
+            NuError::EffectError { missing_effects: Some(_), .. } => {
+                return Some(ErrorCode::E004MissingEffect);
+            }
+            NuError::CapError { explanation: Some(_), .. } => {
+                let msg = self.msg_str();
+                if msg.contains("cannot be sent") || msg.contains("sendable") {
+                    return Some(ErrorCode::E005SendabilityViolation);
+                }
+                if msg.contains("linear") && msg.contains("consumed") {
+                    return Some(ErrorCode::E006LinearUseAfterConsume);
+                }
+            }
+            _ => {}
+        }
+
+        // Fall back to message-string heuristics.
+        let msg = self.msg_str();
+        if msg.is_empty() {
+            return None;
+        }
         if msg.contains("unclosed") {
             Some(ErrorCode::E001UnclosedDelimiter)
         } else if msg.contains("Unbound variable") {
             Some(ErrorCode::E002UnboundVariable)
-        } else if msg.contains("Cannot unify") {
+        } else if msg.contains("Cannot unify") || msg.contains("Type mismatch") {
             Some(ErrorCode::E003TypeMismatch)
-        } else if msg.contains("not a subset of allowed effects") {
+        } else if msg.contains("not a subset of allowed effects") || msg.contains("contain disallowed effect") {
             Some(ErrorCode::E004MissingEffect)
         } else if msg.contains("cannot be sent") {
             Some(ErrorCode::E005SendabilityViolation)
@@ -1431,60 +1522,136 @@ impl NuError {
         }
     }
 
+    /// Extract the primary message string from any error variant.
+    fn msg_str(&self) -> &str {
+        match self {
+            NuError::LexError { msg, .. } => msg,
+            NuError::ParseError { msg, .. } => msg,
+            NuError::TypeError { msg, .. } => msg,
+            NuError::EffectError { msg, .. } => msg,
+            NuError::CapError { msg, .. } => msg,
+            NuError::FFIError { msg, .. } => msg,
+            NuError::RuntimeError { msg, .. } => msg,
+            NuError::VMError { msg, .. } => msg,
+            NuError::PythonError { msg, .. } => msg,
+            NuError::PackageError { msg, .. } => msg,
+            NuError::NotYetImplemented { feature, .. } => feature,
+            NuError::Multiple(_) => "",
+            NuError::Suspended(_) => "",
+        }
+    }
+
+    /// Return a fix suggestion for this error, using both structured fields
+    /// and message-pattern heuristics.
     pub fn suggestion(&self) -> Option<&str> {
         match self {
-            NuError::ParseError { msg, .. } => {
+            NuError::ParseError { msg, expected, found, .. } => {
                 if msg.starts_with("Expected 'fn'") {
                     Some("did you mean `fn`?")
                 } else if msg.contains("unclosed") || msg.starts_with("Expected '}'") {
-                    Some("unclosed delimiter?")
+                    Some("unclosed delimiter — check that every `{`, `(`, and `[` has a matching close")
                 } else if msg.contains("Expected ')'") {
-                    Some("unclosed parenthesis?")
+                    Some("unclosed parenthesis — add a `)` to close it")
                 } else if msg.contains("Expected '('") {
-                    Some("missing opening parenthesis?")
+                    Some("missing opening parenthesis — add `(` before the arguments")
+                } else if msg.contains("Expected ']'") {
+                    Some("unclosed bracket — add a `]` to close the list or array type")
+                } else if msg.contains("Expected identifier") || msg.contains("Expected variable") {
+                    Some("expected a name here — variable names must start with a letter or underscore")
+                } else if msg.contains("Expected integer") {
+                    Some("expected an integer literal like `42` or `0xFF`")
+                } else if msg.contains("Expected float") {
+                    Some("expected a float literal like `3.14` or `1.0`")
+                } else if msg.contains("Expected string") {
+                    Some("expected a string literal in quotes like \"hello\"")
+                } else if msg.contains("Expected type") {
+                    Some("expected a type name like `Int`, `String`, `Bool`, or a user-defined type")
+                } else if msg.contains("Expected pattern") {
+                    Some("expected a pattern — try a variable name, literal, or constructor pattern")
+                } else if msg.contains("Expected ';'") || msg.contains("Expected line break") {
+                    Some("each statement must end with a newline or `;`")
+                } else if msg.contains("Expected '{'") || msg.contains("Expected '}'") {
+                    Some("expected a block delimited by `{ ... }`")
+                } else if msg.contains("Unexpected end of file") {
+                    Some("the source file ended before the expression or declaration was complete")
+                } else if msg.contains("Expected '=>'") {
+                    Some("match arms use `=>` between the pattern and body, like `case 1 => body`")
+                } else if let (Some(exp), Some(fnd)) = (expected, found) {
+                    // Generic expected/found suggestion
+                    None
                 } else {
                     None
                 }
             }
-            NuError::TypeError { msg, .. } => {
+            NuError::TypeError { msg, expected_type, similar_names, .. } => {
                 if msg.contains("Unbound variable") {
-                    Some("did you forget to define this variable, or is there a typo?")
+                    if let Some(names) = similar_names {
+                        if !names.is_empty() {
+                            return None; // "did you mean" already shown in the main output
+                        }
+                    }
+                    Some("this name is not defined in the current scope — check for typos or missing definitions")
                 } else if msg.contains("Cannot unify") && msg.contains("record") {
                     Some("check that all required fields are present and have the correct types")
                 } else if msg.contains("Cannot unify Int") && msg.contains("Float") {
-                    Some("try converting with .to_float() or .to_int()")
+                    Some("Int and Float are different types; convert with `.to_float()` or `.to_int()`")
                 } else if msg.contains("Cannot unify") && msg.contains("function") {
-                    Some("check that the argument types and return type match the function signature")
-                } else if msg.contains("Cannot unify") {
-                    Some("the expression's type does not match the expected type")
+                    Some("function type mismatch — check that the argument types and return type match")
+                } else if msg.contains("Cannot unify") || msg.contains("Type mismatch") {
+                    if let (Some(exp), _) = (expected_type, &None::<String>) {
+                        if exp.contains("Int") {
+                            return Some("the expression produces the wrong type — consider adding a type annotation or conversion");
+                        }
+                    }
+                    Some("the types do not match — check the expression and add type annotations if needed")
                 } else if msg.contains("Infinite type") {
-                    Some("this usually means a value is defined in terms of itself; try restructuring")
+                    Some("this means a value references itself in a cycle — try restructuring the definition")
                 } else if msg.contains("Field") && msg.contains("not found") {
-                    Some("check the field name spelling and that the record has this field")
+                    Some("the record does not have this field — check the spelling or use the correct record type")
                 } else if msg.contains("Unsupported FFI type") {
-                    Some(
-                        "only Int, Float, Bool, String, and Unit are supported in FFI declarations",
-                    )
+                    Some("only Int, Float, Bool, String, and Unit are supported in FFI declarations")
                 } else if msg.contains("Match expression with no arms") {
-                    Some("add at least one pattern match arm")
+                    Some("add at least one pattern match arm, e.g. `case pattern => expression`")
                 } else if msg.contains("wrong number of arguments") {
-                    Some("check the function definition or remove extra arguments")
+                    Some("the function expects a different number of arguments — check the definition")
+                } else if msg.contains("Unknown event") {
+                    Some("check the event name spelling against the available events listed above")
                 } else {
                     None
                 }
             }
-            NuError::EffectError { msg, .. } => {
+            NuError::EffectError { msg, missing_effects, .. } => {
+                if let Some(missing) = missing_effects {
+                    if !missing.is_empty() {
+                        return Some("add the missing effects to the function's effect annotation, or wrap the call in a handler block");
+                    }
+                }
                 if msg.contains("not a subset of allowed effects") {
-                    Some("add the missing effect to the enclosing function's effect annotation, or use a handler")
+                    Some("add the missing effects to the enclosing function's effect annotation, or use a handler")
+                } else if msg.contains("Unhandled effect") {
+                    Some("the effect is not handled anywhere in the call stack — add a `with handler { ... }` block or declare it in the function signature")
                 } else {
                     None
                 }
             }
             NuError::CapError { msg, .. } => {
-                if msg.contains("cannot be sent") {
-                    Some("only `val`, `iso`, and `tag` capabilities are sendable between actors — use `val` for immutable shared data, `iso` for transfer-only ownership")
+                if msg.contains("cannot be sent") || msg.contains("sendable") || msg.contains("send argument") {
+                    Some("only `val`, `iso`, `tag`, and `linear` capabilities are sendable between actors — use `val` for immutable shared data, `iso` for transfer-only ownership")
                 } else if msg.contains("linear") && msg.contains("consumed") {
-                    Some("linear values can only be used once; use `.clone()` to make a copy, or restructure to avoid the second use")
+                    Some("linear values can only be used once — use `.clone()` to make a copy, or restructure to avoid the second use")
+                } else if msg.contains("downgrade") {
+                    Some("capability downgrade is not allowed here — the value must keep its current or stronger capability")
+                } else if msg.contains("Not a subtype") {
+                    Some("this capability is not compatible with the expected one — check the subtyping rules: iso < trn < ref < box, linear < val < box")
+                } else {
+                    None
+                }
+            }
+            NuError::RuntimeError { msg, .. } => {
+                if msg.contains("Stack overflow") {
+                    Some("the recursion depth is too high — check for unbounded recursion or increase the stack limit")
+                } else if msg.contains("Step limit exceeded") {
+                    Some("the computation took too many steps — check for infinite loops")
                 } else {
                     None
                 }
@@ -1492,6 +1659,121 @@ impl NuError {
             _ => None,
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Constructor helpers for common error patterns
+    // -----------------------------------------------------------------------
+
+    /// Create a type-mismatch error with explicit expected/found types.
+    pub fn type_mismatch(expected: impl Into<String>, found: impl Into<String>, span: Span) -> Self {
+        let exp = expected.into();
+        let fnd = found.into();
+        NuError::TypeError {
+            msg: format!("Type mismatch: expected {}, found {}", exp, fnd),
+            span,
+            expected_type: Some(exp),
+            found_type: Some(fnd),
+            similar_names: None,
+        }
+    }
+
+    /// Create a type error for an unbound (undefined) variable.
+    pub fn unbound_variable(name: impl Into<String>, span: Span, in_scope: Option<Vec<String>>) -> Self {
+        let name = name.into();
+        let similar = in_scope.as_ref().and_then(|names| {
+            // Find names within edit distance ≤ 2.
+            let close: Vec<String> = names.iter()
+                .filter(|n| levenshtein(&name, n) <= 2 && n.as_str() != &name)
+                .take(5)
+                .cloned()
+                .collect();
+            if close.is_empty() { None } else { Some(close) }
+        });
+        NuError::TypeError {
+            msg: format!("Unbound variable: '{}'", name),
+            span,
+            expected_type: None,
+            found_type: None,
+            similar_names: similar,
+        }
+    }
+
+    /// Create a field-not-found error for record access.
+    pub fn field_not_found(field: impl Into<String>, span: Span, available: Option<Vec<String>>) -> Self {
+        let field = field.into();
+        let msg = if let Some(ref fields) = available {
+            format!(
+                "Field '{}' not found in record type. Available fields: {}",
+                field,
+                fields.join(", ")
+            )
+        } else {
+            format!("Field '{}' not found in record type", field)
+        };
+        NuError::TypeError {
+            msg,
+            span,
+            expected_type: None,
+            found_type: None,
+            similar_names: None,
+        }
+    }
+
+    /// Create an effect error listing which effects are missing.
+    pub fn missing_effects(
+        missing: Vec<String>,
+        allowed: impl Into<String>,
+        span: Span,
+    ) -> Self {
+        let allowed = allowed.into();
+        let msg = format!(
+            "effects contain disallowed effect(s): {} (allowed: {})",
+            missing.join(", "),
+            allowed
+        );
+        NuError::EffectError {
+            msg,
+            span,
+            missing_effects: Some(missing),
+            allowed_effects: Some(allowed),
+        }
+    }
+
+    /// Create a parsing error for an unexpected token.
+    pub fn parse_unexpected(expected: impl Into<String>, found: impl Into<String>, span: Span) -> Self {
+        let exp = expected.into();
+        let fnd = found.into();
+        NuError::ParseError {
+            msg: format!("Expected {}, found {}", exp, fnd),
+            span,
+            expected: Some(exp),
+            found: Some(fnd),
+        }
+    }
+}
+
+/// Compute the Levenshtein (edit) distance between two strings.
+/// Used for "did you mean?" suggestions on unbound variables.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_len = a.chars().count();
+    let b_len = b.chars().count();
+    if a_len == 0 { return b_len; }
+    if b_len == 0 { return a_len; }
+
+    let mut prev: Vec<usize> = (0..=b_len).collect();
+    let mut curr = vec![0usize; b_len + 1];
+
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.chars().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (prev[j + 1] + 1)
+                .min(curr[j] + 1)
+                .min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_len]
 }
 
 impl std::error::Error for NuError {}

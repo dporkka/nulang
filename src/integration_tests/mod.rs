@@ -8448,4 +8448,88 @@ match { a: 2, b: 9 } with {
         let (value, _ty) = result.unwrap();
         assert_eq!(value.as_bool(), Some(false), "1.eq(2) should be false");
     }
+
+    // ---------- Typeclass constraint syntax tests ----------
+
+    #[test]
+    fn test_typeclass_constraint_parse() {
+        // Verify that `fn foo[T: Eq]` parses and type-checks.
+        let result = check_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            fn id[T: Eq](x: T) -> T { x }
+            42
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "constrained generic function should parse and type-check: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_typeclass_constraint_method_call_on_type_var() {
+        // Verify that a method call on a constrained type variable resolves.
+        let result = check_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            fn eq_check[T: Eq](a: T, b: T) -> Bool { a.eq(b) }
+            42
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "method call on constrained type var should resolve: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_typeclass_constraint_multiple_classes() {
+        // Verify that `T: Eq + Ord` parses with multiple constraints.
+        let result = check_source(
+            r#"
+            class Eq[T] { fn eq(self: T, other: T) -> Bool }
+            class Ord[T]: Eq {
+                fn cmp(self: T, other: T) -> Int
+            }
+            fn compare[T: Eq + Ord](a: T, b: T) -> Bool { a.eq(b) }
+            42
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "multiple constraints should parse and type-check: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_typeclass_constraint_compile_with_impl() {
+        // Verify that a constrained generic function compiles alongside its
+        // impl and a concrete call site. Runtime dispatch through impl dicts
+        // for type-variable receivers is follow-up work (MIR codegen).
+        let result = check_source(
+            r#"
+            class Eq[T] {
+                fn eq(self: T, other: T) -> Bool
+            }
+            impl Eq Int {
+                fn eq(self: Int, other: Int) = self == other
+            }
+            fn eq_check[T: Eq](a: T, b: T) -> Bool { a.eq(b) }
+            eq_check(1, 1)
+            "#,
+        );
+        assert!(
+            result.is_ok(),
+            "constrained generic with impl should compile: {:?}",
+            result.err()
+        );
+    }
 }

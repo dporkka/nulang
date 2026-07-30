@@ -19,8 +19,8 @@
 //! | `textDocument/inlayHint` | Show inferred types after bindings |
 //! | `textDocument/completion` | Keyword/effect/function completion |
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
-
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -265,7 +265,17 @@ impl LanguageServer for NulangLanguageServer {
         if let Some(ref a) = ast {
             engine.set_ast_info(a);
         }
-        let items = engine.complete(params.text_document_position.position);
+        let doc_dir = params
+            .text_document_position
+            .text_document
+            .uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+        let items = engine.complete(
+            params.text_document_position.position,
+            doc_dir.as_deref(),
+        );
         Ok(Some(CompletionResponse::Array(items)))
     }
 
@@ -467,13 +477,15 @@ impl LanguageServer for NulangLanguageServer {
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri.clone();
         let docs = self.documents.lock().unwrap();
-        let source = match docs.get(&params.text_document.uri) {
+        let source = match docs.get(&uri) {
             Some(doc) => doc.source.clone(),
             None => return Ok(None),
         };
         drop(docs);
-        Ok(Self::code_actions(&source))
+        let range = Some(params.range);
+        Ok(Self::code_actions(&source, range, &uri))
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
@@ -1296,8 +1308,23 @@ impl NulangLanguageServer {
             .collect()
     }
 
-    fn code_actions(source: &str) -> Option<CodeActionResponse> {
+    fn code_actions(
+        source: &str,
+        range: Option<Range>,
+        uri: &Url,
+    ) -> Option<CodeActionResponse> {
         let mut actions = Vec::new();
+
+        // Extract variable — only when a non-empty selection range is given.
+        if let Some(ref sel) = range {
+            if sel.start != sel.end {
+                if let Some(action) = Self::extract_variable_action(source, sel, uri) {
+                    actions.push(action);
+                }
+            }
+        }
+
+        // Existing: add type annotations for `let` bindings without explicit types.
         for (li, line) in source.lines().enumerate() {
             let t = line.trim();
             let ln = li as u32;
@@ -1307,9 +1334,6 @@ impl NulangLanguageServer {
                     let rest = &t[after..];
                     if let Some(end) = rest.find(|c: char| c == ' ' || c == '=') {
                         let vname = &rest[..end];
-                        // A half-typed binding with no `=` yet (e.g. `let x y`)
-                        // has no right-hand side to infer from; skip it
-                        // instead of slicing past the end of the line.
                         let Some(eq) = t.find('=') else { continue };
                         let rhs = t[eq + 1..].trim();
                         let ty = if rhs.parse::<i64>().is_ok() {
@@ -1329,7 +1353,7 @@ impl NulangLanguageServer {
                             new_text: format!(" : {}", ty),
                         };
                         let mut changes = std::collections::HashMap::new();
-                        changes.insert(Url::parse("file:///current.nula").unwrap(), vec![edit]);
+                        changes.insert(uri.clone(), vec![edit]);
                         actions.push(CodeActionOrCommand::CodeAction(CodeAction {
                             title: format!("Add type annotation ': {}' for '{}'", ty, vname),
                             kind: Some(CodeActionKind::QUICKFIX),
@@ -1352,6 +1376,75 @@ impl NulangLanguageServer {
         } else {
             Some(actions)
         }
+    }
+
+    /// Offer "Extract to variable" for a selected expression.
+    ///
+    /// Simple version: if the selection is on a line with `= expr`, replace
+    /// from `=` to end of line with `let temp = expr in temp`.
+    fn extract_variable_action(
+        source: &str,
+        range: &Range,
+        uri: &Url,
+    ) -> Option<CodeActionOrCommand> {
+        let selected = Self::extract_selected_text(source, range)?;
+        let sel = selected.trim();
+        if sel.is_empty() || sel.len() == 1 {
+            return None;
+        }
+
+        let line_num = range.start.line;
+        let line = source.lines().nth(line_num as usize)?;
+
+        // Look for `= expr` pattern on this line.
+        if let Some(eq_pos) = line.find('=') {
+            let rhs = line[eq_pos + 1..].trim();
+            if rhs.is_empty() {
+                return None;
+            }
+            let edit = TextEdit {
+                range: Range {
+                    start: Position::new(line_num, eq_pos as u32 + 1),
+                    end: Position::new(line_num, line.len() as u32),
+                },
+                new_text: format!(" let temp = {} in temp", rhs),
+            };
+            let mut changes = std::collections::HashMap::new();
+            changes.insert(uri.clone(), vec![edit]);
+            return Some(CodeActionOrCommand::CodeAction(CodeAction {
+                title: format!("Extract '{}' to variable", sel),
+                kind: Some(CodeActionKind::REFACTOR_EXTRACT),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    ..WorkspaceEdit::default()
+                }),
+                is_preferred: Some(true),
+                ..CodeAction::default()
+            }));
+        }
+        None
+    }
+
+    /// Extract the text covered by an LSP range from the source.
+    fn extract_selected_text(source: &str, range: &Range) -> Option<String> {
+        let start = Self::position_to_byte_offset_offset(source, &range.start)?;
+        let end = Self::position_to_byte_offset_offset(source, &range.end)?;
+        if start >= end {
+            return None;
+        }
+        Some(source[start..end].to_string())
+    }
+
+    /// Convert an LSP Position to a byte offset in the full source.
+    fn position_to_byte_offset_offset(source: &str, pos: &Position) -> Option<usize> {
+        let mut offset = 0usize;
+        for (line_idx, line) in source.lines().enumerate() {
+            if line_idx as u32 == pos.line {
+                return Some(offset + utf16_col_to_byte(line, pos.character as usize));
+            }
+            offset += line.len() + 1; // +1 for newline
+        }
+        None
     }
 
     /// Compute folding ranges by tracking brace depth line-by-line.
@@ -2091,78 +2184,102 @@ impl<'a> InlayHintEngine<'a> {
 pub struct CompletionEngine<'a> {
     source: &'a str,
     function_names: Vec<String>,
+    /// (name, [param_names]) for snippet generation.
+    function_params: Vec<(String, Vec<String>)>,
     variant_names: Vec<String>,
     type_names: Vec<String>,
+    /// (actor_name, [field_names]).
+    actor_state_fields: Vec<(String, Vec<String>)>,
+    /// (type_name, [field_names]).
+    record_type_fields: Vec<(String, Vec<String>)>,
+    /// (behavior_name, [param_names]) for snippet generation.
+    behavior_params: Vec<(String, Vec<String>)>,
 }
 
 impl<'a> CompletionEngine<'a> {
-    /// Nulang language keywords offered by the completion provider.
-    const KEYWORDS: &'static [&'static str] = &[
-        "fn",
-        "let",
-        "if",
-        "else",
-        "match",
-        "effect",
-        "actor",
-        "state_machine",
-        "type",
-        "module",
-        "import",
-        "handle",
-        "perform",
-        "resume",
-        "return",
-        "true",
-        "false",
-        "nil",
-        "unit",
+    /// Nulang language keywords with markdown documentation.
+    const KEYWORDS: &'static [(&'static str, &'static str)] = &[
+        ("fn", "Declare a function.\n\n```nulang\nfn add(x: Int, y: Int) -> Int { x + y }\n```"),
+        ("let", "Bind a value to a name.\n\n```nulang\nlet x = 42\nlet y: Int = x + 1\n```"),
+        ("if", "Conditional expression.\n\n```nulang\nif x > 0 { \"positive\" } else { \"non-positive\" }\n```"),
+        ("else", "Else branch of a conditional.\n\n```nulang\nif x > 0 { \"positive\" } else { \"non-positive\" }\n```"),
+        ("match", "Pattern match expression.\n\n```nulang\nmatch x {\n  | Some(v) => v\n  | None => 0\n}\n```"),
+        ("effect", "Declare an effect.\n\n```nulang\neffect MyEffect {\n  op1: Int -> String\n}\n```"),
+        ("actor", "Declare an actor.\n\n```nulang\nactor Counter {\n  state count = 0\n  behavior inc() { self.count = self.count + 1 }\n}\n```"),
+        ("state_machine", "Declare a state machine.\n\n```nulang\nstate_machine Door {\n  state Closed\n  event open(): Open\n}\n```"),
+        ("type", "Declare a type alias, record, or variant.\n\n```nulang\ntype Point = { x: Int, y: Int }\ntype Option[T] = Some(T) | None\n```"),
+        ("module", "Declare a module.\n\n```nulang\nmodule MyModule {\n  fn foo() { 42 }\n}\n```"),
+        ("import", "Import a module.\n\n```nulang\nimport \"path/to/file.nula\"\nimport stdlib::json\n```"),
+        ("handle", "Handle effects.\n\n```nulang\nhandle perform IO.print(\"x\") with {\n  | IO.print(s) => { /* custom logic */ }\n  | return(x) => x\n}\n```"),
+        ("perform", "Perform an effect operation.\n\n```nulang\nperform IO.print(\"Hello\")\nperform Http.get(\"https://example.com\")\n```"),
+        ("resume", "Resume a handled effect continuation.\n\n```nulang\nhandle perform MyEffect.op() with {\n  | MyEffect.op() => resume(\"result\")\n}\n```"),
+        ("return", "Return a value from a function.\n\n```nulang\nfn foo() -> Int { return 42 }\n```"),
+        ("true", "Boolean `true` literal."),
+        ("false", "Boolean `false` literal."),
+        ("nil", "Nil / null value."),
+        ("unit", "Unit value (void)."),
     ];
 
-    /// Built-in effect names offered by the completion provider.
+    /// Built-in effect names.
     const EFFECTS: &'static [&'static str] = &[
-        "IO",
-        "Net",
-        "FS",
-        "Spawn",
-        "Send",
-        "Receive",
-        "Migrate",
-        "STM",
-        "Async",
-        "Inference",
-        "Cost",
-        "Rand",
-        "Time",
-        "Actor",
-        "Provider",
+        "IO", "Net", "FS", "Spawn", "Send", "Receive",
+        "Migrate", "STM", "Async", "Inference", "Cost", "Rand", "Time",
+        "Actor", "Provider",
+    ];
+
+    /// Known stdlib modules for import path completion.
+    const STDLIB_MODULES: &'static [&'static str] = &[
+        "core", "set", "string", "list", "map", "math", "json", "http", "test",
     ];
 
     pub fn new(source: &'a str) -> Self {
         CompletionEngine {
             source,
             function_names: Vec::new(),
+            function_params: Vec::new(),
             variant_names: Vec::new(),
             type_names: Vec::new(),
+            actor_state_fields: Vec::new(),
+            record_type_fields: Vec::new(),
+            behavior_params: Vec::new(),
         }
     }
 
-    /// Populate cached names from a parsed AST.
+    /// Populate cached names and parameter info from a parsed AST.
     pub fn set_ast_info(&mut self, ast: &crate::ast::AstModule) {
         for decl in &ast.decls {
             match decl {
-                crate::ast::Decl::Function { name, .. } => {
+                crate::ast::Decl::Function {
+                    name, params, ..
+                } => {
                     self.function_names.push(name.clone());
+                    let param_names: Vec<String> =
+                        params.iter().map(|(n, _)| n.clone()).collect();
+                    self.function_params
+                        .push((name.clone(), param_names));
                 }
                 crate::ast::Decl::Actor {
-                    name, behaviors, ..
+                    name,
+                    behaviors,
+                    state_fields,
+                    ..
                 } => {
                     self.type_names.push(name.clone());
+                    let field_names: Vec<String> =
+                        state_fields.iter().map(|(n, _, _, _)| n.clone()).collect();
+                    self.actor_state_fields
+                        .push((name.clone(), field_names));
                     for b in behaviors {
                         self.function_names.push(b.name.clone());
+                        let bparams: Vec<String> =
+                            b.params.iter().map(|(n, _)| n.clone()).collect();
+                        self.behavior_params
+                            .push((b.name.clone(), bparams));
                     }
                 }
-                crate::ast::Decl::VariantType { name, variants, .. } => {
+                crate::ast::Decl::VariantType {
+                    name, variants, ..
+                } => {
                     self.type_names.push(name.clone());
                     for (vname, _) in variants {
                         self.variant_names.push(vname.clone());
@@ -2171,31 +2288,137 @@ impl<'a> CompletionEngine<'a> {
                 crate::ast::Decl::TypeAlias { name, .. } => {
                     self.type_names.push(name.clone());
                 }
+                crate::ast::Decl::RecordType {
+                    name, fields, ..
+                } => {
+                    self.type_names.push(name.clone());
+                    let rfields: Vec<String> =
+                        fields.iter().map(|(n, _)| n.clone()).collect();
+                    self.record_type_fields
+                        .push((name.clone(), rfields));
+                }
                 _ => {}
             }
         }
     }
 
+    // ------------------------------------------------------------------
+    // Public entry point
+    // ------------------------------------------------------------------
+
     /// Return completion items at the given LSP position.
-    pub fn complete(&self, position: Position) -> Vec<CompletionItem> {
+    pub fn complete(
+        &self,
+        position: Position,
+        document_dir: Option<&Path>,
+    ) -> Vec<CompletionItem> {
+        let offset = self.position_to_offset(position);
+
+        // 1. Field access: `self.` or `expr.`
+        if let Some(ident) = self.field_access_before(offset) {
+            let prefix = self.prefix_at(offset);
+            return self.complete_field_access(&ident, &prefix);
+        }
+
+        // 2. Import path: `import "` or `import stdlib::`
+        if let Some(path_prefix) = self.import_context(offset) {
+            return self.complete_import_path(&path_prefix, document_dir);
+        }
+
+        // 3. Regular identifier completion
+        self.complete_ident(position)
+    }
+
+    // ------------------------------------------------------------------
+    // Regular identifier completions
+    // ------------------------------------------------------------------
+
+    fn complete_ident(&self, position: Position) -> Vec<CompletionItem> {
         let offset = self.position_to_offset(position);
         let prefix = self.prefix_at(offset);
         let prefix_lower = prefix.to_lowercase();
 
         let mut items = Vec::new();
 
-        // Keywords.
-        for &kw in Self::KEYWORDS {
-            if kw.to_lowercase().starts_with(&prefix_lower) {
+        // Local let bindings — highest priority (sort "0").
+        for name in self.local_bindings() {
+            if name.to_lowercase().starts_with(&prefix_lower) {
                 items.push(CompletionItem {
-                    label: kw.to_string(),
-                    kind: Some(CompletionItemKind::KEYWORD),
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some("local binding".to_string()),
+                    sort_text: Some(format!("0_{}", name)),
                     ..CompletionItem::default()
                 });
             }
         }
 
-        // Built-in effects.
+        // Cached function names from AST — with snippet for params (sort "1").
+        for name in &self.function_names {
+            if name.to_lowercase().starts_with(&prefix_lower) {
+                items.push(self.make_function_item(name));
+            }
+        }
+
+        // Regex-based function names (fallback) — lower priority (sort "1b").
+        for name in self.top_level_functions() {
+            let nl = name.to_lowercase();
+            if nl.starts_with(&prefix_lower)
+                && !self.function_names.iter().any(|n| n.to_lowercase() == nl)
+            {
+                items.push(CompletionItem {
+                    label: name,
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some("function".to_string()),
+                    sort_text: Some(format!("1b_{}", name)),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Cached type names (sort "2").
+        for name in &self.type_names {
+            if name.to_lowercase().starts_with(&prefix_lower) {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::CLASS),
+                    detail: Some("type".to_string()),
+                    sort_text: Some(format!("2_{}", name)),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Cached variant constructors (sort "3").
+        for name in &self.variant_names {
+            if name.to_lowercase().starts_with(&prefix_lower) {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::CONSTRUCTOR),
+                    detail: Some("variant".to_string()),
+                    sort_text: Some(format!("3_{}", name)),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Keywords — with markdown documentation (sort "4").
+        for &(kw, doc) in Self::KEYWORDS {
+            if kw.to_lowercase().starts_with(&prefix_lower) {
+                items.push(CompletionItem {
+                    label: kw.to_string(),
+                    kind: Some(CompletionItemKind::KEYWORD),
+                    documentation: Some(Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: doc.to_string(),
+                    })),
+                    sort_text: Some(format!("4_{}", kw)),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Built-in effects (sort "5").
         for &eff in Self::EFFECTS {
             let eff_lower = eff.to_lowercase();
             if eff_lower.starts_with(prefix_lower.as_str()) {
@@ -2203,54 +2426,7 @@ impl<'a> CompletionEngine<'a> {
                     label: eff.to_string(),
                     kind: Some(CompletionItemKind::ENUM_MEMBER),
                     detail: Some("built-in effect".to_string()),
-                    ..CompletionItem::default()
-                });
-            }
-        }
-
-        // Regex-based function names (fallback when no AST).
-        for name in self.top_level_functions() {
-            if name.to_lowercase().starts_with(&prefix_lower) {
-                items.push(CompletionItem {
-                    label: name,
-                    kind: Some(CompletionItemKind::FUNCTION),
-                    detail: Some("function".to_string()),
-                    ..CompletionItem::default()
-                });
-            }
-        }
-
-        // Cached function names from AST.
-        for name in &self.function_names {
-            if name.to_lowercase().starts_with(&prefix_lower) {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::FUNCTION),
-                    detail: Some("function".to_string()),
-                    ..CompletionItem::default()
-                });
-            }
-        }
-
-        // Cached variant constructors.
-        for name in &self.variant_names {
-            if name.to_lowercase().starts_with(&prefix_lower) {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::CONSTRUCTOR),
-                    detail: Some("variant".to_string()),
-                    ..CompletionItem::default()
-                });
-            }
-        }
-
-        // Cached type names.
-        for name in &self.type_names {
-            if name.to_lowercase().starts_with(&prefix_lower) {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::CLASS),
-                    detail: Some("type".to_string()),
+                    sort_text: Some(format!("5_{}", eff)),
                     ..CompletionItem::default()
                 });
             }
@@ -2259,13 +2435,325 @@ impl<'a> CompletionEngine<'a> {
         items
     }
 
+    /// Build a function/behavior completion item with a snippet when params
+    /// are known.
+    fn make_function_item(&self, name: &str) -> CompletionItem {
+        // Check behavior params first.
+        if let Some((_, bparams)) = self
+            .behavior_params
+            .iter()
+            .find(|(n, _)| n == name)
+        {
+            let snippet = if bparams.is_empty() {
+                name.to_string()
+            } else {
+                let placeholders: Vec<String> = bparams
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| format!("${{{}:{}}}", i + 1, p))
+                    .collect();
+                format!("{} {}", name, placeholders.join(" "))
+            };
+            return CompletionItem {
+                label: name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some("behavior".to_string()),
+                insert_text: Some(snippet),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                sort_text: Some(format!("0b_{}", name)),
+                ..CompletionItem::default()
+            };
+        }
+
+        // Check function params.
+        if let Some((_, fparams)) = self
+            .function_params
+            .iter()
+            .find(|(n, _)| n == name)
+        {
+            let snippet = if fparams.is_empty() {
+                format!("{}()", name)
+            } else {
+                let placeholders: Vec<String> = fparams
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| format!("${{{}:{}}}", i + 1, p))
+                    .collect();
+                format!("{}({})", name, placeholders.join(", "))
+            };
+            return CompletionItem {
+                label: name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some("function".to_string()),
+                insert_text: Some(snippet),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                sort_text: Some(format!("1_{}", name)),
+                ..CompletionItem::default()
+            };
+        }
+
+        // No params known — plain completion.
+        CompletionItem {
+            label: name.to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some("function".to_string()),
+            sort_text: Some(format!("1_{}", name)),
+            ..CompletionItem::default()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Field access completions (`self.` or `expr.`)
+    // ------------------------------------------------------------------
+
+    /// Check whether the cursor is positioned after `ident.` — return the
+    /// identifier before the dot.
+    fn field_access_before(&self, offset: usize) -> Option<String> {
+        let bytes = self.source.as_bytes();
+        // Walk back from offset past any identifier characters (the partial
+        // field name).
+        let mut pos = offset;
+        while pos > 0 {
+            let b = bytes[pos - 1];
+            if b.is_ascii_alphanumeric() || b == b'_' {
+                pos -= 1;
+            } else {
+                break;
+            }
+        }
+        // Expect a dot right before the identifier.
+        if pos == 0 || bytes[pos - 1] != b'.' {
+            return None;
+        }
+        // Walk back from before the dot to collect the object identifier.
+        let dot_pos = pos - 1;
+        let mut ident_end = dot_pos;
+        while ident_end > 0 && bytes[ident_end - 1].is_ascii_whitespace() {
+            ident_end -= 1;
+        }
+        let mut ident_start = ident_end;
+        while ident_start > 0 {
+            let b = bytes[ident_start - 1];
+            if b.is_ascii_alphanumeric() || b == b'_' {
+                ident_start -= 1;
+            } else {
+                break;
+            }
+        }
+        if ident_start < ident_end {
+            Some(self.source[ident_start..ident_end].to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Offer field completions for the given object identifier.
+    fn complete_field_access(&self, ident: &str, prefix: &str) -> Vec<CompletionItem> {
+        let prefix_lower = prefix.to_lowercase();
+        let mut items = Vec::new();
+
+        // `self.` → actor state fields.
+        if ident == "self" {
+            for (actor_name, fields) in &self.actor_state_fields {
+                for f in fields {
+                    if f.to_lowercase().starts_with(&prefix_lower) {
+                        items.push(CompletionItem {
+                            label: f.clone(),
+                            kind: Some(CompletionItemKind::FIELD),
+                            detail: Some(format!("state field of {}", actor_name)),
+                            sort_text: Some(format!("0_{}", f)),
+                            ..CompletionItem::default()
+                        });
+                    }
+                }
+            }
+            return items;
+        }
+
+        // Type-name-based record field access.
+        for (type_name, fields) in &self.record_type_fields {
+            if type_name.to_lowercase() == ident.to_lowercase() {
+                for f in fields {
+                    if f.to_lowercase().starts_with(&prefix_lower) {
+                        items.push(CompletionItem {
+                            label: f.clone(),
+                            kind: Some(CompletionItemKind::FIELD),
+                            detail: Some(format!("field of {}", type_name)),
+                            sort_text: Some(format!("0_{}", f)),
+                            ..CompletionItem::default()
+                        });
+                    }
+                }
+            }
+        }
+
+        items
+    }
+
+    // ------------------------------------------------------------------
+    // Import path completions
+    // ------------------------------------------------------------------
+
+    /// Check whether the cursor is inside an import path string or after
+    /// `stdlib::`, returning the prefix typed so far.
+    fn import_context(&self, offset: usize) -> Option<String> {
+        let line = self.current_line(offset)?;
+        let line_trimmed = line.trim();
+
+        // `import "path"`
+        if let Some(rest) = line_trimmed.strip_prefix("import \"") {
+            // Compute how far into the path the cursor is.
+            let col_in_trimmed = offset.saturating_sub(
+                self.source[..offset]
+                    .rfind('\n')
+                    .map(|i| i + 1)
+                    .unwrap_or(0)
+                    + (line.len() - line_trimmed.len()),
+            );
+            // `import "` is 8 chars.
+            if col_in_trimmed >= 8 {
+                let path_so_far = &rest[..(col_in_trimmed - 8).min(rest.len())];
+                return Some(path_so_far.to_string());
+            }
+            return Some(String::new());
+        }
+
+        // `import stdlib::mod`
+        if let Some(rest) = line_trimmed.strip_prefix("import stdlib::") {
+            let col_in_trimmed = offset.saturating_sub(
+                self.source[..offset]
+                    .rfind('\n')
+                    .map(|i| i + 1)
+                    .unwrap_or(0)
+                    + (line.len() - line_trimmed.len()),
+            );
+            let prefix_len = "import stdlib::".len();
+            if col_in_trimmed >= prefix_len {
+                let mod_so_far = &rest[..(col_in_trimmed - prefix_len).min(rest.len())];
+                return Some(format!("stdlib::{}", mod_so_far));
+            }
+            return Some("stdlib::".to_string());
+        }
+
+        None
+    }
+
+    /// Offer import path completions.
+    fn complete_import_path(
+        &self,
+        prefix: &str,
+        document_dir: Option<&Path>,
+    ) -> Vec<CompletionItem> {
+        let mut items = Vec::new();
+
+        // `stdlib::` prefix → suggest known stdlib modules.
+        if let Some(mod_prefix) = prefix.strip_prefix("stdlib::") {
+            let mod_prefix_lower = mod_prefix.to_lowercase();
+            for &mod_name in Self::STDLIB_MODULES {
+                if mod_name.to_lowercase().starts_with(&mod_prefix_lower) {
+                    let full = format!("stdlib::{}", mod_name);
+                    items.push(CompletionItem {
+                        label: full.clone(),
+                        kind: Some(CompletionItemKind::MODULE),
+                        detail: Some("stdlib module".to_string()),
+                        insert_text: Some(full),
+                        sort_text: Some(format!("0_{}", full)),
+                        ..CompletionItem::default()
+                    });
+                }
+            }
+            return items;
+        }
+
+        // For bare `import "` — suggest stdlib:: paths and local .nula files.
+        for &mod_name in Self::STDLIB_MODULES {
+            let full = format!("stdlib::{}", mod_name);
+            if full.to_lowercase().starts_with(&prefix.to_lowercase()) {
+                items.push(CompletionItem {
+                    label: full.clone(),
+                    kind: Some(CompletionItemKind::MODULE),
+                    detail: Some("stdlib module".to_string()),
+                    insert_text: Some(full),
+                    sort_text: Some(format!("0_{}", full)),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Scan for local .nula files when a document dir is known.
+        if let Some(dir) = document_dir {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map_or(false, |e| e == "nula") {
+                        if let Some(fname) = path.file_stem().and_then(|s| s.to_str()) {
+                            let rel = format!("./{}", fname);
+                            if rel.to_lowercase().starts_with(&prefix.to_lowercase()) {
+                                items.push(CompletionItem {
+                                    label: rel.clone(),
+                                    kind: Some(CompletionItemKind::FILE),
+                                    detail: Some("local module".to_string()),
+                                    insert_text: Some(format!("./{}.nula", fname)),
+                                    sort_text: Some(format!("1_{}", rel)),
+                                    ..CompletionItem::default()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        items
+    }
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
+
+    /// Get the text of the line containing `offset`.
+    fn current_line(&self, offset: usize) -> Option<&str> {
+        let start = self.source[..offset]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let end = self.source[offset..]
+            .find('\n')
+            .map(|i| offset + i)
+            .unwrap_or(self.source.len());
+        Some(&self.source[start..end])
+    }
+
+    /// Extract all `let` binding names from the source (simple heuristic
+    /// for local variable completions).
+    fn local_bindings(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for line in self.source.lines() {
+            let trimmed = line.trim_start();
+            if let Some(after_let) = trimmed.strip_prefix("let ") {
+                if let Some(name) = after_let
+                    .split(|c: char| c.is_whitespace() || c == ':' || c == '=')
+                    .next()
+                {
+                    let name = name.trim();
+                    if !name.is_empty()
+                        && name
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+        names
+    }
+
     /// Convert an LSP position to a byte offset in the source.
     fn position_to_offset(&self, position: Position) -> usize {
         let mut offset = 0usize;
         for (line_idx, line) in self.source.lines().enumerate() {
             if line_idx as u32 == position.line {
-                // LSP columns are UTF-16 code units; map to a byte offset on
-                // a char boundary so non-ASCII lines cannot panic downstream.
                 return offset + utf16_col_to_byte(line, position.character as usize);
             }
             offset += line.len() + 1; // +1 for newline
@@ -2276,17 +2764,12 @@ impl<'a> CompletionEngine<'a> {
     /// Extract the identifier fragment the user has typed so far.
     fn prefix_at(&self, offset: usize) -> String {
         let bytes = self.source.as_bytes();
-        // Snap a mid-character offset back to the nearest char boundary so
-        // the slice below can never panic.
         let mut offset = offset.min(bytes.len());
         while offset > 0 && !self.source.is_char_boundary(offset) {
             offset -= 1;
         }
         let mut start = offset;
         while start > 0 {
-            // Byte-wise ASCII test: continuation/lead bytes of multibyte
-            // characters are never alphanumeric, so the walk always stops
-            // on a char boundary.
             let prev = bytes[start - 1];
             if prev.is_ascii_alphanumeric() || prev == b'_' {
                 start -= 1;
@@ -2455,10 +2938,13 @@ mod lsp_tests {
     fn test_completion_keywords() {
         let source = "let x = 42";
         let engine = CompletionEngine::new(source);
-        let items = engine.complete(Position {
-            line: 0,
-            character: 0,
-        });
+        let items = engine.complete(
+            Position {
+                line: 0,
+                character: 0,
+            },
+            None,
+        );
         let labels = labels(&items);
         assert!(labels.contains(&"let"));
         assert!(labels.contains(&"fn"));
@@ -2470,10 +2956,13 @@ mod lsp_tests {
         let source = "ret";
         let engine = CompletionEngine::new(source);
         // Cursor at end of "ret".
-        let items = engine.complete(Position {
-            line: 0,
-            character: 3,
-        });
+        let items = engine.complete(
+            Position {
+                line: 0,
+                character: 3,
+            },
+            None,
+        );
         let labels = labels(&items);
         assert!(
             labels.contains(&"return"),
@@ -2489,10 +2978,13 @@ mod lsp_tests {
     fn test_completion_top_level_functions() {
         let source = "fun foo()\nfun bar(x: Int)\nlet x = 1";
         let engine = CompletionEngine::new(source);
-        let items = engine.complete(Position {
-            line: 2,
-            character: 0,
-        });
+        let items = engine.complete(
+            Position {
+                line: 2,
+                character: 0,
+            },
+            None,
+        );
         let labels = labels(&items);
         assert!(labels.contains(&"foo"));
         assert!(labels.contains(&"bar"));
@@ -2502,10 +2994,13 @@ mod lsp_tests {
     fn test_completion_effects() {
         let source = "";
         let engine = CompletionEngine::new(source);
-        let items = engine.complete(Position {
-            line: 0,
-            character: 0,
-        });
+        let items = engine.complete(
+            Position {
+                line: 0,
+                character: 0,
+            },
+            None,
+        );
         let labels = labels(&items);
         assert!(labels.contains(&"IO"));
         assert!(labels.contains(&"Migrate"));
@@ -2517,10 +3012,13 @@ mod lsp_tests {
         // Effect names are matched case-insensitively by prefix.
         let source = "mi";
         let engine = CompletionEngine::new(source);
-        let items = engine.complete(Position {
-            line: 0,
-            character: 2,
-        });
+        let items = engine.complete(
+            Position {
+                line: 0,
+                character: 2,
+            },
+            None,
+        );
         let labels = labels(&items);
         assert!(
             labels.contains(&"Migrate"),
@@ -2535,9 +3033,19 @@ mod lsp_tests {
         // A half-typed `let` line with no `=` (e.g. `let x y`) must not
         // panic the code action provider; no quick fix can be offered
         // without a right-hand side.
-        assert!(NulangLanguageServer::code_actions("let x y").is_none());
+        assert!(NulangLanguageServer::code_actions(
+            "let x y",
+            None,
+            &Url::parse("file:///test.nula").unwrap(),
+        )
+        .is_none());
         // A well-formed binding still produces a quick fix.
-        assert!(NulangLanguageServer::code_actions("let x = 42").is_some());
+        assert!(NulangLanguageServer::code_actions(
+            "let x = 42",
+            None,
+            &Url::parse("file:///test.nula").unwrap(),
+        )
+        .is_some());
     }
 
     #[test]
@@ -2562,7 +3070,7 @@ mod lsp_tests {
         assert_eq!(engine.position_to_offset(Position::new(0, 8)), 9);
         // Completion at that offset must not panic: pre-fix the raw column
         // landed mid-character and prefix_at sliced inside é.
-        let items = engine.complete(Position::new(0, 8));
+        let items = engine.complete(Position::new(0, 8), None);
         assert!(!items.is_empty(), "empty prefix should offer completions");
     }
 

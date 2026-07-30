@@ -115,6 +115,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             annotations: _,
             public,
             span,
+            ..
         } => hir::Decl::Function(hir::FunctionDef {
             name: name.clone(),
             type_params: type_params.clone(),
@@ -1925,6 +1926,7 @@ mod tests {
             decls: vec![Decl::Function {
                 name: "__main".to_string(),
                 type_params: vec![],
+                type_param_constraints: vec![],
                 params: vec![],
                 ret_type: Some(Type::int()),
                 error_type: None,

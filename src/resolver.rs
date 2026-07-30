@@ -151,6 +151,7 @@ mod tests {
         Decl::Function {
             name: name.into(),
             type_params: vec![],
+            type_param_constraints: vec![],
             params: vec![],
             ret_type: None,
             error_type: None,
