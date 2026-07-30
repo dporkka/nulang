@@ -681,11 +681,11 @@ impl Repl {
                 println!();
                 println!("Let bindings:");
                 println!("  let x = 5 in x + 1");
-                println!("  let rec factorial = fn(n) { if n <= 1 then 1 else n * factorial(n - 1) } in factorial(5)");
+                println!("  let rec factorial = fn(n) {{ if n <= 1 then 1 else n * factorial(n - 1) }} in factorial(5)");
                 println!();
                 println!("Functions:");
-                println!("  fn add(x, y) { x + y }");
-                println!("  fn add(x: Int, y: Int) -> Int { x + y }");
+                println!("  fn add(x, y) {{ x + y }}");
+                println!("  fn add(x: Int, y: Int) -> Int {{ x + y }}");
                 println!();
                 println!("Control flow:");
                 println!("  if condition then expr1 else expr2");
@@ -1098,8 +1098,6 @@ mod tests {
         let result = repl.execute("fn pure() -> Unit ! {} { do_io() }");
         assert!(
             matches!(result, Err(NuError::EffectError { .. })),
-            missing_effects: None,
-            allowed_effects: None,
             "pure function calling an IO function must be rejected, got {:?}",
             result
         );
@@ -1116,8 +1114,6 @@ mod tests {
         );
         assert!(
             matches!(result, Err(NuError::EffectError { .. })),
-            missing_effects: None,
-            allowed_effects: None,
             "pure function calling an IO function must be rejected, got {:?}",
             result
         );

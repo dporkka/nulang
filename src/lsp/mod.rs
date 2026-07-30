@@ -2389,7 +2389,7 @@ impl<'a> CompletionEngine<'a> {
                 && !self.function_names.iter().any(|n| n.to_lowercase() == nl)
             {
                 items.push(CompletionItem {
-                    label: name,
+                    label: name.clone(),
                     kind: Some(CompletionItemKind::FUNCTION),
                     detail: Some("function".to_string()),
                     sort_text: Some(format!("1b_{}", name)),
@@ -2670,7 +2670,7 @@ impl<'a> CompletionEngine<'a> {
                         label: full.clone(),
                         kind: Some(CompletionItemKind::MODULE),
                         detail: Some("stdlib module".to_string()),
-                        insert_text: Some(full),
+                        insert_text: Some(full.clone()),
                         sort_text: Some(format!("0_{}", full)),
                         ..CompletionItem::default()
                     });
@@ -2687,7 +2687,7 @@ impl<'a> CompletionEngine<'a> {
                     label: full.clone(),
                     kind: Some(CompletionItemKind::MODULE),
                     detail: Some("stdlib module".to_string()),
-                    insert_text: Some(full),
+                    insert_text: Some(full.clone()),
                     sort_text: Some(format!("0_{}", full)),
                     ..CompletionItem::default()
                 });

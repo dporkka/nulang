@@ -7112,7 +7112,7 @@ match { a: 2, b: 9 } with {
         );
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("Cannot unify"),
+            err_msg.contains("Type mismatch"),
             "Error should be a unification failure: {}",
             err_msg
         );
