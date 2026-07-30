@@ -1,6 +1,6 @@
 # Getting Started with Nulang
 
-> Verified against the example suite in `examples/` (commit `532b568`).
+> Verified against the example suite in `examples/` (commit `1fd62a5`).
 
 ## 1. What is Nulang?
 
@@ -168,7 +168,7 @@ let classify = fn(n) {
     match n with {
         | x if x < 0 => "negative"
         | x if x == 0 => "zero"
-        | _ if x < 10 => "small"
+        | x if x < 10 => "small"
         | _ => "large"
     }
 }
@@ -216,7 +216,7 @@ let p = { x: 1, y: 2 }
 let q = { p .. y = 9 }    // q.x == 1, q.y == 9; p unchanged
 
 // Multiple overrides
-let r = { p .. x = 10, y = 20, z = 30 }
+let r = { p .. x = 10, y = 20 }
 ```
 
 > Full example: `examples/05_records.nula`
@@ -286,15 +286,13 @@ perform Int.to_string(2024)         // → "2024"
 File operations use the `FS` effect:
 
 ```nula
-import std.fs
-
-let content = fs.read("input.txt")    // returns String or nil
-fs.write("output.txt", "Hello!")       // returns Unit
-let exists = fs.exists("data.json")    // returns Bool
+let content = perform FS.read("input.txt")    // returns String or nil
+perform FS.write("output.txt", "Hello!")       // returns Unit
+let exists = perform FS.exists("data.json")    // returns Bool
 ```
 
-Operations: `FS.read(path)`, `FS.write(path, content)`, `FS.append(path, content)`,
-`FS.exists(path)`.
+Operations: `perform FS.read(path)`, `perform FS.write(path, content)`,
+`perform FS.append(path, content)`, `perform FS.exists(path)`.
 
 > Full example: `examples/07_effects.nula`; see also `src/stdlib/fs.nula`
 
@@ -323,6 +321,10 @@ actor Greeter {
 
     behavior set_greeting(g: String) {
         self.greeting = g
+    }
+
+    behavior set_name(n: String) {
+        self.name = n
     }
 
     behavior greet() {
@@ -359,21 +361,24 @@ type Result[Ok, Err] = Ok(Ok) | Error(Err)
 fn ok_val() -> Result[Int, String] { Ok(42) }
 fn err_val() -> Result[Int, String] { Error("fail") }
 
+fn early_return(x: Int) -> Int {
+    if x < 0 then fail 0 else x
+}
+
+fn div(a: Int, b: Int) -> Int ! String {
+    if b == 0 then fail Error("div by zero") else Ok(a / b)
+}
+
+// catch: fallback for error variants
 ok_val() catch 0    // → 42    (success — returns the Ok payload)
 err_val() catch 0   // → 0     (error — returns the fallback)
 
 // fail: early exit from a function
-fn early_return(x: Int) -> Int {
-    if x < 0 then fail 0 else x
-}
 early_return(42)    // → 42
 early_return(-5)    // → 0
 
-// ! syntax: a function can declare an error type
-fn div(a: Int, b: Int) -> Int ! String {
-    if b == 0 then fail Error("div by zero") else Ok(a / b)
-}
-div(10, 2)?         // → 5   (? unwraps the Ok variant)
+// ?: unwrap the Ok variant
+div(10, 2)?         // → 5
 ```
 
 ## 12. The Package Manager
@@ -416,18 +421,17 @@ effect for assertions:
 
 ```nula
 // tests/math_tests.nula
-import std.test
 
 fn test_addition() {
-    test.assert_eq(40 + 2, 42)
+    perform Test.assert_eq(40 + 2, 42)
 }
 
 fn test_multiplication() {
-    test.assert(6 * 7 == 42, "multiplication failed")
+    perform Test.assert(6 * 7 == 42, "multiplication failed")
 }
 
 fn test_truth() {
-    test.assert_true(true)
+    perform Test.assert_true(true)
 }
 
 test_addition()
@@ -442,8 +446,8 @@ nulang nula test
 nulang nula test --filter addition
 ```
 
-Available assertions: `test.assert(cond, msg)`, `test.assert_eq(actual, expected)`,
-`test.assert_true(cond)`, `test.fail_with(msg)`.
+Available assertions: `perform Test.assert(cond, msg)`, `perform Test.assert_eq(actual, expected)`,
+`perform Test.assert_true(cond)`, `perform Test.fail_with(msg)`.
 
 ## 14. Where to Go Next
 
