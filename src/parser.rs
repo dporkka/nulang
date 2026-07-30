@@ -2476,7 +2476,7 @@ impl Parser {
 
     /// Collect expressions until `end_token` (or EOF), splicing incomplete
     /// let-bindings so that `let x = 1` captures following expressions as
-    /// its body. Called recursively so nested statement-lets work correctly.
+    /// its body. Handles chains of statement-lets iteratively.
     fn collect_block_exprs(&mut self, end_token: Option<TokenKind>) -> NuResult<Vec<Expr>> {
         let mut exprs = Vec::new();
         self.skip_newlines();
@@ -2501,47 +2501,75 @@ impl Parser {
             let is_incomplete = matches!(&expr, Expr::Let { body, .. } | Expr::LetRec { body, .. } if matches!(body.as_ref(), Expr::Block { exprs, span } if exprs.is_empty() && span.start == 0 && span.end == 0));
 
             if is_incomplete {
-                let rest = self.collect_block_exprs(end_token.clone())?;
-                let new_body = if rest.is_empty() {
-                    Expr::Literal(Literal::Unit, Span::default())
-                } else if rest.len() == 1 {
-                    rest.into_iter().next().unwrap()
-                } else {
-                    Expr::Block {
-                        exprs: rest,
-                        span: Span::default(),
+                // Collect consecutive incomplete lets iteratively to avoid
+                // deep recursion for blocks with many sequential let-statements
+                // (e.g. 40 let bindings produce 40 AST levels).  Instead
+                // of recursing, accumulate pending lets and parse the rest
+                // in a loop, then fold the chain right-to-left.
+                let mut pending: Vec<Expr> = vec![expr];
+                let final_body = loop {
+                    if let Some(ref end) = end_token {
+                        if self.match_token(end) {
+                            break Expr::Literal(Literal::Unit, Span::default());
+                        }
+                    }
+                    self.skip_newlines();
+                    if self.is_at_end() {
+                        break Expr::Literal(Literal::Unit, Span::default());
+                    }
+                    if let Some(ref end) = end_token {
+                        if self.match_token(end) {
+                            break Expr::Literal(Literal::Unit, Span::default());
+                        }
+                    }
+                    let next = self.parse_expr()?;
+                    self.skip_newlines_semicolons();
+                    let next_incomplete = matches!(
+                        &next,
+                        Expr::Let { body, .. } | Expr::LetRec { body, .. }
+                        if matches!(body.as_ref(), Expr::Block { exprs, span }
+                            if exprs.is_empty() && span.start == 0 && span.end == 0)
+                    );
+                    if next_incomplete {
+                        pending.push(next);
+                    } else {
+                        break next;
                     }
                 };
-                expr = match expr {
-                    Expr::Let {
-                        name,
-                        ty,
-                        value,
-                        span,
-                        ..
-                    } => Expr::Let {
-                        name,
-                        ty,
-                        value,
-                        body: Box::new(new_body),
-                        span,
-                    },
-                    Expr::LetRec {
-                        name,
-                        params,
-                        value,
-                        span,
-                        ..
-                    } => Expr::LetRec {
-                        name,
-                        params,
-                        value,
-                        body: Box::new(new_body),
-                        span,
-                    },
-                    _ => unreachable!(),
-                };
-                exprs.push(expr);
+                // Fold: Let(a0, 0, Let(a1, 1, ... final_body))
+                let mut body = final_body;
+                for let_expr in pending.into_iter().rev() {
+                    body = match let_expr {
+                        Expr::Let {
+                            name,
+                            ty,
+                            value,
+                            span,
+                            ..
+                        } => Expr::Let {
+                            name,
+                            ty,
+                            value,
+                            body: Box::new(body),
+                            span,
+                        },
+                        Expr::LetRec {
+                            name,
+                            params,
+                            value,
+                            span,
+                            ..
+                        } => Expr::LetRec {
+                            name,
+                            params,
+                            value,
+                            body: Box::new(body),
+                            span,
+                        },
+                        _ => unreachable!(),
+                    };
+                }
+                exprs.push(body);
                 break;
             }
             exprs.push(expr);
