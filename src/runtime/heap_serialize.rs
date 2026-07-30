@@ -94,6 +94,8 @@ struct SerializeCtx {
     string_table: Vec<String>,
     /// String → index in string_table.
     string_ids: HashMap<String, u32>,
+    /// TAG_STRING raw values → string table index.
+    string_value_to_idx: HashMap<u64, u32>,
     /// Objects to serialize (in ID order).
     objects: Vec<ObjectInfo>,
     /// Closure environments reachable from frames.
@@ -149,6 +151,7 @@ pub fn serialize_continuation(
         obj_ids: HashMap::new(),
         string_table: Vec::new(),
         string_ids: HashMap::new(),
+        string_value_to_idx: HashMap::new(),
         objects: Vec::new(),
         closures: Vec::new(),
         frames: Vec::new(),
@@ -304,6 +307,7 @@ fn walk_value(
                 let idx = ctx.string_table.len() as u32;
                 ctx.string_table.push(content.clone());
                 ctx.string_ids.insert(content, idx);
+                ctx.string_value_to_idx.insert(value.as_raw(), idx);
             }
         }
     }
@@ -460,15 +464,10 @@ fn serialize_one_value(value: Value, ctx: &SerializeCtx) -> u64 {
     }
 
     if tag == TAG_STRING {
-        // Resolve string ID to string table index.
-        // The walk_value pass already populated the string table and ids.
-        // We need to get the content and look it up.
-        // Since we don't have the VM here, we use a different strategy:
-        // For now, just pass the raw value through. The string table
-        // resolution is best-effort for cross-module portability.
-        // TODO: resolve TAG_STRING to string table during walk and store
-        // the mapped value in the context.
-        return raw;
+        // Resolve TAG_STRING to string table index (populated during walk pass).
+        if let Some(&idx) = ctx.string_value_to_idx.get(&raw) {
+            return TAG_STRING | (idx as u64 & PAYLOAD_MASK);
+        }
     }
 
     raw
@@ -803,14 +802,17 @@ fn read_frames(
             }
             let ce_idx = read_u32(bytes, offset)? as usize;
             if ce_idx < closure_envs.len() {
-                // Reconstruct the closure Value pointing to the env.
-                // We'll store it as a TAG_CLOSURE with the env flag.
-                // For now, just use the env data directly.
-                let (_func_idx, _captures) = &closure_envs[ce_idx];
-                // Build a dummy Value representing the closure.
-                // The actual closure env index in the new VM may differ.
-                // For now, we'll store None and let the caller handle it.
-                None // TODO: re-register closure env with new VM
+                let (func_idx, captures) = &closure_envs[ce_idx];
+                let env_idx = vm.closure_env_count();
+                vm.push_closure_env(crate::vm::ClosureEnv {
+                    func_idx: *func_idx as usize,
+                    captures: captures.clone(),
+                });
+                Some(Value::from_raw(
+                    TAG_CLOSURE
+                        | crate::vm::CLOSURE_ENV_FLAG
+                        | (env_idx as u64 & crate::vm::CLOSURE_ENV_IDX_MASK),
+                ))
             } else {
                 None
             }

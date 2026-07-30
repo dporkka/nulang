@@ -91,10 +91,11 @@ in this version; they are recorded here to establish their tier.
   (`let a = 3 in (fn(x) => a + x)(5)` → 8).  Closure encoding: 30-bit flag
   with packed param-hash, body-start, and captured binding.  Out-of-band
   sentinel `1 << 40` distinguishes "no left operand" from value 0.
-- **Formal semantics: capability lattice proofs.** All five lattice theorems
-  in `spec/formal/capabilities.lean` proved via exhaustive case analysis:
-  `join_assoc`, `join_comm`, `join_idem`, `cap_sendable`, `discharge_sendable`.
-  The core HM soundness theorems (`types.lean`) remain open.
+- **Formal semantics: all three Core theorems proved.** Progress, preservation,
+  and type soundness for the Core expression language (RFC 0002) are now
+  machine-checked in `spec/formal/types.lean` (0 sorries). The capability
+  lattice proofs (`capabilities.lean`) remain proved; effect and combined
+  judgments are definition-only. See `spec/formal/README.md` for scope.
 
 - **Error handling syntax.** `catch expr => body`, `fail expr`
   (structured short-circuit return), and `T ! E` return-type syntax
@@ -109,16 +110,32 @@ in this version; they are recorded here to establish their tier.
   optional `timeout` clause for request-response with deadline semantics.
   Capability enforcement lives in `src/effect_checker.rs`; transport
   modifiers parsed in `src/parser.rs`.
+- **RFC 0010 — 100-Year Language Architecture.** Documented design rationale
+  for multi-century relevance. Deliverables implemented:
+  - **LLM→Inference effect alias:** `perform LLM.ask(p)` and
+    `perform Inference.ask(p)` are synonyms; both resolve to
+    `Effect::Inference`. The `LLM.ask` surface is a deprecated alias
+    (`src/effect_checker.rs`, `src/mir_lower.rs`, `src/runtime/mod.rs`,
+    `src/stdlib.rs`).
+  - **Keyword lifecycle governance:** `GOVERNANCE.md` §2a defines keyword
+    introduction, reservation, deprecation, and removal rules.
+  - **Keyword namespace cleanup:** Six formerly-reserved keywords
+    (`where`, `priv`, `loop`, `node`, `await`, `subworkflow`) removed
+    from the lexer and now lex as plain identifiers (`src/lexer.rs`).
+  - **Keyword inventory documented** in `SPEC2.md` §Implementation Status
+    and verified against the implementation.
 
-## Experimental tier
-
-*No stability promise. May change or be removed in any release. Behind a
-feature flag or explicitly marked experimental.*
-
-### Current experimental surface
-
-- `wasm-backend` feature: the WASM compiler (`src/mir_wasm.rs`) and Wasmtime
-  host runtime (`src/wasm_runtime.rs`). Behind `--features wasm-backend`.
+- `ai-runtime` feature: the AI runtime — **pure types live in the `nulang-ai`
+  workspace crate** (`crates/nulang-ai/`) with zero dependencies on the core
+  language crate. The core crate (`src/ai/mod.rs`) provides a thin re-export
+  facade behind `#[cfg(feature = "ai-runtime")]`. All AI effects dispatch
+  through the generic `PerformAsync` opcode (`0xC6`) with `effect_op` strings
+  (`"Inference.ask"`, `"Pipeline.run"`, etc.). The monolithic AI opcode range
+  (0x9D–0xC5: `LlmAsk`, `PipelineNew`…`DebateRun`) has been removed.
+  Runtime integration (`src/runtime/agent.rs`, `llm.rs`, `ai_registry.rs`)
+  bridges the pure AI types to the actor model. Behind `--features ai-runtime`
+  (enabled by default). `LLM.ask` is a deprecated alias for `Inference.ask`
+  and emits a compiler warning (RFC 0010).
 - `python` feature: PyO3 interop (`src/python/`). Behind `--features python`.
 - `sqlite` feature: libsql/Turso persistence. Behind `--features sqlite`.
 - `lsp` feature: the tower-lsp language server (`src/lsp/`). Behind

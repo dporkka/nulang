@@ -1,6 +1,6 @@
 # Nulang Language Specification v2.0
 
-## DRAFT — December 2025
+## July 2026
 
 ---
 
@@ -48,17 +48,37 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - Workflows: `workflow Name { step name { body } compensate { expr } ... }` with `parallel { ... }` step groups, saga compensation in reverse order, `perform Signal.wait("name")`, and `perform Timer.sleep("name", ms)`, all durable across restarts.
 - The AI runtime: `agent` declarations with model, system prompt, tools, episodic/semantic/procedural memory, and pricing; the generic `PerformAsync` opcode dispatches LLM, Pipeline, Supervisor, and Debate effects via `effect_op` strings (e.g. `"Inference.ask"`, `"Pipeline.run"`); agent behaviors (`ask`, `usage`, `store_fact`, `recall`); tool schemas generated from `@tool` functions; and the `Pipeline`, `Supervisor`, and `Debate` orchestration builtins. The pure AI types live in the `nulang-ai` workspace crate (`crates/nulang-ai/`); the core crate re-exports them behind the `ai-runtime` feature flag.
 - A register-based bytecode VM with a Cranelift JIT tiering path; an OTP-style supervision runtime (restart strategies and policies, links, monitors, exit signals); a distributed runtime (TCP wire protocol, gossip membership, location-transparent addressing, eight CRDT types); a REPL; and an LSP server.
+- Typeclass declarations: `class`/`impl` with dictionary-passing transform for method calls on concrete types (Phase 4, Experimental). See `CHANGELOG.md`.
+- Standard-library modules: `stdlib::core`, `stdlib::list`, `stdlib::string`, `stdlib::set`, `stdlib::map`, `stdlib::http` — resolved via `NULANG_STDLIB` or `src/stdlib/` (Experimental). See `CHANGELOG.md`.
+- Error handling syntax: `catch expr => body`, `fail expr` (structured short-circuit return), `T ! E` return types, `?` operator (Stable). See `CHANGELOG.md`.
+- Transport resilience: `send remote`, `ask remote` with timeout clauses, capability enforcement at call sites (Stable). See `CHANGELOG.md`.
+- `after ms => expr` standalone sugar, desugared to `receive {} after ms => expr` (Stable). See `CHANGELOG.md` §RFC 0005/0007.
+- `entity` keyword and event sourcing (RFC 0005/0007): `events`/`apply`/`emit` blocks, compile-time event validation (Stable).
+- Migration contracts (RFC 0008): `version: N`, `migration from N to M { ... }` blocks inside entities (Stable).
+- Organization primitives (RFC 0009): `organization` keyword desugars to `entity` with durable defaults (Stable).
+- MIR register spilling: `SpillLoad`/`SpillStore` opcodes for functions exceeding 238 usable registers (Stable).
+- Formal semantics: capability lattice proofs in `spec/formal/capabilities.lean` (all five lattice theorems proved); Core HM type soundness (progress + preservation + type soundness) proven in `spec/formal/types.lean` (0 sorries). See `spec/formal/README.md`.
+- `::` import resolution: module paths via `import stdlib::set`, `import mypkg::utils::math` (Experimental).
+- Content-addressed lockfile: `Nulang.lock` carries BLAKE3 `content_hash` per pinned package (Experimental, RFC 0003 Item 11).
+- Self-hosting bootstrap compiler: Stage 10 — end-to-end hex → .nbc pipeline (`bootstrap/compiler_core.nula`, `compile_hex.nula`) supporting lexing, Pratt parsing, evaluation, arithmetic, let bindings, closures, `if`/`else`, comparisons, and booleans in Nulang Core. Remaining: HM type inference, MIR lowering, self-compilation.
+- Backend trait boundary (RFC 0003 Item 6): `JitBackend`, `WasmBackend`, `CryptoProvider`, `ForeignInterop`, `HttpProvider` traits in `src/backends/mod.rs` (Stable).
 
 **Planned (described in this specification, not implemented):**
 
 - The WebAssembly compilation target (Chapter 13): WASM compilation exists behind the `wasm-backend` feature flag via `--backend wasm|wasm-run|wasm-aot`. WIT interface generation and WASI worlds are not yet implemented.
-- The standard-library modules of Chapter 14 (`Core`, `List`, `Map`, `Set`, `String`, `Json`, `Http`, `Concurrent`, …). The only builtin modules today are `Pipeline`, `Supervisor`, and `Debate`.
-- Typeclasses and type-parameter constraints (Section 3.6), higher-kinded types, `Char` and `Decimal` primitives, character literals, multi-line strings, and `\u{...}` escapes.
-- `var` bindings, `consume` / `recover` expressions, record-update syntax `{ r .. f = v }`, ranges, the `**` operator, `<-` message syntax, and indentation-based layout (Section 2.8).
+- Higher-kinded types, `Char` and `Decimal` primitives, character literals,
+  multi-line strings, and `\u{...}` escapes (Sections 2.4, 3.6).
+- `var` bindings, `consume` / `recover` expressions, record-update syntax
+  `{ r .. f = v }`, ranges, the `**` operator, `<-` message syntax, and
+  indentation-based layout (Section 2.8).
 - Authority capabilities (`capability` declarations on actors, delegation, revocation, auditing — Sections 1.5 and 5.3–5.6), `config` blocks, the `tool` declaration form inside actors, `virtual` actors, `select`, `await`, `await_human`, `sleep_until`, and `retry` blocks.
 - The deployment manifest (`nulang.toml`), `nulang migrate`, and `nulang shell` (Chapter 15, Appendix D).
 
-Several keywords are reserved in the lexer but not yet wired into the grammar: `where`, `priv`, `loop`, `node`, `monitor`, `link`, `exit`, `await`, and `subworkflow`. `case` is accepted only as an optional match-arm prefix.
+Six keywords formerly reserved (`where`, `priv`, `loop`, `node`, `await`,
+`subworkflow`) have been removed from the lexer per RFC 0010 and now lex as
+plain identifiers. `link`, `monitor`, and `exit` are wired into
+`spawn link/monitor` and `Actor.exit` syntax. `case` is accepted as an
+optional match-arm prefix.
 
 Where a section is marked **Planned**, its examples show the intended v2.0 syntax and may not parse under the current compiler.
 
@@ -79,7 +99,6 @@ reject it with a named error; it MUST NOT reinterpret the bytes under a
 different layout.
 
 | Format | Magic | Version field | Source of truth |
-|--------|-------|---------------|-----------------|
 | `.nbc` bytecode artifact | `NLBC` (4 bytes) | `format_version: u32` | `src/format/constants.rs` |
 | NUL0 wire protocol | `NUL0` (4 bytes) | `version: u32` in handshake | `src/format/constants.rs` |
 | Value layout (i64-tagged) | — | `VALUE_LAYOUT_VERSION: u32` | `src/value_layout.rs` |
@@ -2246,11 +2265,24 @@ The runtime-backed `Signal.wait(name)` operation (performed as `perform Signal.w
 
 ## 11.1 Overview
 
-- Language-integrated AI, not external SDKs
-- First-class `agent` declarations and an `LLM` effect
-- LLM inference performed as `perform LLM.ask(prompt)`, wired to the runtime's LLM client
-- Orchestration builtins: `Pipeline`, `Supervisor`, `Debate` (§11.6)
-
+- AI capabilities accessed through the `Inference` effect (`perform Inference.ask(prompt)`).
+  The legacy name `LLM.ask` is a deprecated alias (RFC 0010) and emits a
+  compiler warning.
+- **Crate separation:** all pure AI types (clients, providers, memory,
+  pipelines, debates, supervisor teams, usage tracking, tool schemas) live in
+  the standalone `nulang-ai` workspace crate (`crates/nulang-ai/`) with **zero
+  dependencies on the core language crate**. The core crate re-exports them
+  behind the `ai-runtime` feature flag (`src/ai/mod.rs`).
+- **Runtime integration:** the `src/runtime/agent.rs`, `src/runtime/llm.rs`,
+  and `src/runtime/ai_registry.rs` modules implement the AI subsystem of the
+  actor runtime. These modules access `Runtime` internals and stay in core;
+  they are the bridge between the pure AI types and the actor model.
+- **No AI-specific opcodes.** The single `PerformAsync` opcode (`0xC6`)
+  dispatches all AI effects (`Inference.ask`, `Pipeline.run`, etc.) through
+  the generic effect mechanism. The monolithic AI opcode range (`LlmAsk`,
+  `PipelineNew`…`DebateRun`, 0x9D–0xC5) has been removed.
+- `agent`/`workflow`/`database` declarations are deprecated (RFC 0004);
+  new code should use `actor` with Cloud SDK imports.
 ## 11.2 Agent Declarations
 
 An `agent` declaration defines an LLM-backed actor. The `model` field is required; all other fields are optional:

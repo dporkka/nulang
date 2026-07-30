@@ -177,7 +177,7 @@ The following items from earlier reports are now idiomatic and should not be re-
 
 ### 4.1 Current Test Inventory
 
-* `src/integration_tests.rs`: ~52 end-to-end pipeline tests.
+* `src/integration_tests/mod.rs`: ~52 end-to-end pipeline tests.
 * `src/stress_tests.rs`: 29 actor/supervision/scheduler/runtime chaos tests.
 * `src/runtime/tests.rs`: 110 runtime unit tests.
 * `src/jit/tests.rs`: 18 JIT tests.

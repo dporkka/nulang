@@ -1351,6 +1351,12 @@ impl VM {
         self.closure_envs.get(idx)
     }
 
+    /// Push a new closure environment and return its index.
+    pub(crate) fn push_closure_env(&mut self, env: ClosureEnv) -> usize {
+        let idx = self.closure_envs.len();
+        self.closure_envs.push(env);
+        idx
+    }
     /// Copy the payload of a string-like value into a `Vec<u8>`.
     ///
     /// Used by the FFI call path to build temporary `CString` arguments.

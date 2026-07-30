@@ -52,6 +52,34 @@ No stability promise. May change or be removed in any release. Lives behind a
 feature flag (`wasm-backend`, `python`, `sqlite`, `lsp`) or is explicitly
 marked experimental in `CHANGELOG.md`.
 
+## 2a. Keyword Lifecycle (RFC 0010)
+
+Every keyword in the language imposes a permanent tax on the user namespace.
+The following rules govern keyword introduction, reservation, and removal:
+
+1. **A keyword, once added to the Frozen or Stable tier, is permanent.**
+   Its removal requires an RFC, a deprecation cycle (≥2 major versions),
+2. **A reserved-but-unwired keyword has no tier.** As of language version
+   1.0.0-frozen, six formerly-reserved keywords (`where`, `priv`, `loop`,
+   `node`, `await`, `subworkflow`) have been removed from the lexer per
+   RFC 0010 §C.6 and now lex as plain identifiers. They may be re-added
+   with proper RFCs when their features are implemented.
+
+3. **New keyword introduction** requires an RFC specifying:
+   - Which tier (Frozen, Stable, Experimental) the keyword occupies.
+   - Whether it is a reserved word or contextual keyword.
+   - The migration path if it shadows an existing identifier.
+
+4. **Keyword deprecation:**
+   - Emit a compiler warning on use for one major version.
+   - Keep the keyword reserved (unusable as identifier) for one additional
+     major version after functional removal.
+   - Free the identifier in the following major version.
+   - Migration tooling (`nulang migrate`) rewrites affected source files.
+
+The canonical keyword inventory lives in `src/lexer.rs` §keyword_map and
+is audited in `SPEC2.md` §Implementation Status.
+
 ## 3. Roles
 
 ### Language Steward
