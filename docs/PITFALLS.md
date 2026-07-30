@@ -160,31 +160,22 @@ counter ! increment(5)     // send the `increment` message
 **Expression form:** `let x = V in BODY` — `x` is visible *only* in
 `BODY`, not after the `in`.
 
-**Statement form:** `let x = V` (without `in`, inside a block) —
-`x` is visible for the remainder of the block.
+**Statement form:** `let x = V` (without `in`, at block/statement level) —
+`x` is visible for the remainder of the enclosing block.
+
+The gotcha: the `in` form shadows tightly — an inner `let … in` does not
+affect code that follows in the same block.
 
 ```nula
-// ✅ expression form: x scoped to x + 5 only
-let result = let x = 10 in x + 5
-// x is NOT visible here
-
-// ✅ statement form: x visible for rest of block
-{
-    let x = 10
-    let y = x + 5     // x is in scope
-    y
-}
-
-// ❌ expression form without `in`
-{
-    let x = 10         // statement-form, scopes to end of block
-    x + 5
-}
-// ^ this is actually fine — it's using the statement form.
-// The real gotcha is mixing them up:
 let x = 1 in {
-    let x = 10 in 0    // inner x shadows outer, scoped to `0` only
-    x                   // → 1  (the outer x!)
+    let x = 10 in 0    // inner x shadows outer — but only in `0`
+    x                   // → 1 (the outer x! inner x's scope already closed)
+}
+
+// If you want the inner x to reach past the `in`, use a block-`let`:
+let x = 1 in {
+    let x = 10          // statement-form: scopes to end of block
+    x                   // → 10
 }
 ```
 
@@ -287,10 +278,10 @@ fn div(a: Int, b: Int) -> Int ! String {
 
 | Idiom | Snippet |
 |-------|---------|
-| Pipe (`\|>`) | `41 \|> fn(n) { n + 1 }` |
+| Pipe (`|>`) | `41 |> fn(n) { n + 1 }` |
 | Recursive closures | `let rec fib = fn(n) { … }` |
 | Block expression | `{ let a = 10; let b = 20; a + b }` |
-| Alias pattern | `\| s @ Some(x) => …` |
+| Alias pattern | `| s @ Some(x) => …` |
 | Type annotation | `let x: Int = 42` |
 | Function type param | `fn map[T, U](arr: [T], f: fn(T) -> U) -> [U]` |
 | Effect annotation | `fn div(a: Int, b: Int) -> Int ! String` |
