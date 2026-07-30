@@ -906,7 +906,15 @@ impl<'c> FnLowerer<'c> {
                 // comparison), not ICmpEq (raw-bit comparison), because
                 // a string value may be a constant-pool id or a heap
                 // pointer depending on how it was constructed.
-                let is_string = l.ty() == Type::string() || r.ty() == Type::string();
+                // HIR Operand::Var always carries Type::unit(), so we must
+                // also consult the MIR local types (which are populated from
+                // Stmt::Let type annotations) to detect string-typed variables.
+                let l_mir_ty = self.b.local_ty(lid);
+                let r_mir_ty = self.b.local_ty(rid);
+                let is_string = l.ty() == Type::string()
+                    || r.ty() == Type::string()
+                    || *l_mir_ty == Type::string()
+                    || *r_mir_ty == Type::string();
                 match (op, is_string) {
                     (crate::ast::BinOp::Eq, true) => {
                         self.b.assign(dst, mir::RValue::StringEq(lid, rid));

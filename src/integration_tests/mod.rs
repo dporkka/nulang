@@ -2162,6 +2162,31 @@ match { a: 2, b: 9 } with {
         assert_string(r#""count: " + perform Int.to_string(42)"#, "count: 42");
     }
 
+    /// String concatenation with let-bound variables — both operands come
+    /// from variables, so the compiler must detect the string types through
+    /// MIR local type metadata (HIR Operand::Var always carries Type::unit()).
+    #[test]
+    fn test_string_concat_let_vars() {
+        assert_string(r#"let a = "ab" in let b = "cd" in a + b"#, "abcd");
+    }
+
+    /// Chained concatenation of three let-bound string variables.
+    #[test]
+    fn test_string_concat_chained() {
+        assert_string(
+            r#"let a = "ab" in let b = "cd" in let c = "ef" in a + b + c"#,
+            "abcdef",
+        );
+    }
+
+    /// String concatenation with unannotated function parameters (the
+    /// compiler emits IAdd, and the VM must detect string operands at
+    /// runtime).
+    #[test]
+    fn test_string_concat_fn_params_untyped() {
+        assert_string(r#"fn cat(a, b) { a + b } cat("ab", "cd")"#, "abcd");
+    }
+
     // -------------------------------------------------------------------
     // Unicode \\u{...} escape tests (full pipeline)
     // -------------------------------------------------------------------

@@ -3423,7 +3423,20 @@ impl VM {
             OpCode::IAdd => {
                 let a = self.frames[frame_idx].regs[instr.op1 as usize];
                 let b = self.frames[frame_idx].regs[instr.op2 as usize];
-                if a.is_float() && b.is_float() {
+                // String concatenation fallback: when the compiler could not
+                // determine operand types at compile time (e.g. unannotated
+                // function parameters), the IAdd opcode is emitted instead of
+                // SConcat.  Check at runtime whether either operand is a
+                // string (constant-pool TAG_STRING or heap-allocated TAG_PTR
+                // with HeapTypeTag::String) and concatenate if so.
+                let sa = self.string_operand(module_idx, a);
+                let sb = self.string_operand(module_idx, b);
+                if sa.is_some() || sb.is_some() {
+                    let s1 = sa.unwrap_or_else(|| a.to_string_repr());
+                    let s2 = sb.unwrap_or_else(|| b.to_string_repr());
+                    let result = format!("{}{}", s1, s2);
+                    self.frames[frame_idx].regs[instr.op3 as usize] = self.allocate_string(&result);
+                } else if a.is_float() && b.is_float() {
                     self.frames[frame_idx].regs[instr.op3 as usize] =
                         Value::float(a.as_float().unwrap() + b.as_float().unwrap());
                 } else {

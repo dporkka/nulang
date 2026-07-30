@@ -401,6 +401,11 @@ impl FunctionBuilder {
         id
     }
 
+    /// Look up the type of a local by its id.
+    pub fn local_ty(&self, id: LocalId) -> &Type {
+        &self.locals[id.0 as usize].ty
+    }
+
     pub fn add_handler_table(&mut self, table: HandlerTableDef) -> usize {
         self.handler_tables.push(table);
         self.handler_tables.len() - 1
