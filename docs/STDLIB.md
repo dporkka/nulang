@@ -1,7 +1,6 @@
 # Nulang Standard Library Reference
 
-Covers the working stdlib modules as of commit `8f13bea`.
-More modules (`string`, `set`, `map`, `core`) are being repaired.
+Covers the working stdlib modules as of commit `8ca559c`.
 
 ## Using the Standard Library
 
@@ -12,10 +11,16 @@ import stdlib::math
 import stdlib::list
 import stdlib::test
 import stdlib::fs
+import stdlib::core
+import stdlib::set
+import stdlib::map
+import stdlib::string
 ```
 
 Functions are called **unqualified** — `abs(-5)`, not `math.abs`. With imports from
-multiple modules, avoid name collisions (e.g. `list::max_of` vs `math::max`).
+multiple modules, avoid name collisions (e.g. `list::max_of` vs `math::max`,
+or `set` and `map` both exporting `empty`/`size`/`remove`/`is_empty` — import
+only one of the two per file).
 
 ### Locating the stdlib
 
@@ -188,4 +193,165 @@ let content = read("data.txt")
 write("output.txt", "Hello, world!")
 append("log.txt", "another line\n")
 let ok = exists("config.json")  // true or false
+```
+
+---
+
+## Module: core
+
+Function combinators and general-purpose utilities. All functions are pure.
+
+| Function | Signature | Description |
+|---|---|---|
+| `identity` | `fn identity(x)` | Identity function. Returns its argument unchanged. |
+| `const_fn` | `fn const_fn(x, _y)` | Constant function: always returns the first argument, ignoring the second. |
+| `always` | `fn always(x)` | Given a value, returns a function that ignores its input and returns that value. |
+| `apply` | `fn apply(f, x)` | Apply function `f` to argument `x`. |
+| `compose` | `fn compose(f, g, x)` | Function composition (3-arg form): `compose(f, g, x)` = `f(g(x))`. |
+| `compose_fn` | `fn compose_fn(f, g)` | Returns a new function `h(x) = f(g(x))`. |
+| `flip` | `fn flip(f, x, y)` | Flip argument order: `flip(f, x, y)` = `f(y, x)`. |
+| `negate` | `fn negate(b)` | Logical negation. |
+| `clamp` | `fn clamp(x, lo, hi)` | Clamp `x` to the range `[lo, hi]`. |
+| `between` | `fn between(lo, hi, x)` | True when `x` is between `lo` and `hi` (inclusive). |
+
+### Usage
+
+```nula
+import stdlib::core
+
+let id = identity(42)              // 42
+let c = const_fn(1, "ignored")     // 1
+let k = always(10)                 // fn(_y) { 10 }
+let y = apply(fn(x) { x * 2 }, 5)  // 10
+let z = compose(fn(x) { x + 1 }, fn(x) { x * 2 }, 3)  // 7 i.e. (3*2)+1
+let f = compose_fn(fn(x) { x + 1 }, fn(x) { x * 2 })  // fn(x) { (x*2)+1 }
+let w = flip(fn(a, b) { a - b }, 10, 3)  // -7 i.e. 3-10
+let n = negate(true)               // false
+let cl = clamp(15, 0, 10)          // 10
+let b = between(0, 10, 5)          // true
+```
+
+---
+
+## Module: set
+
+Integer set operations. Sets are represented as `[Int]` arrays with no
+duplicates. Mutation functions return a new set; the original is unchanged.
+
+> **Caveat**: `set` and `map` both export `empty`, `size`, `remove`, and
+> `is_empty`. Importing both in the same file causes name collisions — import
+> one at a time, or use distinct names via aliasing at the call site.
+
+| Function | Signature | Description |
+|---|---|---|
+| `empty` | `fn empty()` | An empty set. |
+| `contains` | `fn contains(set, value)` | Check whether a value is in the set. |
+| `add` | `fn add(set, value)` | Add a value to the set (no-op if already present). Returns a new set. |
+| `remove` | `fn remove(set, value)` | Remove a value from the set. Returns a new set. |
+| `size` | `fn size(set)` | Number of elements in the set. |
+| `is_empty` | `fn is_empty(set)` | True when the set is empty. |
+| `union` | `fn union(a, b)` | Union: all elements in `a` or `b` (no duplicates). |
+| `intersect` | `fn intersect(a, b)` | Intersection: elements present in both `a` and `b`. |
+| `difference` | `fn difference(a, b)` | Difference: elements in `a` that are not in `b`. |
+
+### Usage
+
+```nula
+import stdlib::set
+
+let s = empty()                  // []
+let a = add(s, 1)                // [1]
+let b = add(a, 2)                // [1, 2]
+let c = add(b, 1)                // [1, 2]  (no-op, already present)
+let ok = contains(c, 2)          // true
+let n = size(c)                  // 2
+let u = union([1, 2], [2, 3])    // [1, 2, 3]
+let i = intersect([1, 2], [2, 3]) // [2]
+let d = difference([1, 2], [2])   // [1]
+let r = remove(c, 1)             // [2]
+```
+
+---
+
+## Module: map
+
+Integer-to-integer map operations. Maps are arrays of `{key: Int, value: Int}`
+records. Key lookup is O(n). `get` returns `-1` for missing keys.
+
+> **Caveat**: `map` and `set` both export `empty`, `size`, `remove`, and
+> `is_empty`. Importing both in the same file causes name collisions — import
+> one at a time, or use distinct names via aliasing at the call site.
+
+| Function | Signature | Description |
+|---|---|---|
+| `empty` | `fn empty()` | An empty map. |
+| `insert` | `fn insert(k, v, m)` | Insert or update a key-value pair. Returns a new map. |
+| `get` | `fn get(k, m)` | Look up a key. Returns the value, or `-1` if not found. |
+| `contains_key` | `fn contains_key(k, m)` | True when the key is present. |
+| `remove` | `fn remove(k, m)` | Remove a key. Returns a new map. |
+| `size` | `fn size(m)` | Number of key-value pairs. |
+| `is_empty` | `fn is_empty(m)` | True when the map is empty. |
+| `keys` | `fn keys(m)` | Return an array of all keys. |
+| `values` | `fn values(m)` | Return an array of all values. |
+
+### Usage
+
+```nula
+import stdlib::map
+
+let m = empty()                    // []
+let a = insert(1, 100, m)           // [{key: 1, value: 100}]
+let b = insert(2, 200, a)           // [{key: 1, value: 100}, {key: 2, value: 200}]
+let c = insert(1, 999, b)           // [{key: 1, value: 999}, {key: 2, value: 200}]
+let v = get(1, c)                   // 999
+let miss = get(3, c)                // -1
+let ok = contains_key(2, c)         // true
+let kk = keys(c)                     // [1, 2]
+let vv = values(c)                   // [999, 200]
+let d = remove(1, c)                 // [{key: 2, value: 200}]
+let n = size(c)                      // 2
+```
+
+---
+
+## Module: string
+
+String operations built on the `String` builtin effect primitives
+(`String.length`, `String.charAt`, `String.substring`, `String.concat`).
+Functions use `perform` internally to access these effectful operations.
+
+| Function | Signature | Description |
+|---|---|---|
+| `length` | `fn length(s)` | Length of the string in bytes. |
+| `is_empty` | `fn is_empty(s)` | True when the string is empty. |
+| `char_at` | `fn char_at(s, i)` | Character at index `i`, returned as a 1-character string. Returns `""` if out of bounds. |
+| `char_code_at` | `fn char_code_at(s, i)` | Character code at index `i`, or `-1` if out of bounds. |
+| `starts_with` | `fn starts_with(s, prefix)` | True when `s` starts with `prefix`. |
+| `ends_with` | `fn ends_with(s, suffix)` | True when `s` ends with `suffix`. |
+| `contains` | `fn contains(s, sub)` | True when `s` contains the substring `sub`. |
+| `index_of` | `fn index_of(s, ch)` | First index of substring `ch` in `s`, or `-1` if not found. |
+| `repeat` | `fn repeat(s, n)` | Repeat string `s` `n` times. |
+| `trim` | `fn trim(s)` | Remove leading and trailing whitespace (spaces, tabs, newlines, CR). |
+| `split` | `fn split(s, delim)` | Split string `s` by a delimiter character (a 1-char string). Returns an array of substrings. |
+| `join` | `fn join(parts, sep)` | Join an array of strings with a separator string. |
+| `replace` | `fn replace(s, from, to)` | Replace all occurrences of substring `from` with `to` in `s`. |
+
+### Usage
+
+```nula
+import stdlib::string
+
+let n = length("hello")                  // 5
+let e = is_empty("")                      // true
+let c = char_at("hello", 1)              // "e"
+let cc = char_code_at("A", 0)            // 65
+let sw = starts_with("hello", "he")       // true
+let ew = ends_with("hello", "lo")         // true
+let co = contains("hello", "ll")          // true
+let i = index_of("hello", "l")            // 2
+let r = repeat("ab", 3)                   // "ababab"
+let t = trim("  hi  ")                    // "hi"
+let parts = split("a,b,c", ",")           // ["a", "b", "c"]
+let j = join(["a", "b", "c"], "-")         // "a-b-c"
+let rep = replace("hello world", "o", "x") // "hellx wxrld"
 ```

@@ -21,7 +21,10 @@ pub(crate) fn enable_distribution(
     )?);
     let listen_addr = transport.listen_addr();
     let node_id = NodeId(transport.node_id().0);
-    let cluster = ClusterState::new(node_id, listen_addr);
+    let mut cluster = ClusterState::new(node_id, listen_addr);
+    if let Some(clock) = &rt.virtual_clock {
+        cluster.set_clock(clock.clone());
+    }
     let resolver = AddressResolver::new(node_id);
     rt.distributed.transport = Some(transport);
     rt.distributed.cluster = Some(cluster);

@@ -25,8 +25,9 @@
 //! - [`CryptoProvider`] — implemented by [`DefaultCryptoProvider`]; field
 //!   on [`crate::runtime::Runtime`] with `hash_bytes`/`random_bytes` helpers.
 //!   **Wired.** (identity.rs uses direct ed25519 for ActorId key generation.)
-//! - [`HttpProvider`] — implemented by [`ReqwestHttpProvider`]; not yet
-//!   routed through the AI runtime.
+//! - [`HttpProvider`] — implemented by [`ReqwestHttpProvider`]; field on
+//!   [`crate::runtime::Runtime`] with `http_post_json`/`http_get` helpers.
+//!   **Wired.**
 //! - [`ForeignInterop`] — implemented by [`DefaultForeignInterop`] (PyO3,
 //!   feature `python`).  **Wired.**
 
