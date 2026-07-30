@@ -1,16 +1,14 @@
 // Nulang standard library — JSON encoding and decoding.
 // Import: `import stdlib::json`
-//
-// NOTE: JsonNumber stores raw number text (e.g. "42", "3.14", "-1.5e10")
-// because the VM lacks Int↔Float and Float→String conversion primitives.
-// This preserves exact representation for round-tripping and allows
-// parse→stringify to be lossless.
+// NOTE: JsonNumber stores a Float. String.to_float and Float.to_string
+// primitives are now available in the VM, enabling numeric conversion
+// while preserving reasonable fidelity for round-tripping.
 
 /// Represents a parsed JSON value.
 pub type JsonValue =
     | JsonNull
     | JsonBool(Bool)
-    | JsonNumber(String)   // Raw number text from JSON input
+    | JsonNumber(Float)   // Numeric value parsed via String.to_float
     | JsonString(String)
     | JsonArray([JsonValue])
     | JsonObject([(String, JsonValue)])
@@ -217,7 +215,7 @@ pub fn parse(json: String) -> JsonValue {
             }
             else {  // number
                 let nr = parse_number(cp);
-                {value: JsonNumber(nr.value), pos: nr.pos}
+                {value: JsonNumber(perform String.to_float(nr.value)), pos: nr.pos}
             }
         }
     };
@@ -290,7 +288,7 @@ pub fn stringify(value: JsonValue) -> String {
         match v {
             JsonNull => "null",
             JsonBool(b) => if b then "true" else "false",
-            JsonNumber(s) => s,
+            JsonNumber(f) => perform Float.to_string(f),
             JsonString(s) => esc_string(s),
             JsonArray(items) => {
                 var result = "[";
@@ -347,8 +345,8 @@ pub fn get_string(obj: JsonValue, key: String, default: String) -> String {
 }
 
 /// Get a number field from a JSON object, or return a default.
-/// Returns the raw number text (e.g. "42", "3.14").
-pub fn get_number(obj: JsonValue, key: String, default: String) -> String {
+/// Returns the parsed Float value.
+pub fn get_number(obj: JsonValue, key: String, default: Float) -> Float {
     match obj {
         JsonObject(fields) => {
             var i = 0;

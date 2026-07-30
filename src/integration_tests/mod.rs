@@ -2162,6 +2162,44 @@ match { a: 2, b: 9 } with {
         assert_string(r#""count: " + perform Int.to_string(42)"#, "count: 42");
     }
 
+    // ── Numeric type conversions ─────────────────────────────────────
+
+    #[test]
+    fn test_int_to_float() {
+        let (value, _ty) = run_source("perform Int.to_float(42)").unwrap();
+        assert_eq!(
+            value.as_float(),
+            Some(42.0),
+            "Int.to_float(42) should be 42.0"
+        );
+    }
+
+    #[test]
+    fn test_float_to_int() {
+        assert_int("perform Float.to_int(3.9)", 3);
+        assert_int("perform Float.to_int(-3.9)", -3);
+    }
+
+    #[test]
+    fn test_string_to_int() {
+        assert_int(r#"perform String.to_int("42")"#, 42);
+        assert_int(r#"perform String.to_int("-7")"#, -7);
+        // Invalid input returns 0
+        assert_int(r#"perform String.to_int("hello")"#, 0);
+    }
+
+    #[test]
+    fn test_float_to_string() {
+        assert_string("perform Float.to_string(3.14)", "3.14");
+    }
+
+    #[test]
+    fn test_string_to_float() {
+        assert_float(r#"perform String.to_float("3.14")"#, 3.14);
+        // Invalid input returns 0.0
+        assert_float(r#"perform String.to_float("hello")"#, 0.0);
+    }
+
     /// String concatenation with let-bound variables — both operands come
     /// from variables, so the compiler must detect the string types through
     /// MIR local type metadata (HIR Operand::Var always carries Type::unit()).

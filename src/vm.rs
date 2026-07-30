@@ -469,6 +469,39 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 None => return Some(Value::nil()),
             }
         }
+        if effect_name == "Int" && op_name == Some("to_float") {
+            let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+            return Some(Value::float(n as f64));
+        }
+        if effect_name == "Float" && op_name == Some("to_int") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            return Some(Value::int(x as i64));
+        }
+        if effect_name == "Float" && op_name == Some("to_string") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            let s = format!("{}", x);
+            let bytes = s.into_bytes();
+            match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                Some(ptr) => {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                    }
+                    return Some(Value::ptr(ptr));
+                }
+                None => return Some(Value::nil()),
+            }
+        }
+        if effect_name == "String" && op_name == Some("to_int") {
+            let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
+            let n: i64 = s.parse().unwrap_or(0);
+            return Some(Value::int(n));
+        }
+        if effect_name == "String" && op_name == Some("to_float") {
+            let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
+            let f: f64 = s.parse().unwrap_or(0.0);
+            return Some(Value::float(f));
+        }
 
         if effect_name == "String" && op_name == Some("length") {
             let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));

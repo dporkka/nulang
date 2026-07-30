@@ -4772,6 +4772,40 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             });
         }
 
+        if effect_name == "Int" && op_name == Some("to_float") {
+            let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+            return Some(crate::vm::Value::float(n as f64));
+        }
+        if effect_name == "Float" && op_name == Some("to_int") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            return Some(crate::vm::Value::int(x as i64));
+        }
+        if effect_name == "Float" && op_name == Some("to_string") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            let s = format!("{}", x);
+            let mut rt = self.runtime.borrow_mut();
+            return Some(match &mut rt.vm {
+                Some(vm) => vm.allocate_string(&s),
+                None => crate::vm::Value::nil(),
+            });
+        }
+        if effect_name == "String" && op_name == Some("to_int") {
+            let s = crate::vm::resolve_value_string(
+                constants,
+                *regs.first().unwrap_or(&crate::vm::Value::nil()),
+            );
+            let n: i64 = s.parse().unwrap_or(0);
+            return Some(crate::vm::Value::int(n));
+        }
+        if effect_name == "String" && op_name == Some("to_float") {
+            let s = crate::vm::resolve_value_string(
+                constants,
+                *regs.first().unwrap_or(&crate::vm::Value::nil()),
+            );
+            let f: f64 = s.parse().unwrap_or(0.0);
+            return Some(crate::vm::Value::float(f));
+        }
+
         if effect_name == "String" && op_name == Some("length") {
             let s = crate::vm::resolve_value_string(
                 constants,
@@ -5354,6 +5388,39 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     constants,
                     regs,
                 );
+            }
+
+            if effect_name == "Int" && op_name == Some("to_float") {
+                let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+                return Some(crate::vm::Value::float(n as f64));
+            }
+            if effect_name == "Float" && op_name == Some("to_int") {
+                let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+                return Some(crate::vm::Value::int(x as i64));
+            }
+            if effect_name == "Float" && op_name == Some("to_string") {
+                let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+                let s = format!("{}", x);
+                if let Some(vm) = &mut (*self.runtime).vm {
+                    return Some(vm.allocate_string(&s));
+                }
+                return Some(crate::vm::Value::nil());
+            }
+            if effect_name == "String" && op_name == Some("to_int") {
+                let s = crate::vm::resolve_value_string(
+                    constants,
+                    *regs.first().unwrap_or(&crate::vm::Value::nil()),
+                );
+                let n: i64 = s.parse().unwrap_or(0);
+                return Some(crate::vm::Value::int(n));
+            }
+            if effect_name == "String" && op_name == Some("to_float") {
+                let s = crate::vm::resolve_value_string(
+                    constants,
+                    *regs.first().unwrap_or(&crate::vm::Value::nil()),
+                );
+                let f: f64 = s.parse().unwrap_or(0.0);
+                return Some(crate::vm::Value::float(f));
             }
             if effect_name == "Timer" && op_name == Some("after") {
                 let ms = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
