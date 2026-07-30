@@ -6,7 +6,7 @@
 //!   nulang --eval <CODE>
 //!   nulang --check <FILE>
 //!   nulang --lsp
-//!   nulang nula <new|build|build-wasm|test|run>
+//!   nulang nula <new|build|build-wasm|test|run|add|remove|watch>
 //!   nulang --doc
 //!
 //! Options:
@@ -534,7 +534,7 @@ fn print_help() {
     println!("       nulang --eval <CODE>");
     println!("       nulang --check <FILE>");
     println!("       nulang --lsp");
-    println!("       nulang nula <new|build|build-wasm|test|run>");
+    println!("       nulang nula <new|build|build-wasm|test|run|add|remove|watch>");
     println!("       nulang --doc");
     println!();
     println!("Options:");
@@ -559,7 +559,7 @@ fn print_help() {
         "  --verify <src>   When running a .nbc artifact, verify its source hash against <src>"
     );
     println!(
-        "  nula <cmd>       Package manager (new, init, build, build-wasm, test, run, list, clean)"
+        "  nula <cmd>       Package manager (new, init, build, build-wasm, test, run, add, remove, watch, list, clean)"
     );
     println!("  --version, -V    Print version and exit");
     println!("  init <name>      Scaffold experiment");

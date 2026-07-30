@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::types::{NuError, NuResult, Span};
 
@@ -27,7 +27,7 @@ pub const MANIFEST_FILE: &str = "Nulang.toml";
 pub const DEFAULT_ENTRY: &str = "src/main.nula";
 
 /// A parsed `Nulang.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Manifest {
     pub package: PackageSection,
     #[serde(default)]
@@ -35,7 +35,7 @@ pub struct Manifest {
 }
 
 /// The `[package]` section.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PackageSection {
     pub name: String,
     pub version: String,
@@ -49,7 +49,7 @@ fn default_entry() -> String {
 }
 
 /// One entry in `[dependencies]`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Dependency {
     /// `foo = "0.1.0"` — a bare version requirement. The MVP has no network
@@ -61,7 +61,7 @@ pub enum Dependency {
 
 /// Table form of a dependency: a local path, a git URL, or both refined by a
 /// version requirement.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DependencyDetail {
     pub path: Option<String>,
     pub git: Option<String>,
@@ -88,6 +88,23 @@ impl Manifest {
             span: Span::default(),
         })?;
         Self::parse(&source)
+    }
+
+    /// Serialize this manifest to a TOML string.
+    pub fn to_toml(&self) -> NuResult<String> {
+        toml::to_string_pretty(self).map_err(|e| NuError::PackageError {
+            msg: format!("cannot serialize {}: {}", MANIFEST_FILE, e),
+            span: Span::default(),
+        })
+    }
+
+    /// Write this manifest into `dir`.
+    pub fn save(&self, dir: &Path) -> NuResult<()> {
+        let path = dir.join(MANIFEST_FILE);
+        std::fs::write(&path, self.to_toml()?).map_err(|e| NuError::PackageError {
+            msg: format!("cannot write {}: {}", path.display(), e),
+            span: Span::default(),
+        })
     }
 }
 

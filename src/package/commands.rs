@@ -1,5 +1,5 @@
 //! `nula` CLI subcommands: `new`, `init`, `build`, `build-wasm`, `test`, `run`,
-//! `list`, `clean`.
+//! `list`, `clean`, `add`, `remove`, `watch`.
 //!
 //! All commands operate on the package rooted at the current directory
 //! (except `new` and `init`, which create one). Compiling and running is
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::package::lockfile::{Lockfile, LOCKFILE_FILE};
-use crate::package::manifest::{Manifest, MANIFEST_FILE};
+use crate::package::manifest::{Dependency, DependencyDetail, Manifest, MANIFEST_FILE};
 use crate::package::resolver::resolve;
 use crate::types::{NuError, NuResult, Span};
 
@@ -22,7 +22,52 @@ pub fn run(args: &[String]) -> NuResult<()> {
         Some("build") => cmd_build(),
         Some("build-wasm") => cmd_build_wasm(),
         Some("test") => cmd_test(),
-        Some("run") => cmd_run(),
+        Some("run") => {
+            if args.get(1).map(String::as_str) == Some("--watch") {
+                cmd_run_watch()
+            } else {
+                cmd_run()
+            }
+        }
+        Some("watch") => cmd_run_watch(),
+        Some("add") => {
+            let name = args.get(1);
+            let mut path: Option<String> = None;
+            let mut git: Option<String> = None;
+            let mut version: Option<String> = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--path" => {
+                        i += 1;
+                        if i < args.len() {
+                            path = Some(args[i].clone());
+                        }
+                    }
+                    "--git" => {
+                        i += 1;
+                        if i < args.len() {
+                            git = Some(args[i].clone());
+                        }
+                    }
+                    "--version" => {
+                        i += 1;
+                        if i < args.len() {
+                            version = Some(args[i].clone());
+                        }
+                    }
+                    other => {
+                        return Err(NuError::PackageError {
+                            msg: format!("unknown flag '{}' for nula add", other),
+                            span: Span::default(),
+                        });
+                    }
+                }
+                i += 1;
+            }
+            cmd_add(name, path.as_deref(), git.as_deref(), version.as_deref())
+        }
+        Some("remove") => cmd_remove(args.get(1).map(String::as_str)),
         Some("list") => cmd_list(),
         Some("clean") => cmd_clean(),
         Some("--help") | Some("-h") => {
@@ -31,7 +76,7 @@ pub fn run(args: &[String]) -> NuResult<()> {
         }
         Some(other) => Err(NuError::PackageError {
             msg: format!(
-                "unknown nula subcommand '{}' (expected new, init, build, build-wasm, test, run, list, or clean)",
+                "unknown nula subcommand '{}' (expected new, init, build, build-wasm, test, run, add, remove, watch, list, or clean)",
                 other
             ),
             span: Span::default(),
@@ -55,6 +100,10 @@ fn print_usage() {
     println!("  build-wasm    Build package to .wasm + .cwasm (AOT, requires wasmtime)");
     println!("  test          Run every .nula file in the package's tests/ directory");
     println!("  run           Build and run the package entry point");
+    println!("  run --watch   Build and re-run on source changes");
+    println!("  watch         Alias for 'run --watch'");
+    println!("  add   <name>  Add a dependency to Nulang.toml");
+    println!("  remove <name> Remove a dependency from Nulang.toml");
     println!("  list          List resolved dependencies from Nulang.lock");
     println!("  clean         Remove build artifacts (.nbc files)");
 }
@@ -270,6 +319,70 @@ fn cmd_run() -> NuResult<()> {
     nulang_exe(&[&entry_str])
 }
 
+/// `nula run --watch` (or `nula watch`): build, run, and re-run when source
+/// files change under `src/`. Uses simple mtime polling.
+fn cmd_run_watch() -> NuResult<()> {
+    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })?;
+    let entry = prepare_package()?;
+    let entry_str = entry.to_string_lossy().into_owned();
+
+    // Initial run
+    eprintln!("Building and running...");
+    nulang_exe(&[&entry_str])?;
+
+    // Collect initial mtimes for all .nula files under src/
+    let src_dir = root.join("src");
+    let mut last_mtimes = collect_mtimes(&src_dir);
+
+    println!("watching... (Ctrl-C to stop)");
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let current = collect_mtimes(&src_dir);
+        if current != last_mtimes {
+            last_mtimes = current;
+            eprintln!("\n--- change detected, rebuilding ---");
+            // Re-resolve in case dependencies changed
+            match prepare_package() {
+                Ok(entry) => {
+                    let es = entry.to_string_lossy().into_owned();
+                    let _ = nulang_exe(&[&es]);
+                }
+                Err(e) => eprintln!("Error: {}", e),
+            }
+        }
+    }
+}
+
+/// Collect (path, mtime) pairs for all .nula files under `dir`, sorted by path.
+fn collect_mtimes(dir: &Path) -> Vec<(PathBuf, std::time::SystemTime)> {
+    let mut result = Vec::new();
+    collect_mtimes_recursive(dir, &mut result);
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    result
+}
+
+fn collect_mtimes_recursive(dir: &Path, out: &mut Vec<(PathBuf, std::time::SystemTime)>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_mtimes_recursive(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "nula") {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if let Ok(mtime) = meta.modified() {
+                    out.push((path, mtime));
+                }
+            }
+        }
+    }
+}
+
 /// `nula test`: run every `.nula` file under the package's `tests/` directory.
 fn cmd_test() -> NuResult<()> {
     eprintln!("Preparing package...");
@@ -388,6 +501,151 @@ fn remove_nbc_files(dir: &Path, count: &mut u64) {
     }
 }
 
+/// `nula add <name> [--path <p>] [--git <url>] [--version <v>]` — add or
+/// update a dependency in `Nulang.toml`, then re-resolve and update
+/// `Nulang.lock`.
+fn cmd_add(
+    name: Option<&String>,
+    path: Option<&str>,
+    git: Option<&str>,
+    version: Option<&str>,
+) -> NuResult<()> {
+    let name = name.ok_or_else(|| NuError::PackageError {
+        msg: "nula add requires a dependency name".to_string(),
+        span: Span::default(),
+    })?;
+    validate_package_name(name)?;
+
+    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })?;
+    let manifest_path = root.join(MANIFEST_FILE);
+    if !manifest_path.exists() {
+        return Err(NuError::PackageError {
+            msg: format!(
+                "no {} found in {} — run 'nulang nula init' first",
+                MANIFEST_FILE,
+                root.display()
+            ),
+            span: Span::default(),
+        });
+    }
+    let mut manifest = Manifest::load(&root).map_err(|e| NuError::PackageError {
+        msg: format!("failed to load {}: {}", manifest_path.display(), e),
+        span: Span::default(),
+    })?;
+
+    let dep = if path.is_some() || git.is_some() {
+        Dependency::Detailed(DependencyDetail {
+            path: path.map(|s| s.to_string()),
+            git: git.map(|s| s.to_string()),
+            version: version.map(|s| s.to_string()),
+            ..Default::default()
+        })
+    } else {
+        // Bare version dependency (or no flags -> version "*")
+        Dependency::Version(version.unwrap_or("*").to_string())
+    };
+
+    let updated = manifest
+        .dependencies
+        .insert(name.to_string(), dep)
+        .is_some();
+    manifest.save(&root).map_err(|e| NuError::PackageError {
+        msg: format!("failed to write {}: {}", manifest_path.display(), e),
+        span: Span::default(),
+    })?;
+
+    if updated {
+        println!("Updated dependency '{}' in {}.", name, MANIFEST_FILE);
+    } else {
+        println!("Added dependency '{}' to {}.", name, MANIFEST_FILE);
+    }
+
+    // Re-resolve and update the lockfile.
+    eprintln!("  Resolving dependencies...");
+    let resolution = resolve(&root, &manifest).map_err(|e| NuError::PackageError {
+        msg: format!("failed to resolve dependencies: {}", e),
+        span: Span::default(),
+    })?;
+    resolution
+        .to_lockfile()
+        .save(&root)
+        .map_err(|e| NuError::PackageError {
+            msg: format!(
+                "failed to write {}: {}",
+                root.join(LOCKFILE_FILE).display(),
+                e
+            ),
+            span: Span::default(),
+        })?;
+    println!("  Lockfile updated.");
+    Ok(())
+}
+
+/// `nula remove <name>` — remove a dependency from `Nulang.toml` and update
+/// the lockfile.
+fn cmd_remove(name: Option<&str>) -> NuResult<()> {
+    let name = name.ok_or_else(|| NuError::PackageError {
+        msg: "nula remove requires a dependency name".to_string(),
+        span: Span::default(),
+    })?;
+
+    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })?;
+    let manifest_path = root.join(MANIFEST_FILE);
+    if !manifest_path.exists() {
+        return Err(NuError::PackageError {
+            msg: format!(
+                "no {} found in {} — run 'nulang nula init' first",
+                MANIFEST_FILE,
+                root.display()
+            ),
+            span: Span::default(),
+        });
+    }
+    let mut manifest = Manifest::load(&root).map_err(|e| NuError::PackageError {
+        msg: format!("failed to load {}: {}", manifest_path.display(), e),
+        span: Span::default(),
+    })?;
+
+    if manifest.dependencies.remove(name).is_none() {
+        return Err(NuError::PackageError {
+            msg: format!("dependency '{}' not found in {}", name, MANIFEST_FILE),
+            span: Span::default(),
+        });
+    }
+
+    manifest.save(&root).map_err(|e| NuError::PackageError {
+        msg: format!("failed to write {}: {}", manifest_path.display(), e),
+        span: Span::default(),
+    })?;
+    println!("Removed dependency '{}' from {}.", name, MANIFEST_FILE);
+
+    // Re-resolve and update the lockfile.
+    eprintln!("  Resolving dependencies...");
+    let resolution = resolve(&root, &manifest).map_err(|e| NuError::PackageError {
+        msg: format!("failed to resolve dependencies: {}", e),
+        span: Span::default(),
+    })?;
+    resolution
+        .to_lockfile()
+        .save(&root)
+        .map_err(|e| NuError::PackageError {
+            msg: format!(
+                "failed to write {}: {}",
+                root.join(LOCKFILE_FILE).display(),
+                e
+            ),
+            span: Span::default(),
+        })?;
+    println!("  Lockfile updated.");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,5 +746,142 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::env::set_current_dir(&self.original);
         }
+    }
+
+    #[test]
+    fn test_cmd_add_and_remove_dependency() {
+        let dir =
+            std::env::temp_dir().join(format!("nulang_add_remove_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Create a stub dep package inside the test dir so the resolver can find it
+        let dep_dir = dir.join("deps").join("mylib");
+        scaffold_package(&dep_dir, "mylib").expect("scaffold dep should succeed");
+
+        let _guard = ChangeDir::new(&dir);
+        scaffold_package(&dir, "test-pkg").expect("scaffold should succeed");
+
+        let manifest = Manifest::load(&dir).expect("manifest should load");
+        assert!(manifest.dependencies.is_empty());
+
+        // Add a path dep (relative: ./deps/mylib)
+        let result = cmd_add(Some(&"mylib".to_string()), Some("./deps/mylib"), None, None);
+        assert!(result.is_ok(), "add should succeed: {:?}", result.err());
+
+        let manifest = Manifest::load(&dir).expect("manifest should load after add");
+        assert!(manifest.dependencies.contains_key("mylib"));
+        match &manifest.dependencies["mylib"] {
+            Dependency::Detailed(d) => {
+                assert_eq!(d.path.as_deref(), Some("./deps/mylib"));
+            }
+            _ => panic!("expected detailed dependency"),
+        }
+
+        // Remove the dep
+        cmd_remove(Some("mylib")).expect("remove should succeed");
+        let manifest = Manifest::load(&dir).expect("manifest should load after remove");
+        assert!(!manifest.dependencies.contains_key("mylib"));
+
+        // Remove a non-existent dep should fail
+        let err = cmd_remove(Some("nonexistent")).expect_err("remove nonexistent should fail");
+        assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_manifest_add_dependency_direct() {
+        // Test manifest-level mutation directly (avoiding resolver for git/version deps)
+        let dir =
+            std::env::temp_dir().join(format!("nulang_manifest_dep_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = ChangeDir::new(&dir);
+
+        scaffold_package(&dir, "test-pkg").expect("scaffold should succeed");
+
+        // Add a detailed git dependency
+        let mut manifest = Manifest::load(&dir).expect("manifest should load");
+        manifest.dependencies.insert(
+            "json".to_string(),
+            Dependency::Detailed(DependencyDetail {
+                git: Some("https://github.com/example/json.nu.git".to_string()),
+                version: Some("0.2.0".to_string()),
+                ..Default::default()
+            }),
+        );
+        manifest.save(&dir).expect("save should succeed");
+
+        // Reload and verify
+        let manifest2 = Manifest::load(&dir).expect("manifest should reload");
+        match &manifest2.dependencies["json"] {
+            Dependency::Detailed(d) => {
+                assert_eq!(
+                    d.git.as_deref(),
+                    Some("https://github.com/example/json.nu.git")
+                );
+                assert_eq!(d.version.as_deref(), Some("0.2.0"));
+            }
+            _ => panic!("expected detailed dependency"),
+        }
+
+        // Add a version-only dependency via fresh mutable load
+        let mut manifest3 = Manifest::load(&dir).expect("manifest should load");
+        manifest3.dependencies.insert(
+            "registry-dep".to_string(),
+            Dependency::Version("1.0.0".to_string()),
+        );
+        manifest3.save(&dir).expect("save should succeed");
+
+        let manifest4 = Manifest::load(&dir).expect("manifest should reload");
+        assert_eq!(
+            manifest4.dependencies["registry-dep"],
+            Dependency::Version("1.0.0".to_string())
+        );
+
+        // Remove and verify
+        let mut manifest5 = Manifest::load(&dir).expect("manifest should load");
+        assert!(manifest5.dependencies.remove("registry-dep").is_some());
+        manifest5.save(&dir).expect("save should succeed");
+
+        let manifest6 = Manifest::load(&dir).expect("manifest should reload");
+        assert!(!manifest6.dependencies.contains_key("registry-dep"));
+        assert!(manifest6.dependencies.contains_key("json"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cmd_add_rejects_invalid_name() {
+        let dir =
+            std::env::temp_dir().join(format!("nulang_add_invalid_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = ChangeDir::new(&dir);
+
+        scaffold_package(&dir, "test-pkg").expect("scaffold should succeed");
+
+        let err = cmd_add(Some(&"bad.name".to_string()), Some("./foo"), None, None)
+            .expect_err("invalid name should fail");
+        assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cmd_add_missing_name() {
+        let dir =
+            std::env::temp_dir().join(format!("nulang_add_no_name_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = ChangeDir::new(&dir);
+
+        scaffold_package(&dir, "test-pkg").expect("scaffold should succeed");
+
+        let err = cmd_add(None, Some("./foo"), None, None).expect_err("missing name should fail");
+        assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
