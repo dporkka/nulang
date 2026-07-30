@@ -228,6 +228,14 @@ impl StdLib {
                     implemented_in: ImplSite::StandaloneVm,
                     description: "Return the byte at the given index in the string, or -1 if out of bounds.",
                 },
+                BuiltinOp {
+                    name: "String.from_char",
+                    effect: "String",
+                    op: "from_char",
+                    signature: "from_char(code: Int) -> String",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Create a single-character string from a Unicode code point. Returns nil for invalid code points (surrogates, out of range).",
+                },
                 BuiltinOp { name: "String.concat", effect: "String", op: "concat", signature: "concat(a: String, b: String) -> String", implemented_in: ImplSite::StandaloneVm, description: "Concatenate two strings.", },
                 BuiltinOp { name: "String.substring", effect: "String", op: "substring", signature: "substring(s: String, start: Int, len: Int) -> String", implemented_in: ImplSite::StandaloneVm, description: "Extract a substring.", },
                 BuiltinOp {

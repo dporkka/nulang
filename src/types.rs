@@ -217,6 +217,7 @@ impl Capability {
 pub enum Effect {
     IO,
     Net,
+    String,
     FS,
     Rand,
     Time,
@@ -241,6 +242,7 @@ impl std::fmt::Display for Effect {
         match self {
             Effect::IO => write!(f, "IO"),
             Effect::Net => write!(f, "Net"),
+            Effect::String => write!(f, "String"),
             Effect::FS => write!(f, "FS"),
             Effect::Array => write!(f, "Array"),
             Effect::Rand => write!(f, "Rand"),

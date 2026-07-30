@@ -2575,6 +2575,7 @@ impl Parser {
             Box::new(self.parse_expr()?)
         };
 
+        self.skip_newlines();
         let else_branch = if self.consume_if(&TokenKind::Else) {
             Some(if self.match_token(&TokenKind::LBrace) {
                 Box::new(self.parse_block()?)

@@ -358,7 +358,7 @@ impl StandaloneVmCallbacks {
 ///
 /// String-id values index the constant pool; pointer values are read as
 /// null-terminated UTF-8; everything else falls back to `to_string_repr`.
-pub(crate) fn resolve_value_string(constants: &[Constant], value: Value) -> String {
+pub fn resolve_value_string(constants: &[Constant], value: Value) -> String {
     if let Some(id) = value.as_string_id() {
         match constants.get(id as usize) {
             Some(Constant::String(s)) => s.clone(),
@@ -481,6 +481,28 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 return Some(Value::int(-1));
             }
             return Some(Value::int(s.as_bytes()[idx as usize] as i64));
+        }
+        if effect_name == "String" && op_name == Some("from_char") {
+            let code = regs.first().and_then(|v| v.as_int()).unwrap_or(-1);
+            if code < 0 {
+                return Some(Value::nil());
+            }
+            let c = match char::from_u32(code as u32) {
+                Some(c) => c,
+                None => return Some(Value::nil()),
+            };
+            let s: String = c.to_string();
+            let bytes = s.into_bytes();
+            match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                Some(ptr) => {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                    }
+                    return Some(Value::ptr(ptr));
+                }
+                None => return Some(Value::nil()),
+            }
         }
         if effect_name == "String" && op_name == Some("concat") {
             let a = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));

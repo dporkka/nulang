@@ -75,6 +75,7 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "Net" | "Http" => Effect::Net,
         "FS" => Effect::FS,
         "Array" => Effect::Array,
+        "String" => Effect::String,
         "Test" => Effect::Test,
         "Rand" => Effect::Rand,
         "Time" => Effect::Time,

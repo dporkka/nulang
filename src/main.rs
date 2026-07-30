@@ -903,6 +903,7 @@ fn run_source(
         "bytecode" => {
             // Bytecode backend (default).
             let m = compile_with_new_pipeline(&ast, "main")?;
+            let constants = m.constants.clone();
             if verbose {
                 println!("=== Bytecode (HIR/MIR pipeline) ===");
                 println!("{}", disassemble(&m));
@@ -943,7 +944,11 @@ fn run_source(
                 vm.load_module(m);
                 vm.run()?
             };
-            let result_str = value.to_string_repr();
+            let result_str = if value.is_string() || value.is_ptr() {
+                nulang::vm::resolve_value_string(&constants, value)
+            } else {
+                value.to_string_repr()
+            };
             if !result_str.is_empty() && result_str != "unit" && result_str != "()" {
                 println!("{}", result_str);
             }
