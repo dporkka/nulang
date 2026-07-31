@@ -1784,6 +1784,14 @@ impl Parser {
             path.push_str("::");
             path.push_str(&self.expect_ident("module name")?);
         }
+        // Helpful error for dot-separated imports (e.g. `import stdlib.list`)
+        if self.match_token(&TokenKind::Dot) {
+            return Err(NuError::parse_error(
+                "expected `::` in import path; use `::` to separate path segments (not `.`)"
+                    .to_string(),
+                self.current_span(),
+            ));
+        }
         let items = Vec::new();
         self.skip_newlines_semicolons();
         Ok(Decl::Import { path, items, span })

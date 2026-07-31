@@ -548,46 +548,178 @@ fn cmd_test(filter: Option<&str>, verbose: bool) -> NuResult<()> {
         println!("No tests found in {}", tests_dir.display());
         return Ok(());
     }
-    eprintln!("running {} tests", test_files.len());
-    let mut failed = 0;
+
+    // Phase 1: discover per-function tests (fn test_*)
+    struct TestCase {
+        display: String,
+        file_to_run: PathBuf,
+        is_temp: bool,
+    }
+
+    let mut tests: Vec<TestCase> = Vec::new();
+    let temp_dir = std::env::temp_dir().join("nula_test");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
     for file in &test_files {
-        let file_str = file.to_string_lossy().into_owned();
+        let content = match std::fs::read_to_string(file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let test_fns = discover_test_functions(&content);
         let relative = file
             .strip_prefix(&tests_dir.parent().unwrap_or(&tests_dir))
             .unwrap_or(file);
-        if verbose {
-            println!("--- {} ---", relative.display());
-        }
-        match nulang_exe(&[&file_str]) {
-            Ok(()) => {
-                if verbose {
-                    println!("   ✓ PASS");
-                } else {
-                    println!("test {} ... ok", relative.display());
-                }
+
+        if test_fns.is_empty() {
+            // No test_* functions: run whole file as one test
+            tests.push(TestCase {
+                display: relative.display().to_string(),
+                file_to_run: file.clone(),
+                is_temp: false,
+            });
+        } else {
+            if verbose {
+                println!("--- {} ---", relative.display());
+                println!("  discovered: {}", test_fns.join(", "));
             }
-            Err(e) => {
+            // Strip fn main() for per-function wrappers
+            let stripped = strip_main_function(&content);
+            for fn_name in &test_fns {
+                let wrapper = format!(
+                    "{}{}\nfn main() {{ {}() }}\n",
+                    stripped,
+                    if stripped.ends_with('\n') { "" } else { "\n" },
+                    fn_name
+                );
+                let temp_path = temp_dir.join(format!("test_{}.nula", fn_name));
+                if std::fs::write(&temp_path, &wrapper).is_err() {
+                    continue;
+                }
+                tests.push(TestCase {
+                    display: fn_name.clone(),
+                    file_to_run: temp_path,
+                    is_temp: true,
+                });
+            }
+        }
+    }
+
+    eprintln!("running {} tests", tests.len());
+    let mut passed = 0;
+    let mut failed = 0;
+
+    for test in &tests {
+        let file_str = test.file_to_run.to_string_lossy().into_owned();
+        match run_test_file(&file_str) {
+            Ok(()) => {
+                passed += 1;
+                println!("test {} ... ok", test.display);
+            }
+            Err(stderr_output) => {
                 failed += 1;
                 if verbose {
-                    println!("   ✗ FAIL");
-                    println!("   {}", e);
+                    println!("test {} ... FAILED", test.display);
+                    for line in stderr_output.lines() {
+                        println!("   {}", line);
+                    }
                 } else {
-                    let msg = e.to_string();
-                    println!("test {} ... FAILED", relative.display());
-                    eprintln!("{}", msg);
+                    println!("test {} ... FAILED", test.display);
+                    eprintln!("{}", stderr_output.trim());
                 }
             }
         }
     }
-    println!(
-        "\ntest result: {} passed; {} failed",
-        test_files.len() - failed,
-        failed
-    );
+
+    // Clean up temp files
+    for test in &tests {
+        if test.is_temp {
+            let _ = std::fs::remove_file(&test.file_to_run);
+        }
+    }
+    let _ = std::fs::remove_dir(&temp_dir);
+
+    println!("\ntest result: {} passed; {} failed", passed, failed);
     if failed > 0 {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Find all `fn test_*` function names in a source string.
+fn discover_test_functions(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = source;
+    while let Some(pos) = rest.find("fn test_") {
+        let start = pos + 3; // skip "fn "
+        let after_fn = &rest[start..];
+        // Find end of identifier: whitespace or '('
+        let end = after_fn
+            .find(|c: char| c.is_whitespace() || c == '(')
+            .unwrap_or(after_fn.len());
+        let name = after_fn[..end].trim().to_string();
+        if !name.is_empty() {
+            names.push(name);
+        }
+        rest = &after_fn[end..];
+    }
+    names
+}
+
+/// Strip the `fn main() { ... }` block from source, keeping everything else.
+fn strip_main_function(source: &str) -> String {
+    if let Some(pos) = source.find("fn main") {
+        // Find the opening brace after "fn main"
+        if let Some(brace_start) = source[pos..].find('{') {
+            let abs_brace = pos + brace_start;
+            // Count braces to find matching close
+            let mut depth = 0;
+            let mut end = abs_brace;
+            for (i, ch) in source[abs_brace..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = abs_brace + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let before = &source[..pos];
+            let after = &source[end..];
+            return format!("{}{}", before, after);
+        }
+    }
+    source.to_string()
+}
+/// Run a test file via `nulang`, capturing stderr so error messages appear
+/// after the test name (avoiding interleaved output).
+/// Returns `Ok(())` on success, `Err(stderr_string)` on failure.
+fn run_test_file(file_path: &str) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot locate nulang: {}", e))?;
+    let mut cmd = Command::new(&exe);
+    cmd.arg(file_path);
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::piped());
+    if std::env::var_os("NULANG_STDLIB").is_none() {
+        if let Some(exe_dir) = exe.parent() {
+            let candidate = exe_dir.join("stdlib");
+            if candidate.is_dir() {
+                cmd.env("NULANG_STDLIB", &candidate);
+            }
+        }
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run nulang: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        Err(stderr)
+    }
 }
 
 /// `nula list`: print all locked dependencies with versions and sources.
