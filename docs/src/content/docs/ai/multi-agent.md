@@ -32,19 +32,9 @@ agent Writer = {
     system_prompt: "You are a writer. Create engaging content.",
     pricing: { input: 0.0, output: 0.0 }
 }
-
-fn main() {
-    let researcher = spawn Researcher {} in
-    let writer = spawn Writer {} in
-    let pipeline = Pipeline.new()
-        |> Pipeline.stage("research", researcher, "Research: {input}")
-        |> Pipeline.stage("write", writer, "Write based on: {input}")
-    in
-    pipeline.run("CRDTs")
-}
 ```
 
-The `{input}` placeholder in each stage's template is replaced with the previous stage's output. `pipeline.run("CRDTs")` executes the stages in order and returns the final output.
+Pipeline orchestration is available via the Rust `nulang-ai` crate (`Pipeline::new()`, `Pipeline::stage()`, `Pipeline::run()`). A language-level pipeline expression is pending.
 
 ## Debates
 

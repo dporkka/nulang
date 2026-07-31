@@ -84,7 +84,7 @@ Every decade brings new AI models, new cloud providers, and new orchestration fr
 - **Reference capabilities** prevent data races without a GC or borrow checker.
 - **Durable state** means your program's execution survives the machine it runs on.
 
-Nulang freezes these primitives in a [Frozen Core](/language/syntax/) and builds everything else — AI, cloud services, billing, multi-tenancy — as evolvable layers.
+Nulang freezes these primitives in a [Frozen Core](https://github.com/dporkka/nulang/blob/main/GOVERNANCE.md) and builds everything else — AI, cloud services, billing, multi-tenancy — as evolvable layers.
 
 ---
 

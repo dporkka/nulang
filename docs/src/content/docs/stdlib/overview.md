@@ -9,13 +9,13 @@ Nulang ships with a set of built-in effects wired directly into the VM and runti
 
 Each effect groups related operations accessed via `perform Effect.operation(...)`:
 
-| Effect | Operations | Implements |
-|--------|-----------|------------|
 | [IO](/stdlib/io/) | `print`, `println`, `read` | Console input/output |
 | [Int](/stdlib/int/) | `to_string` | Integer conversions |
 | [Timer](/stdlib/timer/) | `sleep` | Durable workflow timers |
 | [Signal](/stdlib/signal/) | `wait` | Workflow signal suspension |
-| [LLM](/stdlib/llm/) | `ask` | AI language model queries |
+| [Inference](/stdlib/llm/) | `ask` | AI language model queries (canonical name) |
+| [LLM](/stdlib/llm/) | `ask` | Deprecated alias for `Inference.ask` (RFC 0010) |
+| [Provider](/stdlib/llm/) | `ask` | General provider abstraction |
 | [Actor](/stdlib/actor/) | `link`, `unlink`, `monitor`, `demonitor`, `trap_exit`, `exit`, `register`, `unregister`, `whereis`, `set_priority` | Actor lifecycle management |
 | [Otp](/stdlib/otp/) | `create_supervisor`, `supervise_child`, `set_template`, `start_child`, `terminate_child`, `child_count` | OTP supervision trees |
 

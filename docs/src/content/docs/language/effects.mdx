@@ -94,9 +94,11 @@ Nulang ships with several built-in effects wired into the VM and runtime:
 | `Int` | `to_string` | Integer-to-string conversion |
 | `Timer` | `sleep` | Durable workflow timers |
 | `Signal` | `wait` | Workflow signal suspension |
-| `LLM` | `ask` | AI language model queries (deprecated — use `Provider.ask`) |
-| `Provider` | `ask` | General provider abstraction (replaces `LLM.ask`) |
-| `Actor` | `link`, `monitor`, `exit`, ... | Actor lifecycle management |
-| `Otp` | `create_supervisor`, ... | OTP supervision trees |
+| `Inference` | `ask` | AI language model queries (canonical name) |
+| `LLM` | `ask` | Deprecated alias for `Inference.ask` |
+| `Provider` | `ask` | General provider abstraction |
+| `Actor` | `link`, `unlink`, `monitor`, `demonitor`, `trap_exit`, `exit`, `register`, `unregister`, `whereis`, `set_priority` | Actor lifecycle management |
+| `Otp` | `create_supervisor`, `supervise_child`, `set_template`, `start_child`, `terminate_child`, `child_count` | OTP supervision trees |
 
+`LLM.ask` emits a compiler warning; use `Inference.ask` instead (RFC 0010).
 See the [Standard Library](/stdlib/overview/) for full documentation of each built-in effect.

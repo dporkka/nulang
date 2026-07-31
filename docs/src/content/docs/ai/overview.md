@@ -4,6 +4,8 @@ description: Build LLM-powered agents using the nulang-ai library — spawning, 
 ---
 
 
+
+> **Note**: The `agent` keyword is currently Experimental and is proposed for deprecation in favor of plain `actor` declarations that import `nlc.ai` (RFC 0004). The keyword remains functional and will continue to work through at least two major language versions.
 ## AI Agents
 
 Nulang's AI capabilities live in the optional nulang-ai library crate. An `agent` is a named record of configuration — model, system prompt, tools, memory, pricing — that the runtime spawns like an actor through the generic PerformAsync effect mechanism. No special AI bytecodes or language extensions are needed. You interact with an agent through the `ask` operator, which is a synchronous request/reply call.
@@ -80,33 +82,7 @@ Nulang's LLM client is provider-agnostic. The `model` field selects the provider
 | OpenAI | `gpt-4o` | `OPENAI_API_KEY` env var |
 | Ollama | `llama3.1` | Local Ollama server on `localhost:11434` |
 
-## Complete Example
-
-From `examples/pipeline.nula` — a research + writing pipeline:
-
-```nulang
-agent Researcher = {
-    model: "llama3.1",
-    system_prompt: "You are a researcher. Provide factual information.",
-    pricing: { input: 0.0, output: 0.0 }
-}
-
-agent Writer = {
-    model: "llama3.1",
-    system_prompt: "You are a writer. Create engaging content.",
-    pricing: { input: 0.0, output: 0.0 }
-}
-
-fn main() {
-    let researcher = spawn Researcher {} in
-    let writer = spawn Writer {} in
-    let pipeline = Pipeline.new()
-        |> Pipeline.stage("research", researcher, "Research: {input}")
-        |> Pipeline.stage("write", writer, "Write based on: {input}")
-    in
-    pipeline.run("CRDTs")
-}
-```
+Pipeline orchestration is available via the Rust `nulang-ai` crate (`Pipeline::new()`, `Pipeline::stage()`, `Pipeline::run()`) and can be accessed through the runtime API. A language-level pipeline expression is pending.
 
 ## Next
 

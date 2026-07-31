@@ -33,14 +33,7 @@ Nodes discover each other via a **gossip protocol**:
 
 ### Joining a Cluster
 
-```nulang
-// Start a node and join a cluster
-// Each node needs a unique node_id
-let node = spawn ClusterNode {
-    state node_id: Int,
-    state seeds: [String]  // e.g. ["192.168.1.10:9000"]
-} in { ... }
-```
+Cluster membership uses **heartbeat-based discovery** and a **gossip protocol** for transitive propagation. A node joins by connecting to one or more seed nodes; membership state (Joining, Healthy, Suspicious, Left, Removed) propagates through connected peers. Each membership entry carries an incarnation number — higher incarnations win in merge conflicts, preventing split-brain regressions.
 
 ### Member States
 
@@ -48,29 +41,13 @@ let node = spawn ClusterNode {
 |-------|-------------|
 | `Joining` | Initial state, awaiting first gossip round |
 | `Healthy` | Active member, heartbeating and receiving messages |
-| `Suspect` | Missed heartbeats, awaiting confirmation |
+| `Suspicious` | Missed heartbeats, awaiting confirmation |
 | `Left` | Gracefully departed |
 | `Removed` | Pruned from membership after timeout |
 
 Membership state carries an **incarnation number** — higher incarnations win in merge conflicts, preventing split-brain regressions.
 
-## Remote Spawn
-
-Spawn an actor on a remote node:
-
-```nulang
-// Register a spawnable behavior on the remote node first
-perform Actor.register("worker")
-
-// Spawn on a remote node
-let remote_actor = spawn_on_node("10.0.0.5:9000") Worker {
-    state task: String = "process"
-} in {
-    remote_actor
-}
-```
-
-The remote node must have `Worker` registered via `Runtime::register_spawnable_behavior`.
+Remote spawn is accessed via the Rust API: behaviors are registered with `Runtime::register_spawnable_behavior`, and the wire protocol uses `Packet::SpawnRequest`/`SpawnResponse` for cross-node actor creation. The receiver spawns the named behavior only if it was pre-registered; unknown names return a failed response. A language-level remote-spawn expression is planned but not yet implemented.
 
 ## Wire Protocol
 
@@ -100,22 +77,7 @@ Nulang supports 8 Conflict-free Replicated Data Types for eventually-consistent 
 
 CRDTs use **delta-state replication**: only changed state (deltas) is shipped over the wire, with periodic full syncs (every 16 rounds) as a repair mechanism.
 
-### Using CRDTs
-
-```nulang
-actor SharedCounter {
-    state counter = Crdt.new_gcounter("my_counter")
-
-    behavior inc() {
-        Crdt.increment(self.counter, 1)
-    }
-
-    behavior get(sender: Actor) {
-        let value = Crdt.value(self.counter)
-        send sender reply(value)
-    }
-}
-```
+CRDT types (`GCounter`, `PNCounter`, `GSet`, `ORSet`, `AWORSet`, `LWWRegister`, `MVRegister`, `RGA`) are Rust-level APIs on `CrdtManager` with delta-state replication and periodic full syncs (every 16 rounds). There are currently no language-level `Crdt.*` built-in effects.
 
 ## Persistence
 

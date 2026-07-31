@@ -50,9 +50,7 @@ The bytecode VM is designed for compact code and fast dispatch:
 - **Size-class free lists**: Small allocations reuse exact-size slots; allocations over 256 bytes use a large-object space.
 - **Global allocator**: `mimalloc` for all non-actor allocations (compiler, runtime, JIT buffers).
 
-## Zero-Copy
-
-- **String interning**: Strings are interned once per module. Message passing copies only the pool handle, not the UTF-8 payload — within a node.
+- **String interning**: Strings are interned once per module. Message passing shares interned pool handles within a node — no deep copies, though `Arc`-shared message payloads incur atomic reference-counting overhead.
 - **Reference capabilities**: `iso` and `val` references are sendable without deep copies; the type system guarantees no aliasing at compile time.
 - **Cross-node**: String content travels by value on the wire and is re-interned at the destination. Heap pointers, closures, and actor refs are rejected at send time.
 

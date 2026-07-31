@@ -10,6 +10,8 @@ editUrl: false
 > Do not edit it by hand — your changes will be overwritten on the next CI run.
 > To add or update a built-in operation, edit the `StdLib::new()` registry in `src/stdlib.rs`.
 
+
+> **Deprecated**: `LLM.ask` is deprecated. Use `perform Inference.ask(prompt)` instead. Both are synonyms resolving to `Effect::Inference`. (RFC 0010)
 # LLM Effect
 
 The `LLM` effect provides the following built-in operations, wired through the generic `PerformAsync` effect dispatch. The compiler emits a single `PerformAsync` bytecode with the effect-op string `"LLM.ask"`; the VM routes it to the registered LLM client via the runtime's effect handler.

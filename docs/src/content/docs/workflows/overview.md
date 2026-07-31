@@ -5,6 +5,9 @@ description: Workflow declarations with steps, parallel branches, event emission
 
 ## Workflows
 
+> **Note**: The `workflow` keyword is currently Experimental and is proposed for deprecation in favor of plain `actor` declarations that import `nlc.workflow` (RFC 0004). The keyword remains functional and will continue to work through at least two major language versions.
+
+
 A workflow is a persistent actor with checkpointed state that progresses through named steps. Workflows survive node restarts: each step completion is journaled, so a crashed workflow resumes from its last completed step rather than restarting from scratch.
 
 ## Declaring a Workflow

@@ -73,18 +73,10 @@ perform Actor.demonitor(target)
 
 ## Exit Trapping
 
-When `trap_exit` is enabled, linked peer exits arrive as system messages instead of killing the actor:
+When `trap_exit` is enabled, linked peer exits arrive as system messages instead of killing the actor. Exit signals are delivered as messages; the actor handles them in its normal message loop.
 
 ```nulang
 perform Actor.trap_exit(true)
-
-behavior handle_info(msg: SystemMessage) {
-    match msg {
-        ExitSignal(actor, reason) => {
-            perform IO.print("Actor exited: " + reason)
-        }
-    }
-}
 ```
 
 ## Actor Exit Reasons
