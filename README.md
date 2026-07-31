@@ -38,6 +38,30 @@ distribution, persistence, and AI runtime are all implemented and backed by
 
 ---
 
+## Installation
+
+### Pre-built binaries
+Download the latest release from [GitHub Releases](https://github.com/dporkka/nulang/releases).
+- **Linux (x86_64)**: `nulang-linux-x86_64.tar.gz`
+- **Linux (aarch64)**: `nulang-linux-aarch64.tar.gz`
+- **macOS (x86_64)**: `nulang-macos-x86_64.tar.gz`
+- **macOS (aarch64)**: `nulang-macos-aarch64.tar.gz`
+
+Extract and place `nulang` in your PATH:
+```bash
+tar xzf nulang-linux-x86_64.tar.gz
+sudo mv nulang /usr/local/bin/
+```
+
+### From source
+```bash
+git clone https://github.com/dporkka/nulang.git
+cd nulang
+cargo build --release
+```
+Requires Rust 1.93+, Linux or macOS.
+
+
 ## Quick Start
 
 **Prerequisites:** Rust 1.93+, Linux or macOS (Windows planned).

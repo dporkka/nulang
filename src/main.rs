@@ -32,6 +32,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
+const VERSION: &str = "0.1.0";
 use nulang::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
 use nulang::lexer::Lexer;
 use nulang::parser::Parser;
@@ -178,7 +179,7 @@ fn main() {
                 }
             }
             "--version" | "-V" => {
-                println!("nulang {}", env!("CARGO_PKG_VERSION"));
+                println!("nulang {}", VERSION);
                 return;
             }
             "--lsp" => opts.lsp = true,
