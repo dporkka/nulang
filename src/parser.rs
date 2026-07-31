@@ -5508,6 +5508,40 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_receive_after_dynamic_timeout() {
+        // The `after` timeout must accept any expression, not just an Int
+        // literal: a variable (or computed expression) timeout must be kept
+        // in the AST, never silently dropped to `None`.
+        let expr = parse_expr("receive { | Msg(x) => x } after timeout => 0").unwrap();
+        match expr {
+            Expr::Receive { arms, after, .. } => {
+                assert_eq!(arms.len(), 1);
+                let (ms, body) = after.expect("dynamic after clause must be kept");
+                assert!(
+                    matches!(ms.as_ref(), Expr::Var(name, _) if name == "timeout"),
+                    "timeout must stay a variable reference, got {:?}",
+                    ms
+                );
+                assert!(matches!(body.as_ref(), Expr::Literal(Literal::Int(0), _)));
+            }
+            _ => panic!("Expected receive expression"),
+        }
+        // A computed expression timeout parses the same way.
+        let expr = parse_expr("receive { | Msg(x) => x } after t * 10 => 0").unwrap();
+        match expr {
+            Expr::Receive { after, .. } => {
+                let (ms, _) = after.expect("computed after clause must be kept");
+                assert!(
+                    matches!(ms.as_ref(), Expr::Binary { .. }),
+                    "computed timeout must stay an expression, got {:?}",
+                    ms
+                );
+            }
+            _ => panic!("Expected receive expression"),
+        }
+    }
+
+    #[test]
     fn test_parse_receive_without_after() {
         let expr = parse_expr("receive { | Msg(x) => x }").unwrap();
         match expr {

@@ -5167,6 +5167,49 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// Dynamic timeout: the `after` clause must accept an expression (here a
+    /// variable holding the deadline), and the computed value must actually
+    /// arm the timer — a silently-ignored clause would never run the after
+    /// body and `seen` would stay 0.
+    #[test]
+    fn test_receive_after_dynamic_timeout_expression() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = r#"
+            actor Listener {
+                state seen = 0
+                behavior drain() {
+                    let timeout = 30
+                    self.seen = receive {
+                        | add(x, y) => x + y
+                    } after timeout => 4242
+                }
+                behavior add(x: Int, y: Int) { x }
+            }
+            let c = spawn Listener { seen = 0 } in {
+                send c drain()
+                c
+            }
+        "#;
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let actor_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        let rt_ref = rt.borrow();
+        let actor = rt_ref.actors.get(&actor_id).unwrap();
+        assert_eq!(
+            actor.get_state_field("seen").and_then(|v| v.as_int()),
+            Some(4242),
+            "the dynamic timeout must arm the timer and run the after body"
+        );
+        assert!(
+            actor.suspended_execution.is_none(),
+            "the wait must be fully resolved after the dynamic timeout fired"
+        );
+    }
+
     /// Timed selective receive: a message arriving before the deadline wakes
     /// the suspended actor and dispatches to the matching arm; the timeout
     /// never fires observably.
