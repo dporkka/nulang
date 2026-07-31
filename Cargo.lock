@@ -2320,7 +2320,7 @@ dependencies = [
 
 [[package]]
 name = "nulang"
-version = "0.13.0-alpha.1"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "cranelift",

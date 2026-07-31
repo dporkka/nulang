@@ -3,7 +3,7 @@ members = ["crates/nulang-ai"]
 
 [package]
 name = "nulang"
-version = "0.13.0-alpha.1"
+version = "0.1.0"
 edition = "2021"
 authors = ["David Porkka"]
 license = "Apache-2.0"
