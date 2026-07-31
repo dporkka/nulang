@@ -16,6 +16,8 @@ mod tests {
     use crate::types::Type;
     use crate::vm::{Value, VM};
     use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::path::Path;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
@@ -9023,5 +9025,172 @@ match { a: 2, b: 9 } with {
         // Record field access still works alongside tuple field access
         assert_int("let r = { x: 1, y: 2 } in r.x + r.y", 3);
         assert_int("let t = (10, 20) in t.0 + t.1", 30);
+    }
+
+    // -------------------------------------------------------------------
+    // Example file compilation helpers (mirrors main.rs run_frontend)
+    // -------------------------------------------------------------------
+
+    /// Compile a .nula example file through the full frontend pipeline:
+    /// prelude + parse + import resolution + typecheck + effect check +
+    /// HIR/MIR lowering + codegen.
+    fn compile_example_file(path: &Path) -> Result<(crate::bytecode::CodeModule, Type), NuError> {
+        let source = std::fs::read_to_string(path).map_err(|e| NuError::VMError {
+            msg: format!("cannot read {}: {}", path.display(), e),
+            span: crate::types::Span::default(),
+        })?;
+        let file_path = path.to_str();
+
+        // 1. Parse prelude (built-in type definitions)
+        let ps = crate::prelude_source::PRELUDE_SOURCE;
+        let mut pl = Lexer::new(ps);
+        crate::types::set_source_map_with_file(ps, Some("<prelude>"));
+        let pt = pl.lex()?;
+        let mut pp = Parser::new(pt);
+        let pa = pp.parse_module()?;
+
+        // 2. Parse source file
+        let mut lexer = Lexer::new(&source);
+        crate::types::set_source_map_with_file(&source, file_path);
+        let tokens = lexer.lex()?;
+        let mut parser = Parser::new(tokens);
+        let mut ast = parser.parse_module()?;
+
+        // 3. Merge prelude variant types into the AST
+        let mut pd: Vec<crate::ast::Decl> = pa
+            .decls
+            .into_iter()
+            .filter(|d| matches!(d, crate::ast::Decl::VariantType { .. }))
+            .collect();
+        pd.append(&mut ast.decls);
+        ast.decls = pd;
+
+        // 4. Resolve imports (stdlib::json, stdlib::datetime, etc.)
+        let base_dir = path.parent().unwrap_or(Path::new("."));
+        let mut visited = HashSet::new();
+        crate::resolver::resolve_imports(&mut ast, base_dir, &mut visited)?;
+
+        // 5. Type check
+        let mut type_checker = TypeChecker::new();
+        let module_type = type_checker.check_module(&ast)?;
+
+        // 6. Effect check
+        let mut effect_checker = crate::effect_checker::EffectChecker::new();
+        effect_checker.check_module(&ast.decls)?;
+
+        // 7. HIR → MIR → bytecode
+        let hir = crate::hir_lower::lower_module(&ast);
+        let mir = crate::mir_lower::lower_module(&hir)?;
+        let module = crate::mir_codegen::compile_mir(&mir, "test")?;
+
+        Ok((module, module_type))
+    }
+
+    /// Run a compiled module in a bare VM (no actor runtime).
+    fn run_module_bare(module: crate::bytecode::CodeModule) -> Result<Value, NuError> {
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.run()
+    }
+
+    /// Run a compiled module with an actor runtime.
+    fn run_module_with_runtime(module: crate::bytecode::CodeModule) -> Result<Value, NuError> {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let mut vm = VM::new();
+        vm.load_module(module);
+        vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt.clone())));
+        let value = vm.run()?;
+        rt.borrow_mut().run_scheduler();
+        Ok(value)
+    }
+
+    // -------------------------------------------------------------------
+    // Example file integration test
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_all_examples_compile_and_run() {
+        // Run in a thread with a larger stack — the compilation pipeline
+        // (prelude + typechecker + effect checker) can be stack-heavy.
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .name("example-runner".into())
+            .spawn(|| {
+                let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+                let examples_dir = manifest_dir.join("examples");
+
+                let all_examples: [&str; 17] = [
+                    "01_hello.nula",
+                    "02_arithmetic.nula",
+                    "03_functions.nula",
+                    "04_pattern_match.nula",
+                    "05_records.nula",
+                    "06_higher_order.nula",
+                    "07_effects.nula",
+                    "08_actors.nula",
+                    "09_loops.nula",
+                    "10_pipe.nula",
+                    "11_arrays.nula",
+                    "12_json.nula",
+                    "13_http.nula",
+                    "14_option_result.nula",
+                    "15_ranges.nula",
+                    "16_realworld.nula",
+                    "17_actor_fetcher.nula",
+                ];
+
+                // Examples that use actors (spawn / send) — need a Runtime.
+                let needs_runtime: &[&str] = &["08_actors.nula", "17_actor_fetcher.nula"];
+
+                // Examples that need network access — compile only, skip run.
+                let needs_network: &[&str] =
+                    &["13_http.nula", "16_realworld.nula", "17_actor_fetcher.nula"];
+
+                let mut compiled = 0usize;
+                let mut run_ok = 0usize;
+                let mut skipped_run = 0usize;
+
+                for name in &all_examples {
+                    let path = examples_dir.join(name);
+                    assert!(path.exists(), "Example file missing: {}", name);
+
+                    // Every example must compile (parse + typecheck + codegen).
+                    let (module, _ty) = compile_example_file(&path)
+                        .unwrap_or_else(|e| panic!("Example {} failed to compile: {}", name, e));
+                    compiled += 1;
+
+                    // Skip execution for network-dependent examples.
+                    if needs_network.contains(name) {
+                        skipped_run += 1;
+                        continue;
+                    }
+
+                    let result = if needs_runtime.contains(name) {
+                        run_module_with_runtime(module)
+                    } else {
+                        run_module_bare(module)
+                    };
+
+                    assert!(
+                        result.is_ok(),
+                        "Example {} failed at runtime: {:?}",
+                        name,
+                        result.err()
+                    );
+                    run_ok += 1;
+                }
+
+                assert_eq!(compiled, 17, "all 17 examples must compile");
+                assert_eq!(
+                    run_ok + skipped_run,
+                    17,
+                    "all examples accounted for ({} run + {} skipped)",
+                    run_ok,
+                    skipped_run
+                );
+            })
+            .expect("failed to spawn example-runner thread");
+
+        handle.join().expect("example-runner thread panicked");
     }
 }

@@ -44,7 +44,7 @@ let format_datetime = fn(dt) {
 }
 
 // Produce a human-readable description of any JsonValue.
-let rec describe = fn(v) {
+let describe = fn(v) {
     match v {
         JsonNull       => "null",
         JsonBool(b)    => if b then "true" else "false",

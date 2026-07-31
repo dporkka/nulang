@@ -121,9 +121,10 @@ perform IO.print(result_desc(Error("not found")))
 let safe_div = fn(a, b) {
     if b == 0 then Error("div by zero") else Ok(a / b)
 }
-let r1 = safe_div(10, 2) catch Error("failed")
-perform IO.print(result_desc(r1))
-let r2 = safe_div(10, 0) catch Error("failed")
-perform IO.print(result_desc(r2))
+// Catch unwraps Ok, so the result is the inner value (or the fallback on Error).
+let r1 = safe_div(10, 2) catch -1
+perform IO.print("safe_div(10, 2) catch -1 = " + perform Int.to_string(r1))
+let r2 = safe_div(10, 0) catch -1
+perform IO.print("safe_div(10, 0) catch -1 = " + perform Int.to_string(r2))
 
 perform IO.print("Option/Result demo complete!")

@@ -1,0 +1,129 @@
+// 17_actor_fetcher.nula — URL Fetcher & Reporter
+//
+// Demonstrates Nulang's unique strengths working together:
+//   algebraic effects — Http, FS, IO, Array, String built-ins via `perform`
+//   types — DateTime records, JsonValue variants, pattern matching
+//   error handling — nil checks, match on response status
+//   functional style — let bindings, closures, for loops
+//
+// NOTE: The original design used actors (spawn/send/behaviors) for
+// concurrent fetching, but actors and Http.get cannot coexist in the same
+// file due to a current VM limitation (effect capabilities are restricted
+// when `actor` declarations are present). This sequential version exercises
+// the full effect + type + pattern-matching surface instead.
+//
+// Design:
+//   - Hardcoded list of 4 URLs (3 valid, 1 intentionally invalid)
+//   - Fetches each URL via Http.get in a loop
+//   - Parses JSON responses using parse() from stdlib::json
+//   - Classifies each response with pattern matching on JsonValue variants
+//   - Accumulates results with Array.push
+//   - Captures a timestamp via now() from stdlib::datetime
+//   - Builds a text report and writes it to disk with FS.write
+//
+// Run:  nulang examples/17_actor_fetcher.nula
+// Also: /tmp/cargo-target/debug/nulang examples/17_actor_fetcher.nula
+
+import stdlib::json
+import stdlib::datetime
+
+
+// ── Main ────────────────────────────────────────────────────────────────────
+
+fn main() {
+    let urls = [
+        "https://jsonplaceholder.typicode.com/todos/1",
+        "https://jsonplaceholder.typicode.com/posts",
+        "https://api.github.com",
+        "https://this-does-not-exist.invalid/"   // bad URL — tests error handling
+    ]
+    let total = 4
+
+    perform IO.print("=== Nulang URL Fetcher ===")
+    perform IO.print("Fetching " + perform Int.to_string(total) + " URLs...")
+    perform IO.print("")
+
+    var results = []
+    var successes = 0
+    var failures = 0
+
+    var i = 0
+    while i < total {
+        let url = urls[i]
+        let idx = i + 1
+
+        perform IO.print("[" + perform Int.to_string(idx) + "] Fetching " + url + "...")
+
+        let response = perform Http.get(url)
+        let ok = response != nil
+        if ok then {
+            let body_len = perform String.length(response)
+            successes = successes + 1
+
+            // Parse as JSON and classify using pattern matching on
+            // JsonValue variants (JsonNull, JsonBool, JsonNumber,
+            // JsonString, JsonArray, JsonObject).
+            let parsed = parse(response)
+            let kind = match parsed {
+                JsonNull       => "null",
+                JsonBool(b)    => if b then "true" else "false",
+                JsonNumber(n)  => "number",
+                JsonString(s)  => "string(" + perform Int.to_string(perform String.length(s)) + " chars)",
+                JsonArray(a)   => "array[" + perform Int.to_string(perform Array.length(a)) + "]",
+                JsonObject(f)  => "object{" + perform Int.to_string(perform Array.length(f)) + " keys}"
+            }
+
+            let line = "[" + perform Int.to_string(idx) + "] OK  " +
+                       perform Int.to_string(body_len) + " bytes, " + kind +
+                       " <- " + url
+            perform IO.print("     " + line)
+            results = perform Array.push(results, line)
+        } else {
+            failures = failures + 1
+            let line = "[" + perform Int.to_string(idx) + "] FAIL  " + url
+            perform IO.print("     " + line)
+            results = perform Array.push(results, line)
+        }
+
+        i = i + 1
+    }
+
+    // ── Build the report ───────────────────────────────────────────────
+
+    // Capture and format the current timestamp.
+    let now = now()
+    let pad2 = fn(x) {
+        if x < 10 then "0" + perform Int.to_string(x)
+        else perform Int.to_string(x)
+    }
+    let ts = perform Int.to_string(now.year) + "-" +
+             pad2(now.month) + "-" +
+             pad2(now.day) + " " +
+             pad2(now.hour) + ":" +
+             pad2(now.minute) + ":" +
+             pad2(now.second)
+
+    var report = "URL Fetch Report\n"
+    report = report + "================\n"
+    report = report + "Timestamp:      " + ts + "\n"
+    report = report + "URLs processed: " + perform Int.to_string(total) + "\n"
+    report = report + "Successful:     " + perform Int.to_string(successes) + "\n"
+    report = report + "Failed:         " + perform Int.to_string(failures) + "\n"
+    report = report + "\n"
+
+    for line in results {
+        report = report + line + "\n"
+    }
+
+    // Print the report to console.
+    perform IO.print("")
+    perform IO.print("=== Report ===")
+    perform IO.print(report)
+
+    // Write the report to disk.
+    let path = "output/fetch_report.txt"
+    perform FS.write(path, report)
+    perform IO.print("Report written to " + path)
+
+    0
+}
