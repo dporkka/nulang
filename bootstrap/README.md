@@ -1,6 +1,6 @@
 # Nulang Self-Hosting Bootstrap
 
-> **Status:** Stage 10 — end-to-end hex → .nbc pipeline.
+> **Status:** Stage 11 — type checking for arithmetic + booleans.
 > **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
 > that targets the `.nbc` format (RFC 0001).
 
@@ -8,7 +8,7 @@
 
 ```
 source.nula
-  → compiler_core.nula      (lexer + parser + evaluator in Core)
+  → compiler_core.nula      (lexer + parser + type checker + evaluator in Core)
   → compile_hex.nula         (Core → hex bytecode emitter)
   → fixup_hex.py             (patch jump offsets + constant pool)
   → hex2nbc.py               (hex → .nbc binary)
@@ -21,7 +21,7 @@ source.nula
 | File | Purpose |
 |------|---------|
 | `host.nula` | Host shim |
-| `compiler_core.nula` | Lexer + Pratt parser + evaluator in Nulang Core |
+| `compiler_core.nula` | Lexer + Pratt parser + type checker + evaluator in Nulang Core |
 | `compile_arith.nula` | Bytecode compiler for arithmetic (prints VM instructions) |
 | `compile_hex.nula` | Hex-output bytecode compiler (u32 words as 8-char hex) |
 | `fixup_hex.py` | Patch Jmp/JmpF/JmpT offsets and ConstU indices |
@@ -109,9 +109,23 @@ nulang bootstrap/compiler_core.nula < /dev/null
 - Full pipeline: `compile_hex.nula | fixup_hex.py | hex2nbc.py > out.nbc`
 - Outputs `Const0/1/2/M1/U`, `IAdd/ISub/IMul/IDiv`, `ICmp*`, `Not`, `Move`, `JmpF`, `JmpT`, `Jmp`, `Halt`.
 
+### Stage 11 — Type checking (2026-07-30)
+- **Type checker:** separate `tc_pratt` pass runs before evaluation.
+- **Types:** `Int` (0), `Bool` (1), `Error` (2). Type environment mirrors value environment.
+- **Integer literals** → `Int`, `true`/`false` → `Bool`.
+- **Arithmetic** (`+`, `-`, `*`, `/`) requires `Int` operands, produces `Int`.
+- **Comparisons** (`==`, `!=`, `<`, `>`, `<=`, `>=`) require `Int` operands, produce `Bool`.
+- **Boolean ops** (`and`, `or`, `not`) require `Bool` operands, produce `Bool`.
+- **`if c then t else e`**: `c` must be `Bool`; `t` and `e` must have the same type.
+- **`let x = v in body`**: propagates type of `v` to `x` in `body`.
+- **Error reporting**: prints "Type error: expected X, got Y" and outputs 0 instead of evaluating.
+- **Limitations**: closures/function application skip type checking (return `Int`). No type ascription syntax yet.
+
 ## What remains
 
 - HM type inference
+- Type ascription syntax (`x: Int`)
+- Type-check closures and function application
 - MIR lowering → `.nbc` codec
 - Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
 - Multi-binding closure capture (closures still limited to 1 captured variable)
