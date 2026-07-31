@@ -1,0 +1,161 @@
+// 16_realworld.nula — Real-world CLI: JSON Fetcher & Reporter
+//
+// Fetches JSON from a URL, parses and inspects it, logs a timestamped
+// summary, and writes the result to disk. A realistic workflow exercising
+// HTTP, JSON, FS, datetime, args, and env together.
+//
+// Demonstrates:
+//   System.arg   — read CLI arguments
+//   Http.get     — fetch data from the web
+//   json.parse / json.stringify / json.get_string — process JSON
+//   datetime.now — capture a timestamp
+//   FS.write     — persist output to a file
+//   Env.get      — read configuration from the environment
+//   IO.print     — user-facing progress messages
+//
+// Usage:
+//   nulang examples/16_realworld.nula <url>
+//
+// Environment:
+//   NU_OUTPUT_DIR — output directory (default: ./output/)
+//
+// Example:
+//   NU_OUTPUT_DIR=/tmp nulang examples/16_realworld.nula \
+//     https://jsonplaceholder.typicode.com/todos/1
+
+import stdlib::json
+import stdlib::datetime
+
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+// Format a DateTime record as "YYYY-MM-DD HH:MM:SS".
+let format_datetime = fn(dt) {
+    let pad = fn(n) {
+        if n < 10 then "0" + perform Int.to_string(n)
+        else perform Int.to_string(n)
+    };
+    perform Int.to_string(dt.year) + "-" +
+    pad(dt.month) + "-" +
+    pad(dt.day) + " " +
+    pad(dt.hour) + ":" +
+    pad(dt.minute) + ":" +
+    pad(dt.second)
+}
+
+// Produce a human-readable description of any JsonValue.
+let rec describe = fn(v) {
+    match v {
+        JsonNull       => "null",
+        JsonBool(b)    => if b then "true" else "false",
+        JsonNumber(n)  => "number",
+        JsonString(s)  => "string (" + perform Int.to_string(perform String.length(s)) + " chars)",
+        JsonArray(a)   => "array[" + perform Int.to_string(perform Array.length(a)) + " items]",
+        JsonObject(f)  => "object{" + perform Int.to_string(perform Array.length(f)) + " keys}"
+    }
+}
+
+// Check whether a string looks like an HTTP URL.
+// (We compare substrings rather than checking == nil because perform
+//  results carry opaque type variables. The VM resolves them correctly
+//  at runtime, but the bytecode for == nil does not compare the
+//  runtime value when the type variable unifies with Nil.)
+let is_url = fn(s) {
+    perform String.substring(s, 0, 4) == "http"
+}
+
+// Check whether an HTTP response body is valid (non-nil, non-empty).
+// A nil/failed Http.get stringifies to "nil" (3 characters).
+let is_valid_response = fn(s) {
+    perform String.length(s) > 10
+}
+
+
+// ── Main program ──────────────────────────────────────────────────────────
+
+// 1. Read the target URL from the command line.
+//    System.arg(0) = program name, System.arg(1) = script path,
+//    System.arg(2) = first user argument.
+let url = perform System.arg(2)
+
+// 2. Check that a URL was provided.
+let got_url = is_url(url)
+
+if got_url then {
+    // 3. Read output directory from environment, falling back to ./output/.
+    //    Env.get returns nil when the variable is not set. nil stringifies
+    //    to "nil" (3 chars), so any real path is longer.
+    let env_dir = perform Env.get("NU_OUTPUT_DIR")
+    let has_env = perform String.length(env_dir) > 3
+    let out_dir = if has_env then env_dir else "./output/"
+
+    perform IO.print("=== JSON Fetcher ===")
+    perform IO.print("URL:        " + url)
+    perform IO.print("Output dir: " + out_dir)
+
+    // 4. Fetch JSON from the URL.
+    perform IO.print("Fetching...")
+    let response = perform Http.get(url)
+
+    // 5. Check that the response is valid.
+    let ok = is_valid_response(response)
+
+    if ok then {
+        let resp_len = perform String.length(response)
+        perform IO.print("Received " + perform Int.to_string(resp_len) + " bytes")
+
+        // 6. Parse the JSON response.
+        let parsed = parse(response)
+        let summary = describe(parsed)
+        perform IO.print("Parsed: " + summary)
+
+        // 7. Capture the current timestamp.
+        let now = now()
+        let ts = format_datetime(now)
+        perform IO.print("Timestamp: " + ts)
+
+        // 8. Build the output report (plain-text for readability).
+        let report =
+            "JSON Fetch Report\n" +
+            "=================\n" +
+            "Fetched at:   " + ts + "\n" +
+            "Source URL:   " + url + "\n" +
+            "Response:     " + perform Int.to_string(resp_len) + " bytes\n" +
+            "Data summary: " + summary + "\n" +
+            "\n" +
+            "── Original JSON ──\n" +
+            stringify(parsed) + "\n"
+
+        // 9. Write the report to disk.
+        let out_path = out_dir + "fetch_report.txt"
+        let write_ok = perform FS.write(out_path, report)
+
+        // FS.write returns Unit on success, nil on failure.
+        // Check whether the write succeeded by reading back the file.
+        let verify = perform FS.read(out_path)
+        let wrote = perform String.length(verify) > 0
+
+        if wrote then {
+            perform IO.print("Wrote output to " + out_path)
+            perform IO.print("=== Done ===")
+            unit
+        } else {
+            perform IO.print("Error: could not write to " + out_path)
+            perform IO.print("(Does the output directory exist?)")
+        }
+    } else {
+        perform IO.print("Error: failed to fetch from " + url)
+        perform IO.print("(Check the URL and network connection)")
+    }
+} else {
+    perform IO.print("Usage: nulang examples/16_realworld.nula <url>")
+    perform IO.print("")
+    perform IO.print("  Fetches JSON from the given URL, parses it, prints a")
+    perform IO.print("  timestamped summary, and writes a report to disk.")
+    perform IO.print("")
+    perform IO.print("Environment:")
+    perform IO.print("  NU_OUTPUT_DIR   output directory (default: ./output/)")
+    perform IO.print("")
+    perform IO.print("Example:")
+    perform IO.print("  nulang examples/16_realworld.nula https://jsonplaceholder.typicode.com/todos/1")
+}
