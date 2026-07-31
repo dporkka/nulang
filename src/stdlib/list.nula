@@ -35,7 +35,7 @@ pub fn contains(x, xs) -> Bool {
 }
 
 /// First index of x in xs, or -1 if not found.
-pub fn index_of(x: Int, xs: [Int]) -> Int {
+pub fn index_of(x, xs) -> Int {
     var i = 0;
     for elem in xs {
         if elem == x then { return i } else {};
@@ -61,7 +61,7 @@ pub fn all(pred, xs) -> Bool {
 }
 
 /// First element satisfying pred, or -1 if none match.
-pub fn find(pred, xs: [Int]) -> Int {
+pub fn find(pred, xs) {
     for x in xs {
         if pred(x) then { return x } else {}
     };
