@@ -274,10 +274,9 @@ fn compile_terminator_with_params(
             builder.ins().return_(&[v]);
             Ok(())
         }
-        _ => Err(AotCompileError::Unsupported(format!(
-            "terminator {:?}",
-            term
-        ))),
+        mir::Terminator::Unterminated => Err(AotCompileError::Internal(
+            "reached Unterminated terminator in codegen — this is a compiler bug".into(),
+        )),
     }
 }
 
@@ -795,10 +794,12 @@ fn compile_stmt(
             )?;
             Ok(())
         }
-        _ => Err(AotCompileError::Unsupported(format!(
-            "statement {:?}",
-            stmt
-        ))),
+        mir::Stmt::Emit { .. } => Err(AotCompileError::Unsupported(
+            "Emit: effect emission is not yet supported in the native backend".into(),
+        )),
+        mir::Stmt::StateSet { .. } => Err(AotCompileError::Unsupported(
+            "StateSet: actor state mutation is not yet supported in the native backend".into(),
+        )),
     }
 }
 
@@ -1060,8 +1061,50 @@ fn compile_rvalue(
             }
             Ok(copy)
         }
-
-        _ => Err(AotCompileError::Unsupported(format!("rvalue {:?}", rv))),
+        mir::RValue::PerformAsync { .. } => Err(AotCompileError::Unsupported(
+            "PerformAsync: async effect dispatch is not yet supported in the native backend".into(),
+        )),
+        mir::RValue::SignalWait { .. } => Err(AotCompileError::Unsupported(
+            "SignalWait: workflow signals are not yet supported in the native backend".into(),
+        )),
+        mir::RValue::Receive => Err(AotCompileError::Unsupported(
+            "Receive: mailbox receive is not yet supported in the native backend".into(),
+        )),
+        mir::RValue::ReceiveMatch { .. } => Err(AotCompileError::Unsupported(
+            "ReceiveMatch: selective receive is not yet supported in the native backend".into(),
+        )),
+        mir::RValue::ReceiveWait { .. } => Err(AotCompileError::Unsupported(
+            "ReceiveWait: timed selective receive is not yet supported in the native backend"
+                .into(),
+        )),
+        mir::RValue::ReceiveCommit => Err(AotCompileError::Unsupported(
+            "ReceiveCommit: receive commit is not yet supported in the native backend".into(),
+        )),
+        mir::RValue::FFICall { .. } => Err(AotCompileError::Unsupported(
+            "FFICall: foreign function calls are not yet supported in the native backend".into(),
+        )),
+        mir::RValue::Migrate { .. } => Err(AotCompileError::Unsupported(
+            "Migrate: actor migration is not yet supported in the native backend".into(),
+        )),
+        mir::RValue::SelfRef => Err(AotCompileError::Unsupported(
+            "SelfRef: actor self-reference is not yet supported in the native backend".into(),
+        )),
+        mir::RValue::CapabilityCheck { .. } => Err(AotCompileError::Unsupported(
+            "CapabilityCheck: capability checking is not yet supported in the native backend"
+                .into(),
+        )),
+        mir::RValue::StateGet { .. } => Err(AotCompileError::Unsupported(
+            "StateGet: actor state access is not yet supported in the native backend".into(),
+        )),
+        mir::RValue::Spawn { .. } => Err(AotCompileError::Unsupported(
+            "Spawn: actor spawning is not yet supported in the native backend".into(),
+        )),
+        mir::RValue::Send { .. } => Err(AotCompileError::Unsupported(
+            "Send: fire-and-forget message send is not yet supported in the native backend".into(),
+        )),
+        mir::RValue::Ask { .. } => Err(AotCompileError::Unsupported(
+            "Ask: request-response is not yet supported in the native backend".into(),
+        )),
     }
 }
 // ---------------------------------------------------------------------------
@@ -1102,7 +1145,15 @@ fn compile_const(
                 (crate::value_layout::TAG_STRING | idx as u64) as i64,
             ))
         }
-        _ => Err(AotCompileError::Unsupported(format!("constant {:?}", c))),
+        crate::bytecode::Constant::TypeDescriptor(_) => Err(AotCompileError::Unsupported(
+            "TypeDescriptor constant".into(),
+        )),
+        crate::bytecode::Constant::FunctionRef(_) => {
+            Err(AotCompileError::Unsupported("FunctionRef constant".into()))
+        }
+        crate::bytecode::Constant::BehaviorRef(_) => {
+            Err(AotCompileError::Unsupported("BehaviorRef constant".into()))
+        }
     }
 }
 
@@ -1395,7 +1446,11 @@ fn compile_binary(
             }
         }
         BinOp::Pow => call_helper(builder, helpers, "nulang_pow", &[lhs_val, rhs_val]),
-        _ => Err(AotCompileError::Unsupported(format!("binary op {:?}", op))),
+        BinOp::Assign => Err(AotCompileError::Unsupported(
+            "BinOp::Assign is not a runtime operator — it should have been lowered away".into(),
+        )),
+        BinOp::Range => Err(AotCompileError::Unsupported("BinOp::Range".into())),
+        BinOp::Pipe => Err(AotCompileError::Unsupported("BinOp::Pipe".into())),
     }
 }
 
@@ -1437,7 +1492,8 @@ fn compile_unary(
             }
         }
         UnOp::Not => call_helper(builder, helpers, "nulang_not", &[val]),
-        _ => Err(AotCompileError::Unsupported(format!("unary op {:?}", op))),
+        UnOp::Deref => Err(AotCompileError::Unsupported("UnOp::Deref".into())),
+        UnOp::Ref(_) => Err(AotCompileError::Unsupported("UnOp::Ref".into())),
     }
 }
 
