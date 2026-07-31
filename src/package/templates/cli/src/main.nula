@@ -1,0 +1,6 @@
+fn main() {
+  let name = perform Env.get("USER")
+  let name = if name != nil then name else perform System.arg(2)
+  let name = if name != nil then name else "World"
+  perform IO.print("Hello, " + name + "!")
+}

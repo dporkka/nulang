@@ -17,7 +17,32 @@ use crate::types::{NuError, NuResult, Span};
 /// Dispatch a `nula` invocation (`args` excludes the leading `nula`).
 pub fn run(args: &[String]) -> NuResult<()> {
     match args.first().map(String::as_str) {
-        Some("new") => cmd_new(args.get(1).map(String::as_str)),
+        Some("new") => {
+            let mut template: Option<&str> = None;
+            let mut path_arg: Option<&str> = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--template" => {
+                        i += 1;
+                        if i < args.len() {
+                            template = Some(args[i].as_str());
+                        }
+                    }
+                    other => {
+                        if path_arg.is_some() {
+                            return Err(NuError::PackageError {
+                                msg: format!("unexpected argument '{}' for nula new", other),
+                                span: Span::default(),
+                            });
+                        }
+                        path_arg = Some(other);
+                    }
+                }
+                i += 1;
+            }
+            cmd_new(path_arg, template)
+        }
         Some("init") => cmd_init(),
         Some("build") => cmd_build(),
         Some("build-wasm") => cmd_build_wasm(),
@@ -121,7 +146,9 @@ fn print_usage() {
     println!("Usage: nulang nula <COMMAND>");
     println!();
     println!("Commands:");
-    println!("  new   <path>  Scaffold a new package directory");
+    println!("  new   <path> [--template <name>]");
+    println!("                Scaffold a new package directory");
+    println!("                Templates: default, cli, lib");
     println!("  init          Scaffold a new package in the current directory");
     println!("  build         Resolve dependencies and type-check the package");
     println!("  build-wasm    Build package to .wasm + .cwasm (AOT, requires wasmtime)");
@@ -136,8 +163,8 @@ fn print_usage() {
     println!("  doc [--open]  Generate Markdown API docs (docs/api.md)");
 }
 
-/// `nula new <name>`: scaffold a package directory.
-fn cmd_new(path_arg: Option<&str>) -> NuResult<()> {
+/// `nula new <name> [--template <name>]`: scaffold a package directory.
+fn cmd_new(path_arg: Option<&str>, template: Option<&str>) -> NuResult<()> {
     let path_str = path_arg.ok_or_else(|| NuError::PackageError {
         msg: "nula new requires a package name or path".to_string(),
         span: Span::default(),
@@ -157,7 +184,19 @@ fn cmd_new(path_arg: Option<&str>) -> NuResult<()> {
             span: Span::default(),
         });
     }
-    scaffold_package(&dir, name)?;
+    let tmpl = template.unwrap_or("default");
+    let valid = ["default", "cli", "lib"];
+    if !valid.contains(&tmpl) {
+        return Err(NuError::PackageError {
+            msg: format!(
+                "unknown template '{}' (available: {})",
+                tmpl,
+                valid.join(", ")
+            ),
+            span: Span::default(),
+        });
+    }
+    scaffold_package(&dir, name, tmpl)?;
     println!("Created package '{}' at '{}'", name, dir.display());
     Ok(())
 }
@@ -184,7 +223,7 @@ fn cmd_init() -> NuResult<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("nulang-project");
     validate_package_name(name)?;
-    scaffold_package(&dir, name)?;
+    scaffold_package(&dir, name, "default")?;
     // Write a basic .gitignore
     let gitignore = dir.join(".gitignore");
     if !gitignore.exists() {
@@ -211,11 +250,10 @@ fn validate_package_name(name: &str) -> NuResult<()> {
     Ok(())
 }
 
-/// Write the `Nulang.toml` + `src/main.nula` scaffold for a new package.
-fn scaffold_package(dir: &Path, name: &str) -> NuResult<()> {
-    let src_dir = dir.join("src");
-    std::fs::create_dir_all(&src_dir).map_err(|e| NuError::PackageError {
-        msg: format!("cannot create {}: {}", src_dir.display(), e),
+/// Write the `Nulang.toml` + template source files for a new package.
+fn scaffold_package(dir: &Path, name: &str, template: &str) -> NuResult<()> {
+    std::fs::create_dir_all(dir).map_err(|e| NuError::PackageError {
+        msg: format!("cannot create {}: {}", dir.display(), e),
         span: Span::default(),
     })?;
     let manifest_path = dir.join(MANIFEST_FILE);
@@ -230,16 +268,45 @@ fn scaffold_package(dir: &Path, name: &str) -> NuResult<()> {
         msg: format!("cannot write {}: {}", manifest_path.display(), e),
         span: Span::default(),
     })?;
-    let main_path = src_dir.join("main.nula");
-    std::fs::write(
-        &main_path,
-        "// Run with: nulang nula run\n\nperform IO.print(\"Hello from Nulang!\")\n",
-    )
-    .map_err(|e| NuError::PackageError {
-        msg: format!("cannot write {}: {}", main_path.display(), e),
-        span: Span::default(),
-    })?;
+    for (rel_path, content) in template_files(template) {
+        let dest = dir.join(rel_path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| NuError::PackageError {
+                msg: format!("cannot create {}: {}", parent.display(), e),
+                span: Span::default(),
+            })?;
+        }
+        std::fs::write(&dest, content).map_err(|e| NuError::PackageError {
+            msg: format!("cannot write {}: {}", dest.display(), e),
+            span: Span::default(),
+        })?;
+    }
     Ok(())
+}
+
+/// Return the list of (relative_path, content) for a named template.
+fn template_files(name: &str) -> Vec<(&'static str, &'static str)> {
+    match name {
+        "default" => vec![(
+            "src/main.nula",
+            "fn main() {\n  perform IO.print(\"Hello from Nulang!\")\n}\n",
+        )],
+        "cli" => vec![(
+            "src/main.nula",
+            "fn main() {\n  let name = perform Env.get(\"USER\")\n  let name = if name != nil then name else perform System.arg(2)\n  let name = if name != nil then name else \"World\"\n  perform IO.print(\"Hello, \" + name + \"!\")\n}\n",
+        )],
+        "lib" => vec![
+            (
+                "src/lib.nula",
+                "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n",
+            ),
+            (
+                "tests/test_add.nula",
+                "fn main() {\n  perform Test.assert_eq(add(1, 2), 3)\n}\n",
+            ),
+        ],
+        _ => unreachable!(),
+    }
 }
 
 /// Resolve the package in the current directory, write `Nulang.lock`, and
@@ -764,7 +831,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nulang_nula_new_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        scaffold_package(&dir, "my-app").expect("scaffold should succeed");
+        scaffold_package(&dir, "my-app", "default").expect("scaffold should succeed");
         let manifest = Manifest::load(&dir).expect("scaffolded manifest should parse");
         assert_eq!(manifest.package.name, "my-app");
         assert_eq!(manifest.package.version, "0.1.0");
@@ -781,9 +848,9 @@ mod tests {
     #[test]
     fn test_cmd_new_rejects_invalid_name() {
         // Path with invalid package name (contains '.')
-        let err = cmd_new(Some("./my.app")).expect_err("dots in name are rejected");
+        let err = cmd_new(Some("./my.app"), None).expect_err("dots in name are rejected");
         assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
-        let err = cmd_new(None).expect_err("missing name is rejected");
+        let err = cmd_new(None, None).expect_err("missing name is rejected");
         assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
     }
 
@@ -792,7 +859,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nulang_new_path_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path_str = dir.to_str().expect("temp dir should be valid UTF-8");
-        let result = cmd_new(Some(path_str));
+        let result = cmd_new(Some(path_str), None);
         assert!(
             result.is_ok(),
             "path with valid basename should succeed: {:?}",
@@ -877,10 +944,10 @@ mod tests {
 
         // Create a stub dep package inside the test dir so the resolver can find it
         let dep_dir = dir.join("deps").join("mylib");
-        scaffold_package(&dep_dir, "mylib").expect("scaffold dep should succeed");
+        scaffold_package(&dep_dir, "mylib", "default").expect("scaffold dep should succeed");
 
         let _guard = ChangeDir::new(&dir);
-        scaffold_package(&dir, "test-pkg").expect("scaffold should succeed");
+        scaffold_package(&dir, "test-pkg", "default").expect("scaffold should succeed");
 
         let manifest = Manifest::load(&dir).expect("manifest should load");
         assert!(manifest.dependencies.is_empty());
@@ -920,7 +987,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let _guard = ChangeDir::new(&dir);
 
-        scaffold_package(&dir, "test-pkg").expect("scaffold should succeed");
+        scaffold_package(&dir, "test-pkg", "default").expect("scaffold should succeed");
 
         // Add a detailed git dependency
         let mut manifest = Manifest::load(&dir).expect("manifest should load");
@@ -982,7 +1049,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let _guard = ChangeDir::new(&dir);
 
-        scaffold_package(&dir, "test-pkg").expect("scaffold should succeed");
+        scaffold_package(&dir, "test-pkg", "default").expect("scaffold should succeed");
 
         let err = cmd_add(Some(&"bad.name".to_string()), Some("./foo"), None, None)
             .expect_err("invalid name should fail");
@@ -1000,7 +1067,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let _guard = ChangeDir::new(&dir);
 
-        scaffold_package(&dir, "test-pkg").expect("scaffold should succeed");
+        scaffold_package(&dir, "test-pkg", "default").expect("scaffold should succeed");
 
         let err = cmd_add(None, Some("./foo"), None, None).expect_err("missing name should fail");
         assert!(matches!(err, NuError::PackageError { msg: _, span: _ }));
@@ -1016,7 +1083,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let _guard = ChangeDir::new(&dir);
 
-        scaffold_package(&dir, "doc-pkg").expect("scaffold should succeed");
+        scaffold_package(&dir, "doc-pkg", "default").expect("scaffold should succeed");
 
         // Add a documented function to src/main.nula
         let main_path = dir.join("src").join("main.nula");
