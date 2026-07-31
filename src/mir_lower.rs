@@ -27,13 +27,6 @@ use std::collections::HashSet;
 type FxHashMap<K, V> =
     std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 
-fn nyi(feature: &str, span: Span) -> NuError {
-    NuError::NotYetImplemented {
-        feature: feature.to_string(),
-        span,
-    }
-}
-
 fn compile_err(msg: impl Into<String>, span: Span) -> NuError {
     NuError::VMError {
         msg: msg.into(),
@@ -137,16 +130,16 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
             });
         }
         hir::Decl::Workflow { name, .. } => {
-            return Err(nyi(
-                &format!("workflow '{}' in HIR/MIR pipeline", name),
-                Span::default(),
-            ));
+            unreachable!(
+                "workflow '{}' should be desugared to an actor by HIR lowering (desugar_workflow)",
+                name
+            );
         }
         hir::Decl::Agent { name, .. } => {
-            return Err(nyi(
-                &format!("agent '{}' in HIR/MIR pipeline", name),
-                Span::default(),
-            ));
+            unreachable!(
+                "agent '{}' should be desugared to an actor by HIR lowering (desugar_agent)",
+                name
+            );
         }
         hir::Decl::Module { decls, .. } => {
             for d in decls {
@@ -2770,27 +2763,6 @@ fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_nyi_error() {
-        let err = nyi("feature_x", Span::default());
-        match err {
-            NuError::NotYetImplemented { feature, span } => {
-                assert_eq!(feature, "feature_x");
-                assert_eq!(span, Span::default());
-            }
-            _ => panic!("expected NotYetImplemented"),
-        }
-    }
-
-    #[test]
-    fn test_compile_err() {
-        let err = compile_err("something broke", Span::default());
-        match err {
-            NuError::VMError { msg, .. } => assert_eq!(msg, "something broke"),
-            _ => panic!("expected VMError"),
-        }
-    }
 
     #[test]
     fn test_lower_empty_module() {

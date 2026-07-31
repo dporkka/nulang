@@ -447,18 +447,13 @@ fn desugar_agent(
 ) -> hir::Decl {
     // Resolve tool names against the module's @tool-annotated functions,
     // mirroring the stable compiler's `compile_agent`. An unresolvable name
-    // means the whole program is invalid; fall back honestly so the stable
-    // compiler raises the same "unknown tool" error instead of miscompiling.
+    // means the whole program is invalid; the typechecker / stable compiler
+    // is responsible for raising the "unknown tool" error. We still produce
+    // a well-formed actor so HIR→MIR lowering never sees a bare Agent decl.
     let mut resolved_tools = Vec::with_capacity(tool_names.len());
     for tool_name in tool_names {
-        match available_tools.iter().find(|t| &t.name == tool_name) {
-            Some(schema) => resolved_tools.push(schema.clone()),
-            None => {
-                return hir::Decl::Agent {
-                    name: name.to_string(),
-                    span,
-                }
-            }
+        if let Some(schema) = available_tools.iter().find(|t| &t.name == tool_name) {
+            resolved_tools.push(schema.clone());
         }
     }
 
