@@ -4525,12 +4525,136 @@ impl VM {
                 self.step_receive_commit();
             }
 
-            // All other opcodes are not yet implemented in the interpreter.
-            _ => {
+            // -- Special opcodes (previously in catch-all) --
+            OpCode::Nop => {
+                // No operation
+            }
+            OpCode::Halt => {
                 return Err(NuError::VMError {
-                    msg: format!("unimplemented opcode {:?}", instr.opcode),
+                    msg: "Halt".to_string(),
                     span: Span::default(),
                 });
+            }
+
+            // -- Constants (cont.) --
+            OpCode::ConstM1 => {
+                self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(-1);
+            }
+            OpCode::ConstL => {
+                return Err(NuError::VMError {
+                    msg: "ConstL (large constant pool index) not yet implemented in interpreter; use ConstU for pools < 65536 entries".into(),
+                    span: Span::default(),
+                });
+            }
+
+            // -- Stack (cont.) --
+            OpCode::Pop => {
+                return Err(NuError::VMError {
+                    msg: "Pop opcode not yet implemented in interpreter".into(),
+                    span: Span::default(),
+                });
+            }
+
+            // -- Conversions --
+            OpCode::IToF => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let int_val = if a.is_int() {
+                    a.as_int().unwrap_or(0)
+                } else if a.is_float() {
+                    a.as_float().unwrap_or(0.0) as i64
+                } else {
+                    sext48(a.as_raw() & PAYLOAD_MASK)
+                };
+                self.frames[frame_idx].regs[instr.op2 as usize] = Value::float(int_val as f64);
+            }
+            OpCode::FToI => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let float_val = a.as_float().unwrap_or(0.0);
+                self.frames[frame_idx].regs[instr.op2 as usize] = Value::int(float_val as i64);
+            }
+            OpCode::FToS => {
+                let a = self.frames[frame_idx].regs[instr.op1 as usize];
+                let s = if let Some(f) = a.as_float() {
+                    if f.fract() == 0.0 && f.is_finite() {
+                        format!("{:.1}", f)
+                    } else {
+                        format!("{}", f)
+                    }
+                } else {
+                    "0.0".to_string()
+                };
+                self.frames[frame_idx].regs[instr.op2 as usize] = self.allocate_string(&s);
+            }
+
+            // -- Control Flow (cont.) --
+            OpCode::Switch => {
+                return Err(NuError::VMError {
+                    msg: "Switch opcode not yet implemented in interpreter".into(),
+                    span: Span::default(),
+                });
+            }
+
+            // -- Memory & Objects (cont.) --
+            OpCode::Alloc => {
+                return Err(NuError::VMError {
+                    msg: "Alloc opcode not yet implemented in interpreter".into(),
+                    span: Span::default(),
+                });
+            }
+            OpCode::TupleL => {
+                return Err(NuError::VMError {
+                    msg: "TupleL opcode not yet implemented in interpreter".into(),
+                    span: Span::default(),
+                });
+            }
+            OpCode::Unpack => {
+                return Err(NuError::VMError {
+                    msg: "Unpack opcode not yet implemented in interpreter".into(),
+                    span: Span::default(),
+                });
+            }
+            OpCode::Copy => {
+                return Err(NuError::VMError {
+                    msg: "Copy opcode not yet implemented in interpreter".into(),
+                    span: Span::default(),
+                });
+            }
+
+            // -- Actor & Concurrency (cont.) — require actor runtime --
+            OpCode::Monitor => {
+                return Err(NuError::VMError {
+                    msg: "Monitor opcode requires actor runtime".into(),
+                    span: Span::default(),
+                });
+            }
+            OpCode::Demon => {
+                return Err(NuError::VMError {
+                    msg: "Demon opcode requires actor runtime".into(),
+                    span: Span::default(),
+                });
+            }
+            OpCode::Link => {
+                return Err(NuError::VMError {
+                    msg: "Link opcode requires actor runtime".into(),
+                    span: Span::default(),
+                });
+            }
+            OpCode::Unlink => {
+                return Err(NuError::VMError {
+                    msg: "Unlink opcode requires actor runtime".into(),
+                    span: Span::default(),
+                });
+            }
+            OpCode::Exit => {
+                return Err(NuError::VMError {
+                    msg: "Exit opcode requires actor runtime".into(),
+                    span: Span::default(),
+                });
+            }
+            OpCode::Yield => {
+                // Set the yield flag; the run loop checks this after step()
+                // returns and will suspend execution.
+                self.yield_pending = true;
             }
         }
         Ok(())
