@@ -84,3 +84,36 @@ pub fn sqrt(x: Float) -> Float {
         guess
     }
 }
+
+// ── Rounding ──────────────────────────────────────────────────────────────
+
+/// Round to nearest integer, 0.5 rounds away from zero.
+pub fn round(x: Float) -> Float {
+    if x >= 0.0 then perform Int.to_float(perform Float.to_int(x + 0.5))
+    else perform Int.to_float(perform Float.to_int(x - 0.5))
+}
+
+/// Largest integer ≤ x.
+pub fn floor(x: Float) -> Int {
+    let t = perform Float.to_int(x);
+    if x < 0.0 && perform Int.to_float(t) != x then t - 1
+    else t
+}
+
+/// Smallest integer ≥ x.
+pub fn ceil(x: Float) -> Int {
+    let t = perform Float.to_int(x);
+    if perform Int.to_float(t) == x then t
+    else if x >= 0.0 then t + 1
+    else t
+}
+
+/// Truncate toward zero.
+pub fn trunc(x: Float) -> Int {
+    perform Float.to_int(x)
+}
+
+/// True when x has no fractional part.
+pub fn is_int(x: Float) -> Bool {
+    perform Int.to_float(perform Float.to_int(x)) == x
+}

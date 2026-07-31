@@ -210,6 +210,62 @@ pub fn replace(s, from, to) {
     result
 }
 
-// ── SKIPPED (missing VM primitives) ───────────────────────────────────────
-// to_upper / to_lower — need String.from_char(code) to convert code to char.
-//   Int.to_string(65) gives "65", not "A". No chr/from_char primitive exists.
+// ── Case conversion ───────────────────────────────────────────────────────
+
+/// Convert string to lowercase (ASCII only, non-ASCII passthrough).
+pub fn to_lower(s: String) -> String {
+    var result = "";
+    var i = 0;
+    let len = perform String.length(s);
+    while i < len {
+        let c = perform String.charAt(s, i);
+        if c >= 65 && c <= 90 then {
+            result = perform String.concat(result, perform String.from_char(c + 32))
+        } else {
+            result = perform String.concat(result, perform String.from_char(c))
+        };
+        i = i + 1
+    };
+    result
+}
+
+/// Convert string to uppercase (ASCII only, non-ASCII passthrough).
+pub fn to_upper(s: String) -> String {
+    var result = "";
+    var i = 0;
+    let len = perform String.length(s);
+    while i < len {
+        let c = perform String.charAt(s, i);
+        if c >= 97 && c <= 122 then {
+            result = perform String.concat(result, perform String.from_char(c - 32))
+        } else {
+            result = perform String.concat(result, perform String.from_char(c))
+        };
+        i = i + 1
+    };
+    result
+}
+
+/// True when no alphabetic character in the string is lowercase.
+pub fn is_upper(s: String) -> Bool {
+    var i = 0;
+    let len = perform String.length(s);
+    while i < len {
+        let c = perform String.charAt(s, i);
+        if c >= 97 && c <= 122 then { return false } else {};
+        i = i + 1
+    };
+    true
+}
+
+/// True when no alphabetic character in the string is uppercase.
+pub fn is_lower(s: String) -> Bool {
+    var i = 0;
+    let len = perform String.length(s);
+    while i < len {
+        let c = perform String.charAt(s, i);
+        if c >= 65 && c <= 90 then { return false } else {};
+        i = i + 1
+    };
+    true
+}
