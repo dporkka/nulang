@@ -3853,8 +3853,16 @@ impl VM {
                     Value::bool(
                         (a.as_float().unwrap() - b.as_float().unwrap()).abs() < f64::EPSILON,
                     )
+                } else if a.is_int() && b.is_int() {
+                    Value::bool(a.as_int().unwrap() == b.as_int().unwrap())
+                } else if a.is_float() && b.is_int() {
+                    let bf = b.as_int().unwrap() as f64;
+                    Value::bool((a.as_float().unwrap() - bf).abs() < f64::EPSILON)
+                } else if a.is_int() && b.is_float() {
+                    let af = a.as_int().unwrap() as f64;
+                    Value::bool((af - b.as_float().unwrap()).abs() < f64::EPSILON)
                 } else {
-                    Value::bool(a.as_int().unwrap_or(0) == b.as_int().unwrap_or(0))
+                    Value::bool(a.raw == b.raw)
                 };
             }
             OpCode::ICmpLt => {
@@ -3862,8 +3870,14 @@ impl VM {
                 let b = self.frames[frame_idx].regs[instr.op2 as usize];
                 self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
                     Value::bool(a.as_float().unwrap() < b.as_float().unwrap())
+                } else if a.is_int() && b.is_int() {
+                    Value::bool(a.as_int().unwrap() < b.as_int().unwrap())
+                } else if a.is_float() && b.is_int() {
+                    Value::bool(a.as_float().unwrap() < b.as_int().unwrap() as f64)
+                } else if a.is_int() && b.is_float() {
+                    Value::bool((a.as_int().unwrap() as f64) < b.as_float().unwrap())
                 } else {
-                    Value::bool(a.as_int().unwrap_or(0) < b.as_int().unwrap_or(0))
+                    Value::bool(a.raw < b.raw)
                 };
             }
             OpCode::ICmpGt => {
@@ -3871,8 +3885,14 @@ impl VM {
                 let b = self.frames[frame_idx].regs[instr.op2 as usize];
                 self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
                     Value::bool(a.as_float().unwrap() > b.as_float().unwrap())
+                } else if a.is_int() && b.is_int() {
+                    Value::bool(a.as_int().unwrap() > b.as_int().unwrap())
+                } else if a.is_float() && b.is_int() {
+                    Value::bool(a.as_float().unwrap() > b.as_int().unwrap() as f64)
+                } else if a.is_int() && b.is_float() {
+                    Value::bool((a.as_int().unwrap() as f64) > b.as_float().unwrap())
                 } else {
-                    Value::bool(a.as_int().unwrap_or(0) > b.as_int().unwrap_or(0))
+                    Value::bool(a.raw > b.raw)
                 };
             }
             OpCode::ICmpLe => {
@@ -3880,8 +3900,14 @@ impl VM {
                 let b = self.frames[frame_idx].regs[instr.op2 as usize];
                 self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
                     Value::bool(a.as_float().unwrap() <= b.as_float().unwrap())
+                } else if a.is_int() && b.is_int() {
+                    Value::bool(a.as_int().unwrap() <= b.as_int().unwrap())
+                } else if a.is_float() && b.is_int() {
+                    Value::bool(a.as_float().unwrap() <= b.as_int().unwrap() as f64)
+                } else if a.is_int() && b.is_float() {
+                    Value::bool((a.as_int().unwrap() as f64) <= b.as_float().unwrap())
                 } else {
-                    Value::bool(a.as_int().unwrap_or(0) <= b.as_int().unwrap_or(0))
+                    Value::bool(a.raw <= b.raw)
                 };
             }
             OpCode::ICmpGe => {
@@ -3889,8 +3915,14 @@ impl VM {
                 let b = self.frames[frame_idx].regs[instr.op2 as usize];
                 self.frames[frame_idx].regs[instr.op3 as usize] = if a.is_float() && b.is_float() {
                     Value::bool(a.as_float().unwrap() >= b.as_float().unwrap())
+                } else if a.is_int() && b.is_int() {
+                    Value::bool(a.as_int().unwrap() >= b.as_int().unwrap())
+                } else if a.is_float() && b.is_int() {
+                    Value::bool(a.as_float().unwrap() >= b.as_int().unwrap() as f64)
+                } else if a.is_int() && b.is_float() {
+                    Value::bool((a.as_int().unwrap() as f64) >= b.as_float().unwrap())
                 } else {
-                    Value::bool(a.as_int().unwrap_or(0) >= b.as_int().unwrap_or(0))
+                    Value::bool(a.raw >= b.raw)
                 };
             }
             OpCode::FCmpEq => {

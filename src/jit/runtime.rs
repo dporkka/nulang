@@ -138,8 +138,16 @@ pub extern "C" fn nulang_idec(a: u64) -> u64 {
 pub extern "C" fn nulang_icmp_eq(a: u64, b: u64) -> u64 {
     if is_float_raw(a) && is_float_raw(b) {
         Value::bool((f64::from_bits(a) - f64::from_bits(b)).abs() < f64::EPSILON).as_raw()
-    } else {
+    } else if (a & TAG_MASK) == TAG_INT && (b & TAG_MASK) == TAG_INT {
         Value::bool(sext48(a & PAYLOAD_MASK) == sext48(b & PAYLOAD_MASK)).as_raw()
+    } else if is_float_raw(a) && (b & TAG_MASK) == TAG_INT {
+        let bf = sext48(b & PAYLOAD_MASK) as f64;
+        Value::bool((f64::from_bits(a) - bf).abs() < f64::EPSILON).as_raw()
+    } else if (a & TAG_MASK) == TAG_INT && is_float_raw(b) {
+        let af = sext48(a & PAYLOAD_MASK) as f64;
+        Value::bool((af - f64::from_bits(b)).abs() < f64::EPSILON).as_raw()
+    } else {
+        Value::bool(a == b).as_raw()
     }
 }
 
@@ -147,8 +155,14 @@ pub extern "C" fn nulang_icmp_eq(a: u64, b: u64) -> u64 {
 pub extern "C" fn nulang_icmp_lt(a: u64, b: u64) -> u64 {
     if is_float_raw(a) && is_float_raw(b) {
         Value::bool(f64::from_bits(a) < f64::from_bits(b)).as_raw()
-    } else {
+    } else if (a & TAG_MASK) == TAG_INT && (b & TAG_MASK) == TAG_INT {
         Value::bool(sext48(a & PAYLOAD_MASK) < sext48(b & PAYLOAD_MASK)).as_raw()
+    } else if is_float_raw(a) && (b & TAG_MASK) == TAG_INT {
+        Value::bool(f64::from_bits(a) < sext48(b & PAYLOAD_MASK) as f64).as_raw()
+    } else if (a & TAG_MASK) == TAG_INT && is_float_raw(b) {
+        Value::bool((sext48(a & PAYLOAD_MASK) as f64) < f64::from_bits(b)).as_raw()
+    } else {
+        Value::bool(a < b).as_raw()
     }
 }
 
@@ -156,8 +170,14 @@ pub extern "C" fn nulang_icmp_lt(a: u64, b: u64) -> u64 {
 pub extern "C" fn nulang_icmp_gt(a: u64, b: u64) -> u64 {
     if is_float_raw(a) && is_float_raw(b) {
         Value::bool(f64::from_bits(a) > f64::from_bits(b)).as_raw()
-    } else {
+    } else if (a & TAG_MASK) == TAG_INT && (b & TAG_MASK) == TAG_INT {
         Value::bool(sext48(a & PAYLOAD_MASK) > sext48(b & PAYLOAD_MASK)).as_raw()
+    } else if is_float_raw(a) && (b & TAG_MASK) == TAG_INT {
+        Value::bool(f64::from_bits(a) > sext48(b & PAYLOAD_MASK) as f64).as_raw()
+    } else if (a & TAG_MASK) == TAG_INT && is_float_raw(b) {
+        Value::bool((sext48(a & PAYLOAD_MASK) as f64) > f64::from_bits(b)).as_raw()
+    } else {
+        Value::bool(a > b).as_raw()
     }
 }
 
@@ -165,8 +185,14 @@ pub extern "C" fn nulang_icmp_gt(a: u64, b: u64) -> u64 {
 pub extern "C" fn nulang_icmp_le(a: u64, b: u64) -> u64 {
     if is_float_raw(a) && is_float_raw(b) {
         Value::bool(f64::from_bits(a) <= f64::from_bits(b)).as_raw()
-    } else {
+    } else if (a & TAG_MASK) == TAG_INT && (b & TAG_MASK) == TAG_INT {
         Value::bool(sext48(a & PAYLOAD_MASK) <= sext48(b & PAYLOAD_MASK)).as_raw()
+    } else if is_float_raw(a) && (b & TAG_MASK) == TAG_INT {
+        Value::bool(f64::from_bits(a) <= sext48(b & PAYLOAD_MASK) as f64).as_raw()
+    } else if (a & TAG_MASK) == TAG_INT && is_float_raw(b) {
+        Value::bool((sext48(a & PAYLOAD_MASK) as f64) <= f64::from_bits(b)).as_raw()
+    } else {
+        Value::bool(a <= b).as_raw()
     }
 }
 
@@ -174,8 +200,14 @@ pub extern "C" fn nulang_icmp_le(a: u64, b: u64) -> u64 {
 pub extern "C" fn nulang_icmp_ge(a: u64, b: u64) -> u64 {
     if is_float_raw(a) && is_float_raw(b) {
         Value::bool(f64::from_bits(a) >= f64::from_bits(b)).as_raw()
-    } else {
+    } else if (a & TAG_MASK) == TAG_INT && (b & TAG_MASK) == TAG_INT {
         Value::bool(sext48(a & PAYLOAD_MASK) >= sext48(b & PAYLOAD_MASK)).as_raw()
+    } else if is_float_raw(a) && (b & TAG_MASK) == TAG_INT {
+        Value::bool(f64::from_bits(a) >= sext48(b & PAYLOAD_MASK) as f64).as_raw()
+    } else if (a & TAG_MASK) == TAG_INT && is_float_raw(b) {
+        Value::bool((sext48(a & PAYLOAD_MASK) as f64) >= f64::from_bits(b)).as_raw()
+    } else {
+        Value::bool(a >= b).as_raw()
     }
 }
 

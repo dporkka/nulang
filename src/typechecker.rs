@@ -1928,11 +1928,17 @@ impl TypeChecker {
                 let (s2, right_ty) = self.infer_expr(&ctx1, right)?;
 
                 let combined = compose_subst(&s2, &s1);
-                let s3 = mgu(
-                    &apply_subst(&right_ty, &combined),
-                    &apply_subst(&left_ty, &combined),
-                    span,
-                )?;
+                let lty = apply_subst(&left_ty, &combined);
+                let rty = apply_subst(&right_ty, &combined);
+
+                // Nil is a universal sentinel: == nil and != nil are valid
+                // for any type (including perform results whose type may
+                // unify with Nil but whose runtime value may be non-nil).
+                if matches!(op, Eq | Ne) && (lty == Type::nil() || rty == Type::nil()) {
+                    return Ok((combined, Type::bool()));
+                }
+
+                let s3 = mgu(&rty, &lty, span)?;
                 let final_subst = compose_subst(&s3, &combined);
 
                 Ok((final_subst, Type::bool()))
