@@ -49,6 +49,7 @@ pub fn run(args: &[String]) -> NuResult<()> {
         Some("test") => {
             let mut filter: Option<&str> = None;
             let mut verbose = false;
+            let mut watch = false;
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
@@ -59,6 +60,7 @@ pub fn run(args: &[String]) -> NuResult<()> {
                         }
                     }
                     "--verbose" | "-v" => verbose = true,
+                    "--watch" | "-w" => watch = true,
                     other => {
                         return Err(NuError::PackageError {
                             msg: format!("unknown flag '{}' for nula test", other),
@@ -68,7 +70,11 @@ pub fn run(args: &[String]) -> NuResult<()> {
                 }
                 i += 1;
             }
-            cmd_test(filter, verbose)
+            if watch {
+                cmd_test_watch(filter, verbose)
+            } else {
+                cmd_test(filter, verbose)
+            }
         }
         Some("run") => {
             if args.get(1).map(String::as_str) == Some("--watch") {
@@ -152,7 +158,7 @@ fn print_usage() {
     println!("  init          Scaffold a new package in the current directory");
     println!("  build         Resolve dependencies and type-check the package");
     println!("  build-wasm    Build package to .wasm + .cwasm (AOT, requires wasmtime)");
-    println!("  test [--filter <substr>] [--verbose|-v]  Run .nula test files");
+    println!("  test [--filter <substr>] [--verbose|-v] [--watch|-w]  Run .nula test files");
     println!("  run           Build and run the package entry point");
     println!("  run --watch   Build and re-run on source changes");
     println!("  watch         Alias for 'run --watch'");
@@ -640,9 +646,45 @@ fn cmd_test(filter: Option<&str>, verbose: bool) -> NuResult<()> {
 
     println!("\ntest result: {} passed; {} failed", passed, failed);
     if failed > 0 {
-        std::process::exit(1);
+        return Err(NuError::PackageError {
+            msg: format!("{} test(s) failed", failed),
+            span: Span::default(),
+        });
     }
     Ok(())
+}
+
+/// `nula test --watch` (or `nula test -w`): run tests and re-run when source
+/// files change under `src/` or `tests/`. Uses simple mtime polling.
+fn cmd_test_watch(filter: Option<&str>, verbose: bool) -> NuResult<()> {
+    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })?;
+
+    // Initial run
+    let _ = cmd_test(filter, verbose);
+
+    // Collect initial mtimes for all .nula files under src/ and tests/
+    let src_dir = root.join("src");
+    let tests_dir = root.join("tests");
+    let mut last_src = collect_mtimes(&src_dir);
+    let mut last_tests = collect_mtimes(&tests_dir);
+
+    println!("watching for changes... (Ctrl-C to stop)");
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let current_src = collect_mtimes(&src_dir);
+        let current_tests = collect_mtimes(&tests_dir);
+        if current_src != last_src || current_tests != last_tests {
+            last_src = current_src;
+            last_tests = current_tests;
+            // Clear screen
+            print!("\x1B[2J\x1B[H");
+            eprintln!("re-running tests...");
+            let _ = cmd_test(filter, verbose);
+        }
+    }
 }
 
 /// Find all `fn test_*` function names in a source string.
