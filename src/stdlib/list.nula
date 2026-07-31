@@ -191,6 +191,52 @@ pub fn sort(xs: [Int]) -> [Int] {
     }
 }
 
+/// Sort using comparator cmp(a, b) that returns true if a should come before b.
+/// Same quicksort as `sort`, but uses cmp for the partition instead of < and >.
+pub fn sort_by(cmp, xs) {
+    var len = perform Array.length(xs);
+    if len <= 1 then { xs } else {
+        var pivot = xs[0];
+        var less = filter(fn(x) { cmp(x, pivot) }, xs);
+        var eq = filter(fn(x) { !cmp(x, pivot) && !cmp(pivot, x) }, xs);
+        var greater = filter(fn(x) { cmp(pivot, x) }, xs);
+        var result = sort_by(cmp, less);
+        for x in eq {
+            result = perform Array.push(result, x)
+        };
+        for x in sort_by(cmp, greater) {
+            result = perform Array.push(result, x)
+        };
+        result
+    }
+}
+
+/// Minimum element according to comparator cmp(a, b) returning true if a is "less than" b.
+/// Returns 0 for empty array (matching max_of/min_of convention).
+pub fn min_by(cmp, xs) {
+    var first = true;
+    var best = 0;
+    for x in xs {
+        if first then { best = x; first = false } else {
+            if cmp(x, best) then { best = x } else {}
+        }
+    };
+    best
+}
+
+/// Maximum element according to comparator cmp(a, b) returning true if a is "less than" b.
+/// Returns 0 for empty array (matching max_of/min_of convention).
+pub fn max_by(cmp, xs) {
+    var first = true;
+    var best = 0;
+    for x in xs {
+        if first then { best = x; first = false } else {
+            if cmp(best, x) then { best = x } else {}
+        }
+    };
+    best
+}
+
 /// Concatenate two arrays into a new array.  Original arrays unchanged.
 pub fn append(xs: [Int], ys: [Int]) -> [Int] {
     var result = xs;
