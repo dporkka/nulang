@@ -758,7 +758,7 @@ mod tests {
 
     #[test]
     fn test_compile_if_expr() {
-        let wasm = compile_source("if true { 1 } else { 2 }").expect("compile if");
+        let wasm = compile_source("if true then 1 else 2").expect("compile if");
         assert_eq!(&wasm[0..4], b"\0asm");
     }
 

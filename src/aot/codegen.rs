@@ -758,6 +758,7 @@ fn compile_const(
         crate::bytecode::Constant::Unit => Ok(builder
             .ins()
             .iconst(types::I64, 0x7FF9_0000_0000_0000u64 as i64)),
+        crate::bytecode::Constant::Nil => Ok(builder.ins().iconst(types::I64, TAG_NIL_I64)),
         _ => Err(AotCompileError::Unsupported(format!("constant {:?}", c))),
     }
 }
@@ -976,6 +977,78 @@ fn compile_binary(
             } else {
                 call_helper(builder, helpers, "nulang_icmp_eq", &[lhs_val, rhs_val])
                     .and_then(|eq| call_helper(builder, helpers, "nulang_not", &[eq]))
+            }
+        }
+        BinOp::And => call_helper(builder, helpers, "nulang_and", &[lhs_val, rhs_val]),
+        BinOp::Or => call_helper(builder, helpers, "nulang_or", &[lhs_val, rhs_val]),
+        BinOp::BitAnd => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().band(lhs_val, rhs_val))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let result = builder.ins().band(l, r);
+                    Ok(emit_tag_int(builder, result))
+                }
+            } else {
+                call_helper(builder, helpers, "nulang_bitand", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::BitOr => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().bor(lhs_val, rhs_val))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let result = builder.ins().bor(l, r);
+                    Ok(emit_tag_int(builder, result))
+                }
+            } else {
+                call_helper(builder, helpers, "nulang_bitor", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::BitXor => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().bxor(lhs_val, rhs_val))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let result = builder.ins().bxor(l, r);
+                    Ok(emit_tag_int(builder, result))
+                }
+            } else {
+                call_helper(builder, helpers, "nulang_xor", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::Shl => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().ishl(lhs_val, rhs_val))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let result = builder.ins().ishl(l, r);
+                    Ok(emit_tag_int(builder, result))
+                }
+            } else {
+                call_helper(builder, helpers, "nulang_shl", &[lhs_val, rhs_val])
+            }
+        }
+        BinOp::Shr => {
+            if type_meta.both_known(lhs_reg_usize, rhs_reg_usize, KnownType::Int) {
+                if mode == CompileMode::Unboxed {
+                    Ok(builder.ins().sshr(lhs_val, rhs_val))
+                } else {
+                    let l = emit_sext48(builder, lhs_val);
+                    let r = emit_sext48(builder, rhs_val);
+                    let result = builder.ins().sshr(l, r);
+                    Ok(emit_tag_int(builder, result))
+                }
+            } else {
+                call_helper(builder, helpers, "nulang_shr", &[lhs_val, rhs_val])
             }
         }
         _ => Err(AotCompileError::Unsupported(format!("binary op {:?}", op))),

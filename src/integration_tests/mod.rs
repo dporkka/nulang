@@ -76,6 +76,19 @@ mod tests {
     // Test helpers
     // -----------------------------------------------------------------------
 
+    /// Which backend to use. Controlled by the `NU_BACKEND` env var:
+    ///   - unset or "bytecode" → bytecode VM (default)
+    ///   - "native" → AOT native compilation via Cranelift
+    fn backend() -> &'static str {
+        use std::sync::LazyLock;
+        static BACKEND: LazyLock<String> = LazyLock::new(|| {
+            std::env::var("NU_BACKEND")
+                .unwrap_or_else(|_| "bytecode".to_string())
+                .to_lowercase()
+        });
+        &BACKEND
+    }
+
     /// Run a source string through the full pipeline and return (value, type).
     fn run_source(source: &str) -> Result<(Value, Type), NuError> {
         // 1. Parse
@@ -103,13 +116,23 @@ mod tests {
         // 4. Compile via HIR/MIR pipeline
         let hir = crate::hir_lower::lower_module(&ast);
         let mir = crate::mir_lower::lower_module(&hir)?;
-        let module = crate::mir_codegen::compile_mir(&mir, "test")?;
-        // 5. Run
-        let mut vm = VM::new();
-        vm.load_module(module);
-        let value = vm.run()?;
 
-        Ok((value, module_type))
+        match backend() {
+            "native" => {
+                let aot_module = crate::aot::AotModule::compile(&mir)?;
+                let result_raw = aot_module.run()?;
+                let value = Value::from_raw(result_raw);
+                Ok((value, module_type))
+            }
+            _ => {
+                let module = crate::mir_codegen::compile_mir(&mir, "test")?;
+                // 5. Run
+                let mut vm = VM::new();
+                vm.load_module(module);
+                let value = vm.run()?;
+                Ok((value, module_type))
+            }
+        }
     }
 
     /// Assert that running source produces an integer value.
