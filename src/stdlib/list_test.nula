@@ -1,0 +1,251 @@
+// Tests for stdlib::list functions.
+
+import stdlib::list
+
+// ── length ───────────────────────────────────────────────────────────────────
+fn test_length() {
+  perform Test.assert_eq(length([]), 0, "length empty")
+  perform Test.assert_eq(length([1, 2, 3]), 3, "length 3")
+  perform Test.assert_eq(length([42]), 1, "length single")
+}
+
+// ── sum ──────────────────────────────────────────────────────────────────────
+fn test_sum() {
+  perform Test.assert_eq(sum([]), 0, "sum empty")
+  perform Test.assert_eq(sum([1, 2, 3, 4]), 10, "sum 1..4")
+  perform Test.assert_eq(sum([-1, 1]), 0, "sum cancel")
+}
+
+// ── contains ─────────────────────────────────────────────────────────────────
+fn test_contains() {
+  perform Test.assert(contains(2, [1, 2, 3]), "contains true")
+  perform Test.assert(!contains(99, [1, 2, 3]), "contains false")
+  perform Test.assert(!contains(1, []), "contains empty")
+}
+
+// ── index_of ─────────────────────────────────────────────────────────────────
+fn test_index_of() {
+  perform Test.assert_eq(index_of(2, [1, 2, 3]), 1, "index_of middle")
+  perform Test.assert_eq(index_of(1, [1, 2, 3]), 0, "index_of first")
+  perform Test.assert_eq(index_of(3, [1, 2, 3]), 2, "index_of last")
+  perform Test.assert_eq(index_of(99, [1, 2, 3]), -1, "index_of not found")
+  perform Test.assert_eq(index_of(1, []), -1, "index_of empty")
+}
+
+// ── any ──────────────────────────────────────────────────────────────────────
+fn test_any() {
+  let is_even = fn(x) { x - (x / 2) * 2 == 0 }
+  perform Test.assert(any(is_even, [1, 2, 3]), "any true")
+  perform Test.assert(!any(is_even, [1, 3, 5]), "any false")
+  perform Test.assert(!any(is_even, []), "any empty")
+}
+
+// ── all ──────────────────────────────────────────────────────────────────────
+fn test_all() {
+  let is_pos = fn(x) { x > 0 }
+  perform Test.assert(all(is_pos, [1, 2, 3]), "all true")
+  perform Test.assert(!all(is_pos, [1, -2, 3]), "all false")
+  perform Test.assert(all(is_pos, []), "all empty")
+}
+
+// ── find ─────────────────────────────────────────────────────────────────────
+fn test_find() {
+  let is_even = fn(x) { x - (x / 2) * 2 == 0 }
+  perform Test.assert_eq(find(is_even, [1, 2, 3]), 2, "find even")
+  perform Test.assert_eq(find(is_even, [1, 3, 5]), -1, "find not found")
+}
+
+// ── fold ─────────────────────────────────────────────────────────────────────
+fn test_fold() {
+  let add = fn(a, b) { a + b }
+  perform Test.assert_eq(fold(add, 0, [1, 2, 3, 4]), 10, "fold sum")
+  perform Test.assert_eq(fold(add, 10, [1, 2, 3]), 16, "fold with init")
+  perform Test.assert_eq(fold(add, 0, []), 0, "fold empty")
+}
+
+// ── max_of ───────────────────────────────────────────────────────────────────
+fn test_max_of() {
+  perform Test.assert_eq(max_of([1, 5, 3, 9, 2]), 9, "max_of middle")
+  perform Test.assert_eq(max_of([-5, -1, -3]), -1, "max_of negative")
+  perform Test.assert_eq(max_of([42]), 42, "max_of single")
+}
+
+// ── min_of ───────────────────────────────────────────────────────────────────
+fn test_min_of() {
+  perform Test.assert_eq(min_of([1, 5, 3, 0, 2]), 0, "min_of middle")
+  perform Test.assert_eq(min_of([-5, -1, -3]), -5, "min_of negative")
+  perform Test.assert_eq(min_of([42]), 42, "min_of single")
+}
+
+// ── map ──────────────────────────────────────────────────────────────────────
+fn test_map() {
+  let double = fn(x) { x * 2 }
+  let result = map(double, [1, 2, 3])
+  perform Test.assert_eq(length(result), 3, "map len")
+  perform Test.assert_eq(sum(result), 12, "map sum 2+4+6")
+  let empty = map(double, [])
+  perform Test.assert_eq(length(empty), 0, "map empty len")
+}
+
+// ── filter ───────────────────────────────────────────────────────────────────
+fn test_filter() {
+  let is_even = fn(x) { x - (x / 2) * 2 == 0 }
+  let result = filter(is_even, [1, 2, 3, 4, 5, 6])
+  perform Test.assert_eq(length(result), 3, "filter len")
+  perform Test.assert_eq(sum(result), 12, "filter sum 2+4+6")
+  let none = filter(is_even, [1, 3, 5])
+  perform Test.assert_eq(length(none), 0, "filter none len")
+  perform Test.assert_eq(length(filter(is_even, [])), 0, "filter empty")
+}
+
+// ── reverse ──────────────────────────────────────────────────────────────────
+fn test_reverse() {
+  let result = reverse([1, 2, 3])
+  perform Test.assert_eq(length(result), 3, "reverse len")
+  perform Test.assert_eq(sum(result), 6, "reverse sum")
+  perform Test.assert_eq(index_of(3, result), 0, "reverse first is 3")
+  perform Test.assert_eq(length(reverse([])), 0, "reverse empty")
+}
+
+// ── take ─────────────────────────────────────────────────────────────────────
+fn test_take() {
+  let result = take(2, [1, 2, 3, 4, 5])
+  perform Test.assert_eq(length(result), 2, "take 2 len")
+  perform Test.assert_eq(sum(result), 3, "take 2 sum 1+2")
+  perform Test.assert_eq(length(take(0, [1, 2, 3])), 0, "take 0")
+  perform Test.assert_eq(length(take(10, [1, 2, 3])), 3, "take more than len")
+  perform Test.assert_eq(length(take(3, [])), 0, "take from empty")
+}
+
+// ── drop ─────────────────────────────────────────────────────────────────────
+fn test_drop() {
+  let result = drop(2, [1, 2, 3, 4, 5])
+  perform Test.assert_eq(length(result), 3, "drop 2 len")
+  perform Test.assert_eq(sum(result), 12, "drop 2 sum 3+4+5")
+  perform Test.assert_eq(length(drop(0, [1, 2, 3])), 3, "drop 0")
+  perform Test.assert_eq(length(drop(10, [1, 2, 3])), 0, "drop more than len")
+  perform Test.assert_eq(length(drop(3, [])), 0, "drop from empty")
+}
+
+// ── range ────────────────────────────────────────────────────────────────────
+fn test_range() {
+  let result = range(5)
+  perform Test.assert_eq(length(result), 5, "range len")
+  perform Test.assert(contains(0, result), "range contains 0")
+  perform Test.assert(contains(4, result), "range contains 4")
+  perform Test.assert_eq(length(range(0)), 0, "range 0")
+}
+
+// ── sort ─────────────────────────────────────────────────────────────────────
+fn test_sort() {
+  let result = sort([3, 1, 4, 1, 5, 9, 2, 6])
+  perform Test.assert_eq(length(result), 8, "sort len")
+  perform Test.assert_eq(sum(result), 31, "sort sum preserved")
+  // Check sorted: index_of each in order
+  perform Test.assert_eq(index_of(1, result), 0, "sort first is 1")
+  let empty = sort([])
+  perform Test.assert_eq(length(empty), 0, "sort empty")
+  let single = sort([42])
+  perform Test.assert_eq(length(single), 1, "sort single len")
+  perform Test.assert_eq(sum(single), 42, "sort single sum")
+}
+
+// ── sort_by ──────────────────────────────────────────────────────────────────
+fn test_sort_by() {
+  let descending = fn(a, b) { a > b }
+  let result = sort_by(descending, [3, 1, 4, 1, 5])
+  perform Test.assert_eq(length(result), 5, "sort_by len")
+  perform Test.assert_eq(sum(result), 14, "sort_by sum preserved")
+  perform Test.assert_eq(index_of(5, result), 0, "sort_by first is 5")
+  let empty = sort_by(descending, [])
+  perform Test.assert_eq(length(empty), 0, "sort_by empty")
+}
+
+// ── min_by ───────────────────────────────────────────────────────────────────
+fn test_min_by() {
+  let by_abs = fn(a, b) {
+    let abs_a = if a < 0 then 0 - a else a;
+    let abs_b = if b < 0 then 0 - b else b;
+    abs_a < abs_b
+  }
+  perform Test.assert_eq(min_by(by_abs, [5, -2, 3, -10]), -2, "min_by abs")
+}
+
+// ── max_by ───────────────────────────────────────────────────────────────────
+fn test_max_by() {
+  let by_abs = fn(a, b) {
+    let abs_a = if a < 0 then 0 - a else a;
+    let abs_b = if b < 0 then 0 - b else b;
+    abs_a < abs_b
+  }
+  perform Test.assert_eq(max_by(by_abs, [5, -2, 3, -10]), -10, "max_by abs")
+}
+
+// ── append ───────────────────────────────────────────────────────────────────
+fn test_append() {
+  let result = append([1, 2, 3], [4, 5])
+  perform Test.assert_eq(length(result), 5, "append len")
+  perform Test.assert_eq(sum(result), 15, "append sum")
+  perform Test.assert_eq(index_of(4, result), 3, "append index of first from ys")
+  let empty_l = append([], [1, 2])
+  perform Test.assert_eq(length(empty_l), 2, "append empty xs")
+  let empty_r = append([1, 2], [])
+  perform Test.assert_eq(length(empty_r), 2, "append empty ys")
+}
+
+// ── zip ──────────────────────────────────────────────────────────────────────
+fn test_zip() {
+  let result = zip([1, 2, 3], [10, 20])
+  perform Test.assert_eq(length(result), 2, "zip len")
+  let result2 = zip([1], [10, 20, 30])
+  perform Test.assert_eq(length(result2), 1, "zip shorter first")
+  let empty = zip([], [1, 2])
+  perform Test.assert_eq(length(empty), 0, "zip empty")
+}
+
+// ── enumerate ────────────────────────────────────────────────────────────────
+fn test_enumerate() {
+  let result = enumerate([10, 20, 30])
+  perform Test.assert_eq(length(result), 3, "enumerate len")
+  let empty = enumerate([])
+  perform Test.assert_eq(length(empty), 0, "enumerate empty")
+}
+
+// ── uniq ─────────────────────────────────────────────────────────────────────
+fn test_uniq() {
+  let result = uniq([1, 2, 2, 3, 1, 4])
+  perform Test.assert_eq(length(result), 4, "uniq len")
+  perform Test.assert_eq(sum(result), 10, "uniq sum 1+2+3+4")
+  let empty = uniq([])
+  perform Test.assert_eq(length(empty), 0, "uniq empty")
+  let same = uniq([5, 5, 5])
+  perform Test.assert_eq(length(same), 1, "uniq all same len")
+  perform Test.assert_eq(sum(same), 5, "uniq all same sum")
+}
+
+fn main() {
+  test_length()
+  test_sum()
+  test_contains()
+  test_index_of()
+  test_any()
+  test_all()
+  test_find()
+  test_fold()
+  test_max_of()
+  test_min_of()
+  test_map()
+  test_filter()
+  test_reverse()
+  test_take()
+  test_drop()
+  test_range()
+  test_sort()
+  test_sort_by()
+  test_min_by()
+  test_max_by()
+  test_append()
+  test_zip()
+  test_enumerate()
+  test_uniq()
+}

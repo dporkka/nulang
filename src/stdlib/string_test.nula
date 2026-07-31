@@ -1,0 +1,184 @@
+// Tests for stdlib::string functions.
+// Each function category is in its own helper to isolate VM local state.
+
+import stdlib::string
+
+// ── length ───────────────────────────────────────────────────────────────────
+fn test_length() {
+  perform Test.assert_eq(length(""), 0, "length empty")
+  perform Test.assert_eq(length("hello"), 5, "length hello")
+  perform Test.assert_eq(length("a"), 1, "length single")
+}
+
+// ── is_empty ─────────────────────────────────────────────────────────────────
+fn test_is_empty() {
+  perform Test.assert(is_empty(""), "is_empty empty")
+  perform Test.assert(!is_empty("a"), "is_empty non-empty")
+}
+
+// ── char_at ──────────────────────────────────────────────────────────────────
+fn test_char_at() {
+  perform Test.assert_eq(length(char_at("hello", 1)), 1, "char_at result 1 char")
+  perform Test.assert(starts_with(char_at("hello", 0), "h"), "char_at first h")
+  perform Test.assert(starts_with(char_at("hello", 4), "o"), "char_at last o")
+  perform Test.assert_eq(length(char_at("hello", -1)), 0, "char_at neg index")
+  perform Test.assert_eq(length(char_at("hello", 99)), 0, "char_at oob")
+}
+
+// ── char_code_at ─────────────────────────────────────────────────────────────
+fn test_char_code_at() {
+  perform Test.assert_eq(char_code_at("a", 0), 97, "char_code_at a")
+  perform Test.assert_eq(char_code_at("A", 0), 65, "char_code_at A")
+  perform Test.assert_eq(char_code_at("0", 0), 48, "char_code_at 0")
+  perform Test.assert_eq(char_code_at("", 0), -1, "char_code_at empty")
+  perform Test.assert_eq(char_code_at("x", 5), -1, "char_code_at oob")
+}
+
+// ── starts_with ──────────────────────────────────────────────────────────────
+fn test_starts_with() {
+  perform Test.assert(starts_with("hello", ""), "starts_with empty")
+  perform Test.assert(starts_with("hello", "he"), "starts_with true")
+  perform Test.assert(!starts_with("hello", "lo"), "starts_with false")
+  perform Test.assert(!starts_with("hi", "hello"), "starts_with longer")
+}
+
+// ── ends_with ────────────────────────────────────────────────────────────────
+fn test_ends_with() {
+  perform Test.assert(ends_with("hello", ""), "ends_with empty")
+  perform Test.assert(ends_with("hello", "lo"), "ends_with true")
+  perform Test.assert(!ends_with("hello", "he"), "ends_with false")
+  perform Test.assert(!ends_with("hi", "hello"), "ends_with longer")
+}
+
+// ── contains ─────────────────────────────────────────────────────────────────
+fn test_contains() {
+  perform Test.assert(contains("hello", ""), "contains empty")
+  perform Test.assert(contains("hello", "ell"), "contains true")
+  perform Test.assert(!contains("hello", "xyz"), "contains false")
+  perform Test.assert(contains("hello", "hello"), "contains self")
+}
+
+// ── index_of ─────────────────────────────────────────────────────────────────
+fn test_index_of() {
+  perform Test.assert_eq(index_of("hello", ""), 0, "index_of empty")
+  perform Test.assert_eq(index_of("hello", "h"), 0, "index_of first")
+  perform Test.assert_eq(index_of("hello", "o"), 4, "index_of last")
+  perform Test.assert_eq(index_of("hello", "ll"), 2, "index_of multi")
+  perform Test.assert_eq(index_of("hello", "xyz"), -1, "index_of not found")
+  perform Test.assert_eq(index_of("banana", "na"), 2, "index_of first match")
+}
+
+// ── repeat ───────────────────────────────────────────────────────────────────
+fn test_repeat() {
+  perform Test.assert_eq(length(repeat("a", 0)), 0, "repeat zero")
+  perform Test.assert_eq(length(repeat("ab", 3)), 6, "repeat 3")
+  perform Test.assert(starts_with(repeat("x", 5), "xxxxx"), "repeat xxxxx")
+}
+
+// ── reverse ──────────────────────────────────────────────────────────────────
+fn test_reverse() {
+  perform Test.assert_eq(length(reverse("")), 0, "reverse empty")
+  perform Test.assert_eq(length(reverse("abc")), 3, "reverse len")
+  let rev = reverse("abc")
+  perform Test.assert(starts_with(rev, "cba"), "reverse content")
+}
+
+// ── trim ─────────────────────────────────────────────────────────────────────
+fn test_trim() {
+  perform Test.assert_eq(length(trim("")), 0, "trim empty")
+  perform Test.assert_eq(length(trim("  a  ")), 1, "trim spaced")
+  let t = trim("  hello  ")
+  perform Test.assert(starts_with(t, "hello"), "trim starts hello")
+  perform Test.assert_eq(length(t), 5, "trim len 5")
+  let t2 = trim("  \n\t\r  ")
+  perform Test.assert_eq(length(t2), 0, "trim all whitespace")
+}
+
+// ── split ────────────────────────────────────────────────────────────────────
+fn test_split() {
+  let parts = split("a,b,c", ",")
+  let rejoined = join(parts, "|")
+  perform Test.assert(starts_with(rejoined, "a|b|c"), "split 3 parts")
+  perform Test.assert_eq(length(rejoined), 5, "split 3 len 5")
+  let parts1 = split("hello", ",")
+  let rejoined1 = join(parts1, "|")
+  perform Test.assert(starts_with(rejoined1, "hello"), "split no delim")
+  perform Test.assert_eq(length(rejoined1), 5, "split no delim len")
+}
+
+// ── split edge cases ─────────────────────────────────────────────────────────
+fn test_split_edge() {
+  let parts2 = split(",a,,b,", ",")
+  let rejoined2 = join(parts2, "|")
+  perform Test.assert(starts_with(rejoined2, "|a||b|"), "split empty parts")
+}
+
+// ── join ─────────────────────────────────────────────────────────────────────
+fn test_join() {
+  let joined = join(["a", "b", "c"], ",")
+  perform Test.assert(starts_with(joined, "a,b,c"), "join content")
+  perform Test.assert_eq(length(joined), 5, "join len 5")
+  perform Test.assert_eq(length(join([], ",")), 0, "join empty")
+}
+
+// ── replace ──────────────────────────────────────────────────────────────────
+fn test_replace() {
+  let r1 = replace("hello world", "world", "there")
+  perform Test.assert(starts_with(r1, "hello there"), "replace simple")
+  perform Test.assert_eq(length(r1), 11, "replace len")
+  let r2 = replace("aaa", "a", "b")
+  perform Test.assert(starts_with(r2, "bbb"), "replace all")
+  let r3 = replace("abc", "xyz", "123")
+  perform Test.assert(starts_with(r3, "abc"), "replace no match")
+}
+
+// ── to_lower ─────────────────────────────────────────────────────────────────
+fn test_to_lower() {
+  let lo = to_lower("HELLO")
+  perform Test.assert(starts_with(lo, "hello"), "to_lower content")
+  perform Test.assert_eq(length(lo), 5, "to_lower len")
+  let lo2 = to_lower("aBc123")
+  perform Test.assert(starts_with(lo2, "abc123"), "to_lower mixed")
+}
+
+// ── to_upper ─────────────────────────────────────────────────────────────────
+fn test_to_upper() {
+  let up = to_upper("hello")
+  perform Test.assert(starts_with(up, "HELLO"), "to_upper content")
+  perform Test.assert_eq(length(up), 5, "to_upper len")
+  let up2 = to_upper("aBc123")
+  perform Test.assert(starts_with(up2, "ABC123"), "to_upper mixed")
+}
+
+// ── is_upper / is_lower ──────────────────────────────────────────────────────
+fn test_case_check() {
+  perform Test.assert(is_upper("HELLO"), "is_upper all upper")
+  perform Test.assert(is_upper("123"), "is_upper no alpha")
+  perform Test.assert(!is_upper("Hello"), "is_upper mixed")
+  perform Test.assert(is_upper(""), "is_upper empty")
+  perform Test.assert(is_lower("hello"), "is_lower all lower")
+  perform Test.assert(is_lower("123"), "is_lower no alpha")
+  perform Test.assert(!is_lower("Hello"), "is_lower mixed")
+  perform Test.assert(is_lower(""), "is_lower empty")
+}
+
+fn main() {
+  test_length()
+  test_is_empty()
+  test_char_at()
+  test_char_code_at()
+  test_starts_with()
+  test_ends_with()
+  test_contains()
+  test_index_of()
+  test_repeat()
+  test_reverse()
+  test_trim()
+  test_split()
+  test_split_edge()
+  test_join()
+  test_replace()
+  test_to_lower()
+  test_to_upper()
+  test_case_check()
+}
