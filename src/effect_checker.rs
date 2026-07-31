@@ -77,7 +77,7 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "Array" => Effect::Array,
         "String" => Effect::String,
         "Test" => Effect::Test,
-        "Rand" => Effect::Rand,
+        "Rand" | "Random" => Effect::Rand,
         "Time" => Effect::Time,
         "Spawn" => Effect::Spawn,
         "Send" => Effect::Send,

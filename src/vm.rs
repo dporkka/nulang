@@ -985,6 +985,19 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 None => return Some(Value::nil()),
             }
         }
+        if effect_name == "Random" && op_name == Some("int") {
+            let lo = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+            let hi = regs.get(1).and_then(|v| v.as_int()).unwrap_or(0);
+            if lo > hi {
+                return Some(Value::int(lo));
+            }
+            let range = (hi - lo + 1) as u64;
+            use rand_core::RngCore;
+            let mut buf = [0u8; 8];
+            rand_core::OsRng.fill_bytes(&mut buf);
+            let r = u64::from_le_bytes(buf) % range;
+            return Some(Value::int(lo + r as i64));
+        }
         if effect_name != "IO" {
             return None;
         }

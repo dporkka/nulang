@@ -224,3 +224,12 @@ pub fn enumerate(xs: [Int]) {
     };
     result
 }
+
+/// Remove duplicates, preserving first-occurrence order.
+pub fn uniq(xs: [Int]) -> [Int] {
+    var result = [];
+    for x in xs {
+        if !contains(x, result) then { result = perform Array.push(result, x) } else {}
+    };
+    result
+}

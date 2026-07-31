@@ -2504,6 +2504,7 @@ impl<'a> CompletionEngine<'a> {
         ("Inference", "AI inference operations.\n\n```nulang\neffect Inference {\n  infer(prompt: String) -> String\n}\n```"),
         ("Cost", "Resource consumption tracking.\n\n```nulang\neffect Cost {\n  track(operation: String) -> Int\n}\n```"),
         ("Rand", "Random value generation.\n\n```nulang\neffect Rand {\n  int(min: Int, max: Int) -> Int\n  float() -> Float\n}\n```"),
+        ("Random", "Random value generation.\n\n```nulang\neffect Random {\n  int(lo: Int, hi: Int) -> Int\n}\n```"),
         ("Time", "Time-related operations.\n\n```nulang\neffect Time {\n  now() -> Int\n  sleep(ms: Int) -> Unit\n}\n```"),
         ("Actor", "Actor system operations.\n\n```nulang\neffect Actor {\n  self() -> ActorId\n  spawn(behavior: () -> T) -> ActorId\n}\n```"),
         ("Provider", "Service provider discovery.\n\n```nulang\neffect Provider {\n  resolve(service: String) -> Url\n}\n```"),

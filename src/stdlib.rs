@@ -494,6 +494,14 @@ impl StdLib {
                     implemented_in: ImplSite::StandaloneVm,
                     description: "Return the n-th command-line argument (0-based), or nil if out of range. Includes the program name at index 0.",
                 },
+                BuiltinOp {
+                    name: "Random.int",
+                    effect: "Random",
+                    op: "int",
+                    signature: "int(lo: Int, hi: Int) -> Int",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Return a random integer in the inclusive range [lo, hi].",
+                },
             ],
         }
     }
@@ -753,6 +761,7 @@ mod tests {
                 "Env",
                 "Process",
                 "System",
+                "Random",
             ]
         );
     }
