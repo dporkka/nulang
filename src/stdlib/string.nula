@@ -109,6 +109,18 @@ pub fn repeat(s, n) {
     result
 }
 
+/// Reverse the string.
+pub fn reverse(s: String) -> String {
+    var result = "";
+    var i = perform String.length(s) - 1;
+    while i >= 0 {
+        let code = perform String.charAt(s, i);
+        result = perform String.concat(result, perform String.from_char(code));
+        i = i - 1
+    };
+    result
+}
+
 // ── Whitespace trimming ───────────────────────────────────────────────────
 
 /// Remove leading and trailing whitespace (spaces, tabs, newlines, CR).

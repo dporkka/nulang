@@ -56,6 +56,14 @@ pub fn all(pred, xs: [Int]) -> Bool {
     true
 }
 
+/// First element satisfying pred, or -1 if none match.
+pub fn find(pred, xs: [Int]) -> Int {
+    for x in xs {
+        if pred(x) then { return x } else {}
+    };
+    -1
+}
+
 /// Left fold: fold(f, init, [a, b, c]) = f(f(f(init, a), b), c).
 pub fn fold(f, init: Int, xs: [Int]) -> Int {
     var acc = init;
