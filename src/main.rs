@@ -117,15 +117,7 @@ fn main() {
                 }
             }
             "--version" | "-V" => {
-                println!("nulang v{}", env!("CARGO_PKG_VERSION"));
-                println!(
-                    "  commit: {}",
-                    option_env!("GIT_COMMIT_HASH").unwrap_or("unknown")
-                );
-                println!(
-                    "  build:  {}",
-                    option_env!("BUILD_DATE").unwrap_or("unknown")
-                );
+                println!("nulang {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             "--lsp" => opts.lsp = true,
