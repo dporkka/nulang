@@ -910,6 +910,50 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 .as_secs() as i64;
             return Some(Value::int(now));
         }
+        if effect_name == "Env" && op_name == Some("get") {
+            let name = regs
+                .first()
+                .map(|v| resolve_value_string(constants, *v))
+                .unwrap_or_default();
+            match std::env::var(&name) {
+                Ok(val) => {
+                    let bytes = val.into_bytes();
+                    match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                        Some(ptr) => {
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                                *ptr.add(bytes.len()) = 0;
+                            }
+                            return Some(Value::ptr(ptr));
+                        }
+                        None => return Some(Value::nil()),
+                    }
+                }
+                Err(_) => return Some(Value::nil()),
+            }
+        }
+        if effect_name == "System" && op_name == Some("arg") {
+            let n = regs.first().and_then(|v| v.as_int()).unwrap_or(-1);
+            if n < 0 {
+                return Some(Value::nil());
+            }
+            match std::env::args().nth(n as usize) {
+                Some(val) => {
+                    let bytes = val.into_bytes();
+                    match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                        Some(ptr) => {
+                            unsafe {
+                                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                                *ptr.add(bytes.len()) = 0;
+                            }
+                            return Some(Value::ptr(ptr));
+                        }
+                        None => return Some(Value::nil()),
+                    }
+                }
+                None => return Some(Value::nil()),
+            }
+        }
         if effect_name != "IO" {
             return None;
         }

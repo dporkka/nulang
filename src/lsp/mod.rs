@@ -2507,6 +2507,8 @@ impl<'a> CompletionEngine<'a> {
         ("Time", "Time-related operations.\n\n```nulang\neffect Time {\n  now() -> Int\n  sleep(ms: Int) -> Unit\n}\n```"),
         ("Actor", "Actor system operations.\n\n```nulang\neffect Actor {\n  self() -> ActorId\n  spawn(behavior: () -> T) -> ActorId\n}\n```"),
         ("Provider", "Service provider discovery.\n\n```nulang\neffect Provider {\n  resolve(service: String) -> Url\n}\n```"),
+        ("Env", "Environment variable access.\n\n```nulang\neffect Env {\n  get(name: String) -> String\n}\n```"),
+        ("System", "System-level operations.\n\n```nulang\neffect System {\n  arg(n: Int) -> String\n}\n```"),
     ];
 
     /// Known stdlib modules for import path completion.

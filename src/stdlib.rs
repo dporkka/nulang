@@ -470,6 +470,22 @@ impl StdLib {
                     implemented_in: ImplSite::RuntimeHost,
                     description: "Return the number of currently supervised children, or nil for an unknown supervisor id.",
                 },
+                BuiltinOp {
+                    name: "Env.get",
+                    effect: "Env",
+                    op: "get",
+                    signature: "get(name: String) -> String",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Return the value of the named environment variable, or nil if not set.",
+                },
+                BuiltinOp {
+                    name: "System.arg",
+                    effect: "System",
+                    op: "arg",
+                    signature: "arg(n: Int) -> String",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Return the n-th command-line argument (0-based), or nil if out of range. Includes the program name at index 0.",
+                },
             ],
         }
     }
@@ -725,7 +741,9 @@ mod tests {
                 "LLM",
                 "Http",
                 "Actor",
-                "Otp"
+                "Otp",
+                "Env",
+                "System",
             ]
         );
     }
