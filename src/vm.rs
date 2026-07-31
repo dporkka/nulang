@@ -910,6 +910,37 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 .as_secs() as i64;
             return Some(Value::int(now));
         }
+        if effect_name == "Process" && op_name == Some("run") {
+            let cmd = regs
+                .first()
+                .map(|v| resolve_value_string(constants, *v))
+                .unwrap_or_default();
+            match std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .output()
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        let out = String::from_utf8_lossy(&output.stdout).to_string();
+                        let bytes = out.into_bytes();
+                        match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                            Some(ptr) => {
+                                unsafe {
+                                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                                    *ptr.add(bytes.len()) = 0;
+                                }
+                                return Some(Value::ptr(ptr));
+                            }
+                            None => return Some(Value::nil()),
+                        }
+                    } else {
+                        return Some(Value::nil());
+                    }
+                }
+                Err(_) => return Some(Value::nil()),
+            }
+        }
         if effect_name == "Env" && op_name == Some("get") {
             let name = regs
                 .first()

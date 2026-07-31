@@ -91,7 +91,7 @@ pub fn parse_effect_name(name: &str) -> Effect {
         "Event" => Effect::Event,
         "FFI" => Effect::FFI,
         "DB" => Effect::DB,
-        "Env" => Effect::Env,
+        "Process" => Effect::Process,
         "System" => Effect::System,
         other => Effect::UserDefined(other.to_string()),
     }

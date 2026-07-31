@@ -479,6 +479,14 @@ impl StdLib {
                     description: "Return the value of the named environment variable, or nil if not set.",
                 },
                 BuiltinOp {
+                    name: "Process.run",
+                    effect: "Process",
+                    op: "run",
+                    signature: "run(cmd: String) -> String",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Execute a shell command via /bin/sh -c and return its stdout; returns nil on error or non-zero exit.",
+                },
+                BuiltinOp {
                     name: "System.arg",
                     effect: "System",
                     op: "arg",
@@ -743,6 +751,7 @@ mod tests {
                 "Actor",
                 "Otp",
                 "Env",
+                "Process",
                 "System",
             ]
         );

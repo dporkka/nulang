@@ -235,6 +235,7 @@ pub enum Effect {
     Test,
     DB,
     Env,
+    Process,
     System,
     UserDefined(String),
 }
@@ -262,6 +263,7 @@ impl std::fmt::Display for Effect {
             Effect::Test => write!(f, "Test"),
             Effect::DB => write!(f, "DB"),
             Effect::Env => write!(f, "Env"),
+            Effect::Process => write!(f, "Process"),
             Effect::System => write!(f, "System"),
             Effect::UserDefined(s) => write!(f, "{}", s),
         }
