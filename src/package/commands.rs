@@ -303,12 +303,16 @@ fn template_files(name: &str) -> Vec<(&'static str, &'static str)> {
         )],
         "lib" => vec![
             (
+                "src/main.nula",
+                "// Entry point for a library package.\n//\n// Library packages export public functions from `src/lib.nula` for other\n// packages to depend on. The entry point is a trivial smoke test — replace\n// it with your own application logic.\n\nfn main() {\n  perform IO.print(\"Library package ready.\")\n  perform IO.print(\"Run `nula test` to verify the public API.\")\n}\n",
+            ),
+            (
                 "src/lib.nula",
-                "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n",
+                "/// Add two integers and return the sum.\npub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n",
             ),
             (
                 "tests/test_add.nula",
-                "fn main() {\n  perform Test.assert_eq(add(1, 2), 3)\n}\n",
+                "// Test file for the library's `add` function.\n//\n// Each test file runs standalone via `nula test` — helper functions must\n// be defined in the test file itself (or imported when the module system\n// supports cross-file imports).\n\nfn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\nfn main() {\n  perform Test.assert_eq(add(1, 2), 3)\n  perform Test.assert_eq(add(-5, 5), 0)\n}\n",
             ),
         ],
         "full" => vec![
