@@ -4,6 +4,9 @@
 
 use crate::ast::{BinOp, Decl, Expr, Literal, Pattern};
 use crate::types::Type;
+use std::path::Path;
+
+use crate::types::{NuError, NuResult, Span};
 
 /// Format a Nulang source string and return the formatted output.
 pub fn format_source(source: &str) -> Result<String, String> {
@@ -25,6 +28,68 @@ pub fn format_source(source: &str) -> Result<String, String> {
         out.push('\n');
     }
     Ok(out)
+}
+
+/// Recursively format all `.nula` files under `dir`.
+///
+/// When `check_only` is true files are never modified; an error is returned
+/// on the first file that *would* be reformatted instead.
+pub fn format_directory(dir: &Path, check_only: bool) -> NuResult<()> {
+    walk_format(dir, check_only)
+}
+
+fn walk_format(dir: &Path, check_only: bool) -> NuResult<()> {
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        NuError::vm_error(
+            format!("Cannot read directory '{}': {}", dir.display(), e),
+            Span::default(),
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            NuError::vm_error(
+                format!("Cannot read entry in '{}': {}", dir.display(), e),
+                Span::default(),
+            )
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            walk_format(&path, check_only)?;
+        } else if path.extension().map_or(false, |ext| ext == "nula") {
+            let source = std::fs::read_to_string(&path).map_err(|e| {
+                NuError::vm_error(
+                    format!("Cannot read '{}': {}", path.display(), e),
+                    Span::default(),
+                )
+            })?;
+            match format_source(&source) {
+                Ok(formatted) => {
+                    if formatted != source {
+                        if check_only {
+                            return Err(NuError::parse_error(
+                                format!("Would reformat {}", path.display()),
+                                Span::default(),
+                            ));
+                        }
+                        std::fs::write(&path, formatted.as_bytes()).map_err(|e| {
+                            NuError::vm_error(
+                                format!("Cannot write '{}': {}", path.display(), e),
+                                Span::default(),
+                            )
+                        })?;
+                        println!("Formatted {}", path.display());
+                    }
+                }
+                Err(e) => {
+                    return Err(NuError::parse_error(
+                        format!("{}: {}", path.display(), e),
+                        Span::default(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn fmt_decl(out: &mut String, decl: &Decl, indent: usize) {

@@ -6,8 +6,8 @@
 //!   nulang --eval <CODE>
 //!   nulang --check <FILE>
 //!   nulang --lsp
-//!   nulang nula <new|build|build-wasm|test|run|add|remove|watch>
-//!   nulang --doc
+//!   nulang nula <new|build|build-wasm|test|run|add|remove|watch|doc>
+//!   nulang fmt [--check] [<file>]
 //!
 //! Options:
 //!   -r, --repl               Start interactive REPL
@@ -64,20 +64,57 @@ fn main() {
 
     // `nulang nula <cmd>` dispatches to the package manager.
     if args[1] == "fmt" {
-        if args.len() < 3 {
-            eprintln!("fmt needs file");
-            std::process::exit(1);
-        }
-        let p = &args[2];
-        let s = std::fs::read_to_string(p).unwrap();
-        match nulang::fmt::format_source(&s) {
-            Ok(f) => {
-                std::fs::write(p, &f).unwrap();
-                println!("Formatted {}", p);
-            }
-            Err(e) => {
-                eprintln!("{}", e);
+        let mut check_mode = false;
+        let mut file_arg: Option<&str> = None;
+        let mut i = 2;
+        while i < args.len() {
+            if args[i] == "--check" {
+                check_mode = true;
+            } else if !args[i].starts_with('-') {
+                file_arg = Some(&args[i]);
+            } else {
+                eprintln!("Unknown fmt option: {}", args[i]);
                 std::process::exit(1);
+            }
+            i += 1;
+        }
+
+        if let Some(p) = file_arg {
+            let s = std::fs::read_to_string(p).unwrap_or_else(|e| {
+                eprintln!("Cannot read '{}': {}", p, e);
+                std::process::exit(1);
+            });
+            match nulang::fmt::format_source(&s) {
+                Ok(f) => {
+                    if check_mode {
+                        if f != s {
+                            eprintln!("Would reformat {}", p);
+                            std::process::exit(1);
+                        }
+                    } else {
+                        if f != s {
+                            std::fs::write(p, &f).unwrap_or_else(|e| {
+                                eprintln!("Cannot write '{}': {}", p, e);
+                                std::process::exit(1);
+                            });
+                            println!("Formatted {}", p);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{}: {}", p, e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            let dir = std::path::Path::new("src");
+            if !dir.is_dir() {
+                eprintln!("Not a package directory (no src/)");
+                std::process::exit(1);
+            }
+            if let Err(e) = nulang::fmt::format_directory(dir, check_mode) {
+                eprintln!("{}", e);
+                std::process::exit(exit_code(&e));
             }
         }
         return;
@@ -526,7 +563,7 @@ fn print_help() {
     println!("       nulang --eval <CODE>");
     println!("       nulang --check <FILE>");
     println!("       nulang --lsp");
-    println!("       nulang nula <new|build|build-wasm|test|run|add|remove|watch|doc>");
+    println!("       nulang fmt [--check] [<file>]");
     println!("       nulang --doc");
     println!();
     println!("Options:");
@@ -557,7 +594,7 @@ fn print_help() {
     println!("  init <name>      Scaffold experiment");
     println!("  --watch <file>   Re-run on changes");
     println!("  --explain <CODE> Error code help");
-    println!("  fmt <file>       Format in-place");
+    println!("  fmt [--check] [<file>]  Format file(s); no file → all src/**/*.nula");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  --color auto|always|never  Colorize error output (default: auto)");
     println!("  -h, --help       Show this help message");
