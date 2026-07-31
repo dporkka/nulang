@@ -74,6 +74,38 @@ jobs:
       - name: Test (release)
         run: cargo test --release
 
+
+  # -----------------------------------------------------------------------
+  # Nula package-manager smoke test — scaffold a package and run `nula test`
+  # -----------------------------------------------------------------------
+  nula-test:
+    name: Nula Package Test
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build nulang (release)
+        run: cargo build --release
+
+      - name: Smoke test (eval)
+        run: ./target/release/nulang --eval 'perform IO.print("hello")'
+
+      - name: Scaffold test package
+        run: ./target/release/nulang nula new test-pkg
+
+      - name: Run nula test
+        run: cd test-pkg && ../target/release/nulang nula test
+
   # -----------------------------------------------------------------------
   # No-default-features build — proves zero PyO3/SQLite/LSP dependencies
   # -----------------------------------------------------------------------

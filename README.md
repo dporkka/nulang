@@ -150,6 +150,18 @@ self-hostable. No lock-in.
 
 ---
 
+## Docker
+
+A multi-stage Docker image is available. Build and run:
+
+```bash
+docker build -t nulang .
+docker run --rm nulang --eval 'perform IO.print("Hello from Docker!")'
+```
+
+The image is ~50 MB and contains only the `nulang` binary and its runtime
+dependencies.
+
 ## License
 
 Nulang is licensed under the [Apache License, Version 2.0](https://github.com/dporkka/nulang/blob/main/LICENSE).
