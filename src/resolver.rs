@@ -124,6 +124,7 @@ fn decl_name(decl: &Decl) -> Option<&str> {
         | Decl::Workflow { .. }
         | Decl::Import { .. }
         | Decl::Class { .. }
+        | Decl::LetBinding { .. }
         | Decl::Impl { .. } => None,
     }
 }

@@ -613,6 +613,14 @@ pub enum Decl {
         methods: Vec<ImplMethod>,
         span: Span,
     },
+    /// Module-level let binding: `let name [: Type] = value`
+    LetBinding {
+        name: String,
+        type_ann: Option<Type>,
+        value: Expr,
+        mutable: bool,
+        span: Span,
+    },
 }
 
 // ---------------------------------------------------------------------------

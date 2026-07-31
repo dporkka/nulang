@@ -263,6 +263,16 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             items: items.clone(),
             span: *span,
         },
+
+        Decl::LetBinding { name, value, .. } => {
+            let mut body = hir::Body::new();
+            let op = lower_expr(value, &mut body);
+            body.set_terminator(hir::Terminator::FnReturn(Some(op)));
+            hir::Decl::Constant {
+                name: name.clone(),
+                body,
+            }
+        }
         Decl::Workflow {
             name, items, span, ..
         } => desugar_workflow(name, items, *span),

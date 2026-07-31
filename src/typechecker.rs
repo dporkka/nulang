@@ -857,6 +857,10 @@ impl TypeChecker {
                     let dict_name = format!("_impl_{}_{}", class_name, for_type);
                     ctx.bind(dict_name, final_ty.clone(), Capability::Ref, false);
                 }
+                Decl::LetBinding { name, .. } => {
+                    let gen_ty = self.do_generalize(&ctx, &final_ty);
+                    ctx.bind(name.clone(), gen_ty, Capability::Ref, false);
+                }
 
                 _ => {}
             }
@@ -1141,6 +1145,24 @@ impl TypeChecker {
                     behavior: Box::new(Type::Var(TypeVar::fresh())),
                 };
                 Ok((vec![], workflow_ty))
+            }
+
+            Decl::LetBinding {
+                name: _,
+                type_ann,
+                value,
+                span,
+                ..
+            } => {
+                let (s1, val_ty) = self.infer_expr(ctx, value)?;
+                let s1 = if let Some(ann_ty) = type_ann {
+                    let s_ann = mgu(&apply_subst(&val_ty, &s1), ann_ty, *span)?;
+                    compose_subst(&s_ann, &s1)
+                } else {
+                    s1
+                };
+                let final_ty = apply_subst(&val_ty, &s1);
+                Ok((s1, final_ty))
             }
             Decl::Import { .. } => Ok((vec![], Type::unit())),
             Decl::Database { .. } => Ok((vec![], Type::unit())),

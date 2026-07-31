@@ -76,6 +76,9 @@ pub struct Parser {
     /// Accumulated parse errors from error-recovery. Callers that want
     /// all errors (not just the first) call `consumed_diagnostics()`.
     diagnostics: Vec<NuError>,
+    /// Cache of types imported from other modules, populated lazily when
+    /// a type name isn't found in the local token stream.
+    imported_type_cache: FxHashMap<String, Type>,
     /// Module-level named handler registry.
     handler_registry: FxHashMap<String, Vec<EffectHandler>>,
 }
@@ -85,16 +88,18 @@ impl Parser {
         Parser {
             tokens,
             pos: 0,
-            local_type_params: FxHashMap::default(),
             global_type_constructors: FxHashMap::default(),
-            diagnostics: Vec::new(),
+            local_type_params: FxHashMap::default(),
+            imported_type_cache: FxHashMap::default(),
             handler_registry: FxHashMap::default(),
+            diagnostics: Vec::new(),
         }
     }
     #[tracing::instrument(level = "debug", skip(self))]
     pub fn parse_module(&mut self) -> NuResult<AstModule> {
         self.diagnostics.clear();
         let mut decls = Vec::new();
+        let mut pending_lets: Vec<Decl> = Vec::new();
         self.skip_newlines();
         while !self.is_at_end() {
             self.skip_newlines();
@@ -105,18 +110,78 @@ impl Parser {
             // Try declaration first, then expression
             let decl_start = self.pos;
             match self.parse_decl() {
-                Ok(decl) => decls.push(decl),
+                Ok(decl) => {
+                    // Collect LetBinding decls — they'll be wrapped into main's body.
+                    if matches!(decl, Decl::LetBinding { .. }) {
+                        pending_lets.push(decl);
+                    } else {
+                        // If this is fn main() and we have pending lets, wrap them in.
+                        if let Decl::Function { name, ref body, .. } = &decl {
+                            if name == "main" && !pending_lets.is_empty() {
+                                let mut wrapped_body = body.clone();
+                                for let_decl in pending_lets.iter().rev() {
+                                    if let Decl::LetBinding {
+                                        name,
+                                        type_ann,
+                                        value,
+                                        ..
+                                    } = let_decl
+                                    {
+                                        wrapped_body = Expr::Let {
+                                            name: name.clone(),
+                                            ty: type_ann.clone(),
+                                            value: Box::new(value.clone()),
+                                            mutable: false,
+                                            body: Box::new(wrapped_body),
+                                            let_in: false,
+                                            span: Span::default(),
+                                        };
+                                    }
+                                }
+                                pending_lets.clear();
+                                // Push the modified main function
+                                if let Decl::Function {
+                                    name,
+                                    type_params,
+                                    type_param_constraints,
+                                    params,
+                                    ret_type,
+                                    error_type,
+                                    effect,
+                                    cap,
+                                    annotations,
+                                    public,
+                                    span,
+                                    ..
+                                } = decl
+                                {
+                                    decls.push(Decl::Function {
+                                        name,
+                                        type_params,
+                                        type_param_constraints,
+                                        params,
+                                        ret_type,
+                                        error_type,
+                                        effect,
+                                        cap,
+                                        body: wrapped_body,
+                                        annotations,
+                                        public,
+                                        span,
+                                    });
+                                }
+                                continue;
+                            }
+                        }
+                        decls.push(decl);
+                    }
+                }
                 Err(e) => {
                     let consumed = self.pos - decl_start;
-                    // Rewind any tokens a failed declaration parse consumed.
                     if consumed > 0 {
-                        // A failed declaration is authoritative: do not retry
-                        // its remaining tokens as a top-level expression.
                         return Err(e);
                     }
                     // Not a declaration — this must be the top-level script body.
-                    // Parse all remaining tokens as a block of expressions,
-                    // using the recursive helper to splice statement-lets.
                     let exprs = self.collect_block_exprs(None)?;
                     let final_expr = if exprs.len() == 1 {
                         exprs.into_iter().next().unwrap()
@@ -126,6 +191,28 @@ impl Parser {
                             span: Span::default(),
                         }
                     };
+                    // If we have pending lets, wrap them around the final expression.
+                    let mut body = final_expr;
+                    for let_decl in pending_lets.iter().rev() {
+                        if let Decl::LetBinding {
+                            name,
+                            type_ann,
+                            value,
+                            ..
+                        } = let_decl
+                        {
+                            body = Expr::Let {
+                                name: name.clone(),
+                                ty: type_ann.clone(),
+                                value: Box::new(value.clone()),
+                                mutable: false,
+                                body: Box::new(body),
+                                let_in: false,
+                                span: Span::default(),
+                            };
+                        }
+                    }
+                    pending_lets.clear();
                     decls.push(Decl::Function {
                         name: "__main".to_string(),
                         type_params: vec![],
@@ -135,7 +222,7 @@ impl Parser {
                         error_type: None,
                         effect: None,
                         cap: None,
-                        body: final_expr,
+                        body,
                         annotations: vec![],
                         public: false,
                         span: Span::new(0, 0),
@@ -144,6 +231,43 @@ impl Parser {
                 }
             }
             self.skip_newlines_semicolons();
+        }
+        // If there are pending lets but no main function, create a synthetic __main.
+        if !pending_lets.is_empty() {
+            let mut body = Expr::Literal(Literal::Unit, Span::default());
+            for let_decl in pending_lets.iter().rev() {
+                if let Decl::LetBinding {
+                    name,
+                    type_ann,
+                    value,
+                    ..
+                } = let_decl
+                {
+                    body = Expr::Let {
+                        name: name.clone(),
+                        ty: type_ann.clone(),
+                        value: Box::new(value.clone()),
+                        mutable: false,
+                        body: Box::new(body),
+                        let_in: false,
+                        span: Span::default(),
+                    };
+                }
+            }
+            decls.push(Decl::Function {
+                name: "__main".to_string(),
+                type_params: vec![],
+                type_param_constraints: vec![],
+                params: vec![],
+                ret_type: None,
+                error_type: None,
+                effect: None,
+                cap: None,
+                body,
+                annotations: vec![],
+                public: false,
+                span: Span::new(0, 0),
+            });
         }
         if !self.diagnostics.is_empty() {
             return Err(NuError::Multiple(std::mem::take(&mut self.diagnostics)));
@@ -225,6 +349,7 @@ impl Parser {
                 })
             }
             TokenKind::Class => self.parse_class(),
+            TokenKind::Let => self.parse_module_let(public),
             TokenKind::Impl => self.parse_impl(),
             TokenKind::Eof => Err(NuError::parse_error(
                 "Unexpected end of file in declaration".to_string(),
@@ -1795,6 +1920,46 @@ impl Parser {
         let items = Vec::new();
         self.skip_newlines_semicolons();
         Ok(Decl::Import { path, items, span })
+    }
+
+    /// Parse a module-level let binding: `let name [: Type] = value`
+    fn parse_module_let(&mut self, _public: bool) -> NuResult<Decl> {
+        let span = self.current_span();
+        let saved_pos = self.pos;
+        self.advance(); // consume 'let'
+        self.skip_newlines();
+        let mutable = self.consume_if(&TokenKind::Var);
+        self.skip_newlines();
+        let name = self.expect_ident("binding name")?;
+        self.skip_newlines();
+        let type_ann = if self.consume_if(&TokenKind::Colon) {
+            self.skip_newlines();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.skip_newlines();
+        self.expect(TokenKind::Assign)?;
+        self.skip_newlines();
+        let value = self.parse_expr()?;
+        self.skip_newlines();
+        // Check if this is a let-in expression (has a body after `in`).
+        // If so, rewind and let the expression path handle it.
+        if self.peek_kind() == &TokenKind::In {
+            self.pos = saved_pos;
+            return Err(NuError::parse_error(
+                "let-in at module level".to_string(),
+                span,
+            ));
+        }
+        self.skip_newlines_semicolons();
+        Ok(Decl::LetBinding {
+            name,
+            type_ann,
+            value,
+            mutable,
+            span,
+        })
     }
 
     fn parse_extern(&mut self, _public: bool) -> NuResult<Decl> {
@@ -3911,22 +4076,76 @@ impl Parser {
     /// the declared type parameters. Unknown names are a hard parse error
     /// instead of a silently unconstrained fresh type variable.
     fn resolve_named_type(&mut self, name: &str, args: Vec<Type>, span: Span) -> NuResult<Type> {
-        let decl_pos = match self.find_type_decl(name) {
-            Some(pos) => pos,
-            None => {
+        // First check local type declarations.
+        if let Some(decl_pos) = self.find_type_decl(name) {
+            return self.resolve_local_type(name, &args, decl_pos, span);
+        }
+
+        // Then check cached imported types.
+        if let Some(ty) = self.imported_type_cache.get(name) {
+            // TODO: handle type args for imported generic types
+            if !args.is_empty() {
                 return Err(NuError::parse_error(
-                    format!("Unknown type name: '{}'", name),
+                    format!(
+                        "Type '{}' from import does not support type arguments yet",
+                        name
+                    ),
                     span,
                 ));
             }
-        };
+            return Ok(ty.clone());
+        }
 
+        // Try to populate the cache from import statements.
+        if let Some(ty) = self.try_import_type(name, span)? {
+            return Ok(ty);
+        }
+
+        return Err(NuError::parse_error(
+            format!("Unknown type name: '{}'", name),
+            span,
+        ));
+    }
+
+    /// Find the token index of the `type` keyword of the declaration named
+    /// `name` (`type Name = ...` or `type alias Name = ...`), if any.
+    fn find_type_decl(&self, name: &str) -> Option<usize> {
+        for i in 0..self.tokens.len() {
+            if self.tokens[i].kind != TokenKind::Type {
+                continue;
+            }
+            let mut j = i + 1;
+            while matches!(
+                self.tokens.get(j).map(|t| &t.kind),
+                Some(TokenKind::Newline) | Some(TokenKind::DocComment(_))
+            ) {
+                j += 1;
+            }
+            // Optional 'alias' keyword between 'type' and the name.
+            if matches!(self.tokens.get(j).map(|t| &t.kind), Some(TokenKind::Alias)) {
+                j += 1;
+            }
+            match self.tokens.get(j).map(|t| &t.kind) {
+                Some(TokenKind::Ident(n)) | Some(TokenKind::UpperIdent(n)) if n == name => {
+                    return Some(i);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Resolve a local type declaration by re-parsing it from the token stream.
+    fn resolve_local_type(
+        &mut self,
+        name: &str,
+        args: &[Type],
+        decl_pos: usize,
+        span: Span,
+    ) -> NuResult<Type> {
         let saved_pos = self.pos;
         let saved_locals = self.local_type_params.clone();
-        // Guard against (mutually) recursive references: while the body is
-        // being expanded, the type's own name resolves to a stable abstract
-        // variable instead of expanding again (e.g. `Tree[T]` inside the
-        // body of `type Tree[T] = ...`).
+        // Guard against (mutually) recursive references.
         let self_tv = *self
             .global_type_constructors
             .entry(name.to_string())
@@ -3988,30 +4207,145 @@ impl Parser {
         result
     }
 
-    /// Find the token index of the `type` keyword of the declaration named
-    /// `name` (`type Name = ...` or `type alias Name = ...`), if any.
-    fn find_type_decl(&self, name: &str) -> Option<usize> {
-        for i in 0..self.tokens.len() {
-            if self.tokens[i].kind != TokenKind::Type {
+    /// Try to find a type name in imported modules. Scans import statements
+    /// in the current token stream, loads the imported files, and looks for
+    /// matching type declarations. On success, caches the result.
+    fn try_import_type(&mut self, name: &str, span: Span) -> NuResult<Option<Type>> {
+        let mut i = 0;
+        while i < self.tokens.len() {
+            if self.tokens[i].kind != TokenKind::Import {
+                i += 1;
                 continue;
             }
+            // Extract the import path.
             let mut j = i + 1;
-            while matches!(
-                self.tokens.get(j).map(|t| &t.kind),
-                Some(TokenKind::Newline) | Some(TokenKind::DocComment(_))
-            ) {
+            while j < self.tokens.len()
+                && matches!(
+                    self.tokens[j].kind,
+                    TokenKind::Newline | TokenKind::DocComment(_)
+                )
+            {
                 j += 1;
             }
-            // Optional 'alias' keyword between 'type' and the name.
-            if matches!(self.tokens.get(j).map(|t| &t.kind), Some(TokenKind::Alias)) {
-                j += 1;
+            if j >= self.tokens.len() {
+                break;
             }
-            match self.tokens.get(j).map(|t| &t.kind) {
-                Some(TokenKind::Ident(n)) | Some(TokenKind::UpperIdent(n)) if n == name => {
-                    return Some(i);
+            let import_path = match &self.tokens[j].kind {
+                TokenKind::Ident(s) => {
+                    let mut path = s.clone();
+                    j += 1;
+                    while j < self.tokens.len() && self.tokens[j].kind == TokenKind::DoubleColon {
+                        j += 1;
+                        if j < self.tokens.len() {
+                            if let TokenKind::Ident(seg) = &self.tokens[j].kind {
+                                path.push_str("::");
+                                path.push_str(seg);
+                                j += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    path
                 }
-                _ => {}
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+
+            // Resolve the file path (stdlib or relative).
+            let file_path = self.resolve_import_path(&import_path);
+            if let Some(path) = file_path {
+                // Load and lex the file.
+                if let Ok(source) = std::fs::read_to_string(&path) {
+                    if let Ok(imported_tokens) = crate::lexer::Lexer::new(&source).lex() {
+                        // Scan the imported tokens for type declarations.
+                        let mut k = 0;
+                        while k < imported_tokens.len() {
+                            if imported_tokens[k].kind != TokenKind::Type {
+                                k += 1;
+                                continue;
+                            }
+                            let mut m = k + 1;
+                            while m < imported_tokens.len()
+                                && matches!(
+                                    imported_tokens[m].kind,
+                                    TokenKind::Newline | TokenKind::DocComment(_)
+                                )
+                            {
+                                m += 1;
+                            }
+                            // Skip optional 'alias' keyword.
+                            if m < imported_tokens.len()
+                                && imported_tokens[m].kind == TokenKind::Alias
+                            {
+                                m += 1;
+                            }
+                            if m < imported_tokens.len() {
+                                match &imported_tokens[m].kind {
+                                    TokenKind::Ident(n) | TokenKind::UpperIdent(n) => {
+                                        if n == name {
+                                            // Found it! Parse the type from the imported file.
+                                            let mut sub_parser =
+                                                Parser::new(imported_tokens.clone());
+                                            sub_parser.global_type_constructors =
+                                                self.global_type_constructors.clone();
+                                            let resolved = sub_parser.resolve_local_type(
+                                                name,
+                                                &[],
+                                                k,
+                                                span,
+                                            )?;
+                                            self.imported_type_cache
+                                                .insert(name.to_string(), resolved.clone());
+                                            return Ok(Some(resolved));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            k += 1;
+                        }
+                    }
+                }
             }
+            i += 1;
+        }
+        Ok(None)
+    }
+
+    /// Resolve an import path to a file path. Handles stdlib:: prefix.
+    fn resolve_import_path(&self, import_path: &str) -> Option<std::path::PathBuf> {
+        if let Some(module) = import_path.strip_prefix("stdlib::") {
+            // Try NULANG_STDLIB env var first.
+            if let Ok(dir) = std::env::var("NULANG_STDLIB") {
+                return Some(std::path::PathBuf::from(dir).join(format!("{}.nula", module)));
+            }
+            // Try relative to executable.
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(exe_dir) = exe.parent() {
+                    let candidate = exe_dir.join("stdlib").join(format!("{}.nula", module));
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+            }
+            // Development fallback: src/stdlib/ relative to CWD.
+            if let Ok(cwd) = std::env::current_dir() {
+                let dev_path = cwd
+                    .join("src")
+                    .join("stdlib")
+                    .join(format!("{}.nula", module));
+                if dev_path.exists() {
+                    return Some(dev_path);
+                }
+            }
+            // Last resort.
+            return Some(std::path::PathBuf::from(format!(
+                "src/stdlib/{}.nula",
+                module
+            )));
         }
         None
     }
