@@ -30,7 +30,9 @@ native backend, and an optional WASM backend. The runtime is a multi-threaded
 work-stealing executor with supervision trees, ORCA garbage collection,
 location-transparent distribution, and durable persistence.
 
-Nulang is in **alpha** — the compiler, VM, JIT, actor runtime, supervision,
+| 15 | `15_ranges.nula` | Range expressions, for-in-range loops, range with pipe/arithmetic | `nulang examples/15_ranges.nula` |
+| 16 | `16_realworld.nula` | Real-world CLI: HTTP fetch, JSON parse, datetime, FS write, env, args | `nulang examples/16_realworld.nula <url>` |
+| 17 | `17_actor_fetcher.nula` | URL fetcher & reporter: Http.get, JSON pattern matching, datetime, FS | `nulang examples/17_actor_fetcher.nula` |
 distribution, persistence, and AI runtime are all implemented and backed by
 1490+ tests.
 
@@ -93,6 +95,7 @@ perform IO.print("Hello, " + name + "!")
 | Document | Description |
 |----------|-------------|
 | [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | Installation, values, effects, actors, pattern matching — with runnable code snippets |
+| [`docs/TUTORIAL.md`](docs/TUTORIAL.md) | **Tutorial:** Build a Weather CLI step by step — variables, functions, HTTP, JSON, pattern matching, records, file I/O |
 | [`docs/PITFALLS.md`](docs/PITFALLS.md) | Common mistakes: `::` vs `.`, `let` vs `var`, `perform` keyword, `catch`/`fail`, record syntax, and more |
 | [`examples/`](examples/) + [`README`](examples/README.md) | 11 verified, self-contained example programs |
 | [`SPEC2.md`](SPEC2.md) | Language specification: syntax, semantics, type system, runtime, format stability contract |
