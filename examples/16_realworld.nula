@@ -55,19 +55,9 @@ let rec describe = fn(v) {
     }
 }
 
-// Check whether a string looks like an HTTP URL.
-// (We compare substrings rather than checking == nil because perform
-//  results carry opaque type variables. The VM resolves them correctly
-//  at runtime, but the bytecode for == nil does not compare the
-//  runtime value when the type variable unifies with Nil.)
-let is_url = fn(s) {
-    perform String.substring(s, 0, 4) == "http"
-}
-
-// Check whether an HTTP response body is valid (non-nil, non-empty).
-// A nil/failed Http.get stringifies to "nil" (3 characters).
-let is_valid_response = fn(s) {
-    perform String.length(s) > 10
+// Check whether a value is non-nil.
+let is_some = fn(v) {
+    v != nil
 }
 
 
@@ -79,14 +69,13 @@ let is_valid_response = fn(s) {
 let url = perform System.arg(2)
 
 // 2. Check that a URL was provided.
-let got_url = is_url(url)
+let got_url = is_some(url)
 
 if got_url then {
     // 3. Read output directory from environment, falling back to ./output/.
-    //    Env.get returns nil when the variable is not set. nil stringifies
-    //    to "nil" (3 chars), so any real path is longer.
+    //    Env.get returns nil when the variable is not set.
     let env_dir = perform Env.get("NU_OUTPUT_DIR")
-    let has_env = perform String.length(env_dir) > 3
+    let has_env = is_some(env_dir)
     let out_dir = if has_env then env_dir else "./output/"
 
     perform IO.print("=== JSON Fetcher ===")
@@ -98,8 +87,7 @@ if got_url then {
     let response = perform Http.get(url)
 
     // 5. Check that the response is valid.
-    let ok = is_valid_response(response)
-
+    let ok = is_some(response)
     if ok then {
         let resp_len = perform String.length(response)
         perform IO.print("Received " + perform Int.to_string(resp_len) + " bytes")
@@ -133,8 +121,7 @@ if got_url then {
         // FS.write returns Unit on success, nil on failure.
         // Check whether the write succeeded by reading back the file.
         let verify = perform FS.read(out_path)
-        let wrote = perform String.length(verify) > 0
-
+        let wrote = is_some(verify)
         if wrote then {
             perform IO.print("Wrote output to " + out_path)
             perform IO.print("=== Done ===")
