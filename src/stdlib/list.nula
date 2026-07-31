@@ -1,15 +1,15 @@
 // Nulang standard library — list/array operations over native arrays.
 // Language version: 2.0.0-alpha
 //
-// Polymorphic functions (map, filter, reverse, take, drop, range) work with
-// any element type. Functions with explicit [Int] annotations (length, sum,
-// contains, index_of, any, all, find, fold, max_of, min_of, sort, append,
-// zip, enumerate) are Int-only for now.
+// Polymorphic functions (map, filter, reverse, take, drop, range, length,
+// contains, any, all) work with any element type. Functions with explicit
+// [Int] annotations (sum, index_of, find, fold, max_of, min_of, sort, append,
+// zip, enumerate, uniq) are Int-only for now.
 //
 // Built on `perform Array.push` / `perform Array.new` / `perform Array.length`
 // primitives (added 2026-07-30).
 /// Number of elements in the array.
-pub fn length(xs: [Int]) -> Int {
+pub fn length(xs) -> Int {
     var n = 0;
     for _x in xs {
         n = n + 1
@@ -27,7 +27,7 @@ pub fn sum(xs: [Int]) -> Int {
 }
 
 /// True if x appears in xs.
-pub fn contains(x: Int, xs: [Int]) -> Bool {
+pub fn contains(x, xs) -> Bool {
     for elem in xs {
         if elem == x then { return true } else {}
     };
@@ -45,7 +45,7 @@ pub fn index_of(x: Int, xs: [Int]) -> Int {
 }
 
 /// True if any element satisfies the predicate.
-pub fn any(pred, xs: [Int]) -> Bool {
+pub fn any(pred, xs) -> Bool {
     for x in xs {
         if pred(x) then { return true } else {}
     };
@@ -53,7 +53,7 @@ pub fn any(pred, xs: [Int]) -> Bool {
 }
 
 /// True if all elements satisfy the predicate.
-pub fn all(pred, xs: [Int]) -> Bool {
+pub fn all(pred, xs) -> Bool {
     for x in xs {
         if !pred(x) then { return false } else {}
     };

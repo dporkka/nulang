@@ -507,6 +507,21 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
             }
             return Some(Value::float(f64::sqrt(x)));
         }
+        if effect_name == "Float" && op_name == Some("tan") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            return Some(Value::float(f64::tan(x)));
+        }
+        if effect_name == "Float" && op_name == Some("log") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            if x <= 0.0 {
+                return Some(Value::nil());
+            }
+            return Some(Value::float(f64::ln(x)));
+        }
+        if effect_name == "Float" && op_name == Some("exp") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            return Some(Value::float(f64::exp(x)));
+        }
         if effect_name == "String" && op_name == Some("to_int") {
             let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
             let n: i64 = s.parse().unwrap_or(0);
