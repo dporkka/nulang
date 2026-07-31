@@ -119,6 +119,47 @@ fn compute_predecessors(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::
     preds
 }
 
+/// Compute successors of each block for topological traversal.
+fn compute_successors(func: &mir::Function) -> HashMap<mir::BlockId, Vec<mir::BlockId>> {
+    let mut succs: HashMap<mir::BlockId, Vec<mir::BlockId>> = HashMap::new();
+    for block in &func.blocks {
+        let targets = match &block.terminator {
+            mir::Terminator::Jump(target) => vec![*target],
+            mir::Terminator::Branch { then_, else_, .. } => vec![*then_, *else_],
+            _ => vec![],
+        };
+        succs.insert(block.id, targets);
+    }
+    succs
+}
+
+/// Compute reverse post-order (topological order) starting from the entry block.
+fn reverse_postorder(func: &mir::Function) -> Vec<mir::BlockId> {
+    let succs = compute_successors(func);
+    let mut order = Vec::new();
+    let mut visited = HashSet::new();
+    // Recursive post-order DFS from entry.
+    fn dfs(
+        node: mir::BlockId,
+        succs: &HashMap<mir::BlockId, Vec<mir::BlockId>>,
+        visited: &mut HashSet<mir::BlockId>,
+        order: &mut Vec<mir::BlockId>,
+    ) {
+        if !visited.insert(node) {
+            return;
+        }
+        if let Some(children) = succs.get(&node) {
+            for &child in children {
+                dfs(child, succs, visited, order);
+            }
+        }
+        order.push(node);
+    }
+    dfs(func.entry, &succs, &mut visited, &mut order);
+    order.reverse();
+    order
+}
+
 /// For each block, collect the set of register indices that are:
 /// - Last assigned in at least one predecessor, AND
 /// - The block has >1 predecessor.
@@ -523,9 +564,31 @@ pub fn compile_mir_function_body(
             block_map.insert(block.id, clif_block);
         }
 
-        // Compile blocks in order.
-        for block in &mir_func.blocks {
-            let clif_block = block_map[&block.id];
+        // Compute topological block order so that each block's predecessors
+        // are compiled before it, ensuring local_vals is populated.
+        let block_order = reverse_postorder(mir_func);
+
+        // Debug: dump MIR when verbose.
+        if std::env::var("NULANG_DUMP_MIR").is_ok() {
+            eprintln!(
+                "=== AOT compiling fn_{} ({}) ===",
+                _func_index, mir_func.name
+            );
+            for &bid in &block_order {
+                let block = &mir_func.blocks[bid.0 as usize];
+                eprintln!("  Block[{}] (preds: {:?}):", bid.0, preds.get(&bid));
+                for stmt in &block.stmts {
+                    eprintln!("    {:?}", stmt);
+                }
+                eprintln!("    term: {:?}", block.terminator);
+            }
+            eprintln!("  block_params: {:?}", block_params);
+        }
+
+        // Compile blocks in topological order.
+        for &bid in &block_order {
+            let block = &mir_func.blocks[bid.0 as usize];
+            let clif_block = block_map[&bid];
             builder.switch_to_block(clif_block);
 
             // Read block parameters into local_vals for non-entry blocks.
