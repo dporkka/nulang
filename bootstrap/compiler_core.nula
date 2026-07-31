@@ -1,8 +1,7 @@
-// bootstrap/compiler_core.nula — Stage 12: type checking for closures + function application
+// bootstrap/compiler_core.nula — Stage 11: type checking for arithmetic + booleans
 // Return: (value << 16) | pos.  Entry: (hash << 32) + value.
-// Closure encoding (64-bit): flag(b62) | has_ph2(b61) | ph1(b54-60) | ph2(b47-53) | bs(b40-46) | cap_h(b32-39) | cap_v(b16-31)
-// flag = 1 << 62. Position is clean source pos.
-// Type constants: 0=Int, 1=Bool, 2=Error, 3=Fn
+// Closure encoding (32-bit): flag(bit30) | (ph<<23) | (bs<<16) | (cap_h<<8) | cap_v
+// flag = 1 << 30 = 1073741824. Position is clean source pos.
 // Env: e0..e3 with elen 0..4. let pushes to next slot. Closures capture most recent.
 
 fn is_digit(c: Int) -> Bool { c >= 48 and c <= 57 }
@@ -176,91 +175,45 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                         (v << 16) + q
                     }
                 } else if h == 620 then {
-                    // "fn" keyword: fn(x) => body or fn(x) { body } or fn(x, y) ...
+                    // "fn" keyword
                     let q2 = skip_ws(src, q, len);
                     if q2 < len then {
                         let c1 = perform String.charAt(src, q2);
                         if c1 == 40 then {
-                            // Read first param
                             let q3 = skip_ws(src, q2 + 1, len);
-                            let param1_id = read_ident(src, q3, len, 0);
-                            let ph1 = param1_id >> 16;
-                            let q4 = param1_id & 0xFFFF;
+                            let param_id = read_ident(src, q3, len, 0);
+                            let ph = param_id >> 16;
+                            let q4 = param_id & 0xFFFF;
                             let q5 = skip_ws(src, q4, len);
                             if q5 < len then {
                                 let c2 = perform String.charAt(src, q5);
-                                let ph2 = 0;
-                                let q_after_params = 0;
                                 if c2 == 41 then {
-                                    // Single param: fn(x)
-                                    q_after_params = q5 + 1
-                                } else if c2 == 44 then {
-                                    // Multi param: fn(x, y
-                                    let q3b = skip_ws(src, q5 + 1, len);
-                                    let param2_id = read_ident(src, q3b, len, 0);
-                                    ph2 = param2_id >> 16;
-                                    let q4b = param2_id & 0xFFFF;
-                                    let q5b = skip_ws(src, q4b, len);
-                                    if q5b < len then {
-                                        let c2b = perform String.charAt(src, q5b);
-                                        if c2b == 41 then {
-                                            q_after_params = q5b + 1
-                                        } else { q_after_params = 0 }
-                                    } else { q_after_params = 0 }
-                                } else { q_after_params = 0 };
-                                if q_after_params == 0 then (0 << 16) + p
-                                else {
-                                    let q6 = skip_ws(src, q_after_params, len);
-                                    let body_start = 0;
-                                    let body_end = 0;
+                                    let q6 = skip_ws(src, q5 + 1, len);
                                     if q6 + 1 < len then {
                                         let c3 = perform String.charAt(src, q6);
                                         let c4 = perform String.charAt(src, q6 + 1);
                                         if c3 == 61 and c4 == 62 then {
-                                            // Arrow body: fn(x) => body
-                                            body_start = q6 + 2;
+                                            let body_start = q6 + 2;
                                             let body_parsed = parse_pratt(src, body_start, len, no_left, 0, e0, e1, e2, e3, elen);
-                                            body_end = body_parsed & 0xFFFF
-                                        } else { body_start = 0; body_end = 0 }
-                                    } else { body_start = 0; body_end = 0 };
-                                    if body_start == 0 then {
-                                        if q6 < len then {
-                                            let c3 = perform String.charAt(src, q6);
-                                            if c3 == 123 then {
-                                                // Block body: fn(x) { body }
-                                                body_start = q6 + 1;
-                                                let body_parsed = parse_pratt(src, body_start, len, no_left, 0, e0, e1, e2, e3, elen);
-                                                body_end = body_parsed & 0xFFFF;
-                                                let bp = skip_ws(src, body_end, len);
-                                                if bp < len then {
-                                                    let cb = perform String.charAt(src, bp);
-                                                    if cb == 125 then {
-                                                        body_end = bp + 1
-                                                    } else { body_start = 0; body_end = 0 }
-                                                } else { body_start = 0; body_end = 0 }
-                                            } else { body_start = 0; body_end = 0 }
-                                        } else { body_start = 0; body_end = 0 }
-                                    } else { };
-                                    if body_start == 0 then (0 << 16) + p
-                                    else {
-                                        let flag = 1 << 62;
-                                        let has_ph2 = if ph2 == 0 then 0 else 1 << 61;
-                                        let enc = flag + has_ph2 + (ph1 << 54) + (ph2 << 47) + (((body_start & 0x7F) << 40));
-                                        let cap_data = if elen > 0 then {
-                                            let cap_e = if elen >= 4 then e3
-                                            else if elen >= 3 then e2
-                                            else if elen >= 2 then e1
-                                            else e0;
-                                            let cap_h = (cap_e >> 32) & 0xFF;
-                                            let cap_v = cap_e & 0xFFFF;
-                                            (cap_h << 16) + cap_v
-                                        } else { 0 };
-                                        let cap_h = cap_data >> 16;
-                                        let cap_v = cap_data & 0xFFFF;
-                                        let enc2 = enc + (cap_h << 32) + (cap_v << 16);
-                                        (enc2 << 16) + body_end
-                                    }
-                                }
+                                            let body_end = body_parsed & 0xFFFF;
+                                            let flag = 1 << 30;
+                                            let enc = flag + (ph << 23) + (((body_start & 0x7F) << 16));
+                                            let cap_data = if elen > 0 then {
+                                                let cap_e = if elen >= 4 then e3
+                                                else if elen >= 3 then e2
+                                                else if elen >= 2 then e1
+                                                else e0;
+                                                let cap_h = (cap_e >> 32) & 0xFF;
+                                                let cap_v = cap_e & 0xFFFF;
+                                                (cap_h << 16) + cap_v
+                                            } else { 0 };
+                                            let cap_h = cap_data >> 16;
+                                            let cap_v = cap_data & 0xFFFF;
+                                            let enc2 = enc + (cap_h << 8) + (cap_v & 0xFF);
+                                            (enc2 << 16) + body_end
+                                        } else (0 << 16) + p
+                                    } else (0 << 16) + p
+                                } else (0 << 16) + p
                             } else (0 << 16) + p
                         } else (0 << 16) + p
                     } else (0 << 16) + p

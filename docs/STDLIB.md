@@ -80,14 +80,15 @@ let r = sqrt(25.0)       // ~5.0
 
 ## Module: list
 
-List/array operations over native arrays (`[Int]`). Traversal functions
-(`length`, `sum`, `contains`, `index_of`, `any`, `all`, `fold`, `max_of`,
-`min_of`) accept `[Int]` arrays.
+List/array operations over native arrays. Functions fall into two categories:
 
-Array-producing functions (`map`, `filter`, `reverse`, `take`, `drop`, `range`)
-are backed by the `Array` builtin effect (`perform Array.push`, `perform
-Array.new`, `perform Array.length`). These functions are polymorphic — they
-accept and return arrays of any element type.
+- **Int-only** (annotated `[Int]`): `length`, `sum`, `contains`, `index_of`,
+  `find`, `any`, `all`, `fold`, `max_of`, `min_of`, `sort`, `append`, `zip`,
+  `enumerate`. Passing a non-Int array produces a type error.
+
+- **Polymorphic** (no element-type annotation): `map`, `filter`, `reverse`,
+  `take`, `drop`, `range`. These accept and return arrays of any element type
+  (strings, records, tuples, etc.).
 
 ### Traversal functions
 
@@ -135,6 +136,19 @@ let rev     = reverse(xs)        // [5, 4, 3, 2, 1]
 let first3  = take(3, xs)        // [1, 2, 3]
 let rest    = drop(2, xs)        // [3, 4, 5]
 let r       = range(4)           // [0, 1, 2, 3]
+```
+
+Polymorphic functions work with strings, records, and any element type:
+
+```nula
+import stdlib::list
+
+// String arrays work with polymorphic functions
+let excited = map(fn(s) { s + "!" }, ["a", "b", "c"])  // ["a!", "b!", "c!"]
+let short   = filter(fn(s) { perform String.length(s) <= 4 }, ["hi", "hello", "hey"])  // ["hi", "hey"]
+
+// ⚠ Passing strings to Int-only functions is a type error:
+// length(["x", "y", "z"])  // ERROR: Type mismatch, expected Int, found String
 ```
 
 ---

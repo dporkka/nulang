@@ -1,9 +1,13 @@
-// Nulang standard library — list operations over native arrays.
+// Nulang standard library — list/array operations over native arrays.
 // Language version: 2.0.0-alpha
 //
+// Polymorphic functions (map, filter, reverse, take, drop, range) work with
+// any element type. Functions with explicit [Int] annotations (length, sum,
+// contains, index_of, any, all, find, fold, max_of, min_of, sort, append,
+// zip, enumerate) are Int-only for now.
+//
 // Built on `perform Array.push` / `perform Array.new` / `perform Array.length`
-// primitives (added 2026-07-30). Array-producing functions are now feasible.
-
+// primitives (added 2026-07-30).
 /// Number of elements in the array.
 pub fn length(xs: [Int]) -> Int {
     var n = 0;

@@ -332,10 +332,41 @@ f(10).1              // → 11
 > Tuple destructuring via `match` still works and is the idiomatic way
 > to extract all fields at once: `match t with | (x, y) => x + y`.
 
+
+---
+
+### 17. List functions: some are Int-only, some are polymorphic
+
+Stdlib `list` functions fall into two categories:
+
+- **Polymorphic** (no `[Int]` annotation): `map`, `filter`, `reverse`,
+  `take`, `drop`, `range` — work with any element type (strings,
+  records, tuples, etc.).
+
+- **Int-only** (annotated `[Int]`): `length`, `sum`, `contains`,
+  `index_of`, `find`, `any`, `all`, `fold`, `max_of`, `min_of`,
+  `sort`, `append`, `zip`, `enumerate` — produce a type error when
+  passed non-Int arrays.
+
+```nula
+import stdlib::list
+
+// ❌ length expects [Int]
+let n = length(["x", "y", "z"])
+// Error: Type mismatch: expected Int, found String
+
+// ❌ fold expects init: Int, xs: [Int]
+let r = fold(fn(acc, s) { acc + " " + s }, "hello", ["world"])
+// Error: Type mismatch: expected Int, found String
+
+// ✅ polymorphic functions work with any type
+let excited = map(fn(s) { s + "!" }, ["a", "b", "c"])  // ["a!", "b!", "c!"]
+let pos = filter(fn(r) { r.x > 0 }, [{x: 1}, {x: -1}, {x: 2}])  // [{x:1}, {x:2}]
+```
+
 ---
 
 ## Quick Idioms
-
 | Idiom | Snippet |
 |-------|---------|
 | Pipe (`|>`) | `41 |> fn(n) { n + 1 }` |

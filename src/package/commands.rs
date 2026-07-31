@@ -22,12 +22,28 @@ pub fn run(args: &[String]) -> NuResult<()> {
         Some("build") => cmd_build(),
         Some("build-wasm") => cmd_build_wasm(),
         Some("test") => {
-            let filter = if args.get(1).map(String::as_str) == Some("--filter") {
-                args.get(2).map(String::as_str)
-            } else {
-                None
-            };
-            cmd_test(filter)
+            let mut filter: Option<&str> = None;
+            let mut verbose = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--filter" => {
+                        i += 1;
+                        if i < args.len() {
+                            filter = Some(args[i].as_str());
+                        }
+                    }
+                    "--verbose" | "-v" => verbose = true,
+                    other => {
+                        return Err(NuError::PackageError {
+                            msg: format!("unknown flag '{}' for nula test", other),
+                            span: Span::default(),
+                        });
+                    }
+                }
+                i += 1;
+            }
+            cmd_test(filter, verbose)
         }
         Some("run") => {
             if args.get(1).map(String::as_str) == Some("--watch") {
@@ -109,7 +125,7 @@ fn print_usage() {
     println!("  init          Scaffold a new package in the current directory");
     println!("  build         Resolve dependencies and type-check the package");
     println!("  build-wasm    Build package to .wasm + .cwasm (AOT, requires wasmtime)");
-    println!("  test [--filter <substr>]  Run .nula test files (optionally filtered by name)");
+    println!("  test [--filter <substr>] [--verbose|-v]  Run .nula test files");
     println!("  run           Build and run the package entry point");
     println!("  run --watch   Build and re-run on source changes");
     println!("  watch         Alias for 'run --watch'");
@@ -404,14 +420,18 @@ fn collect_mtimes_recursive(dir: &Path, out: &mut Vec<(PathBuf, std::time::Syste
     }
 }
 
-/// `nula test [--filter <substr>]`: discover and run `.nula` test files
-/// under the package's `tests/` directory, reporting pass/fail.
+/// `nula test [--filter <substr>] [--verbose|-v]`: discover and run `.nula`
+/// test files under the package's `tests/` directory, reporting pass/fail.
 ///
 /// Each test file is executed via the `nulang` exe in the current package
 /// (same process as `nula run`). A test PASSes if it runs to completion
 /// without error; any compile or runtime error (including assertion
 /// failures from the `Test` effect) is a FAIL.
-fn cmd_test(filter: Option<&str>) -> NuResult<()> {
+///
+/// With `--verbose` (or `-v`): prints each test file name before execution,
+/// shows ✓ PASS / ✗ FAIL per file, and displays error messages for failures.
+/// Default (non-verbose) output is clean and greppable.
+fn cmd_test(filter: Option<&str>, verbose: bool) -> NuResult<()> {
     eprintln!("Preparing package...");
     let _entry = prepare_package()?;
     let tests_dir = std::env::current_dir()
@@ -446,15 +466,27 @@ fn cmd_test(filter: Option<&str>) -> NuResult<()> {
         let relative = file
             .strip_prefix(&tests_dir.parent().unwrap_or(&tests_dir))
             .unwrap_or(file);
+        if verbose {
+            println!("--- {} ---", relative.display());
+        }
         match nulang_exe(&[&file_str]) {
-            Ok(()) => println!("test {} ... ok", relative.display()),
+            Ok(()) => {
+                if verbose {
+                    println!("   ✓ PASS");
+                } else {
+                    println!("test {} ... ok", relative.display());
+                }
+            }
             Err(e) => {
                 failed += 1;
-                let msg = e.to_string();
-                // Extract the actual runtime error message from the NuError display
-                // which includes span info; show the meaningful part.
-                println!("test {} ... FAILED", relative.display());
-                eprintln!("{}", msg);
+                if verbose {
+                    println!("   ✗ FAIL");
+                    println!("   {}", e);
+                } else {
+                    let msg = e.to_string();
+                    println!("test {} ... FAILED", relative.display());
+                    eprintln!("{}", msg);
+                }
             }
         }
     }
@@ -810,7 +842,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let _guard = ChangeDir::new(&dir);
 
-        let result = cmd_test(None);
+        let result = cmd_test(None, false);
         assert!(result.is_err(), "test outside package should fail");
 
         let _ = std::fs::remove_dir_all(&dir);
