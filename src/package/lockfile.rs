@@ -15,7 +15,7 @@
 //! name = "json"
 //! version = "0.2.0"
 //! source = "git+https://github.com/example/json.nu.git#v0.2.0"
-//! ```
+//! commit = "a1b2c3d4e5f6..."
 
 use std::path::Path;
 
@@ -50,6 +50,11 @@ pub struct LockedPackage {
     /// (e.g. the source was unavailable at lock time).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
+    /// Resolved git commit (full SHA) for `git+` sources, recorded at fetch
+    /// time so a later resolution can detect a moved branch/tag and re-fetch
+    /// the dependency. Empty for non-git sources.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub commit: String,
 }
 
 impl Lockfile {
@@ -120,12 +125,14 @@ mod tests {
                     version: "0.1.0".to_string(),
                     source: "path+/home/david/projects/util".to_string(),
                     content_hash: "aabbcc".to_string(),
+                    commit: String::new(),
                 },
                 LockedPackage {
                     name: "json".to_string(),
                     version: "0.2.0".to_string(),
                     source: "git+https://github.com/example/json.nu.git#v0.2.0".to_string(),
                     content_hash: String::new(),
+                    commit: "a1b2c3d4e5f67890abcdef1234567890abcdef12".to_string(),
                 },
             ],
         }
@@ -164,7 +171,6 @@ mod tests {
             other => panic!("expected PackageError, got {:?}", other),
         }
     }
-
     #[test]
     fn test_lockfile_content_hash_round_trips() {
         // A non-empty content_hash must survive serialization + re-parse.
@@ -174,6 +180,7 @@ mod tests {
             version: "1.0.0".to_string(),
             source: "path+/tmp/pinned".to_string(),
             content_hash: "deadbeef".to_string(),
+            commit: String::new(),
         });
         let toml_text = lockfile.to_toml().expect("serialize");
         assert!(

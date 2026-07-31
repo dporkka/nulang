@@ -28,8 +28,14 @@ pub enum PackageSource {
     /// A local directory (canonicalized).
     Path(PathBuf),
     /// A git clone cached under `<root>/.nula/git/`, with the requested
-    /// rev/branch/tag if any.
-    Git { url: String, rev: Option<String> },
+    /// rev/branch/tag if any and the commit the checkout was fetched at.
+    Git {
+        url: String,
+        rev: Option<String>,
+        /// Full SHA of the checkout's HEAD at fetch time — the dependency's
+        /// cache key. A moved remote ref invalidates the cached checkout.
+        commit: Option<String>,
+    },
 }
 
 impl PackageSource {
@@ -38,7 +44,7 @@ impl PackageSource {
         match self {
             PackageSource::Root => "root".to_string(),
             PackageSource::Path(dir) => format!("path+{}", dir.display()),
-            PackageSource::Git { url, rev } => match rev {
+            PackageSource::Git { url, rev, .. } => match rev {
                 Some(rev) => format!("git+{}#{}", url, rev),
                 None => format!("git+{}", url),
             },
@@ -50,7 +56,9 @@ impl PackageSource {
     fn dir(&self) -> Option<&Path> {
         match self {
             PackageSource::Path(dir) => Some(dir),
-            PackageSource::Git { .. } => None, // git clones are hashed at fetch time (TODO)
+            // Git checkouts are keyed by their commit SHA (recorded in
+            // `commit` at fetch time, see `fetch_git`), not by content hash.
+            PackageSource::Git { .. } => None,
             PackageSource::Root => None,
         }
     }
@@ -112,7 +120,8 @@ impl Resolution {
     }
 
     /// Pin every non-root package into a lockfile, including the BLAKE3
-    /// content hash of each resolved package's source.
+    /// content hash of each resolved package's source and the resolved
+    /// git commit of each git dependency.
     pub fn to_lockfile(&self) -> Lockfile {
         let mut lockfile = Lockfile::new();
         for package in self.dependencies() {
@@ -121,6 +130,10 @@ impl Resolution {
                 version: package.version.clone(),
                 source: package.source.lockfile_source(),
                 content_hash: package.content_hash_hex(),
+                commit: match &package.source {
+                    PackageSource::Git { commit, .. } => commit.clone().unwrap_or_default(),
+                    _ => String::new(),
+                },
             });
         }
         lockfile
@@ -256,19 +269,23 @@ impl Resolver {
             Dependency::Detailed(detail) => detail,
         };
 
-        let dep_dir = if let Some(path) = &detail.path {
+        let (dep_dir, git_commit) = if let Some(path) = &detail.path {
             let dir = parent_dir.join(path);
-            std::fs::canonicalize(&dir).map_err(|e| NuError::PackageError {
-                msg: format!(
-                    "cannot resolve path dependency '{}' at {}: {}",
-                    dep_name,
-                    dir.display(),
-                    e
-                ),
-                span: Span::default(),
-            })?
+            (
+                std::fs::canonicalize(&dir).map_err(|e| NuError::PackageError {
+                    msg: format!(
+                        "cannot resolve path dependency '{}' at {}: {}",
+                        dep_name,
+                        dir.display(),
+                        e
+                    ),
+                    span: Span::default(),
+                })?,
+                None,
+            )
         } else if detail.git.is_some() {
-            self.fetch_git(dep_name, detail)?
+            let (dir, commit) = self.fetch_git(dep_name, detail)?;
+            (dir, Some(commit))
         } else {
             return Err(NuError::PackageError {
                 msg: format!("dependency '{}' must specify a path or git URL", dep_name),
@@ -334,6 +351,7 @@ impl Resolver {
                     .clone()
                     .or_else(|| detail.branch.clone())
                     .or_else(|| detail.tag.clone()),
+                commit: git_commit,
             }
         };
 
@@ -343,9 +361,16 @@ impl Resolver {
         self.resolve_package(&dep_dir, &manifest, source)
     }
 
-    /// Clone a git dependency into `<root>/.nula/git/<name>`, reusing an
-    /// existing checkout. Requires `git` on PATH.
-    fn fetch_git(&self, dep_name: &str, detail: &DependencyDetail) -> NuResult<PathBuf> {
+    /// Clone a git dependency into `<root>/.nula/git/<name>` and return its
+    /// directory plus the resolved commit SHA (the dependency's cache key).
+    ///
+    /// The commit is recorded next to the checkout in `<cache>/<name>.commit`.
+    /// A cached checkout is reused only while its recorded commit still
+    /// matches what the dependency spec resolves to now: branch/tag/unpinned
+    /// specs are re-fetched from the remote so a moved ref invalidates the
+    /// cache, while a pinned rev is compared locally. A stale checkout is
+    /// wiped and re-cloned. Requires `git` on PATH.
+    fn fetch_git(&self, dep_name: &str, detail: &DependencyDetail) -> NuResult<(PathBuf, String)> {
         let url = detail.git.as_ref().expect("checked by caller");
         let cache = self.root_dir.join(".nula").join("git");
         std::fs::create_dir_all(&cache).map_err(|e| NuError::PackageError {
@@ -353,8 +378,29 @@ impl Resolver {
             span: Span::default(),
         })?;
         let dest = cache.join(dep_name);
+        let commit_file = cache.join(format!("{}.commit", dep_name));
 
-        if !dest.join(MANIFEST_FILE).exists() {
+        let mut commit: Option<String> = None;
+        if dest.join(MANIFEST_FILE).exists() {
+            // Cached checkout: keep it only while its recorded commit still
+            // matches what the dependency spec resolves to now.
+            let current = current_git_commit(&dest, detail)?;
+            let recorded = std::fs::read_to_string(&commit_file)
+                .ok()
+                .map(|s| s.trim().to_string());
+            if recorded.as_deref() == Some(current.as_str()) {
+                commit = Some(current);
+            } else {
+                // Stale: the ref moved, the remote changed, or the checkout
+                // predates commit recording. Drop it so the clone re-runs.
+                std::fs::remove_dir_all(&dest).map_err(|e| NuError::PackageError {
+                    msg: format!("cannot clear stale checkout {}: {}", dest.display(), e),
+                    span: Span::default(),
+                })?;
+            }
+        }
+
+        if commit.is_none() {
             // No usable checkout yet: (re)clone.
             if dest.exists() {
                 std::fs::remove_dir_all(&dest).map_err(|e| NuError::PackageError {
@@ -382,37 +428,120 @@ impl Resolver {
                     span: Span::default(),
                 });
             }
-        }
 
-        if let Some(rev) = &detail.rev {
-            let output = Command::new("git")
-                .arg("-C")
-                .arg(&dest)
-                .arg("checkout")
-                .arg(rev)
-                .output()
-                .map_err(|e| NuError::PackageError {
-                    msg: format!("failed to run git checkout for '{}': {}", dep_name, e),
-                    span: Span::default(),
-                })?;
-            if !output.status.success() {
-                return Err(NuError::PackageError {
-                    msg: format!(
-                        "git checkout {} of '{}' failed: {}",
-                        rev,
-                        url,
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ),
-                    span: Span::default(),
-                });
+            if let Some(rev) = &detail.rev {
+                let output = Command::new("git")
+                    .arg("-C")
+                    .arg(&dest)
+                    .arg("checkout")
+                    .arg(rev)
+                    .output()
+                    .map_err(|e| NuError::PackageError {
+                        msg: format!("failed to run git checkout for '{}': {}", dep_name, e),
+                        span: Span::default(),
+                    })?;
+                if !output.status.success() {
+                    return Err(NuError::PackageError {
+                        msg: format!(
+                            "git checkout {} of '{}' failed: {}",
+                            rev,
+                            url,
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                        span: Span::default(),
+                    });
+                }
             }
+
+            let head = git_rev_parse(&dest, "HEAD")?;
+            std::fs::write(&commit_file, format!("{}\n", head)).map_err(|e| {
+                NuError::PackageError {
+                    msg: format!("cannot write {}: {}", commit_file.display(), e),
+                    span: Span::default(),
+                }
+            })?;
+            commit = Some(head);
         }
 
-        std::fs::canonicalize(&dest).map_err(|e| NuError::PackageError {
+        let dir = std::fs::canonicalize(&dest).map_err(|e| NuError::PackageError {
             msg: format!("cannot resolve {}: {}", dest.display(), e),
             span: Span::default(),
-        })
+        })?;
+        Ok((dir, commit.expect("both branches record a commit")))
     }
+}
+
+/// Run `git -C <dir> rev-parse <spec>` and return the resolved commit SHA.
+fn git_rev_parse(dir: &Path, spec: &str) -> NuResult<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .arg("rev-parse")
+        .arg(spec)
+        .output()
+        .map_err(|e| NuError::PackageError {
+            msg: format!("failed to run git rev-parse in '{}': {}", dir.display(), e),
+            span: Span::default(),
+        })?;
+    if !output.status.success() {
+        return Err(NuError::PackageError {
+            msg: format!(
+                "git rev-parse {} in '{}' failed: {}",
+                spec,
+                dir.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            span: Span::default(),
+        });
+    }
+    Ok(String::from_utf8(output.stdout)
+        .map_err(|e| NuError::PackageError {
+            msg: format!(
+                "git rev-parse in '{}' returned non-UTF-8 output: {}",
+                dir.display(),
+                e
+            ),
+            span: Span::default(),
+        })?
+        .trim()
+        .to_string())
+}
+
+/// The commit `detail` resolves to inside the existing checkout `dest`.
+///
+/// A pinned rev is compared locally (fetching cannot move a pin); branch,
+/// tag and unpinned specs are refreshed from the remote first, so a moved
+/// ref is detected and invalidates the cache.
+fn current_git_commit(dest: &Path, detail: &DependencyDetail) -> NuResult<String> {
+    let spec = if let Some(rev) = &detail.rev {
+        rev.clone()
+    } else {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(dest)
+            .arg("fetch")
+            .output()
+            .map_err(|e| NuError::PackageError {
+                msg: format!("failed to run git fetch in '{}': {}", dest.display(), e),
+                span: Span::default(),
+            })?;
+        if !output.status.success() {
+            return Err(NuError::PackageError {
+                msg: format!(
+                    "git fetch in '{}' failed: {}",
+                    dest.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                span: Span::default(),
+            });
+        }
+        match (&detail.branch, &detail.tag) {
+            (Some(branch), _) => format!("origin/{}", branch),
+            (None, Some(tag)) => format!("refs/tags/{}", tag),
+            (None, None) => "FETCH_HEAD".to_string(),
+        }
+    };
+    git_rev_parse(dest, &spec)
 }
 
 #[cfg(test)]
@@ -642,6 +771,196 @@ mod tests {
         assert_eq!(
             lockfile2.package[0].content_hash, util.content_hash,
             "content hash must be stable across resolutions of the same source"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// Create a throwaway git repo at `dir` hosting package `name` v`version`
+    /// with a `lib.nula` containing `content`, and return its HEAD commit SHA.
+    fn git_remote(dir: &Path, name: &str, version: &str, content: &str) -> String {
+        write_manifest(dir, name, version, "");
+        std::fs::write(dir.join("lib.nula"), content).unwrap();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("git should run");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Nulang Test"]);
+        git_commit_all(dir, "initial")
+    }
+
+    /// Stage everything in `dir` and commit it, returning the new HEAD SHA.
+    fn git_commit_all(dir: &Path, msg: &str) -> String {
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("git should run");
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", msg]);
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .expect("git should run");
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn test_git_dependency_refetches_when_remote_moves() {
+        // An unpinned git dependency records the resolved commit in the
+        // lockfile and re-fetches (re-clones) when the remote's default
+        // branch moves, so the cached checkout is never stale.
+        let dir = fresh_dir("git_refetch");
+        let remote = dir.join("remote");
+        let app_dir = dir.join("app");
+        let c1 = git_remote(&remote, "util", "0.1.0", "fn main() { 1 }");
+        write_manifest(
+            &app_dir,
+            "app",
+            "1.0.0",
+            &format!("util = {{ git = \"{}\" }}\n", remote.display()),
+        );
+
+        let manifest = Manifest::load(&app_dir).unwrap();
+        let lockfile = resolve(&app_dir, &manifest).unwrap().to_lockfile();
+        let util = &lockfile.package[0];
+        assert_eq!(util.commit, c1, "lockfile must record the fetched commit");
+        assert!(
+            util.content_hash.is_empty(),
+            "git deps are keyed by commit, not content hash"
+        );
+
+        // The commit is also recorded next to the cached checkout, and a
+        // sentinel file proves the checkout itself is reused unchanged.
+        let cache = app_dir.join(".nula").join("git");
+        assert_eq!(
+            std::fs::read_to_string(cache.join("util.commit"))
+                .unwrap()
+                .trim(),
+            c1
+        );
+        std::fs::write(cache.join("util").join("sentinel.txt"), "keep me").unwrap();
+
+        let lockfile2 = resolve(&app_dir, &manifest).unwrap().to_lockfile();
+        assert_eq!(lockfile2.package[0].commit, c1);
+        assert!(
+            cache.join("util").join("sentinel.txt").exists(),
+            "an unchanged dependency must reuse the cached checkout"
+        );
+
+        // Move the remote's default branch: the next resolution must notice
+        // the mismatch and re-fetch.
+        std::fs::write(remote.join("lib.nula"), "fn main() { 2 }").unwrap();
+        let c2 = git_commit_all(&remote, "second");
+        let lockfile3 = resolve(&app_dir, &manifest).unwrap().to_lockfile();
+        assert_eq!(
+            lockfile3.package[0].commit, c2,
+            "a moved branch must invalidate the cache"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cache.join("util").join("lib.nula")).unwrap(),
+            "fn main() { 2 }",
+            "the stale checkout must be replaced by a fresh clone"
+        );
+        assert!(
+            !cache.join("util").join("sentinel.txt").exists(),
+            "the stale checkout must be wiped, sentinel included"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_git_dependency_branch_tracks_remote() {
+        // Same staleness check for an explicit branch: the cached checkout
+        // is invalidated when the branch's tip moves on the remote.
+        let dir = fresh_dir("git_branch");
+        let remote = dir.join("remote");
+        let app_dir = dir.join("app");
+        let c1 = git_remote(&remote, "util", "0.1.0", "fn main() { 1 }");
+        write_manifest(
+            &app_dir,
+            "app",
+            "1.0.0",
+            &format!(
+                "util = {{ git = \"{}\", branch = \"main\" }}\n",
+                remote.display()
+            ),
+        );
+
+        let manifest = Manifest::load(&app_dir).unwrap();
+        let lockfile = resolve(&app_dir, &manifest).unwrap().to_lockfile();
+        assert_eq!(lockfile.package[0].commit, c1);
+
+        std::fs::write(remote.join("lib.nula"), "fn main() { 2 }").unwrap();
+        let c2 = git_commit_all(&remote, "second");
+        let lockfile2 = resolve(&app_dir, &manifest).unwrap().to_lockfile();
+        assert_eq!(
+            lockfile2.package[0].commit, c2,
+            "a moved branch must invalidate the cache"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_git_dependency_pinned_rev_is_stable() {
+        // A rev-pinned git dependency must not move when the remote does:
+        // the recorded commit stays the pin on every resolution.
+        let dir = fresh_dir("git_pin");
+        let remote = dir.join("remote");
+        let app_dir = dir.join("app");
+        let c1 = git_remote(&remote, "util", "0.1.0", "fn main() { 1 }");
+        write_manifest(
+            &app_dir,
+            "app",
+            "1.0.0",
+            &format!(
+                "util = {{ git = \"{}\", rev = \"{}\" }}\n",
+                remote.display(),
+                c1
+            ),
+        );
+
+        let manifest = Manifest::load(&app_dir).unwrap();
+        let lockfile = resolve(&app_dir, &manifest).unwrap().to_lockfile();
+        assert_eq!(lockfile.package[0].commit, c1);
+
+        // Remote moves forward; the pinned checkout must be left untouched.
+        std::fs::write(remote.join("lib.nula"), "fn main() { 2 }").unwrap();
+        let _c2 = git_commit_all(&remote, "second");
+        let lockfile2 = resolve(&app_dir, &manifest).unwrap().to_lockfile();
+        assert_eq!(
+            lockfile2.package[0].commit, c1,
+            "a pinned rev must not follow the remote"
+        );
+        let cache = app_dir.join(".nula").join("git");
+        assert_eq!(
+            std::fs::read_to_string(cache.join("util").join("lib.nula")).unwrap(),
+            "fn main() { 1 }",
+            "the pinned checkout must keep its original content"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
