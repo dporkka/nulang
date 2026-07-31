@@ -60,11 +60,19 @@ pub(crate) fn checkpoint_actor(rt: &mut Runtime, actor_id: u64) {
             state.insert(name.clone(), persisted);
         }
     }
+    // Snapshot the global CRDT state alongside durable actor fields.
+    let crdt_snapshot = rt.crdt_manager.as_ref().map(|m| {
+        m.snapshot()
+            .into_iter()
+            .map(|(id, (ty, bytes))| (id.0, ty.to_u8(), bytes))
+            .collect()
+    });
     let snapshot = crate::runtime::persistence::ActorSnapshot {
         actor_id,
         sequence: seq,
         state,
         waiting_signal: actor.waiting_signal.clone(),
+        crdt_snapshot,
     };
     let _ = rt.persistence.save_snapshot(snapshot);
     if let Some(actor) = rt.actors.get_mut(&actor_id) {

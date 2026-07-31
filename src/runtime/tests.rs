@@ -1458,6 +1458,7 @@ fn test_memory_store_latest_sequence() {
         sequence: 5,
         state: HashMap::new(),
         waiting_signal: None,
+        crdt_snapshot: None,
     };
     store.save_snapshot(snapshot).unwrap();
     store
@@ -1484,6 +1485,7 @@ fn test_libsql_store_save_load_snapshot() {
         sequence: 3,
         state,
         waiting_signal: None,
+        crdt_snapshot: None,
     };
     store.save_snapshot(snapshot).unwrap();
 
@@ -1535,6 +1537,7 @@ fn test_libsql_store_latest_sequence() {
             sequence: 5,
             state: HashMap::new(),
             waiting_signal: None,
+            crdt_snapshot: None,
         })
         .unwrap();
     store
@@ -1560,6 +1563,7 @@ fn test_libsql_store_clear() {
             sequence: 1,
             state: HashMap::new(),
             waiting_signal: None,
+            crdt_snapshot: None,
         })
         .unwrap();
     store
@@ -1593,6 +1597,7 @@ fn test_libsql_store_persists_to_disk() {
                 sequence: 1,
                 state,
                 waiting_signal: None,
+                crdt_snapshot: None,
             })
             .unwrap();
         store

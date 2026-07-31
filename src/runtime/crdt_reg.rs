@@ -3,7 +3,7 @@
 //! Provides LWWRegister (last-write-wins), MVRegister (multi-value), and
 //! RGA (replicated growable array / collaborative text).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 // Lamport clock infrastructure is shared with the other CRDTs; the canonical
@@ -125,23 +125,22 @@ impl<T: Clone + Eq + Hash> MVRegister<T> {
 
     pub fn write(&mut self, value: T) {
         let ts = self.clock.tick();
-        self.values.retain(|(_, t)| *t >= ts);
+        self.values.retain(|(_, t)| t.counter >= ts.counter);
         self.values.insert((value, ts));
     }
 
     pub fn read(&self) -> HashSet<T> {
+        let max_counter = self
+            .values
+            .iter()
+            .map(|(_, t)| t.counter)
+            .max()
+            .unwrap_or(0);
         self.values
             .iter()
-            .map(|(_, t)| *t)
-            .max()
-            .map(|max_ts| {
-                self.values
-                    .iter()
-                    .filter(|(_, t)| *t == max_ts)
-                    .map(|(v, _)| v.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
+            .filter(|(_, t)| t.counter == max_counter)
+            .map(|(v, _)| v.clone())
+            .collect()
     }
 
     pub fn is_conflicted(&self) -> bool {
@@ -153,10 +152,13 @@ impl<T: Clone + Eq + Hash> MVRegister<T> {
         for (val, ts) in &other.values {
             self.values.insert((val.clone(), *ts));
         }
-        if !self.values.is_empty() {
-            let max_ts = self.values.iter().map(|(_, t)| *t).max().unwrap();
-            self.values.retain(|(_, t)| *t == max_ts);
-        }
+        let max_counter = self
+            .values
+            .iter()
+            .map(|(_, t)| t.counter)
+            .max()
+            .unwrap_or(0);
+        self.values.retain(|(_, t)| t.counter == max_counter);
     }
 
     /// Delta relative to `base`: the `(value, timestamp)` pairs not present
@@ -353,14 +355,15 @@ impl<T: Clone + PartialEq> RGA<T> {
     /// changed. New elements keep their relative order so merging the delta
     /// produces the same sorted sequence as merging the full state.
     pub fn delta_since(&self, base: &Self) -> Option<Self> {
+        let base_timestamps: HashMap<LamportTime, LamportTime> =
+            base.elements.iter().map(|e| (e.id, e.timestamp)).collect();
         let elements: Vec<RGAElement<T>> = self
             .elements
             .iter()
             .filter(|e| {
-                base.elements
-                    .iter()
-                    .find(|b| b.id == e.id)
-                    .map_or(true, |b| e.timestamp > b.timestamp)
+                base_timestamps
+                    .get(&e.id)
+                    .map_or(true, |&base_ts| e.timestamp > base_ts)
             })
             .cloned()
             .collect();
@@ -616,13 +619,27 @@ mod tests {
 
     #[test]
     fn test_mv_merge_resolves() {
+        // Sequential writes on the same node: the second write supersedes.
         let mut a = MVRegister::new(1);
-        let mut b = MVRegister::new(2);
         a.write("old".to_string());
-        b.write("new".to_string());
-        a.merge(&b);
+        a.write("new".to_string());
         assert!(a.read().contains("new"));
         assert_eq!(a.read().len(), 1);
+    }
+
+    #[test]
+    fn test_mv_concurrent_nodes_merge() {
+        // Two nodes write concurrently (same counter, different node_id).
+        // Both values should survive the merge.
+        let mut a = MVRegister::new(1);
+        let mut b = MVRegister::new(2);
+        a.write("val-a".to_string());
+        b.write("val-b".to_string());
+        a.merge(&b);
+        assert!(a.read().contains("val-a"));
+        assert!(a.read().contains("val-b"));
+        assert_eq!(a.read().len(), 2);
+        assert!(a.is_conflicted());
     }
 
     #[test]

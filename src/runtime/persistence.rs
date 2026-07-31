@@ -132,6 +132,10 @@ pub struct ActorSnapshot {
     /// suspended waiting for, if any.  This is part of the snapshot so that
     /// recovery can decide whether the in-flight step must be re-triggered.
     pub waiting_signal: Option<String>,
+    /// CRDT state belonging to the runtime's CrdtManager, serialized as
+    /// `Vec<(crdt_id, crdt_type_u8, payload_bytes)>`.
+    #[serde(default)]
+    pub crdt_snapshot: Option<Vec<(u64, u8, Vec<u8>)>>,
 }
 
 /// A journal entry records a message delivered to an actor.
@@ -884,6 +888,7 @@ impl PersistenceStore for LibsqlStore {
                 sequence: sequence as u64,
                 state,
                 waiting_signal,
+                crdt_snapshot: None,
             })
         })
     }
@@ -1169,6 +1174,7 @@ mod json_file_store_tests {
                 sequence: 3,
                 state,
                 waiting_signal: None,
+                crdt_snapshot: None,
             })
             .unwrap();
 
@@ -1228,6 +1234,7 @@ mod json_file_store_tests {
                 sequence: 5,
                 state: HashMap::new(),
                 waiting_signal: None,
+                crdt_snapshot: None,
             })
             .unwrap();
         store
@@ -1254,6 +1261,7 @@ mod json_file_store_tests {
                 sequence: 1,
                 state: HashMap::new(),
                 waiting_signal: None,
+                crdt_snapshot: None,
             })
             .unwrap();
         store
@@ -1287,6 +1295,7 @@ mod json_file_store_tests {
                     sequence: 1,
                     state,
                     waiting_signal: None,
+                    crdt_snapshot: None,
                 })
                 .unwrap();
             store
@@ -1323,6 +1332,7 @@ mod json_file_store_tests {
                 sequence: 9,
                 state: HashMap::new(),
                 waiting_signal: None,
+                crdt_snapshot: None,
             })
             .unwrap();
 

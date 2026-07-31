@@ -3767,6 +3767,18 @@ impl Runtime {
         actor.is_agent = is_agent;
         actor.sequence = snapshot.sequence;
         actor.waiting_signal = snapshot.waiting_signal;
+        // Restore CRDT state if present in the snapshot.
+        if let Some(crdt_snap) = &snapshot.crdt_snapshot {
+            if let Some(manager) = &mut self.crdt_manager {
+                let snapshot: HashMap<CrdtId, (CrdtType, Vec<u8>)> = crdt_snap
+                    .iter()
+                    .filter_map(|(id, ty, bytes)| {
+                        CrdtType::from_u8(*ty).map(|t| (CrdtId(*id), (t, bytes.clone())))
+                    })
+                    .collect();
+                manager.restore(snapshot);
+            }
+        }
         for (name, value) in snapshot.state {
             // Rehydrate the semantic_memory and procedural_memory JSON strings
             // by allocating them on the actor heap so runtime helpers can read
@@ -4469,7 +4481,7 @@ impl Runtime {
         if ops.is_empty() {
             return;
         }
-        let packet = Packet::CrdtSync { ops };
+        let packet = Packet::CrdtSync { ops: Arc::new(ops) };
         if let Some(cluster) = &self.distributed.cluster {
             for member in cluster.healthy_members() {
                 if let Some(transport) = &mut self.distributed.transport {

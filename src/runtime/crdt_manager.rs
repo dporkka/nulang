@@ -38,6 +38,35 @@ pub enum CrdtType {
     RGA,
 }
 
+impl CrdtType {
+    pub fn to_u8(self) -> u8 {
+        match self {
+            CrdtType::GCounter => 0,
+            CrdtType::PNCounter => 1,
+            CrdtType::GSet => 2,
+            CrdtType::ORSet => 3,
+            CrdtType::AWORSet => 4,
+            CrdtType::LWWRegister => 5,
+            CrdtType::MVRegister => 6,
+            CrdtType::RGA => 7,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Option<CrdtType> {
+        match v {
+            0 => Some(CrdtType::GCounter),
+            1 => Some(CrdtType::PNCounter),
+            2 => Some(CrdtType::GSet),
+            3 => Some(CrdtType::ORSet),
+            4 => Some(CrdtType::AWORSet),
+            5 => Some(CrdtType::LWWRegister),
+            6 => Some(CrdtType::MVRegister),
+            7 => Some(CrdtType::RGA),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CrdtOp {
     pub crdt_id: CrdtId,
@@ -133,6 +162,77 @@ pub enum CrdtEntry {
     RGA(RGA<String>),
 }
 
+/// Helper trait mapping CRDT inner types to their `CrdtEntry` variant so
+/// [`CrdtManager::entry_mut`] can return typed references without per-type
+/// boilerplate accessors.
+pub trait CrdtEntryInner: Sized {
+    fn try_from_entry(entry: &mut CrdtEntry) -> Option<&mut Self>;
+}
+
+impl CrdtEntryInner for GCounter {
+    fn try_from_entry(entry: &mut CrdtEntry) -> Option<&mut Self> {
+        match entry {
+            CrdtEntry::GCounter(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+impl CrdtEntryInner for PNCounter {
+    fn try_from_entry(entry: &mut CrdtEntry) -> Option<&mut Self> {
+        match entry {
+            CrdtEntry::PNCounter(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+impl CrdtEntryInner for GSet<String> {
+    fn try_from_entry(entry: &mut CrdtEntry) -> Option<&mut Self> {
+        match entry {
+            CrdtEntry::GSet(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+impl CrdtEntryInner for ORSet<String> {
+    fn try_from_entry(entry: &mut CrdtEntry) -> Option<&mut Self> {
+        match entry {
+            CrdtEntry::ORSet(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+impl CrdtEntryInner for AWORSet<String> {
+    fn try_from_entry(entry: &mut CrdtEntry) -> Option<&mut Self> {
+        match entry {
+            CrdtEntry::AWORSet(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+impl CrdtEntryInner for LWWRegister<String> {
+    fn try_from_entry(entry: &mut CrdtEntry) -> Option<&mut Self> {
+        match entry {
+            CrdtEntry::LWWRegister(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+impl CrdtEntryInner for MVRegister<String> {
+    fn try_from_entry(entry: &mut CrdtEntry) -> Option<&mut Self> {
+        match entry {
+            CrdtEntry::MVRegister(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+impl CrdtEntryInner for RGA<String> {
+    fn try_from_entry(entry: &mut CrdtEntry) -> Option<&mut Self> {
+        match entry {
+            CrdtEntry::RGA(c) => Some(c),
+            _ => None,
+        }
+    }
+}
 impl CrdtEntry {
     pub fn payload_bytes(&self) -> Vec<u8> {
         match self {
@@ -238,7 +338,7 @@ impl CrdtEntry {
                 c.increments.node_id = node_id;
                 c.decrements.node_id = node_id;
             }
-            CrdtEntry::ORSet(c) => c.node_id = node_id as u32,
+            CrdtEntry::ORSet(c) => c.node_id = node_id,
             CrdtEntry::AWORSet(c) => c.clock.node_id = node_id,
             CrdtEntry::LWWRegister(c) => c.clock.node_id = node_id,
             CrdtEntry::MVRegister(c) => c.clock.node_id = node_id,
@@ -251,7 +351,6 @@ impl CrdtEntry {
 pub struct CrdtManager {
     node_id: u64,
     entries: HashMap<CrdtId, CrdtEntry>,
-    pending_ops: Vec<CrdtOp>,
     ops_synced: u64,
     /// Per-entry snapshot of the state last shipped by
     /// [`generate_delta_sync_ops`](CrdtManager::generate_delta_sync_ops).
@@ -314,7 +413,6 @@ impl CrdtManager {
         CrdtManager {
             node_id,
             entries: HashMap::new(),
-            pending_ops: Vec::new(),
             ops_synced: 0,
             sync_base: HashMap::new(),
         }
@@ -345,7 +443,7 @@ impl CrdtManager {
 
     pub fn create_orset(&mut self) -> (CrdtId, ORSet<String>) {
         let id = CrdtId::new(self.node_id);
-        let set = ORSet::new(self.node_id as u32);
+        let set = ORSet::new(self.node_id);
         self.entries.insert(id, CrdtEntry::ORSet(set.clone()));
         (id, set)
     }
@@ -378,6 +476,13 @@ impl CrdtManager {
         (id, rga)
     }
 
+    /// Type-safe generic accessor for any CRDT entry managed by the store.
+    ///
+    /// Returns `Some(&mut T)` when an entry with `id` exists and its variant
+    /// matches `T`, or `None` for unknown ids / type mismatches.
+    pub fn entry_mut<T: CrdtEntryInner>(&mut self, id: CrdtId) -> Option<&mut T> {
+        self.entries.get_mut(&id).and_then(T::try_from_entry)
+    }
     pub fn get_gcounter_mut(&mut self, id: CrdtId) -> Option<&mut GCounter> {
         match self.entries.get_mut(&id) {
             Some(CrdtEntry::GCounter(c)) => Some(c),
@@ -493,16 +598,22 @@ impl CrdtManager {
         let mut ops = Vec::new();
         for (id, entry) in &self.entries {
             match self.sync_base.get(id) {
-                None => ops.push(CrdtDeltaOp {
-                    op: CrdtOp {
-                        crdt_id: *id,
-                        crdt_type: entry.crdt_type(),
-                        payload: entry.payload_bytes(),
-                    },
-                    is_delta: false,
-                }),
+                None => {
+                    // Entry never synced: ship full state and record the base.
+                    self.sync_base.insert(*id, entry.clone());
+                    ops.push(CrdtDeltaOp {
+                        op: CrdtOp {
+                            crdt_id: *id,
+                            crdt_type: entry.crdt_type(),
+                            payload: entry.payload_bytes(),
+                        },
+                        is_delta: false,
+                    });
+                }
                 Some(base) => {
                     if let Some(delta) = entry.delta_since(base) {
+                        // Entry changed since last sync: ship delta and advance base.
+                        self.sync_base.insert(*id, entry.clone());
                         ops.push(CrdtDeltaOp {
                             op: CrdtOp {
                                 crdt_id: *id,
@@ -512,15 +623,43 @@ impl CrdtManager {
                             is_delta: true,
                         });
                     }
+                    // Unchanged: no op, no base update — avoids wasteful clone.
                 }
             }
         }
-        // Record the new base: the next delta covers changes from now on.
-        // Merged-in remote state is deliberately *not* folded into the base
-        // here (only `generate_delta_sync_ops` advances it), so a delta may
-        // echo a peer's own state back to it — a harmless idempotent no-op.
-        self.sync_base = self.entries.clone();
         ops
+    }
+
+    /// Serialize all entries into a snapshot suitable for persistence.
+    pub fn snapshot(&self) -> HashMap<CrdtId, (CrdtType, Vec<u8>)> {
+        self.entries
+            .iter()
+            .map(|(id, entry)| (*id, (entry.crdt_type(), entry.payload_bytes())))
+            .collect()
+    }
+
+    /// Restore CRDT state from a previously saved snapshot.
+    pub fn restore(&mut self, snapshot: HashMap<CrdtId, (CrdtType, Vec<u8>)>) {
+        for (id, (crdt_type, bytes)) in snapshot {
+            let mut entry: Option<CrdtEntry> = match crdt_type {
+                CrdtType::GCounter => GCounter::from_bytes(&bytes).map(CrdtEntry::GCounter),
+                CrdtType::PNCounter => PNCounter::from_bytes(&bytes).map(CrdtEntry::PNCounter),
+                CrdtType::GSet => GSet::<String>::from_bytes(&bytes).map(CrdtEntry::GSet),
+                CrdtType::ORSet => ORSet::<String>::from_bytes(&bytes).map(CrdtEntry::ORSet),
+                CrdtType::AWORSet => AWORSet::<String>::from_bytes(&bytes).map(CrdtEntry::AWORSet),
+                CrdtType::LWWRegister => {
+                    LWWRegister::<String>::from_bytes(&bytes).map(CrdtEntry::LWWRegister)
+                }
+                CrdtType::MVRegister => {
+                    MVRegister::<String>::from_bytes(&bytes).map(CrdtEntry::MVRegister)
+                }
+                CrdtType::RGA => RGA::<String>::from_bytes(&bytes).map(CrdtEntry::RGA),
+            };
+            if let Some(ref mut e) = entry {
+                e.set_local_node_id(self.node_id);
+                self.entries.insert(id, e.clone());
+            }
+        }
     }
 
     /// Apply a delta-tagged sync op received from a peer.
@@ -545,20 +684,6 @@ impl CrdtManager {
                 self.ops_synced += 1;
             }
         }
-    }
-
-    pub fn queue_sync(&mut self, id: CrdtId) {
-        if let Some(entry) = self.entries.get(&id) {
-            self.pending_ops.push(CrdtOp {
-                crdt_id: id,
-                crdt_type: entry.crdt_type(),
-                payload: entry.payload_bytes(),
-            });
-        }
-    }
-
-    pub fn drain_pending_ops(&mut self) -> Vec<CrdtOp> {
-        std::mem::take(&mut self.pending_ops)
     }
 
     pub fn len(&self) -> usize {

@@ -411,7 +411,7 @@ pub enum Packet {
     },
 
     /// CRDT synchronization packet.
-    CrdtSync { ops: Vec<CrdtOp> },
+    CrdtSync { ops: Arc<Vec<CrdtOp>> },
 
     /// Delta-state CRDT synchronization packet.
     ///
@@ -420,7 +420,7 @@ pub enum Packet {
     /// deltas into entries they already hold and apply full-state ops like
     /// [`CrdtSync`](Packet::CrdtSync). The full-state `CrdtSync` packet
     /// remains available as the join/reset fallback.
-    CrdtDeltaSync { ops: Vec<CrdtDeltaOp> },
+    CrdtDeltaSync { ops: Arc<Vec<CrdtDeltaOp>> },
 
     /// Cluster membership gossip.
     ///
@@ -606,13 +606,13 @@ impl Packet {
             }
             Packet::CrdtSync { ops } => {
                 buf.extend_from_slice(&(ops.len() as u32).to_be_bytes());
-                for op in ops {
+                for op in ops.iter() {
                     buf.extend_from_slice(&op.to_bytes());
                 }
             }
             Packet::CrdtDeltaSync { ops } => {
                 buf.extend_from_slice(&(ops.len() as u32).to_be_bytes());
-                for op in ops {
+                for op in ops.iter() {
                     buf.extend_from_slice(&op.to_bytes());
                 }
             }
@@ -800,7 +800,7 @@ impl Packet {
             offset += total_op_len;
             ops.push(op);
         }
-        Some(Packet::CrdtSync { ops })
+        Some(Packet::CrdtSync { ops: Arc::new(ops) })
     }
 
     fn read_crdt_delta_sync(payload: &[u8]) -> Option<Self> {
@@ -830,7 +830,7 @@ impl Packet {
             offset += total_op_len;
             ops.push(op);
         }
-        Some(Packet::CrdtDeltaSync { ops })
+        Some(Packet::CrdtDeltaSync { ops: Arc::new(ops) })
     }
 
     fn read_gossip(payload: &[u8]) -> Option<Self> {
@@ -2047,7 +2047,7 @@ mod tests {
             is_delta: true,
         };
         let packet = Packet::CrdtDeltaSync {
-            ops: vec![full_op, delta_op],
+            ops: Arc::new(vec![full_op, delta_op]),
         };
 
         let bytes = packet.to_bytes(42);
@@ -2061,14 +2061,14 @@ mod tests {
     #[test]
     fn test_packet_crdt_delta_sync_rejects_truncated_payload() {
         let packet = Packet::CrdtDeltaSync {
-            ops: vec![CrdtDeltaOp {
+            ops: Arc::new(vec![CrdtDeltaOp {
                 op: CrdtOp {
                     crdt_id: CrdtId(1),
                     crdt_type: CrdtType::GSet,
                     payload: vec![0xAB; 8],
                 },
                 is_delta: true,
-            }],
+            }]),
         };
         let bytes = packet.to_bytes(1);
         // Keep the header + count, chop the op in half.

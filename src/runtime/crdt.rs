@@ -65,7 +65,7 @@ use std::collections::{HashMap, HashSet};
 /// Every CRDT must support:
 /// - [`merge`](Crdt::merge): combine two replicas into one (must be associative, commutative, idempotent)
 /// - [`value`](Crdt::value): read the current logical value
-/// - [`clone_replica`](Crdt::clone_replica): create a deep copy for sending to another node
+/// - [`delta_since`](Crdt::delta_since): compute a minimal delta-state relative to a base
 /// - [`to_bytes`](Crdt::to_bytes) / [`from_bytes`](Crdt::from_bytes): serialize for network transmission
 ///
 /// # Type Parameters
@@ -94,8 +94,12 @@ pub trait Crdt: Clone {
     /// Read the current logical value.
     fn value(&self) -> Self::Value;
 
-    /// Create a deep copy of this replica.
-    fn clone_replica(&self) -> Self;
+    /// Compute the delta-state relative to `base`.
+    ///
+    /// Returns the minimal state that, when merged into any replica that
+    /// already contains `base`, produces the same result as merging the full
+    /// current state. `None` when nothing changed since `base`.
+    fn delta_since(&self, base: &Self) -> Option<Self>;
 
     /// Serialize this CRDT to bytes for network transmission.
     fn to_bytes(&self) -> Vec<u8>;
@@ -222,8 +226,9 @@ impl Crdt for GCounter {
     fn value(&self) -> Self::Value {
         self.value()
     }
-    fn clone_replica(&self) -> Self {
-        self.clone()
+
+    fn delta_since(&self, base: &Self) -> Option<Self> {
+        GCounter::delta_since(self, base)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -313,8 +318,9 @@ impl Crdt for PNCounter {
     fn value(&self) -> Self::Value {
         self.value()
     }
-    fn clone_replica(&self) -> Self {
-        self.clone()
+
+    fn delta_since(&self, base: &Self) -> Option<Self> {
+        PNCounter::delta_since(self, base)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -408,8 +414,9 @@ impl Crdt for GSet<String> {
     fn value(&self) -> Self::Value {
         self.elements.clone()
     }
-    fn clone_replica(&self) -> Self {
-        self.clone()
+
+    fn delta_since(&self, base: &Self) -> Option<Self> {
+        GSet::delta_since(self, base)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -449,12 +456,12 @@ pub struct ORSet<T: Clone + Eq + std::hash::Hash> {
     /// Tags removed by `remove`; subtracted on merge so removals replicate
     /// and removed elements never resurrect (same role as `AWORSet::removed`).
     pub removed: HashSet<Tag>,
-    pub tag_counter: u32,
-    pub node_id: u32,
+    pub tag_counter: u64,
+    pub node_id: u64,
 }
 
 impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
-    pub fn new(node_id: u32) -> Self {
+    pub fn new(node_id: u64) -> Self {
         Self {
             entries: HashMap::new(),
             removed: HashSet::new(),
@@ -465,10 +472,10 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
 
     fn fresh_tag(&mut self) -> Tag {
         let tag = Tag {
-            node_id: self.node_id,
-            counter: self.tag_counter,
+            node_id: self.node_id as u32,
+            counter: self.tag_counter as u32,
         };
-        self.tag_counter = self.tag_counter.checked_add(1).expect("Counter overflow");
+        self.tag_counter = self.tag_counter.wrapping_add(1);
         tag
     }
 
@@ -566,14 +573,15 @@ impl Crdt for ORSet<String> {
     fn value(&self) -> Self::Value {
         self.value()
     }
-    fn clone_replica(&self) -> Self {
-        self.clone()
+
+    fn delta_since(&self, base: &Self) -> Option<Self> {
+        ORSet::delta_since(self, base)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        push_u64(&mut buf, self.node_id as u64);
-        push_u64(&mut buf, self.tag_counter as u64);
+        push_u64(&mut buf, self.node_id);
+        push_u64(&mut buf, self.tag_counter);
         push_u32(&mut buf, self.entries.len() as u32);
         for (element, tags) in &self.entries {
             push_string(&mut buf, element);
@@ -628,8 +636,8 @@ impl Crdt for ORSet<String> {
         Some(Self {
             entries,
             removed,
-            tag_counter: tag_counter as u32,
-            node_id: node_id as u32,
+            tag_counter,
+            node_id,
         })
     }
 }
@@ -786,8 +794,9 @@ impl Crdt for AWORSet<String> {
     fn value(&self) -> Self::Value {
         self.value()
     }
-    fn clone_replica(&self) -> Self {
-        self.clone()
+
+    fn delta_since(&self, base: &Self) -> Option<Self> {
+        AWORSet::delta_since(self, base)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -1040,8 +1049,8 @@ mod tests {
         a.insert("x".to_string());
         let mut b = GSet::<String>::new();
         b.insert("y".to_string());
-        let a_snap = a.clone_replica();
-        let b_snap = b.clone_replica();
+        let a_snap = a.clone();
+        let b_snap = b.clone();
         a.merge(&b_snap);
         let mut b = b_snap.clone();
         b.merge(&a_snap);
@@ -1062,14 +1071,14 @@ mod tests {
 
     #[test]
     fn test_orset_add() {
-        let mut s = ORSet::<String>::new(1_u32);
+        let mut s = ORSet::<String>::new(1);
         s.add("a".to_string());
         assert!(s.contains(&"a".to_string()));
     }
 
     #[test]
     fn test_orset_remove() {
-        let mut s = ORSet::<String>::new(1_u32);
+        let mut s = ORSet::<String>::new(1);
         s.add("a".to_string());
         s.remove(&"a".to_string());
         assert!(!s.contains(&"a".to_string()));
@@ -1077,7 +1086,7 @@ mod tests {
 
     #[test]
     fn test_orset_add_wins() {
-        let mut a = ORSet::<String>::new(1_u32);
+        let mut a = ORSet::<String>::new(1);
         a.add("x".to_string());
         let mut b = a.clone();
         a.add("x".to_string());
@@ -1088,9 +1097,9 @@ mod tests {
 
     #[test]
     fn test_orset_merge() {
-        let mut a = ORSet::<String>::new(1_u32);
+        let mut a = ORSet::<String>::new(1);
         a.add("x".to_string());
-        let mut b = ORSet::<String>::new(2_u32);
+        let mut b = ORSet::<String>::new(2);
         b.add("y".to_string());
         a.merge(&b);
         assert!(a.contains(&"x".to_string()));
@@ -1099,20 +1108,20 @@ mod tests {
 
     #[test]
     fn test_orset_merge_commutative() {
-        let mut a = ORSet::<String>::new(1_u32);
+        let mut a = ORSet::<String>::new(1);
         a.add("x".to_string());
-        let mut b = ORSet::<String>::new(2_u32);
+        let mut b = ORSet::<String>::new(2);
         b.add("y".to_string());
-        let b_snap = b.clone_replica();
+        let b_snap = b.clone();
         a.merge(&b_snap);
         let mut b = b_snap.clone();
-        b.merge(&a.clone_replica());
+        b.merge(&a.clone());
         assert_eq!(a.value(), b.value());
     }
 
     #[test]
     fn test_orset_serialize_roundtrip() {
-        let mut s = ORSet::<String>::new(1_u32);
+        let mut s = ORSet::<String>::new(1);
         s.add("hello".to_string());
         s.add("world".to_string());
         s.remove(&"hello".to_string()); // exercise the tombstone section
@@ -1125,18 +1134,18 @@ mod tests {
     fn test_orset_remove_then_merge_stays_removed() {
         // Regression: a removed element must not resurrect when merging with
         // a replica that still holds it.
-        let mut a = ORSet::<String>::new(1_u32);
+        let mut a = ORSet::<String>::new(1);
         a.add("x".to_string());
-        let mut b = a.clone_replica();
+        let mut b = a.clone();
         b.remove(&"x".to_string());
 
         a.merge(&b);
         assert!(!a.contains(&"x".to_string()), "removed element resurrected");
 
         // Merge order must not matter (commutativity).
-        let mut a = ORSet::<String>::new(1_u32);
+        let mut a = ORSet::<String>::new(1);
         a.add("x".to_string());
-        let mut b = a.clone_replica();
+        let mut b = a.clone();
         b.remove(&"x".to_string());
         b.merge(&a);
         assert!(!b.contains(&"x".to_string()), "removed element resurrected");
@@ -1146,7 +1155,7 @@ mod tests {
     fn test_orset_remove_replicates_via_delta() {
         // Regression: removals must ride in `delta_since`, otherwise they
         // never propagate over delta-state replication.
-        let mut base = ORSet::<String>::new(1_u32);
+        let mut base = ORSet::<String>::new(1);
         base.add("x".to_string());
         let mut full = base.clone();
         full.remove(&"x".to_string());
@@ -1164,6 +1173,14 @@ mod tests {
         let mut via_full = base.clone();
         via_full.merge(&full);
         assert_eq!(via_delta, via_full);
+    }
+
+    #[test]
+    fn test_orset_tag_counter_wraparound_does_not_panic() {
+        let mut s = ORSet::<String>::new(1);
+        s.tag_counter = u64::MAX;
+        s.add("should-not-panic".to_string());
+        assert!(s.contains(&"should-not-panic".to_string()));
     }
 
     // ---- AWORSet ----
@@ -1211,10 +1228,10 @@ mod tests {
         a.add("x".to_string());
         let mut b = AWORSet::<String>::new(2);
         b.add("y".to_string());
-        let b_snap = b.clone_replica();
+        let b_snap = b.clone();
         a.merge(&b_snap);
         let mut b = b_snap.clone();
-        b.merge(&a.clone_replica());
+        b.merge(&a.clone());
         assert_eq!(a.value(), b.value());
     }
 
@@ -1312,7 +1329,7 @@ mod tests {
 
     #[test]
     fn test_orset_delta_merge_equals_full_merge() {
-        let mut base = ORSet::<String>::new(1_u32);
+        let mut base = ORSet::<String>::new(1);
         base.add("a".to_string());
         let mut full = base.clone();
         full.add("b".to_string());

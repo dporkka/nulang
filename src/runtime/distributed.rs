@@ -967,8 +967,8 @@ pub fn process_network_packets(
             }
             Packet::CrdtSync { ops } => {
                 if let Some(manager) = &mut runtime.crdt_manager {
-                    for op in ops {
-                        manager.apply_op(op);
+                    for op in ops.iter() {
+                        manager.apply_op(op.clone());
                     }
                 }
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
@@ -978,8 +978,8 @@ pub fn process_network_packets(
                 // full-state-tagged ops behave exactly like CrdtSync above
                 // (including entry creation on first sight).
                 if let Some(manager) = &mut runtime.crdt_manager {
-                    for op in ops {
-                        manager.apply_delta_op(op);
+                    for op in ops.iter() {
+                        manager.apply_delta_op(op.clone());
                     }
                 }
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
@@ -1293,7 +1293,7 @@ pub fn sync_crdts_delta(runtime: &mut Runtime) {
     if ops.is_empty() {
         return;
     }
-    let packet = Packet::CrdtDeltaSync { ops };
+    let packet = Packet::CrdtDeltaSync { ops: Arc::new(ops) };
     if let Some(cluster) = &runtime.distributed.cluster {
         for member in cluster.healthy_members() {
             if let Some(transport) = &mut runtime.distributed.transport {
