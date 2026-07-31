@@ -492,6 +492,21 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 None => return Some(Value::nil()),
             }
         }
+        if effect_name == "Float" && op_name == Some("sin") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            return Some(Value::float(f64::sin(x)));
+        }
+        if effect_name == "Float" && op_name == Some("cos") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            return Some(Value::float(f64::cos(x)));
+        }
+        if effect_name == "Float" && op_name == Some("sqrt") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            if x < 0.0 {
+                return Some(Value::nil());
+            }
+            return Some(Value::float(f64::sqrt(x)));
+        }
         if effect_name == "String" && op_name == Some("to_int") {
             let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
             let n: i64 = s.parse().unwrap_or(0);
