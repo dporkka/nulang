@@ -473,6 +473,36 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
             let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
             return Some(Value::float(n as f64));
         }
+        if effect_name == "Int" && op_name == Some("to_hex") {
+            let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+            let s = format!("{:x}", n);
+            let bytes = s.into_bytes();
+            match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                Some(ptr) => {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                    }
+                    return Some(Value::ptr(ptr));
+                }
+                None => return Some(Value::nil()),
+            }
+        }
+        if effect_name == "Int" && op_name == Some("to_binary") {
+            let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
+            let s = format!("{:b}", n);
+            let bytes = s.into_bytes();
+            match self.heap.alloc(bytes.len() + 1, HeapTypeTag::String) {
+                Some(ptr) => {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                        *ptr.add(bytes.len()) = 0;
+                    }
+                    return Some(Value::ptr(ptr));
+                }
+                None => return Some(Value::nil()),
+            }
+        }
         if effect_name == "Float" && op_name == Some("to_int") {
             let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
             return Some(Value::int(x as i64));
@@ -521,6 +551,25 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
         if effect_name == "Float" && op_name == Some("exp") {
             let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
             return Some(Value::float(f64::exp(x)));
+        }
+        if effect_name == "Float" && op_name == Some("log2") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            if x <= 0.0 {
+                return Some(Value::nil());
+            }
+            return Some(Value::float(f64::log2(x)));
+        }
+        if effect_name == "Float" && op_name == Some("log10") {
+            let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            if x <= 0.0 {
+                return Some(Value::nil());
+            }
+            return Some(Value::float(f64::log10(x)));
+        }
+        if effect_name == "Float" && op_name == Some("pow") {
+            let base = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+            let exp = regs.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+            return Some(Value::float(f64::powf(base, exp)));
         }
         if effect_name == "String" && op_name == Some("to_int") {
             let s = resolve_value_string(constants, *regs.first().unwrap_or(&Value::nil()));
