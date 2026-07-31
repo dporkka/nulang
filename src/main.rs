@@ -24,6 +24,7 @@
 //!   nula <cmd>               Package manager (new, init, build, build-wasm, test, run, list, clean)
 //!   --version, -V            Print version and exit
 //!   -v, --verbose            Show bytecode and AST
+//!   --bench [N]             Benchmark: run N times (default 10), print min/mean/median/max
 //!   --color auto|always|never  Colorize error output (default: auto)
 //!   -h, --help               Show this help message
 use mimalloc::MiMalloc;
@@ -41,7 +42,10 @@ use nulang::types::{NuError, NuResult, Span, Type};
 use nulang::vm::VM;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::time::Instant;
 use tracing::instrument;
 fn main() {
     // Initialize structured tracing (RUST_LOG env var controls verbosity).
@@ -275,6 +279,17 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--bench" => {
+                opts.bench_count = Some(10); // default
+                if i + 1 < args.len() {
+                    if let Ok(n) = args[i + 1].parse::<usize>() {
+                        if n > 0 {
+                            opts.bench_count = Some(n);
+                            i += 1;
+                        }
+                    }
+                }
+            }
             "-h" | "--help" => {
                 print_help();
                 return;
@@ -290,6 +305,7 @@ fn main() {
                     "--out",
                     "--emit-nbc",
                     "--verify",
+                    "--bench",
                     "--version",
                     "--verbose",
                     "--color",
@@ -445,17 +461,34 @@ fn main() {
             }
             return;
         }
-        if let Err(e) = run_source(
-            &code,
-            None,
-            opts.verbose,
-            &opts.backend,
-            opts.out_file.as_deref(),
-        ) {
-            print_error(&e, use_color);
-            std::process::exit(exit_code(&e));
+        if let Some(n) = opts.bench_count {
+            if let Err(e) = run_bench(
+                || {
+                    run_source(
+                        &code,
+                        None,
+                        opts.verbose,
+                        &opts.backend,
+                        opts.out_file.as_deref(),
+                    )
+                },
+                n,
+            ) {
+                print_error(&e, use_color);
+                std::process::exit(exit_code(&e));
+            }
+        } else {
+            if let Err(e) = run_source(
+                &code,
+                None,
+                opts.verbose,
+                &opts.backend,
+                opts.out_file.as_deref(),
+            ) {
+                print_error(&e, use_color);
+                std::process::exit(exit_code(&e));
+            }
         }
-        return;
     }
 
     if let Some(path) = opts.check_file {
@@ -513,16 +546,28 @@ fn main() {
             }
             return;
         }
-
-        if let Err(e) = run_source(
-            &source,
-            Some(path),
-            opts.verbose,
-            &opts.backend,
-            opts.out_file.as_deref(),
-        ) {
-            print_error(&e, use_color);
-            std::process::exit(exit_code(&e));
+        if let Some(n) = opts.bench_count {
+            let verbose = opts.verbose;
+            let backend = &opts.backend;
+            let out_file = opts.out_file.as_deref();
+            if let Err(e) = run_bench(
+                || run_source(&source, Some(path), verbose, backend, out_file),
+                n,
+            ) {
+                print_error(&e, use_color);
+                std::process::exit(exit_code(&e));
+            }
+        } else {
+            if let Err(e) = run_source(
+                &source,
+                Some(path),
+                opts.verbose,
+                &opts.backend,
+                opts.out_file.as_deref(),
+            ) {
+                print_error(&e, use_color);
+                std::process::exit(exit_code(&e));
+            }
         }
         return;
     }
@@ -569,6 +614,8 @@ struct Options {
     init: Option<String>,
     watch: Option<String>,
     explain: Option<String>,
+    /// Benchmark: run N times and print timing stats (None = no bench).
+    bench_count: Option<usize>,
 }
 
 impl Default for Options {
@@ -589,6 +636,7 @@ impl Default for Options {
             init: None,
             watch: None,
             explain: None,
+            bench_count: None,
         }
     }
 }
@@ -630,6 +678,7 @@ fn print_help() {
     println!("  init <name>      Scaffold experiment");
     println!("  --watch <file>   Re-run on changes");
     println!("  --explain <CODE> Error code help");
+    println!("  --bench [N]      Benchmark: run N times (default 10), print timing stats");
     println!("  fmt [--check] [<file>]  Format file(s); no file → all src/**/*.nula");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  --color auto|always|never  Colorize error output (default: auto)");
@@ -740,6 +789,122 @@ fn exit_code(err: &NuError) -> i32 {
         NuError::PackageError { .. } => 12,
         NuError::Multiple(_) => 3, // Same as ParseError — accumulated parse errors
     }
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark helpers
+// ---------------------------------------------------------------------------
+
+/// Redirect stdout and stderr to /dev/null.
+/// Returns saved file descriptors for later restoration.
+fn suppress_stdout_stderr() -> (i32, i32) {
+    extern "C" {
+        fn dup(oldfd: i32) -> i32;
+        fn dup2(oldfd: i32, newfd: i32) -> i32;
+    }
+    let stdout_fd = std::io::stdout().as_raw_fd();
+    let stderr_fd = std::io::stderr().as_raw_fd();
+    let saved_out = unsafe { dup(stdout_fd) };
+    let saved_err = unsafe { dup(stderr_fd) };
+    if saved_out < 0 || saved_err < 0 {
+        return (saved_out, saved_err);
+    }
+    if let Ok(null) = std::fs::File::open("/dev/null") {
+        let null_fd = null.as_raw_fd();
+        unsafe {
+            dup2(null_fd, stdout_fd);
+            dup2(null_fd, stderr_fd);
+        }
+    }
+    (saved_out, saved_err)
+}
+
+fn restore_stdout_stderr(saved_out: i32, saved_err: i32) {
+    extern "C" {
+        fn dup2(oldfd: i32, newfd: i32) -> i32;
+        fn close(fd: i32) -> i32;
+    }
+    if saved_out >= 0 {
+        unsafe {
+            dup2(saved_out, 1);
+            close(saved_out);
+        }
+    }
+    if saved_err >= 0 {
+        unsafe {
+            dup2(saved_err, 2);
+            close(saved_err);
+        }
+    }
+}
+
+fn format_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 1.0 {
+        format!("{:.1} ms", secs * 1000.0)
+    } else {
+        format!("{:.2} s", secs)
+    }
+}
+
+fn print_bench_stats(times: &[std::time::Duration]) {
+    let mut sorted: Vec<f64> = times.iter().map(|d| d.as_secs_f64()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    let min = sorted[0];
+    let max = sorted[n - 1];
+    let mean = sorted.iter().sum::<f64>() / n as f64;
+    let median = if n % 2 == 0 {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
+    };
+    println!();
+    println!("runs: {}", n);
+    println!(
+        "min:    {}",
+        format_duration(std::time::Duration::from_secs_f64(min))
+    );
+    println!(
+        "mean:   {}",
+        format_duration(std::time::Duration::from_secs_f64(mean))
+    );
+    println!(
+        "median: {}",
+        format_duration(std::time::Duration::from_secs_f64(median))
+    );
+    println!(
+        "max:    {}",
+        format_duration(std::time::Duration::from_secs_f64(max))
+    );
+}
+
+/// Run a closure `n` times, measuring wall-clock duration of each run.
+/// The first run's output is visible; subsequent runs are silenced.
+fn run_bench<F: FnMut() -> NuResult<()>>(mut run: F, n: usize) -> NuResult<()> {
+    let mut times: Vec<std::time::Duration> = Vec::with_capacity(n);
+
+    // First run — visible output
+    let t0 = Instant::now();
+    run()?;
+    times.push(t0.elapsed());
+
+    // Remaining runs — suppress stdout/stderr for clean timing
+    if n > 1 {
+        let (saved_out, saved_err) = suppress_stdout_stderr();
+        for _ in 1..n {
+            let t0 = Instant::now();
+            run()?;
+            times.push(t0.elapsed());
+        }
+        restore_stdout_stderr(saved_out, saved_err);
+    }
+
+    // Flush any buffered output before stats
+    let _ = std::io::stdout().flush();
+
+    print_bench_stats(&times);
+    Ok(())
 }
 
 /// Shared frontend: lex -> parse -> typecheck -> effect check -> capability
