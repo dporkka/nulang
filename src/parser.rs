@@ -77,8 +77,11 @@ pub struct Parser {
     /// all errors (not just the first) call `consumed_diagnostics()`.
     diagnostics: Vec<NuError>,
     /// Cache of types imported from other modules, populated lazily when
-    /// a type name isn't found in the local token stream.
-    imported_type_cache: FxHashMap<String, Type>,
+    /// a type name isn't found in the local token stream. Each entry holds
+    /// the declaration's type-parameter variables followed by the resolved
+    /// body (with the parameters still free), so use-site type arguments can
+    /// be substituted in on cache hits.
+    imported_type_cache: FxHashMap<String, (Vec<TypeVar>, Type)>,
     /// Module-level named handler registry.
     handler_registry: FxHashMap<String, Vec<EffectHandler>>,
 }
@@ -4100,33 +4103,58 @@ impl Parser {
     fn resolve_named_type(&mut self, name: &str, args: Vec<Type>, span: Span) -> NuResult<Type> {
         // First check local type declarations.
         if let Some(decl_pos) = self.find_type_decl(name) {
-            return self.resolve_local_type(name, &args, decl_pos, span);
+            return self
+                .resolve_local_type(name, &args, decl_pos, span)
+                .map(|(_, ty)| ty);
         }
-
-        // Then check cached imported types.
-        if let Some(ty) = self.imported_type_cache.get(name) {
-            // TODO: handle type args for imported generic types
-            if !args.is_empty() {
-                return Err(NuError::parse_error(
-                    format!(
-                        "Type '{}' from import does not support type arguments yet",
-                        name
-                    ),
-                    span,
-                ));
-            }
-            return Ok(ty.clone());
+        // Then check cached imported types. The cache stores the
+        // declaration's type-parameter variables alongside the resolved
+        // body, so use-site type arguments can be spliced in exactly like
+        // `resolve_local_type` does for local declarations.
+        if let Some((param_vars, ty)) = self.imported_type_cache.get(name) {
+            return self.apply_imported_type_args(name, param_vars, ty, &args, span);
         }
 
         // Try to populate the cache from import statements.
-        if let Some(ty) = self.try_import_type(name, span)? {
-            return Ok(ty);
+        if let Some((param_vars, ty)) = self.try_import_type(name, span)? {
+            return self.apply_imported_type_args(name, &param_vars, &ty, &args, span);
         }
 
         return Err(NuError::parse_error(
             format!("Unknown type name: '{}'", name),
             span,
         ));
+    }
+
+    /// Splice use-site type arguments into an imported type's resolved body,
+    /// substituting each argument for the declaration's type-parameter
+    /// variable. Mirrors `resolve_local_type`'s substitution for local
+    /// declarations; with no arguments the body is returned as-is (its
+    /// parameters remain free).
+    fn apply_imported_type_args(
+        &self,
+        name: &str,
+        param_vars: &[TypeVar],
+        ty: &Type,
+        args: &[Type],
+        span: Span,
+    ) -> NuResult<Type> {
+        if !args.is_empty() && args.len() != param_vars.len() {
+            return Err(NuError::parse_error(
+                format!(
+                    "Type '{}' expects {} type argument(s), got {}",
+                    name,
+                    param_vars.len(),
+                    args.len()
+                ),
+                span,
+            ));
+        }
+        let mut body = ty.clone();
+        for (tv, arg) in param_vars.iter().zip(args.iter()) {
+            body = Self::subst_type_var(&body, *tv, arg);
+        }
+        Ok(body)
     }
 
     /// Find the token index of the `type` keyword of the declaration named
@@ -4158,13 +4186,17 @@ impl Parser {
     }
 
     /// Resolve a local type declaration by re-parsing it from the token stream.
+    /// Returns the declaration's type-parameter variables (in order) together
+    /// with the body after the use-site arguments have been substituted in;
+    /// callers that cache the result keep the parameter variables so later
+    /// uses can substitute their own arguments.
     fn resolve_local_type(
         &mut self,
         name: &str,
         args: &[Type],
         decl_pos: usize,
         span: Span,
-    ) -> NuResult<Type> {
+    ) -> NuResult<(Vec<TypeVar>, Type)> {
         let saved_pos = self.pos;
         let saved_locals = self.local_type_params.clone();
         // Guard against (mutually) recursive references.
@@ -4222,7 +4254,7 @@ impl Parser {
                     body = Self::subst_type_var(&body, *tv, arg);
                 }
             }
-            Ok(body)
+            Ok((param_vars.into_iter().flatten().collect(), body))
         });
         self.pos = saved_pos;
         self.local_type_params = saved_locals;
@@ -4232,7 +4264,11 @@ impl Parser {
     /// Try to find a type name in imported modules. Scans import statements
     /// in the current token stream, loads the imported files, and looks for
     /// matching type declarations. On success, caches the result.
-    fn try_import_type(&mut self, name: &str, span: Span) -> NuResult<Option<Type>> {
+    fn try_import_type(
+        &mut self,
+        name: &str,
+        span: Span,
+    ) -> NuResult<Option<(Vec<TypeVar>, Type)>> {
         let mut i = 0;
         while i < self.tokens.len() {
             if self.tokens[i].kind != TokenKind::Import {
@@ -4313,15 +4349,13 @@ impl Parser {
                                                 Parser::new(imported_tokens.clone());
                                             sub_parser.global_type_constructors =
                                                 self.global_type_constructors.clone();
-                                            let resolved = sub_parser.resolve_local_type(
-                                                name,
-                                                &[],
-                                                k,
-                                                span,
-                                            )?;
-                                            self.imported_type_cache
-                                                .insert(name.to_string(), resolved.clone());
-                                            return Ok(Some(resolved));
+                                            let (param_vars, resolved) = sub_parser
+                                                .resolve_local_type(name, &[], k, span)?;
+                                            self.imported_type_cache.insert(
+                                                name.to_string(),
+                                                (param_vars.clone(), resolved.clone()),
+                                            );
+                                            return Ok(Some((param_vars, resolved)));
                                         }
                                     }
                                     _ => {}
@@ -5018,6 +5052,65 @@ mod tests {
         match result {
             Err(NuError::ParseError { msg, .. }) => {
                 assert!(msg.contains("type argument"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected arity error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_imported_generic_type_expands_with_args() {
+        // `Option[Int]` imported from stdlib::option must expand with the
+        // use-site argument substituted for the declaration's `T` — both on
+        // the first use (cache miss) and on later uses (cache hit with a
+        // different argument). The argument must not be silently dropped.
+        let ast = parse(
+            "import stdlib::option\n\
+             fn f(x: Option[Int]) x\n\
+             fn g(x: Option[String]) x",
+        )
+        .unwrap();
+        match &ast.decls[1] {
+            Decl::Function { params, .. } => match &params[0].1 {
+                Some(Type::Variant(variants)) => {
+                    assert_eq!(variants.len(), 2);
+                    assert_eq!(variants[0].0, "Some");
+                    assert_eq!(
+                        variants[0].1,
+                        Some(Type::Primitive(PrimitiveType::Int)),
+                        "first use of imported Option[Int] must substitute Int"
+                    );
+                    assert_eq!(variants[1].0, "None");
+                    assert_eq!(variants[1].1, None);
+                }
+                other => panic!("expected expanded variant annotation, got {:?}", other),
+            },
+            _ => panic!("Expected function declaration"),
+        }
+        match &ast.decls[2] {
+            Decl::Function { params, .. } => match &params[0].1 {
+                Some(Type::Variant(variants)) => {
+                    assert_eq!(
+                        variants[0].1,
+                        Some(Type::Primitive(PrimitiveType::String)),
+                        "cached imported Option must substitute the new argument"
+                    );
+                }
+                other => panic!("expected expanded variant annotation, got {:?}", other),
+            },
+            _ => panic!("Expected function declaration"),
+        }
+    }
+
+    #[test]
+    fn test_imported_generic_type_argument_arity_error() {
+        let result = parse("import stdlib::option\nfn f(x: Option[Int, String]) x");
+        match result {
+            Err(NuError::ParseError { msg, .. }) => {
+                assert!(
+                    msg.contains("expects 1 type argument(s), got 2"),
+                    "unexpected message: {}",
+                    msg
+                );
             }
             other => panic!("expected arity error, got {:?}", other),
         }
