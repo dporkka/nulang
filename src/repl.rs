@@ -547,7 +547,8 @@ impl Repl {
         // Print results
         if let Some(ref _expr) = main_expr {
             let val_str = value_to_pretty_string(&value);
-            let ty_str = type_to_string(&module_type);
+            let expr_ty = extract_return_type(&module_type);
+            let ty_str = type_to_string(expr_ty);
             println!("{} : {}", val_str, ty_str);
         } else if !new_decls.is_empty() {
             // Print declaration info. Each new declaration is re-checked in
@@ -557,12 +558,22 @@ impl Repl {
             let mut context_decls = self.accumulated_decls.clone();
             for decl in &new_decls {
                 context_decls.push(decl.clone());
-                if let Decl::Function { name, .. } = decl {
-                    let decl_ty = self.type_checker.check_module(&AstModule {
-                        name: "repl".to_string(),
-                        decls: context_decls.clone(),
-                    })?;
-                    println!("{} : {}", name, type_to_string(&decl_ty));
+                match decl {
+                    Decl::Function { name, .. } => {
+                        let decl_ty = self.type_checker.check_module(&AstModule {
+                            name: "repl".to_string(),
+                            decls: context_decls.clone(),
+                        })?;
+                        println!("{} : {}", name, type_to_string(&decl_ty));
+                    }
+                    Decl::LetBinding { name, .. } => {
+                        let decl_ty = self.type_checker.check_module(&AstModule {
+                            name: "repl".to_string(),
+                            decls: context_decls.clone(),
+                        })?;
+                        println!("{} : {}", name, type_to_string(&decl_ty));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -632,7 +643,8 @@ impl Repl {
         };
 
         let ty = self.type_checker.check_module(&module)?;
-        println!("{}", type_to_string(&ty));
+        let expr_ty = extract_return_type(&ty);
+        println!("{}", type_to_string(expr_ty));
         Ok(())
     }
 
@@ -920,6 +932,16 @@ fn extract_main_expr(ast: &AstModule) -> NuResult<Expr> {
 /// Convert a runtime Value to a pretty display string.
 fn value_to_pretty_string(value: &Value) -> String {
     value.to_string_repr()
+}
+
+/// Extract the return type from a function type, or return the type as-is.
+/// This unwraps the __main wrapper function's type (fn(()) -> T) to get
+/// the actual expression type T.
+fn extract_return_type(ty: &Type) -> &Type {
+    match ty {
+        Type::Function { ret, .. } => ret,
+        _ => ty,
+    }
 }
 
 /// Convert a Type to a human-readable string.
