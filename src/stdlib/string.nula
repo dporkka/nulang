@@ -33,14 +33,8 @@ pub fn char_code_at(s, i) {
 /// True when s starts with prefix.
 pub fn starts_with(s, prefix) {
     let plen = perform String.length(prefix);
-    let slen = perform String.length(s);
-    if plen > slen then { return false } else {};
-    var i = 0;
-    while i < plen {
-        if perform String.charAt(s, i) != perform String.charAt(prefix, i) then { return false } else {};
-        i = i + 1
-    };
-    true
+    if plen > perform String.length(s) then { return false } else {};
+    perform String.substring(s, 0, plen) == prefix
 }
 
 /// True when s ends with suffix.
@@ -48,30 +42,18 @@ pub fn ends_with(s, suffix) {
     let sulen = perform String.length(suffix);
     let slen = perform String.length(s);
     if sulen > slen then { return false } else {};
-    let offset = slen - sulen;
-    var i = 0;
-    while i < sulen {
-        if perform String.charAt(s, offset + i) != perform String.charAt(suffix, i) then { return false } else {};
-        i = i + 1
-    };
-    true
+    perform String.substring(s, slen - sulen, sulen) == suffix
 }
 
-/// True when s contains the substring sub.
-pub fn contains(s, sub) {
+/// True when s contains the substring needle.
+pub fn contains(s, needle) {
     let slen = perform String.length(s);
-    let sublen = perform String.length(sub);
-    if sublen == 0 then { return true } else {};
-    if sublen > slen then { return false } else {};
+    let nlen = perform String.length(needle);
+    if nlen == 0 then { return true } else {};
+    if nlen > slen then { return false } else {};
     var i = 0;
-    while i + sublen <= slen {
-        var found = true;
-        var j = 0;
-        while j < sublen {
-            if perform String.charAt(s, i + j) != perform String.charAt(sub, j) then { found = false } else {};
-            j = j + 1
-        };
-        if found then { return true } else {};
+    while i + nlen <= slen {
+        if perform String.substring(s, i, nlen) == needle then { return true } else {};
         i = i + 1
     };
     false
