@@ -1,8 +1,8 @@
-// Nulang standard library — Int Set operations.
+// Nulang standard library — Set operations.
 // Language version: 2.0.0-alpha
 // Import: `import stdlib::set`
 //
-// Sets are represented as arrays of Int with no duplicates.
+// Sets are represented as arrays with no duplicates.
 
 /// An empty set.
 pub fn empty() { [] }

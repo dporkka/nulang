@@ -1,8 +1,8 @@
-// Nulang standard library — Int→Int Map operations.
+// Nulang standard library — Map operations.
 // Language version: 2.0.0-alpha
 // Import: `import stdlib::map`
 //
-// Maps are arrays of {key: Int, value: Int} records.
+// Maps are arrays of {key, value} records.
 // Key lookup is O(n). get() returns -1 for missing keys.
 
 /// An empty map.
