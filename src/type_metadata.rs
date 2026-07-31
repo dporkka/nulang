@@ -75,23 +75,26 @@ impl TypeMetadata {
     }
 
     /// Set the known type for a register index.
+    /// Silently ignores indices beyond REG_COUNT (defense against MIR overflow).
     pub fn set_type(&mut self, reg: usize, ty: KnownType) {
-        self.regs[reg] = ty;
+        if reg < REG_COUNT {
+            self.regs[reg] = ty;
+        }
     }
 
     /// Get the known type for a register index.
     pub fn get_type(&self, reg: usize) -> KnownType {
-        self.regs[reg]
+        if reg < REG_COUNT { self.regs[reg] } else { KnownType::Unknown }
     }
 
     /// Check whether both operands have the same known type.
     pub fn both_known(&self, r1: usize, r2: usize, expected: KnownType) -> bool {
-        self.regs[r1] == expected && self.regs[r2] == expected
+        r1 < REG_COUNT && r2 < REG_COUNT && self.regs[r1] == expected && self.regs[r2] == expected
     }
 
     /// Check whether a single value has the expected known type.
     pub fn is_known(&self, reg: usize, expected: KnownType) -> bool {
-        self.regs[reg] == expected
+        reg < REG_COUNT && self.regs[reg] == expected
     }
 
     /// Mark the destination as having a known type after an operation.
@@ -99,12 +102,16 @@ impl TypeMetadata {
     /// For arithmetic: the result type is the same as the operand type.
     /// For comparisons: the result is always Bool.
     pub fn propagate_result(&mut self, dst: usize, operand_reg: usize) {
-        self.regs[dst] = self.regs[operand_reg];
+        if operand_reg < REG_COUNT && dst < REG_COUNT {
+            self.regs[dst] = self.regs[operand_reg];
+        }
     }
 
     /// Mark the destination as Bool (used after comparisons).
     pub fn set_bool_result(&mut self, dst: usize) {
-        self.regs[dst] = KnownType::Bool;
+        if dst < REG_COUNT {
+            self.regs[dst] = KnownType::Bool;
+        }
     }
 
     /// Returns true if no register has a known type (all Unknown).
@@ -122,6 +129,9 @@ impl TypeMetadata {
     ) -> Self {
         let mut meta = TypeMetadata::new();
         for (reg, ty) in locals {
+            if reg >= REG_COUNT {
+                continue; // MIR locals beyond frame register capacity — skip type tracking
+            }
             let known = type_to_known_type(ty);
             if known != KnownType::Unknown {
                 meta.set_type(reg, known);
