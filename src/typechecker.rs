@@ -2476,6 +2476,20 @@ impl TypeChecker {
                         }
                     }
                 }
+                // If the receiver is a concrete type that is not a record,
+                // not a tuple, and no class method matched, the user is
+                // likely trying method-call syntax on a built-in type.
+                // Produce a clear error instead of the confusing
+                // record-field unification failure.
+                if !matches!(&record_ty_resolved, Type::Var(_)) {
+                    return Err(NuError::parse_error(
+                        format!(
+                            "method-call syntax (`.{}()`) is not supported for type `{}`; use `perform <Effect>.op(args)` for built-in operations",
+                            field, record_ty_resolved
+                        ),
+                        span,
+                    ));
+                }
                 // Unknown receiver shape or no class defines this method:
                 // require an open record carrying the demanded field,
                 // leaving the rest of the row to be inferred from other
