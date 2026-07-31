@@ -84,7 +84,11 @@ impl TypeMetadata {
 
     /// Get the known type for a register index.
     pub fn get_type(&self, reg: usize) -> KnownType {
-        if reg < REG_COUNT { self.regs[reg] } else { KnownType::Unknown }
+        if reg < REG_COUNT {
+            self.regs[reg]
+        } else {
+            KnownType::Unknown
+        }
     }
 
     /// Check whether both operands have the same known type.
