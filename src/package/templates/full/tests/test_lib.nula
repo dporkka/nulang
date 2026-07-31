@@ -1,0 +1,36 @@
+// Tests for the library functions.
+//
+// Each test file runs standalone via `nula test`.
+// Define helper functions before `main` so they are in scope.
+
+/// Return a greeting for the given name.
+fn greet(name: String) -> String {
+  "Hello, " + name + "!"
+}
+
+/// Add two integers together.
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+/// Compute the factorial of n recursively.
+fn factorial(n: Int) -> Int {
+  if n <= 1 then 1
+  else n * factorial(n - 1)
+}
+
+/// Return a friendly message describing the sign of a number.
+fn describe_number(n: Int) -> String {
+  if n > 0 then "positive"
+  else if n < 0 then "negative"
+  else "zero"
+}
+
+fn main() {
+  perform Test.assert_eq(greet("World"), "Hello, World!")
+  perform Test.assert_eq(add(40, 2), 42)
+  perform Test.assert_eq(factorial(5), 120)
+  perform Test.assert_eq(describe_number(7), "positive")
+  perform Test.assert_eq(describe_number(-3), "negative")
+  perform Test.assert_eq(describe_number(0), "zero")
+}

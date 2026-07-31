@@ -148,7 +148,7 @@ fn print_usage() {
     println!("Commands:");
     println!("  new   <path> [--template <name>]");
     println!("                Scaffold a new package directory");
-    println!("                Templates: default, cli, lib");
+    println!("                Templates: default, cli, lib, full");
     println!("  init          Scaffold a new package in the current directory");
     println!("  build         Resolve dependencies and type-check the package");
     println!("  build-wasm    Build package to .wasm + .cwasm (AOT, requires wasmtime)");
@@ -185,7 +185,7 @@ fn cmd_new(path_arg: Option<&str>, template: Option<&str>) -> NuResult<()> {
         });
     }
     let tmpl = template.unwrap_or("default");
-    let valid = ["default", "cli", "lib"];
+    let valid = ["default", "cli", "lib", "full"];
     if !valid.contains(&tmpl) {
         return Err(NuError::PackageError {
             msg: format!(
@@ -293,7 +293,7 @@ fn template_files(name: &str) -> Vec<(&'static str, &'static str)> {
         )],
         "cli" => vec![(
             "src/main.nula",
-            "fn main() {\n  let name = perform Env.get(\"USER\")\n  let name = if name != nil then name else perform System.arg(2)\n  let name = if name != nil then name else \"World\"\n  perform IO.print(\"Hello, \" + name + \"!\")\n}\n",
+            "// CLI template — a starting point for command-line tools.\n//\n// This file demonstrates:\n//   System.arg   — reading command-line arguments (0-indexed)\n//   Env.get      — reading environment variables\n//   FS.write     — writing output to a file\n//   IO.print     — printing to stdout\n//   == nil       — checking whether a value is nil\n\n// ── Helper (defined before `main` so it is in scope) ───────────────────────\n// Print a friendly greeting.  Extracted as a function so the main flow\n// stays readable.\nfn greet(name) {\n  perform IO.print(\"Hello, \" + name + \"!\")\n}\n\n// ── Entry point ────────────────────────────────────────────────────────────\n\nfn main() {\n  // ── 1. Read the target name from the command line ──────────────────────\n  // System.arg(0) = program name; System.arg(1) = script path.\n  // System.arg(2) is the first user argument.\n  let given = perform System.arg(2)\n\n  // ── 2. Fall back to the USER environment variable ─────────────────────\n  // Env.get returns nil when the variable is not set.\n  match given {\n    nil => {\n      let user = perform Env.get(\"USER\")\n      match user {\n        nil => {\n          // ── 3. Hard-coded default when nothing else is available ──────\n          // Both arg and env were nil — use \"World\" as a friendly fallback.\n          let name = \"World\"\n          // Print usage hint because the user didn't supply a name.\n          let prog = perform System.arg(0)\n          perform IO.print(\"Usage: \" + prog + \" <name>\")\n          perform IO.print(\"\")\n          greet(name)\n        }\n        _ => {\n          // Env.get returned a value; use it.\n          greet(user)\n        }\n      }\n    }\n    _ => {\n      // System.arg(2) returned a value; use it.\n      greet(given)\n    }\n  }\n\n  // ── 4. Optional: log the greeting to a file ───────────────────────────\n  // Pass --log <path> to write the greeting to a file.\n  // This shows how to handle optional flags and do file output.\n  let log_path = perform System.arg(3)\n  match log_path {\n    nil => unit,\n    _ => {\n      match log_path {\n        \"--log\" => {\n          let path = perform System.arg(4)\n          match path {\n            nil => {\n              perform IO.print(\"--log requires a file path\")\n            }\n            _ => {\n              // Build the log line with timestamp-like prefix.\n              let ts = perform Env.get(\"NU_TIMESTAMP\")\n              let prefix = match ts {\n                nil => \"[nulang]\",\n                _   => \"[\" + ts + \"]\"\n              }\n              let out_name = match given {\n                nil => match perform Env.get(\"USER\") {\n                  nil => \"World\",\n                  u   => u\n                },\n                n   => n\n              }\n              let line = prefix + \" Greeted \" + out_name\n              let wrote = perform FS.write(path, line)\n              match wrote {\n                nil => perform IO.print(\"Warning: could not write log to \" + path),\n                _   => perform IO.print(\"Logged to \" + path)\n              }\n            }\n          }\n        }\n        _ => unit\n      }\n    }\n  }\n}\n",
         )],
         "lib" => vec![
             (
@@ -303,6 +303,28 @@ fn template_files(name: &str) -> Vec<(&'static str, &'static str)> {
             (
                 "tests/test_add.nula",
                 "fn main() {\n  perform Test.assert_eq(add(1, 2), 3)\n}\n",
+            ),
+        ],
+        "full" => vec![
+            (
+                "README.md",
+                "# {{name}}\n\nA Nulang project.\n\n## Structure\n\n- `src/main.nula`   — entry point\n- `src/lib.nula`     — library module\n- `tests/`           — test files\n- `examples/`        — standalone demos\n\n## Commands\n\n```\n# Build and type-check\nnula build\n\n# Run the entry point\nnula run\n\n# Run tests\nnula test\n\n# Run a demo\nnulang examples/demo.nula\n```\n\n## Dependencies\n\nAdd dependencies with `nula add <name>`.\n",
+            ),
+            (
+                "src/lib.nula",
+                "// Library module — reusable functions shared across the project.\n//\n// Public functions (marked `pub`) can be imported by other files.\n// Use `///` doc comments to document public API surfaces.\n\n/// Return a greeting for the given name.\npub fn greet(name: String) -> String {\n  \"Hello, \" + name + \"!\"\n}\n\n/// Add two integers together.\npub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\n/// Compute the factorial of n recursively.\npub fn factorial(n: Int) -> Int {\n  if n <= 1 then 1\n  else n * factorial(n - 1)\n}\n\n/// Return a friendly message describing the sign of a number.\npub fn describe_number(n: Int) -> String {\n  if n > 0 then \"positive\"\n  else if n < 0 then \"negative\"\n  else \"zero\"\n}\n",
+            ),
+            (
+                "src/main.nula",
+                "// Entry point for the application.\n// All application logic lives here; the build system type-checks this file.\n\n// ── Library functions (defined before `main` so they are in scope) ─────────\n\n/// Return a greeting for the given name.\nfn greet(name: String) -> String {\n  \"Hello, \" + name + \"!\"\n}\n\n/// Return a friendly label for a number's sign.\nfn describe_number(n: Int) -> String {\n  if n > 0 then \"positive\"\n  else if n < 0 then \"negative\"\n  else \"zero\"\n}\n\n// ── Entry point ────────────────────────────────────────────────────────────\n\nfn main() {\n  // Read an optional count from the environment.\n  let upto = perform Env.get(\"COUNT\")\n  let n = match upto {\n    nil => 10,\n    _   => perform Int.parse(upto)\n  }\n\n  let msg = greet(\"Nulang\")\n  perform IO.print(msg)\n\n  // Demonstrate basic operations.\n  let sum = n + 42\n  perform IO.print(\"n + 42 = \" + perform Int.to_string(sum))\n\n  let desc = describe_number(n)\n  perform IO.print(\"n is \" + desc)\n}\n",
+            ),
+            (
+                "tests/test_lib.nula",
+                "// Tests for the library functions.\n//\n// Each test file runs standalone via `nula test`.\n// Define helper functions before `main` so they are in scope.\n\n/// Return a greeting for the given name.\nfn greet(name: String) -> String {\n  \"Hello, \" + name + \"!\"\n}\n\n/// Add two integers together.\nfn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\n/// Compute the factorial of n recursively.\nfn factorial(n: Int) -> Int {\n  if n <= 1 then 1\n  else n * factorial(n - 1)\n}\n\n/// Return a friendly message describing the sign of a number.\nfn describe_number(n: Int) -> String {\n  if n > 0 then \"positive\"\n  else if n < 0 then \"negative\"\n  else \"zero\"\n}\n\nfn main() {\n  perform Test.assert_eq(greet(\"World\"), \"Hello, World!\")\n  perform Test.assert_eq(add(40, 2), 42)\n  perform Test.assert_eq(factorial(5), 120)\n  perform Test.assert_eq(describe_number(7), \"positive\")\n  perform Test.assert_eq(describe_number(-3), \"negative\")\n  perform Test.assert_eq(describe_number(0), \"zero\")\n}\n",
+            ),
+            (
+                "examples/demo.nula",
+                "// Demo script — a small standalone example using the library.\n//\n// Run with:  nulang examples/demo.nula\n\n/// Return a greeting for the given name.\nfn greet(name: String) -> String {\n  \"Hello, \" + name + \"!\"\n}\n\n/// Add two integers together.\nfn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\n/// Compute the factorial of n recursively.\nfn factorial(n: Int) -> Int {\n  if n <= 1 then 1\n  else n * factorial(n - 1)\n}\n\n/// Return a friendly message describing the sign of a number.\nfn describe_number(n: Int) -> String {\n  if n > 0 then \"positive\"\n  else if n < 0 then \"negative\"\n  else \"zero\"\n}\n\nfn main() {\n  let msg = greet(\"demo user\")\n  perform IO.print(msg)\n\n  let f = factorial(6)\n  perform IO.print(\"6! = \" + perform Int.to_string(f))\n\n  let d = describe_number(42)\n  perform IO.print(\"42 is \" + d)\n\n  let s = add(100, 200)\n  perform IO.print(\"100 + 200 = \" + perform Int.to_string(s))\n}\n",
             ),
         ],
         _ => unreachable!(),

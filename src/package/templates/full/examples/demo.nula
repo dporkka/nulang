@@ -1,0 +1,40 @@
+// Demo script — a small standalone example using the library.
+//
+// Run with:  nulang examples/demo.nula
+
+/// Return a greeting for the given name.
+fn greet(name: String) -> String {
+  "Hello, " + name + "!"
+}
+
+/// Add two integers together.
+fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+/// Compute the factorial of n recursively.
+fn factorial(n: Int) -> Int {
+  if n <= 1 then 1
+  else n * factorial(n - 1)
+}
+
+/// Return a friendly message describing the sign of a number.
+fn describe_number(n: Int) -> String {
+  if n > 0 then "positive"
+  else if n < 0 then "negative"
+  else "zero"
+}
+
+fn main() {
+  let msg = greet("demo user")
+  perform IO.print(msg)
+
+  let f = factorial(6)
+  perform IO.print("6! = " + perform Int.to_string(f))
+
+  let d = describe_number(42)
+  perform IO.print("42 is " + d)
+
+  let s = add(100, 200)
+  perform IO.print("100 + 200 = " + perform Int.to_string(s))
+}

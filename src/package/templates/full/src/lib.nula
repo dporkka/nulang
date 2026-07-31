@@ -1,0 +1,27 @@
+// Library module — reusable functions shared across the project.
+//
+// Public functions (marked `pub`) can be imported by other files.
+// Use `///` doc comments to document public API surfaces.
+
+/// Return a greeting for the given name.
+pub fn greet(name: String) -> String {
+  "Hello, " + name + "!"
+}
+
+/// Add two integers together.
+pub fn add(a: Int, b: Int) -> Int {
+  a + b
+}
+
+/// Compute the factorial of n recursively.
+pub fn factorial(n: Int) -> Int {
+  if n <= 1 then 1
+  else n * factorial(n - 1)
+}
+
+/// Return a friendly message describing the sign of a number.
+pub fn describe_number(n: Int) -> String {
+  if n > 0 then "positive"
+  else if n < 0 then "negative"
+  else "zero"
+}

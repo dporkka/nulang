@@ -1,6 +1,94 @@
-fn main() {
-  let name = perform Env.get("USER")
-  let name = if name != nil then name else perform System.arg(2)
-  let name = if name != nil then name else "World"
+// CLI template — a starting point for command-line tools.
+//
+// This file demonstrates:
+//   System.arg   — reading command-line arguments (0-indexed)
+//   Env.get      — reading environment variables
+//   FS.write     — writing output to a file
+//   IO.print     — printing to stdout
+//   == nil       — checking whether a value is nil
+
+// ── Helper (defined before `main` so it is in scope) ───────────────────────
+// Print a friendly greeting.  Extracted as a function so the main flow
+// stays readable.
+fn greet(name) {
   perform IO.print("Hello, " + name + "!")
+}
+
+// ── Entry point ────────────────────────────────────────────────────────────
+
+fn main() {
+  // ── 1. Read the target name from the command line ──────────────────────
+  // System.arg(0) = program name; System.arg(1) = script path.
+  // System.arg(2) is the first user argument.
+  let given = perform System.arg(2)
+
+  // ── 2. Fall back to the USER environment variable ─────────────────────
+  // Env.get returns nil when the variable is not set.
+  match given {
+    nil => {
+      let user = perform Env.get("USER")
+      match user {
+        nil => {
+          // ── 3. Hard-coded default when nothing else is available ──────
+          // Both arg and env were nil — use "World" as a friendly fallback.
+          let name = "World"
+          // Print usage hint because the user didn't supply a name.
+          let prog = perform System.arg(0)
+          perform IO.print("Usage: " + prog + " <name>")
+          perform IO.print("")
+          greet(name)
+        }
+        _ => {
+          // Env.get returned a value; use it.
+          greet(user)
+        }
+      }
+    }
+    _ => {
+      // System.arg(2) returned a value; use it.
+      greet(given)
+    }
+  }
+
+  // ── 4. Optional: log the greeting to a file ───────────────────────────
+  // Pass --log <path> to write the greeting to a file.
+  // This shows how to handle optional flags and do file output.
+  let log_path = perform System.arg(3)
+  match log_path {
+    nil => unit,
+    _ => {
+      match log_path {
+        "--log" => {
+          let path = perform System.arg(4)
+          match path {
+            nil => {
+              perform IO.print("--log requires a file path")
+            }
+            _ => {
+              // Build the log line with timestamp-like prefix.
+              let ts = perform Env.get("NU_TIMESTAMP")
+              let prefix = match ts {
+                nil => "[nulang]",
+                _   => "[" + ts + "]"
+              }
+              let out_name = match given {
+                nil => match perform Env.get("USER") {
+                  nil => "World",
+                  u   => u
+                },
+                n   => n
+              }
+              let line = prefix + " Greeted " + out_name
+              let wrote = perform FS.write(path, line)
+              match wrote {
+                nil => perform IO.print("Warning: could not write log to " + path),
+                _   => perform IO.print("Logged to " + path)
+              }
+            }
+          }
+        }
+        _ => unit
+      }
+    }
+  }
 }
