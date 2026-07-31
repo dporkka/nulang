@@ -40,6 +40,7 @@ use nulang::typechecker::TypeChecker;
 use nulang::types::{NuError, NuResult, Span, Type};
 use nulang::vm::VM;
 use std::io::IsTerminal;
+use std::io::Read;
 use std::path::PathBuf;
 use tracing::instrument;
 fn main() {
@@ -56,7 +57,26 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() <= 1 {
-        // Default: start REPL with the HIR/MIR pipeline.
+        // If stdin is piped, execute as a script; otherwise start REPL.
+        if !std::io::stdin().is_terminal() {
+            let mut source = String::new();
+            std::io::stdin()
+                .read_to_string(&mut source)
+                .expect("Failed to read stdin");
+            let opts = Options::default();
+            let use_color = color_enabled(&opts);
+            if let Err(e) = run_source(
+                &source,
+                None,
+                opts.verbose,
+                &opts.backend,
+                opts.out_file.as_deref(),
+            ) {
+                print_error(&e, use_color);
+                std::process::exit(exit_code(&e));
+            }
+            return;
+        }
         let mut repl = Repl::new();
         repl.run();
         return;
@@ -506,8 +526,24 @@ fn main() {
         }
         return;
     }
-
-    // No arguments and no options: start REPL
+    // No arguments and no options: if stdin is piped, execute as script.
+    if !std::io::stdin().is_terminal() {
+        let mut source = String::new();
+        std::io::stdin()
+            .read_to_string(&mut source)
+            .expect("Failed to read stdin");
+        if let Err(e) = run_source(
+            &source,
+            None,
+            opts.verbose,
+            &opts.backend,
+            opts.out_file.as_deref(),
+        ) {
+            print_error(&e, use_color);
+            std::process::exit(exit_code(&e));
+        }
+        return;
+    }
     let mut repl = Repl::new();
     repl.run();
 }

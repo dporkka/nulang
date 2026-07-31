@@ -351,6 +351,16 @@ impl<'a> Lexer<'a> {
     // --- Core tokenizer ---
 
     fn next_token(&mut self) -> NuResult<Token> {
+        // Shebang line: skip `#!/path/to/interpreter ...` at start of file
+        if self.pos == 0 && self.bytes.len() >= 2 && self.bytes[0] == b'#' && self.bytes[1] == b'!'
+        {
+            while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
+                self.pos += 1;
+            }
+            if self.pos < self.bytes.len() && self.bytes[self.pos] == b'\n' {
+                self.pos += 1;
+            }
+        }
         self.skip_whitespace();
 
         let start = self.pos;
