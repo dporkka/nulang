@@ -2297,7 +2297,13 @@ impl VM {
                 self.actor_callbacks.as_mut() as *mut dyn ActorVmCallbacks
             );
         }
+        // Thread the current module's constant pool so the JIT runtime can
+        // resolve interned (TAG_STRING) values for string comparison.
+        unsafe {
+            crate::jit::runtime::set_jit_constants(&module.constants);
+        }
         let action = jit.tiered_execute_step_typed(module_idx, pc, module, &mut regs, constants);
+        crate::jit::runtime::clear_jit_constants();
         crate::jit::runtime::clear_jit_callbacks();
 
         if action != TieredAction::Interpret {
@@ -3904,6 +3910,21 @@ impl VM {
                 } else if a.is_int() && b.is_float() {
                     let af = a.as_int().unwrap() as f64;
                     Value::bool((af - b.as_float().unwrap()).abs() < f64::EPSILON)
+                } else if a.is_string() || a.is_ptr() || b.is_string() || b.is_ptr() {
+                    // String equality must compare content, not raw bits.
+                    // Two interned strings (TAG_STRING) may have different
+                    // constant-pool indices; heap strings (TAG_PTR) may hold
+                    // the same text at different addresses.  Only when BOTH
+                    // resolve to a string do we compare text; a string vs
+                    // non-string is never equal.
+                    let eq = match (
+                        self.string_operand(module_idx, a),
+                        self.string_operand(module_idx, b),
+                    ) {
+                        (Some(sa), Some(sb)) => sa == sb,
+                        _ => false,
+                    };
+                    Value::bool(eq)
                 } else {
                     Value::bool(a.raw == b.raw)
                 };

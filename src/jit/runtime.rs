@@ -1,12 +1,13 @@
 //! Runtime helper functions callable from JIT-compiled code.
 
-use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
-
+use crate::bytecode::Constant;
 use crate::value_layout::{
-    is_float_raw, sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK, TAG_PTR,
+    is_float_raw, sext48, tag_int, PAYLOAD_MASK, TAG_INT, TAG_MASK, TAG_PTR, TAG_STRING,
 };
 use crate::vm::Value;
+use std::cell::UnsafeCell;
+use std::ffi::CStr;
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 // is_float_raw is now imported from crate::value_layout (integer bitmask, no FPU).
 
@@ -146,6 +147,18 @@ pub extern "C" fn nulang_icmp_eq(a: u64, b: u64) -> u64 {
     } else if (a & TAG_MASK) == TAG_INT && is_float_raw(b) {
         let af = sext48(a & PAYLOAD_MASK) as f64;
         Value::bool((af - f64::from_bits(b)).abs() < f64::EPSILON).as_raw()
+    } else if (a & TAG_MASK) == TAG_STRING
+        || (a & TAG_MASK) == TAG_PTR
+        || (b & TAG_MASK) == TAG_STRING
+        || (b & TAG_MASK) == TAG_PTR
+    {
+        // String equality must compare content, not raw bits.
+        // Only when BOTH resolve to strings do we compare text.
+        let eq = match (resolve_jit_string(a), resolve_jit_string(b)) {
+            (Some(sa), Some(sb)) => sa == sb,
+            _ => false,
+        };
+        Value::bool(eq).as_raw()
     } else {
         Value::bool(a == b).as_raw()
     }
@@ -334,6 +347,85 @@ pub fn clear_jit_callbacks() {
     JIT_CALLBACKS.with(|cell| unsafe {
         *cell.get() = CbPair::NULL;
     });
+}
+
+// ---------------------------------------------------------------------------
+// Constant-pool thread-local for JIT runtime helpers (string comparison)
+// ---------------------------------------------------------------------------
+
+/// Pointer-length pair for the current module's constant pool, stored as
+/// two usize values to avoid zero-initialization UB in the thread-local.
+#[derive(Clone, Copy)]
+struct ConstantsPtr(*const Constant, usize);
+
+impl ConstantsPtr {
+    const NULL: Self = ConstantsPtr(std::ptr::null(), 0);
+
+    /// # Safety
+    /// The slice must be valid for the duration of the JIT execution.
+    unsafe fn as_slice(self) -> &'static [Constant] {
+        if self.0.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts(self.0, self.1)
+        }
+    }
+}
+
+thread_local! {
+    static JIT_CONSTANTS: UnsafeCell<ConstantsPtr> = UnsafeCell::new(ConstantsPtr::NULL);
+}
+
+/// Set the current module's constant pool for JIT runtime helpers.
+///
+/// # Safety
+/// The slice must remain valid until `clear_jit_constants` is called.
+pub unsafe fn set_jit_constants(constants: &[Constant]) {
+    JIT_CONSTANTS.with(|cell| {
+        *cell.get() = ConstantsPtr(constants.as_ptr(), constants.len());
+    });
+}
+
+pub fn clear_jit_constants() {
+    JIT_CONSTANTS.with(|cell| unsafe {
+        *cell.get() = ConstantsPtr::NULL;
+    });
+}
+
+/// Resolve a raw u64 value to its string content (for comparison).
+/// Returns None for non-string values or when the constant pool is unavailable.
+fn resolve_jit_string(raw: u64) -> Option<String> {
+    if (raw & TAG_MASK) == TAG_STRING {
+        // Interned string: look up in the thread-local constant pool.
+        let id = (raw & PAYLOAD_MASK) as u32;
+        JIT_CONSTANTS.with(|cell| unsafe {
+            let cp = (*cell.get()).as_slice();
+            match cp.get(id as usize) {
+                Some(Constant::String(s)) => Some(s.clone()),
+                _ => None,
+            }
+        })
+    } else if (raw & TAG_MASK) == TAG_PTR {
+        let ptr = (raw & PAYLOAD_MASK) as *mut u8;
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: ptr is a valid ActorHeap allocation with a header.
+        // We check the type tag to ensure it's a string.
+        unsafe {
+            let header = &*ActorHeap::header_of(ptr);
+            if header.type_tag != HeapTypeTag::String {
+                return None;
+            }
+            Some(
+                CStr::from_ptr(ptr as *const std::ffi::c_char)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
