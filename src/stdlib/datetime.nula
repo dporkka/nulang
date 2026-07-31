@@ -11,13 +11,90 @@ pub type DateTime = {
     second: Int,
 }
 
-/// Return the current system time.
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/// True when y is a leap year (Gregorian calendar).
+fn is_leap(y: Int) -> Bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+/// Number of days in the given year.
+fn days_in_year(y: Int) -> Int {
+    if is_leap(y) then 366 else 365
+}
+
+/// Days per month (non-leap index 0 = January).
+fn month_days(month: Int, leap: Bool) -> Int {
+    if month == 1 then 31
+    else if month == 2 then { if leap then 29 else 28 }
+    else if month == 3 then 31
+    else if month == 4 then 30
+    else if month == 5 then 31
+    else if month == 6 then 30
+    else if month == 7 then 31
+    else if month == 8 then 31
+    else if month == 9 then 30
+    else if month == 10 then 31
+    else if month == 11 then 30
+    else if month == 12 then 31
+    else 0
+}
+
+// ── Conversion ──────────────────────────────────────────────────────────────
+
+/// Convert a Unix timestamp (seconds since epoch) to a DateTime.
 ///
-/// Currently returns a stub (1970-01-01 00:00:00). A real implementation
-/// requires an effect such as `perform Time.now()` which is not yet
-/// wired into the standalone VM.
+/// Handles timestamps before 1970 (negative values) via floor division.
+/// The conversion is accurate for all dates in the Gregorian calendar.
+/// Leap seconds are not accounted for.
+fn unix_to_datetime(ts: Int) -> DateTime {
+    // Seconds within the day.
+    let sec_of_day = ts % 86400;
+    var sec = sec_of_day;
+    // Handle negative remainders for timestamps before epoch.
+    if sec < 0 then { sec = sec + 86400 } else {};
+    let hour = sec / 3600;
+    let minute = (sec % 3600) / 60;
+    let second = sec % 60;
+
+    // Days since epoch (floor division for negative timestamps).
+    var days = ts / 86400;
+    if ts < 0 && ts % 86400 != 0 then { days = days - 1 } else {};
+
+    // Walk forward/backward through years.
+    var year = 1970;
+    if days >= 0 then {
+        while days >= days_in_year(year) {
+            days = days - days_in_year(year);
+            year = year + 1
+        }
+    } else {
+        while days < 0 {
+            year = year - 1;
+            days = days + days_in_year(year)
+        }
+    };
+
+    // days is now day-of-year (0-indexed).
+    let leap = is_leap(year);
+    var month = 1;
+    while days >= month_days(month, leap) {
+        days = days - month_days(month, leap);
+        month = month + 1
+    };
+
+    { year: year, month: month, day: days + 1, hour: hour, minute: minute, second: second }
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────
+
+/// Return the current system time as a DateTime.
+///
+/// Calls `perform Time.now()` to obtain a Unix timestamp (seconds since
+/// 1970-01-01 00:00:00 UTC) and delegates to `unix_to_datetime`.
 pub fn now() -> DateTime {
-    { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 }
+    let ts = perform Time.now();
+    unix_to_datetime(ts)
 }
 
 /// Create a DateTime from individual fields.

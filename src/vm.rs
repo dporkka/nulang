@@ -903,6 +903,13 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
                 _ => return None,
             }
         }
+        if effect_name == "Time" && op_name == Some("now") {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            return Some(Value::int(now));
+        }
         if effect_name != "IO" {
             return None;
         }

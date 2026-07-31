@@ -279,6 +279,14 @@ impl StdLib {
                 BuiltinOp { name: "String.concat", effect: "String", op: "concat", signature: "concat(a: String, b: String) -> String", implemented_in: ImplSite::StandaloneVm, description: "Concatenate two strings.", },
                 BuiltinOp { name: "String.substring", effect: "String", op: "substring", signature: "substring(s: String, start: Int, len: Int) -> String", implemented_in: ImplSite::StandaloneVm, description: "Extract a substring.", },
                 BuiltinOp {
+                    name: "Time.now",
+                    effect: "Time",
+                    op: "now",
+                    signature: "now() -> Int",
+                    implemented_in: ImplSite::StandaloneVm,
+                    description: "Return the current Unix timestamp (seconds since 1970-01-01 00:00:00 UTC).",
+                },
+                BuiltinOp {
                     name: "Timer.sleep",
                     effect: "Timer",
                     op: "sleep",
@@ -710,6 +718,7 @@ mod tests {
                 "Int",
                 "Float",
                 "String",
+                "Time",
                 "Timer",
                 "Signal",
                 "Inference",
