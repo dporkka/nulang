@@ -9,7 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::bytecode::{CodeModule, Constant, Instruction, OpCode};
+use crate::lexer::Lexer;
+use crate::parser::Parser;
 use crate::runtime::*;
+use crate::typechecker::TypeChecker;
 use crate::types::ExitReason;
 use crate::vm::{Value, VM};
 
@@ -39,6 +42,46 @@ impl TestContext {
     }
 }
 
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Helper: compile_and_run_nula — compile .nula source and run it
+// ---------------------------------------------------------------------------
+
+/// Compile a .nula source string through the full pipeline and run it,
+/// returning the resulting Value.
+fn compile_and_run_nula(source: &str) -> Result<Value, crate::types::NuError> {
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.lex()?;
+    let mut parser = Parser::new(tokens);
+    let ast = parser.parse_module()?;
+    let mut type_checker = TypeChecker::new();
+    type_checker.check_module(&ast)?;
+    let hir = crate::hir_lower::lower_module(&ast);
+    let mir = crate::mir_lower::lower_module(&hir)?;
+    let module = crate::mir_codegen::compile_mir(&mir, "stress")?;
+    let mut vm = VM::new();
+    vm.load_module(module);
+    vm.run()
+}
+
+/// Compile and run .nula source, asserting that the result is the given integer.
+fn assert_nula_int(source: &str, expected: i64) {
+    let value = compile_and_run_nula(source).unwrap_or_else(|e| {
+        panic!(
+            "nula source failed to compile/run: {:?}\nSource:\n{}",
+            e, source
+        );
+    });
+    assert_eq!(
+        value.as_int(),
+        Some(expected),
+        "Expected {}, got {:?}\nSource:\n{}",
+        expected,
+        value,
+        source
+    );
+}
 // ---------------------------------------------------------------------------
 // Test 1 — Slow Worker + Mailbox Flood
 // ---------------------------------------------------------------------------
@@ -1501,4 +1544,151 @@ fn stress_gc_cycle_detector_under_foreign_ref_load() {
         stats.foreign_refs_sent >= (N * REFS_PER_ACTOR * 2) as u64,
         "foreign refs sent should match injected cross-actor references"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test 31 — Large Array Allocation + GC Pressure
+// ---------------------------------------------------------------------------
+// Allocates arrays of 50 ints in a tight loop (100 iterations), fills them,
+// sums, and discards. Exercises the heap allocator and GC under array churn.
+
+#[test]
+fn stress_large_array_allocation_and_gc() {
+    // Build a 50-element zero-filled array, fill with 0..49, sum (=1225),
+    // repeat 100 times. Expected checksum: 100 * 1225 = 122,500.
+    let source = r#"
+let run = fn() {
+    let iter = [0]
+    let checksum = [0]
+    while iter[0] < 100 {
+        let arr = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        let i = [0]
+        while i[0] < 50 {
+            arr[i[0]] = i[0]
+            i[0] = i[0] + 1
+        }
+        let j = [0]
+        let sum = [0]
+        while j[0] < 50 {
+            sum[0] = sum[0] + arr[j[0]]
+            j[0] = j[0] + 1
+        }
+        checksum[0] = checksum[0] + sum[0]
+        iter[0] = iter[0] + 1
+    }
+    checksum[0]
+}
+run()
+"#;
+    let expected: i64 = 100 * (49 * 50 / 2); // 100 * 1225 = 122,500
+    assert_nula_int(source, expected);
+}
+
+// ---------------------------------------------------------------------------
+// Test 32 — String Allocation Pressure
+// ---------------------------------------------------------------------------
+// Concatenates a short string in a tight loop (5,000 iterations), creating
+// and discarding intermediate string allocations. Exercises the string heap
+// and GC under repeated concatenation churn.
+
+#[test]
+fn stress_string_allocation_pressure() {
+    // Build a string by repeatedly concatenating "x" in a loop,
+    // discarding intermediate results. Return the iteration count.
+    // The real stress is that this completes without crashing or OOM.
+    let source = r#"
+let run = fn() {
+    let i = [0]
+    let s = [""]
+    while i[0] < 5000 {
+        s[0] = s[0] + "x"
+        i[0] = i[0] + 1
+    }
+    1
+}
+run()
+"#;
+    // The test passes if it completes without error (returning 1).
+    assert_nula_int(source, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Test 33 — Deep Recursion (Stack Depth)
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Computes a recursive sum from 1..1000, exercising stack depth and
+// verifying that the interpreter handles deep call chains.
+
+#[test]
+fn stress_deep_recursion() {
+    // Recursively sum 1 + 2 + ... + 1000 = 500,500.
+    // Wrap in a block because `let rec` is not valid at the module top-level
+    // in the test compilation pipeline.
+    let source = r#"
+{
+    let rec sum_to = fn(n) {
+        if n <= 0 then 0 else n + sum_to(n - 1)
+    }
+    sum_to(1000)
+}
+"#;
+    let expected: i64 = 1000 * 1001 / 2; // 500,500
+    assert_nula_int(source, expected);
+}
+
+// ---------------------------------------------------------------------------
+// Test 34 — Actor Message Passing (Ping-Pong) Under Load
+// ---------------------------------------------------------------------------
+#[test]
+fn stress_actor_ping_pong_messaging() {
+    let mut rt = Runtime::new();
+
+    // Create two actors: pinger and ponger
+    let pinger = rt.spawn_actor(Box::new(|| vec![("name".into(), Value::int(100))]));
+
+    let ponger = rt.spawn_actor(Box::new(|| vec![("name".into(), Value::int(101))]));
+
+    // Pre-load the pinger's mailbox with 10,000 "pong" messages
+    // that each carry a decrementing counter.
+    const MSG_COUNT: usize = 10_000;
+    for i in 0..MSG_COUNT {
+        rt.send_message(
+            pinger,
+            "pong",
+            &[Value::int(i as i64), Value::int(ponger as i64)],
+        );
+    }
+
+    // Run the scheduler to process all messages.
+    rt.run_scheduler();
+
+    // After processing, both actors should still be alive
+    // and their mailboxes should be drained.
+    assert!(
+        rt.actors.contains_key(&pinger),
+        "pinger should still be alive after ping-pong"
+    );
+    assert!(
+        rt.actors.contains_key(&ponger),
+        "ponger should still be alive after ping-pong"
+    );
+
+    if let Some(actor) = rt.actors.get(&pinger) {
+        assert!(
+            actor.mailbox.is_empty(),
+            "pinger mailbox should be drained after scheduler run"
+        );
+        assert!(
+            actor.reduction_count > 0,
+            "pinger should have processed messages, reductions={}",
+            actor.reduction_count
+        );
+    }
+    if let Some(actor) = rt.actors.get(&ponger) {
+        assert!(
+            actor.mailbox.is_empty(),
+            "ponger mailbox should be drained after scheduler run"
+        );
+    }
 }
