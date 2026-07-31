@@ -91,13 +91,13 @@ This document is the design target for Nulang 2.0. The implementation in this re
 - LSP code lenses, document links, enriched hover: `textDocument/codeLens` shows reference counts; `textDocument/documentLink` creates clickable import links; `textDocument/hover` includes doc comments, effects, and type signatures — `src/lsp/mod.rs`. (Experimental)
 - LSP completion documentation: keyword and built-in effect completion items carry markdown documentation strings — `src/lsp/mod.rs`. (Experimental)
 - 15 verified example programs under `examples/` with `examples/README.md` — from basic IO to JSON, HTTP, Option/Result, and ranges. (Experimental)
+- `consume` / `recover` expressions: `consume x` marks a linear (`lineariso`) variable as consumed (reusing the existing at-most-once tracker); `recover { body }` wraps a fallible body in `Ok`/`Error`, checking the result is sendable — `src/parser.rs`, `src/typechecker.rs`, `src/effect_checker.rs`. Commit `e0cf432`. (Experimental)
 
 **Planned (described in this specification, not implemented):**
 
 - The WebAssembly compilation target (Chapter 13): WASM compilation exists behind the `wasm-backend` feature flag via `--backend wasm|wasm-run|wasm-aot`. WIT interface generation and WASI worlds are not yet implemented.
 - Higher-kinded types, `Char` and `Decimal` primitives, character literals (Sections 2.4, 3.6).
-- `consume` / `recover` expressions, `<-` message syntax, and
-  indentation-based layout (Section 2.8).
+- `<-` message syntax and indentation-based layout (Section 2.8).
 - Authority capabilities (`capability` declarations on actors, delegation, revocation, auditing — Sections 1.5 and 5.3–5.6), `config` blocks, the `tool` declaration form inside actors, `virtual` actors, `select`, `await`, `await_human`, `sleep_until`, and `retry` blocks.
 - The deployment manifest (`nulang.toml`), `nulang migrate`, and `nulang shell` (Chapter 15, Appendix D).
 

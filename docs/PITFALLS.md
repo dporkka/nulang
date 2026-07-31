@@ -6,7 +6,7 @@ a one-line rule, a ❌ wrong snippet, and a ✅ correct one — all verified
 against `examples/`, `docs/GETTING_STARTED.md`, and the integration-test
 suite.
 
-> **Verified against commit `9dfeef5`.**  Several previously-listed
+> **Verified against commit `e0cf432`.**  Several previously-listed
 > pitfalls have been fixed — see *Recently Fixed* at the bottom.
 
 ---
@@ -355,7 +355,7 @@ f(10).1              // → 11
 ## Recently Fixed
 
 These used to be pitfalls but are now working correctly
-(commits `fd516ef`, `cb6ac4c`, `fcd4741`, `d91dcc6`, `8ca559c`, `3744b9d`, `6a55e0d`, `8f13bea`).
+(commits `e0cf432`, `fa98dcf`, `fd516ef`, `cb6ac4c`, `fcd4741`, `d91dcc6`, `8ca559c`, `3744b9d`, `6a55e0d`, `8f13bea`).
 
 | Issue | Status | Notes |
 |-------|--------|-------|
@@ -368,3 +368,5 @@ These used to be pitfalls but are now working correctly
 | `Array.push`/`Array.new`/`Array.length`/`Array.set`/`Array.slice` | ✅ Added | Full Array builtin with value semantics |
 | `String.from_char` | ✅ Added | Code point → 1-char string; used by JSON parser |
 | `var` bindings, record-update, ranges | ✅ Added | Mutable locals, `{ r .. f = v }` syntax, `a..b` expressions |
+| `consume` / `recover` expressions | ✅ Added | `consume x` marks linear variable consumed; `recover { body }` wraps result in Ok/Error |
+| Numeric conversion primitives | ✅ Added | `Int.to_float`, `Float.to_int`, `Float.to_string`, `String.to_int`, `String.to_float` |
