@@ -156,3 +156,34 @@ pub fn range(n) {
     };
     result
 }
+
+/// Quicksort: returns a new sorted array (ascending).  Original unchanged.
+/// Picks the first element as pivot; partitions via `filter` into less,
+/// equal, and greater slices, then recurses.  Handles empty, single-element,
+/// duplicates, and negative numbers correctly.
+pub fn sort(xs: [Int]) -> [Int] {
+    var len = perform Array.length(xs);
+    if len <= 1 then { xs } else {
+        var pivot = xs[0];
+        var less = filter(fn(x) { x < pivot }, xs);
+        var eq = filter(fn(x) { x == pivot }, xs);
+        var greater = filter(fn(x) { x > pivot }, xs);
+        var result = sort(less);
+        for x in eq {
+            result = perform Array.push(result, x)
+        };
+        for x in sort(greater) {
+            result = perform Array.push(result, x)
+        };
+        result
+    }
+}
+
+/// Concatenate two arrays into a new array.  Original arrays unchanged.
+pub fn append(xs: [Int], ys: [Int]) -> [Int] {
+    var result = xs;
+    for x in ys {
+        result = perform Array.push(result, x)
+    };
+    result
+}
