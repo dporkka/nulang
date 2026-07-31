@@ -2771,13 +2771,35 @@ impl Parser {
     fn parse_if(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
         self.advance(); // consume 'if'
+
+        // Detect C-style parenthesized condition: `if (cond) ...`
+        let cstyle_paren = self.peek_kind() == &TokenKind::LParen;
+
         let cond = self.parse_expr()?;
 
+        // If user wrote `if (cond) ...` C-style, suggest nulang syntax
+        if cstyle_paren {
+            let next = self.peek_kind();
+            if next == &TokenKind::LBrace || next == &TokenKind::Then {
+                return Err(NuError::parse_error(
+                    "Nulang uses `if cond then body else other` (no parentheses around the condition)".to_string(),
+                    span,
+                ));
+            }
+        }
+
         // Optional `then` keyword for ML-style syntax: `if c then a else b`
-        let _ = self.consume_if(&TokenKind::Then);
+        let has_then = self.consume_if(&TokenKind::Then);
 
         // Parse then branch: either { block } or single expression
         let then_branch = if self.match_token(&TokenKind::LBrace) {
+            if !has_then {
+                return Err(NuError::parse_error(
+                    "expected `then` after if-condition; use `if <cond> then <body> else <else>`"
+                        .to_string(),
+                    self.current_span(),
+                ));
+            }
             Box::new(self.parse_block()?)
         } else {
             Box::new(self.parse_expr()?)

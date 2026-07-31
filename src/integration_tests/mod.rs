@@ -7639,7 +7639,7 @@ match { a: 2, b: 9 } with {
     /// module directly. This is the "run a 2026 program in 2126" guarantee.
     #[test]
     fn test_nbc_roundtrip_preserves_execution_result() {
-        let source = "fn main() { let x = 6 * 7; if x > 40 { x + 1 } else { x - 1 } }";
+        let source = "fn main() { let x = 6 * 7; if x > 40 then { x + 1 } else { x - 1 } }";
         let original = compile_source_new(source).expect("compile");
         let bytes = original.to_nbc(None).expect("encode");
         let artifact = crate::bytecode::CodeModule::from_nbc(&bytes).expect("decode");
@@ -7852,7 +7852,7 @@ match { a: 2, b: 9 } with {
 
         #[test]
         fn test_wasm_compile_if_expr() {
-            let wasm = compile_source_to_wasm("if true { 1 } else { 2 }").expect("compile");
+            let wasm = compile_source_to_wasm("if true then { 1 } else { 2 }").expect("compile");
             assert_eq!(&wasm[0..4], b"\0asm", "not valid WASM magic");
         }
 
@@ -8001,7 +8001,7 @@ match { a: 2, b: 9 } with {
 
     #[test]
     fn test_while_conditional_break_with_value() {
-        let source = r#"while true { if true { break 42 } else { 0 } }"#;
+        let source = r#"while true { if true then { break 42 } else { 0 } }"#;
         let result = run_source_new(source).unwrap();
         assert_eq!(
             result.as_int(),
