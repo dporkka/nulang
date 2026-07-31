@@ -163,4 +163,13 @@ define_helpers! {
     ArrStore => nulang_arr_store, Reg4,
     ArrLen   => nulang_arr_len,   Reg3,
     FieldL   => nulang_field_load, Reg4,
+    // AOT value-based helpers (new)
+    Pow      => nulang_pow,         Bin,
+    StrEq    => nulang_str_eq,      Bin,
+    StrConcat => nulang_str_concat,  Bin,
+    AllocObj => nulang_alloc_obj,   Bin,  // actually (i64,i32)->i64 but builder only needs ptr
+    ObjGet   => nulang_obj_get,     Bin,
+    ObjSet   => nulang_obj_set,     Reg4, // actually (i64,i64,i64)->void
+    ObjLen   => nulang_obj_len,     Unary,
+    RecCopy  => nulang_rec_copy,    Unary,
 }

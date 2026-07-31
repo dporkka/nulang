@@ -76,8 +76,11 @@ pub struct AotContext<'a> {
     pub func_ids: Vec<cranelift_module::FuncId>,
     /// Compilation mode: boxed (NaN-tagged) or unboxed (raw i64 for Int).
     pub mode: CompileMode,
+    /// Module-wide field name → slot index mapping for records.
+    pub field_map: HashMap<String, u8>,
+    /// Module constant pool (for String constant resolution).
+    pub constants: Vec<crate::bytecode::Constant>,
 }
-
 impl<'a> AotContext<'a> {
     pub fn new(module: &'a mut JITModule, builder_context: &'a mut FunctionBuilderContext) -> Self {
         let codegen_ctx = module.make_context();
@@ -88,6 +91,8 @@ impl<'a> AotContext<'a> {
             helpers: HashMap::new(),
             func_ids: Vec::new(),
             mode: CompileMode::Boxed,
+            field_map: HashMap::new(),
+            constants: Vec::new(),
         }
     }
 }
@@ -304,8 +309,10 @@ pub fn compile_mir_function_body(
     }
     sig.returns.push(AbiParam::new(types::I64));
     aot.codegen_ctx.func.signature = sig;
-
     // Split module and codegen_ctx for independent borrows.
+    // Extract refs to constants and field_map before the split.
+    let constants: &[crate::bytecode::Constant] = &aot.constants;
+    let field_map: &HashMap<String, u8> = &aot.field_map;
     let module: &mut JITModule = aot.module;
     let codegen_ctx: &mut codegen::Context = &mut aot.codegen_ctx;
     let builder_ctx: &mut FunctionBuilderContext = aot.builder_context;
@@ -391,6 +398,63 @@ pub fn compile_mir_function_body(
             h.insert(*name, func_ref);
         }
 
+        // Add new AOT helpers (bin: pow, str_eq, str_concat, obj_get)
+        let extra_bin: &[&str] = &[
+            "nulang_pow",
+            "nulang_str_eq",
+            "nulang_str_concat",
+            "nulang_obj_get",
+        ];
+        for name in extra_bin {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function(name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(*name, func_ref);
+        }
+
+        // Add unary helpers for obj_len, rec_copy
+        let extra_unary: &[&str] = &["nulang_obj_len", "nulang_rec_copy"];
+        for name in extra_unary {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function(name, Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert(*name, func_ref);
+        }
+
+        // alloc_obj: (i64, i32) -> i64
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.params.push(AbiParam::new(types::I32));
+            h_sig.returns.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_alloc_obj", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_alloc_obj", func_ref);
+        }
+
+        // obj_set: (i64, i64, i64) -> void
+        {
+            let mut h_sig = module.make_signature();
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.params.push(AbiParam::new(types::I64));
+            h_sig.params.push(AbiParam::new(types::I64));
+            let h_id = module
+                .declare_function("nulang_obj_set", Linkage::Import, &h_sig)
+                .map_err(|e| AotCompileError::Cranelift(e.to_string()))?;
+            let func_ref = module.declare_func_in_func(h_id, builder.func);
+            h.insert("nulang_obj_set", func_ref);
+        }
         // Helper to register a call target FuncRef.
         let mut register_call_target = |n: usize| {
             if !call_targets.contains_key(&n) {
@@ -484,6 +548,8 @@ pub fn compile_mir_function_body(
                     &mut closure_targets,
                     &mut local_vals,
                     mode,
+                    constants,
+                    field_map,
                 )?;
             }
             compile_terminator_with_params(
@@ -593,6 +659,8 @@ fn compile_stmt(
     closure_targets: &mut HashMap<u32, usize>,
     local_vals: &mut HashMap<u32, Value>,
     mode: CompileMode,
+    constants: &[crate::bytecode::Constant],
+    field_map: &HashMap<String, u8>,
 ) -> AotResult<()> {
     match stmt {
         mir::Stmt::Assign { dst, op } => {
@@ -611,6 +679,8 @@ fn compile_stmt(
                 closure_targets,
                 local_vals,
                 mode,
+                constants,
+                field_map,
             )?;
             let reg = mir::FunctionBuilder::LOCAL_BASE + dst.0;
             local_vals.insert(reg, val);
@@ -620,6 +690,46 @@ fn compile_stmt(
             // Handler tables and the handler stack are a runtime (VM)
             // concept — at the AOT level these are no-ops.  The handler
             // body is compiled inline as ordinary blocks.
+            Ok(())
+        }
+        mir::Stmt::StoreFieldNamed { obj, field, src } => {
+            let obj_reg = mir::FunctionBuilder::LOCAL_BASE + obj.0;
+            let obj_val = *local_vals.get(&obj_reg).ok_or_else(|| {
+                AotCompileError::Internal("StoreFieldNamed obj uninitialized".into())
+            })?;
+            let src_reg = mir::FunctionBuilder::LOCAL_BASE + src.0;
+            let src_val = *local_vals.get(&src_reg).ok_or_else(|| {
+                AotCompileError::Internal("StoreFieldNamed src uninitialized".into())
+            })?;
+            let slot = field_map.get(field).copied().unwrap_or(0);
+            let slot_val = builder.ins().iconst(types::I64, slot as i64);
+            call_void_helper(
+                builder,
+                helpers,
+                "nulang_obj_set",
+                &[obj_val, slot_val, src_val],
+            )?;
+            Ok(())
+        }
+        mir::Stmt::ArrayStore { arr, idx, src } => {
+            let arr_reg = mir::FunctionBuilder::LOCAL_BASE + arr.0;
+            let arr_val = *local_vals
+                .get(&arr_reg)
+                .ok_or_else(|| AotCompileError::Internal("ArrayStore arr uninitialized".into()))?;
+            let idx_reg = mir::FunctionBuilder::LOCAL_BASE + idx.0;
+            let idx_val = *local_vals
+                .get(&idx_reg)
+                .ok_or_else(|| AotCompileError::Internal("ArrayStore idx uninitialized".into()))?;
+            let src_reg = mir::FunctionBuilder::LOCAL_BASE + src.0;
+            let src_val = *local_vals
+                .get(&src_reg)
+                .ok_or_else(|| AotCompileError::Internal("ArrayStore src uninitialized".into()))?;
+            call_void_helper(
+                builder,
+                helpers,
+                "nulang_obj_set",
+                &[arr_val, idx_val, src_val],
+            )?;
             Ok(())
         }
         _ => Err(AotCompileError::Unsupported(format!(
@@ -632,7 +742,6 @@ fn compile_stmt(
 // ---------------------------------------------------------------------------
 // RValue compilation
 // ---------------------------------------------------------------------------
-
 fn compile_rvalue(
     builder: &mut FunctionBuilder,
     rv: &mir::RValue,
@@ -642,9 +751,11 @@ fn compile_rvalue(
     closure_targets: &mut HashMap<u32, usize>,
     local_vals: &HashMap<u32, Value>,
     mode: CompileMode,
+    constants: &[crate::bytecode::Constant],
+    field_map: &HashMap<String, u8>,
 ) -> AotResult<Value> {
     match rv {
-        mir::RValue::Const(c) => compile_const(builder, c, mode),
+        mir::RValue::Const(c) => compile_const(builder, c, mode, constants),
 
         mir::RValue::Load(id) => {
             let reg = mir::FunctionBuilder::LOCAL_BASE + id.0;
@@ -727,10 +838,169 @@ fn compile_rvalue(
             "Perform with dynamic dispatch is not supported in the native backend".into(),
         )),
 
+        // ---- Record ----
+        mir::RValue::Record(fields) => {
+            let max_slot: u8 = fields
+                .iter()
+                .filter_map(|(name, _)| field_map.get(name))
+                .copied()
+                .max()
+                .unwrap_or(0);
+            let slot_count = (max_slot as u64).saturating_add(1);
+            // alloc_obj(slot_count, type_tag=3 for Record)
+            let count_val = builder.ins().iconst(types::I64, slot_count as i64);
+            let tag_val = builder.ins().iconst(types::I32, 3);
+            let ptr = call_helper(builder, helpers, "nulang_alloc_obj", &[count_val, tag_val])?;
+
+            for (name, val_id) in fields {
+                let val_reg = mir::FunctionBuilder::LOCAL_BASE + val_id.0;
+                let val_val = *local_vals.get(&val_reg).ok_or_else(|| {
+                    AotCompileError::Internal("record field uninitialized".into())
+                })?;
+                let slot = field_map.get(name).copied().unwrap_or(0);
+                let slot_val = builder.ins().iconst(types::I64, slot as i64);
+                call_void_helper(
+                    builder,
+                    helpers,
+                    "nulang_obj_set",
+                    &[ptr, slot_val, val_val],
+                )?;
+            }
+            Ok(ptr)
+        }
+
+        // ---- Tuple ----
+        mir::RValue::Tuple(elements) => {
+            let count = elements.len() as u64;
+            let count_val = builder.ins().iconst(types::I64, count as i64);
+            let tag_val = builder.ins().iconst(types::I32, 6);
+            let ptr = call_helper(builder, helpers, "nulang_alloc_obj", &[count_val, tag_val])?;
+
+            for (i, val_id) in elements.iter().enumerate() {
+                let val_reg = mir::FunctionBuilder::LOCAL_BASE + val_id.0;
+                let val_val = *local_vals.get(&val_reg).ok_or_else(|| {
+                    AotCompileError::Internal("tuple element uninitialized".into())
+                })?;
+                let idx_val = builder.ins().iconst(types::I64, i as i64);
+                call_void_helper(builder, helpers, "nulang_obj_set", &[ptr, idx_val, val_val])?;
+            }
+            Ok(ptr)
+        }
+
+        // ---- ArrayLit ----
+        mir::RValue::ArrayLit(elements) => {
+            let count = elements.len() as u64;
+            let count_val = builder.ins().iconst(types::I64, count as i64);
+            let tag_val = builder.ins().iconst(types::I32, 1);
+            let ptr = call_helper(builder, helpers, "nulang_alloc_obj", &[count_val, tag_val])?;
+
+            for (i, val_id) in elements.iter().enumerate() {
+                let val_reg = mir::FunctionBuilder::LOCAL_BASE + val_id.0;
+                let val_val = *local_vals.get(&val_reg).ok_or_else(|| {
+                    AotCompileError::Internal("array element uninitialized".into())
+                })?;
+                let idx_val = builder.ins().iconst(types::I64, i as i64);
+                call_void_helper(builder, helpers, "nulang_obj_set", &[ptr, idx_val, val_val])?;
+            }
+            Ok(ptr)
+        }
+
+        // ---- LoadFieldNamed (record field access) ----
+        mir::RValue::LoadFieldNamed { obj, field } => {
+            let obj_reg = mir::FunctionBuilder::LOCAL_BASE + obj.0;
+            let obj_val = *local_vals.get(&obj_reg).ok_or_else(|| {
+                AotCompileError::Internal("LoadFieldNamed obj uninitialized".into())
+            })?;
+            let slot = field_map.get(field).copied().unwrap_or(0);
+            let slot_val = builder.ins().iconst(types::I64, slot as i64);
+            call_helper(builder, helpers, "nulang_obj_get", &[obj_val, slot_val])
+        }
+
+        // ---- LoadFieldPos (tuple field access) ----
+        mir::RValue::LoadFieldPos { obj, index } => {
+            let obj_reg = mir::FunctionBuilder::LOCAL_BASE + obj.0;
+            let obj_val = *local_vals.get(&obj_reg).ok_or_else(|| {
+                AotCompileError::Internal("LoadFieldPos obj uninitialized".into())
+            })?;
+            let idx_val = builder.ins().iconst(types::I64, *index as i64);
+            call_helper(builder, helpers, "nulang_obj_get", &[obj_val, idx_val])
+        }
+
+        // ---- ArrayLoad ----
+        mir::RValue::ArrayLoad { arr, idx } => {
+            let arr_reg = mir::FunctionBuilder::LOCAL_BASE + arr.0;
+            let arr_val = *local_vals
+                .get(&arr_reg)
+                .ok_or_else(|| AotCompileError::Internal("ArrayLoad arr uninitialized".into()))?;
+            let idx_reg = mir::FunctionBuilder::LOCAL_BASE + idx.0;
+            let idx_val = *local_vals
+                .get(&idx_reg)
+                .ok_or_else(|| AotCompileError::Internal("ArrayLoad idx uninitialized".into()))?;
+            call_helper(builder, helpers, "nulang_obj_get", &[arr_val, idx_val])
+        }
+
+        // ---- ArrayLen ----
+        mir::RValue::ArrayLen(arr) => {
+            let arr_reg = mir::FunctionBuilder::LOCAL_BASE + arr.0;
+            let arr_val = *local_vals
+                .get(&arr_reg)
+                .ok_or_else(|| AotCompileError::Internal("ArrayLen arr uninitialized".into()))?;
+            call_helper(builder, helpers, "nulang_obj_len", &[arr_val])
+        }
+
+        // ---- StringEq ----
+        mir::RValue::StringEq(l, r) => {
+            let l_reg = mir::FunctionBuilder::LOCAL_BASE + l.0;
+            let l_val = *local_vals
+                .get(&l_reg)
+                .ok_or_else(|| AotCompileError::Internal("StringEq lhs uninitialized".into()))?;
+            let r_reg = mir::FunctionBuilder::LOCAL_BASE + r.0;
+            let r_val = *local_vals
+                .get(&r_reg)
+                .ok_or_else(|| AotCompileError::Internal("StringEq rhs uninitialized".into()))?;
+            call_helper(builder, helpers, "nulang_str_eq", &[l_val, r_val])
+        }
+
+        // ---- StrConcat ----
+        mir::RValue::StrConcat(l, r) => {
+            let l_reg = mir::FunctionBuilder::LOCAL_BASE + l.0;
+            let l_val = *local_vals
+                .get(&l_reg)
+                .ok_or_else(|| AotCompileError::Internal("StrConcat lhs uninitialized".into()))?;
+            let r_reg = mir::FunctionBuilder::LOCAL_BASE + r.0;
+            let r_val = *local_vals
+                .get(&r_reg)
+                .ok_or_else(|| AotCompileError::Internal("StrConcat rhs uninitialized".into()))?;
+            call_helper(builder, helpers, "nulang_str_concat", &[l_val, r_val])
+        }
+
+        // ---- RecordUpdate ----
+        mir::RValue::RecordUpdate { base, overrides } => {
+            let base_reg = mir::FunctionBuilder::LOCAL_BASE + base.0;
+            let base_val = *local_vals.get(&base_reg).ok_or_else(|| {
+                AotCompileError::Internal("RecordUpdate base uninitialized".into())
+            })?;
+            let copy = call_helper(builder, helpers, "nulang_rec_copy", &[base_val])?;
+            for (name, val_id) in overrides {
+                let val_reg = mir::FunctionBuilder::LOCAL_BASE + val_id.0;
+                let val_val = *local_vals.get(&val_reg).ok_or_else(|| {
+                    AotCompileError::Internal("RecordUpdate override uninitialized".into())
+                })?;
+                let slot = field_map.get(name).copied().unwrap_or(0);
+                let slot_val = builder.ins().iconst(types::I64, slot as i64);
+                call_void_helper(
+                    builder,
+                    helpers,
+                    "nulang_obj_set",
+                    &[copy, slot_val, val_val],
+                )?;
+            }
+            Ok(copy)
+        }
+
         _ => Err(AotCompileError::Unsupported(format!("rvalue {:?}", rv))),
     }
 }
-
 // ---------------------------------------------------------------------------
 // Constant emission
 // ---------------------------------------------------------------------------
@@ -739,6 +1009,7 @@ fn compile_const(
     builder: &mut FunctionBuilder,
     c: &crate::bytecode::Constant,
     mode: CompileMode,
+    constants: &[crate::bytecode::Constant],
 ) -> AotResult<Value> {
     match c {
         crate::bytecode::Constant::Int(v) => {
@@ -759,6 +1030,15 @@ fn compile_const(
             .ins()
             .iconst(types::I64, 0x7FF9_0000_0000_0000u64 as i64)),
         crate::bytecode::Constant::Nil => Ok(builder.ins().iconst(types::I64, TAG_NIL_I64)),
+        crate::bytecode::Constant::String(_) => {
+            // Emit TAG_STRING | index into constant pool.
+            // The constant pool is built during module pre-scan.
+            let idx = constants.iter().position(|k| k == c).unwrap_or(0);
+            Ok(builder.ins().iconst(
+                types::I64,
+                (crate::value_layout::TAG_STRING | idx as u64) as i64,
+            ))
+        }
         _ => Err(AotCompileError::Unsupported(format!("constant {:?}", c))),
     }
 }
@@ -1051,6 +1331,7 @@ fn compile_binary(
                 call_helper(builder, helpers, "nulang_shr", &[lhs_val, rhs_val])
             }
         }
+        BinOp::Pow => call_helper(builder, helpers, "nulang_pow", &[lhs_val, rhs_val]),
         _ => Err(AotCompileError::Unsupported(format!("binary op {:?}", op))),
     }
 }
@@ -1110,6 +1391,21 @@ fn call_helper(
         .ok_or_else(|| AotCompileError::Internal(format!("helper {} not registered", name)))?;
     let call = builder.ins().call(func_ref, args);
     Ok(builder.inst_results(call)[0])
+}
+
+/// Call a void-returning runtime helper function by name.
+fn call_void_helper(
+    builder: &mut FunctionBuilder,
+    helpers: &HashMap<&str, FuncRef>,
+    name: &str,
+    args: &[Value],
+) -> AotResult<()> {
+    let func_ref = helpers
+        .get(name)
+        .copied()
+        .ok_or_else(|| AotCompileError::Internal(format!("void helper {} not registered", name)))?;
+    builder.ins().call(func_ref, args);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -496,6 +496,333 @@ unsafe fn with_callbacks<R>(f: impl FnOnce(&mut dyn crate::vm::ActorVmCallbacks)
 
 use crate::runtime::heap::{ActorHeap, TypeTag as HeapTypeTag};
 
+// ---------------------------------------------------------------------------
+// AOT standalone execution context
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Standalone heap for AOT execution when no actor runtime is active.
+    static AOT_HEAP: std::cell::RefCell<Option<crate::runtime::heap::ActorHeap>> =
+        std::cell::RefCell::new(None);
+    /// Standalone constant pool for AOT execution.
+    static AOT_CONSTANTS: std::cell::RefCell<Option<Vec<crate::bytecode::Constant>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Set up a standalone heap for AOT execution.
+pub fn aot_set_heap(heap: crate::runtime::heap::ActorHeap) {
+    AOT_HEAP.with(|cell| {
+        *cell.borrow_mut() = Some(heap);
+    });
+}
+
+/// Take the standalone heap, returning it to the caller.
+pub fn aot_take_heap() -> Option<crate::runtime::heap::ActorHeap> {
+    AOT_HEAP.with(|cell| cell.borrow_mut().take())
+}
+
+/// Set standalone constants for AOT execution.
+///
+/// # Safety
+/// The slice must remain valid until `aot_clear_constants` is called.
+pub unsafe fn aot_set_constants(constants: &[crate::bytecode::Constant]) {
+    AOT_CONSTANTS.with(|cell| {
+        *cell.borrow_mut() = Some(constants.to_vec());
+    });
+}
+
+/// Clear standalone constants.
+pub fn aot_clear_constants() {
+    AOT_CONSTANTS.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+/// Resolve a string from either the JIT constant pool or the AOT standalone pool.
+fn resolve_string(raw: u64) -> Option<String> {
+    // Try JIT constant pool first (for JIT-compiled code).
+    if (raw & TAG_MASK) == TAG_STRING {
+        let id = (raw & PAYLOAD_MASK) as u32;
+        // Check JIT constants
+        let jit_result = JIT_CONSTANTS.with(|cell| unsafe {
+            let cp = (*cell.get()).as_slice();
+            cp.get(id as usize).and_then(|c| match c {
+                crate::bytecode::Constant::String(s) => Some(s.clone()),
+                _ => None,
+            })
+        });
+        if jit_result.is_some() {
+            return jit_result;
+        }
+        // Fall back to AOT constants
+        AOT_CONSTANTS.with(|cell| {
+            let guard = cell.borrow();
+            if let Some(ref constants) = *guard {
+                constants.get(id as usize).and_then(|c| match c {
+                    crate::bytecode::Constant::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+            } else {
+                None
+            }
+        })
+    } else if (raw & TAG_MASK) == TAG_PTR {
+        let ptr = (raw & PAYLOAD_MASK) as *mut u8;
+        if ptr.is_null() {
+            return None;
+        }
+        unsafe {
+            let header = &*ActorHeap::header_of(ptr);
+            if header.type_tag != HeapTypeTag::String {
+                return None;
+            }
+            Some(
+                CStr::from_ptr(ptr as *const std::ffi::c_char)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }
+    } else {
+        None
+    }
+}
+
+/// Allocate via callbacks or fall back to standalone AOT heap.
+/// Check if JIT callbacks are set, and if so, use them.
+unsafe fn try_with_callbacks<R>(
+    f: impl FnOnce(&mut dyn crate::vm::ActorVmCallbacks) -> R,
+) -> Option<R> {
+    JIT_CALLBACKS.with(|cell| {
+        let pair = *cell.get();
+        if pair.is_null() {
+            None
+        } else {
+            Some(f(&mut *pair.to_ptr()))
+        }
+    })
+}
+
+/// Allocate via callbacks or fall back to standalone AOT heap.
+unsafe fn alloc_obj(size: usize, type_tag: HeapTypeTag) -> Option<*mut u8> {
+    if let Some(ptr) = try_with_callbacks(|cb| cb.alloc(size, type_tag)) {
+        return ptr;
+    }
+    AOT_HEAP.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|heap| heap.alloc(size, type_tag))
+    })
+}
+
+/// Retain a reference via callbacks or AOT heap directly.
+unsafe fn retain_obj(ptr: *mut u8) {
+    if try_with_callbacks(|cb| {
+        cb.retain_ref(ptr);
+        true
+    })
+    .is_some()
+    {
+        return;
+    }
+    if !ptr.is_null() {
+        let header = &mut *ActorHeap::header_of(ptr);
+        header.ref_count += 1;
+    }
+}
+
+/// Drop a reference via callbacks or AOT heap directly.
+unsafe fn drop_obj(ptr: *mut u8) {
+    if try_with_callbacks(|cb| {
+        cb.drop_ref(ptr);
+        true
+    })
+    .is_some()
+    {
+        return;
+    }
+    if !ptr.is_null() {
+        let header = &mut *ActorHeap::header_of(ptr);
+        if header.ref_count > 0 {
+            header.ref_count -= 1;
+        }
+        if header.ref_count == 0 {
+            AOT_HEAP.with(|cell| {
+                if let Some(ref mut heap) = *cell.borrow_mut() {
+                    heap.free(ptr);
+                }
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AOT value-based runtime helpers
+// ---------------------------------------------------------------------------
+
+/// Allocate a heap object with `slot_count` slots of type `type_tag`.
+/// Returns tagged pointer or nil.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_alloc_obj(slot_count: u64, type_tag_raw: u32) -> u64 {
+    let count = slot_count as usize;
+    let tag: HeapTypeTag = match type_tag_raw {
+        1 => HeapTypeTag::Array,
+        3 => HeapTypeTag::Record,
+        6 => HeapTypeTag::Tuple,
+        2 => HeapTypeTag::String,
+        _ => return Value::nil().as_raw(),
+    };
+    let size = count.checked_mul(std::mem::size_of::<Value>()).unwrap_or(0);
+    if let Some(ptr) = alloc_obj(size, tag) {
+        let slots = std::slice::from_raw_parts_mut(ptr as *mut Value, count);
+        for slot in slots.iter_mut() {
+            *slot = Value::nil();
+        }
+        Value::ptr(ptr).as_raw()
+    } else {
+        Value::nil().as_raw()
+    }
+}
+
+/// Read slot `idx` from a heap object (record, tuple, or array).
+/// Returns nil if the object is not a valid heap object or idx is out of range.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_obj_get(obj: u64, idx: u64) -> u64 {
+    let obj_ptr = val_ptr(obj);
+    if obj_ptr.is_null() {
+        return Value::nil().as_raw();
+    }
+    let header = &*ActorHeap::header_of(obj_ptr);
+    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+    let len = payload_size / std::mem::size_of::<Value>();
+    let i = idx as usize;
+    if i < len {
+        (*((obj_ptr as *const Value).add(i))).as_raw()
+    } else {
+        Value::nil().as_raw()
+    }
+}
+
+/// Write `val` into slot `idx` of a heap object, with proper refcounting.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_obj_set(obj: u64, idx: u64, val: u64) {
+    let obj_ptr = val_ptr(obj);
+    if obj_ptr.is_null() {
+        return;
+    }
+    let val = Value::from_raw(val);
+    let header = &*ActorHeap::header_of(obj_ptr);
+    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+    let len = payload_size / std::mem::size_of::<Value>();
+    let i = idx as usize;
+    if i < len {
+        if let Some(ptr) = val.as_ptr() {
+            retain_obj(ptr);
+        }
+        let slot = (obj_ptr as *mut Value).add(i);
+        let old = *slot;
+        *slot = val;
+        if let Some(old_ptr) = old.as_ptr() {
+            drop_obj(old_ptr);
+        }
+    }
+}
+
+/// Get element count of a heap object (record, tuple, or array).
+/// Returns tagged int.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_obj_len(obj: u64) -> u64 {
+    let obj_ptr = val_ptr(obj);
+    if obj_ptr.is_null() {
+        return Value::int(0).as_raw();
+    }
+    let header = &*ActorHeap::header_of(obj_ptr);
+    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+    let len = payload_size / std::mem::size_of::<Value>();
+    Value::int(len as i64).as_raw()
+}
+
+/// Shallow copy a record (copies all slots, retains each).
+/// Returns tagged pointer or nil.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_rec_copy(obj: u64) -> u64 {
+    let src_ptr = val_ptr(obj);
+    if src_ptr.is_null() {
+        return Value::nil().as_raw();
+    }
+    let header = &*ActorHeap::header_of(src_ptr);
+    if header.type_tag != HeapTypeTag::Record {
+        return Value::nil().as_raw();
+    }
+    let payload_size = header.size.saturating_sub(ActorHeap::HEADER_SIZE);
+    let slot_count = payload_size / std::mem::size_of::<Value>();
+    if let Some(dst_ptr) = alloc_obj(payload_size, HeapTypeTag::Record) {
+        let src_slots = std::slice::from_raw_parts(src_ptr as *const Value, slot_count);
+        let dst_slots = std::slice::from_raw_parts_mut(dst_ptr as *mut Value, slot_count);
+        for i in 0..slot_count {
+            let val = src_slots[i];
+            if let Some(ptr) = val.as_ptr() {
+                retain_obj(ptr);
+            }
+            dst_slots[i] = val;
+        }
+        Value::ptr(dst_ptr).as_raw()
+    } else {
+        Value::nil().as_raw()
+    }
+}
+
+/// String equality: compare two Nulang values as strings.
+/// Returns tagged bool.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_str_eq(a: u64, b: u64) -> u64 {
+    let sa = resolve_string(a);
+    let sb = resolve_string(b);
+    let eq = match (sa, sb) {
+        (Some(sa), Some(sb)) => sa == sb,
+        _ => false,
+    };
+    Value::bool(eq).as_raw()
+}
+
+/// String concatenation: allocate a new heap string.
+/// Returns tagged pointer or nil.
+#[no_mangle]
+pub unsafe extern "C" fn nulang_str_concat(a: u64, b: u64) -> u64 {
+    let sa = resolve_string(a);
+    let sb = resolve_string(b);
+    let result = match (sa, sb) {
+        (Some(sa), Some(sb)) => format!("{}{}", sa, sb),
+        (Some(s), None) => s,
+        (None, Some(s)) => s,
+        _ => return Value::nil().as_raw(),
+    };
+    let bytes = result.into_bytes();
+    if let Some(ptr) = alloc_obj(bytes.len() + 1, HeapTypeTag::String) {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+        *ptr.add(bytes.len()) = 0;
+        Value::ptr(ptr).as_raw()
+    } else {
+        Value::nil().as_raw()
+    }
+}
+
+/// Power operation: a^b for tagged integers.
+/// Returns tagged int or nil (for negative exponent / overflow).
+#[no_mangle]
+pub extern "C" fn nulang_pow(a: u64, b: u64) -> u64 {
+    let base = as_int_or_zero(a);
+    let exp = as_int_or_zero(b);
+    if exp < 0 {
+        return Value::nil().as_raw();
+    }
+    // 0^0 = 1 in Nulang (matching Rust's checked_pow and math convention for discrete exponentiation)
+    let result = base
+        .checked_pow(exp as u32)
+        .map(|r| Value::int(r).as_raw())
+        .unwrap_or_else(|| Value::nil().as_raw());
+    result
+}
+
 /// # Safety
 /// `regs` must point to a valid `[u64; 256]` array. Called only from
 /// JIT-compiled code that follows the `regs_ptr` ABI contract.
@@ -581,9 +908,18 @@ mod tests {
     fn test_jit_helpers_linked() {
         // Force the linker to retain the JIT runtime helpers by taking
         // their addresses. Without this, the linker may strip them since
+        // they are only called from JIT-compiled code.
         let _ = super::nulang_arr_store as unsafe extern "C" fn(_, _, _, _);
         let _ = super::nulang_arr_len as unsafe extern "C" fn(_, _, _);
         let _ = super::nulang_field_load as unsafe extern "C" fn(_, _, _, _);
         let _ = super::nulang_safepoint_yield as unsafe extern "C" fn(u64) -> u64;
+        let _ = super::nulang_alloc_obj as unsafe extern "C" fn(u64, u32) -> u64;
+        let _ = super::nulang_obj_get as unsafe extern "C" fn(u64, u64) -> u64;
+        let _ = super::nulang_obj_set as unsafe extern "C" fn(u64, u64, u64);
+        let _ = super::nulang_obj_len as unsafe extern "C" fn(u64) -> u64;
+        let _ = super::nulang_rec_copy as unsafe extern "C" fn(u64) -> u64;
+        let _ = super::nulang_str_eq as unsafe extern "C" fn(u64, u64) -> u64;
+        let _ = super::nulang_str_concat as unsafe extern "C" fn(u64, u64) -> u64;
+        let _ = super::nulang_pow as extern "C" fn(u64, u64) -> u64;
     }
 }

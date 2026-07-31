@@ -37,6 +37,11 @@ pub struct AotModule {
     compiled_funcs: Vec<*const u8>,
     /// Entry point index (the `__main` or `main` function).
     entry_idx: Option<usize>,
+    /// Module-wide field name → slot index mapping for records.
+    #[allow(dead_code)]
+    field_map: std::collections::HashMap<String, u8>,
+    /// Constant pool (String literals), for runtime string resolution.
+    constants: Vec<crate::bytecode::Constant>,
 }
 
 impl AotModule {
@@ -64,6 +69,37 @@ impl AotModule {
 
         let mut jit_module = JITModule::new(jit_builder);
         let mut builder_context = FunctionBuilderContext::new();
+
+        // Pre-scan: build module-wide field name → slot index map and
+        // constant pool for string literals.
+        let mut field_map: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+        let mut next_field_id: u8 = 0;
+        let mut constants: Vec<crate::bytecode::Constant> = Vec::new();
+
+        for func in &mir_module.functions {
+            for block in &func.blocks {
+                for stmt in &block.stmts {
+                    collect_field_and_consts(
+                        stmt,
+                        &mut field_map,
+                        &mut next_field_id,
+                        &mut constants,
+                    );
+                }
+            }
+        }
+        for func in &mir_module.behaviors {
+            for block in &func.blocks {
+                for stmt in &block.stmts {
+                    collect_field_and_consts(
+                        stmt,
+                        &mut field_map,
+                        &mut next_field_id,
+                        &mut constants,
+                    );
+                }
+            }
+        }
 
         // Pass 1: declare all functions so forward references resolve.
         let mut func_ids: Vec<cranelift_module::FuncId> =
@@ -117,7 +153,9 @@ impl AotModule {
                 // Compile unboxed variant (self-recursive calls resolve to ub_fid).
                 let mut ctx2 = codegen::AotContext::new(&mut jit_module, &mut builder_context);
                 ctx2.func_ids = func_ids.clone();
-                ctx2.func_ids[idx] = ub_fid; // Step 4d: self-calls use unboxed variant
+                ctx2.func_ids[idx] = ub_fid;
+                ctx2.field_map = field_map.clone();
+                ctx2.constants = constants.clone();
                 codegen::compile_mir_function_body(
                     &mut ctx2,
                     func,
@@ -146,6 +184,8 @@ impl AotModule {
                 // Normal boxed compilation for non-all-Int functions.
                 let mut ctx = codegen::AotContext::new(&mut jit_module, &mut builder_context);
                 ctx.func_ids = func_ids.clone();
+                ctx.field_map = field_map.clone();
+                ctx.constants = constants.clone();
                 codegen::compile_mir_function_body(
                     &mut ctx,
                     func,
@@ -182,13 +222,13 @@ impl AotModule {
             builder_context,
             compiled_funcs,
             entry_idx,
+            field_map,
+            constants,
         })
     }
 
     /// Execute the module entry point and return the result as a u64 value.
     ///
-    /// The entry point is `__main` if it exists, otherwise `main`, otherwise
-    /// the first function. Returns the NaN-tagged result value.
     pub fn run(&self) -> NuResult<u64> {
         let idx = self.entry_idx.unwrap_or(0);
         let ptr = self
@@ -199,10 +239,28 @@ impl AotModule {
                 span: Span::default(),
             })?;
 
+        // Set up standalone heap for AOT runtime helpers.
+        let mut heap = crate::runtime::heap::ActorHeap::new(1024 * 1024);
+        heap.set_actor_id(0);
+        crate::jit::runtime::aot_set_heap(heap);
+
+        // Set up constant pool for string resolution.
+        if !self.constants.is_empty() {
+            unsafe {
+                crate::jit::runtime::aot_set_constants(&self.constants);
+            }
+        }
+
         // Call the compiled function. Signature: extern "C" fn() -> u64
         // (for the entry point with no params).
         let func: extern "C" fn() -> u64 = unsafe { std::mem::transmute(*ptr) };
-        Ok(func())
+        let result = func();
+
+        // Clean up.
+        crate::jit::runtime::aot_clear_constants();
+        let _ = crate::jit::runtime::aot_take_heap();
+
+        Ok(result)
     }
 }
 
@@ -210,4 +268,72 @@ impl AotModule {
 /// Single source of truth: `src/jit/helpers.rs` `define_helpers!` macro.
 fn register_runtime_helpers(builder: &mut JITBuilder) {
     crate::jit::helpers::register_with_builder(builder);
+}
+
+/// Scan MIR statements to collect field names and string constants.
+fn collect_field_and_consts(
+    stmt: &mir::Stmt,
+    field_map: &mut std::collections::HashMap<String, u8>,
+    next_field_id: &mut u8,
+    constants: &mut Vec<crate::bytecode::Constant>,
+) {
+    match stmt {
+        mir::Stmt::Assign { op, .. } => {
+            collect_rvalue_field_and_consts(op, field_map, next_field_id, constants);
+        }
+        mir::Stmt::StoreFieldNamed { field, .. } => {
+            field_map.entry(field.clone()).or_insert_with(|| {
+                let id = *next_field_id;
+                *next_field_id = next_field_id.saturating_add(1);
+                id
+            });
+        }
+        _ => {}
+    }
+}
+
+fn collect_rvalue_field_and_consts(
+    rv: &mir::RValue,
+    field_map: &mut std::collections::HashMap<String, u8>,
+    next_field_id: &mut u8,
+    constants: &mut Vec<crate::bytecode::Constant>,
+) {
+    match rv {
+        mir::RValue::Const(c) => {
+            if let crate::bytecode::Constant::String(_) = c {
+                // Add string constant to pool, returning index
+                constants.push(c.clone());
+            }
+        }
+        mir::RValue::Record(fields)
+        | mir::RValue::RecordUpdate {
+            overrides: fields, ..
+        } => {
+            for (name, _) in fields {
+                field_map.entry(name.clone()).or_insert_with(|| {
+                    let id = *next_field_id;
+                    *next_field_id = next_field_id.saturating_add(1);
+                    id
+                });
+            }
+        }
+        mir::RValue::LoadFieldNamed { field, .. } => {
+            field_map.entry(field.clone()).or_insert_with(|| {
+                let id = *next_field_id;
+                *next_field_id = next_field_id.saturating_add(1);
+                id
+            });
+        }
+        mir::RValue::Spawn { init, .. } => {
+            for (name, rv) in init {
+                field_map.entry(name.clone()).or_insert_with(|| {
+                    let id = *next_field_id;
+                    *next_field_id = next_field_id.saturating_add(1);
+                    id
+                });
+                collect_rvalue_field_and_consts(rv, field_map, next_field_id, constants);
+            }
+        }
+        _ => {}
+    }
 }
