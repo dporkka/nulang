@@ -37,6 +37,11 @@ export default defineConfig({
       // To migrate to Algolia, replace with:
       //   plugins: [starlightDocSearch({ appId: '...', apiKey: '...', indexName: '...' })]
       pagefind: true,
+      expressiveCode: {
+        shiki: {
+          langAlias: { 'nulang': 'rust' },
+        },
+      },
       sidebar: [
         {
           label: 'Getting Started',
