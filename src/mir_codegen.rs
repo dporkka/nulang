@@ -170,6 +170,28 @@ impl MirCodegen {
         }
     }
 
+    /// For compound rvalues that write to dst then call local_reg: save dst
+    /// to r11 (safe from local_reg) to prevent clobbering. Returns the
+    /// register (r11 or dst) to use for subsequent construction operations.
+    fn protect_dst(&mut self, dst: u8) -> u8 {
+        // Only needed when dst is in the spill-temp zone (12-14) that
+        // local_reg may return.  r11 is in the staging zone and is never
+        // returned by local_reg or load_constant during construction loops.
+        if dst == SPILL_TEMP || dst == SPILL_TEMP2 || dst == SPILL_TEMP3 {
+            const SAFE_DST: u8 = 11;
+            self.emit(Instruction::new2(OpCode::Move, dst, SAFE_DST));
+            SAFE_DST
+        } else {
+            dst
+        }
+    }
+
+    /// Restore dst from the safe register if protection was applied.
+    fn restore_dst(&mut self, dst: u8, safe: u8) {
+        if safe != dst {
+            self.emit(Instruction::new2(OpCode::Move, safe, dst));
+        }
+    }
     /// Drop a spilled local: load → drop → store nil back.
     fn spill_drop(&mut self, id: mir::LocalId) {
         if let Some(&slot) = self.spill_map.get(&id.0) {
@@ -681,13 +703,17 @@ impl MirCodegen {
                 self.emit(Instruction::new2(OpCode::ArrLen, _rarr, dst));
             }
             mir::RValue::ArrayLit(elems) => {
+                // Protect dst from local_reg clobbering: save to r11
+                // (r11 is in the staging zone never returned by local_reg).
                 self.load_constant(SCRATCH0, &Constant::Int(elems.len() as i64));
                 self.emit(Instruction::new2(OpCode::ArrAlloc, SCRATCH0, dst));
+                let safe = self.protect_dst(dst);
                 for (i, e) in elems.iter().enumerate() {
                     self.load_constant(SCRATCH1, &Constant::Int(i as i64));
                     let _re = self.local_reg(*e);
-                    self.emit(Instruction::new3(OpCode::ArrStore, dst, SCRATCH1, _re));
+                    self.emit(Instruction::new3(OpCode::ArrStore, safe, SCRATCH1, _re));
                 }
+                self.restore_dst(dst, safe);
             }
             mir::RValue::Unary(op, id) => {
                 let src = self.local_reg(*id);
@@ -785,21 +811,23 @@ impl MirCodegen {
                     (*func & 0xFF) as u8,
                     dst,
                 ));
+                let safe = self.protect_dst(dst);
                 for (i, cap) in captures.iter().enumerate() {
                     let _rcap = self.local_reg(*cap);
-                    self.emit(Instruction::new3(OpCode::CapStore, dst, i as u8, _rcap));
+                    self.emit(Instruction::new3(OpCode::CapStore, safe, i as u8, _rcap));
                 }
+                self.restore_dst(dst, safe);
             }
             mir::RValue::Tuple(elems) => {
                 self.emit(Instruction::new2(OpCode::TupleMk, elems.len() as u8, dst));
+                let safe = self.protect_dst(dst);
                 for (i, e) in elems.iter().enumerate() {
                     let _re = self.local_reg(*e);
-                    self.emit(Instruction::new3(OpCode::FieldS, dst, i as u8, _re));
+                    self.emit(Instruction::new3(OpCode::FieldS, safe, i as u8, _re));
                 }
+                self.restore_dst(dst, safe);
             }
             mir::RValue::Record(fields) => {
-                // Stable-compiler layout: records are flat arrays indexed by
-                // module-wide field ids; slot count covers the largest id.
                 let mut max_field_id: u8 = 0;
                 let mut field_ids = Vec::with_capacity(fields.len());
                 for (name, _) in fields {
@@ -809,20 +837,24 @@ impl MirCodegen {
                 }
                 let slot_count = max_field_id.saturating_add(1);
                 self.emit(Instruction::new2(OpCode::RecMk, slot_count, dst));
+                let safe = self.protect_dst(dst);
                 for ((_, e), fid) in fields.iter().zip(field_ids) {
                     let _re = self.local_reg(*e);
-                    self.emit(Instruction::new3(OpCode::RecS, dst, fid, _re));
+                    self.emit(Instruction::new3(OpCode::RecS, safe, fid, _re));
                 }
+                self.restore_dst(dst, safe);
             }
             mir::RValue::RecordUpdate { base, overrides } => {
                 // Shallow copy the base record, then overwrite each override.
                 let _rbase = self.local_reg(*base);
                 self.emit(Instruction::new2(OpCode::RecCopy, _rbase, dst));
+                let safe = self.protect_dst(dst);
                 for (name, val_id) in overrides {
                     let fid = self.field_id(name)?;
                     let _rval = self.local_reg(*val_id);
-                    self.emit(Instruction::new3(OpCode::RecS, dst, fid, _rval));
+                    self.emit(Instruction::new3(OpCode::RecS, safe, fid, _rval));
                 }
+                self.restore_dst(dst, safe);
             }
             mir::RValue::Perform {
                 effect,

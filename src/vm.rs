@@ -3158,8 +3158,6 @@ impl VM {
         self.frames[frame_idx].regs[instr.op3 as usize] = val;
         Ok(())
     }
-
-    #[inline(never)]
     fn step_call(
         &mut self,
         frame_idx: usize,
@@ -3190,8 +3188,6 @@ impl VM {
         self.current_frame_idx = Some(self.frames.len() - 1);
         Ok(())
     }
-
-    #[inline(never)]
     fn step_spawn(
         &mut self,
         frame_idx: usize,
