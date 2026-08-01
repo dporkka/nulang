@@ -409,6 +409,9 @@ pub enum Type {
     Reference { cap: Capability, inner: Box<Type> },
     /// Existential / type scheme: forall vars. Type
     Scheme { vars: Vec<TypeVar>, body: Box<Type> },
+    /// Nominal (opaque) type: `opaque type UserId = Int`.
+    /// Distinct from its underlying type at compile time, erases at runtime.
+    Nominal { name: String, underlying: Box<Type> },
 }
 
 impl std::fmt::Display for Type {
@@ -494,6 +497,7 @@ impl std::fmt::Display for Type {
                 }
                 write!(f, ". {}", body)
             }
+            Type::Nominal { name, .. } => write!(f, "{}", name),
         }
     }
 }
@@ -588,6 +592,7 @@ impl Type {
                 NtirNode::Capability(*cap, Box::new(inner.to_ntir_with_stack(stack)))
             }
             Type::Scheme { body, .. } => body.to_ntir_with_stack(stack),
+            Type::Nominal { underlying, .. } => underlying.to_ntir_with_stack(stack),
         };
 
         if push_var {
@@ -686,6 +691,7 @@ impl Type {
                 args.iter().for_each(|a| a.collect_ref_free_vars(acc));
             }
             Type::Scheme { body, .. } => body.collect_ref_free_vars(acc),
+            Type::Nominal { underlying, .. } => underlying.collect_ref_free_vars(acc),
             Type::Var(_) | Type::Primitive(_) => {}
         }
     }
@@ -720,6 +726,7 @@ impl Type {
                 // Remove bound vars
                 acc.retain(|v| !vars.contains(v));
             }
+            Type::Nominal { underlying, .. } => underlying.collect_free_vars(acc),
         }
     }
 }

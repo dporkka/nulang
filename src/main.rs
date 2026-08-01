@@ -1429,6 +1429,7 @@ fn type_to_string(ty: &Type) -> String {
                 .join(", "),
             type_to_string(body)
         ),
+        Type::Nominal { name, .. } => name.clone(),
     }
 }
 

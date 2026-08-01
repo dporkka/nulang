@@ -4512,20 +4512,29 @@ impl Parser {
     /// `name` (`type Name = ...` or `type alias Name = ...`), if any.
     fn find_type_decl(&self, name: &str) -> Option<usize> {
         for i in 0..self.tokens.len() {
-            if self.tokens[i].kind != TokenKind::Type {
+            let kind = &self.tokens[i].kind;
+            if *kind != TokenKind::Type && *kind != TokenKind::Opaque {
                 continue;
             }
             let mut j = i + 1;
+            // Skip newlines and doc comments between keyword and name.
             while matches!(
                 self.tokens.get(j).map(|t| &t.kind),
                 Some(TokenKind::Newline) | Some(TokenKind::DocComment(_))
             ) {
                 j += 1;
             }
-            // Optional 'alias' keyword between 'type' and the name.
+            // Skip optional 'alias' keyword.
             if matches!(self.tokens.get(j).map(|t| &t.kind), Some(TokenKind::Alias)) {
                 j += 1;
             }
+            // For `opaque type Name`, skip 'type' after 'opaque'.
+            if *kind == TokenKind::Opaque {
+                if matches!(self.tokens.get(j).map(|t| &t.kind), Some(TokenKind::Type)) {
+                    j += 1;
+                }
+            }
+            // Check if the name matches.
             match self.tokens.get(j).map(|t| &t.kind) {
                 Some(TokenKind::Ident(n)) | Some(TokenKind::UpperIdent(n)) if n == name => {
                     return Some(i);
@@ -4557,19 +4566,38 @@ impl Parser {
             .or_insert_with(TypeVar::fresh);
         self.local_type_params.insert(name.to_string(), self_tv);
 
-        // Position the cursor at the declaration and re-parse it.
-        self.pos = decl_pos + 1; // skip the 'type' keyword
+        // Position the cursor just past the keyword(s): 'type' or 'opaque type'.
+        let is_opaque = self.tokens[decl_pos].kind == TokenKind::Opaque;
+        self.pos = decl_pos + 1; // skip 'type' or 'opaque'
+        if is_opaque {
+            self.pos += 1; // also skip 'type' after 'opaque'
+        }
         self.skip_newlines();
         let decl_result = if self.peek_kind() == &TokenKind::Alias {
-            self.parse_type_alias(false, false)
+            self.parse_type_alias(false, is_opaque)
         } else {
             self.parse_type_decl_variant_or_record(false)
         };
         let result = decl_result.and_then(|decl| {
             let (type_params, body) = match decl {
                 Decl::TypeAlias {
-                    type_params, body, ..
-                } => (type_params, body),
+                    type_params,
+                    body,
+                    opaque,
+                    ..
+                } => {
+                    if opaque {
+                        (
+                            type_params,
+                            Type::Nominal {
+                                name: name.to_string(),
+                                underlying: Box::new(body),
+                            },
+                        )
+                    } else {
+                        (type_params, body)
+                    }
+                }
                 Decl::RecordType {
                     type_params,
                     fields,
@@ -4816,6 +4844,10 @@ impl Parser {
             Type::Reference { cap, inner } => Type::Reference {
                 cap: *cap,
                 inner: Box::new(Self::subst_type_var(inner, var, arg)),
+            },
+            Type::Nominal { name, underlying } => Type::Nominal {
+                name: name.clone(),
+                underlying: Box::new(Self::subst_type_var(underlying, var, arg)),
             },
             Type::Scheme { vars, body } => {
                 if vars.contains(&var) {

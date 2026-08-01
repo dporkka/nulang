@@ -96,6 +96,7 @@ pub fn type_to_json_schema(ty: &Type) -> serde_json::Value {
         Type::Function { .. } => serde_json::json!({}),
         Type::Actor { .. } => serde_json::json!({}),
         Type::Scheme { body, .. } => type_to_json_schema(body),
+        Type::Nominal { underlying, .. } => type_to_json_schema(underlying),
         Type::Var(_) => serde_json::json!({}),
     }
 }

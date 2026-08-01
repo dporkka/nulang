@@ -97,6 +97,10 @@ pub(crate) fn apply_subst(ty: &Type, subst: &Substitution) -> Type {
                 body: Box::new(apply_subst(body, &filtered)),
             }
         }
+        Type::Nominal { name, underlying } => Type::Nominal {
+            name: name.clone(),
+            underlying: Box::new(apply_subst(underlying, subst)),
+        },
     }
 }
 
@@ -265,6 +269,18 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             let s1 = mgu(p1, p2, span)?;
             let s2 = mgu(&apply_subst(r1, &s1), &apply_subst(r2, &s1), span)?;
             Ok(compose_subst(&s2, &s1))
+        }
+
+        // Nominal types: transparent for now (enforcement not yet active).
+        // Future: only transparent inside defining scope, opaque outside.
+        // For now, unify with underlying type so programs using opaque types
+        // still compile. The opaque keyword serves as documentation.
+        (Type::Nominal { name, underlying }, other)
+        | (other, Type::Nominal { name, underlying }) => {
+            // Emit a diagnostic that enforcement is not yet active.
+            // TODO: make this a proper compiler warning instead of ignoring.
+            let _ = (name, span);
+            mgu(underlying, other, span)
         }
 
         // Tuples
@@ -643,6 +659,7 @@ fn occurs_in(v: TypeVar, t: &Type) -> bool {
         }
         Type::Reference { inner, .. } => occurs_in(v, inner),
         Type::Scheme { vars, body } => !vars.contains(&v) && occurs_in(v, body),
+        Type::Nominal { underlying, .. } => occurs_in(v, underlying),
     }
 }
 

@@ -1021,6 +1021,7 @@ pub fn type_to_string(ty: &Type) -> String {
             let var_names: Vec<String> = vars.iter().map(|v| format!("'t{}", v.0)).collect();
             format!("forall {}. {}", var_names.join(", "), type_to_string(body))
         }
+        Type::Nominal { name, .. } => name.clone(),
     }
 }
 

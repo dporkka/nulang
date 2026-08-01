@@ -1394,6 +1394,7 @@ fn may_hold_heap_ptr(ty: &Type) -> bool {
         | Type::Scheme { .. }
         | Type::Reference { .. } => true,
         Type::Variant(_) | Type::Function { .. } | Type::Actor { .. } => false,
+        Type::Nominal { underlying, .. } => may_hold_heap_ptr(underlying),
     }
 }
 
