@@ -21,7 +21,7 @@ fn double(x) {
 }
 
 // Single-expression functions (block with implicit return)
-fn square(x: Int) -> Int { x * x }
+fn square(x: Int) -> Int = x * x
 
 ## Let Bindings
 
@@ -176,7 +176,7 @@ Function signatures declare their effects with `!` or `throws` followed by an ef
 
 ```nulang
 // Pure function — no effects
-fn add(x: Int, y: Int) -> Int { x + y }
+fn add(x: Int, y: Int) -> Int = x + y
 
 // Effectful — performs IO (effect row after return type)
 fn greet() -> Unit ! {IO} {

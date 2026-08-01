@@ -498,6 +498,9 @@ impl Parser {
             None
         };
 
+        // Optional `=` for single-expression shorthand: `fn f() -> T = expr`
+        let _ = self.consume_if(&TokenKind::Assign);
+
         let body = self.parse_expr()?;
         Ok(Decl::Function {
             name,

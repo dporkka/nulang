@@ -100,7 +100,7 @@ Every function carries an effect row. Pure functions have an empty effect row. E
 
 ```nulang
 // Pure: no effects
-fn add(x: Int, y: Int) -> Int { x + y }
+fn add(x: Int, y: Int) -> Int = x + y
 
 // Effectful: performs IO
 fn greet() -> Unit ! {IO} {
