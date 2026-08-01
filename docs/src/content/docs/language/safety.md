@@ -40,7 +40,7 @@ Every function carries an effect row checked at compile time:
 
 ```nulang
 // Pure — no effects
-fn add(x: Int, y: Int) -> Int = x + y
+fn add(x: Int, y: Int) -> Int { x + y }
 
 // Performs IO — effect row {IO}
 fn greet() -> Unit ! {IO} {

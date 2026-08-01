@@ -92,9 +92,10 @@ Actors can be persisted for durability:
 Persistent actors support journaling and checkpointing for crash recovery.
 
 ```nulang
-// Actor state model annotations
+// State durability is configured at the runtime level
+// (Local, Durable, EventSourced, Crdt — see PersistenceStore)
 actor DurableWorker {
-    state tasks: Durable [String] = []
+    state tasks: [String] = []
 
     behavior add_task(task: String) {
         self.tasks = self.tasks + [task]
