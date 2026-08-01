@@ -25,9 +25,28 @@ pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
     let mut module = hir::Module::new(&ast.name);
     let tools = collect_tool_schemas(&ast.decls);
 
-    // Build class/instance tables and make them available to lower_expr
-    // via thread-local so typeclass method calls (e.g. 1.eq(2)) can
-    // resolve through instance dictionaries.
+    // Scan for given declarations and using params.
+    let mut givens = FxHashMap::default();
+    let mut fn_using = FxHashMap::default();
+    for decl in &ast.decls {
+        if let Decl::Given { name, value, .. } = decl {
+            givens.insert(name.clone(), value.clone());
+        }
+        if let Decl::Function {
+            name, using_params, ..
+        } = decl
+        {
+            if !using_params.is_empty() {
+                fn_using.insert(
+                    name.clone(),
+                    using_params.iter().map(|(n, _)| n.clone()).collect(),
+                );
+            }
+        }
+    }
+    GIVEN_BINDINGS.with(|c| *c.borrow_mut() = givens);
+    FN_USING_PARAMS.with(|c| *c.borrow_mut() = fn_using);
+
     let class_tables = crate::typechecker::build_class_tables(ast);
     CURRENT_CLASS_TABLES.with(|cell| {
         *cell.borrow_mut() = Some(class_tables);
@@ -40,7 +59,6 @@ pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
         module.decls.push(lower_decl(decl, &tools));
     }
 
-    // Clear the tables so they don't leak to the next module.
     CURRENT_CLASS_TABLES.with(|cell| {
         *cell.borrow_mut() = None;
     });
@@ -107,6 +125,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             name,
             type_params,
             params,
+            using_params,
             ret_type,
             error_type: _,
             effect,
@@ -116,20 +135,26 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             public,
             span,
             ..
-        } => hir::Decl::Function(hir::FunctionDef {
-            name: name.clone(),
-            type_params: type_params.clone(),
-            params: params
+        } => {
+            let mut all_params: Vec<(String, Type)> = params
                 .iter()
                 .map(|(n, t)| (n.clone(), resolve_type(t)))
-                .collect(),
-            ret: resolve_type(ret_type),
-            effect: effect.clone().unwrap_or_else(EffectRow::empty),
-            cap: cap.unwrap_or(Capability::Ref),
-            body: with_fresh_defer_stack(|| lower_body(body)),
-            public: *public,
-            span: *span,
-        }),
+                .collect();
+            for (n, t) in using_params {
+                all_params.push((n.clone(), resolve_type(t)));
+            }
+            hir::Decl::Function(hir::FunctionDef {
+                name: name.clone(),
+                type_params: type_params.clone(),
+                params: all_params,
+                ret: resolve_type(ret_type),
+                effect: effect.clone().unwrap_or_else(EffectRow::empty),
+                cap: cap.unwrap_or(Capability::Ref),
+                body: with_fresh_defer_stack(|| lower_body(body)),
+                public: *public,
+                span: *span,
+            })
+        }
         Decl::Actor {
             name,
             type_params,
@@ -1091,6 +1116,22 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                 return hir::Operand::Var(temp, ty);
             }
 
+            // Resolve `using` params from `given` bindings.
+            let mut extra_given_args: Vec<ast::Expr> = Vec::new();
+            if let ast::Expr::Var(fn_name, _) = func.as_ref() {
+                FN_USING_PARAMS.with(|c| {
+                    if let Some(using_names) = c.borrow().get(fn_name) {
+                        for uname in using_names {
+                            GIVEN_BINDINGS.with(|g| {
+                                if let Some(val) = g.borrow().get(uname) {
+                                    extra_given_args.push(val.clone());
+                                }
+                            });
+                        }
+                    }
+                });
+            }
+
             // Typeclass method resolution: FieldAccess on a concrete type
             // with a matching impl → route through the instance dictionary.
             if let Expr::FieldAccess {
@@ -1147,7 +1188,10 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             }
 
             let fop = lower_expr(func, body);
-            let aops: Vec<_> = args.iter().map(|a| lower_expr(a, body)).collect();
+            let mut aops: Vec<_> = args.iter().map(|a| lower_expr(a, body)).collect();
+            for g in &extra_given_args {
+                aops.push(lower_expr(g, body));
+            }
             let ty = Type::unit();
             let temp = fresh_temp_name();
             body.push(hir::Stmt::Let {
@@ -2161,6 +2205,12 @@ thread_local! {
     /// Stack of scope indices marking loop boundaries. On `break`,
     /// defers are drained down to (but not including) the nearest loop marker.
     static LOOP_MARKERS: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+}
+
+// Thread-local given bindings populated from `lower_module`.
+thread_local! {
+    static GIVEN_BINDINGS: RefCell<FxHashMap<String, ast::Expr>> = RefCell::new(FxHashMap::default());
+    static FN_USING_PARAMS: RefCell<FxHashMap<String, Vec<String>>> = RefCell::new(FxHashMap::default());
 }
 
 /// Push a new defer scope (called when entering a block).

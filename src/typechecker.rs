@@ -704,6 +704,10 @@ pub struct TypeChecker {
     /// Keyed by declaration name; for functions this is the function type,
     /// for let bindings this is the inferred value type.
     pub inferred_decl_types: FxHashMap<String, Type>,
+    /// Contextual `given` bindings: name → (type annotation, value expression).
+    pub given_bindings: FxHashMap<String, (Option<Type>, Expr)>,
+    /// Functions with `using` params: fn_name → using param names.
+    pub fn_using_params: FxHashMap<String, Vec<String>>,
 }
 
 /// Pre-computed class and instance tables extracted from an AST module.
@@ -780,6 +784,8 @@ impl TypeChecker {
             class_table: FxHashMap::default(),
             instance_table: FxHashMap::default(),
             inferred_decl_types: FxHashMap::default(),
+            given_bindings: FxHashMap::default(),
+            fn_using_params: FxHashMap::default(),
         }
     }
 
@@ -801,7 +807,15 @@ impl TypeChecker {
             ctx = apply_subst_to_ctx(&ctx, &s);
             let final_ty = apply_subst(&ty, &s);
             match decl {
-                Decl::Function { name, .. } => {
+                Decl::Function {
+                    name, using_params, ..
+                } => {
+                    if !using_params.is_empty() {
+                        self.fn_using_params.insert(
+                            name.clone(),
+                            using_params.iter().map(|(n, _)| n.clone()).collect(),
+                        );
+                    }
                     self.inferred_decl_types
                         .insert(name.clone(), final_ty.clone());
                     let gen_ty = self.do_generalize(&ctx, &final_ty);
@@ -972,6 +986,7 @@ impl TypeChecker {
                 name,
                 type_param_constraints,
                 params,
+                using_params,
                 ret_type,
                 error_type,
                 effect,
@@ -996,6 +1011,13 @@ impl TypeChecker {
                         None => Type::Var(TypeVar::fresh()),
                     };
                     param_types.push(pty);
+                }
+                for (_using_name, using_ty) in using_params {
+                    let uty = match using_ty {
+                        Some(t) => t.clone(),
+                        None => Type::Var(TypeVar::fresh()),
+                    };
+                    param_types.push(uty);
                 }
 
                 // Preliminary parameter type for the function binding
@@ -1022,6 +1044,13 @@ impl TypeChecker {
                 // Bind parameters
                 for (param_name, pty) in params.iter().zip(param_types.iter()) {
                     new_ctx.bind(param_name.0.clone(), pty.clone(), Capability::Ref, false);
+                }
+                for (using_name, using_ty) in using_params {
+                    let uty = match using_ty {
+                        Some(t) => t.clone(),
+                        None => Type::Var(TypeVar::fresh()),
+                    };
+                    new_ctx.bind(using_name.clone(), uty, Capability::Ref, false);
                 }
 
                 // Inject typeclass constraints from type parameter annotations
@@ -1193,7 +1222,14 @@ impl TypeChecker {
             }
             Decl::Import { .. } => Ok((vec![], Type::unit())),
             Decl::Database { .. } => Ok((vec![], Type::unit())),
-            Decl::Given { .. } => Ok((vec![], Type::unit())),
+            Decl::Given {
+                name, ty, value, ..
+            } => {
+                let (s_val, val_ty) = self.infer_expr(ctx, value)?;
+                self.given_bindings
+                    .insert(name.clone(), (ty.clone(), value.clone()));
+                Ok((s_val, val_ty))
+            }
             Decl::Class { .. } => Ok((vec![], Type::unit())),
             Decl::Impl {
                 class_name: _,
@@ -1691,6 +1727,24 @@ impl TypeChecker {
 
         // Infer each argument
         for arg in args {
+            let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+            let (s_arg, arg_ty) = self.infer_expr(&ctx_sub, arg)?;
+            subst = compose_subst(&s_arg, &subst);
+            arg_types.push(apply_subst(&arg_ty, &subst));
+        }
+
+        // Resolve `using` params from `given` bindings.
+        let mut extra_given_args: Vec<Expr> = Vec::new();
+        if let Expr::Var(fn_name, _) = func {
+            if let Some(using_names) = self.fn_using_params.get(fn_name) {
+                for uname in using_names {
+                    if let Some((_, val)) = self.given_bindings.get(uname) {
+                        extra_given_args.push(val.clone());
+                    }
+                }
+            }
+        }
+        for arg in &extra_given_args {
             let ctx_sub = apply_subst_to_ctx(ctx, &subst);
             let (s_arg, arg_ty) = self.infer_expr(&ctx_sub, arg)?;
             subst = compose_subst(&s_arg, &subst);
