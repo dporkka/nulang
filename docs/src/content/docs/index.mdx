@@ -32,8 +32,9 @@ actor Counter {
     behavior get() { self.count }
 }
 let c = spawn Counter {} in {
-    ask c inc()
-    ask c get()
+    send c inc()    // fire-and-forget
+    send c inc()
+    ask c get()     // synchronous request → 2
 }
 ```
 
@@ -152,11 +153,10 @@ actor Counter {
 
 // Spawn and use it
 let counter = spawn Counter {} in {
-    ask counter inc()
-    ask counter inc()
-    ask counter get()
+    send counter inc()   // fire-and-forget
+    send counter inc()
+    ask counter get()    // 2
 }
-```
 
 ## Installation
 

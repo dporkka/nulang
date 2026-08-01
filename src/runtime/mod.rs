@@ -1934,6 +1934,14 @@ impl Runtime {
             return Ok(result);
         }
 
+        // Flush any pending messages in the target's mailbox before executing
+        // the asked behavior.  This ensures that `send c inc(); ask c get()`
+        // works: the `inc` message gets processed before `get` runs, so the
+        // ask sees the updated state.  Without this, sends sit in the mailbox
+        // until the scheduler runs (which happens after the top-level program
+        // completes).
+        self.flush_actor_mailbox(actor_id);
+
         let is_native = self
             .actors
             .get(&actor_id)
@@ -1971,6 +1979,63 @@ impl Runtime {
         }
         self.current_actor = None;
         Ok(Value::nil())
+    }
+
+    /// Process all pending messages in an actor's mailbox synchronously.
+    /// Used by `ask_actor_sync_inner` so that `send`-then-`ask` works:
+    /// messages queued by `send` before the `ask` get delivered before the
+    /// asked behavior executes.
+    fn flush_actor_mailbox(&mut self, actor_id: u64) {
+        // We must not recurse into ask_actor_sync_inner (which calls us).
+        // Guard against re-entrant flushes by tracking depth per actor.
+        // In practice this shouldn't happen because behaviors triggered
+        // by flush don't issue nested asks, but be safe.
+        const MAX_FLUSH_DEPTH: usize = 32;
+        let mut depth = 0;
+        loop {
+            let msg = match self.actors.get_mut(&actor_id) {
+                Some(actor) => actor.receive(),
+                None => return,
+            };
+            let msg = match msg {
+                Some(m) => m,
+                None => return,
+            };
+            let behavior_idx = msg.behavior_id as usize;
+
+            // Hold heap pointers from the payload.
+            self.hold_payload_refs(actor_id, &msg.payload);
+
+            if self.has_bytecode_handler(actor_id, behavior_idx) {
+                let prev = self.current_actor;
+                self.current_actor = Some(actor_id);
+                let _ = self.run_bytecode_behavior(actor_id, behavior_idx, &msg.payload);
+                self.checkpoint_actor(actor_id);
+                self.current_actor = prev;
+            } else if let Some(handler) = self
+                .actors
+                .get(&actor_id)
+                .and_then(|a| a.behavior_table.get(behavior_idx))
+                .map(|e| e.handler_fn)
+            {
+                let prev = self.current_actor;
+                self.current_actor = Some(actor_id);
+                if let Some(actor) = self.actors.get_mut(&actor_id) {
+                    handler(actor, &msg.payload);
+                }
+                self.checkpoint_actor(actor_id);
+                self.current_actor = prev;
+            }
+            // Unknown behavior id — skip the message (shouldn't happen for
+            // well-formed programs, but be defensive).
+
+            depth += 1;
+            if depth >= MAX_FLUSH_DEPTH {
+                // Safety valve: if an actor keeps sending itself messages
+                // that trigger more sends, don't loop forever.
+                break;
+            }
+        }
     }
 
     pub fn behavior_id_for(&self, target_id: u64, behavior: &str) -> Option<u16> {

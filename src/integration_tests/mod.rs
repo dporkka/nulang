@@ -1770,6 +1770,61 @@ match { a: 2, b: 9 } with {
         assert_eq!(value.as_int(), Some(30), "ask add(10, 20) should return 30");
     }
 
+    /// `send` messages queue in the mailbox; `ask` should flush them before
+    /// executing the asked behavior so that `send c inc(); ask c get()` returns
+    /// the post-increment value, not the initial state.
+    #[test]
+    fn test_send_before_ask_flushes_mailbox() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+
+        let source = r#"
+            actor Counter {
+                state count: Int = 0
+                behavior inc() { self.count = self.count + 1 }
+                behavior get() { self.count }
+            }
+            let c = spawn Counter {} in {
+                send c inc()
+                send c inc()
+                ask c get()
+            }
+        "#;
+
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        assert_eq!(
+            value.as_int(),
+            Some(2),
+            "send inc() ×2 then ask get() should return 2 after flush"
+        );
+    }
+
+    /// `send` followed by `ask` with arguments: verify the flush dispatches
+    /// each message correctly with the right parameter counts.
+    #[test]
+    fn test_send_before_ask_with_args_flushes_mailbox() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+
+        let source = r#"
+            actor Counter {
+                state count: Int = 0
+                behavior add(n: Int) { self.count = self.count + n }
+                behavior get() { self.count }
+            }
+            let c = spawn Counter {} in {
+                send c add(10)
+                send c add(5)
+                ask c get()
+            }
+        "#;
+
+        let (value, _ty) = run_source_with_runtime(source, rt.clone()).unwrap();
+        assert_eq!(
+            value.as_int(),
+            Some(15),
+            "send add(10) + add(5) then ask get() should return 15 after flush"
+        );
+    }
+
     /// Regression test for a silent-data-loss bug found while adding actor
     /// support to the HIR/MIR pipeline: `compile_binary`'s BinOp::Assign case
     /// only special-cased `self.field = v`; every other assignment target
