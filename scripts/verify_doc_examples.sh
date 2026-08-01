@@ -2,8 +2,8 @@
 # Verify all ```nulang code blocks in documentation.
 # Runs each block through --check (parse + type + effect checking).
 set -uo pipefail
+NULANG="${NULANG_BIN:-cargo run --quiet --}"
 
-NULANG="cargo run --quiet --"
 DOCS_DIR="docs/src/content/docs"
 TMPDIR=$(mktemp -d)
 PASS=0
