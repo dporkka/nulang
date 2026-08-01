@@ -9,6 +9,8 @@ use std::path::Path;
 use crate::types::{NuError, NuResult, Span};
 
 /// Format a Nulang source string and return the formatted output.
+/// Returns an error if any construct is not yet supported by the formatter
+/// (rather than silently dropping or corrupting it).
 pub fn format_source(source: &str) -> Result<String, String> {
     let mut lexer = crate::lexer::Lexer::new(source);
     let tokens = lexer.lex().map_err(|e| e.to_string())?;
@@ -17,12 +19,16 @@ pub fn format_source(source: &str) -> Result<String, String> {
 
     let mut out = String::new();
     let mut first = true;
+    let mut had_unhandled = false;
     for decl in &ast.decls {
         if !first {
             out.push('\n');
         }
         first = false;
-        fmt_decl(&mut out, decl, 0);
+        fmt_decl(&mut out, decl, 0, &mut had_unhandled);
+    }
+    if had_unhandled {
+        return Err("file contains constructs not yet supported by the formatter (e.g. workflow, agent, let-binding, class, impl). The file was not modified.".to_string());
     }
     if !out.ends_with('\n') {
         out.push('\n');
@@ -92,7 +98,7 @@ fn walk_format(dir: &Path, check_only: bool) -> NuResult<()> {
     Ok(())
 }
 
-fn fmt_decl(out: &mut String, decl: &Decl, indent: usize) {
+fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bool) {
     let sp = " ".repeat(indent);
     match decl {
         Decl::Function {
@@ -121,7 +127,7 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize) {
                 out.push_str(&format!(" ! {}", e));
             }
             out.push_str(" {\n");
-            fmt_expr(out, body, indent + 4);
+            fmt_expr(out, body, indent + 4, had_unhandled);
             out.push_str(&format!("\n{}}}\n", sp));
         }
         Decl::VariantType {
@@ -168,7 +174,7 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize) {
             for (fnm, _, fty, fdef) in state_fields {
                 out.push_str(&format!("{}    state {}: {}", sp, fnm, fmt_type(fty)));
                 out.push_str(" = ");
-                fmt_expr(out, fdef, indent + 4);
+                fmt_expr(out, fdef, indent + 4, had_unhandled);
                 out.push('\n');
             }
             if !state_fields.is_empty() && !behaviors.is_empty() {
@@ -186,18 +192,19 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize) {
                     }
                 }
                 out.push_str(") {\n");
-                fmt_expr(out, &b.body, indent + 8);
+                fmt_expr(out, &b.body, indent + 8, had_unhandled);
                 out.push_str(&format!("\n{}    }}\n", sp));
             }
             out.push_str(&format!("{}}}\n", sp));
         }
         _ => {
-            out.push_str(&format!("{}// (unformatted: {:?})\n", sp, decl));
+            *had_unhandled = true;
+            out.push_str(&format!("{}// (unformatted decl)\n", sp));
         }
     }
 }
 
-fn fmt_expr(out: &mut String, expr: &Expr, indent: usize) {
+fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bool) {
     let sp = " ".repeat(indent);
     match expr {
         Expr::Literal(lit, _) => match lit {
@@ -209,13 +216,14 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize) {
             Literal::Unit => out.push_str("unit"),
         },
         Expr::Var(name, _) => out.push_str(name),
+        Expr::SelfRef(_) => out.push_str("self"),
         Expr::Let {
             name, value, body, ..
         } => {
             out.push_str(&format!("let {} = ", name));
-            fmt_expr(out, value, indent);
+            fmt_expr(out, value, indent, had_unhandled);
             out.push_str(" in\n");
-            fmt_expr(out, body, indent);
+            fmt_expr(out, body, indent, had_unhandled);
         }
         Expr::If {
             cond,
@@ -224,22 +232,22 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize) {
             ..
         } => {
             out.push_str("if ");
-            fmt_expr(out, cond, indent);
+            fmt_expr(out, cond, indent, had_unhandled);
             out.push_str(" then ");
-            fmt_expr(out, then_branch, indent);
+            fmt_expr(out, then_branch, indent, had_unhandled);
             if let Some(e) = else_branch {
                 out.push_str(" else ");
-                fmt_expr(out, e, indent);
+                fmt_expr(out, e, indent, had_unhandled);
             }
         }
         Expr::App { func, args, .. } => {
-            fmt_expr(out, func, indent);
+            fmt_expr(out, func, indent, had_unhandled);
             out.push('(');
             for (i, a) in args.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                fmt_expr(out, a, indent);
+                fmt_expr(out, a, indent, had_unhandled);
             }
             out.push(')');
         }
@@ -252,31 +260,31 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize) {
                 out.push_str(pn);
             }
             out.push_str(") { ");
-            fmt_expr(out, body, indent);
+            fmt_expr(out, body, indent, had_unhandled);
             out.push_str(" }");
         }
         Expr::Binary {
             op, left, right, ..
         } => {
-            fmt_expr(out, left, indent);
+            fmt_expr(out, left, indent, had_unhandled);
             out.push_str(&format!(" {} ", op_sym(*op)));
-            fmt_expr(out, right, indent);
+            fmt_expr(out, right, indent, had_unhandled);
         }
         Expr::Match {
             scrutinee, arms, ..
         } => {
             out.push_str("match ");
-            fmt_expr(out, scrutinee, indent);
+            fmt_expr(out, scrutinee, indent, had_unhandled);
             out.push_str(" {\n");
             for (pat, guard, body) in arms {
                 out.push_str(&format!("{}    | ", sp));
                 fmt_pat(out, pat);
                 if let Some(g) = guard {
                     out.push_str(" if ");
-                    fmt_expr(out, g, indent + 4);
+                    fmt_expr(out, g, indent + 4, had_unhandled);
                 }
                 out.push_str(" => ");
-                fmt_expr(out, body, indent + 4);
+                fmt_expr(out, body, indent + 4, had_unhandled);
                 out.push('\n');
             }
             out.push_str(&format!("{}}}", sp));
@@ -285,7 +293,7 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize) {
             out.push_str("{\n");
             for e in exprs {
                 out.push_str(&format!("{}    ", sp));
-                fmt_expr(out, e, indent + 4);
+                fmt_expr(out, e, indent + 4, had_unhandled);
                 out.push('\n');
             }
             out.push_str(&format!("{}}}", sp));
@@ -298,17 +306,17 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                fmt_expr(out, a, indent);
+                fmt_expr(out, a, indent, had_unhandled);
             }
             out.push(')');
         }
         Expr::Pipe { left, right, .. } => {
-            fmt_expr(out, left, indent);
+            fmt_expr(out, left, indent, had_unhandled);
             out.push_str(" |> ");
-            fmt_expr(out, right, indent);
+            fmt_expr(out, right, indent, had_unhandled);
         }
         Expr::FieldAccess { expr, field, .. } => {
-            fmt_expr(out, expr, indent);
+            fmt_expr(out, expr, indent, had_unhandled);
             out.push_str(&format!(".{}", field));
         }
         Expr::Tuple(elems, _) => {
@@ -317,7 +325,7 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                fmt_expr(out, e, indent);
+                fmt_expr(out, e, indent, had_unhandled);
             }
             out.push(')');
         }
@@ -328,33 +336,34 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize) {
                     out.push_str(", ");
                 }
                 out.push_str(&format!("{}: ", nm));
-                fmt_expr(out, val, indent);
+                fmt_expr(out, val, indent, had_unhandled);
             }
             out.push_str(" }");
         }
         Expr::RecordUpdate { base, fields, .. } => {
             out.push_str("{ ");
-            fmt_expr(out, base, indent);
+            fmt_expr(out, base, indent, had_unhandled);
             out.push_str(" .. ");
             for (i, (nm, val)) in fields.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
                 out.push_str(&format!("{} = ", nm));
-                fmt_expr(out, val, indent);
+                fmt_expr(out, val, indent, had_unhandled);
             }
             out.push_str(" }");
         }
         Expr::Consume { expr, .. } => {
             out.push_str("consume ");
-            fmt_expr(out, expr, indent);
+            fmt_expr(out, expr, indent, had_unhandled);
         }
         Expr::Recover { body, .. } => {
             out.push_str("recover ");
-            fmt_expr(out, body, indent);
+            fmt_expr(out, body, indent, had_unhandled);
         }
         _ => {
-            out.push_str(&format!("/* {:?} */", expr));
+            *had_unhandled = true;
+            out.push_str("/* unformatted */");
         }
     }
 }
@@ -366,7 +375,8 @@ fn fmt_pat(out: &mut String, pat: &Pattern) {
         Pattern::Lit(lit) => match lit {
             Literal::Int(n) => out.push_str(&n.to_string()),
             Literal::String(s) => out.push_str(&format!("\"{}\"", s)),
-            _ => out.push_str(&format!("{:?}", lit)),
+            Literal::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            _ => out.push_str("_"),
         },
         Pattern::Variant(name, Some(inner)) => {
             out.push_str(&format!("{}(", name));
@@ -384,7 +394,23 @@ fn fmt_pat(out: &mut String, pat: &Pattern) {
             }
             out.push(')');
         }
-        _ => out.push_str(&format!("{:?}", pat)),
+        Pattern::Record(fields) => {
+            out.push('{');
+            for (i, (name, pat)) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(name);
+                out.push_str(": ");
+                fmt_pat(out, pat);
+            }
+            out.push('}');
+        }
+        Pattern::Alias(name, inner) => {
+            out.push_str(name);
+            out.push_str(" @ ");
+            fmt_pat(out, inner);
+        }
     }
 }
 
