@@ -126,14 +126,15 @@ actor Counter {
 }
 ```
 
-Spawn an actor, send it messages with `!`, and query it with `ask`:
+Spawn an actor, call behaviors with `ask`, or fire-and-forget with `send`:
 
 ```nulang
 let counter = spawn Counter {}
-counter ! inc()
-counter ! inc()
-let result = ask counter get()
-perform IO.print(perform Int.to_string(result))  // 2
+let result = ask counter get()       // 0
+ask counter inc()
+ask counter inc()
+let result2 = ask counter get()
+perform IO.print(perform Int.to_string(result2))  // 2
 ```
 
 Actors can link together for fault tolerance, register names in the global registry, and monitor each other's lifecycle:

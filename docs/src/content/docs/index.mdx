@@ -32,7 +32,7 @@ actor Counter {
     behavior get() { self.count }
 }
 let c = spawn Counter {} in {
-    send c inc()
+    ask c inc()
     ask c get()
 }
 ```
@@ -152,8 +152,8 @@ actor Counter {
 
 // Spawn and use it
 let counter = spawn Counter {} in {
-    send counter inc()
-    send counter inc()
+    ask counter inc()
+    ask counter inc()
     ask counter get()
 }
 ```

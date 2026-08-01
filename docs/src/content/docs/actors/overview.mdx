@@ -29,11 +29,11 @@ actor Counter {
         self.count = self.count + amount
     }
 
-    behavior get(sender: Actor) {
-        send sender reply(self.count)
-    }
+    behavior get() { self.count }
 }
 ```
+
+Behaviors that return a value can be called synchronously with `ask`. For actor-to-actor replies, use the `sender` pattern: `behavior get(sender: Actor) { send sender reply(self.count) }`.
 
 ## Spawning Actors
 
@@ -82,8 +82,8 @@ Inside a behavior, `receive` blocks until a matching message arrives:
 ```nulang
 behavior wait_for_reply() {
     receive {
-        | reply(value: Int) => {
-            perform IO.print("Got: " + Int.to_string(value))
+        | reply(value) => {
+            perform IO.print("Got: " + perform Int.to_string(value))
         }
     }
 }
@@ -93,11 +93,11 @@ The `receive` expression supports selective matching — only matching messages 
 
 ```nulang
 receive {
-    | reply(value: Int) => {
+    | reply(value) => {
         // Handle integer reply
-        perform IO.print("Int: " + Int.to_string(value))
+        perform IO.print("Int: " + perform Int.to_string(value))
     }
-    | reply(msg: String) => {
+    | reply(msg) => {
         // Handle string reply
         perform IO.print("String: " + msg)
     }
@@ -110,7 +110,7 @@ Wait for a message with a timeout:
 
 ```nulang
 receive {
-    | reply(value: Int) => perform IO.print("Got it")
+    | reply(value) => perform IO.print("Got it")
 } after 5000 => {
     perform IO.print("Timed out after 5 seconds")
 }

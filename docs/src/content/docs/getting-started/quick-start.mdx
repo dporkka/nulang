@@ -68,13 +68,13 @@ actor Counter {
 }
 
 let c = spawn Counter {} in {
-    send c inc()
-    send c inc()
+    ask c inc()
+    ask c inc()
     ask c get()
 }
 ```
 
-Use `spawn` to create an actor, `send` to fire-and-forget a message, and `ask` to call a behavior and wait for its return value.
+Use `spawn` to create an actor, `ask` to call a behavior and wait for its return value, and `send` to fire-and-forget a message (useful in the full runtime where actors process messages concurrently).
 
 ## Algebraic Effects
 

@@ -117,7 +117,7 @@ actor PoolWorker {
         if task == "crash" {
             perform Actor.exit(1)
         }
-        perform IO.print("Worker " + Int.to_string(self.id) + " processed: " + task)
+        perform IO.print("Worker " + perform Int.to_string(self.id) + " processed: " + task)
     }
 }
 
