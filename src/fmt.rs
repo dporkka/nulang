@@ -364,9 +364,127 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bo
             out.push_str("recover ");
             fmt_expr(out, body, indent, had_unhandled);
         }
-        _ => {
+        Expr::Return(value, _) => {
+            out.push_str("return");
+            if let Some(v) = value {
+                out.push(' ');
+                fmt_expr(out, v, indent, had_unhandled);
+            }
+        }
+        Expr::Break(_, _) => out.push_str("break"),
+        Expr::Array(elems, _) => {
+            out.push('[');
+            for (i, e) in elems.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                fmt_expr(out, e, indent, had_unhandled);
+            }
+            out.push(']');
+        }
+        Expr::Index { arr, idx, .. } => {
+            fmt_expr(out, arr, indent, had_unhandled);
+            out.push('[');
+            fmt_expr(out, idx, indent, had_unhandled);
+            out.push(']');
+        }
+        Expr::Unary { op, expr, .. } => {
+            out.push_str(op_sym_unary(*op));
+            fmt_expr(out, expr, indent, had_unhandled);
+        }
+        Expr::Assign { target, value, .. } => {
+            fmt_expr(out, target, indent, had_unhandled);
+            out.push_str(" = ");
+            fmt_expr(out, value, indent, had_unhandled);
+        }
+        Expr::While { cond, body, .. } => {
+            out.push_str("while ");
+            fmt_expr(out, cond, indent, had_unhandled);
+            out.push_str(" {\n");
+            fmt_block_body(out, body, indent + 4, had_unhandled);
+            out.push_str(&format!("\n{}}}", sp));
+        }
+        Expr::For {
+            var,
+            iterable,
+            body,
+            ..
+        } => {
+            out.push_str(&format!("for {} in ", var));
+            fmt_expr(out, iterable, indent, had_unhandled);
+            out.push_str(" {\n");
+            fmt_block_body(out, body, indent + 4, had_unhandled);
+            out.push_str(&format!("\n{}}}", sp));
+        }
+        Expr::LetRec {
+            name,
+            params,
+            value,
+            body,
+            ..
+        } => {
+            out.push_str(&format!("let rec {}(", name));
+            for (i, (pn, _)) in params.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(pn);
+            }
+            out.push_str(") = ");
+            fmt_expr(out, value, indent, had_unhandled);
+            out.push_str(" in\n");
+            fmt_expr(out, body, indent, had_unhandled);
+        }
+        Expr::Send {
+            actor,
+            behavior,
+            args,
+            ..
+        } => {
+            out.push_str("send ");
+            fmt_expr(out, actor, indent, had_unhandled);
+            out.push_str(&format!(" {}(", behavior));
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                fmt_expr(out, a, indent, had_unhandled);
+            }
+            out.push(')');
+        }
+        Expr::Ask {
+            actor,
+            behavior,
+            args,
+            ..
+        } => {
+            out.push_str("ask ");
+            fmt_expr(out, actor, indent, had_unhandled);
+            out.push_str(&format!(" {}(", behavior));
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                fmt_expr(out, a, indent, had_unhandled);
+            }
+            out.push(')');
+        }
+        Expr::Spawn { .. } => {
+            // Complex formatting deferred; preserve original via catch-all behavior
             *had_unhandled = true;
-            out.push_str("/* unformatted */");
+            out.push_str("/* unformatted spawn */");
+        }
+        Expr::Handle { .. } => {
+            *had_unhandled = true;
+            out.push_str("/* unformatted handle */");
+        }
+        Expr::Receive { .. }
+        | Expr::Emit { .. }
+        | Expr::Migrate { .. }
+        | Expr::CapAnnotate { .. }
+        | Expr::TypeAnnotate { .. } => {
+            *had_unhandled = true;
+            out.push_str("/* unformatted receive */");
         }
     }
 }
@@ -462,4 +580,13 @@ fn op_sym(op: BinOp) -> &'static str {
 
 fn fmt_type(ty: &Type) -> String {
     format!("{}", ty)
+}
+
+fn op_sym_unary(op: crate::ast::UnOp) -> &'static str {
+    match op {
+        crate::ast::UnOp::Neg => "-",
+        crate::ast::UnOp::Not => "!",
+        crate::ast::UnOp::Deref => "*",
+        crate::ast::UnOp::Ref(_) => "ref",
+    }
 }
