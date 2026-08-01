@@ -68,8 +68,8 @@ Effect types use row polymorphism, like records. The effect row appears in a fun
 // Pure function — no effects
 fn add(x: Int, y: Int) -> Int ! {} = x + y
 
-// This function performs IO and State effects
-fn program() -> Unit ! {IO, State} {
+// This function performs IO, State, and Int effects
+fn program() -> Unit ! {IO, State, Int} {
     perform IO.print("Running...")
     let v = perform State.get()
     perform IO.print(perform Int.to_string(v))

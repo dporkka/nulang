@@ -44,7 +44,7 @@ Records are structurally typed with row polymorphism. When a function parameter 
 ```nulang
 // Inferred parameter — accepts ANY record with 'x' and 'y' fields
 fn distance(point) {
-    to_float(point.x * point.x + point.y * point.y)
+    point.x * point.x + point.y * point.y
 }
 
 // Works with extra fields
