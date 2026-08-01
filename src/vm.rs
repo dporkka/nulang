@@ -1077,6 +1077,15 @@ impl ActorVmCallbacks for StandaloneVmCallbacks {
             let r = u64::from_le_bytes(buf) % range;
             return Some(Value::int(lo + r as i64));
         }
+        if effect_name == "Debug" {
+            if op_name == Some("dbg") {
+                let val = regs.first().copied().unwrap_or(Value::nil());
+                let msg = resolve_value_string(constants, val);
+                eprintln!("[dbg] {}", msg);
+                return Some(val);
+            }
+            return None;
+        }
         if effect_name != "IO" {
             return None;
         }

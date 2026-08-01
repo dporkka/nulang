@@ -154,6 +154,7 @@ mod tests {
             type_params: vec![],
             type_param_constraints: vec![],
             params: vec![],
+            default_values: vec![],
             ret_type: None,
             error_type: None,
             effect: None,

@@ -113,7 +113,7 @@ impl Parser {
             // Try declaration first, then expression
             let decl_start = self.pos;
             match self.parse_decl() {
-                Ok(decl) => {
+                Ok(mut decl) => {
                     // Collect LetBinding decls — they'll be wrapped into main's body.
                     if matches!(decl, Decl::LetBinding { .. }) {
                         pending_lets.push(decl);
@@ -148,6 +148,7 @@ impl Parser {
                                     type_params,
                                     type_param_constraints,
                                     params,
+                                    default_values,
                                     ret_type,
                                     error_type,
                                     effect,
@@ -163,6 +164,7 @@ impl Parser {
                                         type_params,
                                         type_param_constraints,
                                         params,
+                                        default_values,
                                         ret_type,
                                         error_type,
                                         effect,
@@ -174,6 +176,99 @@ impl Parser {
                                     });
                                 }
                                 continue;
+                            }
+                        }
+                        // Multi-clause function merging: if this is a fn decl,
+                        // peek ahead for additional clauses with the same name.
+                        // First clause provides signature + catch-all body.
+                        // Additional clauses: `fn name(pattern) = body` where
+                        // pattern is a literal, wildcard, or variant.
+                        if let Decl::Function {
+                            ref name,
+                            ref type_params,
+                            ref params,
+                            ref mut body,
+                            ..
+                        } = decl
+                        {
+                            let canonical_params = params.clone();
+                            let mut additional_arms: Vec<(Pattern, Option<Expr>, Expr)> =
+                                Vec::new();
+                            loop {
+                                let saved_pos = self.pos;
+                                self.skip_newlines();
+                                if self.peek_kind() == &TokenKind::Fn {
+                                    let fn_pos = self.pos;
+                                    self.advance(); // consume 'fn'
+                                    if let Ok(next_name) = self.expect_ident("function name") {
+                                        if next_name == *name {
+                                            // Parse this clause: `fn name(pat) = body`
+                                            let (clause_type_params, _) =
+                                                self.parse_type_params_with_constraints()?;
+                                            if clause_type_params != *type_params {
+                                                return Err(NuError::parse_error(
+                                                    format!(
+                                                        "function clause '{}' has different type parameters than first clause",
+                                                        name
+                                                    ),
+                                                    self.current_span(),
+                                                ));
+                                            }
+                                            self.expect(TokenKind::LParen)?;
+                                            let clause_pats =
+                                                self.parse_clause_patterns(canonical_params.len())?;
+                                            self.expect(TokenKind::RParen)?;
+                                            self.expect(TokenKind::Assign)?;
+                                            let clause_body = self.parse_expr()?;
+                                            let pat = if clause_pats.len() == 1 {
+                                                clause_pats.into_iter().next().unwrap()
+                                            } else {
+                                                Pattern::Tuple(clause_pats)
+                                            };
+                                            additional_arms.push((pat, None, clause_body));
+                                            continue;
+                                        }
+                                    }
+                                    self.pos = fn_pos;
+                                }
+                                self.pos = saved_pos;
+                                break;
+                            }
+
+                            if !additional_arms.is_empty() {
+                                // Build catch-all arm from first clause's params and body
+                                let catch_all_pat = if canonical_params.len() == 1 {
+                                    Pattern::Var(canonical_params[0].0.clone())
+                                } else {
+                                    Pattern::Tuple(
+                                        canonical_params
+                                            .iter()
+                                            .map(|(pname, _)| Pattern::Var(pname.clone()))
+                                            .collect(),
+                                    )
+                                };
+                                let mut all_arms = additional_arms;
+                                all_arms.push((catch_all_pat, None, body.clone()));
+
+                                // Build scrutinee
+                                let scrutinee = if canonical_params.len() == 1 {
+                                    Expr::Var(canonical_params[0].0.clone(), Span::default())
+                                } else {
+                                    Expr::Tuple(
+                                        canonical_params
+                                            .iter()
+                                            .map(|(pname, _)| {
+                                                Expr::Var(pname.clone(), Span::default())
+                                            })
+                                            .collect(),
+                                        Span::default(),
+                                    )
+                                };
+                                *body = Expr::Match {
+                                    scrutinee: Box::new(scrutinee),
+                                    arms: all_arms,
+                                    span: Span::default(),
+                                };
                             }
                         }
                         decls.push(decl);
@@ -221,6 +316,7 @@ impl Parser {
                         type_params: vec![],
                         type_param_constraints: vec![],
                         params: vec![],
+                        default_values: vec![],
                         ret_type: None,
                         error_type: None,
                         effect: None,
@@ -262,6 +358,7 @@ impl Parser {
                 type_params: vec![],
                 type_param_constraints: vec![],
                 params: vec![],
+                default_values: vec![],
                 ret_type: None,
                 error_type: None,
                 effect: None,
@@ -449,7 +546,7 @@ impl Parser {
         let (type_params, type_param_constraints) = self.parse_type_params_with_constraints()?;
 
         self.expect(TokenKind::LParen)?;
-        let params = self.parse_params()?;
+        let (params, default_values) = self.parse_params_with_defaults()?;
         self.expect(TokenKind::RParen)?;
 
         // Return type
@@ -507,6 +604,7 @@ impl Parser {
             type_params,
             type_param_constraints,
             params,
+            default_values,
             ret_type,
             error_type,
             effect,
@@ -2176,6 +2274,43 @@ impl Parser {
                 continue;
             }
 
+            // Optional chaining: `expr?.field` — nil-safe field access.
+            // Desugars to: match expr { nil => nil, __tmp => __tmp.field }
+            if self.peek_kind() == &TokenKind::Question {
+                // Check if it's `?.` (Question followed by Dot)
+                let saved = self.pos;
+                self.advance(); // consume '?'
+                if self.peek_kind() == &TokenKind::Dot {
+                    self.advance(); // consume '.'
+                    let span_start = self.current_span();
+                    let field = self.expect_ident("field name")?;
+                    let tmp = format!("__q{}", span_start.start);
+                    let match_span = self.current_span();
+                    left = Expr::Match {
+                        scrutinee: Box::new(left),
+                        arms: vec![
+                            (
+                                Pattern::Lit(Literal::Nil),
+                                None,
+                                Expr::Literal(Literal::Nil, match_span),
+                            ),
+                            (
+                                Pattern::Var(tmp.clone()),
+                                None,
+                                Expr::FieldAccess {
+                                    expr: Box::new(Expr::Var(tmp, match_span)),
+                                    field,
+                                    span: span_start,
+                                },
+                            ),
+                        ],
+                        span: match_span,
+                    };
+                    continue;
+                }
+                // Not `?.` — restore and fall through to `?` error propagation
+                self.pos = saved;
+            }
             // Try operator: expr? desugars to match on Ok/Error
             if self.consume_if(&TokenKind::Question) {
                 let span = self.current_span();
@@ -2432,6 +2567,23 @@ impl Parser {
                         self.pos = saved + 1;
                         Ok(Expr::Var("after".to_string(), span))
                     }
+                    // `dbg(expr)` contextual keyword — desugars to `perform Debug.dbg(expr)`
+                    TokenKind::Ident(name) if name == "dbg" => {
+                        self.advance(); // consume 'dbg'
+                        if self.consume_if(&TokenKind::LParen) {
+                            let expr = self.parse_expr()?;
+                            self.expect(TokenKind::RParen)?;
+                            Ok(Expr::Perform {
+                                effect: "Debug".to_string(),
+                                op: "dbg".to_string(),
+                                args: vec![expr],
+                                span,
+                            })
+                        } else {
+                            // Not dbg(expr) — treat as variable reference
+                            Ok(Expr::Var("dbg".to_string(), span))
+                        }
+                    }
                     TokenKind::Ident(name) => {
                         let name = name.clone();
                         self.advance();
@@ -2460,11 +2612,33 @@ impl Parser {
                         self.advance();
                         self.skip_newlines();
                         self.consume_if(&TokenKind::Rec);
-                        let name = self.expect_ident("variable name")?;
-                        if self.peek_kind() == &TokenKind::LParen {
-                            self.parse_let_rec_named(name)
+                        // `let _ = expr [in body]` — wildcard binding, desugar to discard
+                        if self.peek_kind() == &TokenKind::Ident("_".to_string()) {
+                            self.advance(); // consume '_'
+                            let _ty = if self.consume_if(&TokenKind::Colon) {
+                                Some(self.parse_type()?)
+                            } else {
+                                None
+                            };
+                            self.expect(TokenKind::Assign)?;
+                            let value = self.parse_expr()?;
+                            if self.consume_if(&TokenKind::In) {
+                                let body = self.parse_expr()?;
+                                Ok(Expr::Block {
+                                    exprs: vec![value, body],
+                                    span: self.current_span(),
+                                })
+                            } else {
+                                // Statement-let: `let _ = expr;` — just the expr for effects
+                                Ok(value)
+                            }
                         } else {
-                            self.parse_let_named(name, false)
+                            let name = self.expect_ident("variable name")?;
+                            if self.peek_kind() == &TokenKind::LParen {
+                                self.parse_let_rec_named(name)
+                            } else {
+                                self.parse_let_named(name, false)
+                            }
                         }
                     }
                     TokenKind::Var => {
@@ -2778,6 +2952,36 @@ impl Parser {
         let span = self.current_span();
         self.advance(); // consume 'if'
 
+        // `if let <pattern> = <scrutinee> { <body> } [else { <fallback> }]`
+        // Desugars to `match <scrutinee> { <pattern> => <body>, _ => <fallback-or-unit> }`
+        if self.consume_if(&TokenKind::Let) {
+            let pat = self.parse_pattern()?;
+            self.expect(TokenKind::Assign)?;
+            let scrutinee = self.parse_expr()?;
+            let then_branch = self.parse_block()?;
+            self.skip_newlines();
+            let else_branch = if self.consume_if(&TokenKind::Else) {
+                Some(if self.match_token(&TokenKind::LBrace) {
+                    self.parse_block()?
+                } else {
+                    self.parse_expr()?
+                })
+            } else {
+                None
+            };
+            let wildcard_arm = (
+                Pattern::Wild,
+                None,
+                else_branch.unwrap_or(Expr::Literal(Literal::Unit, span)),
+            );
+            let then_arm = (pat, None, then_branch);
+            return Ok(Expr::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![then_arm, wildcard_arm],
+                span,
+            });
+        }
+
         // Detect C-style parenthesized condition: `if (cond) ...`
         let cstyle_paren = self.peek_kind() == &TokenKind::LParen;
 
@@ -2853,6 +3057,15 @@ impl Parser {
             self.skip_newlines();
 
             let pat = self.parse_pattern()?;
+            // Or-patterns: `| A(x) | B(x) => body` — parse additional
+            // alternatives and desugar by duplicating the arm for each.
+            let mut alt_pats = vec![pat];
+            self.skip_newlines();
+            while self.consume_if(&TokenKind::Pipe) {
+                self.skip_newlines();
+                alt_pats.push(self.parse_pattern()?);
+                self.skip_newlines();
+            }
             // Optional guard: `| pat if cond => body`. The guard is a full
             // expression; it may reference variables bound by the pattern.
             let guard = if self.consume_if(&TokenKind::If) {
@@ -2862,7 +3075,9 @@ impl Parser {
             };
             self.expect(TokenKind::FatArrow)?;
             let expr = self.parse_expr()?;
-            arms.push((pat, guard, expr));
+            for p in alt_pats {
+                arms.push((p, guard.clone(), expr.clone()));
+            }
             self.skip_newlines_semicolons();
             self.consume_if(&TokenKind::Comma);
         }
@@ -3805,6 +4020,29 @@ impl Parser {
     fn parse_while(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
         self.expect(TokenKind::While)?;
+
+        // `while let <pattern> = <scrutinee> { <body> }`
+        // Desugars to `while true { match <scrutinee> { <pattern> => <body>, _ => break } }`
+        if self.consume_if(&TokenKind::Let) {
+            let pat = self.parse_pattern()?;
+            self.expect(TokenKind::Assign)?;
+            let scrutinee = self.parse_expr()?;
+            let body = self.parse_expr()?;
+            let match_expr = Expr::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![
+                    (pat, None, body),
+                    (Pattern::Wild, None, Expr::Break(None, span)),
+                ],
+                span,
+            };
+            return Ok(Expr::While {
+                cond: Box::new(Expr::Literal(Literal::Bool(true), span)),
+                body: Box::new(match_expr),
+                span,
+            });
+        }
+
         let cond = self.parse_expr()?;
         let body = self.parse_expr()?;
         Ok(Expr::While {
@@ -3910,7 +4148,93 @@ impl Parser {
 
     fn parse_with_block(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
-        self.advance();
+        self.advance(); // consume 'with'
+
+        // `with { pat <- expr, pat2 <- expr2, ... } { body }` — error chaining.
+        // Desugars to nested `let pat = catch expr => { |e| fail e } in ...`.
+        if self.peek_kind() == &TokenKind::LBrace {
+            self.advance(); // consume '{'
+            let mut bindings: Vec<(Pattern, Expr)> = Vec::new();
+            self.skip_newlines();
+            while !self.match_token(&TokenKind::RBrace) && !self.is_at_end() {
+                self.skip_newlines();
+                let pat = self.parse_pattern()?;
+                self.expect(TokenKind::ThinArrow)?; // <-
+                let expr = self.parse_expr()?;
+                bindings.push((pat, expr));
+                self.skip_newlines();
+                self.consume_if(&TokenKind::Comma);
+                self.skip_newlines();
+            }
+            self.expect(TokenKind::RBrace)?; // close binding block
+            let body = self.parse_block()?; // { body }
+                                            // Desugar: chain of let-catch
+            let mut result = body;
+            for (pat, expr) in bindings.into_iter().rev() {
+                let err_var = format!("__we{}", span.start);
+                result = Expr::Let {
+                    name: match &pat {
+                        Pattern::Var(name) => name.clone(),
+                        _ => format!("__wp{}", span.start),
+                    },
+                    ty: None,
+                    value: Box::new(Expr::Match {
+                        scrutinee: Box::new(expr),
+                        arms: vec![
+                            (
+                                Pattern::Variant("Ok".to_string(), Some(Box::new(pat))),
+                                None,
+                                result.clone(),
+                            ),
+                            (
+                                Pattern::Variant(
+                                    "Error".to_string(),
+                                    Some(Box::new(Pattern::Var(err_var.clone()))),
+                                ),
+                                None,
+                                Expr::Return(Some(Box::new(Expr::Var(err_var, span))), span),
+                            ),
+                        ],
+                        span,
+                    }),
+                    mutable: false,
+                    let_in: false,
+                    body: Box::new(result),
+                    span,
+                };
+            }
+            return Ok(result);
+        }
+
+        // Try parsing as `with <expr> as <name> { <body> }` (resource management).
+        let saved = self.pos;
+        let first = self.parse_expr();
+
+        // Check for `as` keyword
+        if self.peek_kind() == &TokenKind::Ident("as".to_string()) {
+            match first {
+                Ok(resource) => {
+                    self.advance(); // consume 'as'
+                    let var_name = self.expect_ident("variable name")?;
+                    let body = self.parse_block()?;
+                    return Ok(Expr::Let {
+                        name: var_name,
+                        ty: None,
+                        value: Box::new(resource),
+                        body: Box::new(body),
+                        mutable: false,
+                        let_in: false,
+                        span,
+                    });
+                }
+                Err(_) => {
+                    self.pos = saved;
+                }
+            }
+        }
+
+        // Not resource-with — must be handler-with: `with <handler_name> <expr>`
+        self.pos = saved;
         let handler_name = self.expect_ident("handler name")?;
         let body = self.parse_expr()?;
         let resolved = self.handler_registry.get(&handler_name).cloned();
@@ -4482,6 +4806,57 @@ impl Parser {
         }
     }
 
+    /// Parse a fixed number of simple patterns for multi-clause function arms.
+    /// Each pattern is a literal (`0`, `true`, `"hello"`), wildcard (`_`),
+    /// variant (`None`, `Some(x)`), or identifier (variable binding).
+    fn parse_clause_patterns(&mut self, expected_count: usize) -> NuResult<Vec<Pattern>> {
+        let mut pats = Vec::new();
+        self.skip_newlines();
+        for i in 0..expected_count {
+            if i > 0 {
+                self.expect(TokenKind::Comma)?;
+                self.skip_newlines();
+            }
+            let pat = self.parse_clause_pattern()?;
+            pats.push(pat);
+        }
+        Ok(pats)
+    }
+
+    /// Parse a single simple pattern for a multi-clause function arm parameter.
+    fn parse_clause_pattern(&mut self) -> NuResult<Pattern> {
+        match self.peek_kind().clone() {
+            TokenKind::IntLit(n) => { self.advance(); Ok(Pattern::Lit(Literal::Int(n))) }
+            TokenKind::FloatLit(f) => { self.advance(); Ok(Pattern::Lit(Literal::Float(f))) }
+            TokenKind::StringLit(s) => { self.advance(); Ok(Pattern::Lit(Literal::String(s))) }
+            TokenKind::True => { self.advance(); Ok(Pattern::Lit(Literal::Bool(true))) }
+            TokenKind::False => { self.advance(); Ok(Pattern::Lit(Literal::Bool(false))) }
+            TokenKind::NilLit => { self.advance(); Ok(Pattern::Variant("None".to_string(), None)) }
+            TokenKind::Ident(s) if s == "_" => { self.advance(); Ok(Pattern::Wild) }
+            TokenKind::Ident(name) => {
+                self.advance();
+                Ok(Pattern::Var(name))
+            }
+            TokenKind::UpperIdent(name) => {
+                self.advance();
+                if self.consume_if(&TokenKind::LParen) {
+                    let inner = self.parse_clause_pattern()?;
+                    self.expect(TokenKind::RParen)?;
+                    Ok(Pattern::Variant(name, Some(Box::new(inner))))
+                } else {
+                    Ok(Pattern::Variant(name, None))
+                }
+            }
+            _ => Err(NuError::parse_error(
+                format!(
+                    "expected a literal, identifier, or variant pattern in function clause, found {:?}",
+                    self.peek_kind()
+                ),
+                self.current_span(),
+            )),
+        }
+    }
+
     fn parse_capability(&mut self) -> NuResult<Capability> {
         let current_kind = self.peek_kind();
         match current_kind {
@@ -4825,6 +5200,37 @@ impl Parser {
             self.skip_newlines();
         }
         Ok(params)
+    }
+
+    /// Parse function parameters with optional default values.
+    /// Returns params and a parallel vec of default expressions (None = required).
+    fn parse_params_with_defaults(
+        &mut self,
+    ) -> NuResult<(Vec<(String, Option<Type>)>, Vec<Option<Expr>>)> {
+        let mut params = Vec::new();
+        let mut defaults = Vec::new();
+        self.skip_newlines();
+        while self.peek_kind() != &TokenKind::RParen && !self.is_at_end() {
+            let name = self.expect_ident("parameter name")?;
+            let ty = if self.consume_if(&TokenKind::Colon) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            let default = if self.consume_if(&TokenKind::Assign) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            params.push((name, ty));
+            defaults.push(default);
+            self.skip_newlines();
+            if !self.consume_if(&TokenKind::Comma) {
+                break;
+            }
+            self.skip_newlines();
+        }
+        Ok((params, defaults))
     }
 
     /// Parse method parameters for class/impl methods. Accepts `self` keyword

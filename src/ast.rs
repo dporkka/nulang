@@ -453,7 +453,6 @@ pub struct ImplMethod {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decl {
-    /// Function declaration: pub fn name[T](x: T) -> R ! E { body }
     Function {
         name: String,
         type_params: Vec<String>,
@@ -462,6 +461,10 @@ pub enum Decl {
         /// [("T", tv, ["Eq", "Ord"])].  Empty when no constraints.
         type_param_constraints: Vec<(String, TypeVar, Vec<String>)>,
         params: Vec<(String, Option<Type>)>,
+        /// Default values for parameters. Same length as `params`;
+        /// `Some(expr)` when a default is declared (`name: Type = expr`),
+        /// `None` when the parameter is required.
+        default_values: Vec<Option<Expr>>,
         ret_type: Option<Type>,
         error_type: Option<Type>,
         effect: Option<EffectRow>,
