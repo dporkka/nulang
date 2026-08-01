@@ -106,8 +106,10 @@
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initHeroBackground);
+    document.addEventListener('DOMContentLoaded', () => {
+      requestIdleCallback ? requestIdleCallback(initHeroBackground) : setTimeout(initHeroBackground, 200);
+    });
   } else {
-    initHeroBackground();
+    requestIdleCallback ? requestIdleCallback(initHeroBackground) : setTimeout(initHeroBackground, 200);
   }
 </script>

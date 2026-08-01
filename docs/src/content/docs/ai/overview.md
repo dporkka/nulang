@@ -3,11 +3,7 @@ title: AI Agents Overview
 description: Build LLM-powered agents using the nulang-ai library — spawning, asking, and tool binding.
 ---
 
-
-
-> **Note**: The `agent` keyword is currently Experimental and is proposed for deprecation in favor of plain `actor` declarations that import `nlc.ai` (RFC 0004). The keyword remains functional and will continue to work through at least two major language versions.
 ## AI Agents
-
 Nulang's AI capabilities live in the optional nulang-ai library crate. An `agent` is a named record of configuration — model, system prompt, tools, memory, pricing — that the runtime spawns like an actor through the generic PerformAsync effect mechanism. No special AI bytecodes or language extensions are needed. You interact with an agent through the `ask` operator, which is a synchronous request/reply call.
 
 ## Declaring an Agent
@@ -88,3 +84,5 @@ Pipeline orchestration is available via the Rust `nulang-ai` crate (`Pipeline::n
 
 - [Memory](/ai/memory/) — episodic, semantic, and procedural memory subsystems
 - [Multi-Agent Patterns](/ai/multi-agent/) — pipelines, debates, and supervisor teams
+
+> **Note**: The `agent` keyword is currently Experimental and is proposed for deprecation in favor of plain `actor` declarations that import `nlc.ai` (RFC 0004). The keyword remains functional and will continue to work through at least two major language versions.

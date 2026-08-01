@@ -17,7 +17,7 @@ Nulang is a systems language with static types, algebraic effects, and actor-bas
 - Koka-inspired algebraic effects with compile-time checking and effect rows
 - JIT tiering (Cranelift), WASM backend (wasm-encoder + Wasmtime), native AOT
 - Optional AI library (nulang-ai): provider-agnostic LLM client (OpenAI, Ollama), agent declarations, pipelines, debates, supervisor teams
-- Register-based bytecode VM with 138 opcodes, 256-register frames
+- Register-based bytecode VM with 135 opcodes, 256-register frames
 
 ## Quick Install
 ```bash

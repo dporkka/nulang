@@ -103,10 +103,10 @@ export default defineConfig({
           ],
         },
         {
-          label: 'Blog',
-          collapsed: true,
+          label: 'Why Nulang?',
+          collapsed: false,
           items: [
-            { label: 'Why Nulang?', link: 'blog/' },
+            { label: 'Comparisons & Philosophy', link: 'blog/' },
           ],
         },
         {
@@ -114,6 +114,10 @@ export default defineConfig({
           collapsed: true,
           items: [
             { label: 'API Reference', link: 'https://github.com/dporkka/nulang/blob/main/docs/api.md' },
+            { label: 'Changelog', link: 'https://github.com/dporkka/nulang/blob/main/CHANGELOG.md' },
+            { label: 'Governance', link: 'https://github.com/dporkka/nulang/blob/main/GOVERNANCE.md' },
+            { label: 'RFCs', link: 'https://github.com/dporkka/nulang/tree/main/RFC' },
+            { label: 'Language Spec', link: 'https://github.com/dporkka/nulang/blob/main/SPEC2.md' },
           ],
         },
         {

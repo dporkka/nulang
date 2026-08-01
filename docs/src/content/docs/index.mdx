@@ -23,11 +23,23 @@ import DistributionDemo from '../../components/animations/DistributionDemo.astro
 import AIPipeline from '../../components/animations/AIPipeline.astro';
 import GcDemo from '../../components/animations/GcDemo.astro';
 
-<HeroBackground />
+<div class="hero-example">
 
+```nulang
+actor Counter {
+    state count: Int = 0
+    behavior inc() { self.count = self.count + 1 }
+    behavior get() { self.count }
+}
+let c = spawn Counter {} in {
+    send c inc()
+    ask c get()
+}
+```
+
+</div>
 
 ## Why Nulang?
-
 
 Building reliable distributed systems today usually means stitching together actors, queues, databases, workflow engines, and observability tools. Nulang integrates those capabilities into the language itself so you can focus on your application logic instead of infrastructure plumbing.
 
@@ -36,7 +48,7 @@ Building reliable distributed systems today usually means stitching together act
 
 ### Build software that heals
 
-Nulang's actor model and supervision trees mean failures are isolated and restarted automatically. A bad message or a crashing service doesn't take down the whole system.
+Nulang's actor model and supervision trees mean failures are isolated and restarted automatically. A bad message or a crashing service doesn't take down the whole system. Durable workflows checkpoint state at each step and use saga compensation to roll back safely when a step fails — your program survives node restarts.
 
   </div>
   <div class="benefit-demo">
@@ -74,14 +86,6 @@ Build AI agents with the nulang-ai library — LLM integrations, episodic/semant
 <AIPipeline />
 
   </div>
-</div>
-
-<div class="benefit-callout">
-
-### Survive restarts
-
-Workflows checkpoint durable state and use saga compensation to roll back safely when a step fails.
-
 </div>
 
 <div class="benefit-row benefit-row-reverse">
@@ -134,8 +138,6 @@ Nulang is open source and licensed under the Apache 2.0 license. The source code
   </div>
 </div>
 
-## Quick Example
-
 ```nulang
 // A simple counter actor
 actor Counter {
@@ -145,17 +147,14 @@ actor Counter {
         self.count = self.count + 1
     }
 
-    behavior get(sender: Actor) {
-        send sender reply(self.count)
-    }
+    behavior get() { self.count }
 }
 
 // Spawn and use it
 let counter = spawn Counter {} in {
     send counter inc()
     send counter inc()
-    // counter.count is now 2
-    counter
+    ask counter get()
 }
 ```
 
