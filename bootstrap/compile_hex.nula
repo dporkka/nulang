@@ -1,7 +1,7 @@
 // bootstrap/compile_hex.nula — Compile expressions to hex-encoded VM bytecode.
-// Outputs u32 instruction words as 8-char hex, one per line.
-// Run: echo "1 + 2" | nulang bootstrap/compile_hex.nula
-
+// Supports: arithmetic, comparisons, booleans, if/then/else, let bindings,
+//   anonymous closures fn(x) => body, function application f(arg).
+// Named functions: use "let name = fn(x) => body in ..."
 fn is_digit(c: Int) -> Bool { c >= 48 and c <= 57 }
 fn is_alpha(c: Int) -> Bool { (c >= 65 and c <= 90) or (c >= 97 and c <= 122) }
 fn is_alphanum(c: Int) -> Bool { is_alpha(c) or is_digit(c) or c == 95 }
@@ -156,7 +156,8 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                                 let ci = perform String.charAt(src, vp2);
                                 let cn = perform String.charAt(src, vp2 + 1);
                                 if ci == 105 and cn == 110 then {
-                                    let entry = (vh << 32) + vr;
+                                    let vh16 = vh & 0xFFFF;
+                                    let entry = (vh16 << 32) + vr;
                                     let nxt = nr + 1;
                                     if elen == 0 then comp(src, vp2 + 2, len, no_left, -1, nxt, entry, 0, 0, 0, 1)
                                     else if elen == 1 then comp(src, vp2 + 2, len, no_left, -1, nxt, e0, entry, 0, 0, 2)
@@ -164,6 +165,45 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                                     else comp(src, vp2 + 2, len, no_left, -1, nxt, e0, e1, e2, entry, 4)
                                 } else (vr << 18) + vp2
                             } else (vr << 18) + vp2
+                        } else (nr << 18) + p
+                    } else (nr << 18) + p
+                } else if h == 620 then {
+                    let q2 = skip_ws(src, q, len);
+                    if q2 < len then {
+                        let c1 = perform String.charAt(src, q2);
+                        if c1 == 40 then {
+                            let q3 = skip_ws(src, q2 + 1, len);
+                            let param_id = read_ident(src, q3, len, 0);
+                            let ph = param_id >> 16;
+                            let q4 = param_id & 0xFFFF;
+                            let q5 = skip_ws(src, q4, len);
+                            if q5 < len then {
+                                let c2 = perform String.charAt(src, q5);
+                                if c2 == 41 then {
+                                    let q6 = skip_ws(src, q5 + 1, len);
+                                    if q6 + 1 < len then {
+                                        let c3 = perform String.charAt(src, q6);
+                                        let c4 = perform String.charAt(src, q6 + 1);
+                                        if c3 == 61 and c4 == 62 then {
+                                            remark("Jmp -> fn_end");
+                                            emit_hex(instr(0x50, 0, 0, 0));
+                                            remark("FN_START");
+                                            let param_reg = 10;
+                                            let entry = (ph << 32) + param_reg;
+                                            let body_nr = 8;
+                                            let body = comp(src, q6 + 2, len, no_left, -1, body_nr, entry, 0, 0, 0, 1);
+                                            let body_reg = body >> 18;
+                                            let body_end = body & 0x1FFFF;
+                                            emit_hex(instr(0x12, body_reg, 0, 0));
+                                            emit_hex(instr(0x57, 0, 0, 0));
+                                            remark("fn_end:");
+                                            let closure_reg = nr;
+                                            emit_hex(instr(0x60, 0xFF, 0xFF, closure_reg));
+                                            (closure_reg << 18) + body_end
+                                        } else (nr << 18) + p
+                                    } else (nr << 18) + p
+                                } else (nr << 18) + p
+                            } else (nr << 18) + p
                         } else (nr << 18) + p
                     } else (nr << 18) + p
                 } else if h == 627 then {
@@ -224,7 +264,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                     emit_hex(instr(0x40, iv, dr, dr2));
                     (dr2 << 18) + (1 << 17) + ip
                 } else {
-                    let reg = env_lookup(e0, e1, e2, e3, elen, h);
+                    let reg = env_lookup(e0, e1, e2, e3, elen, h & 0xFFFF);
                     if reg == 0 then (nr << 18) + p
                     else {
                         emit_hex(instr(0x12, reg, nr, 0));
@@ -246,7 +286,23 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
     if p >= len then pair
     else {
         let c = perform String.charAt(src, p);
-        if c == 61 or c == 33 or c == 60 or c == 62 then {
+        if c == 40 then {
+            let save_reg = nr + 20;
+            emit_hex(instr(0x12, lr, save_reg, 0));
+            let arg = comp(src, p + 1, len, no_left, -1, nr + 1, e0, e1, e2, e3, elen);
+            let arg_reg = arg >> 18;
+            let arg_end = arg & 0x1FFFF;
+            let ap = skip_ws(src, arg_end, len);
+            if ap < len then {
+                let c2 = perform String.charAt(src, ap);
+                if c2 == 41 then {
+                    emit_hex(instr(0x12, arg_reg, 10, 0));
+                    let dst = nr;
+                    emit_hex(instr(0x64, save_reg, 1, dst));
+                    comp(src, ap + 1, len, dst, min_prec, dst + 1, e0, e1, e2, e3, elen)
+                } else pair
+            } else pair
+        } else if c == 61 or c == 33 or c == 60 or c == 62 then {
             let cmp = parse_cmp(src, p, len);
             if cmp == 0 then pair else {
                 let cprec = cmp >> 16;
@@ -254,6 +310,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, e0: 
                 let clen = cmp & 0xFF;
                 if cprec < min_prec then pair else {
                     let rhs = comp(src, p + clen, len, no_left, cprec, nr + 1, e0, e1, e2, e3, elen);
+                    let dr = nr + 2;
                     let rr = rhs >> 18;
                     let rp = rhs & 0x1FFFF;
                     if cop == 0xFF then {
