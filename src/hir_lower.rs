@@ -376,6 +376,14 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             tables: tables.clone(),
             span: *span,
         },
+        Decl::Given { .. } => {
+            // Given declarations are resolved to call-site arguments
+            // during typechecking and do not produce HIR nodes.
+            hir::Decl::Constant {
+                name: "_unused_given".to_string(),
+                body: hir::Body::new(),
+            }
+        }
     }
 }
 
@@ -2228,6 +2236,7 @@ mod tests {
                 type_param_constraints: vec![],
                 params: vec![],
                 default_values: vec![],
+                using_params: vec![],
                 ret_type: Some(Type::int()),
                 error_type: None,
                 effect: None,

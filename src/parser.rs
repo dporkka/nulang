@@ -149,6 +149,7 @@ impl Parser {
                                     type_param_constraints,
                                     params,
                                     default_values,
+                                    using_params,
                                     ret_type,
                                     error_type,
                                     effect,
@@ -165,6 +166,7 @@ impl Parser {
                                         type_param_constraints,
                                         params,
                                         default_values,
+                                        using_params,
                                         ret_type,
                                         error_type,
                                         effect,
@@ -317,6 +319,7 @@ impl Parser {
                         type_param_constraints: vec![],
                         params: vec![],
                         default_values: vec![],
+                        using_params: vec![],
                         ret_type: None,
                         error_type: None,
                         effect: None,
@@ -359,6 +362,7 @@ impl Parser {
                 type_param_constraints: vec![],
                 params: vec![],
                 default_values: vec![],
+                using_params: vec![],
                 ret_type: None,
                 error_type: None,
                 effect: None,
@@ -457,6 +461,7 @@ impl Parser {
             TokenKind::Class => self.parse_class(),
             TokenKind::Let => self.parse_module_let(public),
             TokenKind::Impl => self.parse_impl(),
+            TokenKind::Given => self.parse_given(public),
             TokenKind::Eof => Err(NuError::parse_error(
                 "Unexpected end of file in declaration".to_string(),
                 self.current_span(),
@@ -555,7 +560,15 @@ impl Parser {
         let (params, default_values) = self.parse_params_with_defaults()?;
         self.expect(TokenKind::RParen)?;
 
-        // Return type
+        // Optional `using` clause: `fn foo(x) using (log: Logger) -> T`
+        let using_params = if self.consume_if(&TokenKind::Using) {
+            self.expect(TokenKind::LParen)?;
+            let (up, _) = self.parse_params_with_defaults()?;
+            self.expect(TokenKind::RParen)?;
+            up
+        } else {
+            vec![]
+        };
         let ret_type = if self.consume_if(&TokenKind::Arrow) {
             Some(self.parse_type()?)
         } else {
@@ -611,6 +624,7 @@ impl Parser {
             type_param_constraints,
             params,
             default_values,
+            using_params,
             ret_type,
             error_type,
             effect,
@@ -2071,6 +2085,31 @@ impl Parser {
             type_ann,
             value,
             mutable,
+            span,
+        })
+    }
+
+    /// Parse a module-level given binding: `given name [: Type] = value`
+    fn parse_given(&mut self, _public: bool) -> NuResult<Decl> {
+        let span = self.current_span();
+        self.advance(); // consume 'given'
+        self.skip_newlines();
+        let name = self.expect_ident("given name")?;
+        self.skip_newlines();
+        let ty = if self.consume_if(&TokenKind::Colon) {
+            self.skip_newlines();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.skip_newlines();
+        self.expect(TokenKind::Assign)?;
+        self.skip_newlines();
+        let value = self.parse_expr()?;
+        Ok(Decl::Given {
+            name,
+            ty,
+            value,
             span,
         })
     }

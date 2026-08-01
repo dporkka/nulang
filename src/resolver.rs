@@ -125,7 +125,8 @@ fn decl_name(decl: &Decl) -> Option<&str> {
         | Decl::Import { .. }
         | Decl::Class { .. }
         | Decl::LetBinding { .. }
-        | Decl::Impl { .. } => None,
+        | Decl::Impl { .. }
+        | Decl::Given { .. } => None,
     }
 }
 
@@ -155,6 +156,7 @@ mod tests {
             type_param_constraints: vec![],
             params: vec![],
             default_values: vec![],
+            using_params: vec![],
             ret_type: None,
             error_type: None,
             effect: None,

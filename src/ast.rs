@@ -473,6 +473,8 @@ pub enum Decl {
         /// `Some(expr)` when a default is declared (`name: Type = expr`),
         /// `None` when the parameter is required.
         default_values: Vec<Option<Expr>>,
+        /// `using` parameters: filled from `given` bindings in the caller's scope.
+        using_params: Vec<(String, Option<Type>)>,
         ret_type: Option<Type>,
         error_type: Option<Type>,
         effect: Option<EffectRow>,
@@ -633,6 +635,13 @@ pub enum Decl {
         type_ann: Option<Type>,
         value: Expr,
         mutable: bool,
+        span: Span,
+    },
+    /// Contextual value declaration: `given name: Type = expr`
+    Given {
+        name: String,
+        ty: Option<Type>,
+        value: Expr,
         span: Span,
     },
 }
