@@ -126,7 +126,7 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             ret: resolve_type(ret_type),
             effect: effect.clone().unwrap_or_else(EffectRow::empty),
             cap: cap.unwrap_or(Capability::Ref),
-            body: lower_body(body),
+            body: with_fresh_defer_stack(|| lower_body(body)),
             public: *public,
             span: *span,
         }),
@@ -186,12 +186,14 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             name,
             type_params,
             body,
+            opaque,
             public,
             span,
         } => hir::Decl::TypeAlias {
             name: name.clone(),
             type_params: type_params.clone(),
             body: body.clone(),
+            opaque: *opaque,
             public: *public,
             span: *span,
         },
@@ -384,7 +386,7 @@ fn lower_behavior(b: &ast::Behavior, apply_handlers: &[ast::ApplyHandler]) -> hi
             *cell.borrow_mut() = Some(apply_handlers.to_vec());
         });
     }
-    let body = lower_body(&b.body);
+    let body = with_fresh_defer_stack(|| lower_body(&b.body));
     CURRENT_APPLY_HANDLERS.with(|cell| {
         *cell.borrow_mut() = None;
     });
@@ -959,7 +961,7 @@ fn lower_let_chain(first_body: &Expr, body: &mut hir::Body) -> hir::Operand {
                 } = value.as_ref()
                 {
                     if lambda_references(name, params, lam_body) {
-                        let func_body = lower_body(lam_body);
+                        let func_body = with_fresh_defer_stack(|| lower_body(lam_body));
                         body.push(hir::Stmt::Let {
                             name: name.clone(),
                             ty: Type::unit(),
@@ -986,6 +988,32 @@ fn lower_let_chain(first_body: &Expr, body: &mut hir::Body) -> hir::Operand {
     }
 }
 
+/// Emit all active deferred expressions from all scopes in LIFO order.
+/// Snapshots the defer stack to avoid RefCell double-borrow when deferred
+/// expressions themselves contain blocks/if/match (which re-enter the stack).
+fn emit_all_defers(body: &mut hir::Body) {
+    let snapshot = DEFER_SCOPES.with(|s| s.borrow().clone());
+    for scope in snapshot.iter().rev() {
+        for (expr, _error_only) in scope.iter().rev() {
+            let _ = lower_expr(expr, body);
+        }
+    }
+}
+
+/// Emit deferred expressions from scopes above the nearest loop boundary.
+fn emit_defers_for_break(body: &mut hir::Body) {
+    let (snapshot, boundary) = DEFER_SCOPES.with(|s| {
+        LOOP_MARKERS.with(|m| (s.borrow().clone(), m.borrow().last().copied().unwrap_or(0)))
+    });
+    for scope_idx in (boundary..snapshot.len()).rev() {
+        if let Some(scope) = snapshot.get(scope_idx) {
+            for (expr, _error_only) in scope.iter().rev() {
+                let _ = lower_expr(expr, body);
+            }
+        }
+    }
+}
+
 pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
     if body.is_terminated() {
         // Dead code after an explicit `return`/`break`: don't lower it.
@@ -998,7 +1026,6 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         }
         Expr::Var(name, _span) => hir::Operand::Var(name.clone(), Type::unit()),
         Expr::SelfRef(_) => hir::Operand::Var("self".to_string(), Type::unit()),
-        Expr::TypeAnnotate { expr, .. } => lower_expr(expr, body),
         Expr::CapAnnotate { expr, .. } => lower_expr(expr, body),
         Expr::Lambda {
             params,
@@ -1006,7 +1033,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             span,
             ..
         } => {
-            let lambda_body = lower_body(lb);
+            let lambda_body = with_fresh_defer_stack(|| lower_body(lb));
             let ty = Type::unit();
             let captures = lambda_captures(params, lb);
             let temp = fresh_temp_name();
@@ -1151,7 +1178,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                 } = value.as_ref()
                 {
                     if lambda_references(name, params, lam_body) {
-                        let func_body = lower_body(lam_body);
+                        let func_body = with_fresh_defer_stack(|| lower_body(lam_body));
                         let mut inner_body = hir::Body::new();
                         inner_body.push(hir::Stmt::Let {
                             name: name.clone(),
@@ -1205,7 +1232,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                 } = value.as_ref()
                 {
                     if lambda_references(name, params, lam_body) {
-                        let func_body = lower_body(lam_body);
+                        let func_body = with_fresh_defer_stack(|| lower_body(lam_body));
                         body.push(hir::Stmt::Let {
                             name: name.clone(),
                             ty: Type::unit(),
@@ -1238,7 +1265,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             body: b,
             span,
         } => {
-            let func_body = lower_body(value);
+            let func_body = with_fresh_defer_stack(|| lower_body(value));
             body.push(hir::Stmt::Let {
                 name: name.clone(),
                 ty: Type::unit(),
@@ -1307,12 +1334,31 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             hir::Operand::Var(temp, ty)
         }
         Expr::Block { exprs, span: _ } => {
+            push_defer_scope();
             let mut last = hir::Operand::Unit;
             for e in exprs {
                 if body.is_terminated() {
                     break;
                 }
+                if let Expr::Defer {
+                    expr, error_only, ..
+                } = e
+                {
+                    add_defer((**expr).clone(), *error_only);
+                    continue;
+                }
                 last = lower_expr(e, body);
+            }
+            if !body.is_terminated() {
+                let scope = pop_defer_scope();
+                for (expr, _error_only) in scope.into_iter().rev() {
+                    if body.is_terminated() {
+                        break;
+                    }
+                    let _ = lower_expr(&expr, body);
+                }
+            } else {
+                let _ = pop_defer_scope();
             }
             last
         }
@@ -1707,7 +1753,9 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             span,
         } => {
             let iop = lower_expr(iterable, body);
+            push_loop_marker();
             let loop_body = lower_body(b);
+            pop_loop_marker();
             let temp = fresh_temp_name();
             body.push(hir::Stmt::Let {
                 name: temp.clone(),
@@ -1727,7 +1775,9 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             span,
         } => {
             let cond_body = lower_body(cond);
+            push_loop_marker();
             let loop_body = lower_body(b);
+            pop_loop_marker();
             let temp = fresh_temp_name();
             body.push(hir::Stmt::Let {
                 name: temp.clone(),
@@ -1742,8 +1792,6 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             hir::Operand::Var(temp, Type::unit())
         }
         Expr::Pipe { left, right, span } => {
-            // Lower `x |> f(a, b)` to `f(x, a, b)`, matching the stable
-            // compiler's pipe semantics.
             let app = match right.as_ref() {
                 Expr::App {
                     func,
@@ -1767,17 +1815,26 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             lower_expr(&app, body)
         }
         Expr::Return(val, _span) => {
+            // Emit all active defers before return (all scopes, LIFO).
+            emit_all_defers(body);
             let op = val.as_ref().map(|e| lower_expr(e, body));
             body.set_terminator(hir::Terminator::FnReturn(op));
             hir::Operand::Unit
         }
         Expr::Break(val, _span) => {
+            emit_defers_for_break(body);
             let op = val.as_ref().map(|e| lower_expr(e, body));
             body.set_terminator(hir::Terminator::Break(op));
             hir::Operand::Unit
         }
         Expr::Consume { expr, .. } => lower_expr(expr, body),
         Expr::Recover { body: b, .. } => lower_expr(b, body),
+        Expr::Defer { expr, .. } => {
+            // Defer is handled at block level; standalone defer is a no-op.
+            let _ = lower_expr(expr, body);
+            hir::Operand::Unit
+        }
+        Expr::TypeAnnotate { expr, .. } => lower_expr(expr, body),
     }
 }
 
@@ -1793,10 +1850,6 @@ fn lower_assign_to(target: &Expr, value: &Expr, span: Span, body: &mut hir::Body
         value: hir::RValue::Use(val.clone()),
         span,
     });
-    // Mirrors the stable compiler's `compile_assign`, which returns the
-    // assigned value (val_reg) rather than unit — load-bearing for code
-    // like `(emit E(), self.x = self.x + 1)`, whose block result is the
-    // assignment's value.
     val
 }
 
@@ -2090,6 +2143,74 @@ thread_local! {
 // instance dictionaries.
 thread_local! {
     static CURRENT_CLASS_TABLES: RefCell<Option<crate::typechecker::ClassTables>> = RefCell::new(None);
+}
+
+// Thread-local defer stack. Each Vec<(Expr, bool)> is one block scope.
+// Shared across lower_body calls so that `return` inside if/match/loop
+// branches drains the parent's defers too.
+thread_local! {
+    static DEFER_SCOPES: RefCell<Vec<Vec<(ast::Expr, bool)>>> = RefCell::new(Vec::new());
+    /// Stack of scope indices marking loop boundaries. On `break`,
+    /// defers are drained down to (but not including) the nearest loop marker.
+    static LOOP_MARKERS: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+}
+
+/// Push a new defer scope (called when entering a block).
+fn push_defer_scope() {
+    DEFER_SCOPES.with(|s| s.borrow_mut().push(Vec::new()));
+}
+
+/// Pop the current defer scope and return its deferred expressions.
+fn pop_defer_scope() -> Vec<(ast::Expr, bool)> {
+    DEFER_SCOPES.with(|s| s.borrow_mut().pop().unwrap_or_default())
+}
+
+/// Add a defer to the current (innermost) scope.
+fn add_defer(expr: ast::Expr, error_only: bool) {
+    DEFER_SCOPES.with(|s| {
+        if let Some(scope) = s.borrow_mut().last_mut() {
+            scope.push((expr, error_only));
+        }
+    });
+}
+
+/// Mark the current scope depth as a loop boundary (called before lowering a loop body).
+fn push_loop_marker() {
+    DEFER_SCOPES.with(|s| LOOP_MARKERS.with(|m| m.borrow_mut().push(s.borrow().len())));
+}
+
+/// Remove the innermost loop marker (called after lowering a loop body).
+fn pop_loop_marker() {
+    LOOP_MARKERS.with(|m| {
+        m.borrow_mut().pop();
+    });
+}
+
+/// Save the current defer stack and loop markers, returning a snapshot.
+fn save_defer_state() -> (Vec<Vec<(ast::Expr, bool)>>, Vec<usize>) {
+    DEFER_SCOPES.with(|s| LOOP_MARKERS.with(|m| (s.borrow().clone(), m.borrow().clone())))
+}
+
+fn restore_defer_state(state: (Vec<Vec<(ast::Expr, bool)>>, Vec<usize>)) {
+    DEFER_SCOPES.with(|s| {
+        LOOP_MARKERS.with(|m| {
+            *s.borrow_mut() = state.0;
+            *m.borrow_mut() = state.1;
+        })
+    });
+}
+
+/// Run a closure with a fresh defer stack, restoring the previous state after.
+fn with_fresh_defer_stack<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let saved = save_defer_state();
+    DEFER_SCOPES.with(|s| s.borrow_mut().clear());
+    LOOP_MARKERS.with(|m| m.borrow_mut().clear());
+    let result = f();
+    restore_defer_state(saved);
+    result
 }
 
 #[cfg(test)]

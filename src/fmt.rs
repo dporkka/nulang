@@ -486,6 +486,16 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bo
             *had_unhandled = true;
             out.push_str("/* unformatted receive */");
         }
+        Expr::Defer {
+            expr, error_only, ..
+        } => {
+            if *error_only {
+                out.push_str("errdefer ");
+            } else {
+                out.push_str("defer ");
+            }
+            fmt_expr(out, expr, indent, had_unhandled);
+        }
     }
 }
 

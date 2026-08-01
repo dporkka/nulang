@@ -254,6 +254,14 @@ pub enum Expr {
         body: Box<Expr>,
         span: Span,
     },
+    /// Deferred expression: `defer expr` — runs when enclosing scope exits.
+    /// `errdefer expr` runs only on error exit paths.
+    Defer {
+        expr: Box<Expr>,
+        /// true for `errdefer` (only on error), false for `defer` (always).
+        error_only: bool,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -520,6 +528,9 @@ pub enum Decl {
         name: String,
         type_params: Vec<String>,
         body: Type,
+        /// true for `opaque type Name = Type` — distinct type at compile time,
+        /// erases to underlying type at runtime.
+        opaque: bool,
         public: bool,
         span: Span,
     },

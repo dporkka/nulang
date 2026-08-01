@@ -1566,6 +1566,12 @@ impl TypeChecker {
                 let final_subst = compose_subst(&s3, &compose_subst(&s2, &s1));
                 Ok((final_subst, Type::unit()))
             }
+            // Defer — just typecheck the deferred expression; the defer
+            // itself has unit type.
+            Expr::Defer { expr, .. } => {
+                let _ = self.infer_expr(ctx, expr)?;
+                Ok((vec![], Type::unit()))
+            }
         }
     }
 

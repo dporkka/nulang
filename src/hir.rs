@@ -31,6 +31,7 @@ pub enum Decl {
         name: String,
         type_params: Vec<String>,
         body: Type,
+        opaque: bool,
         public: bool,
         span: Span,
     },
@@ -183,8 +184,6 @@ impl Default for Body {
 }
 
 impl Body {
-    /// True once an explicit control-transfer terminator has been set;
-    /// statements lowered after this point are dead code and are dropped.
     pub fn is_terminated(&self) -> bool {
         matches!(
             self.terminator,

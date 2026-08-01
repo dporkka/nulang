@@ -9314,4 +9314,86 @@ match { a: 2, b: 9 } with {
 
         handle.join().expect("example-runner thread panicked");
     }
+
+    // -----------------------------------------------------------------------
+    // Defer — deterministic cleanup
+    // -----------------------------------------------------------------------
+
+    /// Basic defer: deferred expression compiles and the block returns
+    /// the normal exit value (defer doesn't change the return value).
+    #[test]
+    fn test_defer_basic_normal_exit() {
+        let source = "{ defer 1; 42 }";
+        assert_int(source, 42);
+    }
+
+    /// Defer with early return: defers run before return.
+    /// The defer expression is type-checked (must be valid).
+    #[test]
+    fn test_defer_with_early_return() {
+        let source = "{ defer 1; return 42 }";
+        assert_int(source, 42);
+    }
+
+    /// Defer with return inside if: the defer runs on the return path.
+    #[test]
+    fn test_defer_return_in_if() {
+        let source = r#"
+        {
+          defer 1
+          if true then { return 42 } else { 0 }
+        }
+        "#;
+        assert_int(source, 42);
+    }
+
+    /// Multiple defers: both compile and run (LIFO order).
+    #[test]
+    fn test_defer_multiple() {
+        let source = "{ defer 1; defer 2; 42 }";
+        assert_int(source, 42);
+    }
+
+    /// Defer with block body: deferred expression contains a block.
+    #[test]
+    fn test_defer_block_body() {
+        let source = "{ defer { let x = 1 in x }; 42 }";
+        assert_int(source, 42);
+    }
+
+    /// errdefer: same as defer (error-only distinction not yet tracked in HIR).
+    #[test]
+    fn test_errdefer_basic() {
+        let source = "{ errdefer 1; 42 }";
+        assert_int(source, 42);
+    }
+
+    /// Defer with break: defers run on break path.
+    #[test]
+    fn test_defer_with_break() {
+        let source = r#"
+        {
+          defer 1
+          while true {
+            defer 2
+            break
+          }
+          42
+        }
+        "#;
+        assert_int(source, 42);
+    }
+
+    /// Type error in defer expression is caught.
+    #[test]
+    fn test_defer_type_error() {
+        let source = r#"{ defer 1 + "hello"; 42 }"#;
+        let err = run_source(source).expect_err("defer with type error must fail");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("type") || msg.contains("Type"),
+            "expected type error, got: {}",
+            msg
+        );
+    }
 }

@@ -409,11 +409,17 @@ impl Parser {
             TokenKind::Agent => self.parse_agent(),
             TokenKind::Workflow => self.parse_workflow(),
             TokenKind::Database => self.parse_database(),
+            TokenKind::Opaque => {
+                self.advance(); // consume 'opaque'
+                self.expect(TokenKind::Type)?; // 'type'
+                self.skip_newlines();
+                self.parse_type_alias(public, true)
+            }
             TokenKind::Type => {
                 self.advance(); // consume 'type'
                 self.skip_newlines();
                 match self.peek_kind() {
-                    TokenKind::Alias => self.parse_type_alias(public),
+                    TokenKind::Alias => self.parse_type_alias(public, false),
                     _ => {
                         // Peek ahead: if we see a '{' it's a record, if '|' or variant-like it's variant
                         // Actually: type Name = ... determines it
@@ -1747,9 +1753,11 @@ impl Parser {
         })
     }
 
-    fn parse_type_alias(&mut self, public: bool) -> NuResult<Decl> {
+    fn parse_type_alias(&mut self, public: bool, opaque: bool) -> NuResult<Decl> {
         let span = self.current_span();
-        self.advance(); // consume 'alias'
+        if !opaque {
+            self.advance(); // consume 'alias'
+        }
         let name = self.expect_ident("type alias name")?;
         let type_params = self.parse_type_params()?;
         self.expect(TokenKind::Assign)?;
@@ -1758,6 +1766,7 @@ impl Parser {
             name,
             type_params,
             body,
+            opaque,
             public,
             span,
         })
@@ -2724,6 +2733,8 @@ impl Parser {
                     TokenKind::With => self.parse_with_block(),
                     TokenKind::Consume => self.parse_consume_expr(),
                     TokenKind::Recover => self.parse_recover_expr(),
+                    TokenKind::Defer => self.parse_defer_expr(false),
+                    TokenKind::Errdefer => self.parse_defer_expr(true),
                     TokenKind::Return => {
                         self.advance();
                         if self.is_expr_start() {
@@ -3715,6 +3726,8 @@ impl Parser {
                 | TokenKind::Handle
                 | TokenKind::Consume
                 | TokenKind::Recover
+                | TokenKind::Defer
+                | TokenKind::Errdefer
                 | TokenKind::Receive
                 | TokenKind::For
                 | TokenKind::While
@@ -4273,6 +4286,17 @@ impl Parser {
             span,
         })
     }
+
+    fn parse_defer_expr(&mut self, error_only: bool) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.advance(); // consume 'defer' or 'errdefer'
+        let expr = self.parse_expr()?;
+        Ok(Expr::Defer {
+            expr: Box::new(expr),
+            error_only,
+            span,
+        })
+    }
     fn parse_type(&mut self) -> NuResult<Type> {
         self.parse_type_arrow()
     }
@@ -4537,7 +4561,7 @@ impl Parser {
         self.pos = decl_pos + 1; // skip the 'type' keyword
         self.skip_newlines();
         let decl_result = if self.peek_kind() == &TokenKind::Alias {
-            self.parse_type_alias(false)
+            self.parse_type_alias(false, false)
         } else {
             self.parse_type_decl_variant_or_record(false)
         };

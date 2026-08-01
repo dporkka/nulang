@@ -340,6 +340,9 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
         Expr::Recover { body: b, .. } => {
             free_vars(b, bound, acc);
         }
+        Expr::Defer { expr, .. } => {
+            free_vars(expr, bound, acc);
+        }
     }
 }
 
@@ -862,6 +865,8 @@ impl EffectChecker {
 
             // Recover: effects of the recovery body.
             Expr::Recover { body: b, .. } => self.infer_effects(ctx, b),
+            // Defer: effects of the deferred expression.
+            Expr::Defer { expr: e, .. } => self.infer_effects(ctx, e),
         }
     }
 
@@ -1792,6 +1797,8 @@ impl CapabilityAnalyzer {
                 }
                 Ok(body_cap)
             }
+            // Defer: capability of the deferred expression.
+            Expr::Defer { expr, .. } => self.infer_cap_tracked(ctx, expr, consumed),
         }
     }
 
@@ -1886,6 +1893,7 @@ fn expr_span(expr: &Expr) -> Span {
         Expr::Break(_, s) => *s,
         Expr::Consume { span, .. } => *span,
         Expr::Recover { span, .. } => *span,
+        Expr::Defer { span, .. } => *span,
     }
 }
 
