@@ -1,3 +1,14 @@
+//! QUIC transport (`quic-experimental` feature, off by default).
+//!
+//! Implements `NetworkTransport` end-to-end — TLS via a self-signed
+//! `rcgen` cert, the same node-id handshake as the TCP transport
+//! (`src/runtime/network.rs`), and the full connect/send/receive/
+//! disconnect/shutdown surface. It compiles and has run manually, but
+//! is **not wired into `Runtime`'s transport selection** (nothing
+//! constructs a `QuicTransport` outside this file) and has **no test
+//! coverage**. Treat as a starting point for RFC 0003 item 14
+//! (route transports through `trait Transport`), not a usable transport.
+
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;

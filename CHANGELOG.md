@@ -152,8 +152,7 @@ in this version; they are recorded here to establish their tier.
   `nulang-ai` crate with zero core dependencies; the core `ActorVmCallbacks`
   trait no longer carries AI-specific methods. The `LLM` effect redirects to
   `Provider.ask` under the hood.
-- AOT native backend (`src/aot/`), JIT tiering (`src/jit/`), QUIC transport
-  (`src/runtime/quic_transport.rs`).
+- AOT native backend (`src/aot/`), JIT tiering (`src/jit/`).
 
 - **Stdlib modules.** Standard library modules provide reusable generic
   data structures and operations: `stdlib::core` (base utilities),
