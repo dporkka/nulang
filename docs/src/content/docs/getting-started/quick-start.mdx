@@ -8,21 +8,20 @@ import CopyMarkdown from '../../../components/CopyMarkdown.astro';
 
 <CopyMarkdown />
 
-Start the REPL:
-
-```bash
-cargo run -- --repl
-```
-
-```nulang
-nulang> perform IO.print("Hello, Nulang!")
-Hello, Nulang!
-```
-
-Or evaluate from the command line:
+Run a one-liner:
 
 ```bash
 cargo run -- --eval 'perform IO.print("Hello, Nulang!")'
+```
+
+```
+Hello, Nulang!
+```
+
+Or start the REPL for an interactive session:
+
+```bash
+cargo run -- --repl
 ```
 
 ## Variables and Functions
