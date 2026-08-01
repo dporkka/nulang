@@ -114,11 +114,11 @@ def le (a b : Cap) : Bool := join a b == b
 /--
   `a` is sendable iff values with capability `a` can be safely sent
   to another actor (the value is immutable and alias-tracked).
-  Mirrors `Capability::is_sendable()` → `Linear | Val | Tag`.
+  Mirrors `Capability::is_sendable()` → `LinearIso | Linear | Iso | Val | Tag`.
 -/
 def is_sendable (a : Cap) : Bool :=
   match a with
-  | .LinearIso | .Linear | .Val | .Tag => true
+  | .LinearIso | .Linear | .Iso | .Val | .Tag => true
   | _ => false
 
 /--
@@ -195,14 +195,14 @@ theorem join_idem : ∀ a : Cap, join a a = a := by
   disjunction to capture both cases.
 -/
 theorem cap_sendable : ∀ (cap : Cap), is_sendable cap = true → (le cap .Val = true ∨ cap = .Tag) := by
-  sorry
+  intro cap h
+  have h' := h
+  cases cap <;> simp [is_sendable, le, join] at h' ⊢
+  <;> first | rfl | trivial | done
 
-/--
-  **Theorem: Discharging linear tracking preserves sendability.**
-  If `is_sendable cap`, then `is_sendable (discharge_linear cap)`.
--/
 theorem discharge_sendable : ∀ (cap : Cap), is_sendable cap → is_sendable (discharge_linear cap) := by
-  sorry
+  intro cap h
+  cases cap <;> simp [is_sendable, discharge_linear] at h ⊢
 
 end Cap
 

@@ -36,7 +36,7 @@ type FxHashSet<T> =
 
 /// Apply a substitution to a type, replacing any type variables that appear
 /// in the substitution with their mapped types.
-fn apply_subst(ty: &Type, subst: &Substitution) -> Type {
+pub(crate) fn apply_subst(ty: &Type, subst: &Substitution) -> Type {
     match ty {
         Type::Var(v) => {
             // Find the first mapping for this variable
@@ -683,6 +683,10 @@ pub struct TypeChecker {
     pub class_table: FxHashMap<String, ClassInfo>,
     /// Registered instance declarations: (class_name, type_name) → methods.
     pub instance_table: FxHashMap<(String, String), Vec<ImplMethod>>,
+    /// Inferred types for top-level declarations, populated by `check_module`.
+    /// Keyed by declaration name; for functions this is the function type,
+    /// for let bindings this is the inferred value type.
+    pub inferred_decl_types: FxHashMap<String, Type>,
 }
 
 /// Pre-computed class and instance tables extracted from an AST module.
@@ -758,6 +762,7 @@ impl TypeChecker {
         TypeChecker {
             class_table: FxHashMap::default(),
             instance_table: FxHashMap::default(),
+            inferred_decl_types: FxHashMap::default(),
         }
     }
 
@@ -780,10 +785,8 @@ impl TypeChecker {
             let final_ty = apply_subst(&ty, &s);
             match decl {
                 Decl::Function { name, .. } => {
-                    // Generalize at the binding site so each use of a
-                    // module-level function instantiates fresh type (and row)
-                    // variables — without this the substitution threads
-                    // through the context and monomorphizes every later use.
+                    self.inferred_decl_types
+                        .insert(name.clone(), final_ty.clone());
                     let gen_ty = self.do_generalize(&ctx, &final_ty);
                     ctx.bind(name.clone(), gen_ty, Capability::Ref, false);
                 }
@@ -858,6 +861,8 @@ impl TypeChecker {
                     ctx.bind(dict_name, final_ty.clone(), Capability::Ref, false);
                 }
                 Decl::LetBinding { name, .. } => {
+                    self.inferred_decl_types
+                        .insert(name.clone(), final_ty.clone());
                     let gen_ty = self.do_generalize(&ctx, &final_ty);
                     ctx.bind(name.clone(), gen_ty, Capability::Ref, false);
                 }
@@ -866,6 +871,7 @@ impl TypeChecker {
             }
             last_type = final_ty;
         }
+
         // Verify behavior contracts for actors with `implements` clauses.
         self.verify_behavior_contracts(module)?;
         Ok(last_type)
@@ -939,7 +945,11 @@ impl TypeChecker {
     }
 
     /// Infer the type of a declaration.
-    fn infer_decl(&mut self, ctx: &TypeContext, decl: &Decl) -> NuResult<(Substitution, Type)> {
+    pub(crate) fn infer_decl(
+        &mut self,
+        ctx: &TypeContext,
+        decl: &Decl,
+    ) -> NuResult<(Substitution, Type)> {
         match decl {
             Decl::Function {
                 name,

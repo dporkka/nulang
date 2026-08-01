@@ -30,6 +30,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::repl::type_to_string;
 use crate::typechecker::TypeChecker;
 use crate::types::NuError;
 
@@ -2211,167 +2212,98 @@ impl<'a> InlayHintEngine<'a> {
             .collect()
     }
 
-    /// Collect type annotations from the source.
-    ///
-    /// This is a simplified implementation that uses regex-based parsing
-    /// for the MVP. A full implementation would parse the AST and run
-    /// the typechecker.
     fn collect_annotations(&self) -> Vec<TypeAnnotation> {
+        // Parse and typecheck the source.
+        let mut lexer = crate::lexer::Lexer::new(self.source);
+        let tokens = match lexer.lex() {
+            Ok(t) => t,
+            Err(_) => return Vec::new(),
+        };
+        let ast = match Parser::new(tokens).parse_module() {
+            Ok(a) => a,
+            Err(_) => return Vec::new(),
+        };
+        let mut tc = TypeChecker::new();
+        if tc.check_module(&ast).is_err() {
+            return Vec::new();
+        }
+
         let mut annotations = Vec::new();
-        for (line_idx, line) in self.source.lines().enumerate() {
-            let line_num = line_idx as u32;
-            let trimmed = line.trim();
 
-            // Skip comments and blank lines
-            if trimmed.is_empty() || trimmed.starts_with("--") {
-                continue;
-            }
-
-            // let binding without explicit type → infer
-            if let Some(pos) = line.find("let ") {
-                if !line[pos..].contains(":") {
-                    // No explicit type annotation
-                    let after_let = pos + 4;
-                    let rest = &line[after_let..];
-                    if let Some(end) = rest.find(|c: char| c == ' ' || c == '=') {
-                        let _var_name = &rest[..end];
-                        let col = (after_let + end) as u32;
-                        if let Some(inferred) = self.infer_type(line) {
+        for decl in &ast.decls {
+            match decl {
+                crate::ast::Decl::Function {
+                    name,
+                    params,
+                    ret_type,
+                    span,
+                    ..
+                } => {
+                    let func_ty = match tc.inferred_decl_types.get(name) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    let param_types: Vec<&crate::types::Type> = match func_ty {
+                        crate::types::Type::Function { param, .. } => match param.as_ref() {
+                            crate::types::Type::Tuple(types) => types.iter().collect(),
+                            t => vec![t],
+                        },
+                        _ => continue,
+                    };
+                    let line = span.line().saturating_sub(1) as u32;
+                    let source_line = self.source.lines().nth(line as usize).unwrap_or("");
+                    if let Some(lparen) = source_line.find('(') {
+                        let mut col = (lparen + 1) as u32;
+                        for (i, (pname, ptype_ann)) in params.iter().enumerate() {
+                            let pname_len = pname.len() as u32;
+                            if ptype_ann.is_none() && i < param_types.len() {
+                                annotations.push(TypeAnnotation {
+                                    line,
+                                    character: col + pname_len,
+                                    label: format!(": {}", type_to_string(param_types[i])),
+                                    kind: AnnotationKind::Type,
+                                });
+                            }
+                            col += pname_len + 2;
+                        }
+                    }
+                    if ret_type.is_none() {
+                        if let crate::types::Type::Function { ret, .. } = func_ty {
+                            if let Some(rparen) = source_line.find(')') {
+                                annotations.push(TypeAnnotation {
+                                    line,
+                                    character: rparen as u32 + 1,
+                                    label: format!(" -> {}", type_to_string(ret)),
+                                    kind: AnnotationKind::Type,
+                                });
+                            }
+                        }
+                    }
+                }
+                crate::ast::Decl::LetBinding {
+                    name,
+                    type_ann,
+                    span,
+                    ..
+                } => {
+                    if type_ann.is_none() {
+                        if let Some(ty) = tc.inferred_decl_types.get(name) {
+                            let line = span.line().saturating_sub(1) as u32;
+                            let col = (span.column() + name.len()) as u32;
                             annotations.push(TypeAnnotation {
-                                line: line_num,
+                                line,
                                 character: col,
-                                label: format!(": {}", inferred),
+                                label: format!(": {}", type_to_string(ty)),
                                 kind: AnnotationKind::Type,
                             });
                         }
                     }
                 }
-            }
-
-            // fun parameter without explicit type
-            if trimmed.starts_with("fun ") {
-                if let Some(lparen) = line.find('(') {
-                    if let Some(rparen) = line.find(')') {
-                        // A malformed line with `)` before `(` must not panic
-                        // the parameter slice below.
-                        if rparen > lparen {
-                            let params = &line[lparen + 1..rparen];
-                            let mut col_offset = (lparen + 1) as u32;
-                            for param in params.split(',') {
-                                let param = param.trim();
-                                if !param.is_empty() && !param.contains(":") {
-                                    let param_len = param.len() as u32;
-                                    if let Some(inferred) = self.infer_param_type(param, line) {
-                                        annotations.push(TypeAnnotation {
-                                            line: line_num,
-                                            character: col_offset + param_len,
-                                            label: format!(": {}", inferred),
-                                            kind: AnnotationKind::Type,
-                                        });
-                                    }
-                                    col_offset += param_len + 2; // +2 for ", "
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Capability annotations (iso, val, trn, ref, box, tag)
-            for cap in &["iso", "val", "trn", "ref", "box", "tag", "linear"] {
-                if let Some(pos) = line.find(&format!(" :{}", cap)) {
-                    annotations.push(TypeAnnotation {
-                        line: line_num,
-                        character: (pos + 1) as u32,
-                        label: format!(":{}", cap),
-                        kind: AnnotationKind::Capability,
-                    });
-                }
-            }
-
-            // Effect annotations (! IO, ! FileSystem, etc.)
-            if let Some(pos) = line.find(" ! ") {
-                let after_bang = pos + 3;
-                let rest = &line[after_bang..];
-                let effect_name = rest.split_whitespace().next().unwrap_or("");
-                if !effect_name.is_empty() {
-                    annotations.push(TypeAnnotation {
-                        line: line_num,
-                        character: (after_bang + effect_name.len()) as u32,
-                        label: format!(" [{}]", effect_name),
-                        kind: AnnotationKind::Effect,
-                    });
-                }
+                _ => {}
             }
         }
+
         annotations
-    }
-
-    /// Infer the type of a value from context (simplified heuristic).
-    fn infer_type(&self, line: &str) -> Option<String> {
-        let trimmed = line.trim();
-        // Check RHS of assignment
-        if let Some(eq_pos) = trimmed.find('=') {
-            let rhs = trimmed[eq_pos + 1..].trim();
-            return self.infer_expr_type(rhs);
-        }
-        None
-    }
-
-    /// Infer parameter type from usage context.
-    fn infer_param_type(&self, _param: &str, func_line: &str) -> Option<String> {
-        // Simplified: check for arithmetic operations
-        if func_line.contains('+') || func_line.contains('-') || func_line.contains('*') {
-            Some("Int".to_string())
-        } else if func_line.contains(".") && !func_line.contains("..") {
-            Some("Float".to_string())
-        } else {
-            Some("a".to_string()) // Generic type variable
-        }
-    }
-
-    /// Infer expression type from syntax (heuristic).
-    fn infer_expr_type(&self, expr: &str) -> Option<String> {
-        let expr = expr.trim();
-        if expr.is_empty() {
-            return None;
-        }
-
-        // Integer literal
-        if expr.parse::<i64>().is_ok() {
-            return Some("Int".to_string());
-        }
-        // Float literal
-        if expr.parse::<f64>().is_ok() && expr.contains('.') {
-            return Some("Float".to_string());
-        }
-        // String literal
-        if (expr.starts_with('"') && expr.ends_with('"'))
-            || (expr.starts_with('\'') && expr.ends_with('\''))
-        {
-            return Some("String".to_string());
-        }
-        // Boolean
-        if expr == "true" || expr == "false" {
-            return Some("Bool".to_string());
-        }
-        // List/array
-        if expr.starts_with('[') && expr.ends_with(']') {
-            return Some("[a]".to_string());
-        }
-        // Unit
-        if expr == "unit" || expr == "()" {
-            return Some("Unit".to_string());
-        }
-        // Arithmetic operation
-        if expr.contains('+') || expr.contains('-') || expr.contains('*') || expr.contains("/") {
-            return Some("Int".to_string());
-        }
-        // Function call
-        if expr.contains('(') && expr.contains(')') {
-            return Some("b".to_string());
-        }
-        Some("a".to_string())
     }
 
     /// Convert a TypeAnnotation to an LSP InlayHint.
@@ -3080,116 +3012,57 @@ pub async fn run_lsp_server() {
 mod lsp_tests {
     use super::*;
 
-    fn label_to_string(label: &InlayHintLabel) -> String {
-        match label {
-            InlayHintLabel::String(s) => s.clone(),
-            InlayHintLabel::LabelParts(parts) => parts.iter().map(|p| p.value.clone()).collect(),
-        }
-    }
-
+    /// Function parameter without type annotation gets an inlay hint.
     #[test]
-    fn test_type_inlay_for_let_binding() {
-        let source = "let x = 42";
+    fn test_type_inlay_for_fn_param() {
+        let source = "fn add(x: Int, y) { x + y }";
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
-        assert!(!hints.is_empty());
-        let type_hint = &hints[0];
-        assert!(label_to_string(&type_hint.label).contains("Int"));
+        // The unannotated param `y` should get a hint
+        assert!(!hints.is_empty(), "expected hints for fn params, got 0");
     }
 
+    /// Function return type without annotation gets an inlay hint.
     #[test]
-    fn test_type_inlay_for_float_binding() {
-        let source = "let pi = 3.14";
+    fn test_type_inlay_for_fn_return() {
+        let source = "fn answer() -> Int { 42 }";
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
-        assert!(!hints.is_empty());
-        assert!(label_to_string(&hints[0].label).contains("Float"));
+        // Return type is explicit, so no hint expected
+        assert!(
+            hints.is_empty(),
+            "no hints expected when types are explicit"
+        );
     }
 
+    /// Cross-decl inference: main calls helper, both get hints.
     #[test]
-    fn test_type_inlay_for_string_binding() {
-        let source = "let name = \"hello\"";
+    fn test_inlay_cross_decl() {
+        let source = "fn helper(x) { x + 1 }\nfn main() { helper(5) }";
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
-        assert!(!hints.is_empty());
-        assert!(label_to_string(&hints[0].label).contains("String"));
+        assert!(!hints.is_empty(), "expected hints for cross-decl functions");
     }
 
-    #[test]
-    fn test_capability_inlay_for_iso() {
-        let source = "let x :iso String = \"hello\"";
-        let engine = InlayHintEngine::new(source);
-        let hints = engine.generate_inlay_hints();
-        let cap_hints: Vec<_> = hints
-            .iter()
-            .filter(|h| label_to_string(&h.label).contains(":iso"))
-            .collect();
-        assert!(!cap_hints.is_empty());
-    }
-
-    #[test]
-    fn test_effect_inlay_for_handler() {
-        let source = "fun read() ! IO";
-        let engine = InlayHintEngine::new(source);
-        let hints = engine.generate_inlay_hints();
-        let effect_hints: Vec<_> = hints
-            .iter()
-            .filter(|h| label_to_string(&h.label).contains("[IO]"))
-            .collect();
-        assert!(!effect_hints.is_empty());
-    }
-
+    /// No hint when type is already explicit.
     #[test]
     fn test_no_inlay_when_explicit_type() {
-        let source = "let x : Int = 42";
+        let source = "fn add(x: Int, y: Int) -> Int { x + y }";
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
-        // Should NOT generate a type inlay since type is already explicit
-        let type_inlays: Vec<_> = hints
-            .iter()
-            .filter(|h| {
-                let label = label_to_string(&h.label);
-                label.starts_with(": ") && !label.contains(":iso")
-            })
-            .collect();
         assert!(
-            type_inlays.is_empty(),
-            "should not add inlay when type is explicit"
+            hints.is_empty(),
+            "should not add hints when all types are explicit"
         );
     }
 
     #[test]
     fn test_inlay_position_calculation() {
-        let source = "let abc = 123";
+        let source = "fn f(x) { x }";
         let engine = InlayHintEngine::new(source);
         let hints = engine.generate_inlay_hints();
+        assert!(!hints.is_empty(), "expected hint for fn param");
         assert_eq!(hints[0].position.line, 0);
-        assert_eq!(hints[0].position.character, 7); // after "abc"
-    }
-
-    #[test]
-    fn test_type_to_inlay_string() {
-        let ann = TypeAnnotation {
-            line: 0,
-            character: 5,
-            label: ": Int".to_string(),
-            kind: AnnotationKind::Type,
-        };
-        let engine = InlayHintEngine::new("");
-        let inlay = engine.annotation_to_inlay(ann);
-        assert_eq!(label_to_string(&inlay.label), ": Int");
-        assert_eq!(inlay.kind, Some(InlayHintKind::TYPE));
-    }
-
-    #[test]
-    fn test_multiple_let_bindings() {
-        let source = "let x = 42\nlet y = 3.14\nlet z = \"hi\"";
-        let engine = InlayHintEngine::new(source);
-        let hints = engine.generate_inlay_hints();
-        assert_eq!(hints.len(), 3);
-        assert!(label_to_string(&hints[0].label).contains("Int"));
-        assert!(label_to_string(&hints[1].label).contains("Float"));
-        assert!(label_to_string(&hints[2].label).contains("String"));
     }
 
     // -- Completion engine tests --

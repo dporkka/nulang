@@ -1,6 +1,6 @@
 # Nulang Self-Hosting Bootstrap
 
-> **Status:** Stage 11 — type checking for arithmetic + booleans.
+> **Status:** Stage 13 — bytecode closure compilation + fn type checking.
 > **Target:** A Nulang→Nulang compiler written in Nulang Core (RFC 0002)
 > that targets the `.nbc` format (RFC 0001).
 
@@ -119,13 +119,33 @@ nulang bootstrap/compiler_core.nula < /dev/null
 - **`if c then t else e`**: `c` must be `Bool`; `t` and `e` must have the same type.
 - **`let x = v in body`**: propagates type of `v` to `x` in `body`.
 - **Error reporting**: prints "Type error: expected X, got Y" and outputs 0 instead of evaluating.
-- **Limitations**: closures/function application skip type checking (return `Int`). No type ascription syntax yet.
+
+### Stage 12 — Type checking for closures (2026-07-31)
+- **Fn type:** `tc_pratt` returns type `Fn` (3) for closures instead of `Int` (0).
+- **Function application:** `f(arg)` validates that `f` has type `Fn`, produces "expected function" errors.
+- **Parameter typing:** closure parameters added to type environment as `Int`.
+- **Error propagation:** type errors inside closure bodies propagate outward.
+- **Currying:** `Fn` type preserved through application results for chained calls.
+
+
+### Stage 13 — Bytecode closure compilation (2026-07-31)
+- **compile_hex.nula:** emits `Closure` (0x60), `ClosureCall` (0x64), and `RetVal` (0x57) opcodes.
+- **Named functions:** `fn name(x) => body` support desugars to env binding + continuation.
+- **Function table:** `fixup_hex.py` patches placeholder function indices and Jmp offsets; `hex2nbc.py` builds `.nbc` function table from `FN_START` markers.
+- **Argument passing:** caller moves arg to r10; VM copies all registers to the new frame on `ClosureCall`.
+- **Conditionals in closures:** `(fn(x) => if x then 1 else 0)(1) = 1` — fixed `fixup_hex.py` Jmp target priority (`fn_end` before `end`).
+- **End-to-end verified:** `(fn(x) => x + 1)(5) = 6`, `fn add(x) => x + 1 add(5) = 6`, `(fn(x) => x + 1)((fn(y) => y * 2)(3)) = 7`.
+- **Limitations:** multi-fn continuation parsing; nested closures without capture support return closure values.
+
+### Unnumbered — Formal semantics proofs
+- **`types.lean`:** `canonical_forms` proved (was `sorry`).
+- **`capabilities.lean`:** `cap_sendable` and `discharge_sendable` proved; `is_sendable` fixed to include `Iso`.
 
 ## What remains
 
+
+- Module-level parsing (multiple `fn` definitions in one file)
+- Multi-binding closure capture via `CapStore`/`CapLoad` opcodes
 - HM type inference
 - Type ascription syntax (`x: Int`)
-- Type-check closures and function application
-- MIR lowering → `.nbc` codec
 - Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
-- Multi-binding closure capture (closures still limited to 1 captured variable)

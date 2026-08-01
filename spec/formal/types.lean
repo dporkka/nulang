@@ -481,7 +481,36 @@ theorem canonical_forms {v : Expr} {τ : Ty}
     (∃ (x : Name) (τ₁ : Ty) (e : Expr), v = .lambda x τ₁ e ∧
      ∃ τ₂ : Ty, τ = .fn τ₁ τ₂) ∨
     (v = .unitVal ∧ τ = .prim .Unit) := by
-  sorry
+  cases h
+  · -- tVar: impossible, empty context
+    rename_i h_lookup h_inst
+    simp [Context.lookup] at h_lookup
+    injection h_lookup
+  · -- tLitInt
+    left; exact ⟨_, rfl, rfl⟩
+  · -- tLitBool
+    right; left; exact ⟨_, rfl, rfl⟩
+  · -- tLitString
+    right; right; left; exact ⟨_, rfl, rfl⟩
+  · -- tLambda
+    right; right; right; left
+    exact ⟨_, _, _, rfl, _, rfl⟩
+  · -- tApp
+    simp [isValue] at hv
+  · -- tLet
+    simp [isValue] at hv
+  · -- tIf
+    simp [isValue] at hv
+  · -- tBinOpIntArith
+    simp [isValue] at hv
+  · -- tBinOpIntCmp
+    simp [isValue] at hv
+  · -- tBinOpBoolLogic
+    simp [isValue] at hv
+  · -- tStrConcat
+    simp [isValue] at hv
+  · -- tUnit
+    right; right; right; right; exact ⟨rfl, rfl⟩
 
 theorem progress {e : Expr} {τ : Ty} (h : HasType Context.empty e τ) :
     isValue e ∨ (∃ e', Step e e') := by

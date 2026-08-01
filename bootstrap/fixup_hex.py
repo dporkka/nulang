@@ -67,7 +67,7 @@ def fixup(lines: list[str]) -> list[str]:
                 if check_li in line_to_ic:
                     jmpf_info.append((check_li, line_to_ic[check_li]))
                     break
-        elif marker in ("; Jmp -> end", "; Jmp -> or_end", "; Jmp -> and_end"):
+        elif marker in ("; Jmp -> end", "; Jmp -> or_end", "; Jmp -> and_end", "; Jmp -> fn_end"):
             for check_li in range(li + 1, len(lines)):
                 if check_li in line_to_ic:
                     jmp_info.append((check_li, line_to_ic[check_li]))
@@ -78,6 +78,8 @@ def fixup(lines: list[str]) -> list[str]:
     and_end_markers = [li for li, m in markers.items() if m.startswith("; and_end:")]
     or_right_markers = [li for li, m in markers.items() if m.startswith("; or_right:")]
     or_end_markers = [li for li, m in markers.items() if m.startswith("; or_end:")]
+    fn_end_markers = [li for li, m in markers.items() if m.startswith("; fn_end:")]
+    fn_start_markers = [li for li, m in markers.items() if m.startswith("; FN_START")]
     
     patched = {}  # line_idx -> new word
     
@@ -119,14 +121,24 @@ def fixup(lines: list[str]) -> list[str]:
             old_word = [w for li, w in instr_lines if li == jf_li][0]
             patched[jf_li] = patch_jmpf(old_word, offset)
     
-    # Patch Jmp offsets (check ; end: then ; or_end: then ; else: then end of list)
+    # Patch Jmp offsets (check ; fn_end: then ; end: then ; or_end: then ; else: then end of list)
     for jp_li, jp_ic in reversed(jmp_info):
         target_ic = None
-        for em in end_markers:
-            if em > jp_li:
-                for check_li in range(em + 1, len(lines)):
-                    if check_li in line_to_ic:
-                        target_ic = line_to_ic[check_li]
+        marker_text = markers.get(jp_li - 1, "")
+        if "fn_end" in marker_text:
+            for em in fn_end_markers:
+                if em > jp_li:
+                    for check_li in range(em + 1, len(lines)):
+                        if check_li in line_to_ic:
+                            target_ic = line_to_ic[check_li]
+                            break
+                    break
+        if target_ic is None:
+            for em in end_markers:
+                if em > jp_li:
+                    for check_li in range(em + 1, len(lines)):
+                        if check_li in line_to_ic:
+                            target_ic = line_to_ic[check_li]
                         break
                 break
         if target_ic is None:
@@ -152,6 +164,23 @@ def fixup(lines: list[str]) -> list[str]:
             old_word = [w for li, w in instr_lines if li == jp_li][0]
             patched[jp_li] = patch_jmp(old_word, offset)
     
+    # Patch Closure function indices from FN_START markers
+    fn_indices = {}
+    for idx, li in enumerate(sorted(fn_start_markers)):
+        fn_indices[li] = idx + 1  # 0 is entry point
+    
+    for fn_li, fn_idx in sorted(fn_indices.items()):
+        for em in fn_end_markers:
+            if em > fn_li:
+                for check_li in range(em + 1, len(lines)):
+                    if check_li in line_to_ic:
+                        word = [w for cli, w in instr_lines if cli == check_li][0]
+                        if ((word >> 24) & 0xFF) == 0x60:
+                            dst = word & 0xFF
+                            patched[check_li] = instr(0x60, (fn_idx >> 8) & 0xFF, fn_idx & 0xFF, dst)
+                        break
+                break
+
     # Build constant pool from ; const N markers
     const_markers = {}  # line_idx -> value
     for li, marker in markers.items():

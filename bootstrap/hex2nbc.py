@@ -14,18 +14,22 @@ import sys, re, json, struct
 def main():
     lines = sys.stdin.readlines()
 
-    # Parse hex instructions and constant pool
+    # Parse hex instructions, constant pool, and function table markers
     instructions = []
     pool = []
-    for line in lines:
+    fn_table = [0]  # entry point is always at instruction 0
+    
+    for i, line in enumerate(lines):
         s = line.strip()
         if not s: continue
         if s.startswith("; constant pool:"):
-            # Parse "; constant pool: [1, 2, 3]"
             try:
                 inside = s.split("[", 1)[1].rsplit("]", 1)[0]
                 pool = [int(x.strip()) for x in inside.split(",") if x.strip()]
             except: pass
+        elif s.startswith("; FN_START"):
+            # Next non-comment line is the start of a function body
+            fn_table.append(len(instructions))
         elif re.match(r'^[0-9a-fA-F]{8}$', s):
             instructions.append(int(s, 16))
 
@@ -46,7 +50,7 @@ def main():
 
     meta = {
         "name": "main", "constants": consts, "instructions": [],
-        "behaviors": [], "function_table": [0], "exports": [],
+        "behaviors": [], "function_table": fn_table, "exports": [],
         "entry_point": None, "handler_tables": [], "actor_metadata": [],
         "foreign_functions": [], "tools": [],
     }
