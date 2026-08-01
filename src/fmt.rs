@@ -127,7 +127,7 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
                 out.push_str(&format!(" ! {}", e));
             }
             out.push_str(" {\n");
-            fmt_expr(out, body, indent + 4, had_unhandled);
+            fmt_block_body(out, body, indent + 4, had_unhandled);
             out.push_str(&format!("\n{}}}\n", sp));
         }
         Decl::VariantType {
@@ -180,10 +180,13 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
             if !state_fields.is_empty() && !behaviors.is_empty() {
                 out.push('\n');
             }
-            for b in behaviors {
+            for (i, b) in behaviors.iter().enumerate() {
+                if i > 0 {
+                    out.push('\n');
+                }
                 out.push_str(&format!("{}    behavior {}(", sp, b.name));
-                for (i, (pn, pty)) in b.params.iter().enumerate() {
-                    if i > 0 {
+                for (j, (pn, pty)) in b.params.iter().enumerate() {
+                    if j > 0 {
                         out.push_str(", ");
                     }
                     out.push_str(pn);
@@ -192,7 +195,7 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
                     }
                 }
                 out.push_str(") {\n");
-                fmt_expr(out, &b.body, indent + 8, had_unhandled);
+                fmt_block_body(out, &b.body, indent + 8, had_unhandled);
                 out.push_str(&format!("\n{}    }}\n", sp));
             }
             out.push_str(&format!("{}}}\n", sp));
@@ -411,6 +414,22 @@ fn fmt_pat(out: &mut String, pat: &Pattern) {
             out.push_str(" @ ");
             fmt_pat(out, inner);
         }
+    }
+}
+
+/// Format a function/behavior body, unwrapping blocks to avoid double braces.
+fn fmt_block_body(out: &mut String, body: &Expr, indent: usize, had_unhandled: &mut bool) {
+    if let Expr::Block { exprs, .. } = body {
+        let sp = " ".repeat(indent);
+        for (i, e) in exprs.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(&sp);
+            fmt_expr(out, e, indent, had_unhandled);
+        }
+    } else {
+        fmt_expr(out, body, indent, had_unhandled);
     }
 }
 
