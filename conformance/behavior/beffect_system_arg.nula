@@ -1,0 +1,5 @@
+fn main() {
+    // argv[1] is the script path passed by the conformance runner.
+    let a1 = perform System.arg(1)
+    perform IO.print(a1)
+}

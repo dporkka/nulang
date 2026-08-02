@@ -1,0 +1,7 @@
+fn main() {
+    perform IO.print(perform Int.to_hex(255))
+    perform IO.print(perform Int.to_binary(5))
+    let f = perform Int.to_float(3)
+    perform IO.print(f)
+    perform IO.print(f + 0.5)
+}

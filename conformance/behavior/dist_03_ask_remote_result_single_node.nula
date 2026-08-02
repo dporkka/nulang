@@ -1,0 +1,18 @@
+actor Greeter {
+    state got: Int = 0
+    behavior hello(x: Int) { self.got = x }
+    behavior get() { self.got }
+}
+fn main() {
+    let g = spawn Greeter {} in {
+        // `ask remote` is accepted syntax. Single-node current behavior:
+        // the RAsk VM instruction writes its result into the wrong register
+        // (op3 instead of op1), so the expression yields the target actor's
+        // reference (#Actor:1) rather than nil, and the message is dropped
+        // (got stays 0).
+        let r = ask remote g hello(42)
+        perform IO.print(r)
+        let s = ask g get()
+        perform IO.print(s)
+    }
+}

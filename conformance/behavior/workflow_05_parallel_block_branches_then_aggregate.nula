@@ -1,0 +1,29 @@
+// SPEC2 10.6: a `parallel { ... }` block declares steps that execute and
+// the workflow waits for all branches before continuing to the next step.
+// (The current runtime executes branches sequentially inside a synthetic
+// step, but all branches complete and the aggregate runs only after.)
+workflow ParallelProcessing {
+  parallel {
+    step gather_a {
+      perform IO.print("gathering A")
+    }
+    step gather_b {
+      perform IO.print("gathering B")
+    }
+  }
+
+  step aggregate_results {
+    perform IO.print("aggregating")
+  }
+}
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn ParallelProcessing {}
+  send w parallel_0()
+  send w aggregate_results()
+  perform IO.print("main-done")
+}

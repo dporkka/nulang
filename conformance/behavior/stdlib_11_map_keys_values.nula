@@ -1,0 +1,17 @@
+// stdlib::map — keys and values (arrays of keys / values in insertion order).
+// SPEC2.md 14.3's `Map.keys(phonebook)` matches this implementation directly.
+import stdlib::map
+import stdlib::list
+
+fn main() {
+    let phonebook = insert("Alice", "555-1234", insert("Bob", "555-5678", insert("Carol", "555-9012", [])))
+    let ks = keys(phonebook)
+    perform IO.print("keys_len=" + perform Int.to_string(length(ks)))
+    perform IO.print("key0=" + ks[0])
+    perform IO.print("key1=" + ks[1])
+    perform IO.print("key2=" + ks[2])
+    let vs = values(phonebook)
+    perform IO.print("values_len=" + perform Int.to_string(length(vs)))
+    perform IO.print("value0=" + vs[0])
+    perform IO.print("value2=" + vs[2])
+}

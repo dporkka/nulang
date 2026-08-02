@@ -1,0 +1,1 @@
+{"exit_code":0,"stdout":"len5=5\nlen0=0\nis_empty_yes=1\nis_empty_no=0\nchar_at1=e\nchar_at_oob_len=0\ncode_A=65\ncode_oob=-1\nstarts_nu=1\nstarts_no=0\nends_lang=1\nends_no=0\ncontains_sub=1\ncontains_no=0\nidx_la=2\nidx_miss=-1","stderr":""}

@@ -1,0 +1,18 @@
+// stdlib::map — contains_key, size, is_empty, empty, remove.
+// SPEC2.md 14.3's `Map.delete` is named `remove` in the implementation.
+import stdlib::map
+
+fn main() {
+    let b2i = fn(b) { if b then 1 else 0 }
+    let phonebook = insert("Alice", "555-1234", insert("Bob", "555-5678", insert("Carol", "555-9012", [])))
+    perform IO.print("size3=" + perform Int.to_string(size(phonebook)))
+    perform IO.print("has_alice=" + perform Int.to_string(b2i(contains_key("Alice", phonebook))))
+    perform IO.print("has_zed=" + perform Int.to_string(b2i(contains_key("Zed", phonebook))))
+    perform IO.print("empty_yes=" + perform Int.to_string(b2i(is_empty([]))))
+    perform IO.print("empty_no=" + perform Int.to_string(b2i(is_empty(phonebook))))
+    perform IO.print("empty_fn=" + perform Int.to_string(size(empty())))
+    let without_bob = remove("Bob", phonebook)
+    perform IO.print("after_remove_size=" + perform Int.to_string(size(without_bob)))
+    perform IO.print("after_remove_has_bob=" + perform Int.to_string(b2i(contains_key("Bob", without_bob))))
+    perform IO.print("after_remove_has_alice=" + perform Int.to_string(b2i(contains_key("Alice", without_bob))))
+}

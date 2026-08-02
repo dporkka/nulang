@@ -1,0 +1,4 @@
+fn main() {
+    let v = perform Env.get("NULANG_CONFORMANCE_UNSET_7f3a")
+    perform IO.print(v == nil)
+}

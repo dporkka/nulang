@@ -1,0 +1,21 @@
+// stdlib::set — add, contains, remove, size, is_empty over dedup arrays.
+// SPEC2.md 14.3's `Set.insert` is named `add` in the implementation;
+// `Set.contains(tags, "actors")` matches (set, value) order.
+import stdlib::set
+
+fn main() {
+    let b2i = fn(b) { if b then 1 else 0 }
+    let tags = add(add(add([], "nulang"), "programming"), "actors")
+    perform IO.print("size3=" + perform Int.to_string(size(tags)))
+    perform IO.print("has_actors=" + perform Int.to_string(b2i(contains(tags, "actors"))))
+    perform IO.print("has_rust=" + perform Int.to_string(b2i(contains(tags, "rust"))))
+    perform IO.print("add_dup_same_size=" + perform Int.to_string(size(add(tags, "actors"))))
+    let added = add(tags, "distributed")
+    perform IO.print("after_add_size=" + perform Int.to_string(size(added)))
+    perform IO.print("after_add_has=" + perform Int.to_string(b2i(contains(added, "distributed"))))
+    let removed = remove(tags, "programming")
+    perform IO.print("after_remove_size=" + perform Int.to_string(size(removed)))
+    perform IO.print("after_remove_gone=" + perform Int.to_string(b2i(contains(removed, "programming"))))
+    perform IO.print("empty_yes=" + perform Int.to_string(b2i(is_empty([]))))
+    perform IO.print("int_elems=" + perform Int.to_string(b2i(contains(add(add([], 1), 2), 2))))
+}

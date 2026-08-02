@@ -1,0 +1,25 @@
+// SPEC2 10.3: steps take no parameters; data is passed through actor state.
+// A later step reads a field written by an earlier step.
+workflow StatePassing {
+  step set_total {
+    {
+      self.total = 42
+      perform IO.print("set-total")
+    }
+  }
+
+  step get_total {
+    perform IO.print("total=" + perform Int.to_string(self.total))
+  }
+}
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn StatePassing {}
+  send w set_total()
+  send w get_total()
+  perform IO.print("main-done")
+}

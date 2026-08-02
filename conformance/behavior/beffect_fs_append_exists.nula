@@ -1,0 +1,9 @@
+fn main() {
+    let p = "/tmp/nulang_beffect_fs2.txt"
+    perform FS.write(p, "foo")
+    perform FS.append(p, "bar")
+    let r = perform FS.read(p)
+    perform IO.print(r)
+    let missing = perform FS.exists("/tmp/nulang_beffect_fs2_nope.txt")
+    perform IO.print(missing)
+}

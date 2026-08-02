@@ -1,0 +1,8 @@
+fn main() {
+    let p = "/tmp/nulang_beffect_fs1.txt"
+    perform FS.write(p, "hello")
+    let r = perform FS.read(p)
+    perform IO.print(r)
+    let e = perform FS.exists(p)
+    perform IO.print(e)
+}

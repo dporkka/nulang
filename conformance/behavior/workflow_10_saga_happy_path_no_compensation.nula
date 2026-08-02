@@ -1,0 +1,32 @@
+// SPEC2 10.8: when every step succeeds, no compensation runs — the
+// happy-path output contains only the step prints, not the compensate
+// bodies.
+workflow SagaHappy {
+  step reserve_inventory {
+    perform IO.print("reserved")
+  } compensate {
+    perform IO.print("released")
+  }
+
+  step charge_payment {
+    perform IO.print("charged")
+  } compensate {
+    perform IO.print("refunded")
+  }
+
+  step ship_goods {
+    perform IO.print("shipped")
+  }
+}
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn SagaHappy {}
+  send w reserve_inventory()
+  send w charge_payment()
+  send w ship_goods()
+  perform IO.print("main-done")
+}

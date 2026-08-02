@@ -1,0 +1,9 @@
+fn main() {
+    let arr = [10, 20, 30]
+    perform IO.print(perform Array.length(arr))
+    let pushed = perform Array.push(arr, 40)
+    perform IO.print(perform Array.length(pushed))
+    perform IO.print(pushed[3])
+    let made = perform Array.new(3, 7)
+    perform IO.print(made[0] + made[1] + made[2])
+}

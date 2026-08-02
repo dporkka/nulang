@@ -1,0 +1,28 @@
+// stdlib::list — sort (Int-only, ascending), sort_by with a comparator,
+// min_by / max_by with a comparator.
+import stdlib::list
+
+fn main() {
+    let s = sort([3, 1, 4, 1, 5])
+    perform IO.print("sort_len=" + perform Int.to_string(length(s)))
+    perform IO.print("sort0=" + perform Int.to_string(s[0]))
+    perform IO.print("sort1=" + perform Int.to_string(s[1]))
+    perform IO.print("sort2=" + perform Int.to_string(s[2]))
+    perform IO.print("sort4=" + perform Int.to_string(s[4]))
+    perform IO.print("sort_dup=" + perform Int.to_string(sort([5, 5, 3])[0]))
+    perform IO.print("sort_empty=" + perform Int.to_string(length(sort([]))))
+    let desc = fn(a, b) { a > b }
+    let d = sort_by(desc, [3, 1, 4])
+    perform IO.print("sort_by0=" + perform Int.to_string(d[0]))
+    perform IO.print("sort_by2=" + perform Int.to_string(d[2]))
+    let lt = fn(a, b) { a < b }
+    perform IO.print("min_by=" + perform Int.to_string(min_by(lt, [5, 2, 9])))
+    perform IO.print("max_by=" + perform Int.to_string(max_by(lt, [5, 2, 9])))
+    let by_abs = fn(a, b) {
+        let abs_a = if a < 0 then 0 - a else a;
+        let abs_b = if b < 0 then 0 - b else b;
+        abs_a < abs_b
+    }
+    perform IO.print("min_by_abs=" + perform Int.to_string(min_by(by_abs, [5, -2, 3, -10])))
+    perform IO.print("max_by_abs=" + perform Int.to_string(max_by(by_abs, [5, -2, 3, -10])))
+}

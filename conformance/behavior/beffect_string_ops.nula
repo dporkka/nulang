@@ -1,0 +1,9 @@
+fn main() {
+    perform IO.print(perform String.length("hello"))
+    perform IO.print(perform String.charAt("abc", 1))
+    perform IO.print(perform String.from_char(65))
+    perform IO.print(perform String.concat("foo", "bar"))
+    perform IO.print(perform String.substring("hello", 1, 3))
+    perform IO.print(perform String.to_int("42") + 1)
+    perform IO.print(perform String.to_float("2.5") + 0.5)
+}

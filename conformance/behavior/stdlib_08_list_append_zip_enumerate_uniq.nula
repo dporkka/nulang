@@ -1,0 +1,20 @@
+// stdlib::list — append, zip, enumerate, uniq.
+// zip is Int-typed: SPEC2.md 14.3's `List.zip([1,2,3], ["a","b","c"])`
+// (strings) is rejected by the typechecker.
+import stdlib::list
+
+fn main() {
+    let a = append([1, 2], [3, 4])
+    perform IO.print("append_len=" + perform Int.to_string(length(a)))
+    perform IO.print("append3=" + perform Int.to_string(a[2]))
+    perform IO.print("append_empty_l=" + perform Int.to_string(length(append([], [1, 2]))))
+    perform IO.print("append_empty_r=" + perform Int.to_string(length(append([1, 2], []))))
+    let z = zip([1, 2, 3], [10, 20])
+    perform IO.print("zip_len=" + perform Int.to_string(length(z)))
+    let e = enumerate([10, 20, 30])
+    perform IO.print("enum_len=" + perform Int.to_string(length(e)))
+    let u = uniq([1, 2, 2, 3, 1, 4])
+    perform IO.print("uniq_len=" + perform Int.to_string(length(u)))
+    perform IO.print("uniq_sum=" + perform Int.to_string(sum(u)))
+    perform IO.print("uniq_same=" + perform Int.to_string(length(uniq([5, 5, 5]))))
+}

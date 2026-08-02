@@ -1,0 +1,23 @@
+// stdlib::list — reverse, take, drop, range.
+import stdlib::list
+
+fn main() {
+    let xs = [1, 2, 3, 4, 5]
+    let r = reverse(xs)
+    perform IO.print("rev_len=" + perform Int.to_string(length(r)))
+    perform IO.print("rev0=" + perform Int.to_string(r[0]))
+    perform IO.print("rev4=" + perform Int.to_string(r[4]))
+    perform IO.print("rev_orig=" + perform Int.to_string(xs[0]))
+    perform IO.print("take2_len=" + perform Int.to_string(length(take(2, xs))))
+    perform IO.print("take2_0=" + perform Int.to_string(take(2, xs)[0]))
+    perform IO.print("take0=" + perform Int.to_string(length(take(0, xs))))
+    perform IO.print("take_more=" + perform Int.to_string(length(take(10, xs))))
+    perform IO.print("drop2_len=" + perform Int.to_string(length(drop(2, xs))))
+    perform IO.print("drop2_0=" + perform Int.to_string(drop(2, xs)[0]))
+    perform IO.print("drop_all=" + perform Int.to_string(length(drop(10, xs))))
+    let g = range(4)
+    perform IO.print("range_len=" + perform Int.to_string(length(g)))
+    perform IO.print("range0=" + perform Int.to_string(g[0]))
+    perform IO.print("range3=" + perform Int.to_string(g[3]))
+    perform IO.print("range0_len=" + perform Int.to_string(length(range(0))))
+}

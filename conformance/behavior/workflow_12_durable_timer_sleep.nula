@@ -1,0 +1,29 @@
+// SPEC2 10.10: `perform Timer.sleep(name, ms)` is runtime-backed and
+// available today. The two-argument form schedules a durable workflow
+// timer: the step completes immediately and the runtime keeps running
+// until the timer fires, so later steps still execute. A 0ms timer keeps
+// the case fast and deterministic.
+workflow TimedWf {
+  step arm_timer {
+    {
+      perform IO.print("scheduling-timer")
+      perform Timer.sleep("durable", 0)
+      perform IO.print("scheduled")
+    }
+  }
+
+  step after_timer {
+    perform IO.print("after-timer")
+  }
+}
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn TimedWf {}
+  send w arm_timer()
+  send w after_timer()
+  perform IO.print("main-done")
+}

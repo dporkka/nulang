@@ -1,0 +1,22 @@
+// stdlib::set — union, intersect, difference.
+// SPEC2.md 14.3's `Set.intersection` is named `intersect` in the implementation;
+// `Set.union(tags, ...)` matches directly.
+import stdlib::set
+
+fn main() {
+    let b2i = fn(b) { if b then 1 else 0 }
+    let tags = add(add(add([], "nulang"), "programming"), "actors")
+    let more = add(add([], "wasm"), "ai")
+    let combined = union(tags, more)
+    perform IO.print("union_size=" + perform Int.to_string(size(combined)))
+    perform IO.print("union_has_wasm=" + perform Int.to_string(b2i(contains(combined, "wasm"))))
+    perform IO.print("union_has_actors=" + perform Int.to_string(b2i(contains(combined, "actors"))))
+    let common = intersect(tags, add(add([], "actors"), "rust"))
+    perform IO.print("intersect_size=" + perform Int.to_string(size(common)))
+    perform IO.print("intersect_has_actors=" + perform Int.to_string(b2i(contains(common, "actors"))))
+    perform IO.print("intersect_has_rust=" + perform Int.to_string(b2i(contains(common, "rust"))))
+    let diff = difference(tags, add([], "actors"))
+    perform IO.print("diff_size=" + perform Int.to_string(size(diff)))
+    perform IO.print("diff_has_nulang=" + perform Int.to_string(b2i(contains(diff, "nulang"))))
+    perform IO.print("diff_no_actors=" + perform Int.to_string(b2i(contains(diff, "actors"))))
+}

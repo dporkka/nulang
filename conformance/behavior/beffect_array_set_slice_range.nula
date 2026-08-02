@@ -1,0 +1,10 @@
+fn main() {
+    let arr = [10, 20, 30, 40]
+    let set = perform Array.set(arr, 1, 99)
+    perform IO.print(set[1])
+    perform IO.print(perform Array.length(set))
+    let sl = perform Array.slice(arr, 1, 3)
+    perform IO.print(sl[0] + sl[1])
+    let rg = perform Array.range(5, 9)
+    perform IO.print(rg[0] + rg[1] + rg[2] + rg[3])
+}

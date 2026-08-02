@@ -1,0 +1,6 @@
+fn main() {
+    let out = perform Process.run("printf conformance")
+    perform IO.print(out)
+    let failed = perform Process.run("exit 3")
+    perform IO.print(failed == nil)
+}

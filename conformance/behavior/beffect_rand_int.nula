@@ -1,0 +1,9 @@
+fn main() {
+    // Random.int(lo, hi) is deterministic when lo == hi.
+    perform IO.print(perform Random.int(5, 5))
+    // lo > hi returns lo.
+    perform IO.print(perform Random.int(10, 9))
+    // Any value in [1, 3] satisfies the range check.
+    let x = perform Random.int(1, 3)
+    perform IO.print(x >= 1 && x <= 3)
+}

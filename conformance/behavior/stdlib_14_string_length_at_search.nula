@@ -1,0 +1,24 @@
+// stdlib::string — length, is_empty, char_at, char_code_at, starts_with,
+// ends_with, contains, index_of. SPEC2.md 14.4's starts_with/ends_with
+// calls match the implementation directly.
+import stdlib::string
+
+fn main() {
+    let b2i = fn(b) { if b then 1 else 0 }
+    perform IO.print("len5=" + perform Int.to_string(length("hello")))
+    perform IO.print("len0=" + perform Int.to_string(length("")))
+    perform IO.print("is_empty_yes=" + perform Int.to_string(b2i(is_empty(""))))
+    perform IO.print("is_empty_no=" + perform Int.to_string(b2i(is_empty("a"))))
+    perform IO.print("char_at1=" + char_at("hello", 1))
+    perform IO.print("char_at_oob_len=" + perform Int.to_string(length(char_at("hello", 99))))
+    perform IO.print("code_A=" + perform Int.to_string(char_code_at("A", 0)))
+    perform IO.print("code_oob=" + perform Int.to_string(char_code_at("x", 5)))
+    perform IO.print("starts_nu=" + perform Int.to_string(b2i(starts_with("nulang", "nu"))))
+    perform IO.print("starts_no=" + perform Int.to_string(b2i(starts_with("nulang", "la"))))
+    perform IO.print("ends_lang=" + perform Int.to_string(b2i(ends_with("nulang", "lang"))))
+    perform IO.print("ends_no=" + perform Int.to_string(b2i(ends_with("nulang", "nu"))))
+    perform IO.print("contains_sub=" + perform Int.to_string(b2i(contains("nulang", "ula"))))
+    perform IO.print("contains_no=" + perform Int.to_string(b2i(contains("nulang", "xyz"))))
+    perform IO.print("idx_la=" + perform Int.to_string(index_of("nulang", "la")))
+    perform IO.print("idx_miss=" + perform Int.to_string(index_of("nulang", "zz")))
+}

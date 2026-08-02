@@ -1,0 +1,26 @@
+// SPEC2 10.7: `for x in array body` loops within workflow steps, with
+// state accumulated across iterations (via a mutable `var`).
+workflow LoopWf {
+  step sum_items {
+    {
+      let items = [10, 20, 30]
+      var total = 0 in
+      {
+        for x in items {
+          total = total + x
+        }
+        perform IO.print("sum=" + perform Int.to_string(total))
+      }
+    }
+  }
+}
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn LoopWf {}
+  send w sum_items()
+  perform IO.print("main-done")
+}

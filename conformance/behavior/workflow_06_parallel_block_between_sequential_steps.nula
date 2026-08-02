@@ -1,0 +1,33 @@
+// SPEC2 10.4/10.6: a parallel block sits between sequential steps; the
+// preceding step runs first, then all parallel branches, then the
+// following step — the block is a barrier that completes every branch.
+workflow BarrierWf {
+  step prepare {
+    perform IO.print("prepare")
+  }
+
+  parallel {
+    step branch_one {
+      perform IO.print("branch-1")
+    }
+    step branch_two {
+      perform IO.print("branch-2")
+    }
+  }
+
+  step finalize {
+    perform IO.print("finalize")
+  }
+}
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn BarrierWf {}
+  send w prepare()
+  send w parallel_0()
+  send w finalize()
+  perform IO.print("main-done")
+}

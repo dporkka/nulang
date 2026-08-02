@@ -1,0 +1,26 @@
+// SPEC2 10.5/10.7: a `for` loop over an array whose body uses an `if` to
+// accumulate only even elements — 2 + 4 = 6 from [1, 2, 3, 4].
+workflow FilterLoopWf {
+  step sum_evens {
+    {
+      let items = [1, 2, 3, 4]
+      var total = 0 in
+      {
+        for x in items {
+          if x % 2 == 0 then total = total + x else ()
+        }
+        perform IO.print("evens=" + perform Int.to_string(total))
+      }
+    }
+  }
+}
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn FilterLoopWf {}
+  send w sum_evens()
+  perform IO.print("main-done")
+}

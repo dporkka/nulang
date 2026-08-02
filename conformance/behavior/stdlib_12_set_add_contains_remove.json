@@ -1,0 +1,1 @@
+{"exit_code":0,"stdout":"size3=3\nhas_actors=1\nhas_rust=0\nadd_dup_same_size=3\nafter_add_size=4\nafter_add_has=1\nafter_remove_size=2\nafter_remove_gone=0\nempty_yes=1\nint_elems=1","stderr":""}

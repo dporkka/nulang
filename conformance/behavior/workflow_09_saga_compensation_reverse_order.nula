@@ -1,0 +1,44 @@
+// SPEC2 10.8: saga pattern. reserve and charge complete (each advancing
+// the durable step_index, which the runtime consults for compensation),
+// then ship fails at runtime (non-exhaustive match). The compensations
+// run in reverse order of step completion: refunded, then released.
+workflow SagaTransaction {
+  step reserve_inventory {
+    {
+      perform IO.print("reserved")
+      self.step_index = self.step_index + 1
+    }
+  } compensate {
+    perform IO.print("released")
+  }
+
+  step charge_payment {
+    {
+      perform IO.print("charged")
+      self.step_index = self.step_index + 1
+    }
+  } compensate {
+    perform IO.print("refunded")
+  }
+
+  step ship_goods {
+    let m: Maybe[Int] = None in
+    match m {
+      | Some(x) => perform IO.print("unreachable")
+    }
+  }
+}
+
+type Maybe[V] = Some(V) | None
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn SagaTransaction {}
+  send w reserve_inventory()
+  send w charge_payment()
+  send w ship_goods()
+  perform IO.print("main-done")
+}

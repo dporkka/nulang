@@ -1,0 +1,13 @@
+// stdlib::list — length and sum over native arrays.
+// SPEC2.md 14.3 "List": List.length / List.sum (sum is not in SPEC 14.3 but
+// is part of the implemented module; called unqualified after import).
+import stdlib::list
+
+fn main() {
+    let xs = [1, 2, 3, 4, 5]
+    perform IO.print("len5=" + perform Int.to_string(length(xs)))
+    perform IO.print("len0=" + perform Int.to_string(length([])))
+    perform IO.print("sum15=" + perform Int.to_string(sum(xs)))
+    perform IO.print("sum0=" + perform Int.to_string(sum([])))
+    perform IO.print("sum_neg=" + perform Int.to_string(sum([-1, 1])))
+}

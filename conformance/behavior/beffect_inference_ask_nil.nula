@@ -1,0 +1,6 @@
+fn main() {
+    // Without a configured LLM client, Inference.ask resolves to nil
+    // rather than raising "Unhandled effect".
+    let resp = perform Inference.ask("hello")
+    perform IO.print(resp == nil)
+}

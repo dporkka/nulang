@@ -1,0 +1,29 @@
+// SPEC2 10.2/10.3/10.4: workflow declaration with steps; steps run in
+// declaration order (sequential execution is the default mode).
+workflow OrderFulfillment {
+  step receive_order {
+    perform IO.print("Processing order")
+  }
+
+  step validate_inventory {
+    perform IO.print("Checking stock")
+  }
+
+  step charge_payment {
+    perform IO.print("Charging payment")
+  }
+}
+
+// Workflow-only files bypass the actor runtime (main.rs has_actors misses
+// Decl::Workflow), so a plain actor declaration keeps the runtime active.
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn OrderFulfillment {}
+  send w receive_order()
+  send w validate_inventory()
+  send w charge_payment()
+  perform IO.print("main-done")
+}

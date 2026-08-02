@@ -1,0 +1,17 @@
+actor Cart {
+    state items_count: Int = 0
+    behavior get() { self.items_count }
+}
+fn main() {
+    let cart = spawn Cart { items_count = 0 } in {
+        let target_node = 7
+        // SPEC2.md 12.4: "Actors move between nodes explicitly with `migrate`".
+        // Single-node reality: the syntax is accepted, the program completes
+        // with exit code 0, and nothing observable happens — the actor stays
+        // put and keeps its state. The runtime migration callback is a no-op
+        // when distribution is not enabled (no --distributed CLI exists).
+        migrate cart to target_node
+        let r = ask cart get()
+        perform IO.print(r)
+    }
+}

@@ -1,0 +1,28 @@
+// SPEC2 10.5: ordinary `if` expressions within step bodies select which
+// side effect runs. Step one takes the then-branch, step two the else-branch.
+workflow ConditionalWf {
+  step then_branch {
+    {
+      let flag = true in
+      if flag then perform IO.print("cond-true") else perform IO.print("cond-false")
+    }
+  }
+
+  step else_branch {
+    {
+      let flag = false in
+      if flag then perform IO.print("cond-true") else perform IO.print("cond-false")
+    }
+  }
+}
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn ConditionalWf {}
+  send w then_branch()
+  send w else_branch()
+  perform IO.print("main-done")
+}

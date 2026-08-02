@@ -1,0 +1,1 @@
+{"exit_code":0,"stdout":"union_size=5\nunion_has_wasm=1\nunion_has_actors=1\nintersect_size=1\nintersect_has_actors=1\nintersect_has_rust=0\ndiff_size=2\ndiff_has_nulang=1\ndiff_no_actors=0","stderr":""}

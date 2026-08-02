@@ -1,0 +1,29 @@
+// SPEC2 10.5: a failing condition with a unit else-branch must produce no
+// side effect at all — the output proves the then-branch was skipped.
+workflow GatedWf {
+  step check_high {
+    {
+      let x = 5 in
+      if x > 10 then perform IO.print("big") else ()
+      perform IO.print("check-done")
+    }
+  }
+
+  step check_low {
+    {
+      let x = 25 in
+      if x > 10 then perform IO.print("big") else ()
+    }
+  }
+}
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn GatedWf {}
+  send w check_high()
+  send w check_low()
+  perform IO.print("main-done")
+}

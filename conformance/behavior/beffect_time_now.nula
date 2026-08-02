@@ -1,0 +1,6 @@
+fn main() {
+    let t1 = perform Time.now()
+    perform IO.print(t1 > 0)
+    let t2 = perform Time.now()
+    perform IO.print(t2 >= t1)
+}

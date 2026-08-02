@@ -1,0 +1,50 @@
+// SPEC2 10.8: a failing step triggers saga compensation for completed
+// steps in reverse order (comp-b before comp-a). Current runtime
+// contract: the failure is not fatal to the workflow actor — steps still
+// queued in the mailbox (step_d) execute afterwards, and compensations
+// are marked so they run only once.
+workflow HaltWf {
+  step step_a {
+    {
+      perform IO.print("step-a")
+      self.step_index = self.step_index + 1
+    }
+  } compensate {
+    perform IO.print("comp-a")
+  }
+
+  step step_b {
+    {
+      perform IO.print("step-b")
+      self.step_index = self.step_index + 1
+    }
+  } compensate {
+    perform IO.print("comp-b")
+  }
+
+  step step_c {
+    let m: Maybe[Int] = None in
+    match m {
+      | Some(x) => perform IO.print("unreachable")
+    }
+  }
+
+  step step_d {
+    perform IO.print("step-d")
+  }
+}
+
+type Maybe[V] = Some(V) | None
+
+actor Dummy {
+  behavior noop() { 0 }
+}
+
+fn main() {
+  let w = spawn HaltWf {}
+  send w step_a()
+  send w step_b()
+  send w step_c()
+  send w step_d()
+  perform IO.print("main-done")
+}

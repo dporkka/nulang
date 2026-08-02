@@ -1,0 +1,17 @@
+actor Greeter {
+    state got: Int = 0
+    behavior hello(x: Int) { self.got = x }
+    behavior get() { self.got }
+}
+fn main() {
+    let g = spawn Greeter {} in {
+        // Local send is delivered (got = 99).
+        send g hello(99)
+        // `send remote` is accepted syntax, but single-node the message is
+        // silently dropped: the remote-send callback no-ops when no
+        // transport/cluster/resolver is attached, so got stays 99.
+        send remote g hello(42)
+        let r = ask g get()
+        perform IO.print(r)
+    }
+}

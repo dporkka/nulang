@@ -1,0 +1,8 @@
+fn main() {
+    perform IO.print(perform Float.to_int(perform Float.sqrt(16.0)))
+    perform IO.print(perform Float.to_int(perform Float.pow(2.0, 10.0)))
+    perform IO.print(perform Float.to_int(perform Float.sin(0.0)))
+    perform IO.print(perform Float.to_int(perform Float.cos(0.0)))
+    perform IO.print(perform Float.to_int(perform Float.exp(0.0)))
+    perform IO.print(perform Float.to_int(perform Float.log(1.0)))
+}

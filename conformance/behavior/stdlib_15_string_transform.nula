@@ -1,0 +1,31 @@
+// stdlib::string — repeat, reverse, trim, split, join, replace, to_lower,
+// to_upper, is_upper, is_lower. SPEC2.md 14.4's `String.to_lowercase` /
+// `String.to_uppercase` are named to_lower / to_upper in the implementation;
+// `String.trim`, `String.split`, `String.replace`, `String.join` match.
+import stdlib::string
+
+fn main() {
+    let b2i = fn(b) { if b then 1 else 0 }
+    perform IO.print("repeat3=" + repeat("ab", 3))
+    perform IO.print("repeat0_len=" + perform Int.to_string(length(repeat("a", 0))))
+    perform IO.print("reverse=" + reverse("abc"))
+    perform IO.print("reverse_empty_len=" + perform Int.to_string(length(reverse(""))))
+    perform IO.print("trim=" + trim("  hello  "))
+    perform IO.print("trim_len=" + perform Int.to_string(length(trim("  hello  "))))
+    perform IO.print("trim_ws_len=" + perform Int.to_string(length(trim(" \n\t\r "))))
+    perform IO.print("split_rejoin=" + join(split("a,b,c", ","), "|"))
+    perform IO.print("split_empty_parts=" + join(split(",a,,b,", ","), "|"))
+    perform IO.print("join=" + join(["a", "b", "c"], ","))
+    perform IO.print("join_empty_len=" + perform Int.to_string(length(join([], ","))))
+    perform IO.print("replace=" + replace("hello world", "world", "Nulang"))
+    perform IO.print("replace_all=" + replace("aaa", "a", "b"))
+    perform IO.print("replace_none=" + replace("abc", "xyz", "123"))
+    perform IO.print("to_lower=" + to_lower("HELLO"))
+    perform IO.print("to_lower_mixed=" + to_lower("aBc123"))
+    perform IO.print("to_upper=" + to_upper("hello"))
+    perform IO.print("to_upper_mixed=" + to_upper("aBc123"))
+    perform IO.print("is_upper=" + perform Int.to_string(b2i(is_upper("HELLO"))))
+    perform IO.print("is_upper_noalpha=" + perform Int.to_string(b2i(is_upper("123"))))
+    perform IO.print("is_lower=" + perform Int.to_string(b2i(is_lower("hello"))))
+    perform IO.print("is_lower_mixed=" + perform Int.to_string(b2i(is_lower("Hello"))))
+}

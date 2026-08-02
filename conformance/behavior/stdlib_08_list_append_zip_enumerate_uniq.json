@@ -1,0 +1,1 @@
+{"exit_code":0,"stdout":"append_len=4\nappend3=3\nappend_empty_l=2\nappend_empty_r=2\nzip_len=2\nenum_len=3\nuniq_len=4\nuniq_sum=10\nuniq_same=1","stderr":""}

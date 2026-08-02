@@ -1,0 +1,1 @@
+{"exit_code":0,"stdout":"size3=3\nhas_alice=1\nhas_zed=0\nempty_yes=1\nempty_no=0\nempty_fn=0\nafter_remove_size=2\nafter_remove_has_bob=0\nafter_remove_has_alice=1","stderr":""}
