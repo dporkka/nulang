@@ -2916,7 +2916,7 @@ fn test_workflow_recovery_handles_new_event_variants() {
 #[cfg(feature = "ai-runtime")]
 #[test]
 fn test_pipeline_runtime_api() {
-    use crate::ai::PipelineRuntime;
+    use nulang_ai::PipelineRuntime;
 
     let mut rt = Runtime::new();
 

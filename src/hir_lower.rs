@@ -499,7 +499,7 @@ fn desugar_agent(
     #[cfg(feature = "ai-runtime")]
     let max_turns = memory.as_ref().map(|m| m.max_turns).unwrap_or(50);
     #[cfg(feature = "ai-runtime")]
-    let initial_memory = serde_json::to_string(&crate::ai::EpisodicMemory::new(max_turns))
+    let initial_memory = serde_json::to_string(&nulang_ai::EpisodicMemory::new(max_turns))
         .unwrap_or_else(|_| "{}".to_string());
     #[cfg(not(feature = "ai-runtime"))]
     let initial_memory = "{}".to_string();
@@ -508,7 +508,7 @@ fn desugar_agent(
     let initial_semantic_memory = semantic_memory_dimensions.map(|dimensions| {
         #[cfg(feature = "ai-runtime")]
         {
-            serde_json::to_string(&crate::ai::SemanticMemory::new(dimensions, None))
+            serde_json::to_string(&nulang_ai::SemanticMemory::new(dimensions, None))
                 .unwrap_or_else(|_| "{}".to_string())
         }
         #[cfg(not(feature = "ai-runtime"))]
@@ -522,7 +522,7 @@ fn desugar_agent(
     let initial_procedural_memory = procedural_memory_namespace.as_ref().map(|namespace| {
         #[cfg(feature = "ai-runtime")]
         {
-            serde_json::to_string(&crate::ai::ProceduralMemory::new(namespace.clone()))
+            serde_json::to_string(&nulang_ai::ProceduralMemory::new(namespace.clone()))
                 .unwrap_or_else(|_| "{}".to_string())
         }
         #[cfg(not(feature = "ai-runtime"))]

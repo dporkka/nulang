@@ -4577,7 +4577,7 @@ match { a: 2, b: 9 } with {
     #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_token_budget_exhausted_rejects_llm_request() {
-        use crate::ai::{LlmErrorKind, LlmRequest, LlmResponse, MockLlmClient, TokenUsage};
+        use nulang_ai::{LlmErrorKind, LlmRequest, LlmResponse, MockLlmClient, TokenUsage};
 
         let mut rt = Runtime::new();
 
@@ -4608,7 +4608,7 @@ match { a: 2, b: 9 } with {
     #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_token_budget_deducts_after_successful_call() {
-        use crate::ai::{LlmRequest, LlmResponse, MockLlmClient, TokenUsage};
+        use nulang_ai::{LlmRequest, LlmResponse, MockLlmClient, TokenUsage};
 
         let mut rt = Runtime::new();
         let mock = Box::new(MockLlmClient::new(LlmResponse {
@@ -4813,7 +4813,7 @@ match { a: 2, b: 9 } with {
         let module = compile_source_new(source).unwrap();
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let client = crate::ai::MockLlmClient::text("world");
+        let client = nulang_ai::MockLlmClient::text("world");
         rt.borrow_mut().set_llm_client(Box::new(client.clone()));
 
         let mut vm = VM::new();
@@ -4875,7 +4875,7 @@ match { a: 2, b: 9 } with {
         let actor = rt.actors.values().next().expect("expected one actor");
         let memory_json = actor.get_state_field("semantic_memory").unwrap();
         let memory_json_str = vm.value_to_string(module_idx, memory_json);
-        let memory: crate::ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
+        let memory: nulang_ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
         assert_eq!(memory.len(), 1);
         assert_eq!(memory.documents[0].content, "hello world");
     }
@@ -4925,7 +4925,7 @@ match { a: 2, b: 9 } with {
             let legacy_rt = Rc::new(RefCell::new(Runtime::new()));
             legacy_rt
                 .borrow_mut()
-                .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+                .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
             let mut legacy_vm = VM::new();
             legacy_vm.load_module(legacy_module);
             legacy_vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(legacy_rt)));
@@ -4939,7 +4939,7 @@ match { a: 2, b: 9 } with {
             let mir_rt = Rc::new(RefCell::new(Runtime::new()));
             mir_rt
                 .borrow_mut()
-                .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+                .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
             let mut mir_vm = VM::new();
             mir_vm.load_module(mir_module);
             mir_vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(mir_rt)));
@@ -5102,7 +5102,7 @@ match { a: 2, b: 9 } with {
     fn test_mir_fn_main_with_runtime() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
-            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
         let v =
             run_source_new_with_runtime("fn main() { perform LLM.ask(\"hello\") }", rt).unwrap();
         assert!(!v.is_nil());
@@ -5115,7 +5115,7 @@ match { a: 2, b: 9 } with {
     fn test_mir_fn_main_with_runtime_inference_ask() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
-            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
         let v = run_source_new_with_runtime("fn main() { perform Inference.ask(\"hello\") }", rt)
             .unwrap();
         assert!(!v.is_nil());
@@ -6170,7 +6170,7 @@ match { a: 2, b: 9 } with {
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
-            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
 
         let mut vm = VM::new();
         vm.load_module(module);
@@ -6208,7 +6208,7 @@ match { a: 2, b: 9 } with {
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
-            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
 
         let mut vm = VM::new();
         vm.load_module(module);
@@ -6228,7 +6228,7 @@ match { a: 2, b: 9 } with {
     #[test]
     fn test_llm_ask_actor_behavior_suspends_and_resumes() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let client = crate::ai::MockLlmClient::text("world");
+        let client = nulang_ai::MockLlmClient::text("world");
         rt.borrow_mut().set_llm_client(Box::new(client.clone()));
 
         let source = r#"
@@ -6279,7 +6279,7 @@ match { a: 2, b: 9 } with {
     fn test_llm_ask_nonblocking_other_actors_run_first() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
-            .set_llm_client(Box::new(crate::ai::MockLlmClient::delayed(
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::delayed(
                 "done",
                 std::time::Duration::from_millis(100),
             )));
@@ -6375,15 +6375,15 @@ match { a: 2, b: 9 } with {
     #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_llm_ask_chained_suspensions_resume_in_order() {
-        let text_response = |content: &str| crate::ai::LlmResponse {
+        let text_response = |content: &str| nulang_ai::LlmResponse {
             content: Some(content.to_string()),
             tool_calls: Vec::new(),
             model: "mock".to_string(),
             finish_reason: "stop".to_string(),
-            usage: crate::ai::TokenUsage::default(),
+            usage: nulang_ai::TokenUsage::default(),
         };
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let client = crate::ai::MockLlmClient::sequence(vec![
+        let client = nulang_ai::MockLlmClient::sequence(vec![
             text_response("first-reply"),
             text_response("second-reply"),
         ]);
@@ -6436,15 +6436,15 @@ match { a: 2, b: 9 } with {
     #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_llm_ask_queued_messages_wait_for_suspended_behavior() {
-        let text_response = |content: &str| crate::ai::LlmResponse {
+        let text_response = |content: &str| nulang_ai::LlmResponse {
             content: Some(content.to_string()),
             tool_calls: Vec::new(),
             model: "mock".to_string(),
             finish_reason: "stop".to_string(),
-            usage: crate::ai::TokenUsage::default(),
+            usage: nulang_ai::TokenUsage::default(),
         };
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let client = crate::ai::MockLlmClient::sequence(vec![
+        let client = nulang_ai::MockLlmClient::sequence(vec![
             text_response("reply-one"),
             text_response("reply-two"),
         ]);
@@ -6529,7 +6529,7 @@ match { a: 2, b: 9 } with {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut().persistence = Box::new(store.clone());
         rt.borrow_mut()
-            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
         let value = {
             let mut vm = VM::new();
             vm.load_module(module.clone());
@@ -6597,7 +6597,7 @@ match { a: 2, b: 9 } with {
         let rt1 = Rc::new(RefCell::new(Runtime::new()));
         rt1.borrow_mut().persistence = Box::new(store.clone());
         rt1.borrow_mut()
-            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("stale")));
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("stale")));
         let value = {
             let mut vm = VM::new();
             vm.load_module(module.clone());
@@ -6642,7 +6642,7 @@ match { a: 2, b: 9 } with {
 
         let rt2 = Rc::new(RefCell::new(Runtime::new()));
         rt2.borrow_mut().persistence = Box::new(store.clone());
-        let client2 = crate::ai::MockLlmClient::text("world");
+        let client2 = nulang_ai::MockLlmClient::text("world");
         rt2.borrow_mut().set_llm_client(Box::new(client2.clone()));
         rt2.borrow_mut().register_recovery_module(
             actor_id,
@@ -6708,7 +6708,7 @@ match { a: 2, b: 9 } with {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut().persistence = Box::new(store.clone());
         rt.borrow_mut()
-            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
         let value = {
             let mut vm = VM::new();
             vm.load_module(module.clone());
@@ -6826,7 +6826,7 @@ match { a: 2, b: 9 } with {
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut().persistence = Box::new(store.clone());
-        let client = crate::ai::MockLlmClient::text("world");
+        let client = nulang_ai::MockLlmClient::text("world");
         rt.borrow_mut().set_llm_client(Box::new(client.clone()));
         let value = {
             let mut vm = VM::new();
@@ -6909,7 +6909,7 @@ match { a: 2, b: 9 } with {
         let (module, _ty) = compile_source(source).unwrap();
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let client = crate::ai::MockLlmClient::text("world");
+        let client = nulang_ai::MockLlmClient::text("world");
         rt.borrow_mut().set_llm_client(Box::new(client.clone()));
 
         let mut vm = VM::new();
@@ -6959,7 +6959,7 @@ match { a: 2, b: 9 } with {
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let client =
-            crate::ai::MockLlmClient::with_usage("world", crate::ai::TokenUsage::new(1000, 500));
+            nulang_ai::MockLlmClient::with_usage("world", nulang_ai::TokenUsage::new(1000, 500));
         let client_ref = client.clone();
         rt.borrow_mut().set_llm_client(Box::new(client));
 
@@ -7014,7 +7014,7 @@ match { a: 2, b: 9 } with {
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
         let client =
-            crate::ai::MockLlmClient::with_usage("world", crate::ai::TokenUsage::new(1000, 500));
+            nulang_ai::MockLlmClient::with_usage("world", nulang_ai::TokenUsage::new(1000, 500));
         rt.borrow_mut().set_llm_client(Box::new(client));
 
         let mut vm = VM::new();
@@ -7068,7 +7068,7 @@ match { a: 2, b: 9 } with {
         let actor = rt.actors.values().next().expect("expected one actor");
         let memory_json = actor.get_state_field("semantic_memory").unwrap();
         let memory_json_str = vm.value_to_string(module_idx, memory_json);
-        let memory: crate::ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
+        let memory: nulang_ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
         assert_eq!(memory.len(), 1);
         assert_eq!(memory.documents[0].content, "hello world");
     }
@@ -7111,26 +7111,26 @@ match { a: 2, b: 9 } with {
             serde_json::Value::String("CRDTs".to_string()),
         );
 
-        let client = crate::ai::MockLlmClient::sequence(vec![
-            crate::ai::LlmResponse {
+        let client = nulang_ai::MockLlmClient::sequence(vec![
+            nulang_ai::LlmResponse {
                 content: None,
-                tool_calls: vec![crate::ai::ToolCall {
+                tool_calls: vec![nulang_ai::ToolCall {
                     id: String::new(),
                     name: "store_fact".to_string(),
                     arguments: store_args,
                 }],
                 model: "mock".to_string(),
                 finish_reason: "tool_calls".to_string(),
-                usage: crate::ai::TokenUsage::default(),
+                usage: nulang_ai::TokenUsage::default(),
             },
-            crate::ai::LlmResponse {
+            nulang_ai::LlmResponse {
                 content: Some(
                     "CRDTs enable strong eventual consistency without coordination.".to_string(),
                 ),
                 tool_calls: Vec::new(),
                 model: "mock".to_string(),
                 finish_reason: "stop".to_string(),
-                usage: crate::ai::TokenUsage::default(),
+                usage: nulang_ai::TokenUsage::default(),
             },
         ]);
         let client_ref = client.clone();
@@ -7162,7 +7162,7 @@ match { a: 2, b: 9 } with {
         let actor = rt.actors.values().next().expect("expected one actor");
         let memory_json = actor.get_state_field("semantic_memory").unwrap();
         let memory_json_str = vm.value_to_string(module_idx, memory_json);
-        let memory: crate::ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
+        let memory: nulang_ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
         assert_eq!(memory.len(), 1);
         assert_eq!(
             memory.documents[0].content,
@@ -7218,16 +7218,16 @@ match { a: 2, b: 9 } with {
             serde_json::Value::String("CRDTs".to_string()),
         );
 
-        let client = crate::ai::MockLlmClient::sequence(vec![crate::ai::LlmResponse {
+        let client = nulang_ai::MockLlmClient::sequence(vec![nulang_ai::LlmResponse {
             content: None,
-            tool_calls: vec![crate::ai::ToolCall {
+            tool_calls: vec![nulang_ai::ToolCall {
                 id: String::new(),
                 name: "store_fact".to_string(),
                 arguments: store_args,
             }],
             model: "mock".to_string(),
             finish_reason: "tool_calls".to_string(),
-            usage: crate::ai::TokenUsage::default(),
+            usage: nulang_ai::TokenUsage::default(),
         }]);
 
         let rt1 = Rc::new(RefCell::new(Runtime::new()));
@@ -7247,7 +7247,7 @@ match { a: 2, b: 9 } with {
             let actor = rt1_ref.actors.get(&actor_id).unwrap();
             let memory_json = actor.get_state_field("semantic_memory").unwrap();
             let memory_json_str = VM::new().value_to_string(0, memory_json);
-            let memory: crate::ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
+            let memory: nulang_ai::SemanticMemory = serde_json::from_str(&memory_json_str).unwrap();
             assert_eq!(memory.len(), 1);
         }
 
@@ -7315,7 +7315,7 @@ match { a: 2, b: 9 } with {
         let actor = rt.actors.values().next().expect("expected one actor");
         let memory_json = actor.get_state_field("procedural_memory").unwrap();
         let memory_json_str = vm.value_to_string(module_idx, memory_json);
-        let memory: crate::ai::ProceduralMemory = serde_json::from_str(&memory_json_str).unwrap();
+        let memory: nulang_ai::ProceduralMemory = serde_json::from_str(&memory_json_str).unwrap();
         assert_eq!(memory.len(), 1);
         assert_eq!(memory.namespace, "my_app");
         assert_eq!(
@@ -7359,7 +7359,7 @@ match { a: 2, b: 9 } with {
         let actor = rt.actors.values().next().expect("expected one actor");
         let memory_json = actor.get_state_field("procedural_memory").unwrap();
         let memory_json_str = vm.value_to_string(module_idx, memory_json);
-        let memory: crate::ai::ProceduralMemory = serde_json::from_str(&memory_json_str).unwrap();
+        let memory: nulang_ai::ProceduralMemory = serde_json::from_str(&memory_json_str).unwrap();
         assert_eq!(memory.len(), 2);
     }
 
@@ -7464,20 +7464,20 @@ match { a: 2, b: 9 } with {
         "#;
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let client = crate::ai::MockLlmClient::sequence(vec![
-            crate::ai::LlmResponse {
+        let client = nulang_ai::MockLlmClient::sequence(vec![
+            nulang_ai::LlmResponse {
                 content: Some("research notes".to_string()),
                 tool_calls: Vec::new(),
                 model: "mock".to_string(),
                 finish_reason: "stop".to_string(),
-                usage: crate::ai::TokenUsage::default(),
+                usage: nulang_ai::TokenUsage::default(),
             },
-            crate::ai::LlmResponse {
+            nulang_ai::LlmResponse {
                 content: Some("final article".to_string()),
                 tool_calls: Vec::new(),
                 model: "mock".to_string(),
                 finish_reason: "stop".to_string(),
-                usage: crate::ai::TokenUsage::default(),
+                usage: nulang_ai::TokenUsage::default(),
             },
         ]);
         rt.borrow_mut().set_llm_client(Box::new(client));
@@ -7520,20 +7520,20 @@ match { a: 2, b: 9 } with {
         "#;
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let client = crate::ai::MockLlmClient::sequence(vec![
-            crate::ai::LlmResponse {
+        let client = nulang_ai::MockLlmClient::sequence(vec![
+            nulang_ai::LlmResponse {
                 content: Some("research notes".to_string()),
                 tool_calls: Vec::new(),
                 model: "mock".to_string(),
                 finish_reason: "stop".to_string(),
-                usage: crate::ai::TokenUsage::default(),
+                usage: nulang_ai::TokenUsage::default(),
             },
-            crate::ai::LlmResponse {
+            nulang_ai::LlmResponse {
                 content: Some("final article".to_string()),
                 tool_calls: Vec::new(),
                 model: "mock".to_string(),
                 finish_reason: "stop".to_string(),
-                usage: crate::ai::TokenUsage::default(),
+                usage: nulang_ai::TokenUsage::default(),
             },
         ]);
         rt.borrow_mut().set_llm_client(Box::new(client));
@@ -7583,34 +7583,34 @@ match { a: 2, b: 9 } with {
         "#;
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
-        let client = crate::ai::MockLlmClient::sequence(vec![
-            crate::ai::LlmResponse {
+        let client = nulang_ai::MockLlmClient::sequence(vec![
+            nulang_ai::LlmResponse {
                 content: Some("pro argument".to_string()),
                 tool_calls: Vec::new(),
                 model: "mock".to_string(),
                 finish_reason: "stop".to_string(),
-                usage: crate::ai::TokenUsage::default(),
+                usage: nulang_ai::TokenUsage::default(),
             },
-            crate::ai::LlmResponse {
+            nulang_ai::LlmResponse {
                 content: Some("con argument".to_string()),
                 tool_calls: Vec::new(),
                 model: "mock".to_string(),
                 finish_reason: "stop".to_string(),
-                usage: crate::ai::TokenUsage::default(),
+                usage: nulang_ai::TokenUsage::default(),
             },
-            crate::ai::LlmResponse {
+            nulang_ai::LlmResponse {
                 content: Some("moderator observation".to_string()),
                 tool_calls: Vec::new(),
                 model: "mock".to_string(),
                 finish_reason: "stop".to_string(),
-                usage: crate::ai::TokenUsage::default(),
+                usage: nulang_ai::TokenUsage::default(),
             },
-            crate::ai::LlmResponse {
+            nulang_ai::LlmResponse {
                 content: Some("consensus reached".to_string()),
                 tool_calls: Vec::new(),
                 model: "mock".to_string(),
                 finish_reason: "stop".to_string(),
-                usage: crate::ai::TokenUsage::default(),
+                usage: nulang_ai::TokenUsage::default(),
             },
         ]);
         rt.borrow_mut().set_llm_client(Box::new(client));
@@ -8016,17 +8016,17 @@ match { a: 2, b: 9 } with {
 
         let rt = Rc::new(RefCell::new(Runtime::new()));
         // Mock: first call rate-limited, second succeeds after fallback.
-        let client = crate::ai::MockLlmClient::sequence_with_errors(vec![
-            Err(crate::ai::LlmError::new(
-                crate::ai::LlmErrorKind::RateLimit,
+        let client = nulang_ai::MockLlmClient::sequence_with_errors(vec![
+            Err(nulang_ai::LlmError::new(
+                nulang_ai::LlmErrorKind::RateLimit,
                 "429 Too Many Requests",
             )),
-            Ok(crate::ai::LlmResponse {
+            Ok(nulang_ai::LlmResponse {
                 content: Some("recovered via fallback".to_string()),
                 tool_calls: Vec::new(),
                 model: "fallback-model".to_string(),
                 finish_reason: "stop".to_string(),
-                usage: crate::ai::TokenUsage::new(10, 5),
+                usage: nulang_ai::TokenUsage::new(10, 5),
             }),
         ]);
         rt.borrow_mut().set_llm_client(Box::new(client));
@@ -8159,7 +8159,7 @@ match { a: 2, b: 9 } with {
     fn test_provider_ask_llm_equivalent_to_llm_ask() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
-            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
 
         // The new, general Provider effect.
         let v = run_source_new_with_runtime(
@@ -8181,7 +8181,7 @@ match { a: 2, b: 9 } with {
     fn test_provider_ask_unknown_provider_is_unhandled() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
         rt.borrow_mut()
-            .set_llm_client(Box::new(crate::ai::MockLlmClient::text("world")));
+            .set_llm_client(Box::new(nulang_ai::MockLlmClient::text("world")));
 
         let result = run_source_new_with_runtime(
             "fn main() { perform Provider.ask(\"unknown\", \"hello\") }",

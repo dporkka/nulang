@@ -1,9 +1,11 @@
 //! `impl` blocks that tie `nulang_ai` types to the core `Runtime`.
 //!
 //! The traits (`PipelineRuntime`, `DebateRuntime`, `SupervisorRuntime`) and
-//! the structs they operate on (`Pipeline`, `Debate`, `SupervisorTeam`) live
-//! in the `nulang-ai` crate so the pure AI types stay extractable. These
-//! impl blocks stay in core because they depend on `Runtime` internals.
+//! the structs they operate on (`Pipeline`, `Debate`, `SupervisorTeam`,
+//! `AiRuntimeRegistry`, `SupervisorTeamRegistry`) live in the `nulang-ai`
+//! crate so the pure AI types stay extractable. These impl blocks stay in
+//! core because they depend on `Runtime` internals (the orphan rule requires
+//! them to live in `Runtime`'s home crate).
 
 use crate::bytecode::Constant;
 use crate::runtime::{Actor, Runtime};

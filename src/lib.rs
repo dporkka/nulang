@@ -4,12 +4,9 @@
     clippy::missing_transmute_annotations
 )]
 
-pub mod backends;
-pub mod format;
-
-pub mod ai;
 pub mod aot;
 pub mod ast;
+pub mod backends;
 pub mod bytecode;
 pub mod cranelift_utils;
 pub mod docgen;
@@ -17,6 +14,7 @@ pub mod dst;
 pub mod effect_checker;
 pub mod ffi;
 pub mod fmt;
+pub mod format;
 pub mod fuzz;
 pub mod hir;
 pub mod hir_lower;

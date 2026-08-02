@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::ai::{LlmClient, LlmError, LlmRequest, LlmResponse, TokenBudget};
+use nulang_ai::{LlmClient, LlmError, LlmRequest, LlmResponse, TokenBudget};
 
 /// Work item sent to the persistent LLM worker thread.
 pub(crate) struct LlmWorkItem {

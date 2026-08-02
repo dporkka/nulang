@@ -235,7 +235,7 @@ pub struct Actor {
     /// Completed background LLM result waiting to be consumed when the
     /// suspended behavior re-executes its `LlmAsk` instruction.
     #[cfg(feature = "ai-runtime")]
-    pub llm_completed: Option<Result<crate::ai::LlmResponse, crate::ai::LlmError>>,
+    pub llm_completed: Option<Result<nulang_ai::LlmResponse, nulang_ai::LlmError>>,
     /// State of an in-flight timed selective receive (`receive ... after
     /// ms =>`), from the first suspension until the wait resolves (match,
     /// timeout, or the behavior ends). `None` when no receive-wait is live.

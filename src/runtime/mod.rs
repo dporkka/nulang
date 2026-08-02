@@ -25,13 +25,11 @@ mod orca_cycle;
 #[cfg(feature = "quic-experimental")]
 pub mod quic_transport;
 mod supervisor;
-#[cfg(feature = "ai-runtime")]
-mod supervisor_registry;
 use distributed_context::DistributedContext;
 #[cfg(feature = "ai-runtime")]
 mod agent;
 #[cfg(feature = "ai-runtime")]
-mod ai_registry;
+mod ai_impls;
 mod crdt;
 mod crdt_manager;
 mod crdt_reg;
@@ -67,16 +65,15 @@ pub use process_groups::*;
 pub use registry::*;
 pub use scheduler::*;
 pub use supervisor::*;
-#[cfg(feature = "ai-runtime")]
-pub use supervisor_registry::*;
 pub use timer::*;
 
-#[cfg(feature = "ai-runtime")]
-use crate::ai::{
-    complete_sync, LlmClient, LlmError, LlmErrorKind, LlmMessage, LlmRequest, LlmResponse,
-};
 use crate::types::{ExitReason, VmSuspension};
 use crate::vm::Value;
+#[cfg(feature = "ai-runtime")]
+use nulang_ai::{
+    complete_sync, AiRuntimeRegistry, LlmClient, LlmError, LlmErrorKind, LlmMessage, LlmRequest,
+    LlmResponse, SupervisorTeamRegistry,
+};
 
 // ---------------------------------------------------------------------------
 // Global actor ID generator
@@ -302,7 +299,7 @@ pub struct Runtime {
     // Pipelines and debates (v0.9 AI Runtime) — extracted into a registry so
     // the god-object shrinks and the subsystems can evolve independently.
     #[cfg(feature = "ai-runtime")]
-    pub ai: ai_registry::AiRuntimeRegistry,
+    pub ai: AiRuntimeRegistry,
     // Supervisor teams (v0.9 AI Runtime) — extracted into a registry so the
     // god-object shrinks and the subsystem can evolve independently.
     #[cfg(feature = "ai-runtime")]
@@ -407,7 +404,7 @@ impl Runtime {
             idle_callback: None,
             recovery_modules: HashMap::new(),
             #[cfg(feature = "ai-runtime")]
-            ai: ai_registry::AiRuntimeRegistry::new(),
+            ai: AiRuntimeRegistry::new(),
             #[cfg(feature = "ai-runtime")]
             supervisor_teams: SupervisorTeamRegistry::new(),
             crypto: Box::new(crate::backends::DefaultCryptoProvider::new()),
@@ -772,7 +769,7 @@ impl Runtime {
         request.tools = module
             .tools
             .iter()
-            .map(|t| crate::ai::ToolSchema {
+            .map(|t| nulang_ai::ToolSchema {
                 name: t.name.clone(),
                 description: t.description.clone(),
                 parameters: t.parameters.clone(),
@@ -1361,8 +1358,8 @@ impl Runtime {
             )
             .unwrap_or_default()
         };
-        let mut memory: crate::ai::EpisodicMemory = serde_json::from_str(&memory_json)
-            .unwrap_or_else(|_| crate::ai::EpisodicMemory::new(50));
+        let mut memory: nulang_ai::EpisodicMemory = serde_json::from_str(&memory_json)
+            .unwrap_or_else(|_| nulang_ai::EpisodicMemory::new(50));
 
         let max_chars = max_tokens.saturating_mul(4);
         let total_chars: usize = memory.turns.iter().map(|t| t.content.len()).sum();
@@ -3158,7 +3155,7 @@ impl Runtime {
 
     /// Read an agent's durable `semantic_memory` state field as a `SemanticMemory`.
     #[cfg(feature = "ai-runtime")]
-    fn read_semantic_memory(&self, actor: &Actor) -> Option<crate::ai::SemanticMemory> {
+    fn read_semantic_memory(&self, actor: &Actor) -> Option<nulang_ai::SemanticMemory> {
         let value = actor.get_state_field("semantic_memory")?;
         let ptr = value.as_ptr()?;
         if ptr.is_null() {
@@ -3174,7 +3171,7 @@ impl Runtime {
 
     /// Write a `SemanticMemory` back to an agent's durable `semantic_memory` state field.
     #[cfg(feature = "ai-runtime")]
-    fn write_semantic_memory(actor: &mut Actor, memory: &crate::ai::SemanticMemory) {
+    fn write_semantic_memory(actor: &mut Actor, memory: &nulang_ai::SemanticMemory) {
         if let Ok(json) = serde_json::to_string(memory) {
             let ptr = actor.allocate_string(&json);
             actor.set_state_field("semantic_memory", ptr);
@@ -3236,7 +3233,7 @@ impl Runtime {
         } else {
             None
         };
-        let mut memory = memory_opt.unwrap_or_else(|| crate::ai::SemanticMemory::new(64, None));
+        let mut memory = memory_opt.unwrap_or_else(|| nulang_ai::SemanticMemory::new(64, None));
         let id = memory.store(content, metadata);
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             Self::write_semantic_memory(actor, &memory);
@@ -3285,7 +3282,7 @@ impl Runtime {
 
     /// Read an agent's durable `procedural_memory` state field as a `ProceduralMemory`.
     #[cfg(feature = "ai-runtime")]
-    fn read_procedural_memory(&self, actor: &Actor) -> Option<crate::ai::ProceduralMemory> {
+    fn read_procedural_memory(&self, actor: &Actor) -> Option<nulang_ai::ProceduralMemory> {
         let value = actor.get_state_field("procedural_memory")?;
         let ptr = value.as_ptr()?;
         if ptr.is_null() {
@@ -3301,7 +3298,7 @@ impl Runtime {
 
     /// Write a `ProceduralMemory` back to an agent's durable `procedural_memory` state field.
     #[cfg(feature = "ai-runtime")]
-    fn write_procedural_memory(actor: &mut Actor, memory: &crate::ai::ProceduralMemory) {
+    fn write_procedural_memory(actor: &mut Actor, memory: &nulang_ai::ProceduralMemory) {
         if let Ok(json) = serde_json::to_string(memory) {
             let ptr = actor.allocate_string(&json);
             actor.set_state_field("procedural_memory", ptr);
@@ -3321,7 +3318,7 @@ impl Runtime {
             .actors
             .get(&actor_id)
             .and_then(|actor| self.read_procedural_memory(actor));
-        let mut memory = memory_opt.unwrap_or_else(|| crate::ai::ProceduralMemory::new("default"));
+        let mut memory = memory_opt.unwrap_or_else(|| nulang_ai::ProceduralMemory::new("default"));
         let key = memory.store_pattern(key, input_pattern, output_template);
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             Self::write_procedural_memory(actor, &memory);
@@ -3359,7 +3356,7 @@ impl Runtime {
             .actors
             .get(&actor_id)
             .and_then(|actor| self.read_procedural_memory(actor));
-        let mut memory = memory_opt.unwrap_or_else(|| crate::ai::ProceduralMemory::new("default"));
+        let mut memory = memory_opt.unwrap_or_else(|| nulang_ai::ProceduralMemory::new("default"));
         memory.add_example(task, input, output);
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             Self::write_procedural_memory(actor, &memory);
@@ -5192,9 +5189,9 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                     if rt.llm.client.is_none() {
                         return Some(crate::vm::Value::nil());
                     }
-                    let request = crate::ai::LlmRequest {
+                    let request = nulang_ai::LlmRequest {
                         model: String::new(),
-                        messages: vec![crate::ai::LlmMessage {
+                        messages: vec![nulang_ai::LlmMessage {
                             role: "user".to_string(),
                             content: prompt,
                         }],

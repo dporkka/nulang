@@ -12,18 +12,18 @@
 
 use std::sync::Arc;
 
-use crate::ai::{
+use crate::runtime::Runtime;
+use nulang_ai::{
     EpisodicMemory, LlmClient, LlmMessage, LlmRequest, LlmResponse, ModelPricing, TokenBudget,
 };
-use crate::runtime::Runtime;
 
 /// Convert core `ToolSchema` (bytecode/HIR, unconditional) into the
 /// `nulang-ai` wire-format `ToolSchema` used by `LlmRequest.tools`. The two
 /// types are structurally identical but independently defined: `nulang-ai`
 /// has zero dependency on core `nulang`, so core cannot hand it its own
 /// type directly.
-fn to_provider_tool_schema(t: &crate::tool_schema::ToolSchema) -> crate::ai::ToolSchema {
-    crate::ai::ToolSchema {
+fn to_provider_tool_schema(t: &crate::tool_schema::ToolSchema) -> nulang_ai::ToolSchema {
+    nulang_ai::ToolSchema {
         name: t.name.clone(),
         description: t.description.clone(),
         parameters: t.parameters.clone(),
@@ -290,7 +290,7 @@ pub(crate) fn finish_agent_llm(
     let content = response.content.clone().unwrap_or_default();
 
     // Accumulate token usage and cost into durable state.
-    let new_cost = crate::ai::estimated_cost(&response.usage, &pricing);
+    let new_cost = nulang_ai::estimated_cost(&response.usage, &pricing);
     let updated_prompt = usage_prompt.saturating_add(response.usage.prompt);
     let updated_completion = usage_completion.saturating_add(response.usage.completion);
     let updated_cost = usage_cost + new_cost;

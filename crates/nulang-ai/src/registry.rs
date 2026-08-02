@@ -1,22 +1,29 @@
-//! Extracted AI-runtime registry: pipelines and debates.
+//! Registries for AI-runtime pipelines, debates, and supervisor teams.
 //!
-//! Groups the v0.9 AI Runtime bookkeeping (`next_pipeline_id`, `pipelines`,
-//! `next_debate_id`, `debates`) into a single struct so the `Runtime`
-//! god-object (`src/runtime/mod.rs` is ~6100 lines) shrinks and these
-//! subsystems can evolve — or be removed — independently.
+//! Both [`AiRuntimeRegistry`] (pipelines + debates) and
+//! [`SupervisorTeamRegistry`] are pure state — a monotonically-increasing id
+//! counter plus a `HashMap` — with `run_*` methods that delegate through the
+//! trait-object runtime abstractions ([`PipelineRuntime`], [`DebateRuntime`],
+//! [`SupervisorRuntime`]).
 //!
-//! This follows the extraction pattern established by
-//! [`SupervisorTeamRegistry`](super::supervisor_registry::SupervisorTeamRegistry).
+//! The core `nulang` crate mounts one instance of each on its `Runtime` and
+//! implements the abstraction traits. Keeping the registries here means the
+//! `Runtime` god-object never grows a new AI field: adding a new
+//! orchestration primitive is a `nulang-ai`-only change.
+//!
+//! Classified as Experimental (RFC 0004).
 
 use std::collections::HashMap;
 
-use crate::ai::{Debate, Pipeline};
+use crate::debate::{Debate, DebateRuntime};
+use crate::pipeline::{Pipeline, PipelineRuntime, PipelineStage};
+use crate::supervisor::{SupervisorRuntime, SupervisorTeam, Worker};
+
+// ---------------------------------------------------------------------------
+// Pipelines + debates
+// ---------------------------------------------------------------------------
 
 /// Owns the AI-runtime pipeline and debate bookkeeping.
-///
-/// Both are AI-runtime constructs classified as Experimental in the
-/// repositioned language (see RFC 0004). They remain functional during
-/// the deprecation cycle.
 #[derive(Debug, Default)]
 pub struct AiRuntimeRegistry {
     /// Next pipeline id.
@@ -62,7 +69,7 @@ impl AiRuntimeRegistry {
             .pipelines
             .get_mut(&id)
             .ok_or_else(|| format!("Pipeline {} not found", id))?;
-        pipeline.stages.push(crate::ai::PipelineStage {
+        pipeline.stages.push(PipelineStage {
             name: name.to_string(),
             agent_id,
             prompt_template: template.to_string(),
@@ -71,9 +78,7 @@ impl AiRuntimeRegistry {
     }
 
     /// Run a pipeline, returning the output of the final stage.
-    /// Takes a `&mut dyn PipelineRuntime` because the pipeline calls back
-    /// into the runtime to execute its LLM-backed stages.
-    pub fn run_pipeline<R: crate::ai::PipelineRuntime>(
+    pub fn run_pipeline<R: PipelineRuntime>(
         &self,
         id: u64,
         runtime: &mut R,
@@ -114,13 +119,7 @@ impl AiRuntimeRegistry {
     }
 
     /// Run a debate and return the moderator's synthesis.
-    /// Takes a `&mut dyn DebateRuntime` because the debate calls back into
-    /// the runtime to execute its LLM-backed participant turns.
-    pub fn run_debate<R: crate::ai::DebateRuntime>(
-        &self,
-        id: u64,
-        runtime: &mut R,
-    ) -> Result<String, String> {
+    pub fn run_debate<R: DebateRuntime>(&self, id: u64, runtime: &mut R) -> Result<String, String> {
         let debate = self
             .debates
             .get(&id)
@@ -130,10 +129,77 @@ impl AiRuntimeRegistry {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Supervisor teams
+// ---------------------------------------------------------------------------
+
+/// Owns the AI-runtime supervisor-team bookkeeping.
+#[derive(Debug, Default)]
+pub struct SupervisorTeamRegistry {
+    pub next_id: u64,
+    pub teams: HashMap<u64, SupervisorTeam>,
+}
+
+impl SupervisorTeamRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        SupervisorTeamRegistry {
+            next_id: 1,
+            teams: HashMap::new(),
+        }
+    }
+
+    /// Create a new supervisor team and return its id.
+    pub fn create(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.teams.insert(id, SupervisorTeam::new());
+        id
+    }
+
+    /// Add a worker to an existing team.
+    pub fn add_worker(
+        &mut self,
+        id: u64,
+        name: &str,
+        agent_id: u64,
+        description: &str,
+    ) -> Result<u64, String> {
+        let team = self
+            .teams
+            .get_mut(&id)
+            .ok_or_else(|| format!("Supervisor team {} not found", id))?;
+        team.workers.push(Worker {
+            name: name.to_string(),
+            agent_id,
+            description: description.to_string(),
+        });
+        Ok(id)
+    }
+
+    /// Run a supervisor team, returning the final worker's output.
+    pub fn run<R: SupervisorRuntime>(
+        &self,
+        id: u64,
+        runtime: &mut R,
+        task: &str,
+    ) -> Result<String, String> {
+        let team = self
+            .teams
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| format!("Supervisor team {} not found", id))?;
+        team.run(runtime, task)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::{DebateRuntime, PipelineRuntime};
 
     #[allow(dead_code)]
     struct MockRuntime;
@@ -145,6 +211,12 @@ mod tests {
     }
 
     impl DebateRuntime for MockRuntime {
+        fn ask_agent(&mut self, _agent_id: u64, prompt: &str) -> Result<String, String> {
+            Ok(prompt.to_string())
+        }
+    }
+
+    impl SupervisorRuntime for MockRuntime {
         fn ask_agent(&mut self, _agent_id: u64, prompt: &str) -> Result<String, String> {
             Ok(prompt.to_string())
         }
@@ -185,5 +257,23 @@ mod tests {
             .expect("participant should succeed");
         let debate = reg.debates.get(&id).unwrap();
         assert_eq!(debate.participants.len(), 1);
+    }
+
+    #[test]
+    fn test_supervisor_registry_creates_incrementing_ids() {
+        let mut reg = SupervisorTeamRegistry::new();
+        let id1 = reg.create();
+        let id2 = reg.create();
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert!(reg.teams.contains_key(&id1));
+        assert!(reg.teams.contains_key(&id2));
+    }
+
+    #[test]
+    fn test_supervisor_add_worker_errors_on_unknown_team() {
+        let mut reg = SupervisorTeamRegistry::new();
+        let err = reg.add_worker(999, "w", 0, "d").unwrap_err();
+        assert!(err.contains("not found"));
     }
 }
