@@ -1,0 +1,1 @@
+{ "exit_code": 5, "stdout": "", "stderr": "missing effects: IO\n  allowed effects: {}", "proves": "An explicit `! {}` annotation narrower than the body's actual effects populates NuError::EffectError.missing_effects/allowed_effects as separate structured fields, not just free text." }

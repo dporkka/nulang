@@ -2135,6 +2135,106 @@ impl ExitReason {
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------
+    // Structured error diagnostics (PLAN.md Phase 1 bullet 7): verify
+    // the NuError constructor helpers actually populate their
+    // expected/found/suggestion fields, not just the free-text `msg`.
+    // These are unit-level companions to the end-to-end
+    // `structerr_*` conformance cases, which verify the same
+    // populated fields reach the real error output through
+    // `format_rich`/`Display`.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_type_mismatch_populates_expected_and_found() {
+        let err = NuError::type_mismatch("Int", "String", Span::default());
+        match &err {
+            NuError::TypeError {
+                expected_type,
+                found_type,
+                ..
+            } => {
+                assert_eq!(expected_type.as_deref(), Some("Int"));
+                assert_eq!(found_type.as_deref(), Some("String"));
+            }
+            other => panic!("expected TypeError, got {other:?}"),
+        }
+        let displayed = format!("{err}");
+        assert!(displayed.contains("expected: Int") || displayed.contains("Int"));
+        assert!(displayed.contains("String"));
+    }
+
+    #[test]
+    fn test_unbound_variable_suggests_close_name_within_edit_distance() {
+        let in_scope = vec!["counter".to_string(), "unrelated_far_name".to_string()];
+        let err = NuError::unbound_variable("countr", Span::default(), Some(in_scope));
+        match &err {
+            NuError::TypeError { similar_names, .. } => {
+                let names = similar_names.as_ref().expect("expected a suggestion");
+                assert_eq!(names, &vec!["counter".to_string()]);
+            }
+            other => panic!("expected TypeError, got {other:?}"),
+        }
+        assert!(format!("{err}").contains("did you mean"));
+    }
+
+    #[test]
+    fn test_unbound_variable_no_suggestion_when_nothing_close() {
+        let in_scope = vec!["totally_unrelated".to_string()];
+        let err = NuError::unbound_variable("xyz", Span::default(), Some(in_scope));
+        match &err {
+            NuError::TypeError { similar_names, .. } => {
+                assert!(similar_names.is_none());
+            }
+            other => panic!("expected TypeError, got {other:?}"),
+        }
+        assert!(!format!("{err}").contains("did you mean"));
+    }
+
+    #[test]
+    fn test_unbound_variable_no_suggestion_without_scope_context() {
+        // Call sites that can't cheaply compute in-scope names (or choose
+        // not to) pass `None` — must degrade cleanly, not panic.
+        let err = NuError::unbound_variable("whatever", Span::default(), None);
+        match &err {
+            NuError::TypeError { similar_names, .. } => assert!(similar_names.is_none()),
+            other => panic!("expected TypeError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_missing_effects_populates_structured_fields() {
+        let err = NuError::missing_effects(vec!["IO".to_string()], "{}", Span::default());
+        match &err {
+            NuError::EffectError {
+                missing_effects,
+                allowed_effects,
+                ..
+            } => {
+                assert_eq!(missing_effects.as_deref(), Some(&["IO".to_string()][..]));
+                assert_eq!(allowed_effects.as_deref(), Some("{}"));
+            }
+            other => panic!("expected EffectError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unexpected_populates_expected_and_found() {
+        let err = NuError::parse_unexpected("','", "'}'", Span::default());
+        match &err {
+            NuError::ParseError {
+                expected, found, ..
+            } => {
+                assert_eq!(expected.as_deref(), Some("','"));
+                assert_eq!(found.as_deref(), Some("'}'"));
+            }
+            other => panic!("expected ParseError, got {other:?}"),
+        }
+        let displayed = format!("{err}");
+        assert!(displayed.contains("expected: ','"));
+        assert!(displayed.contains("found: '}'"));
+    }
+
     #[test]
     fn test_discharge_linear() {
         assert_eq!(Capability::LinearIso.discharge_linear(), Capability::Iso);

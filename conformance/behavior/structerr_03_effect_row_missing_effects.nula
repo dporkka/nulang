@@ -1,0 +1,12 @@
+// Structured error diagnostics: an explicit effect annotation narrower
+// than what the body actually performs populates
+// NuError::EffectError.missing_effects/allowed_effects (see
+// src/effect_checker.rs's effect_row_subset check), surfaced as
+// separate "missing effects:"/"allowed effects:" lines.
+fn pure_fn() -> Int ! {} {
+  perform IO.print("side effect")
+  42
+}
+fn main() {
+  perform IO.print(perform Int.to_string(pure_fn()))
+}

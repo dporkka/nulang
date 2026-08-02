@@ -1,0 +1,8 @@
+// Structured error diagnostics: an unbound variable close (Levenshtein
+// distance <= 2) to an in-scope name gets a "did you mean" suggestion.
+// See NuError::unbound_variable / NuError::TypeError.similar_names in
+// src/types.rs.
+fn main() {
+  let counter = 5
+  perform IO.print(perform Int.to_string(countr + 1))
+}

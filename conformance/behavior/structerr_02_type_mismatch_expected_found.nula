@@ -1,0 +1,8 @@
+// Structured error diagnostics: a type mismatch from mgu's unification
+// fallback populates NuError::TypeError.expected_type/found_type (via
+// NuError::type_mismatch in src/types.rs), surfaced as separate
+// "expected type:"/"found type:" lines in the real error output.
+fn add(x: Int, y: Int) -> Int { x + y }
+fn main() {
+  perform IO.print(perform Int.to_string(add(1, "two")))
+}

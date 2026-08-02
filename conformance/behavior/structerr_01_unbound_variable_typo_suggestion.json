@@ -1,0 +1,1 @@
+{ "exit_code": 4, "stdout": "", "stderr": "did you mean one of: counter?", "proves": "Unbound-variable errors close (Levenshtein distance <= 2) to an in-scope name populate NuError::TypeError.similar_names and surface a 'did you mean' suggestion in the real error output." }
