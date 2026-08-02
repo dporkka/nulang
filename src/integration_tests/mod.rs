@@ -2196,6 +2196,115 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// Regression for the `state_models` recovery bug fixed alongside
+    /// PLAN.md bullet 8: before the fix, `recover_actor` never restored
+    /// `Actor.state_models` on the rebuilt actor, so every field
+    /// silently reverted to the `Local` default after one recovery --
+    /// meaning a *second* crash would have dropped `durable` fields
+    /// from the snapshot entirely (`checkpoint_actor` only includes
+    /// `Durable`/`Crdt` fields, and `state_models.get(name)` on a field
+    /// missing from the map falls back to `Local`). This drives a
+    /// durable counter through two full crash-and-recover cycles and
+    /// asserts the count survives both.
+    #[test]
+    fn test_durable_state_survives_two_recovery_cycles() {
+        let source = r#"
+            persistent actor Counter {
+                state durable count: Int = 0
+                behavior inc() { self.count = self.count + 1 }
+                behavior get() { self.count }
+            }
+            spawn Counter {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        let mut comp_offsets: Vec<Option<usize>> = vec![None; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+                comp_offsets[idx] = entry.compensate_offset;
+            }
+        }
+
+        // Cycle 0: spawn, one inc, checkpoint happens automatically per
+        // step.
+        let rt0 = Rc::new(RefCell::new(Runtime::new()));
+        rt0.borrow_mut().persistence = Box::new(store.clone());
+        let actor_id = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt0.clone())));
+            vm.run().unwrap().as_actor_id().unwrap()
+        };
+        rt0.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt0.borrow_mut().run_scheduler();
+
+        // Cycle 1: first crash + recover, one more inc.
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        rt1.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            comp_offsets.clone(),
+        );
+        rt1.borrow_mut().recover_actor(actor_id);
+        rt1.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt1.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(2),
+            "count should be 2 after cycle 1 (1 inc pre-crash + 1 post-recovery)"
+        );
+
+        // Cycle 2: SECOND crash + recover -- this is the one that would
+        // have silently lost `count` before the state_models fix, since
+        // rt1's checkpoint_actor would have treated `count` as `Local`
+        // (missing from an empty state_models map) and excluded it from
+        // the snapshot entirely.
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            comp_offsets.clone(),
+        );
+        rt2.borrow_mut().recover_actor(actor_id);
+        assert_eq!(
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(2),
+            "count must survive a SECOND recovery cycle, not silently \
+             reset to 0"
+        );
+        rt2.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt2.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(3),
+            "counter should keep incrementing correctly after two \
+             recovery cycles"
+        );
+    }
+
     #[test]
     fn test_event_sourced_counter_emits_and_recovers() {
         let source = r#"
@@ -2233,6 +2342,152 @@ match { a: 2, b: 9 } with {
         );
         assert_eq!(actor.event_log.len(), 3, "three events should be logged");
         assert_eq!(actor.event_log[0].0, "Incremented");
+    }
+
+    /// PLAN.md bullet 8 (persistence recovery correctness): does recovery
+    /// of an `event_sourced` field with an `apply` handler reproduce the
+    /// value a never-crashed run would reach? It does not -- see
+    /// SPEC2.md §9.6's "Implementation status" note for full analysis.
+    /// This test pins the CURRENT (buggy) recovered value so a silent
+    /// regression or silent fix is caught either way, rather than
+    /// leaving the gap purely as a documentation claim.
+    ///
+    /// Baseline (no crash): `entity Counter` with
+    /// `apply | Incremented(by) => self.count = self.count + by`, sent
+    /// `increment(3)` then `increment(4)`, reaches count = 9 -- this
+    /// matches `persist_07_emit_accumulates_across_sends.nula`'s real
+    /// captured output (apply computes `count + by`, plus an
+    /// unconditional "+1" every `event_sourced` field gets per emit,
+    /// see `persist_08_emit_bumps_all_event_sourced.json`).
+    ///
+    /// With a crash-and-recover between the two sends, recovery ignores
+    /// the first event's `by = 3` entirely (it only counts "one event
+    /// happened": `recover_actor` reconstructs `event_sourced` fields as
+    /// a bare count of persisted `EventEntry` rows, never running the
+    /// `apply` handler against their `args`), landing on 1 instead of
+    /// the live value of 4. The second send then applies on top of that
+    /// wrong base, landing the whole run on 6 instead of 9.
+    #[test]
+    fn test_event_sourced_apply_handler_recovery_known_gap() {
+        let source = r#"
+            entity Counter {
+                state count: Int = 0
+                events
+                    | Incremented(by: Int)
+                apply
+                    | Incremented(by) => self.count = self.count + by
+                behavior increment(by: Int) { emit Incremented(by) }
+                behavior get() { self.count }
+            }
+            spawn Counter {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        let mut comp_offsets: Vec<Option<usize>> = vec![None; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+                comp_offsets[idx] = entry.compensate_offset;
+            }
+        }
+
+        // Baseline: no crash, two increments sent back-to-back.
+        let rt_baseline = Rc::new(RefCell::new(Runtime::new()));
+        let actor_id_baseline = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt_baseline.clone())));
+            vm.run().unwrap().as_actor_id().unwrap()
+        };
+        rt_baseline
+            .borrow_mut()
+            .send_message(actor_id_baseline, "increment", &[Value::int(3)]);
+        rt_baseline
+            .borrow_mut()
+            .send_message(actor_id_baseline, "increment", &[Value::int(4)]);
+        rt_baseline.borrow_mut().run_scheduler();
+        let baseline_count = rt_baseline
+            .borrow()
+            .actors
+            .get(&actor_id_baseline)
+            .unwrap()
+            .get_state_field("count")
+            .and_then(|v| v.as_int())
+            .unwrap();
+        assert_eq!(
+            baseline_count, 9,
+            "sanity: must match persist_07 conformance case's real captured output"
+        );
+
+        // Same two messages, but with a crash+recover in between them.
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        let actor_id = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().unwrap().as_actor_id().unwrap()
+        };
+        rt1.borrow_mut()
+            .send_message(actor_id, "increment", &[Value::int(3)]);
+        rt1.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(4),
+            "live (pre-crash) value after one increment(3): apply's 0+3, \
+             plus the unconditional +1 bump"
+        );
+
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            comp_offsets.clone(),
+        );
+        rt2.borrow_mut().recover_actor(actor_id);
+        assert_eq!(
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(1),
+            "KNOWN GAP: should reconstruct to 4 (matching the live value \
+             above) but recovery's bare event-count heuristic ignores \
+             `by` and the apply handler entirely -- see SPEC2.md §9.6"
+        );
+
+        rt2.borrow_mut()
+            .send_message(actor_id, "increment", &[Value::int(4)]);
+        rt2.borrow_mut().run_scheduler();
+        let recovered_count = rt2
+            .borrow()
+            .actors
+            .get(&actor_id)
+            .unwrap()
+            .get_state_field("count")
+            .and_then(|v| v.as_int())
+            .unwrap();
+        assert_eq!(
+            recovered_count, 6,
+            "KNOWN GAP (PLAN.md bullet 8, SPEC2.md §9.6): a from-scratch \
+             reconstruction would reach {baseline_count} like the \
+             never-crashed baseline above; recovery instead reaches 6. \
+             If this assertion starts failing, either a regression made \
+             it worse or a fix made it better -- update this test and \
+             SPEC2.md §9.6 together either way."
+        );
     }
 
     /// String concatenation and Int.to_string via the full MIR pipeline.

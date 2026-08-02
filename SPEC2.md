@@ -2149,6 +2149,47 @@ Runtime recovery process:
 4. Reconstruct `event_sourced` state by applying replayed events
 5. Merge `crdt` state from all available replicas
 
+**Implementation status (verified 2026-08-02).** `Runtime::recover_actor`
+(`src/runtime/mod.rs`) does NOT run a field's `apply` handler during
+recovery, despite §9.5's "reconstructed by replaying it" and bullet 4
+above. It reconstructs every `event_sourced` field as a bare *count* of
+persisted events for that field (`current + 1` per `EventEntry`,
+unconditionally) -- the event's `args` and the field's `apply` clause
+are read from storage but never consulted. This is invisible for a
+field with no `apply` block (a plain incrementing counter, like this
+section's own `events: Int` example above, where "count of events" and
+"the field's actual value" happen to coincide) but silently wrong for
+any field with a non-trivial `apply` handler.
+
+Concrete, compiled-binary-verified evidence
+(`test_event_sourced_apply_handler_survives_recovery`,
+`src/integration_tests/mod.rs`): an `entity Counter` with
+`apply | Incremented(by) => self.count = self.count + by`, sent
+`increment(3)` then `increment(4)` with no crash, reaches `count = 9`
+(matches `conformance/behavior/persist_07_emit_accumulates_across_sends.nula`).
+The same two messages with a crash-and-recover between them reach only
+`count = 6` after recovery -- the first event's `by = 3` is dropped
+entirely; recovery only knows "one event happened" and reconstructs
+`0 + 1 = 1` where the live actor had reached `4` (apply's `0 + 3`, plus
+the unconditional "+1" every `event_sourced` field gets per emit, see
+`Runtime::emit_event` in `src/runtime/workflow.rs`). A real fix needs
+apply handlers compiled to an addressable, replayable bytecode unit
+keyed by event name (they are currently inlined at each `emit` call
+site by `hir_lower.rs`, with no standalone entry point recovery could
+re-invoke against a persisted event's `args`) -- tracked as follow-up,
+not attempted here.
+
+A related, more severe bug was found and fixed alongside this: before
+this session, `recover_actor` never restored `Actor.state_models` (the
+per-field Local/Durable/EventSourced/Crdt map) on the rebuilt actor,
+so *every* field silently reverted to the `Local` default the moment
+an actor recovered once -- a second crash would have dropped `durable`
+fields from the snapshot entirely, and `event_sourced` fields would
+have stopped accumulating altogether (the "+1 per emit" bump above
+iterates `state_models` to find which fields to bump). Fixed by
+restoring `state_models` from the recovery module's `actor_metadata`
+in the same place `bytecode_module`/`bytecode_offsets` are restored.
+
 ## 9.7 Deterministic Replay
 
 - Same input sequence + same initial state = same output
