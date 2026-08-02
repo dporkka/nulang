@@ -3625,3 +3625,110 @@ fn test_crypto_provider_random_bytes() {
         "random bytes should not be all zero"
     );
 }
+
+// ========================================================================
+// Deterministic Simulation Testing (DST) integration
+// ========================================================================
+
+#[test]
+fn test_pick_ready_actor_deterministic_same_seed_same_sequence() {
+    let mut rt = Runtime::new();
+    let ids: Vec<u64> = (0..6).map(|_| rt.spawn_actor(Box::new(Vec::new))).collect();
+    // Give every OTHER actor a pending message: uneven readiness, so the
+    // pick has to actually filter + sort, not just echo a single
+    // candidate.
+    for &id in ids.iter().step_by(2) {
+        rt.send_message(id, "noop", &[]);
+    }
+    let mut rng1 = crate::dst::DeterministicRng::new(999);
+    let mut rng2 = crate::dst::DeterministicRng::new(999);
+    // Picking doesn't step actors, so mailboxes stay non-empty across all
+    // 10 calls: every call sees the identical ready-set, isolating the
+    // RNG-driven selection itself from any state mutation.
+    let seq1: Vec<Option<u64>> = (0..10)
+        .map(|_| rt.pick_ready_actor_deterministic(&mut rng1))
+        .collect();
+    let seq2: Vec<Option<u64>> = (0..10)
+        .map(|_| rt.pick_ready_actor_deterministic(&mut rng2))
+        .collect();
+    assert_eq!(seq1, seq2, "same seed must pick the same actor sequence");
+
+    let ready_ids: std::collections::HashSet<u64> = ids.iter().copied().step_by(2).collect();
+    for picked in seq1.into_iter().flatten() {
+        assert!(
+            ready_ids.contains(&picked),
+            "picked actor {picked} was never given a message"
+        );
+    }
+}
+
+#[test]
+fn test_run_scheduler_deterministic_reaches_quiescence() {
+    let mut rt = Runtime::new();
+    let a1 = rt.spawn_actor(Box::new(|| vec![("counter".to_string(), Value::int(0))]));
+    let a2 = rt.spawn_actor(Box::new(|| vec![("counter".to_string(), Value::int(0))]));
+    fn add(actor: &mut Actor, args: &[Value]) {
+        if let Some(n) = actor.get_state_field("counter").and_then(|v| v.as_int()) {
+            if let Some(incr) = args.first().and_then(|v| v.as_int()) {
+                actor.set_state_field("counter", Value::int(n + incr));
+            }
+        }
+    }
+    rt.actors
+        .get_mut(&a1)
+        .unwrap()
+        .register_behavior("add", add);
+    rt.actors
+        .get_mut(&a2)
+        .unwrap()
+        .register_behavior("add", add);
+    // a1 gets two messages (FIFO within its own mailbox is unaffected by
+    // cross-actor scheduling order), a2 gets one.
+    rt.send_message(a1, "add", &[Value::int(10)]);
+    rt.send_message(a1, "add", &[Value::int(5)]);
+    rt.send_message(a2, "add", &[Value::int(20)]);
+
+    let result = rt.run_scheduler_deterministic(42, 1000);
+    assert_eq!(result, DeterministicRunResult::Quiescent { steps: 3 });
+    assert!(rt.actors.get(&a1).unwrap().mailbox.is_empty());
+    assert!(rt.actors.get(&a2).unwrap().mailbox.is_empty());
+
+    let c1 = rt
+        .actors
+        .get(&a1)
+        .unwrap()
+        .get_state_field("counter")
+        .and_then(|v| v.as_int())
+        .unwrap();
+    let c2 = rt
+        .actors
+        .get(&a2)
+        .unwrap()
+        .get_state_field("counter")
+        .and_then(|v| v.as_int())
+        .unwrap();
+    assert_eq!(c1, 15);
+    assert_eq!(c2, 20);
+}
+
+#[test]
+fn test_run_scheduler_deterministic_step_limit_exceeded() {
+    let mut rt = Runtime::new();
+    let a1 = rt.spawn_actor(Box::new(Vec::new));
+    rt.actors
+        .get_mut(&a1)
+        .unwrap()
+        .register_behavior("noop", |_actor, _args| {});
+    for _ in 0..50 {
+        rt.send_message(a1, "noop", &[]);
+    }
+
+    let result = rt.run_scheduler_deterministic(1, 10);
+    assert_eq!(
+        result,
+        DeterministicRunResult::StepLimitExceeded { steps: 10 }
+    );
+    // The run was correctly cut off mid-flight, not silently truncated to
+    // a false quiescence: messages are still pending.
+    assert!(!rt.actors.get(&a1).unwrap().mailbox.is_empty());
+}

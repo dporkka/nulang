@@ -357,6 +357,18 @@ pub struct Runtime {
 // thread-confined.
 unsafe impl Send for Runtime {}
 
+/// Outcome of `Runtime::run_scheduler_deterministic`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeterministicRunResult {
+    /// No actor has a non-empty mailbox; the run completed normally.
+    Quiescent { steps: u64 },
+    /// `max_steps` was reached with actors still having pending
+    /// messages -- a real invariant violation (deadlock/livelock),
+    /// since every step executed real actor code via `step_actor`, not
+    /// a simulated stand-in.
+    StepLimitExceeded { steps: u64 },
+}
+
 impl Runtime {
     pub fn new() -> Self {
         Runtime {
@@ -2519,6 +2531,84 @@ impl Runtime {
         // drained queue implies drained mailboxes for terminating programs.
         self.process_gc_ops();
         self.process_deferred_all();
+    }
+
+    /// Pick the next actor to step, deterministically: the SORTED set of
+    /// ready (non-empty-mailbox) actor ids, indexed by `rng`. `None` if no
+    /// actor currently has a pending message.
+    ///
+    /// Split out from `run_scheduler_deterministic` so the selection
+    /// policy itself is unit-testable against a fixed `Runtime` snapshot
+    /// (same-seed same-sequence), independent of actually stepping
+    /// actors -- which matters because `Actor::register_behavior` takes
+    /// a bare `fn` pointer with no closure capture, so hand-registered
+    /// test behaviors can't record an externally observable step
+    /// sequence themselves.
+    pub fn pick_ready_actor_deterministic(
+        &self,
+        rng: &mut crate::dst::DeterministicRng,
+    ) -> Option<u64> {
+        let mut ready: Vec<u64> = self
+            .actors
+            .iter()
+            .filter(|(_, a)| !a.mailbox.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+        if ready.is_empty() {
+            return None;
+        }
+        // Sort first: HashMap iteration order is randomized per-process,
+        // so the CANDIDATE list itself must be made deterministic before
+        // the seeded pick, not just the pick's own randomness source.
+        ready.sort_unstable();
+        rng.pick(&ready).copied()
+    }
+
+    /// Run the scheduler deterministically: actor selection at each step
+    /// goes through `pick_ready_actor_deterministic` instead of the real
+    /// crossbeam work-stealing `Scheduler`. Reuses `step_actor` unchanged
+    /// -- the SAME VM execution, GC, and persistence machinery the
+    /// production scheduler drives -- so a bug caught here is a bug in
+    /// the real actor runtime, not a simulated stand-in.
+    ///
+    /// Scope (PLAN.md Phase 1 bullet 2, first step): pure message-passing
+    /// determinism. Does NOT drive `self.scheduler` (the crossbeam
+    /// queue), `tick_timers`, cross-shard messages, or LLM completions --
+    /// a program that spawns/sends/asks/links/monitors between actors
+    /// with no timers, no distribution, and no LLM calls executes
+    /// byte-identically for the same seed. Timer- and network-driven
+    /// determinism are tracked as follow-up work, not attempted here:
+    /// the timer wheel and cross-shard channels both key off wall-clock
+    /// reads (`self.now()`), which this method deliberately never
+    /// touches -- a timer-armed program simply stops making progress
+    /// once its timer-waiting actor's mailbox empties, which surfaces
+    /// correctly as `Quiescent` (not a hang), just without exercising
+    /// the timer firing itself.
+    ///
+    /// Returns `Quiescent` once no actor has a non-empty mailbox, or
+    /// `StepLimitExceeded` if `max_steps` is hit first (the DST
+    /// framework's deadlock/livelock signal -- a real invariant
+    /// violation, not a simulation artifact, since every step here
+    /// executes real actor code).
+    pub fn run_scheduler_deterministic(
+        &mut self,
+        seed: u64,
+        max_steps: u64,
+    ) -> DeterministicRunResult {
+        let mut rng = crate::dst::DeterministicRng::new(seed);
+        let mut steps: u64 = 0;
+        loop {
+            if steps >= max_steps {
+                return DeterministicRunResult::StepLimitExceeded { steps };
+            }
+            match self.pick_ready_actor_deterministic(&mut rng) {
+                Some(actor_id) => {
+                    self.step_actor(actor_id);
+                    steps += 1;
+                }
+                None => return DeterministicRunResult::Quiescent { steps },
+            }
+        }
     }
 
     /// Retry deferred local decrements on every actor's heap. Objects whose
