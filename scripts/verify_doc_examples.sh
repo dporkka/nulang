@@ -1,10 +1,35 @@
 #!/usr/bin/env bash
 # Verify all ```nulang code blocks in documentation.
 # Runs each block through --check (parse + type + effect checking).
+#
+# Scans docs/src/content/docs/**/*.{md,mdx} (the Astro docs site) by
+# default -- unchanged behavior, matches the existing CI invocation in
+# .github/workflows/ci.yml exactly.
+#
+# Set NULANG_DOC_VERIFY_INCLUDE_ROOT=1 to additionally scan repo-root
+# markdown files that carry runnable examples (SPEC2.md, README.md,
+# docs/GETTING_STARTED.md, docs/TUTORIAL.md). This is opt-in, not
+# wired into the default/CI-blocking run yet: as of 2026-08-02, SPEC2.md
+# alone has dozens of blocks that are illustrative narrative fragments
+# (referencing a variable/type introduced in surrounding prose, not
+# redeclared in the fenced block itself -- e.g. "Unbound variable:
+# 'answer'") rather than standalone programs, which this script's
+# fragment-detection heuristic (is_runnable(), matching a handful of
+# declaration-keyword first lines) doesn't reliably catch. Sections
+# explicitly marked "— Planned" in their own heading ARE handled
+# (skipped, not failed) via chapter_planned/section_planned below --
+# that's a distinct, correctly-handled case from narrative fragments.
+# Run with the env var set to see the current gap directly; closing it
+# needs either a smarter fragment heuristic or rewriting the affected
+# examples to be self-contained, both out of scope for this pass.
 set -uo pipefail
 NULANG="${NULANG_BIN:-cargo run --quiet --}"
 
 DOCS_DIR="docs/src/content/docs"
+ROOT_DOCS=()
+if [[ "${NULANG_DOC_VERIFY_INCLUDE_ROOT:-0}" == "1" ]]; then
+    ROOT_DOCS=(SPEC2.md README.md docs/GETTING_STARTED.md docs/TUTORIAL.md)
+fi
 TMPDIR=$(mktemp -d)
 PASS=0
 FAIL=0
@@ -29,15 +54,35 @@ is_runnable() {
 echo "=== Verifying documentation code examples ==="
 echo ""
 
-while IFS= read -r -d '' file; do
-    rel="${file#$DOCS_DIR/}"
+verify_file() {
+    local file="$1" rel="$2"
 
     # Extract blocks: lines between ```nulang and ```
     in_block=0
     block=""
     block_num=0
+    # Track whether the CURRENT markdown section (chapter '# ' or
+    # subsection '## ') is explicitly marked '— Planned' in its own
+    # heading text. Both chapter- and subsection-level markers exist in
+    # SPEC2.md (e.g. '# Chapter 14: Standard Library — Planned' and
+    # '## 5.3 Authority Capabilities — Planned'); a block under either
+    # is aspirational syntax for a feature that doesn't exist yet, not a
+    # doc-accuracy bug, so it's skipped like a REPL session rather than
+    # expected to compile.
+    chapter_planned=0
+    section_planned=0
 
     while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ $in_block -eq 0 ]]; then
+            if [[ "$line" == "# "* ]]; then
+                chapter_planned=0
+                section_planned=0
+                [[ "$line" == *"Planned"* ]] && chapter_planned=1
+            elif [[ "$line" == "## "* ]]; then
+                section_planned=0
+                [[ "$line" == *"Planned"* ]] && section_planned=1
+            fi
+        fi
         if [[ "$line" == '```nulang' ]]; then
             in_block=1
             block=""
@@ -54,6 +99,12 @@ while IFS= read -r -d '' file; do
             if is_repl "$block"; then
                 SKIP=$((SKIP + 1))
                 echo "  SKIP  $label (REPL session)"
+                continue
+            fi
+
+            if [[ $chapter_planned -eq 1 || $section_planned -eq 1 ]]; then
+                SKIP=$((SKIP + 1))
+                echo "  SKIP  $label (— Planned section, aspirational syntax)"
                 continue
             fi
 
@@ -87,7 +138,16 @@ while IFS= read -r -d '' file; do
             block="${block}${line}"$'\n'
         fi
     done < "$file"
+}
+
+while IFS= read -r -d '' file; do
+    verify_file "$file" "${file#$DOCS_DIR/}"
 done < <(find "$DOCS_DIR" -name '*.md' -o -name '*.mdx' -print0)
+
+for file in "${ROOT_DOCS[@]}"; do
+    [[ -f "$file" ]] || continue
+    verify_file "$file" "$file"
+done
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed, $SKIP skipped ($TOTAL total) ==="
