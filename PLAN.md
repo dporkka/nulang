@@ -212,11 +212,13 @@ the restoration. This phase must complete on schedule.
 
 **Current state (in progress, verified 2026-08-02):** 3/8 deliverables
 substantially done (fuzzer maturation, benchmark harness informational
-half, doc-example verification extended), bullet 5 at 175/300, bullet 7
-partially addressed (phrase cleanup, not the full structured-error
-pass). 5 real runtime/tooling bugs found and fixed, 4 more found and
-documented for follow-up, plus a dozen SPEC2.md/GOVERNANCE.md/
-CHANGELOG.md truth-in-advertising corrections. 20 commits this session.
+half, doc-example verification extended), 2/8 partially wired this
+extended session (DST, persistence recovery), bullet 5 at 175/300,
+bullet 7 partially addressed (phrase cleanup, not the full
+structured-error pass). 7 real runtime/tooling bugs found and fixed,
+5 more found and documented for follow-up, plus a dozen SPEC2.md/
+GOVERNANCE.md/CHANGELOG.md truth-in-advertising corrections. 23
+commits this session.
 - **[X] Bullet 1 (fuzzer maturation) — interp/JIT/AOT leg done.**
   `src/fuzz.rs` grew from panic-avoidance to real differential execution
   fuzzing (`differential_fuzz_one`): compiles a mutant, runs it
@@ -358,10 +360,43 @@ CHANGELOG.md truth-in-advertising corrections. 20 commits this session.
   in the error-formatting helper) but extending that to every variant
   touches error-construction call sites throughout the codebase — a
   separate, larger pass not attempted here.
-- **[ ] Bullets 2, 4, 8 — not started.** Bullets 2/4 (DST, chaos suite)
-  need `src/dst.rs` wired into the real actor runtime — currently a
-  standalone, unwired module. Bullet 8 (persistence recovery
-  correctness) also needs DST.
+- **[~] Bullet 2 (DST) — single-node message-passing wired, cluster/timer
+  determinism not started.** `src/dst.rs` was not even part of the
+  compiled crate (`mod dst;` was missing from `src/lib.rs` — its 4
+  tests had never run). Fixed that first, then added
+  `Runtime::run_scheduler_deterministic`/`pick_ready_actor_deterministic`:
+  actor selection driven by a seeded RNG over the sorted ready-set,
+  reusing `step_actor` unchanged (same VM/GC/persistence machinery the
+  production scheduler drives). Scope, by design: pure message-passing
+  determinism only — does not drive the timer wheel, cross-shard
+  messages, or LLM completions, all of which key off wall-clock reads.
+  3 new tests verify same-seed same-sequence selection, real
+  quiescence with correct final actor state, and step-limit-exceeded
+  reporting for a run that hasn't settled.
+- **[ ] Bullet 4 (chaos suite) — not started.** Needs cluster topologies
+  (3-node, 5-node, split-brain, asymmetric partition, rolling restart)
+  layered on top of bullet 2's single-node wiring; genuinely separate
+  work, not attempted here.
+- **[~] Bullet 8 (persistence recovery correctness) — one real bug
+  found and fixed, one real gap found and documented, not the full
+  "repeat for every StateModel" sweep.** `Runtime::recover_actor` never
+  restored `Actor.state_models` on the rebuilt actor, so every field
+  silently reverted to `Local` after one recovery — a second crash
+  would have dropped `durable` fields from the snapshot entirely.
+  Fixed and verified with a new two-cycle recovery test. Separately,
+  and NOT fixed: `event_sourced` field reconstruction during recovery
+  is a bare count of persisted events, never running the field's
+  `apply` handler against the event's args — correct for a plain
+  counter, silently wrong for any field with a non-trivial `apply`
+  handler (verified against the real compiled binary: an `apply`-driven
+  counter reaches 9 with no crash, only 6 with a crash-and-recover
+  between the same two messages). Root cause is architectural — apply
+  handlers are inlined at each `emit` call site at compile time, no
+  addressable bytecode unit recovery could re-invoke — tracked as
+  follow-up, documented in SPEC2.md §9.6 and pinned by a regression
+  test. `local`/`crdt` StateModels not exercised this session (`local`
+  is a straightforward reset-on-restart check; `crdt` persistence is
+  already documented elsewhere as not wired to the eight CRDT types).
 
 **Goal.** The language does what it says, provably, on the paths users
 actually take. This is what makes 0.1.0 → 0.2.0 justifiable.
