@@ -9,16 +9,25 @@ import subprocess
 WARNINGS_BASELINE = 0
 
 
-def check_warnings():
-    """Run cargo check --tests and fail if compiler warnings exceed WARNINGS_BASELINE."""
-    print("Running cargo check --tests to count compiler warnings...")
+def check_warnings_for(feature_args, label):
+    """Run cargo check --tests with the given feature args and fail if
+    compiler warnings/errors are produced. Errors (not just warnings) are
+    fatal here too: a feature combination that doesn't compile is exactly
+    how the ai-runtime/core coupling bug (fixed 2026-08-01 — crate::ai::*
+    used unconditionally outside its #[cfg(feature = "ai-runtime")] gate)
+    slipped past this script for as long as it did — check_warnings()
+    originally checked only the default feature set, while CI's
+    minimal-build job (--no-default-features) was the only thing that
+    would have caught it.
+    """
+    print(f"Running cargo check --tests {label} to count compiler warnings...")
     res = subprocess.run(
-        ["cargo", "check", "--tests", "--message-format=short"],
+        ["cargo", "check", "--tests", "--message-format=short"] + feature_args,
         capture_output=True,
         text=True,
     )
     if res.returncode != 0:
-        print("Error: cargo check --tests failed.")
+        print(f"Error: cargo check --tests {label} failed.")
         print("STDOUT:")
         print(res.stdout)
         print("STDERR:")
@@ -40,19 +49,32 @@ def check_warnings():
         ]
     )
 
-    print(f"cargo check --tests warning count: {count} (baseline: {WARNINGS_BASELINE}).")
+    print(f"cargo check --tests {label} warning count: {count} (baseline: {WARNINGS_BASELINE}).")
 
     if count > WARNINGS_BASELINE:
         print(
-            f"Error: cargo check --tests produced {count} warning(s), exceeding the baseline of {WARNINGS_BASELINE}."
+            f"Error: cargo check --tests {label} produced {count} warning(s), exceeding the baseline of {WARNINGS_BASELINE}."
         )
         print("Fix the warnings or document the reason for raising the baseline.")
-        print("cargo check --tests output:")
+        print(f"cargo check --tests {label} output:")
         print(res.stderr)
         return False
 
-    print("Success: cargo check --tests warning count is within baseline.")
+    print(f"Success: cargo check --tests {label} warning count is within baseline.")
     return True
+
+
+def check_warnings():
+    """Run cargo check --tests across every feature combination CI exercises
+    (default, --no-default-features, --all-features) and fail if any of them
+    produce compiler warnings/errors. Checking only the default feature set
+    is not sufficient — see check_warnings_for's docstring.
+    """
+    return (
+        check_warnings_for([], "(default features)")
+        and check_warnings_for(["--no-default-features"], "(--no-default-features)")
+        and check_warnings_for(["--all-features"], "(--all-features)")
+    )
 
 def verify_files():
     # 1. (compiler.rs has been removed; MIR pipeline is now exclusive.)

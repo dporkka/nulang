@@ -271,14 +271,28 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             Ok(compose_subst(&s2, &s1))
         }
 
-        // Nominal types: transparent for now (enforcement not yet active).
-        // Future: only transparent inside defining scope, opaque outside.
-        // For now, unify with underlying type so programs using opaque types
-        // still compile. The opaque keyword serves as documentation.
+        // `opaque type X = Y` currently provides ZERO type-level opacity:
+        // `X` unifies transparently with `Y` (and anything `Y` unifies
+        // with) everywhere, with no distinction between "inside the
+        // defining module" and "outside" — there is no enforcement at all
+        // today, not even a partial/best-effort form. The `opaque` keyword
+        // is accepted at parse time and carried through the AST/HIR
+        // (`Type::Nominal`) but is presently equivalent to a plain
+        // `type X = Y` alias.
+        //
+        // Not documented in SPEC2.md or any public-facing doc as a working
+        // feature (verified 2026-08-01) — this is not a truth-in-advertising
+        // gap, just an incomplete Experimental-tier feature. Real opacity
+        // requires module-defining-scope tracking that does not exist
+        // anywhere in TypeChecker today (mgu has no notion of "which module
+        // is currently being checked"), which is real design + implementation
+        // work, not a one-line fix — see the "Future" line above for the
+        // target shape. Tracked as a real gap; do not read the presence of
+        // `Type::Nominal` as evidence opacity is enforced.
+        //
+        // Future: transparent inside the defining module, opaque outside it.
         (Type::Nominal { name, underlying }, other)
         | (other, Type::Nominal { name, underlying }) => {
-            // Emit a diagnostic that enforcement is not yet active.
-            // TODO: make this a proper compiler warning instead of ignoring.
             let _ = (name, span);
             mgu(underlying, other, span)
         }

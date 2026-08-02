@@ -16,7 +16,11 @@
 //!   --doc                    Generate Markdown API docs (docs/api.md)
 //!   --emit-stdlib-docs <dir> Generate per-effect stdlib docs into <dir>
 //!   --lsp                    Start Language Server (stdio)
-//!   --backend <b>            Backend: bytecode (default) | native | wasm*
+//!   --backend <b>            Backend: bytecode (default, full language) | native
+//!                            (pure-functional subset only — effects/actors/FFI
+//!                            error with a specific unsupported-construct message)
+//!                            | wasm* (IO.print/read only; no user-defined effect
+//!                            handlers, no actor mailbox — requires wasm-backend)
 //!   --out <file>             Output file (WASM backends / --emit-nbc)
 //!   --emit-nbc               Compile <FILE> to a .nbc artifact; don't run
 //!   <FILE>.nbc               Run a pre-compiled .nbc artifact directly
@@ -663,6 +667,13 @@ fn print_help() {
         print!(" | wasm | wasm-run | wasm-aot");
     }
     println!();
+    println!("                   native: pure-functional subset only (no effects,");
+    println!("                   actors, or FFI — errors name the unsupported");
+    println!("                   construct; use bytecode for full-language programs)");
+    if cfg!(feature = "wasm-backend") {
+        println!("                   wasm*: IO.print/read only (no user-defined effect");
+        println!("                   handlers, no actor mailbox)");
+    }
     if cfg!(feature = "wasm-backend") {
         println!("  --out <file>     Output file for WASM backends (default: out.wasm)");
     }

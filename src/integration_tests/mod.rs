@@ -9348,6 +9348,107 @@ match { a: 2, b: 9 } with {
         handle.join().expect("example-runner thread panicked");
     }
 
+    /// `ConstL`, `Pop`, `Switch`, `Alloc`, `TupleL`, `Unpack`, and `Copy`
+    /// are reserved opcodes with no current producer (see the comments at
+    /// their interpreter cases in `vm.rs`). This test is the enforcement
+    /// mechanism for that claim: it compiles every example and every
+    /// stdlib module and asserts none of them appear in the resulting
+    /// bytecode. A failure here means a codegen path started emitting a
+    /// reserved opcode — implement it in the interpreter (and the JIT/AOT/
+    /// WASM backends) before landing whatever change caused the emission.
+    #[test]
+    fn test_no_codegen_path_emits_reserved_opcodes() {
+        const RESERVED: [OpCode; 7] = [
+            OpCode::ConstL,
+            OpCode::Pop,
+            OpCode::Switch,
+            OpCode::Alloc,
+            OpCode::TupleL,
+            OpCode::Unpack,
+            OpCode::Copy,
+        ];
+
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .name("reserved-opcode-scan".into())
+            .spawn(|| {
+                let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+                let mut scanned = 0usize;
+
+                let examples_dir = manifest_dir.join("examples");
+                let all_examples: [&str; 17] = [
+                    "01_hello.nula",
+                    "02_arithmetic.nula",
+                    "03_functions.nula",
+                    "04_pattern_match.nula",
+                    "05_records.nula",
+                    "06_higher_order.nula",
+                    "07_effects.nula",
+                    "08_actors.nula",
+                    "09_loops.nula",
+                    "10_pipe.nula",
+                    "11_arrays.nula",
+                    "12_json.nula",
+                    "13_http.nula",
+                    "14_option_result.nula",
+                    "15_ranges.nula",
+                    "16_realworld.nula",
+                    "17_actor_fetcher.nula",
+                ];
+                for name in &all_examples {
+                    let path = examples_dir.join(name);
+                    let (module, _ty) = compile_example_file(&path)
+                        .unwrap_or_else(|e| panic!("example {} failed to compile: {}", name, e));
+                    for instr in &module.instructions {
+                        assert!(
+                            !RESERVED.contains(&instr.opcode),
+                            "example {} emitted reserved opcode {:?} — implement it \
+                             (interpreter + JIT/AOT/WASM) before this can land",
+                            name,
+                            instr.opcode
+                        );
+                    }
+                    scanned += 1;
+                }
+
+                // Stdlib modules: best-effort — a module with no top-level
+                // executable expression may fail to compile standalone for
+                // reasons unrelated to opcode emission, so only scan modules
+                // that do compile.
+                let stdlib_dir = manifest_dir.join("src").join("stdlib");
+                if let Ok(entries) = std::fs::read_dir(&stdlib_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("nula") {
+                            continue;
+                        }
+                        if let Ok((module, _ty)) = compile_example_file(&path) {
+                            for instr in &module.instructions {
+                                assert!(
+                                    !RESERVED.contains(&instr.opcode),
+                                    "stdlib module {} emitted reserved opcode {:?} — \
+                                     implement it (interpreter + JIT/AOT/WASM) before \
+                                     this can land",
+                                    path.display(),
+                                    instr.opcode
+                                );
+                            }
+                            scanned += 1;
+                        }
+                    }
+                }
+
+                assert!(
+                    scanned >= 17,
+                    "expected to scan at least the 17 examples, scanned {}",
+                    scanned
+                );
+            })
+            .expect("failed to spawn reserved-opcode-scan thread");
+
+        handle.join().expect("reserved-opcode-scan thread panicked");
+    }
+
     // -----------------------------------------------------------------------
     // Defer — deterministic cleanup
     // -----------------------------------------------------------------------

@@ -4550,16 +4550,26 @@ impl VM {
                 self.frames[frame_idx].regs[instr.op1 as usize] = Value::int(-1);
             }
             OpCode::ConstL => {
+                // Reserved for constant pools >= 65536 entries. No current
+                // Nulang codegen path (mir_codegen, aot, wasm) emits this —
+                // ConstU (u16 index) covers every program the compiler
+                // produces; see `no_codegen_path_emits_reserved_opcodes` in
+                // integration_tests. Implement before enabling >64k-constant
+                // modules (e.g. a future large-program or bootstrap target).
                 return Err(NuError::VMError {
-                    msg: "ConstL (large constant pool index) not yet implemented in interpreter; use ConstU for pools < 65536 entries".into(),
+                    msg: "ConstL is a reserved opcode: no current codegen path emits large constant pool indices; use ConstU for pools < 65536 entries".into(),
                     span: Span::default(),
                 });
             }
 
             // -- Stack (cont.) --
             OpCode::Pop => {
+                // Reserved for a stack-based operand model. The register VM's
+                // codegen never emits it — locals and temporaries are always
+                // register-addressed. See
+                // `no_codegen_path_emits_reserved_opcodes`.
                 return Err(NuError::VMError {
-                    msg: "Pop opcode not yet implemented in interpreter".into(),
+                    msg: "Pop is a reserved opcode: no current codegen path emits stack-based operand pops in this register VM".into(),
                     span: Span::default(),
                 });
             }
@@ -4597,34 +4607,51 @@ impl VM {
 
             // -- Control Flow (cont.) --
             OpCode::Switch => {
+                // Reserved for jump-table dispatch. Codegen currently lowers
+                // every match/if to a compare-and-branch chain, which covers
+                // every case a jump table would optimize.
                 return Err(NuError::VMError {
-                    msg: "Switch opcode not yet implemented in interpreter".into(),
+                    msg: "Switch is a reserved opcode: no current codegen path emits jump-table dispatch; match/if lower to compare-and-branch chains".into(),
                     span: Span::default(),
                 });
             }
 
             // -- Memory & Objects (cont.) --
             OpCode::Alloc => {
+                // Reserved for explicit sized heap allocation. Codegen
+                // allocates only through the typed ArrAlloc/RecMk/TupleMk/
+                // Closure opcodes, which cover every allocation site the
+                // compiler produces.
                 return Err(NuError::VMError {
-                    msg: "Alloc opcode not yet implemented in interpreter".into(),
+                    msg: "Alloc is a reserved opcode: no current codegen path emits explicit sized allocation; ArrAlloc/RecMk/TupleMk/Closure cover every allocation site".into(),
                     span: Span::default(),
                 });
             }
             OpCode::TupleL => {
+                // Reserved for a dedicated tuple-field-load encoding.
+                // Codegen lowers tuple field access (`t.0`) through the same
+                // FieldL opcode used for record fields — no dedicated tuple
+                // opcode is emitted.
                 return Err(NuError::VMError {
-                    msg: "TupleL opcode not yet implemented in interpreter".into(),
+                    msg: "TupleL is a reserved opcode: no current codegen path emits it; tuple field access lowers through FieldL".into(),
                     span: Span::default(),
                 });
             }
             OpCode::Unpack => {
+                // Reserved for a dedicated variant-payload-extraction
+                // encoding. No current codegen path emits it.
                 return Err(NuError::VMError {
-                    msg: "Unpack opcode not yet implemented in interpreter".into(),
+                    msg: "Unpack is a reserved opcode: no current codegen path emits variant payload extraction through this opcode".into(),
                     span: Span::default(),
                 });
             }
             OpCode::Copy => {
+                // Reserved for a generic capability-aware deep copy.
+                // RecCopy (0x9D) covers the one deep-copy case (record
+                // duplication) the compiler emits; codegen never needs a
+                // generic Copy.
                 return Err(NuError::VMError {
-                    msg: "Copy opcode not yet implemented in interpreter".into(),
+                    msg: "Copy is a reserved opcode: no current codegen path emits it; RecCopy covers the deep-copy cases the compiler produces".into(),
                     span: Span::default(),
                 });
             }
