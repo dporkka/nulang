@@ -1,0 +1,19 @@
+// Regression: string concatenation and Float.to_string at `main()`'s top
+// level, exercised AFTER an actor has already run (spawn + ask). Before the
+// `Runtime::main_heap` fix, ANY top-level heap allocation failed once a
+// program used any actor construct -- not just values derived from `ask` --
+// because `RuntimeVmCallbacks::alloc` required a current actor context that
+// top-level code never has. Two unrelated string literals concatenated here
+// exercise that general path, independent of `Int.to_string`.
+actor Pinger {
+    behavior ping() { 999 }
+}
+fn main() {
+    let p = spawn Pinger {}
+    let alive = ask p ping()
+    perform IO.print(perform Int.to_string(alive) + "!")
+    let s = "hello"
+    let t = "world"
+    perform IO.print(s + t)
+    perform IO.print("pi: " + perform Float.to_string(3.5))
+}

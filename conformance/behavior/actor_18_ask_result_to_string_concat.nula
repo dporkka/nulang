@@ -1,0 +1,18 @@
+// Regression: top-level `ask` result converted via `Int.to_string` and
+// concatenated with `+`. `RuntimeVmCallbacks` (used whenever a program
+// declares any actor) used to allocate `Int.to_string`'s result string on
+// `Runtime.vm`'s heap -- a separate VM instance used only to run actor
+// bytecode -- which `main()`'s own top-level VM could not read back from,
+// silently producing `nil`. See src/runtime/mod.rs `Runtime::main_heap`.
+actor Adder {
+    state total: Int = 0
+    behavior add(x: Int) { self.total = self.total + x }
+    behavior get() { self.total }
+}
+fn main() {
+    let a = spawn Adder {}
+    send a add(5)
+    send a add(7)
+    let result = ask a get()
+    perform IO.print("result: " + perform Int.to_string(result))
+}
