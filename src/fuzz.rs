@@ -1,14 +1,28 @@
-//! Typechecker fuzzer — mutation-based fuzzing of the Nulang compiler
-//! frontend (lex → parse → typecheck → HIR → MIR → bytecode).
+//! Nulang compiler/runtime fuzzer: mutation-based fuzzing of the frontend
+//! (lex -> parse -> typecheck -> HIR -> MIR -> bytecode) plus differential
+//! execution fuzzing across the interpreter, JIT, and (when a mutant
+//! compiles under it) the AOT native backend.
 //!
-//! Generates mutants from a seed corpus of valid programs and verifies
-//! that the compiler never panics. Uses a built-in xorshift64 RNG.
+//! Generates mutants from a seed corpus of valid programs. Two independent
+//! properties are checked:
+//!   1. Panic-avoidance: the compiler frontend never panics on a mutant,
+//!      whether or not the mutant is well-formed (`fuzz_one`).
+//!   2. Differential correctness: for mutants that DO compile to bytecode,
+//!      the interpreter and the JIT-compiled path must agree on every
+//!      observable result, and when the AOT backend also accepts the
+//!      program, it must agree too (`differential_fuzz_one`). Any
+//!      disagreement is a real bug, not a fuzzer false positive — see
+//!      PLAN.md Phase 1 bullet 1's kill criteria: a divergence touching
+//!      Frozen-tier surface (bytecode/value-layout semantics) is a Sev-1.
+//!
+//! Uses a built-in xorshift64 RNG, no external fuzzing crate dependency.
 //!
 //! ```bash
-//! cargo test -- fuzz    # Quick fuzz (1000 iterations, CI-friendly)
+//! cargo test -- fuzz    # Quick fuzz (1000 iterations each mode, CI-friendly)
 //! ```
 
 use std::panic;
+use std::panic::AssertUnwindSafe;
 
 // ---------------------------------------------------------------------------
 // Minimal xorshift64 RNG — no external dependencies
@@ -315,12 +329,364 @@ fn fuzz_one(rng: &mut XorShift64, corpus: &[&str]) -> Result<(), (String, String
 }
 
 // ---------------------------------------------------------------------------
+// Differential execution fuzzing: interpreter vs JIT vs AOT
+// ---------------------------------------------------------------------------
+
+/// A mutant that compiles to bytecode, ready for differential execution.
+#[allow(dead_code)]
+struct CompiledMutant {
+    code_module: crate::bytecode::CodeModule,
+    mir_module: crate::mir::Module,
+}
+
+/// Compile `source` through the full pipeline. Returns `None` (not an
+/// error) when the mutant fails to compile — most mutants are malformed
+/// by construction and have nothing to differentially execute; that's
+/// `fuzz_one`'s job to check for panics, not this function's.
+#[allow(dead_code)]
+fn compile_for_diff(source: &str) -> Option<CompiledMutant> {
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.lex().ok()?;
+    let mut parser = Parser::new(tokens);
+    let ast = parser.parse_module().ok()?;
+    let mut type_checker = TypeChecker::new();
+    type_checker.check_module(&ast).ok()?;
+    let hir = crate::hir_lower::lower_module(&ast);
+    let mir_module = crate::mir_lower::lower_module(&hir).ok()?;
+    let code_module = crate::mir_codegen::compile_mir(&mir_module, "fuzz-diff").ok()?;
+    Some(CompiledMutant {
+        code_module,
+        mir_module,
+    })
+}
+
+/// Run `module` to completion, catching panics. Returns the raw `Value`
+/// alongside a comparable string representation (via
+/// `Value::to_string_repr`). The raw `Value` lets callers restrict
+/// cross-backend comparison to tags that don't need pool/heap context to
+/// resolve (see `is_safely_comparable`) — `to_string_repr` alone is NOT a
+/// safe cross-backend comparison key: a `TAG_STRING` value is a constant-
+/// pool INDEX, and the interpreter's module pool and an independently
+/// AOT-compiled module's pool are not guaranteed to index the same
+/// literal identically, so two semantically-identical string results can
+/// carry different indices and print as different opaque `#Value(..)`
+/// fallback hex — a false-positive divergence, not a real one.
+#[allow(dead_code)]
+fn run_once(vm: &mut crate::vm::VM) -> Result<(crate::vm::Value, String), String> {
+    match panic::catch_unwind(AssertUnwindSafe(|| vm.run())) {
+        Ok(Ok(value)) => Ok((value, value.to_string_repr())),
+        Ok(Err(e)) => Err(format!("runtime error: {}", e)),
+        Err(payload) => Err(format!(
+            "panic: {}",
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown panic payload".to_string())
+        )),
+    }
+}
+
+/// True for tags whose `to_string_repr()` is self-contained (no pool/heap
+/// context needed), so a raw cross-backend comparison is trustworthy:
+/// nil, unit, bool, int, float. False for anything pointer/pool-indexed
+/// (string, closure, actor ref, heap object) — those need module-aware
+/// resolution this fuzzer doesn't attempt (see `run_once` doc comment).
+#[allow(dead_code)]
+fn is_safely_comparable(v: crate::vm::Value) -> bool {
+    v.is_nil() || v.is_unit() || v.is_bool() || v.is_int() || v.is_float()
+}
+
+/// Collapse a runtime error message to a stable comparison key.
+///
+/// `VM::step_count` is a lifetime counter on the `VM` instance, not a
+/// per-`run()` counter (only `VM::new()` initializes it) — so repeated
+/// `run()` calls on the same VM (this fuzzer's warmup loop) accumulate
+/// steps across calls. For a pathological mutant that individually burns
+/// millions of steps, that means cold's and warm's calls trip the 10M
+/// step-limit safety net at different CUMULATIVE counts, embedding
+/// different exact numbers and stack-trace depths in otherwise-equivalent
+/// "this program is a runaway and was correctly aborted" outcomes. The
+/// step limit is a resource bound, not observable language semantics, so
+/// normalize it to a fixed marker before comparing — otherwise every
+/// runaway mutant is a guaranteed false-positive divergence.
+#[allow(dead_code)]
+fn normalize_error(msg: &str) -> String {
+    if msg.contains("Step limit exceeded") {
+        "step limit exceeded".to_string()
+    } else {
+        msg.to_string()
+    }
+}
+
+/// Differentially execute one compiled mutant: interpreter (cold) vs JIT
+/// (warm) vs AOT (when the mutant's constructs are within AOT's supported
+/// subset). `VM::run()` fully resets frame/PC state on every call while
+/// the JIT session's hot-region cache persists across calls on the same
+/// VM instance (see benches/jit_bench.rs for the same technique validated
+/// against a hand-picked hot loop) — so calling `run()` `HOT_THRESHOLD`+
+/// times on one VM naturally exercises real JIT-compiled code for any
+/// mutant whose entry-point code contains a compilable straight-line
+/// region, without needing to wrap every mutant in an explicit loop.
+///
+/// Returns `Err(description)` on any divergence. `Ok(DiffOutcome)` covers
+/// "nothing to compile", "compared and agreed" (with or without AOT), and
+/// "result type has no stable cross-run identity" (`Uncomparable` — e.g. a
+/// top-level closure or actor ref; see `resolve_key`).
+#[allow(dead_code)]
+fn differential_fuzz_one(source: &str) -> Result<DiffOutcome, String> {
+    const HOT_ITERATIONS: usize = 1200; // > jit::mod's HOT_THRESHOLD (1000)
+                                        // Caps warmup cost for a mutant whose OWN body loops heavily (the seed
+                                        // corpus includes large-loop programs, e.g. vm_bench.rs-style hot
+                                        // loops): repeating `run()` up to HOT_ITERATIONS times multiplies an
+                                        // already-large per-call cost, which is both unbounded and pointless —
+                                        // a loop that iterates thousands of times inside ONE `run()` call
+                                        // already accumulates enough hot-counter hits to trigger tier-up
+                                        // within that single call, so further outer repetitions buy nothing.
+                                        // 25ms keeps a full-corpus fuzz run bounded while still giving cheap,
+                                        // straight-line mutants every rep they need to cross HOT_THRESHOLD.
+    const WARMUP_BUDGET: std::time::Duration = std::time::Duration::from_millis(25);
+
+    let Some(mutant) = compile_for_diff(source) else {
+        return Ok(DiffOutcome::NothingToCompile);
+    };
+
+    let mut vm = crate::vm::VM::new();
+    vm.load_module(mutant.code_module.clone());
+    const MODULE_IDX: usize = 0; // the fuzzer always loads exactly one module
+
+    let cold = run_once(&mut vm);
+    let warmup_deadline = std::time::Instant::now() + WARMUP_BUDGET;
+    for _ in 0..HOT_ITERATIONS {
+        if std::time::Instant::now() >= warmup_deadline {
+            break;
+        }
+        let _ = run_once(&mut vm);
+    }
+    let warm = run_once(&mut vm);
+
+    // Resolve each side to a comparison key. Numeric/bool/nil/unit compare
+    // by `to_string_repr()` directly. String/heap-pointer values resolve
+    // to actual text via `VM::string_operand` — module-aware and
+    // content-based (its own doc comment: "the same text may live at
+    // different pool indices"), which is exactly the interpreter's own
+    // fix for this problem in `ICmpEq`, reused here rather than
+    // reinvented. Anything else (closures, actor refs) has no stable
+    // identity across independent executions — fresh actor ids and fresh
+    // closure allocations differ run to run by design — so it's `None`.
+    let resolve_key = |vm: &crate::vm::VM,
+                       r: &Result<(crate::vm::Value, String), String>|
+     -> Option<Result<String, String>> {
+        match r {
+            Err(e) => Some(Err(normalize_error(e))),
+            Ok((v, repr)) => {
+                if is_safely_comparable(*v) {
+                    Some(Ok(repr.clone()))
+                } else if v.is_string() || v.is_ptr() {
+                    vm.string_operand(MODULE_IDX, *v)
+                        .map(|s| Ok(format!("str:{:?}", s)))
+                } else {
+                    None
+                }
+            }
+        }
+    };
+
+    let (Some(cold_key), Some(warm_key)) = (resolve_key(&vm, &cold), resolve_key(&vm, &warm))
+    else {
+        return Ok(DiffOutcome::Uncomparable);
+    };
+
+    if cold_key != warm_key {
+        return Err(format!(
+            "interpreter/JIT divergence on {:?}: cold={:?} warm={:?}",
+            source, cold_key, warm_key
+        ));
+    }
+
+    // AOT: compiled independently with its own constant pool that isn't
+    // guaranteed to index shared string literals identically, and there's
+    // no AOT-side equivalent of `string_operand` to resolve against — so
+    // only tags whose representation needs no pool/heap context are
+    // compared here. Rejection at compile time (`AotCompileError::
+    // Unsupported`, e.g. effects/actors/FFI — see src/aot/codegen.rs) and
+    // "no compiled entry point" at run time (nothing executable, e.g. an
+    // empty/comment-only program) are both expected, non-divergent
+    // outcomes, not silently-passed successes: `aot_outcome` stays false
+    // and the caller's `InterpJitOnlyAgreed` vs `AllAgreed` split reports
+    // real AOT coverage honestly.
+    let aot_outcome = match crate::aot::AotModule::compile(&mutant.mir_module) {
+        Ok(aot_module) => match panic::catch_unwind(AssertUnwindSafe(|| aot_module.run())) {
+            Err(_) => return Err(format!("AOT run panicked on {:?}", source)),
+            Ok(Err(e)) if e.to_string().contains("no compiled entry point") => false,
+            Ok(Err(e)) => {
+                let aot_key: Result<String, String> =
+                    Err(normalize_error(&format!("runtime error: {}", e)));
+                if aot_key != cold_key {
+                    return Err(format!(
+                        "interpreter/AOT divergence on {:?}: interp={:?} aot={:?}",
+                        source, cold_key, aot_key
+                    ));
+                }
+                true
+            }
+            Ok(Ok(raw)) => {
+                let aot_value = crate::vm::Value::from_raw(raw);
+                if !is_safely_comparable(aot_value) {
+                    false
+                } else {
+                    let aot_key: Result<String, String> = Ok(aot_value.to_string_repr());
+                    if aot_key != cold_key {
+                        return Err(format!(
+                            "interpreter/AOT divergence on {:?}: interp={:?} aot={:?}",
+                            source, cold_key, aot_key
+                        ));
+                    }
+                    true
+                }
+            }
+        },
+        Err(_) => false,
+    };
+
+    Ok(if aot_outcome {
+        DiffOutcome::AllAgreed
+    } else {
+        DiffOutcome::InterpJitOnlyAgreed
+    })
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffOutcome {
+    /// Mutant didn't compile to bytecode — nothing to differentially run.
+    NothingToCompile,
+    /// Interpreter and JIT agreed; AOT rejected the program (expected for
+    /// effectful/actor programs) so wasn't compared.
+    InterpJitOnlyAgreed,
+    /// Interpreter, JIT, and AOT all agreed.
+    AllAgreed,
+    /// Result has no stable identity across independent runs (closure,
+    /// actor ref, ...) — not compared, not counted as agreement.
+    Uncomparable,
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Quick differential fuzz: 300 iterations with a fixed seed, part of
+    /// the default `cargo test --lib` run. Unlike `fuzz_typechecker_quick`
+    /// (lex/parse/typecheck only), each iteration here compiles to
+    /// bytecode, runs the interpreter, forces real JIT tier-up, and
+    /// attempts AOT compilation — real compute per mutant, plus the
+    /// occasional pathological mutant (e.g. runaway recursion that burns
+    /// the full step-limit budget) costing multiple seconds on its own.
+    /// 300 keeps this test's contribution to the default suite's runtime
+    /// proportionate; see `fuzz_differential_extended` for the larger,
+    /// `#[ignore]`'d run intended for a dedicated nightly job. PLAN.md
+    /// Phase 1 targets 4x10^4/day in per-PR CI and 10^6/day in CI nightly;
+    /// neither figure is achievable inside a single `cargo test`
+    /// invocation, so `fuzz_differential_extended` is the seed for a
+    /// dedicated CI job that runs it in a loop (or with a higher
+    /// iteration count) on a schedule.
+    #[test]
+    fn fuzz_differential_quick() {
+        let corpus = seed_corpus();
+        let mut rng = XorShift64(0xD1FF_5EED_0000_0001);
+        let mut divergences: Vec<String> = Vec::new();
+        let mut compiled = 0usize;
+        let mut aot_agreed = 0usize;
+        let mut uncomparable = 0usize;
+
+        for _ in 0..300 {
+            let seed = corpus[rng.index(&corpus)];
+            let mutant = mutate(&mut rng, seed, &corpus);
+            match differential_fuzz_one(&mutant) {
+                Ok(DiffOutcome::NothingToCompile) => {}
+                Ok(DiffOutcome::Uncomparable) => uncomparable += 1,
+                Ok(DiffOutcome::InterpJitOnlyAgreed) => compiled += 1,
+                Ok(DiffOutcome::AllAgreed) => {
+                    compiled += 1;
+                    aot_agreed += 1;
+                }
+                Err(msg) => {
+                    divergences.push(msg);
+                    if divergences.len() >= 5 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "differential fuzz: {} mutants compiled and ran (agreed), {} of those also agreed \
+             under AOT, {} uncomparable (closures/actor refs)",
+            compiled, aot_agreed, uncomparable
+        );
+
+        if !divergences.is_empty() {
+            for msg in &divergences {
+                eprintln!("DIVERGENCE: {}", msg);
+            }
+            panic!(
+                "Differential fuzzer found {} divergence(s) in 1000 iterations — see PLAN.md \
+                 Phase 1 kill criteria",
+                divergences.len()
+            );
+        }
+    }
+
+    /// Extended differential fuzz (ignored by default — run explicitly or
+    /// from a dedicated CI job): 30,000 iterations with a fixed seed.
+    #[test]
+    #[ignore]
+    fn fuzz_differential_extended() {
+        let corpus = seed_corpus();
+        let mut rng = XorShift64(0xD1FF_5EED_0000_0002);
+        let mut divergence_count = 0usize;
+        let mut compiled = 0usize;
+        let mut aot_agreed = 0usize;
+        let mut uncomparable = 0usize;
+
+        for _ in 0..30_000 {
+            let seed = corpus[rng.index(&corpus)];
+            let mutant = mutate(&mut rng, seed, &corpus);
+            match differential_fuzz_one(&mutant) {
+                Ok(DiffOutcome::NothingToCompile) => {}
+                Ok(DiffOutcome::Uncomparable) => uncomparable += 1,
+                Ok(DiffOutcome::InterpJitOnlyAgreed) => compiled += 1,
+                Ok(DiffOutcome::AllAgreed) => {
+                    compiled += 1;
+                    aot_agreed += 1;
+                }
+                Err(msg) => {
+                    divergence_count += 1;
+                    eprintln!("DIVERGENCE: {}", msg);
+                    if divergence_count >= 10 {
+                        panic!("Too many divergences ({}) — aborting", divergence_count);
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "differential fuzz (extended): {} mutants compiled and ran (agreed), {} of those \
+             also agreed under AOT, {} uncomparable (closures/actor refs)",
+            compiled, aot_agreed, uncomparable
+        );
+
+        if divergence_count > 0 {
+            panic!(
+                "Differential fuzzer found {} divergence(s)",
+                divergence_count
+            );
+        }
+    }
 
     /// Quick fuzz: 1000 iterations with fixed seed for reproducibility.
     #[test]

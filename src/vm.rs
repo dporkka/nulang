@@ -2021,7 +2021,7 @@ impl VM {
     /// arrays, ...) yields `None` so the comparison evaluates to `false`
     /// instead of erroring — mirroring the coerce-don't-fail style of
     /// `ICmpEq`/`FCmpEq`.
-    fn string_operand(&self, module_idx: usize, value: Value) -> Option<String> {
+    pub(crate) fn string_operand(&self, module_idx: usize, value: Value) -> Option<String> {
         if let Some(id) = value.as_string_id() {
             self.constant_string(module_idx, id)
         } else if let Some(ptr) = value.as_ptr() {
