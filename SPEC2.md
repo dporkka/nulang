@@ -1333,24 +1333,39 @@ When a function or lambda carries an explicit `! {Row}` annotation, the effect c
 
 ## 4.6 Built-in Effects
 
-The following effect names are recognized by the compiler without an explicit `effect` declaration (any other name becomes a user-defined effect, which should be declared with `effect`):
+The following effect names are recognized by the compiler without an
+explicit `effect` declaration (any other name becomes a user-defined
+effect, which should be declared with `effect`). This table is
+illustrative, not exhaustive — `src/stdlib.rs` (surfaced via `nulang
+--doc`) is the code-derived, authoritative inventory; it currently lists
+substantially more (`Array`, `String`, `Int`, `Float`, `Debug`, `Env`,
+`Process`, `System`, `Otp`, ...) than fit usefully in prose here.
 
-| Effect | Description |
-|--------|-------------|
-| `IO` | Console input/output |
-| `Net` | Network communication |
-| `FS` | File system access |
-| `Rand` | Random number generation |
-| `Time` | Time access and delays |
-| `Spawn` | Actor spawning |
-| `Send` | Message sending |
-| `Receive` | Message receiving |
-| `Migrate` | Actor migration |
-| `STM` | Software transactional memory |
-| `Async` | Asynchronous computation |
-| `Inference` | Inference provider (was `LLM`; `LLM.ask` / `Inference.ask` are runtime-backed) |
-| `LLM` | Deprecated alias for `Inference` |
-| `Cost` | Cost accounting |
+**Corrected 2026-08-02** (found while writing conformance coverage for
+this table — every row below was verified against the real compiled
+binary, not assumed from the table that used to be here):
+
+| Effect | Description | Status |
+|--------|-------------|--------|
+| `IO` | Console input/output | Implemented |
+| `Http` | Network communication (`Http.get`/`post`/`serve`) | Implemented — this table previously said `Net`, which is not a recognized effect name; `perform Net.get(...)` fails with "Unhandled effect" |
+| `FS` | File system access | Implemented |
+| `Random` | Random number generation | Implemented — this table previously said `Rand`; that name type-checks (it's in the effect-name grammar) but has no runtime dispatch and fails with "Unhandled effect" at `perform` time |
+| `Time` | Wall-clock read (`Time.now`) | Implemented |
+| `Timer` | Delays (`Timer.sleep`/`Timer.after`) | Partial — a silent no-op (returns `unit` without sleeping) outside a workflow/actor context; real delays need the workflow runtime |
+| `Signal` | Cross-actor coordination (`Signal.wait`) | Partial — `Signal.wait` is a silent no-op outside a workflow context; `Signal.notify` is not wired at all despite appearing in editor autocomplete |
+| `Inference` | Inference provider (was `LLM`; `LLM.ask`/`Inference.ask` are runtime-backed) | Implemented |
+| `LLM` | Deprecated alias for `Inference` | Implemented (emits an RFC 0010 deprecation warning on `perform`) |
+| `STM` | Software transactional memory | **Not implemented** — `perform STM.*` always fails with "Unhandled effect" |
+| `Async` | Asynchronous computation | **Not implemented** as a general user-facing effect — `perform Async.*` always fails with "Unhandled effect"; the only asynchronous dispatch path in the VM is internal, specific to `Inference.ask`/`LLM.ask` |
+| `Cost` | Cost accounting | **Not implemented** — `perform Cost.*` always fails with "Unhandled effect" |
+
+`Spawn`, `Send`, `Receive`, and `Migrate` were previously listed in this
+table as effect names, which is misleading: they are language syntax
+(`spawn`/`send`/`receive` keywords, §6.14 and Chapter 8; `migrate` is a
+dedicated bytecode op with no `perform` surface), not effects invoked via
+`perform Effect.op(...)`. `perform Spawn.spawn(...)` and similarly for
+the other three are parse errors, not effect dispatch.
 
 ## 4.7 Effect Inference
 
@@ -2173,6 +2188,47 @@ implementation surface.
 
 # Chapter 10: Workflows
 
+**Deprecated (RFC 0004, Draft).** `workflow` is on a path out of the
+language surface entirely, toward an ordinary `actor` + Cloud SDK
+(`nlc.workflow`) library pattern. The keyword remains functional today
+(the CLI emits a deprecation warning on `workflow` declarations) and
+this chapter still describes its current behavior, but treat everything
+below as a snapshot of a feature being phased out, not a design target
+to invest deeply against. `conformance/behavior/workflow_*.nula` pins
+the current, verified behavior precisely — treat it as more current
+than this prose for edge cases.
+
+**Known issues, current implementation (verified 2026-08-02, not fixed
+in this pass beyond the first):**
+1. **Fixed this pass:** a workflow-only program (no other `actor`
+   declaration) used to never activate the actor runtime at all —
+   `spawn`/`send` were silent stubs, so every step was inert with no
+   error. `src/main.rs`'s actor-detection now includes `Decl::Workflow`.
+2. Saga step compensation (§10.8) is index-based against the *whole
+   module's* declaration order, not the workflow's own steps — an
+   `actor` declared before the `workflow` in the same file silently
+   shifts which step's compensation runs, with no error.
+3. A workflow-level `compensate { }` block (as opposed to a per-step
+   one) parses but is silently dropped during lowering and never runs.
+4. The single-argument `perform Timer.sleep(ms)` form suspends a step
+   and never resumes it in a plain invocation (permanent hang, not an
+   error) — only the two-argument durable form, `Timer.sleep(name, ms)`,
+   works. `ms = 0` hangs too.
+5. A step failing (e.g. a non-exhaustive match) produces no diagnostic
+   at all — no stderr, exit 0 — only a difference in which
+   compensations ran (if any) reveals it happened.
+6. `parallel` blocks (§10.6) run their branches sequentially today, not
+   concurrently, though the observable contract (all branches complete;
+   the aggregate step waits; a branch failure fails the whole block)
+   holds — the desugaring's own comment already says concurrent
+   synthesis isn't ported yet.
+7. `fail` inside a step is sugar for `return`, not a failure signal —
+   triggering real step failure requires a genuine runtime error.
+8. Saga compensation only sees a step as "completed" if the step body
+   manually increments `self.step_index`; nothing does this
+   automatically for ordinary sequential steps despite the desugaring
+   comment implying otherwise.
+
 ## 10.1 Workflows as Actor Graphs
 
 - Workflows are long-running, durable compositions of actor interactions
@@ -2439,6 +2495,13 @@ Cluster parameters are configured through the runtime API today; a declarative `
 
 ## 12.4 Message Routing
 
+**Implementation status: single-node only.** No CLI flag or `.nula`
+syntax forms an actual cluster (`Runtime::enable_distribution` is a
+Rust-embedder-only API, called from nowhere in `main.rs`) — every claim
+below about routing "to whichever node hosts the actor" describes
+planned multi-node behavior that cannot be observed from a single
+`nulang <file>.nula` process.
+
 - The runtime resolves an actor's address (local or remote) and routes messages accordingly
 - Remote-actor references are cached; the programmer sends messages and the runtime handles routing
 
@@ -2448,13 +2511,39 @@ send cart add_item(42)
 // Runtime routes to whichever node hosts the actor
 ```
 
+This example's `send` is ordinary single-node actor messaging (§8.5) —
+it works today, but doesn't exercise any routing decision since there's
+only ever one node to route to. `send remote <actor> <behavior>(args)`
+and `ask remote <actor> <behavior>(args)` are also accepted syntax, but
+single-node their messages are silently dropped rather than
+locally-delivered (a real bug, not just a doc gap: the local-delivery
+fallback these should use already exists and works for other distributed
+paths — `send remote`/`ask remote` just aren't wired to call it).
+`ask remote` additionally returns the wrong value (the target's own
+actor reference) due to a register-write mismatch between the local and
+remote `Ask` opcodes. Tracked as an implementation gap, not fixed in
+this documentation pass.
+
 Actors move between nodes explicitly with `migrate` (the `to` here is contextual syntax, not a keyword):
 
 ```nulang
 migrate cart to target_node
 ```
 
-`monitor`, `link`, and `exit` are reserved keywords for the planned in-language fault-tolerance surface; today these are runtime-level operations.
+This is also accepted syntax that silently no-ops single-node: the
+runtime's `migrate` handler is an empty stub, so the actor stays put and
+the program continues normally with no error or observable effect.
+
+`monitor`, `link`, and `exit` are fully implemented in-language today —
+not merely "reserved for a planned surface" as this section previously
+said. `spawn link Foo {}` / `spawn monitor Foo {}` and `perform
+Actor.link/monitor/exit` have real runtime semantics (link propagation,
+`DOWN` messages, trapped vs. non-trapping exit) and are conformance-
+tested end-to-end (`actor_14` through `actor_17` in
+`conformance/behavior/`). What's accurate about the old wording: they
+ARE runtime-level operations (dispatched through `Runtime`, not
+compiled to dedicated bytecode per-operation) — that part just doesn't
+mean "planned."
 
 ## 12.5 CRDT Replication
 
