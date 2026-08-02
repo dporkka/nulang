@@ -1,0 +1,11 @@
+// Structured error diagnostics: a function-call arity mismatch now
+// populates NuError::TypeError.expected_type/found_type with
+// human-readable, correctly-pluralized descriptions ("2 arguments" /
+// "1 argument"), not just embedding bare numbers in the free-text
+// message. Previously used the hollow NuError::type_error(msg, span)
+// helper, which left these fields None despite the call site already
+// having the exact counts on hand.
+fn add(x: Int, y: Int) -> Int { x + y }
+fn main() {
+  perform IO.print(perform Int.to_string(add(1)))
+}

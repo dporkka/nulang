@@ -1777,14 +1777,19 @@ impl TypeChecker {
                 _ => 1,
             };
             if arg_types.len() != expected_count {
-                return Err(NuError::type_error(
-                    format!(
+                let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
+                let expected_desc = format!("{} {}", expected_count, plural(expected_count));
+                let found_desc = format!("{} {}", arg_types.len(), plural(arg_types.len()));
+                return Err(NuError::TypeError {
+                    msg: format!(
                         "wrong number of arguments: expected {}, got {}",
-                        expected_count,
-                        arg_types.len()
+                        expected_desc, found_desc
                     ),
                     span,
-                ));
+                    expected_type: Some(expected_desc),
+                    found_type: Some(found_desc),
+                    similar_names: None,
+                });
             }
         }
 

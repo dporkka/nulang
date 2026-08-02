@@ -9584,6 +9584,26 @@ match { a: 2, b: 9 } with {
         );
     }
     #[test]
+    fn test_function_call_arity_mismatch_populates_structured_fields() {
+        // PLAN.md bullet 7 (structured error quality): a wrong-arg-count
+        // call must populate NuError::TypeError.expected_type/found_type
+        // with correctly-pluralized descriptions, not leave them None.
+        let err = run_source("fn add(x: Int, y: Int) -> Int { x + y } add(1)").unwrap_err();
+        match &err {
+            NuError::TypeError {
+                expected_type,
+                found_type,
+                ..
+            } => {
+                assert_eq!(expected_type.as_deref(), Some("2 arguments"));
+                assert_eq!(found_type.as_deref(), Some("1 argument"));
+            }
+            other => panic!("expected TypeError, got {other:?}"),
+        }
+        let msg = format!("{}", err);
+        assert!(msg.contains("wrong number of arguments"));
+    }
+    #[test]
     fn test_tuple_field_access_string_concat() {
         // String tuple elements load correctly.
         assert_string("let t = (\"a\", \"b\") in t.0 + t.1", "ab");
