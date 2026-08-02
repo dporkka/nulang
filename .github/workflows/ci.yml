@@ -236,14 +236,22 @@ jobs:
           lake build
 
   # -----------------------------------------------------------------------
-  # Benchmarks — informational, not regression-gated (see benchmarks/
-  # README.md for why: shared-runner noise makes a naive fixed-percentage
-  # threshold flaky). Runs on push to main only (not every PR) since a
-  # full criterion run of every group is slow; results are committed back
-  # so PERFORMANCE_ANALYSIS.md can cite real numbers instead of estimates.
+  # Benchmarks — regression-gated against a rolling window of recent
+  # main-branch history (see scripts/check_bench_regression.py and
+  # benchmarks/README.md for the noise-aware methodology: each
+  # benchmark's own historical spread sets its threshold, not a flat
+  # percentage — GitHub Actions' shared runners commonly show 20-50%+
+  # run-to-run noise, so a naive fixed threshold would fail PRs for
+  # noise, not real regressions). Runs on push to main only (not every
+  # PR) since a full criterion run of every group is slow; results are
+  # committed back so PERFORMANCE_ANALYSIS.md can cite real numbers
+  # instead of estimates. The gate needs >= 3 prior commits' worth of
+  # history for a given benchmark before it will fail anything, so
+  # early runs (and brand-new benchmarks) are informational only until
+  # enough history accumulates.
   # -----------------------------------------------------------------------
   bench:
-    name: Benchmarks (informational)
+    name: Benchmarks (regression-gated)
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
@@ -267,6 +275,14 @@ jobs:
             --criterion-dir target/criterion \
             --out "benchmarks/$(git rev-parse --short HEAD).json"
 
+      - name: Check for regressions
+        id: regression_check
+        continue-on-error: true
+        run: |
+          python3 scripts/check_bench_regression.py \
+            --latest "benchmarks/$(git rev-parse --short HEAD).json" \
+            --history-dir benchmarks
+
       - name: Upload results as build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -281,3 +297,10 @@ jobs:
           git add "benchmarks/$(git rev-parse --short HEAD).json"
           git diff --staged --quiet || git commit -m "bench: record results for $(git rev-parse --short HEAD) [skip ci]"
           git push
+
+      # Separate from the check step itself so the commit above always
+      # happens (preserving complete rolling-window history) even when
+      # this commit's numbers regressed.
+      - name: Fail the job if a regression was found
+        if: steps.regression_check.outcome == 'failure'
+        run: exit 1

@@ -243,19 +243,25 @@ commits this session.
   dedicated scheduled CI job, not a `cargo test` invocation — the seed for
   one exists in `fuzz_differential_extended` but the job itself isn't
   wired).
-- **[~] Bullet 3 (benchmark harness) — informational half done, gating
-  half deliberately deferred.** `benches/*.rs` was fixed to actually
-  compile and run (they didn't before — see `8636b01`). CI now runs
-  `cargo bench` on every push to `main`, collects results via
-  `scripts/collect_bench_results.py` (verified against real criterion
-  0.5.x output, not just the documented schema), and commits them to
-  `benchmarks/`. **Not done, on purpose:** the `>5%` regression-gating
-  this bullet calls for. GitHub Actions' shared runners have commonly-
-  cited 20-50%+ run-to-run noise on wall-clock benchmarks; a naive fixed
-  threshold would fail PRs on noise, not regressions, which is worse
-  than no gate. See `benchmarks/README.md` for what closing this
-  properly needs (dedicated runner, or a noise-aware statistical
-  comparison against a rolling window).
+- **[X] Bullet 3 (benchmark harness) — done, including regression
+  gating.** `benches/*.rs` was fixed to actually compile and run (they
+  didn't before — see `8636b01`). CI runs `cargo bench` on every push
+  to `main`, collects results via `scripts/collect_bench_results.py`
+  (verified against real criterion 0.5.x output, not just the
+  documented schema), commits them to `benchmarks/`, and now also runs
+  `scripts/check_bench_regression.py` against them. GitHub Actions'
+  shared runners have commonly-cited 20-50%+ run-to-run noise on
+  wall-clock benchmarks, so this deliberately isn't the `>5%` flat
+  threshold this bullet originally called for (that would fail pushes
+  on noise, not regressions, which is worse than no gate) — instead
+  each benchmark's own median + 6×MAD across a rolling 10-commit
+  window sets its threshold (floored at 20%), with a 3-prior-sample
+  minimum before a benchmark is gated at all. Verified against
+  synthetic history covering a genuine 2× regression (correctly
+  flagged), a value within a noisy benchmark's normal historical
+  spread (correctly not flagged), and both sparse-history cases
+  (correctly skipped rather than false-positiving). See
+  `benchmarks/README.md` for the full methodology.
 - **[~] Bullet 5 (conformance suite expansion) — 26 → 175 of 300
   target.** Corrected from this doc's original "52" (that was a file
   count — `.nula`+`.json` pairs — not a case count; the actual starting
@@ -419,12 +425,16 @@ actually take. This is what makes 0.1.0 → 0.2.0 justifiable.
      divergence, supervision-cascade failure).
    - Any bug found is captured as a permanent regression test with
      its exact seed.
-3. **Benchmark harness with regression tracking.** Every criterion
-   bench under `benches/` runs in CI on `main` and PRs; results are
-   written to a `benchmarks/` directory in the repo (or an
-   externally-hosted dashboard). Regressions >5% fail the PR unless
-   annotated. Publishes measured numbers to replace the estimates in
-   `PERFORMANCE_ANALYSIS.md`.
+3. **Benchmark harness with regression tracking.** ✅ **Delivered.** Every
+   criterion bench under `benches/` runs in CI on `main` pushes (not
+   PRs — a full run of every group is too slow to gate every PR on);
+   results are written to `benchmarks/` in the repo. Regression
+   threshold is not a flat percentage (GitHub Actions' shared runners
+   show 20-50%+ run-to-run noise, which a flat 5% cutoff can't survive)
+   — `scripts/check_bench_regression.py` computes each benchmark's own
+   median + 6×MAD across a rolling 10-commit window, floored at 20%, and
+   requires ≥3 prior samples before gating a benchmark at all. Publishes
+   measured numbers to replace the estimates in `PERFORMANCE_ANALYSIS.md`.
 4. **Chaos suite for distribution.** Extends the DST harness with
    concrete cluster topologies: 3-node, 5-node, split-brain,
    asymmetric partition, rolling restart. Runs 10³ seeds per commit.
