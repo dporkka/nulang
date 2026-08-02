@@ -55,8 +55,16 @@ The following are verified through other means (fuzzer, integration tests):
   handler dispatch is tested via integration tests
 - **Distribution** — the wire protocol and actor model are tested via
   chaos/stress tests (`src/stress_tests.rs`)
-- **LinearIso must-use** — at-most-once use is enforced by the
-  capability analyzer; exactly-once is future work
+- **LinearIso must-use** — at-most-once use (no double-use) is enforced
+  for every binding. Exactly-once (must-use) is enforced for `let`-bound
+  linear values as of 2026-08-02 (`CapabilityAnalyzer::infer_cap_tracked`'s
+  `Expr::Let` case in `src/effect_checker.rs`, with a transparent-rebind
+  exemption for bare `let a = x` aliases — see the tests prefixed
+  `test_lineariso_let_bound_` / `test_linear_let_bound_` in that file).
+  Function/lambda parameter-level must-use remains future work (a linear
+  binding already present in the *initial* context, e.g. a parameter, is
+  not yet checked); this mirrors why `linear_at_most_once` in
+  `capabilities.lean` is still `sorry`.
 - **Numeric semantics** — value-layout tag dispatch is tested via
   the bytecode VM test suite
 

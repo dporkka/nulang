@@ -608,6 +608,14 @@ runtime withstands adversarial operational review. Both hold up as
 2. **LinearIso must-use enforcement.** Upgrade the at-most-once check
    in `CapabilityAnalyzer` (`src/effect_checker.rs`) to exactly-once
    with a proof. The Lean statement is the source of truth.
+   **Partial progress (2026-08-02):** exactly-once is now enforced for
+   `let`-bound linear values (`Expr::Let`'s must-use check, with a
+   transparent-rebind exemption for bare `let a = x` aliases — 8 new
+   tests). Still open: function/lambda parameter-level must-use (a
+   linear value already bound in the *initial* context, e.g. a
+   parameter, is not yet checked), and the Lean proof itself
+   (`linear_at_most_once` in `capabilities.lean` is still `sorry` —
+   the Rust-side implementation moved ahead of the formal statement).
 3. **Backend-trait completion (RFC 0003 item 6 full wiring).** Route
    `src/jit/`, `src/mir_wasm.rs`, `src/wasm_runtime.rs`, and
    `src/python/` behind the traits already defined in `src/backends/`.

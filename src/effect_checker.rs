@@ -1289,9 +1289,18 @@ impl CapabilityAnalyzer {
                 Ok(cap)
             }
 
-            // Let: capability of the body.
+            // Let: capability of the body. A `LinearIso`/`Linear` binding
+            // must be consumed exactly once: `consume_linear` (via any Var
+            // reference) already rejects a *second* use; here we reject
+            // *zero* uses once the body's scope closes, completing the
+            // exactly-once discipline (see `spec/formal/capabilities.lean`'s
+            // `linear_at_most_once` theorem and its doc comment).
             Expr::Let {
-                name, value, body, ..
+                name,
+                value,
+                body,
+                span,
+                ..
             } => {
                 let val_cap = self.infer_cap_tracked(ctx, value, consumed)?;
                 let body_ctx = ctx.with_binding(name.clone(), val_cap);
@@ -1301,6 +1310,35 @@ impl CapabilityAnalyzer {
                 // consumption is scope-local and never leaks out.
                 let outer_consumed = consumed.remove(name);
                 let result = self.infer_cap_tracked(&body_ctx, body, consumed);
+                // A bare rebind (`let a = x` or `let a = consume x`) is
+                // transparent: evaluating `value` already discharged the
+                // source binding's own obligation (via `consume_linear` in
+                // the Var/Consume cases below), so `a` doesn't carry a
+                // *second*, independent must-use obligation for the same
+                // underlying value — only a genuinely fresh linear value
+                // (a literal/call annotated `:cap lineariso`, a function
+                // return, etc.) does.
+                let is_transparent_rebind = match value.as_ref() {
+                    Expr::Var(..) => true,
+                    Expr::Consume { expr: inner, .. } => matches!(inner.as_ref(), Expr::Var(..)),
+                    _ => false,
+                };
+                if result.is_ok()
+                    && val_cap.is_linear()
+                    && !is_transparent_rebind
+                    && !consumed.contains(name)
+                {
+                    let msg = format!(
+                        "linear value `{}` is never used ({} bindings must be consumed exactly once — pass it to a function, `send` it, or `consume {}` it explicitly)",
+                        name, val_cap, name
+                    );
+                    self.diagnostics.push(msg.clone());
+                    consumed.remove(name);
+                    if outer_consumed {
+                        consumed.insert(name.clone());
+                    }
+                    return Err(NuError::cap_error(msg, *span));
+                }
                 consumed.remove(name);
                 if outer_consumed {
                     consumed.insert(name.clone());
@@ -2837,6 +2875,26 @@ mod tests {
         }
     }
 
+    fn let_expr(name: &str, value: Expr, body: Expr) -> Expr {
+        Expr::Let {
+            name: name.to_string(),
+            ty: None,
+            value: Box::new(value),
+            body: Box::new(body),
+            mutable: false,
+            let_in: true,
+            span: s(),
+        }
+    }
+
+    fn fresh_lineariso(n: i64) -> Expr {
+        Expr::CapAnnotate {
+            expr: Box::new(Expr::Literal(Literal::Int(n), s())),
+            cap: Capability::LinearIso,
+            span: s(),
+        }
+    }
+
     #[test]
     fn test_lineariso_used_once_ok() {
         let mut analyzer = CapabilityAnalyzer::new();
@@ -2871,12 +2929,169 @@ mod tests {
 
     #[test]
     fn test_lineariso_never_used_ok() {
-        // At-most-once MVP: an unused linear binding is NOT an error.
-        // Exactly-once (must-use on all paths) analysis is a follow-up.
+        // A LinearIso binding already present in the *initial* context
+        // (e.g. a function parameter) is not yet must-use checked — only
+        // `let`-introduced bindings are (see test_lineariso_let_bound_*
+        // below). Parameter-level must-use is a separate, still-open
+        // follow-up (see spec/formal/capabilities.lean's
+        // `linear_at_most_once`, which is `sorry` for the same reason).
         let mut analyzer = CapabilityAnalyzer::new();
         let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
         let expr = Expr::Literal(Literal::Int(1), s());
         assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_lineariso_let_bound_fresh_never_used_errors() {
+        // let x: LinearIso = 1 :cap lineariso in 42 — `x` is a genuinely
+        // fresh linear introduction (not a rebind) and is never referenced;
+        // this must now be rejected (exactly-once/must-use).
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        let expr = let_expr(
+            "x",
+            fresh_lineariso(1),
+            Expr::Literal(Literal::Int(42), s()),
+        );
+        let result = analyzer.infer_cap(&ctx, &expr);
+        match result {
+            Err(NuError::CapError { msg, .. }) => {
+                assert!(msg.contains('x'), "error should name the binding: {}", msg);
+                assert!(
+                    msg.contains("never used"),
+                    "error should describe a must-use violation: {}",
+                    msg
+                );
+            }
+            other => panic!("expected CapError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lineariso_let_bound_fresh_used_ok() {
+        // let x: LinearIso = ... in f(x) — x is consumed, satisfies must-use.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        let expr = let_expr("x", fresh_lineariso(1), call1("f", lvar("x")));
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_lineariso_let_bound_transparent_rebind_never_used_ok() {
+        // let x: LinearIso = ... in { let a = x; 1 } — `a` is a bare
+        // rebind of `x`; evaluating `x` to initialize `a` already
+        // discharges x's own must-use obligation, and `a` itself (a
+        // transparent alias, never separately referenced) is exempt from
+        // carrying a second, independent obligation for the same value.
+        // Mirrors conformance/behavior/cap_13_lineariso_branch_merge_one_side_ok.nula.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        let expr = let_expr(
+            "x",
+            fresh_lineariso(1),
+            let_expr("a", lvar("x"), Expr::Literal(Literal::Int(1), s())),
+        );
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_lineariso_let_bound_consumed_on_only_one_branch_errors() {
+        // let x: LinearIso = ... in if true then f(x) else 42 — the else
+        // path never consumes x, and there is no code after the if to
+        // catch up (unlike cap_13's outer rebind), so this is a genuine
+        // must-use violation on the else-taken path.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        let expr = let_expr(
+            "x",
+            fresh_lineariso(1),
+            Expr::If {
+                cond: Box::new(Expr::Literal(Literal::Bool(true), s())),
+                then_branch: Box::new(call1("f", lvar("x"))),
+                else_branch: Some(Box::new(Expr::Literal(Literal::Int(42), s()))),
+                span: s(),
+            },
+        );
+        let result = analyzer.infer_cap(&ctx, &expr);
+        match result {
+            Err(NuError::CapError { msg, .. }) => {
+                assert!(msg.contains('x'), "error should name the binding: {}", msg);
+            }
+            other => panic!("expected CapError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lineariso_let_bound_consumed_on_both_branches_ok() {
+        // let x: LinearIso = ... in if true then f(x) else g(x) — both
+        // branches consume x, so the post-merge set contains it: must-use
+        // is satisfied.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        let expr = let_expr(
+            "x",
+            fresh_lineariso(1),
+            Expr::If {
+                cond: Box::new(Expr::Literal(Literal::Bool(true), s())),
+                then_branch: Box::new(call1("f", lvar("x"))),
+                else_branch: Some(Box::new(call1("g", lvar("x")))),
+                span: s(),
+            },
+        );
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_lineariso_let_bound_consumed_via_explicit_consume_ok() {
+        // let x: LinearIso = ... in consume x — explicit consume discharges
+        // must-use.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        let expr = let_expr(
+            "x",
+            fresh_lineariso(1),
+            Expr::Consume {
+                expr: Box::new(lvar("x")),
+                span: s(),
+            },
+        );
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_lineariso_let_bound_non_linear_never_used_ok() {
+        // Regression guard: a non-linear let binding never needs must-use.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        let expr = let_expr(
+            "x",
+            Expr::Literal(Literal::Int(1), s()),
+            Expr::Literal(Literal::Int(42), s()),
+        );
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_linear_let_bound_fresh_never_used_errors() {
+        // Same must-use discipline for plain `Linear` (not just LinearIso).
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new();
+        let expr = let_expr(
+            "x",
+            Expr::CapAnnotate {
+                expr: Box::new(Expr::Literal(Literal::Int(1), s())),
+                cap: Capability::Linear,
+                span: s(),
+            },
+            Expr::Literal(Literal::Int(42), s()),
+        );
+        let result = analyzer.infer_cap(&ctx, &expr);
+        match result {
+            Err(NuError::CapError { msg, .. }) => {
+                assert!(msg.contains('x'), "error should name the binding: {}", msg);
+            }
+            other => panic!("expected CapError, got {:?}", other),
+        }
     }
 
     #[test]
