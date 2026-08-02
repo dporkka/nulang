@@ -210,6 +210,72 @@ the restoration. This phase must complete on schedule.
 
 ## Phase 1 — Correctness Floor (weeks 4–12)
 
+**Current state (in progress, verified 2026-08-02):** ~1/8 deliverables
+substantially done, 1/8 partially done, a real bug found and fixed along
+the way.
+- **[X] Bullet 1 (fuzzer maturation) — interp/JIT/AOT leg done.**
+  `src/fuzz.rs` grew from panic-avoidance to real differential execution
+  fuzzing (`differential_fuzz_one`): compiles a mutant, runs it
+  interpreted, forces real JIT tier-up on the same VM instance, and
+  compares against the AOT backend when it accepts the program. Building
+  this surfaced and fixed three of its own false-positive bug classes —
+  worth recording because they're exactly the kind of subtle harness bugs
+  that make a "0 divergences" result meaningless if unaddressed:
+  `Value::to_string_repr()` doesn't resolve pool-indexed or heap-pointer
+  values, so raw comparison across independently-compiled backends is
+  unsound (fixed via `is_safely_comparable` gating + reusing the VM's own
+  `string_operand` resolver for the same-VM leg); `VM::step_count` is a
+  lifetime counter that accumulates across repeated `run()` calls, so a
+  step-limit-triggered safety abort trips at different cumulative counts
+  on cold vs warm and must be compared by category, not exact text; and
+  forcing JIT tier-up via a fixed repeat count is unbounded when a
+  mutant's own body loops heavily, requiring a wall-clock warmup budget
+  instead. `fuzz_differential_quick` (300 iter, default `cargo test`) and
+  `fuzz_differential_extended` (30,000 iter, `#[ignore]`d) both currently
+  pass with 0 divergences. **Not done:** WASM backend comparison leg;
+  reaching the 10⁶/day CI-nightly or 4×10⁴/day per-PR scale (that needs a
+  dedicated scheduled CI job, not a `cargo test` invocation — the seed for
+  one exists in `fuzz_differential_extended` but the job itself isn't
+  wired).
+- **[~] Bullet 5 (conformance suite expansion) — 26 → 115 of 300 target.**
+  Corrected from this doc's original "52" (that was a file count —
+  `.nula`+`.json` pairs — not a case count; the actual starting case count
+  was 26). Seven parallel agents each targeted one SPEC2.md area
+  (capabilities, effect-handler resume, effect rows, actor
+  messaging/supervision, CRDT merge laws, pattern matching/error handling,
+  persistence/event sourcing), landing 87 new cases with every expected
+  value captured from the real compiled binary. Two more cases added
+  directly as regression coverage (see below). Still short of 300 —
+  the remaining ~185 need the same treatment across whatever surfaces the
+  existing batches didn't reach.
+- **Real bug found and fixed, not from a PLAN.md bullet but squarely
+  "correctness floor":** writing actor conformance cases surfaced that
+  concatenating a top-level `ask` result (via `Int.to_string` or similar)
+  silently produced `nil`. Root cause: `RuntimeVmCallbacks` (attached
+  whenever a program declares any actor) allocated new heap strings via
+  `Runtime.vm.allocate_string` — but `Runtime.vm` is a separate,
+  lazily-created VM instance that only runs actor bytecode; its heap is
+  not reachable from `main()`'s own top-level VM. Worse, `alloc`/
+  `drop_ref`/`retain_ref` returned `None`/no-op whenever there was no
+  *current actor* — which is always true at the top level — so this
+  wasn't just an `ask`-result bug: **any string concatenation or other
+  heap allocation in `main()`'s own code failed once a program used any
+  actor construct at all**, confirmed against a real shipped example
+  (`examples/supervisor_tree.nula` printed literal `nil` for two lines).
+  Fixed by giving `Runtime` a dedicated `main_heap`/`main_gc` fallback
+  (commit `7215088`) and adding two permanent regression cases
+  (`actor_18`/`actor_19`, commit `ef1f451`) that the pre-fix binary would
+  have failed. Full suite (1555 default, 1511 no-default-features), all
+  115 conformance cases, and `wasm-backend` feature check all verified
+  green after the fix.
+- **[ ] Bullets 2, 3, 4, 6, 7, 8 — not started this session.** Bullet 3
+  (benchmark harness) has a prerequisite already done: `benches/*.rs` was
+  fixed to actually compile and run (they didn't before — see
+  `8636b01`), but CI wiring, a `benchmarks/` results directory, and
+  regression-threshold gating remain. Bullets 2/4 (DST, chaos suite) need
+  `src/dst.rs` wired into the real actor runtime — currently a standalone,
+  unwired module. Bullets 6/7/8 untouched.
+
 **Goal.** The language does what it says, provably, on the paths users
 actually take. This is what makes 0.1.0 → 0.2.0 justifiable.
 
@@ -241,7 +307,7 @@ actually take. This is what makes 0.1.0 → 0.2.0 justifiable.
    concrete cluster topologies: 3-node, 5-node, split-brain,
    asymmetric partition, rolling restart. Runs 10³ seeds per commit.
 5. **Conformance suite expansion.** Grow `conformance/behavior/` from
-   52 to ≥300 cases covering every Frozen and Stable surface — every
+   26 to ≥300 cases covering every Frozen and Stable surface — every
    built-in effect, every capability transition, every CRDT merge law,
    every supervisor restart strategy, every effect-handler resume
    shape. This is the executable spec that a second implementation
