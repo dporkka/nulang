@@ -1,0 +1,5 @@
+type Result[Ok,Err] = Ok(Ok) | Error(Err)
+fn div(a: Int, b: Int) -> Int ! String {
+    if b == 0 then Error(42) else Ok(a / b)
+}
+perform IO.print(div(10, 0) catch 0 - 1)

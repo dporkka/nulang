@@ -1,0 +1,5 @@
+fn main() {
+    let x = 42 :cap lineariso
+    let y = x
+    perform IO.print(y)
+}

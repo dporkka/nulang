@@ -1,0 +1,15 @@
+persistent actor ShoppingCart {
+    state durable items_count: Int = 0
+    state event_sourced events_seen: Int = 0
+    behavior add_item(item: Int) {
+        self.items_count = self.items_count + 1
+        emit ItemAdded(item)
+    }
+    behavior get_events_seen() { self.events_seen }
+}
+fn main() {
+    let cart = spawn ShoppingCart {} in {
+        send cart add_item(7)
+        perform IO.print(ask cart get_events_seen())
+    }
+}

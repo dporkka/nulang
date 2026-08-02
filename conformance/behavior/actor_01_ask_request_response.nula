@@ -1,0 +1,12 @@
+actor Adder {
+    state total: Int = 0
+    behavior add(x: Int) { self.total = self.total + x }
+    behavior get() { self.total }
+}
+fn main() {
+    let a = spawn Adder {}
+    send a add(5)
+    send a add(7)
+    let result = ask a get()
+    perform IO.print(result)
+}

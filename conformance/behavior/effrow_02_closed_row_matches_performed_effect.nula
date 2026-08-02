@@ -1,0 +1,4 @@
+fn greet(name: String) -> Unit ! {IO} {
+    perform IO.print("Hello, " + name)
+}
+greet("Nu")

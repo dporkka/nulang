@@ -1,0 +1,16 @@
+entity Counter {
+    state count: Int = 0
+    events
+        | Incremented(by: Int)
+    apply
+        | Incremented(by) => self.count = self.count + by
+    behavior increment(by: Int) { emit Incremented(by) }
+    behavior get() { self.count }
+}
+fn main() {
+    let c = spawn Counter {} in {
+        send c increment(3)
+        send c increment(4)
+        perform IO.print(ask c get())
+    }
+}

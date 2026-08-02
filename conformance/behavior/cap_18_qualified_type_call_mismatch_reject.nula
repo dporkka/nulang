@@ -1,0 +1,7 @@
+fn takes_box(x: &box Int) {
+    perform IO.print("got box")
+}
+fn main() {
+    let r: &ref Int = &5
+    takes_box(r)
+}

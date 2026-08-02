@@ -1,0 +1,7 @@
+entity E {
+    state x: Int = 0
+    events
+        | Ev(a: Int, b: Int)
+    behavior go() { emit Ev(1) }
+}
+fn main() { 0 }

@@ -1,0 +1,8 @@
+type Option[T] = Some(T) | None
+fn combine(pair) -> Int {
+    match pair {
+        | (Some(x), y) => x + y
+        | (None, y) => y
+    }
+}
+perform IO.print(combine((Some(3), 4)) * 100 + combine((None, 9)))

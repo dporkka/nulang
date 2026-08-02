@@ -1,0 +1,12 @@
+fn main() {
+    let status = handle {
+        handle {
+            perform Auth.check()
+        } {
+            | Auth.check() resume => perform Log.record() + 1
+        }
+    } {
+        | Log.record() resume => 5
+    }
+    perform IO.print(perform Int.to_string(status))
+}

@@ -1,0 +1,4 @@
+fn g() -> Unit ! {IO, | row} {
+    perform FS.read("/tmp/x")
+}
+g()

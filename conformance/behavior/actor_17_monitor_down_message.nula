@@ -1,0 +1,27 @@
+actor Watcher {
+    state down_reason: Int = -1
+    state down_seen: Int = 0
+    behavior system(target, watcher, reason) {
+        self.down_reason = reason
+        self.down_seen = self.down_seen + 1
+    }
+    behavior watch(v) {
+        perform Actor.monitor(v)
+        0
+    }
+    behavior get_reason() { self.down_reason }
+    behavior get_seen() { self.down_seen }
+}
+actor Victim {
+    behavior die() { perform Actor.exit(1) }
+}
+fn main() {
+    let w = spawn Watcher {}
+    let v = spawn Victim {}
+    let s1 = ask w watch(v)
+    let s2 = ask v die()
+    let reason = ask w get_reason()
+    perform IO.print(reason)
+    let seen = ask w get_seen()
+    perform IO.print(seen)
+}

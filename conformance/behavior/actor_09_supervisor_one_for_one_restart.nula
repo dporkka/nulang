@@ -1,0 +1,25 @@
+actor Worker {
+    state count: Int = 0
+    behavior bump(x: Int) { self.count = self.count + x }
+    behavior get() { self.count }
+    behavior die() { perform Actor.exit(1) }
+}
+fn main() {
+    let sup = perform Otp.create_supervisor("sup1", 0)
+    let w0 = spawn Worker {}
+    let w1 = spawn Worker {}
+    let w2 = spawn Worker {}
+    perform Otp.supervise_child(sup, w0, 0)
+    perform Otp.supervise_child(sup, w1, 0)
+    perform Otp.supervise_child(sup, w2, 0)
+    let b0 = ask w0 bump(30)
+    let b1 = ask w1 bump(50)
+    let b2 = ask w2 bump(90)
+    let r = ask w1 die()
+    let count = perform Otp.child_count(sup)
+    perform IO.print(count)
+    let w0_after = ask w0 get()
+    perform IO.print(w0_after)
+    let w2_after = ask w2 get()
+    perform IO.print(w2_after)
+}

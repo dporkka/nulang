@@ -1,0 +1,7 @@
+type Result[Ok,Err] = Ok(Ok) | Error(Err)
+fn safe_div(a: Int, b: Int) -> Result[Int, String] {
+    if b == 0 then Error("div by zero") else Ok(a / b)
+}
+perform IO.print(safe_div(10, 0) catch {
+    | Error(msg) => 0 - 1
+})

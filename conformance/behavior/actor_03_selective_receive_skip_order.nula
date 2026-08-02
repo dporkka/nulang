@@ -1,0 +1,18 @@
+actor Tagger {
+    behavior start() {
+        let b = receive { | beta(x) => x }
+        let n = receive { | alpha(y) => y | gamma(z) => z }
+        perform IO.print(perform Int.to_string(b) + "," + perform Int.to_string(n))
+    }
+    behavior alpha(x: Int) { x }
+    behavior beta(x: Int) { x }
+    behavior gamma(x: Int) { x }
+}
+fn main() {
+    let a = spawn Tagger {}
+    send a start()
+    send a alpha(1)
+    send a beta(2)
+    send a gamma(3)
+    unit
+}

@@ -1,0 +1,13 @@
+entity BankAccount {
+    state balance: Int = 0
+    events
+        | Deposited(amount: Int)
+    apply
+        | Deposited(amount) => self.balance = self.balance + amount
+    behavior deposit(amount: Int) { emit Deposited(amount) }
+    behavior get_balance() { self.balance }
+}
+fn main() {
+    let acc = spawn BankAccount {} in
+    perform IO.print(ask acc get_balance())
+}

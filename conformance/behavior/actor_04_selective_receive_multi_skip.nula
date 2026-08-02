@@ -1,0 +1,22 @@
+actor Tagger {
+    behavior start() {
+        let t = receive { | target(x) => x }
+        let r1 = receive { | w1(a) => a | w2(b) => b | w3(c) => c }
+        let r2 = receive { | w1(a) => a | w2(b) => b | w3(c) => c }
+        let r3 = receive { | w1(a) => a | w2(b) => b | w3(c) => c }
+        perform IO.print(perform Int.to_string(t) + "," + perform Int.to_string(r1) + "," + perform Int.to_string(r2) + "," + perform Int.to_string(r3))
+    }
+    behavior w1(x: Int) { x }
+    behavior w2(x: Int) { x }
+    behavior w3(x: Int) { x }
+    behavior target(x: Int) { x }
+}
+fn main() {
+    let a = spawn Tagger {}
+    send a start()
+    send a w1(1)
+    send a w2(2)
+    send a w3(3)
+    send a target(4)
+    unit
+}

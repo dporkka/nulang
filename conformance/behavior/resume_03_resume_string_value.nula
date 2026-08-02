@@ -1,0 +1,8 @@
+fn main() {
+    let greeting = handle {
+        "Hello, " + perform Name.get() + "!"
+    } {
+        | Name.get() resume => "World"
+    }
+    perform IO.print(greeting)
+}

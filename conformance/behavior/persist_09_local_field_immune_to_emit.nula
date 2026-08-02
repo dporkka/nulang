@@ -1,0 +1,16 @@
+entity Counter {
+    state count: Int = 0
+    state local scratch: Int = 100
+    events
+        | Incremented(by: Int)
+    apply
+        | Incremented(by) => self.count = self.count + by
+    behavior increment(by: Int) { emit Incremented(by) }
+    behavior get_scratch() { self.scratch }
+}
+fn main() {
+    let c = spawn Counter {} in {
+        send c increment(5)
+        perform IO.print(ask c get_scratch())
+    }
+}

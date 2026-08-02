@@ -1,0 +1,4 @@
+fn f() -> Unit ! {IO, FS, | row} {
+    perform IO.print("subset")
+}
+f()

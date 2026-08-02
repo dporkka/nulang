@@ -1,0 +1,15 @@
+actor Worker {
+    state count: Int = 0
+    behavior bump(x: Int) { self.count = self.count + x }
+    behavior die() { perform Actor.exit(1) }
+}
+fn main() {
+    let sup = perform Otp.create_supervisor("sup1", 0)
+    let w1 = spawn Worker {}
+    perform Otp.supervise_child(sup, w1, 1)
+    let before = perform Otp.child_count(sup)
+    perform IO.print(before)
+    let r = ask w1 die()
+    let after = perform Otp.child_count(sup)
+    perform IO.print(after)
+}

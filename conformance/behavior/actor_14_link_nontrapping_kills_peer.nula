@@ -1,0 +1,20 @@
+actor Watcher {
+    behavior watch(v) {
+        perform Actor.link(v)
+        0
+    }
+    behavior ping() { 999 }
+}
+actor Victim {
+    behavior die() { perform Actor.exit(1) }
+}
+fn main() {
+    let w = spawn Watcher {}
+    let v = spawn Victim {}
+    let s1 = ask w watch(v)
+    let alive_before = ask w ping()
+    perform IO.print(alive_before)
+    let s2 = ask v die()
+    let alive_after = ask w ping()
+    perform IO.print(alive_after)
+}

@@ -1,0 +1,4 @@
+fn pure_add(x: Int, y: Int) -> Int ! {} {
+    x + y
+}
+perform IO.print(pure_add(2, 3))

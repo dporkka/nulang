@@ -1,0 +1,19 @@
+actor PoolWorker {
+    state count: Int = 0
+    behavior work(x: Int) { self.count = self.count + x }
+    behavior die() { perform Actor.exit(1) }
+}
+fn main() {
+    let sup = perform Otp.create_supervisor("pool", 3)
+    let t = perform Otp.set_template(sup, "PoolWorker")
+    let w1 = perform Otp.start_child(sup)
+    let w2 = perform Otp.start_child(sup)
+    let before = perform Otp.child_count(sup)
+    perform IO.print(before)
+    let r1 = ask w1 die()
+    let after_crash = perform Otp.child_count(sup)
+    perform IO.print(after_crash)
+    let r2 = perform Otp.terminate_child(sup, w2)
+    let after_terminate = perform Otp.child_count(sup)
+    perform IO.print(after_terminate)
+}

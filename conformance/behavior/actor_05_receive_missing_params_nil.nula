@@ -1,0 +1,18 @@
+actor Listener {
+    behavior drain() {
+        let y_missing = receive {
+            | add(x, y) => {
+                perform IO.print(x)
+                y == nil
+            }
+        }
+        perform IO.print(y_missing)
+    }
+    behavior add(x: Int, y: Int) { x }
+}
+fn main() {
+    let c = spawn Listener {}
+    send c drain()
+    send c add(7)
+    unit
+}

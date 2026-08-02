@@ -1,0 +1,10 @@
+actor Sink {
+    behavior recv(x: Int) { perform IO.print(x) }
+}
+fn main() {
+    let s = spawn Sink {}
+    let r = 42 :cap ref
+    let t = r :cap tag
+    send s recv(t)
+    unit
+}

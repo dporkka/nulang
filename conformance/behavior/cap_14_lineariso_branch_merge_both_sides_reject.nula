@@ -1,0 +1,12 @@
+fn main() {
+    let x = 42 :cap lineariso
+    let r = if true then {
+        let a = x
+        1
+    } else {
+        let b = x
+        2
+    }
+    let c = x
+    perform IO.print(r)
+}

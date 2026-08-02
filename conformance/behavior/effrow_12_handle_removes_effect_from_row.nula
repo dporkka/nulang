@@ -1,0 +1,5 @@
+fn quiet() -> Unit ! {} {
+    handle { perform IO.print("hidden"); unit } { | IO.print(msg) => unit }
+}
+quiet()
+perform IO.print("done")

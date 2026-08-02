@@ -1,0 +1,4 @@
+fn do_io() -> Unit ! {IO} { perform IO.print("x") }
+fn middle() -> Unit { do_io() }
+fn pure_fn() -> Unit ! {} { middle() }
+pure_fn()

@@ -1,0 +1,10 @@
+type Result[Ok,Err] = Ok(Ok) | Error(Err)
+fn div(a: Int, b: Int) -> Int ! String {
+    if b == 0 then fail Error("div by zero") else Ok(a / b)
+}
+fn compute(a: Int, b: Int) -> Int ! String {
+    let r = div(a, b)?
+    Ok(r + 1)
+}
+perform IO.print(compute(10, 2) catch 0 - 1)
+perform IO.print(compute(10, 0) catch 0 - 1)

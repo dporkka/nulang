@@ -1,0 +1,3 @@
+fn do_io() -> Unit ! {IO} { perform IO.print("hi") }
+fn wrapper() -> Unit ! {IO} { do_io() }
+wrapper()

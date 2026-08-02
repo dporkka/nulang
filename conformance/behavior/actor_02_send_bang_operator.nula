@@ -1,0 +1,13 @@
+actor Acc {
+    state value: Int = 0
+    behavior push(d: Int) { self.value = self.value * 10 + d }
+    behavior get() { self.value }
+}
+fn main() {
+    let a = spawn Acc {}
+    a ! push(1)
+    send a push(2)
+    a ! push(3)
+    let result = ask a get()
+    perform IO.print(result)
+}

@@ -1,0 +1,8 @@
+type Option[T] = Some(T) | None
+fn describe(o: Option[Int]) -> Int {
+    match o {
+        | s @ Some(x) => x + 1000
+        | None => 0 - 1
+    }
+}
+perform IO.print(describe(Some(41)))

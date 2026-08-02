@@ -1,0 +1,8 @@
+actor Sink {
+    behavior recv(x: Int) { perform IO.print(x) }
+}
+fn main() {
+    let s = spawn Sink {}
+    send s recv(42)
+    unit
+}

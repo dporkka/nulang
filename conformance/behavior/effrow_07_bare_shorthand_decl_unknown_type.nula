@@ -1,0 +1,4 @@
+fn log_once(msg: String) -> Unit ! IO {
+    perform IO.print(msg)
+}
+log_once("shorthand test")

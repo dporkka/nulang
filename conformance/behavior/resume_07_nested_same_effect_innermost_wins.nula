@@ -1,0 +1,12 @@
+fn main() {
+    let result = handle {
+        handle {
+            perform Shared.get()
+        } {
+            | Shared.get() resume => 1
+        }
+    } {
+        | Shared.get() resume => 2
+    }
+    perform IO.print(perform Int.to_string(result))
+}

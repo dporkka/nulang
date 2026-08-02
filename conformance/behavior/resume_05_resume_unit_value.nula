@@ -1,0 +1,8 @@
+fn main() {
+    handle {
+        perform Log.write("a")
+        perform IO.print("after log")
+    } {
+        | Log.write(msg) resume => unit
+    }
+}

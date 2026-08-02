@@ -1,0 +1,4 @@
+fn pure_cb() -> Int { 1 }
+fn io_cb() -> Int ! {IO} { perform IO.print("cb running"); 2 }
+fn accepts_wide(cb: () -> Int ! {IO, | row}) -> Int { cb() }
+perform IO.print(accepts_wide(pure_cb) + accepts_wide(io_cb))

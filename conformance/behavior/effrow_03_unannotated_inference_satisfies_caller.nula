@@ -1,0 +1,7 @@
+fn helper() -> Unit {
+    perform IO.print("inferred")
+}
+fn caller() -> Unit ! {IO} {
+    helper()
+}
+caller()

@@ -1,0 +1,12 @@
+entity Account {
+    state balance: Int = 0
+    state local scratch: Int = 0
+    behavior touch(n: Int) { self.scratch = self.scratch + n }
+    behavior get_scratch() { self.scratch }
+}
+fn main() {
+    let a = spawn Account {} in {
+        send a touch(7)
+        perform IO.print(ask a get_scratch())
+    }
+}

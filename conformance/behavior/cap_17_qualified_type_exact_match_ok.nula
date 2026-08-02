@@ -1,0 +1,4 @@
+fn main() {
+    let x: &ref Int = &5
+    perform IO.print(*x)
+}

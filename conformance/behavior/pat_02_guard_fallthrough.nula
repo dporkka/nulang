@@ -1,0 +1,8 @@
+fn classify(n: Int) -> Int {
+    match n {
+        | n if n > 10 => 1
+        | n if n < 0 => 2
+        | _ => 0
+    }
+}
+perform IO.print(classify(3))

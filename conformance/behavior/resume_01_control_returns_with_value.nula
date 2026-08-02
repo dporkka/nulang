@@ -1,0 +1,10 @@
+fn main() {
+    let x = handle {
+        let y = perform Counter.ask()
+        perform IO.print("resumed")
+        y * 2
+    } {
+        | Counter.ask() resume => 21
+    }
+    perform IO.print(perform Int.to_string(x))
+}

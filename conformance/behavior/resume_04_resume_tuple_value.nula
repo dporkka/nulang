@@ -1,0 +1,10 @@
+fn main() {
+    let sum = handle {
+        match perform Point.get() {
+            | (a, b) => a + b
+        }
+    } {
+        | Point.get() resume => (3, 4)
+    }
+    perform IO.print(perform Int.to_string(sum))
+}

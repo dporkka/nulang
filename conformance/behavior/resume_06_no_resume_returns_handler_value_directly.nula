@@ -1,0 +1,11 @@
+fn main() {
+    let result = handle {
+        perform IO.print("computing")
+        let y = perform Task.request()
+        perform IO.print("this line never runs")
+        y + 1
+    } {
+        | Task.request() => 99
+    }
+    perform IO.print(perform Int.to_string(result))
+}

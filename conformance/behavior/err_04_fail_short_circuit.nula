@@ -1,0 +1,6 @@
+type Result[Ok,Err] = Ok(Ok) | Error(Err)
+fn early_return(x: Int) -> Result[Int, String] {
+    if x < 0 then fail Error("negative") else Ok(x * 2)
+}
+perform IO.print(early_return(5) catch 0 - 1)
+perform IO.print(early_return(0 - 5) catch 0 - 1)

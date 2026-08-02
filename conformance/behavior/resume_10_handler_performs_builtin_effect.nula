@@ -1,0 +1,10 @@
+fn main() {
+    let result = handle {
+        perform Console.print("event happened")
+        perform IO.print("continued after log")
+        1
+    } {
+        | Console.print(msg) resume => perform IO.print("logged")
+    }
+    perform IO.print(perform Int.to_string(result))
+}

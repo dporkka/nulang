@@ -1,0 +1,8 @@
+persistent actor BankAccount {
+    state durable balance: Int = 0
+    behavior get_balance() { self.balance }
+}
+fn main() {
+    let acc = spawn BankAccount {} in
+    perform IO.print(ask acc get_balance())
+}

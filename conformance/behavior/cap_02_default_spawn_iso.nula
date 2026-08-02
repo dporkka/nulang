@@ -1,0 +1,12 @@
+actor Worker {
+    behavior ping() { perform IO.print("pong") }
+}
+actor Registry {
+    behavior register(w) { send w ping() }
+}
+fn main() {
+    let reg = spawn Registry {}
+    let w = spawn Worker {}
+    send reg register(w)
+    unit
+}

@@ -1,0 +1,11 @@
+actor Sink {
+    behavior recv(x: Int) { perform IO.print(x) }
+}
+fn forward(s, n: Int) {
+    send s recv(n)
+}
+fn main() {
+    let sink = spawn Sink {}
+    forward(sink, 7)
+    unit
+}

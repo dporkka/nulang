@@ -1,0 +1,15 @@
+actor Waiter {
+    behavior start() {
+        let r = receive {
+            | ping(x) => x
+        } after 3000 => 999
+        perform IO.print(r)
+    }
+    behavior ping(x: Int) { x }
+}
+fn main() {
+    let w = spawn Waiter {}
+    send w start()
+    send w ping(42)
+    unit
+}

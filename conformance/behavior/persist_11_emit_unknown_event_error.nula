@@ -1,0 +1,7 @@
+entity E {
+    state x: Int = 0
+    events
+        | KnownEvent(n: Int)
+    behavior go() { emit UnknownEvent(1) }
+}
+fn main() { 0 }

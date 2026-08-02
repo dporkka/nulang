@@ -1,0 +1,11 @@
+fn main() {
+    let result = handle {
+        let a = perform Math.double(3)
+        let b = perform Math.double(10)
+        let c = perform Math.double(a + b)
+        c
+    } {
+        | Math.double(n) resume => n * 2
+    }
+    perform IO.print(perform Int.to_string(result))
+}

@@ -1,0 +1,14 @@
+actor Waiter {
+    behavior start() {
+        let r = receive {
+            | never(x) => x
+        } after 0 => 999
+        perform IO.print(r)
+    }
+    behavior never(x: Int) { x }
+}
+fn main() {
+    let w = spawn Waiter {}
+    send w start()
+    unit
+}
