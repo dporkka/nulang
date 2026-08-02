@@ -210,15 +210,16 @@ the restoration. This phase must complete on schedule.
 
 ## Phase 1 — Correctness Floor (weeks 4–12)
 
-**Current state (in progress, verified 2026-08-02):** 3/8 deliverables
-substantially done (fuzzer maturation, benchmark harness informational
-half, doc-example verification extended), 2/8 partially wired this
-extended session (DST, persistence recovery), bullet 5 at 175/300,
-bullet 7 partially addressed (phrase cleanup, not the full
-structured-error pass). 7 real runtime/tooling bugs found and fixed,
-5 more found and documented for follow-up, plus a dozen SPEC2.md/
-GOVERNANCE.md/CHANGELOG.md truth-in-advertising corrections. 23
-commits this session.
+**Current state (in progress, verified 2026-08-02):** 4/8 deliverables
+done (fuzzer maturation, benchmark harness including regression
+gating, doc-example verification extended), 2/8 partially wired this
+extended session (DST, persistence recovery), bullet 5 at 210/300,
+bullet 7 partially addressed (phrase cleanup plus a unit-test
+verification layer for the existing structured-error fields, not the
+full "every variant" pass). 8 real runtime/tooling bugs found and
+fixed, 8 more found and documented for follow-up, plus a dozen
+SPEC2.md/GOVERNANCE.md/CHANGELOG.md truth-in-advertising corrections.
+30 commits this session.
 - **[X] Bullet 1 (fuzzer maturation) — interp/JIT/AOT leg done.**
   `src/fuzz.rs` grew from panic-avoidance to real differential execution
   fuzzing (`differential_fuzz_one`): compiles a mutant, runs it
@@ -262,10 +263,10 @@ commits this session.
   spread (correctly not flagged), and both sparse-history cases
   (correctly skipped rather than false-positiving). See
   `benchmarks/README.md` for the full methodology.
-- **[~] Bullet 5 (conformance suite expansion) — 26 → 175 of 300
+- **[~] Bullet 5 (conformance suite expansion) — 26 → 210 of 300
   target.** Corrected from this doc's original "52" (that was a file
   count — `.nula`+`.json` pairs — not a case count; the actual starting
-  case count was 26). Three waves of parallel agents:
+  case count was 26). Four waves of parallel agents:
   - Wave 1 (7 agents): capabilities, effect-handler resume, effect rows,
     actor messaging/supervision, CRDT merge laws, pattern
     matching/error handling, persistence/event sourcing → +87 cases.
@@ -281,9 +282,18 @@ commits this session.
     ordering, IEEE-754 float determinism including exact tie-break
     cases, and the real nil-collapse/epsilon-equality boundary
     semantics) → +17 cases.
+  - Wave 4 (3 agents, extended session): generics (§7.8), imports/
+    modules (§7.6-7.7), visibility (§7.9), and the Phase-4-experimental
+    typeclass surface — zero prior coverage on any of these → +32
+    cases, plus 3 more targeted at the structured-error diagnostic
+    fields (bullet 7). Surfaced two of this session's most severe
+    findings: a compiler crash on sibling same-named module functions
+    (fixed, see the bug list below) and a runtime crash on constrained
+    generic typeclass dispatch (documented, see SPEC2.md's
+    Implementation Status section).
   Every value captured from the real compiled binary, never guessed.
-  Still short of 300 — the remaining ~125 need the same treatment
-  across whatever surfaces these thirteen agents didn't reach (AI
+  Still short of 300 — the remaining ~90 need the same treatment
+  across whatever surfaces these sixteen agents didn't reach (AI
   runtime, operational-model surfaces, remaining grammar/syntax edge
   cases).
 - **Real bugs found and FIXED this session (not from a numbered
@@ -320,6 +330,30 @@ commits this session.
      as `perform`-able effects when they're actually keywords/opcodes
      with a parse error on that syntax. Removed the non-functional
      entries, corrected the misnamed ones.
+  5. **Two sibling `module { }` blocks declaring a same-named function
+     crashed the compiler** (`5e9430c`, extended session). Nested
+     modules are purely a flattening/namespacing construct — `module
+     Alpha { fn value() {..} } module Beta { fn value() {..} }` both
+     land in the same flat `func_map`, and the second registration
+     silently overwrote the first's slot mapping, leaving the
+     first-reserved MIR function slot permanently unfilled: `internal:
+     MIR function slot 0 left unfilled`. Same root-cause *shape* as bug
+     2 above (silent name collision surfacing as an internal-error
+     symptom far from the real cause) but a different code path
+     (`mir_lower.rs`'s `reserve_decl`, not the resolver's import
+     merging). Fixed with the same pattern: detect the collision where
+     it happens, name it in the error.
+  6. **Recovered actors silently lost per-field persistence-model
+     tracking, breaking a second crash/recovery cycle** (`03ed058`,
+     extended session). `Runtime::recover_actor` built a bare
+     `Actor::new()` and never restored `Actor.state_models` (the
+     `local`/`durable`/`event_sourced`/`crdt` map per field) — every
+     field silently reverted to `local` after one recovery, meaning a
+     *second* crash would have dropped `durable` fields from the
+     snapshot entirely and stopped `event_sourced` fields from
+     accumulating. Fixed by restoring `state_models` from the recovery
+     module's `actor_metadata` alongside `bytecode_module`/
+     `bytecode_offsets`. Verified with a new two-cycle recovery test.
 - **Real bugs found and DOCUMENTED, not fixed this session (tracked
   for follow-up, all in `SPEC2.md` with full evidence):**
   1. `ask remote`/distributed `RAsk` returns the wrong value (the
@@ -334,6 +368,23 @@ commits this session.
   4. Single-argument `perform Timer.sleep(ms)` suspends a step and
      never resumes it — a permanent hang, not an error. Only the
      two-argument durable form works.
+  5. `event_sourced` field reconstruction during recovery is a bare
+     count of persisted events, never running the field's `apply`
+     handler against the event's args — correct for a plain counter,
+     silently wrong for any field with a non-trivial `apply` handler
+     (extended session; see bug 6 above's neighbor finding).
+  6. A constrained generic function using a typeclass bound on a
+     type-variable receiver type-checks but crashes at runtime ("Not a
+     function: nil") — the dictionary-passing transform only resolves
+     literal receivers (extended session, `typeclass_06`).
+  7. Recursive generic ADTs cannot be constructed — SPEC2.md §7.8's own
+     `Tree[T]` example fails to type-check its own constructor call
+     (extended session, `generics_03`/`07`).
+  8. Generic function type parameters are not skolemized in the
+     function body, so an internally-inconsistent generic (e.g. a body
+     that only ever produces `Int` for a declared `T`) is accepted at
+     the declaration and only fails later at a mismatched call site
+     (extended session, `generics_08`).
   Also corrected: `SPEC2.md` §4.6 (built-in effects table — see bug 4
   above), §12.4 (distributed message routing — see bugs 1-2 above, plus
   a separate correction: `monitor`/`link`/`exit` were undersold as
@@ -355,17 +406,31 @@ commits this session.
   left for follow-up. Not done: the `///` doc-comment coverage this
   bullet also calls for (needs a Rust-source-aware extractor, not a
   markdown-fence scanner).
-- **[~] Bullet 7 (structured error quality) — phrase cleanup done, the
-  larger structural ask isn't.** Removed the "not yet supported" phrase
-  from the two places it appeared in user-facing errors (`resolver.rs`'s
-  new duplicate-import error, and 17 uniformly-templated messages in
-  `aot/codegen.rs`) — same actionable content, different wording. The
-  fuller ask (every `NuError` variant carrying `expected`/`found`/
-  `suggestion`, verified by test) is partially already in place
-  (`ParseError` has `expected`/`found`; there's a `suggestion` parameter
-  in the error-formatting helper) but extending that to every variant
-  touches error-construction call sites throughout the codebase — a
-  separate, larger pass not attempted here.
+- **[~] Bullet 7 (structured error quality) — phrase cleanup done,
+  "verified by test" now landed for the fields that already existed,
+  the "every variant" structural ask still isn't.** Removed the "not
+  yet supported" phrase from the two places it appeared in user-facing
+  errors (`resolver.rs`'s new duplicate-import error, and 17
+  uniformly-templated messages in `aot/codegen.rs`) — same actionable
+  content, different wording. The fuller ask (every `NuError` variant
+  carrying `expected`/`found`/`suggestion`, verified by test) is
+  partially already in place: `ParseError`/`TypeError`/`EffectError`
+  already carry rich fields (`expected`/`found`, `expected_type`/
+  `found_type`/`similar_names`, `missing_effects`/`allowed_effects`)
+  and their constructor helpers already populate them correctly at
+  real call sites — verified this extended session (`type_mismatch`,
+  `unbound_variable`, `missing_effects`, `parse_unexpected` each got a
+  unit test asserting the field population, plus 3 conformance cases
+  proving the same fields reach real compiled-binary stderr output,
+  where previously ZERO tests exercised these fields at all — the one
+  prior test only checked `is_err()`). Not done: `LexError`/
+  `FFIError`/`RuntimeError`/`VMError`/`PythonError`/`PackageError`
+  still carry only `{msg, span}` — extending structured fields to
+  these is lower-value (they're inherently dynamic/message-driven,
+  without a natural "expected vs found" shape) but still unaddressed;
+  no variant has a field literally named `suggestion` (the closest
+  equivalents are `similar_names`/`explanation`, which already do the
+  job under a different name).
 - **[~] Bullet 2 (DST) — single-node message-passing wired, cluster/timer
   determinism not started.** `src/dst.rs` was not even part of the
   compiled crate (`mod dst;` was missing from `src/lib.rs` — its 4
