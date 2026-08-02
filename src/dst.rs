@@ -116,18 +116,22 @@ impl Simulator {
 
     /// Register a simulated actor.
     pub fn register_actor(&mut self, id: u64, name: &str) {
-        self.actors.insert(id, SimActor {
+        self.actors.insert(
             id,
-            name: name.to_string(),
-            mailbox: VecDeque::new(),
-            state: HashMap::new(),
-        });
+            SimActor {
+                id,
+                name: name.to_string(),
+                mailbox: VecDeque::new(),
+                state: HashMap::new(),
+            },
+        );
     }
 
     /// Send a message to an actor.
     pub fn send(&mut self, sender: u64, target: u64, behavior: &str, payload: Vec<SimValue>) {
         self.pending_messages.push_back(SimMessage {
-            sender, target,
+            sender,
+            target,
             behavior: behavior.to_string(),
             payload,
         });
@@ -165,7 +169,9 @@ impl Simulator {
         }
 
         // Collect actors with non-empty mailboxes
-        let ready: Vec<u64> = self.actors.iter()
+        let ready: Vec<u64> = self
+            .actors
+            .iter()
             .filter(|(_, a)| !a.mailbox.is_empty())
             .map(|(id, _)| *id)
             .collect();
@@ -189,7 +195,10 @@ impl Simulator {
                 let behavior = msg.behavior.clone();
                 // In a real implementation, this would execute the behavior.
                 // For DST, we just record the step.
-                StepResult::MessageProcessed { actor: actor_id, behavior }
+                StepResult::MessageProcessed {
+                    actor: actor_id,
+                    behavior,
+                }
             } else {
                 StepResult::NoProgress
             }
@@ -214,10 +223,14 @@ impl Simulator {
     }
 
     /// Returns the number of steps executed.
-    pub fn step_count(&self) -> u64 { self.step_count }
+    pub fn step_count(&self) -> u64 {
+        self.step_count
+    }
 
     /// Returns the current simulated clock in milliseconds.
-    pub fn clock_ms(&self) -> u64 { self.clock_ms }
+    pub fn clock_ms(&self) -> u64 {
+        self.clock_ms
+    }
 }
 
 #[cfg(test)]

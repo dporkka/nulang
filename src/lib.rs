@@ -13,6 +13,7 @@ pub mod ast;
 pub mod bytecode;
 pub mod cranelift_utils;
 pub mod docgen;
+pub mod dst;
 pub mod effect_checker;
 pub mod ffi;
 pub mod fmt;
