@@ -1450,15 +1450,21 @@ impl TypeChecker {
                         }
                         Some(params) => {
                             if args.len() != params.1.len() {
-                                return Err(NuError::type_error(
-                                    format!(
-                                        "Event '{}' expects {} argument(s), got {}",
-                                        event,
-                                        params.1.len(),
-                                        args.len()
+                                let plural =
+                                    |n: usize| if n == 1 { "argument" } else { "arguments" };
+                                let expected_desc =
+                                    format!("{} {}", params.1.len(), plural(params.1.len()));
+                                let found_desc = format!("{} {}", args.len(), plural(args.len()));
+                                return Err(NuError::TypeError {
+                                    msg: format!(
+                                        "Event '{}' expects {}, got {}",
+                                        event, expected_desc, found_desc
                                     ),
-                                    *span,
-                                ));
+                                    span: *span,
+                                    expected_type: Some(expected_desc),
+                                    found_type: Some(found_desc),
+                                    similar_names: None,
+                                });
                             }
                         }
                     }
