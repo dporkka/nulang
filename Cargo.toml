@@ -81,8 +81,13 @@ tokio = { version = "1.37.0", features = ["full", "macros", "net", "rt-multi-thr
 
 # Python interop (optional, see [features])
 pyo3 = { version = "0.29", features = ["auto-initialize", "py-clone"], optional = true }
-# libSQL persistence backend (LibsqlStore + remote Turso support)
-libsql = { version = "0.10.0-pre.4", optional = true }
+# libSQL persistence backend (LibsqlStore + remote Turso support). Only
+# `core` (local SQLite) + `remote` (hrana/HTTP Turso access, what
+# `Builder::new_remote` uses) + `tls` are needed -- default-features also
+# pulls `replication`/`sync` (embedded-replica gRPC sync via tonic/axum),
+# which nothing in this codebase calls (verified: no `.sync()`/
+# `new_synced_database` usage).
+libsql = { version = "0.10.0-pre.4", optional = true, default-features = false, features = ["core", "remote", "tls"] }
 # Native library loading
 libloading = "0.8"
 # AI runtime crate (optional; enabled by the `ai-runtime` feature).
