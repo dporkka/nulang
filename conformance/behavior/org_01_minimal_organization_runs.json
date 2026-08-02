@@ -1,0 +1,1 @@
+{ "exit_code": 0, "stdout": "0", "proves": "A minimal `organization Name { state x: Int = 0  behavior get() { self.x } }` (RFC 0009) parses, spawns, and answers `ask` like an ordinary persistent actor: the initial value of its default-model state field is readable through a behavior." }

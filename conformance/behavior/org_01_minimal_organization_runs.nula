@@ -1,0 +1,9 @@
+organization Team {
+    state lead: Int = 0
+    behavior get() { self.lead }
+}
+fn main() {
+    let t = spawn Team {} in {
+        perform IO.print(ask t get())
+    }
+}

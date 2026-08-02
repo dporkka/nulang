@@ -1,0 +1,12 @@
+organization SupplyChain {
+    state members: Int = 0
+    governance {
+        authorize PurchaseOrder.emit(role) => role == "buyer"
+    }
+    behavior get() { self.members }
+}
+fn main() {
+    let s = spawn SupplyChain {} in {
+        perform IO.print(ask s get())
+    }
+}

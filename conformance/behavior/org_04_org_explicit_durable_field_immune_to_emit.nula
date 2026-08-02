@@ -1,0 +1,17 @@
+organization Org {
+    state durable durable_count: Int = 0
+    state event_sourced es_count: Int = 0
+    events
+        | Bumped()
+    behavior bump() { emit Bumped() }
+    behavior get_durable() { self.durable_count }
+    behavior get_es() { self.es_count }
+}
+fn main() {
+    let o = spawn Org {} in {
+        send o bump()
+        send o bump()
+        perform IO.print(ask o get_durable())
+        perform IO.print(ask o get_es())
+    }
+}

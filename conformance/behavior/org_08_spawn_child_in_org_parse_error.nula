@@ -1,0 +1,12 @@
+organization Org {
+    state x: Int = 0
+    behavior get() { self.x }
+}
+entity Member {
+    state y: Int = 0
+}
+fn main() {
+    let org = spawn Org {} in {
+        spawn Member {} in org
+    }
+}

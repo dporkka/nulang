@@ -1,0 +1,10 @@
+entity Counter {
+    version: 1
+    state count: Int = 0
+    behavior get() { self.count }
+}
+fn main() {
+    let c = spawn Counter {} in {
+        perform IO.print(ask c get())
+    }
+}

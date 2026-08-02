@@ -1,0 +1,28 @@
+organization OrgCounter {
+    state count: Int = 0
+    events
+        | Incremented(by: Int)
+    apply
+        | Incremented(by) => self.count = self.count + by
+    behavior increment(by: Int) { emit Incremented(by) }
+    behavior get() { self.count }
+}
+entity EntCounter {
+    state count: Int = 0
+    events
+        | Incremented(by: Int)
+    apply
+        | Incremented(by) => self.count = self.count + by
+    behavior increment(by: Int) { emit Incremented(by) }
+    behavior get() { self.count }
+}
+fn main() {
+    let o = spawn OrgCounter {} in {
+        let e = spawn EntCounter {} in {
+            send o increment(5)
+            send e increment(5)
+            perform IO.print(ask o get())
+            perform IO.print(ask e get())
+        }
+    }
+}

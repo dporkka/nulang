@@ -1,0 +1,1 @@
+{ "exit_code": 0, "stdout": "42", "proves": "`spawn Org {} as \"name\"` (SPEC2.md 8.x stable-identity spawn) works for organizations: the spawned organization answers asks under its registered name. Note RFC 0009's examples use `spawn Org {} named \"...\"` -- that form does NOT parse (see org_08); the implemented stable-identity form is `as \"name\"`." }

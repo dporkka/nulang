@@ -1,0 +1,19 @@
+entity Counter {
+    version: 2
+    state count: Int = 0
+    events
+        | Bumped(by: Int)
+    apply
+        | Bumped(by) => self.count = self.count + by
+    behavior bump(by: Int) { emit Bumped(by) }
+    behavior get() { self.count }
+    migration from 1 to 2 {
+        state => { 0 }
+    }
+}
+fn main() {
+    let c = spawn Counter {} in {
+        send c bump(3)
+        perform IO.print(ask c get())
+    }
+}

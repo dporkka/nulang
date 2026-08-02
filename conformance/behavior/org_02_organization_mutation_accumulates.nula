@@ -1,0 +1,13 @@
+organization Counter {
+    state x: Int = 0
+    behavior bump() { self.x = self.x + 1 }
+    behavior get() { self.x }
+}
+fn main() {
+    let c = spawn Counter {} in {
+        send c bump()
+        send c bump()
+        send c bump()
+        perform IO.print(ask c get())
+    }
+}

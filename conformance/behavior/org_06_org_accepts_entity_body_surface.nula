@@ -1,0 +1,15 @@
+organization Org {
+    version: 1
+    state x: Int = 0
+    migration from 1 to 2 {
+        state => { self.x }
+    }
+    behavior set(v: Int) { self.x = v }
+    behavior get() { self.x }
+}
+fn main() {
+    let o = spawn Org {} in {
+        send o set(7)
+        perform IO.print(ask o get())
+    }
+}

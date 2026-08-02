@@ -1,0 +1,13 @@
+entity Counter {
+    version: 3
+    state count: Int = 0
+    behavior get() { self.count }
+    migration from 1 to 3 {
+        state => { 0 }
+    }
+}
+fn main() {
+    let c = spawn Counter {} in {
+        perform IO.print(ask c get())
+    }
+}

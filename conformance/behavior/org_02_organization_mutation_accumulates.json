@@ -1,0 +1,1 @@
+{ "exit_code": 0, "stdout": "3", "proves": "An `organization`'s behaviors mutate and accumulate `self` state across `send`s exactly like a persistent actor (RFC 0009 'durable by default'): three sends of a self-incrementing behavior read back 3." }

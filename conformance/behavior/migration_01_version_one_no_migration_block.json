@@ -1,0 +1,1 @@
+{ "exit_code": 0, "stdout": "0", "proves": "RFC 0008 `version: N` tag is accepted syntax in an entity body (parser.rs contextual keyword) with no behavioral effect for a version-1 entity: spawn + ask run normally." }

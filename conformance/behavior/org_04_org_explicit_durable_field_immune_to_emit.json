@@ -1,0 +1,1 @@
+{ "exit_code": 0, "stdout": "0\n2", "proves": "Explicit state models are honored inside an `organization` exactly as in `entity`: a `state durable` field is immune to the per-emit bump (0) while a `state event_sourced` field accumulates one per emit (2). Organizations support the full four-model state-declaration surface, not just the event_sourced default." }

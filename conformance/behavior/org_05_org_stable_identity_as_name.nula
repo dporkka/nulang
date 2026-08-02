@@ -1,0 +1,11 @@
+organization Org {
+    state x: Int = 0
+    behavior set(v: Int) { self.x = v }
+    behavior get() { self.x }
+}
+fn main() {
+    let a = spawn Org {} as "org:acme" in {
+        send a set(42)
+        perform IO.print(ask a get())
+    }
+}
