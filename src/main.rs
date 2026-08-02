@@ -1153,7 +1153,9 @@ fn run_source(
             let has_actors = ast.decls.iter().any(|d| {
                 matches!(
                     d,
-                    nulang::ast::Decl::Actor { .. } | nulang::ast::Decl::StateMachine { .. }
+                    nulang::ast::Decl::Actor { .. }
+                        | nulang::ast::Decl::StateMachine { .. }
+                        | nulang::ast::Decl::Workflow { .. }
                 )
             });
             let value = if has_actors {
