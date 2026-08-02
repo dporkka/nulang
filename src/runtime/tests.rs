@@ -3169,6 +3169,166 @@ fn test_three_node_remote_actor_message_delivery() {
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c]);
 }
 
+/// Pump network processing on the surviving `nodes` until `dead` is
+/// marked `NodeStatus::Failed` in every survivor's cluster view, or the
+/// deadline elapses. Mirrors `pump_until_converged`'s polling shape;
+/// real wall-clock time must actually pass here (heartbeat timeout +
+/// suspicion window are real `Instant`-based durations, not a mocked
+/// clock), so callers should budget for `DEFAULT_HEARTBEAT_TIMEOUT` +
+/// `DEFAULT_SUSPICION_DURATION` (2s + 5s at the time of writing) plus
+/// margin.
+fn pump_until_peer_failed(nodes: &mut [&mut Runtime], dead: NodeId, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut all_failed = true;
+        for rt in nodes.iter_mut() {
+            rt.process_network();
+            let status = rt
+                .distributed
+                .cluster
+                .as_ref()
+                .unwrap()
+                .get_node(dead)
+                .map(|info| info.status);
+            if status != Some(NodeStatus::Failed) {
+                all_failed = false;
+            }
+        }
+        if all_failed {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "peer {:?} was not marked Failed within the timeout",
+            dead
+        );
+        sleep(Duration::from_millis(100));
+    }
+}
+
+/// PLAN.md Phase 1 bullet 4 (chaos suite for distribution): a first,
+/// real step -- not the full "10^3 seeds across 5 topologies" target,
+/// but a genuine fault-injection test against real `Runtime` instances
+/// over real loopback TCP (the same infrastructure
+/// `test_three_node_cluster_membership_converges` uses), not a
+/// simulated stand-in. Covers the core chaos-suite value proposition:
+/// a hard node failure (transport killed with no graceful Leave
+/// packet, simulating a crash or a network cable pulled, not
+/// `leave_cluster()`) is detected by the survivors via heartbeat
+/// timeout, the surviving nodes keep operating correctly with each
+/// other (both membership-table health AND actual remote message
+/// delivery, not just membership bookkeeping), and a fresh node
+/// (simulating the crashed node restarting) can rejoin the cluster
+/// afterward.
+///
+/// What this does NOT cover (follow-up, not attempted here): 5-node
+/// topologies, split-brain (two healthy sub-clusters that can't see
+/// each other, as opposed to one node dying outright), asymmetric
+/// partition (A sees B but B can't see A), rolling restart of every
+/// node in sequence, and running this shape across many seeds in CI.
+#[test]
+fn test_three_node_cluster_survives_hard_node_failure_and_rejoin() {
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+    let mut rt_c = start_distributed_node();
+
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_a = rt_a.distributed.node_id.unwrap();
+    let node_b = rt_b.distributed.node_id.unwrap();
+    let node_c = rt_c.distributed.node_id.unwrap();
+
+    rt_b.join_cluster(addr_a);
+    rt_c.join_cluster(addr_a);
+    rt_c.join_cluster(addr_b);
+    pump_until_converged(
+        &mut [&mut rt_a, &mut rt_b, &mut rt_c],
+        3,
+        Duration::from_secs(30),
+    );
+
+    // An actor on node A that A and B will exchange a remote message
+    // through AFTER C dies, proving the survivors keep doing real work
+    // together, not just that their membership tables update.
+    let actor_id = rt_a.spawn_actor(Box::new(|| vec![("received".to_string(), Value::int(0))]));
+    {
+        let actor = rt_a.actors.get_mut(&actor_id).unwrap();
+        actor.register_behavior("store", |actor, args| {
+            let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+            actor.set_state_field("received", Value::int(n));
+        });
+    }
+
+    // Kill C's transport hard -- no graceful Leave packet.
+    shutdown_nodes(&mut [&mut rt_c]);
+
+    // A and B must detect C's failure via heartbeat timeout + suspicion
+    // window (real wall-clock time).
+    pump_until_peer_failed(&mut [&mut rt_a, &mut rt_b], node_c, Duration::from_secs(20));
+
+    // A and B remain Healthy to each other throughout -- the cluster
+    // survives losing one of three nodes, it doesn't cascade.
+    for rt in [&rt_a, &rt_b] {
+        let cluster = rt.distributed.cluster.as_ref().unwrap();
+        assert_eq!(
+            cluster.get_node(node_a).unwrap().status,
+            NodeStatus::Healthy
+        );
+        assert_eq!(
+            cluster.get_node(node_b).unwrap().status,
+            NodeStatus::Healthy
+        );
+    }
+
+    // B sends a remote message to A's actor -- real cross-node delivery
+    // still works after losing a peer, not just membership bookkeeping.
+    let target = ActorAddress::remote(node_a, actor_id);
+    rt_b.send_distributed(target, "store", &[Value::int(77)]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let delivered = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        rt_a.run_scheduler();
+        let got = rt_a
+            .actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("received"))
+            .and_then(|v| v.as_int());
+        if got == Some(77) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(50));
+    };
+    assert!(
+        delivered,
+        "remote delivery between surviving nodes failed after losing a peer"
+    );
+
+    // Rejoin: a fresh Runtime (simulating node C restarting after its
+    // crash, not resuming the old process) joins the surviving cluster.
+    let mut rt_c2 = start_distributed_node();
+    let node_c2 = rt_c2.distributed.node_id.unwrap();
+    rt_c2.join_cluster(addr_a);
+    pump_until_converged(
+        &mut [&mut rt_a, &mut rt_b, &mut rt_c2],
+        3,
+        Duration::from_secs(30),
+    );
+    for rt in [&rt_a, &rt_b, &rt_c2] {
+        let cluster = rt.distributed.cluster.as_ref().unwrap();
+        assert_eq!(
+            cluster.get_node(node_c2).unwrap().status,
+            NodeStatus::Healthy,
+            "restarted node did not rejoin as healthy"
+        );
+    }
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c2]);
+}
+
 /// Content hash mismatch triggers bytecode fetch; the retry queue holds
 /// the message until the FetchBehaviorResponse arrives, then delivers it.
 #[test]
