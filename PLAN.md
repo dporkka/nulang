@@ -210,9 +210,10 @@ the restoration. This phase must complete on schedule.
 
 ## Phase 1 — Correctness Floor (weeks 4–12)
 
-**Current state (in progress, verified 2026-08-02):** ~1/8 deliverables
-substantially done, 1/8 partially done, a real bug found and fixed along
-the way.
+**Current state (in progress, verified 2026-08-02):** 2/8 deliverables
+substantially done, 1/8 partially done (informational half only), 4 real
+bugs found and fixed along the way, 4 more found and documented but not
+fixed.
 - **[X] Bullet 1 (fuzzer maturation) — interp/JIT/AOT leg done.**
   `src/fuzz.rs` grew from panic-avoidance to real differential execution
   fuzzing (`differential_fuzz_one`): compiles a mutant, runs it
@@ -237,44 +238,95 @@ the way.
   dedicated scheduled CI job, not a `cargo test` invocation — the seed for
   one exists in `fuzz_differential_extended` but the job itself isn't
   wired).
-- **[~] Bullet 5 (conformance suite expansion) — 26 → 115 of 300 target.**
-  Corrected from this doc's original "52" (that was a file count —
-  `.nula`+`.json` pairs — not a case count; the actual starting case count
-  was 26). Seven parallel agents each targeted one SPEC2.md area
-  (capabilities, effect-handler resume, effect rows, actor
-  messaging/supervision, CRDT merge laws, pattern matching/error handling,
-  persistence/event sourcing), landing 87 new cases with every expected
-  value captured from the real compiled binary. Two more cases added
-  directly as regression coverage (see below). Still short of 300 —
-  the remaining ~185 need the same treatment across whatever surfaces the
-  existing batches didn't reach.
-- **Real bug found and fixed, not from a PLAN.md bullet but squarely
-  "correctness floor":** writing actor conformance cases surfaced that
-  concatenating a top-level `ask` result (via `Int.to_string` or similar)
-  silently produced `nil`. Root cause: `RuntimeVmCallbacks` (attached
-  whenever a program declares any actor) allocated new heap strings via
-  `Runtime.vm.allocate_string` — but `Runtime.vm` is a separate,
-  lazily-created VM instance that only runs actor bytecode; its heap is
-  not reachable from `main()`'s own top-level VM. Worse, `alloc`/
-  `drop_ref`/`retain_ref` returned `None`/no-op whenever there was no
-  *current actor* — which is always true at the top level — so this
-  wasn't just an `ask`-result bug: **any string concatenation or other
-  heap allocation in `main()`'s own code failed once a program used any
-  actor construct at all**, confirmed against a real shipped example
-  (`examples/supervisor_tree.nula` printed literal `nil` for two lines).
-  Fixed by giving `Runtime` a dedicated `main_heap`/`main_gc` fallback
-  (commit `7215088`) and adding two permanent regression cases
-  (`actor_18`/`actor_19`, commit `ef1f451`) that the pre-fix binary would
-  have failed. Full suite (1555 default, 1511 no-default-features), all
-  115 conformance cases, and `wasm-backend` feature check all verified
-  green after the fix.
-- **[ ] Bullets 2, 3, 4, 6, 7, 8 — not started this session.** Bullet 3
-  (benchmark harness) has a prerequisite already done: `benches/*.rs` was
-  fixed to actually compile and run (they didn't before — see
-  `8636b01`), but CI wiring, a `benchmarks/` results directory, and
-  regression-threshold gating remain. Bullets 2/4 (DST, chaos suite) need
-  `src/dst.rs` wired into the real actor runtime — currently a standalone,
-  unwired module. Bullets 6/7/8 untouched.
+- **[~] Bullet 3 (benchmark harness) — informational half done, gating
+  half deliberately deferred.** `benches/*.rs` was fixed to actually
+  compile and run (they didn't before — see `8636b01`). CI now runs
+  `cargo bench` on every push to `main`, collects results via
+  `scripts/collect_bench_results.py` (verified against real criterion
+  0.5.x output, not just the documented schema), and commits them to
+  `benchmarks/`. **Not done, on purpose:** the `>5%` regression-gating
+  this bullet calls for. GitHub Actions' shared runners have commonly-
+  cited 20-50%+ run-to-run noise on wall-clock benchmarks; a naive fixed
+  threshold would fail PRs on noise, not regressions, which is worse
+  than no gate. See `benchmarks/README.md` for what closing this
+  properly needs (dedicated runner, or a noise-aware statistical
+  comparison against a rolling window).
+- **[~] Bullet 5 (conformance suite expansion) — 26 → 158 of 300
+  target.** Corrected from this doc's original "52" (that was a file
+  count — `.nula`+`.json` pairs — not a case count; the actual starting
+  case count was 26). Two waves of parallel agents:
+  - Wave 1 (7 agents): capabilities, effect-handler resume, effect rows,
+    actor messaging/supervision, CRDT merge laws, pattern
+    matching/error handling, persistence/event sourcing → +87 cases.
+  - Wave 2 (4 agents): built-in effects inventory, distributed-messaging
+    single-node behavior, stdlib collections/string (the real, working
+    subset — see the bug list below), workflow steps/conditionals/
+    parallel/sagas → +43 cases, +2 direct regression cases.
+  Every value captured from the real compiled binary, never guessed.
+  Still short of 300 — the remaining ~140 need the same treatment
+  across whatever surfaces these ten agents didn't reach (concurrency
+  primitives, HTTP client/server, JSON serialization, AI runtime,
+  operational-model surfaces).
+- **Real bugs found and FIXED this session (not from a numbered
+  bullet, but squarely "correctness floor" — every one of these was
+  found by an agent whose actual assignment was writing conformance
+  cases, verified independently before fixing, and pinned by a
+  regression case or test):**
+  1. **Top-level heap allocation silently failed for any actor-using
+     program** (`7215088`, `ef1f451`). `RuntimeVmCallbacks` allocated
+     new heap strings via `Runtime.vm.allocate_string` — a separate,
+     lazily-created VM instance whose heap `main()`'s own top-level VM
+     can't read back from — and `alloc`/`drop_ref`/`retain_ref`
+     returned `None`/no-op whenever there was no *current actor*, which
+     is always true at the top level. Confirmed against a real shipped
+     example (`examples/supervisor_tree.nula` printed literal `nil`).
+     Fixed with a dedicated `Runtime::main_heap`/`main_gc` fallback.
+  2. **Importing two stdlib modules with a same-named function crashed
+     the compiler** (`b3d6a2f`). `import stdlib::map` + `import
+     stdlib::set` (both export `empty`/`contains`/`remove`/...) produced
+     two same-named top-level functions with no collision check, which
+     MIR's function-slot allocator can't handle — it failed deep in
+     codegen with `internal: MIR function slot 0 left unfilled`. Fixed
+     by detecting the collision at import-resolution time with a clear,
+     actionable error instead.
+  3. **Workflow-only programs never activated the actor runtime**
+     (`2057900`). `main.rs`'s actor-detection matched `Decl::Actor`/
+     `Decl::StateMachine` but not `Decl::Workflow`, so a program with
+     only a `workflow` declaration ran on the stub-only standalone VM —
+     every step silently never ran, no error. One-line fix.
+  4. **LSP hover/autocomplete advertised effects that don't work**
+     (`6d27037`). `STM`/`Async`/`Cost` shown with full example syntax
+     despite zero implementation; `Net`/`Rand` didn't match their real
+     names (`Http`/`Random`); `Spawn`/`Send`/`Receive`/`Migrate` shown
+     as `perform`-able effects when they're actually keywords/opcodes
+     with a parse error on that syntax. Removed the non-functional
+     entries, corrected the misnamed ones.
+- **Real bugs found and DOCUMENTED, not fixed this session (tracked
+  for follow-up, all in `SPEC2.md` with full evidence):**
+  1. `ask remote`/distributed `RAsk` returns the wrong value (the
+     target's own actor reference) from a register-write mismatch
+     between the local and remote `Ask` opcodes.
+  2. `send remote`/`ask remote` silently drop their message single-node
+     instead of using the local-delivery fallback that already exists
+     and works for other distributed paths — just isn't wired to these.
+  3. Saga compensation indexes by whole-module declaration order, not
+     the workflow's own steps — another `actor` declared before the
+     `workflow` silently shifts which step's compensation runs.
+  4. Single-argument `perform Timer.sleep(ms)` suspends a step and
+     never resumes it — a permanent hang, not an error. Only the
+     two-argument durable form works.
+  Also corrected: `SPEC2.md` §4.6 (built-in effects table — see bug 4
+  above), §12.4 (distributed message routing — see bugs 1-2 above, plus
+  a separate correction: `monitor`/`link`/`exit` were undersold as
+  "planned" when they're fully implemented and conformance-tested),
+  Chapter 10 (workflow known-issues list — see bugs 3-4 above, plus a
+  deprecation note per RFC 0004), Chapter 14 examples (stdlib argument
+  order/naming mismatches found by the `StdlibCollectionsString` wave;
+  Chapter 14 was already headed "— Planned" so this didn't need the
+  same "Stable-tier false claim" severity of fix CRDT got).
+- **[ ] Bullets 2, 4, 6, 7, 8 — not started.** Bullets 2/4 (DST, chaos
+  suite) need `src/dst.rs` wired into the real actor runtime —
+  currently a standalone, unwired module. Bullets 6/7/8 untouched.
 
 **Goal.** The language does what it says, provably, on the paths users
 actually take. This is what makes 0.1.0 → 0.2.0 justifiable.
