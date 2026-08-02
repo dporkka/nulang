@@ -2428,20 +2428,12 @@ impl<'a> CompletionEngine<'a> {
     /// Built-in effect names with markdown documentation.
     const EFFECTS: &'static [(&'static str, &'static str)] = &[
         ("IO", "Input/Output operations.\n\n```nulang\neffect IO {\n  print(s: String) -> Unit\n  read() -> String\n}\n```"),
-        ("Net", "Network operations.\n\n```nulang\neffect Net {\n  get(url: String) -> String\n  post(url: String, body: String) -> String\n}\n```"),
+        ("Http", "Network operations.\n\n```nulang\neffect Http {\n  get(url: String) -> String\n  post(url: String, body: String) -> String\n}\n```"),
         ("FS", "File system operations.\n\n```nulang\neffect FS {\n  read(path: String) -> String\n  write(path: String, content: String) -> Unit\n}\n```"),
-        ("Spawn", "Spawn a new concurrent task.\n\n```nulang\neffect Spawn {\n  spawn(f: () -> T) -> T\n}\n```"),
-        ("Send", "Send a message to an actor.\n\n```nulang\neffect Send {\n  send(target: ActorId, msg: T) -> Unit\n}\n```"),
-        ("Receive", "Receive a message from an actor mailbox.\n\n```nulang\neffect Receive {\n  receive() -> T\n}\n```"),
-        ("Migrate", "Migrate an actor to another node.\n\n```nulang\neffect Migrate {\n  migrate(target: NodeId) -> Unit\n}\n```"),
-        ("STM", "Software transactional memory operations.\n\n```nulang\neffect STM {\n  atomically(f: () -> T) -> T\n}\n```"),
-        ("Async", "Asynchronous operation scheduling.\n\n```nulang\neffect Async {\n  delay(ms: Int) -> Unit\n  await(future: Future[T]) -> T\n}\n```"),
-        ("Inference", "AI inference operations.\n\n```nulang\neffect Inference {\n  infer(prompt: String) -> String\n}\n```"),
-        ("Cost", "Resource consumption tracking.\n\n```nulang\neffect Cost {\n  track(operation: String) -> Int\n}\n```"),
-        ("Rand", "Random value generation.\n\n```nulang\neffect Rand {\n  int(min: Int, max: Int) -> Int\n  float() -> Float\n}\n```"),
+        ("Inference", "AI inference operations.\n\n```nulang\neffect Inference {\n  ask(prompt: String) -> String\n}\n```"),
         ("Random", "Random value generation.\n\n```nulang\neffect Random {\n  int(lo: Int, hi: Int) -> Int\n}\n```"),
-        ("Time", "Time-related operations.\n\n```nulang\neffect Time {\n  now() -> Int\n  sleep(ms: Int) -> Unit\n}\n```"),
-        ("Actor", "Actor system operations.\n\n```nulang\neffect Actor {\n  self() -> ActorId\n  spawn(behavior: () -> T) -> ActorId\n}\n```"),
+        ("Time", "Wall-clock read.\n\n```nulang\neffect Time {\n  now() -> Int\n}\n```\n\nNote: `Timer.sleep`/`Timer.after` are a separate effect and are a silent no-op outside a workflow/actor context."),
+        ("Actor", "Actor system operations.\n\n```nulang\neffect Actor {\n  self() -> ActorId\n  link(target: ActorId) -> Unit\n  monitor(target: ActorId) -> Unit\n  exit(reason: Int) -> Unit\n}\n```"),
         ("Provider", "Service provider discovery.\n\n```nulang\neffect Provider {\n  resolve(service: String) -> Url\n}\n```"),
         ("Env", "Environment variable access.\n\n```nulang\neffect Env {\n  get(name: String) -> String\n}\n```"),
         ("System", "System-level operations.\n\n```nulang\neffect System {\n  arg(n: Int) -> String\n}\n```"),
@@ -3140,14 +3132,14 @@ mod lsp_tests {
         );
         let labels = labels(&items);
         assert!(labels.contains(&"IO"));
-        assert!(labels.contains(&"Migrate"));
+        assert!(labels.contains(&"Http"));
         assert!(labels.contains(&"Inference"));
     }
 
     #[test]
     fn test_completion_case_insensitive() {
         // Effect names are matched case-insensitively by prefix.
-        let source = "mi";
+        let source = "en";
         let engine = CompletionEngine::new(source);
         let items = engine.complete(
             Position {
@@ -3158,8 +3150,8 @@ mod lsp_tests {
         );
         let labels = labels(&items);
         assert!(
-            labels.contains(&"Migrate"),
-            "should match 'Migrate' for prefix 'mi'"
+            labels.contains(&"Env"),
+            "should match 'Env' for prefix 'en'"
         );
     }
 
