@@ -698,6 +698,33 @@ runtime withstands adversarial operational review. Both hold up as
    and `Cluster` from `src/runtime/mod.rs` into standalone structs
    owned by `Runtime`. Each behind its own trait. Enables independent
    evolution and independent test harnesses.
+   **Partial progress (2026-08-02):** `mod.rs` was 6447 lines at
+   session start; three extractions (free functions taking `&Runtime`/
+   `&mut Runtime`, following the pattern already established by
+   `workflow.rs`/`exit.rs`/`distribution.rs`/`spawn.rs`/`agent.rs`,
+   not yet the full standalone-struct-behind-a-trait vision this
+   bullet describes) brought it to 4314 lines (-33%): VM callback
+   bridges into `callbacks.rs` (-1528 lines, a verbatim cut of one
+   contiguous, self-contained block), agent tool-calling into
+   `agent.rs` (-284), and LLM dispatch/retry/suspend into `llm.rs`
+   (-381, including the most delicate function moved so far —
+   `resume_suspended_llm_step`'s raw-pointer VM-callback reinstallation,
+   verified not to disturb the `vm_exec_begin`/`vm_exec_end`
+   receive-wait-wake deferral invariant AGENTS.md documents). Each
+   extraction verified via clean `cargo check` on both default and
+   `--no-default-features`, full lib test suite (1576/1578, unchanged
+   baseline), 239/239 conformance, `cargo fmt`, and clippy warning
+   count parity (191, full workspace, before/after every commit).
+   **Deliberately not attempted this session:** the remaining
+   ~4000-line `impl Runtime` block is dominated by core scheduling/
+   actor-stepping methods (`step_actor` at 399 lines, `recover_actor`,
+   `ask_actor_sync_inner`) deeply entangled with the GC/concurrency
+   invariants AGENTS.md flags as "do not break" (the reclamation
+   protocol, `vm_execution_depth` tracking) — a materially higher risk
+   profile than the AI/LLM subsystem extracted here, and better suited
+   to a dedicated, fresh session than squeezed in at the end of a long
+   one. The full trait-based structural decomposition this bullet
+   originally envisions remains entirely open.
 5. **Windows support.** Port build.rs (currently Fedora-specific
    Python symlink), test the mimalloc + Cranelift path, verify JIT
    symbol linking on MSVC. Add `windows-latest` to the CI matrix.
