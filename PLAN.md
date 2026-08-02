@@ -57,7 +57,7 @@ first external user. Nothing on the critical path is a research problem.
 | CI matrix | build/test/release/wasm/minimal/lint/lean/package-smoke |
 | Direct deps | 65 |
 | Transitive deps | 483 |
-| Formal proofs (Lean 4) | Core type soundness proved; capabilities/effects definition-only |
+| Formal proofs (Lean 4) | Core type soundness NOT proved (`progress`/`preservation`/`type_soundness` all `sorry`, regressed 2026-07-26, undocumented until 2026-08-02); capability lattice genuinely proved (5/6 theorems); effects are vacuous `True` stubs, not proofs |
 | Conformance suite | 52 behavior cases + grammar cases |
 | Bootstrap self-hosting | Stage 13; not yet self-compiling |
 | Benchmarks | `benches/` uses criterion (7 files, 404 lines); no CI regression tracking |

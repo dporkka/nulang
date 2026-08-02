@@ -235,6 +235,23 @@ jobs:
           cd spec/formal
           lake build
 
+      - name: Sorry-count ratchet (no silent proof regressions)
+        run: |
+          cd spec/formal
+          count=$(grep -rc '\bsorry\b' *.lean | awk -F: '{sum+=$2} END {print sum+0}')
+          baseline=9
+          echo "sorry count: $count (baseline: $baseline)"
+          if [ "$count" -gt "$baseline" ]; then
+            echo "::error::spec/formal/*.lean sorry count ($count) exceeds baseline ($baseline)."
+            echo "::error::A PR must not silently regress a proved theorem to 'sorry'. If intentional"
+            echo "::error::(e.g. a toolchain compat fix), lower this baseline AND document the"
+            echo "::error::regression in spec/formal/README.md, SPEC2.md, CHANGELOG.md, and PLAN.md"
+            echo "::error::(see the 2026-08-02 correction entries for the required disclosure"
+            echo "::error::pattern this repeats: what regressed, which commit, why, and current"
+            echo "::error::per-theorem status)."
+            exit 1
+          fi
+
   # -----------------------------------------------------------------------
   # Benchmarks — regression-gated against a rolling window of recent
   # main-branch history (see scripts/check_bench_regression.py and

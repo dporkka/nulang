@@ -99,11 +99,18 @@ in this version; they are recorded here to establish their tier.
   (`let a = 3 in (fn(x) => a + x)(5)` → 8).  Closure encoding: 30-bit flag
   with packed param-hash, body-start, and captured binding.  Out-of-band
   sentinel `1 << 40` distinguishes "no left operand" from value 0.
-- **Formal semantics: all three Core theorems proved.** Progress, preservation,
-  and type soundness for the Core expression language (RFC 0002) are now
-  machine-checked in `spec/formal/types.lean` (0 sorries). The capability
-  lattice proofs (`capabilities.lean`) remain proved; effect and combined
-  judgments are definition-only. See `spec/formal/README.md` for scope.
+- ~~Formal semantics: all three Core theorems proved.~~ **correction
+  (2026-08-02):** false as of today. This was true at this commit, but the
+  very next commit (`ac9ef5d`, 2026-07-26 — Lean 4.16.0 compatibility fix)
+  honestly disclosed in its own message that it reverted 9 theorem bodies
+  to `sorry` (a custom recursor `weakening` depended on broke under the
+  newer toolchain); no doc was ever updated to match. Current state: only
+  `canonical_forms` is proved in `types.lean` — `progress`, `preservation`,
+  and `type_soundness` (the three headline claims) are all `sorry`. The
+  capability lattice proofs (`capabilities.lean`) genuinely are proved (5
+  theorems); only `linear_at_most_once` there is `sorry`. `effects.lean`'s
+  two theorems are vacuous `True` stubs, not proofs. See
+  `spec/formal/README.md` for the corrected, per-theorem scope table.
 
 - **Error handling syntax.** `catch expr => body`, `fail expr`
   (structured short-circuit return), and `T ! E` return-type syntax
