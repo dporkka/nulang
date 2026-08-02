@@ -31,6 +31,8 @@ nulang examples/NN_name.nula
 | 13 | `13_http.nula` | HTTP get and post requests via the Http built-in effect | `nulang examples/13_http.nula` |
 | 14 | `14_option_result.nula` | Option/Result types, map, unwrap, catch, pattern matching | `nulang examples/14_option_result.nula` |
 | 15 | `15_ranges.nula` | Range expressions, for-in-range loops, range with pipe/arithmetic | `nulang examples/15_ranges.nula` |
+| 16 | `16_realworld.nula` | Real-world CLI: HTTP fetch, JSON parse, datetime, FS write, env, args | `nulang examples/16_realworld.nula <url>` |
+| 17 | `17_actor_fetcher.nula` | URL fetcher & reporter: Http.get, JSON pattern matching, datetime, FS | `nulang examples/17_actor_fetcher.nula` |
 
 ## Notes
 

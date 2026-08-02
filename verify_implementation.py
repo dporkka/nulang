@@ -177,8 +177,42 @@ def verify_files():
     print("Success: All files passed implementation checks!")
     return True
 
+
+def run_tests():
+    """Run cargo test --lib (default features) and fail on any test failure.
+
+    AGENTS.md documents this script as running 'cargo test' — it did not;
+    check_warnings() only ever ran cargo check --tests (compiles, never
+    executes). This is also RELEASE_CHECKLIST.md's first pre-flight box
+    ("cargo test --lib — all tests pass"), previously unautomated. Runs
+    default features only — check_warnings() already exercises all three
+    feature configs for compile-cleanliness; running the full suite three
+    times over would be slow for marginal additional coverage.
+    """
+    print("Running cargo test --lib (default features)...")
+    res = subprocess.run(
+        ["cargo", "test", "--lib", "--quiet"],
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode != 0:
+        print("Error: cargo test --lib failed.")
+        print("STDOUT:")
+        print(res.stdout)
+        print("STDERR:")
+        print(res.stderr)
+        return False
+
+    result_line = next(
+        (line for line in res.stdout.splitlines() if line.startswith("test result:")),
+        "test result: (not found in output)",
+    )
+    print(f"Success: cargo test --lib passed. {result_line}")
+    return True
+
+
 if __name__ == "__main__":
-    if verify_files() and check_warnings():
+    if verify_files() and check_warnings() and run_tests():
         sys.exit(0)
     else:
         sys.exit(1)

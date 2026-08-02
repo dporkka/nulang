@@ -30,12 +30,6 @@ native backend, and an optional WASM backend. The runtime is a multi-threaded
 work-stealing executor with supervision trees, ORCA garbage collection,
 location-transparent distribution, and durable persistence.
 
-| 15 | `15_ranges.nula` | Range expressions, for-in-range loops, range with pipe/arithmetic | `nulang examples/15_ranges.nula` |
-| 16 | `16_realworld.nula` | Real-world CLI: HTTP fetch, JSON parse, datetime, FS write, env, args | `nulang examples/16_realworld.nula <url>` |
-| 17 | `17_actor_fetcher.nula` | URL fetcher & reporter: Http.get, JSON pattern matching, datetime, FS | `nulang examples/17_actor_fetcher.nula` |
-distribution, persistence, and AI runtime are all implemented and backed by
-1490+ tests.
-
 ---
 
 ## Installation
@@ -89,8 +83,8 @@ perform IO.print("Hello, " + name + "!")
 ```
 
 > Run `nulang examples/01_hello.nula`. See [`examples/`](examples/) for
-> 11 verified programs covering actors, effects, pattern matching, records,
-> loops, arrays, and more.
+> 17 verified programs covering actors, effects, pattern matching, records,
+> loops, arrays, HTTP, JSON, and more.
 
 ---
 
@@ -111,6 +105,7 @@ perform IO.print("Hello, " + name + "!")
 - **AI runtime** — `agent` declarations, LLM providers (OpenAI, Ollama), episodic/semantic/procedural memory, pipelines, debates, and supervisor teams. Gated behind the `ai-runtime` feature flag. *Experimental.*
 - **Distribution** — location-transparent `send`/`ask` over TCP (NUL0 wire protocol), gossip membership, 8 CRDT types. *Experimental.*
 - **WASM backend** — MIR→WASM compilation via `--backend wasm|wasm-run|wasm-aot`, Wasmtime host runtime with guard pages and SIMD. Gated behind the `wasm-backend` feature flag. *Experimental.*
+- **AOT native backend** — `--backend native` compiles pure-functional programs (no effects, actors, or FFI) to native code via Cranelift; other constructs fail with a specific "not yet supported in the native backend" error naming the construct. Use the default `bytecode` backend for full-language programs. *Experimental.*
 
 ---
 
@@ -121,7 +116,7 @@ perform IO.print("Hello, " + name + "!")
 | [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | Installation, values, effects, actors, pattern matching — with runnable code snippets |
 | [`docs/TUTORIAL.md`](docs/TUTORIAL.md) | **Tutorial:** Build a Weather CLI step by step — variables, functions, HTTP, JSON, pattern matching, records, file I/O |
 | [`docs/PITFALLS.md`](docs/PITFALLS.md) | Common mistakes: `::` vs `.`, `let` vs `var`, `perform` keyword, `catch`/`fail`, record syntax, and more |
-| [`examples/`](examples/) + [`README`](examples/README.md) | 11 verified, self-contained example programs |
+| [`examples/`](examples/) + [`README`](examples/README.md) | 17 verified, self-contained example programs |
 | [`SPEC2.md`](SPEC2.md) | Language specification: syntax, semantics, type system, runtime, format stability contract |
 | [`CHANGELOG.md`](CHANGELOG.md) | Changelog organized by stability tier (Frozen / Stable / Experimental) |
 | [`GOVERNANCE.md`](GOVERNANCE.md) | Stability tiers, RFC process, and language versioning |
@@ -161,7 +156,7 @@ Nulang is **alpha software**. The language version is `1.0.0-frozen`
 | **Stable** | HM type system, effect rows, capability lattice, actor surface, CRDT operations. Breaking changes require an RFC and a deprecation cycle. |
 | **Experimental** | Everything else — feature flags (`wasm-backend`, `python`, `sqlite`, `lsp`, `ai-runtime`) and items marked Experimental in [`CHANGELOG.md`](CHANGELOG.md). |
 
-1490+ tests pass with `cargo test`. Add `--features wasm-backend` for the
+1550+ tests pass with `cargo test`. Add `--features wasm-backend` for the
 WASM backend test suite.
 
 ---

@@ -451,8 +451,8 @@ Available assertions: `perform Test.assert(cond, msg)`, `perform Test.assert_eq(
 
 ## 14. Where to Go Next
 
-- **`examples/`** — 11 verified, runnable examples from hello world through
-  arrays (see `examples/README.md`).
+- **`examples/`** — 17 verified, runnable examples from hello world through
+  HTTP/JSON and actor-based URL fetching (see `examples/README.md`).
 - **`SPEC2.md`** — language specification with formal syntax and semantics.
 - **`CHANGELOG.md`** — per-commit feature log.
 - **`src/stdlib/`** — standard library source (`fs.nula`, `test.nula`, …).
