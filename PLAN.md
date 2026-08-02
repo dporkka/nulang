@@ -212,14 +212,18 @@ the restoration. This phase must complete on schedule.
 
 **Current state (in progress, verified 2026-08-02):** 4/8 deliverables
 done (fuzzer maturation, benchmark harness including regression
-gating, doc-example verification extended), 2/8 partially wired this
-extended session (DST, persistence recovery), bullet 5 at 210/300,
-bullet 7 partially addressed (phrase cleanup plus a unit-test
-verification layer for the existing structured-error fields, not the
-full "every variant" pass). 8 real runtime/tooling bugs found and
-fixed, 8 more found and documented for follow-up, plus a dozen
-SPEC2.md/GOVERNANCE.md/CHANGELOG.md truth-in-advertising corrections.
-30 commits this session.
+gating, doc-example verification extended), 3/8 substantially wired
+this extended session (DST, persistence recovery, one real chaos-suite
+test), bullet 5 at 239/300, bullet 7 partially addressed (phrase
+cleanup, a unit-test verification layer for existing structured-error
+fields, plus two arity-mismatch construction sites converted from
+hollow to populated). 9 real runtime/tooling bugs found and fixed
+(one, RFC 0008 migration contracts, was a false Stable-tier claim —
+corrected in SPEC2.md), 12 more found and documented for follow-up
+(including a real compiler SIGABRT on large functions and two
+behavior-dispatch surprises), plus a dozen SPEC2.md/GOVERNANCE.md/
+CHANGELOG.md truth-in-advertising corrections. 42 commits this
+session.
 - **[X] Bullet 1 (fuzzer maturation) — interp/JIT/AOT leg done.**
   `src/fuzz.rs` grew from panic-avoidance to real differential execution
   fuzzing (`differential_fuzz_one`): compiles a mutant, runs it
@@ -263,10 +267,10 @@ SPEC2.md/GOVERNANCE.md/CHANGELOG.md truth-in-advertising corrections.
   spread (correctly not flagged), and both sparse-history cases
   (correctly skipped rather than false-positiving). See
   `benchmarks/README.md` for the full methodology.
-- **[~] Bullet 5 (conformance suite expansion) — 26 → 210 of 300
+- **[~] Bullet 5 (conformance suite expansion) — 26 → 239 of 300
   target.** Corrected from this doc's original "52" (that was a file
   count — `.nula`+`.json` pairs — not a case count; the actual starting
-  case count was 26). Four waves of parallel agents:
+  case count was 26). Five waves of parallel agents:
   - Wave 1 (7 agents): capabilities, effect-handler resume, effect rows,
     actor messaging/supervision, CRDT merge laws, pattern
     matching/error handling, persistence/event sourcing → +87 cases.
@@ -282,20 +286,33 @@ SPEC2.md/GOVERNANCE.md/CHANGELOG.md truth-in-advertising corrections.
     ordering, IEEE-754 float determinism including exact tie-break
     cases, and the real nil-collapse/epsilon-equality boundary
     semantics) → +17 cases.
-  - Wave 4 (3 agents, extended session): generics (§7.8), imports/
-    modules (§7.6-7.7), visibility (§7.9), and the Phase-4-experimental
-    typeclass surface — zero prior coverage on any of these → +32
-    cases, plus 3 more targeted at the structured-error diagnostic
-    fields (bullet 7). Surfaced two of this session's most severe
-    findings: a compiler crash on sibling same-named module functions
-    (fixed, see the bug list below) and a runtime crash on constrained
-    generic typeclass dispatch (documented, see SPEC2.md's
-    Implementation Status section).
+  - Wave 4 (3 agents): generics (§7.8), imports/modules (§7.6-7.7),
+    visibility (§7.9), and the Phase-4-experimental typeclass surface
+    — zero prior coverage on any of these → +32 cases, plus 3 more
+    targeted at the structured-error diagnostic fields (bullet 7).
+    Surfaced a compiler crash on sibling same-named module functions
+    (fixed) and a runtime crash on constrained generic typeclass
+    dispatch (documented).
+  - Wave 5 (3 agents): two Stable-tier claims with zero prior coverage
+    (RFC 0008 migration contracts, RFC 0009 organization primitives),
+    plus MIR register spilling and actor lifecycle edges → +28 cases.
+    The most severe finding of this session: RFC 0008's "Stable" tag
+    was false — migration contracts parse and shallow-typecheck but
+    are functionally inert, no trigger mechanism exists anywhere in
+    the runtime (corrected in SPEC2.md). Also found a real compiler
+    SIGABRT (stack overflow) on ~286+-statement functions, and two
+    behavior-dispatch surprises (unknown behavior names silently run
+    behavior 0; same-named behaviors across different actor types can
+    collide) — both documented, not fixed given the blast radius
+    (`send_message` is called pervasively).
   Every value captured from the real compiled binary, never guessed.
-  Still short of 300 — the remaining ~90 need the same treatment
-  across whatever surfaces these sixteen agents didn't reach (AI
-  runtime, operational-model surfaces, remaining grammar/syntax edge
-  cases).
+  Still short of 300 — the remaining ~61 would need to cover
+  progressively narrower surfaces (the AI runtime's `agent`/Pipeline/
+  Supervisor/Debate declarations need a mock LLM provider the CLI
+  binary doesn't expose, so that surface is appropriately tested at
+  the Rust integration-test layer instead — not reachable by
+  CLI-driven conformance cases at all, not a coverage gap in the same
+  sense as the others).
 - **Real bugs found and FIXED this session (not from a numbered
   bullet, but squarely "correctness floor" — every one of these was
   found by an agent whose actual assignment was writing conformance
