@@ -3,14 +3,21 @@
 
 **Verdict:** 20 of 28 proposals are high-value and should be pursued. 8 deferred.
 
-> **Status update (2026-07-11):** This document was written 2026-06-25 as a
+> **Status update (2026-08-02):** This document was written 2026-06-25 as a
 > pre-implementation evaluation. Much of Phase 1 has since shipped. All
 > speedup/throughput figures quoted below ("10-100x", "~30%", "2-4x", "10x",
-> "10-20%") are proposal-era design estimates, **not measurements** — the
-> repository has no benchmark harness (no `benches/`, no criterion), so no
-> number in this file should be cited as a measured result. Read the status
-> table and the "Track 1 as built" section before treating any recommendation
-> below as current.
+> "10-20%") remain proposal-era design estimates, **not measurements**, and
+> should not be cited as measured results. The "no benchmark harness" claim
+> that used to be here is now stale: `benches/` (6 criterion groups —
+> actor, dist, gc, jit, persist, vm throughput) exists, compiles, and runs
+> (`cargo bench`); a CI job now runs it on every push to `main` and commits
+> raw results to `benchmarks/`. What hasn't happened yet: reconciling each
+> of this document's 28 specific proposal-level claims against a matching
+> measurement — the 6 bench groups are general-purpose, not a 1:1 map to
+> every number below. Treat `benchmarks/*.json` as the source of truth for
+> whatever it covers; everything else here is still a design-time estimate
+> until it's replaced or removed. Read the status table and the "Track 1
+> as built" section before treating any recommendation below as current.
 
 ### Implementation status (verified 2026-07-11)
 

@@ -234,3 +234,50 @@ jobs:
         run: |
           cd spec/formal
           lake build
+
+  # -----------------------------------------------------------------------
+  # Benchmarks — informational, not regression-gated (see benchmarks/
+  # README.md for why: shared-runner noise makes a naive fixed-percentage
+  # threshold flaky). Runs on push to main only (not every PR) since a
+  # full criterion run of every group is slow; results are committed back
+  # so PERFORMANCE_ANALYSIS.md can cite real numbers instead of estimates.
+  # -----------------------------------------------------------------------
+  bench:
+    name: Benchmarks (informational)
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run benchmarks
+        run: cargo bench --bench bench_main
+
+      - name: Collect results
+        run: |
+          python3 scripts/collect_bench_results.py \
+            --criterion-dir target/criterion \
+            --out "benchmarks/$(git rev-parse --short HEAD).json"
+
+      - name: Upload results as build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.sha }}
+          path: benchmarks/*.json
+          retention-days: 90
+
+      - name: Commit results to benchmarks/
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "benchmarks/$(git rev-parse --short HEAD).json"
+          git diff --staged --quiet || git commit -m "bench: record results for $(git rev-parse --short HEAD) [skip ci]"
+          git push
