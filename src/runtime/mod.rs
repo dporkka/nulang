@@ -4103,6 +4103,32 @@ impl Runtime {
                 }
             }
         }
+        // Fill in declared initial values for fields not touched by any
+        // restoration path above (snapshot state, event-sourced
+        // replay). This is specifically for `local` fields:
+        // checkpoint_actor never includes them in the snapshot (by
+        // design -- they're "Ephemeral, reset on restart" per
+        // SPEC2.md §9.3), and nothing else re-runs the spawn-time
+        // default-value initialization recover_actor's bare
+        // `Actor::new` skipped. Without this, a `local` field comes
+        // back as nil/unset instead of its declared initial value.
+        // Placed after event-sourced replay above (not before) so it
+        // only fills genuine gaps -- an EventSourced field with zero
+        // persisted events legitimately has no value yet either, but
+        // that's a separate, pre-existing question this fix doesn't
+        // change.
+        if let Some(module) = self.recovery_modules.get(&actor_id).map(|(m, _, _)| m) {
+            for (name, c) in module.actor_metadata.iter().flat_map(|m| &m.state_defaults) {
+                if actor.get_state_field(name).is_some() {
+                    continue;
+                }
+                let v = match c {
+                    crate::bytecode::Constant::String(s) => actor.allocate_string(s),
+                    other => crate::vm::constant_to_value(other),
+                };
+                actor.set_state_field(name, v);
+            }
+        }
         // Restore bytecode metadata registered for recovery.
         if let Some((module, offsets, comp_offsets)) = self.recovery_modules.get(&actor_id) {
             actor.bytecode_module = Some(module.clone());

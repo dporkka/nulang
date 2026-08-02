@@ -2490,6 +2490,174 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// PLAN.md bullet 8: "repeat for every StateModel" -- the `local`
+    /// case. SPEC2.md §9.3's table says `local` recovery is "Reset to
+    /// initial value". Verifies that against a real crash+recover
+    /// cycle: a local field mutated before the crash must NOT retain
+    /// its last-set value afterward.
+    #[test]
+    fn test_local_state_resets_to_initial_value_on_recovery() {
+        let source = r#"
+            persistent actor Counter {
+                state local count: Int = 0
+                state durable anchor: Int = 0
+                behavior inc() {
+                    self.count = self.count + 1
+                    self.anchor = self.anchor + 1
+                }
+                behavior get() { self.count }
+            }
+            spawn Counter {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        let mut comp_offsets: Vec<Option<usize>> = vec![None; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+                comp_offsets[idx] = entry.compensate_offset;
+            }
+        }
+
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        let actor_id = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().unwrap().as_actor_id().unwrap()
+        };
+        rt1.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt1.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt1.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt1.borrow_mut().run_scheduler();
+        assert_eq!(
+            rt1.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(3),
+            "sanity: local field updates live like any other field before a crash"
+        );
+
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            comp_offsets.clone(),
+        );
+        rt2.borrow_mut().recover_actor(actor_id);
+
+        // The durable anchor proves recovery actually ran (journal
+        // replay reconstructed the 3 increments), isolating whether a
+        // nil/missing `count` is "recovery didn't run" versus "local
+        // correctly reset".
+        assert_eq!(
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("anchor")
+                .and_then(|v| v.as_int()),
+            Some(3),
+            "sanity: the durable anchor field must survive recovery normally"
+        );
+        let recovered_count = rt2
+            .borrow()
+            .actors
+            .get(&actor_id)
+            .unwrap()
+            .get_state_field("count")
+            .and_then(|v| v.as_int());
+        assert_eq!(
+            recovered_count,
+            Some(0),
+            "local field must reset to its declared initial value (0), \
+             not retain 3 or come back unset -- SPEC2.md §9.3"
+        );
+    }
+
+    /// PLAN.md bullet 8: "repeat for every StateModel" -- the `crdt`
+    /// case. SPEC2.md documents (§9.10, §12.5, and this session's
+    /// earlier truth-in-advertising correction) that `crdt` is accepted
+    /// syntax tracked as a state-model tag but not yet wired to the
+    /// eight built-in CRDT types or their merge semantics -- it behaves
+    /// as `durable` today. Verifies that concretely: a `crdt` field
+    /// survives crash+recovery via the same snapshot+journal path as
+    /// `durable` (checkpoint_actor includes both `Durable` and `Crdt`
+    /// fields in the snapshot), not via any CRDT merge machinery.
+    #[test]
+    fn test_crdt_state_recovery_behaves_as_durable_today() {
+        let source = r#"
+            persistent actor Counter {
+                state crdt count: Int = 0
+                behavior inc() { self.count = self.count + 1 }
+                behavior get() { self.count }
+            }
+            spawn Counter {}
+        "#;
+
+        let store = SharedMemoryStore::new();
+        let (module, _ty) = compile_source(source).unwrap();
+        let meta = module.actor_metadata.first().unwrap();
+        let mut offsets = vec![0; module.behaviors.len()];
+        let mut comp_offsets: Vec<Option<usize>> = vec![None; module.behaviors.len()];
+        for &idx in &meta.behavior_indices {
+            if let Some(entry) = module.behaviors.get(idx) {
+                offsets[idx] = entry.code_offset;
+                comp_offsets[idx] = entry.compensate_offset;
+            }
+        }
+
+        let rt1 = Rc::new(RefCell::new(Runtime::new()));
+        rt1.borrow_mut().persistence = Box::new(store.clone());
+        let actor_id = {
+            let mut vm = VM::new();
+            vm.load_module(module.clone());
+            vm.set_actor_callbacks(Box::new(RuntimeVmCallbacks::new(rt1.clone())));
+            vm.run().unwrap().as_actor_id().unwrap()
+        };
+        rt1.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt1.borrow_mut().send_message(actor_id, "inc", &[]);
+        rt1.borrow_mut().run_scheduler();
+
+        let snapshot_before_recovery = store.load_snapshot(actor_id).unwrap();
+        assert!(
+            snapshot_before_recovery.state.contains_key("count"),
+            "a crdt field must appear in the ordinary snapshot -- confirms \
+             it's routed through checkpoint_actor's Durable|Crdt filter, \
+             not excluded like event_sourced fields are"
+        );
+
+        let rt2 = Rc::new(RefCell::new(Runtime::new()));
+        rt2.borrow_mut().persistence = Box::new(store.clone());
+        rt2.borrow_mut().register_recovery_module(
+            actor_id,
+            module.clone(),
+            offsets.clone(),
+            comp_offsets.clone(),
+        );
+        rt2.borrow_mut().recover_actor(actor_id);
+        assert_eq!(
+            rt2.borrow()
+                .actors
+                .get(&actor_id)
+                .unwrap()
+                .get_state_field("count")
+                .and_then(|v| v.as_int()),
+            Some(2),
+            "crdt field survives recovery via the durable snapshot path \
+             today -- no CRDT merge machinery is exercised"
+        );
+    }
+
     /// String concatenation and Int.to_string via the full MIR pipeline.
     #[test]
     fn test_string_concat_and_int_to_string() {
