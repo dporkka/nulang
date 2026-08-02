@@ -1,0 +1,16 @@
+// http_02: two sequential Http.serve(0, handler) calls each bind a NEW real
+// listener and return a distinct positive port. If serve merely accepted the
+// call or cached a port, the two ports would not both be positive and
+// different. Each new bind replaces the previous server (which shuts its
+// listener thread down cleanly). Deterministic, loopback-free, no network I/O.
+actor Ping {}
+fn echo(body: String) -> String {
+    body
+}
+fn main() {
+    let p1 = perform Http.serve(0, echo)
+    let p2 = perform Http.serve(0, echo)
+    perform IO.print(p1 > 0)
+    perform IO.print(p2 > 0)
+    perform IO.print(p1 != p2)
+}

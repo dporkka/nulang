@@ -1,0 +1,32 @@
+// stdlib::json — a parsed JSON value is the JsonValue variant enum
+// (JsonNull | JsonBool | JsonNumber(Float) | JsonString | JsonArray |
+// JsonObject([(String, JsonValue)])), not a generic Value type.
+// Pattern matching distinguishes every variant and unwraps elements.
+import stdlib::json
+
+fn main() {
+    let label = fn(v) {
+        match v {
+            JsonNull => "null",
+            JsonBool(b) => if b then "bool:true" else "bool:false",
+            JsonNumber(f) => "num:" + perform Float.to_string(f),
+            JsonString(s) => "str:" + s,
+            JsonArray(items) => "arr:" + perform Int.to_string(perform Array.length(items)),
+            JsonObject(fields) => "obj:" + perform Int.to_string(perform Array.length(fields)),
+        }
+    }
+    perform IO.print(label(parse("30")))
+    perform IO.print(label(parse("null")))
+    perform IO.print(label(parse("true")))
+    perform IO.print(label(parse("\"hi\"")))
+    perform IO.print(label(parse("[10, 20]")))
+    perform IO.print(label(parse("{\"x\":1,\"y\":2,\"z\":3}")))
+    let first = match parse("[10, 20]") {
+        JsonArray(items) => match items[0] {
+            JsonNumber(f) => perform Float.to_string(f),
+            _ => "?"
+        },
+        _ => "?"
+    }
+    perform IO.print("first=" + first)
+}

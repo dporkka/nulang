@@ -1,0 +1,1 @@
+{"exit_code":0,"stdout":"ws={\"a\":1}\nempty=null\nws_only=null\ntrailing=12\ntrunc_obj={\"a\":1}\ntrunc_brace={}\ntrunc_arr=[1,2]\nextra={\"a\":1}","stderr":""}

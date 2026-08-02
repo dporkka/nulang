@@ -1,0 +1,14 @@
+// stdlib::json — parse a JSON array and round-trip it through stringify.
+// Numbers live in JsonNumber(Float); integral floats print without a
+// decimal point and scientific notation is normalized (1e2 -> 100).
+import stdlib::json
+
+fn main() {
+    let nums = parse("[1, -2, 3.5, 1e2, 2.5E-3]")
+    perform IO.print("nums=" + stringify(nums))
+    let strs = parse("[\"a\",\"b\",\"c\"]")
+    perform IO.print("strs=" + stringify(strs))
+    let mixed = parse("[true, null, 0.5]")
+    perform IO.print("mixed=" + stringify(mixed))
+    perform IO.print("empty=" + stringify(parse("[]")))
+}

@@ -1,0 +1,14 @@
+// stdlib::json — string escape round-trip: parse decodes the JSON escapes
+// \" \\ \/ \b \f \n \r \t and stringify re-escapes quote, backslash,
+// tab, and control characters (0x00-0x1F as \u00XX). ASCII-only inputs;
+// multi-byte characters are unsafe (see findings).
+import stdlib::json
+
+fn main() {
+    let esc = parse("\"a\\\"b\\\\c\\/d\\b\\f\\n\\r\\t\"")
+    perform IO.print("esc_parsed=" + stringify(esc))
+    perform IO.print("quoted=" + stringify(JsonString("say \"hi\"")))
+    perform IO.print("tabbed=" + stringify(JsonString("a\tb")))
+    perform IO.print("back=" + stringify(JsonString("c\\d")))
+    perform IO.print("ctrl=" + stringify(JsonString(perform String.from_char(1))))
+}

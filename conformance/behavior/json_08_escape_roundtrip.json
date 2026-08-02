@@ -1,0 +1,1 @@
+{"exit_code":0,"stdout":"esc_parsed=\"a\\\"b\\\\c/d\\b\\f\\n\\r\\t\"\nquoted=\"say \\\"hi\\\"\"\ntabbed=\"a\\tb\"\nback=\"c\\\\d\"\nctrl=\"\\u0001\"","stderr":""}

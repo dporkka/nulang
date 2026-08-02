@@ -1,0 +1,1 @@
+{"exit_code":0,"stdout":"nested_name=Bob\nnested_str={\"name\":\"Bob\",\"scores\":[1,2,3]}\ntag1=y\nscores_sum=6","stderr":""}

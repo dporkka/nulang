@@ -1,0 +1,9 @@
+// http_03: Http.get dispatches as a real builtin in standalone (no-actor)
+// mode and returns nil on connection failure. 127.0.0.1:1 is a loopback
+// address with no listener (port 1 is not bound on any test host), so this
+// exercises the client path without any external network dependency. nil
+// (not an error, not a hang) proves the ureq client ran and failed cleanly.
+fn main() {
+    let response = perform Http.get("http://127.0.0.1:1/")
+    perform IO.print(response == nil)
+}

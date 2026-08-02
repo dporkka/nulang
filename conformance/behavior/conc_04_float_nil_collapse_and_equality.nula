@@ -1,0 +1,22 @@
+// SPEC2 14.5 Determinism Contract bullet 1 (SPEC2.md:2982-2985) — actual
+// boundary semantics of the bytecode backend, deterministic but deviating
+// from strict IEEE-754:
+//   - Division/modulo by zero yield nil (vm.rs FDiv/FMod guard b != 0.0),
+//     never +/-inf or NaN.
+//   - Float.sqrt(x < 0) and Float.log/log2/log10(x <= 0) yield nil.
+//   - Float equality is epsilon-based ((a-b).abs() < f64::EPSILON, vm.rs
+//     ICmpEq), so 0.1+0.2 == 0.3 is true even though the values differ.
+//   - Canonical NaN bits (0x7FF8000000000000) are bit-identical to
+//     TAG_NIL (value_layout.rs:57), so a NaN value collapses to nil:
+//     String.to_float("NaN") prints nil and NaN == NaN prints true
+//     (both operands read as nil). This is the real mechanism behind the
+//     spec's "NaN payloads are not preserved" claim.
+fn main() {
+    perform IO.print(1.0 / 0.0)
+    perform IO.print(0.0 / 0.0)
+    perform IO.print(perform Float.sqrt(-4.0))
+    perform IO.print(perform Float.log(-1.0))
+    perform IO.print(0.1 + 0.2 == 0.3)
+    perform IO.print(perform String.to_float("NaN"))
+    perform IO.print(perform String.to_float("NaN") == perform String.to_float("NaN"))
+}

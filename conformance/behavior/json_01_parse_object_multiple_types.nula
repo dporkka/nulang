@@ -1,0 +1,15 @@
+// stdlib::json — parse an object with all four scalar field types
+// (string/number/bool/null) and read them back with the accessors.
+// SPEC2.md 14.7 line 2936 shows `Json.stringify({ name = "Alice", ... })`
+// on a record; the implemented API (src/stdlib/json.nula) is
+// parse(String) -> JsonValue plus get_string/get_number/get_bool(obj, key, default).
+import stdlib::json
+
+fn main() {
+    let obj = parse("{\"name\":\"Alice\",\"age\":30,\"active\":true,\"note\":null}")
+    perform IO.print("name=" + get_string(obj, "name", "?"))
+    perform IO.print("age=" + perform Float.to_string(get_number(obj, "age", -1.0)))
+    let active = get_bool(obj, "active", false)
+    perform IO.print("active=" + (if active then "true" else "false"))
+    perform IO.print("s=" + stringify(obj))
+}

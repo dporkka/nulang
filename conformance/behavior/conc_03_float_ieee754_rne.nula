@@ -1,0 +1,19 @@
+// SPEC2 14.5 Determinism Contract bullet 1 (SPEC2.md:2982-2985): "all
+// Float arithmetic is IEEE-754 binary64 using round-to-nearest,
+// ties-to-even." Probes against the bytecode backend (vm.rs FAdd/FDiv use
+// native f64 ops):
+//   - 0.1 + 0.2 -> 0.30000000000000004 (nearest binary64, not decimal)
+//   - 1.0 / 3.0 -> 0.3333333333333333
+//   - 2^52 + 0.5  -> 4503599627370496 (exact tie, mantissa 0 = even)
+//   - (2^52+1)+0.5 -> 4503599627370498 (exact tie, mantissa 0 = even)
+//     (ties-away/up would yield 4503599627370497 in the first case)
+//   - 2^52 - 1 + 0.5 -> 4503599627370495.5 (exact: ulp is 0.5 below 2^52)
+fn main() {
+    perform IO.print(0.1 + 0.2)
+    perform IO.print(1.0 / 3.0)
+    perform IO.print(4503599627370496.0 + 0.5)
+    perform IO.print(4503599627370497.0 + 0.5)
+    perform IO.print(4503599627370495.0 + 0.5)
+    perform IO.print(perform String.to_float("inf"))
+    perform IO.print(perform String.to_float("-inf"))
+}

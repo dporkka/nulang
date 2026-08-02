@@ -1,0 +1,17 @@
+// SPEC2 14.5 Determinism Contract bullet 2 (SPEC2.md:2986-2987):
+// "when multiple actors have the same priority and are ready to run, the
+// scheduler dequeue order is strictly FIFO based on enqueue time."
+// Both actors are Normal priority; main enqueues A first, then B. FIFO
+// dequeue order means A's message is processed (prints "A") before B's
+// (prints "B"). Deterministic across runs (scheduler drains fully after
+// main returns; runtime/actor.rs documents FIFO-within-priority-level).
+actor Tagger {
+    behavior say(s: String) { perform IO.print(s) }
+}
+fn main() {
+    let a = spawn Tagger {}
+    let b = spawn Tagger {}
+    send a say("A")
+    send b say("B")
+    unit
+}

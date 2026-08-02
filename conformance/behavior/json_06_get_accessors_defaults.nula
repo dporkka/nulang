@@ -1,0 +1,19 @@
+// stdlib::json — accessor semantics: get_string/get_number/get_bool
+// return the supplied default when the key is missing, the field has the
+// wrong type, or (for get_string) the field is JSON null. SPEC2.md 14.7
+// lines 2955-2956 show `Json.get_field(json, "name") -> Some(Json.String(...))`
+// and `Json.get_field_as(json, "age", Int)`; neither exists — the real
+// accessors take (obj, key, default) and return the bare value.
+import stdlib::json
+
+fn main() {
+    let obj = parse("{\"name\":\"Alice\",\"age\":30,\"active\":true,\"note\":null}")
+    perform IO.print("missing=" + get_string(obj, "nope", "default"))
+    perform IO.print("wrongtype=" + get_string(obj, "age", "default"))
+    perform IO.print("nullfield=" + get_string(obj, "note", "default"))
+    let nb = get_bool(obj, "name", true)
+    perform IO.print("boolwrongtype=" + (if nb then "true" else "false"))
+    perform IO.print("nummissing=" + perform Float.to_string(get_number(obj, "nope", -1.0)))
+    perform IO.print("numwrongtype=" + perform Float.to_string(get_number(obj, "name", -1.0)))
+    perform IO.print("boolmissing=" + (if get_bool(obj, "nope", false) then "true" else "false"))
+}

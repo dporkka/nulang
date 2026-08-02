@@ -1,0 +1,53 @@
+// stdlib::json — nested objects and arrays: parse, stringify, and extract
+// inner values by pattern-matching JsonObject fields (there is no
+// get-JsonValue accessor; get_string/get_number/get_bool only unwrap
+// scalars). Sums the numbers inside a nested array.
+import stdlib::json
+
+fn main() {
+    let v = parse("{\"user\":{\"name\":\"Bob\",\"scores\":[1,2,3]},\"tags\":[\"x\",\"y\"]}")
+    let find = fn(obj, key) {
+        match obj {
+            JsonObject(fields) => {
+                var found = JsonNull
+                var i = 0
+                let flen = perform Array.length(fields)
+                while i < flen {
+                    let pair = fields[i]
+                    if pair.0 == key then { found = pair.1 } else {}
+                    i = i + 1
+                }
+                found
+            },
+            _ => JsonNull
+        }
+    }
+    let inner = find(v, "user")
+    perform IO.print("nested_name=" + get_string(inner, "name", "?"))
+    perform IO.print("nested_str=" + stringify(inner))
+    let tag1 = match find(v, "tags") {
+        JsonArray(items) => match items[1] {
+            JsonString(s) => s,
+            _ => "?"
+        },
+        _ => "?"
+    }
+    perform IO.print("tag1=" + tag1)
+    let total = match find(inner, "scores") {
+        JsonArray(items) => {
+            var acc = 0.0
+            var i = 0
+            let alen = perform Array.length(items)
+            while i < alen {
+                match items[i] {
+                    JsonNumber(f) => { acc = acc + f },
+                    _ => {}
+                }
+                i = i + 1
+            }
+            acc
+        },
+        _ => 0.0
+    }
+    perform IO.print("scores_sum=" + perform Float.to_string(total))
+}

@@ -1,0 +1,1 @@
+{"exit_code":0,"stdout":"missing=default\nwrongtype=default\nnullfield=default\nboolwrongtype=true\nnummissing=-1\nnumwrongtype=-1\nboolmissing=false","stderr":""}

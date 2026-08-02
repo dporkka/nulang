@@ -2861,7 +2861,24 @@ let results = parallel_map(items, (item) -> {
 
 ## 14.6 HTTP Client/Server
 
+**Implementation status: real, but with different syntax and a real
+coexistence limitation.** `Http.get(url) -> String` / `Http.post(url,
+body) -> String` (client) and `Http.serve(port, handler) -> Int` (a real
+OS listener; returns the bound port, or a positive port even for `0`
+meaning "pick one") are genuine, wired effects (`src/vm.rs`,
+`src/stdlib.rs`) — but as bare `perform Http.*` calls, not through an
+`import Http` module, and not with the request/response record types,
+headers, or `http.*` lowercase spelling shown below and elsewhere in
+this section (those don't exist — no request object, no response
+record, client calls return a bare `String` body or `nil` on failure).
+`Http.serve` is dispatched only when a program has an actor/workflow
+declaration; `Http.get`/`Http.post` are dispatched only when it doesn't
+(`src/main.rs`'s runtime-vs-standalone split) — the two currently can't
+be used in the same file (`examples/17_actor_fetcher.nula` already
+documents this as a known VM limitation).
+
 The `Http` module provides both client and server functionality through the `Network` effect.
+
 
 ### HTTP Client
 
@@ -2925,7 +2942,22 @@ actor HttpServer {
 
 ## 14.7 Serialization
 
+**Implementation status: JSON is real with a different, simpler API;
+Binary doesn't exist.** `import stdlib::json` (not `import Json`) gives
+unqualified `parse(json: String) -> JsonValue` and
+`stringify(value: JsonValue) -> String`, where `JsonValue` is a closed
+variant (`JsonNull | JsonBool | JsonNumber(Float) | JsonString |
+JsonArray | JsonObject`) — not the generic record/`Result`-returning API
+shown below. `parse` never fails (lenient by design: malformed input
+degrades gracefully rather than erroring) and there is no
+`stringify_pretty`, `get_field`/`get_field_as`, or schema-driven
+deserialization; field access is `get_string`/`get_number`/`get_bool`
+with a required default value. `Binary` (serialize/deserialize/
+deserialize_with_schema) has no implementation at all — `import Binary`
+fails to resolve.
+
 The `Json` and `Binary` modules provide data serialization and deserialization.
+
 
 ### JSON
 

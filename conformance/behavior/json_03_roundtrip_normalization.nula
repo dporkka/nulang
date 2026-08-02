@@ -1,0 +1,14 @@
+// stdlib::json — parse -> stringify -> parse is stable. stringify emits
+// compact JSON (input whitespace removed) and normalizes number spelling
+// (30.0 -> 30, 1e2 -> 100); a second round-trip is a fixed point.
+import stdlib::json
+
+fn main() {
+    let src = " { \"b\" : 2 , \"a\" : [ 1 , 2 , 3 ] , \"c\" : 1e2 } "
+    let once = stringify(parse(src))
+    perform IO.print("once=" + once)
+    let twice = stringify(parse(once))
+    perform IO.print("twice=" + twice)
+    perform IO.print("stable=" + (if once == twice then "yes" else "no"))
+    perform IO.print("n30=" + stringify(parse("30.0")))
+}

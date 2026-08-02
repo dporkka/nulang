@@ -1,0 +1,19 @@
+// SPEC2 14.5 Determinism Contract bullet 2 (SPEC2.md:2986-2987) and the
+// stdlib `Actor.set_priority(level: Int) -> Nil` op (0=High, 1=Normal,
+// 2=Low): "Ready High-priority actors are scheduled before Normal."
+// main synchronously boosts B to High via `ask` (the ask blocks until the
+// boost behavior has run, so B is High before any work is enqueued), then
+// enqueues A (Normal) first and B (High) second. The scheduler dequeues
+// High before Normal, so B prints before A — priority beats enqueue order.
+actor Tagger {
+    behavior say(s: String) { perform IO.print(s) }
+    behavior boost() { perform Actor.set_priority(0) }
+}
+fn main() {
+    let a = spawn Tagger {}
+    let b = spawn Tagger {}
+    let _ = ask b boost()
+    send a say("A")
+    send b say("B")
+    unit
+}

@@ -1,0 +1,1 @@
+{"exit_code":0,"stdout":"built={\"name\":\"Alice\",\"age\":30,\"active\":true,\"empty\":null,\"tags\":[\"x\",1]}\nquoted=\"say \\\"hi\\\"\"\ntabbed=\"a\\tb\"\nback=\"c\\\\d\"\nctrl=\"\\u0001\"\nnum0=0\nnumneg0=-0\nnumfrac=0.1\nnull=null","stderr":""}

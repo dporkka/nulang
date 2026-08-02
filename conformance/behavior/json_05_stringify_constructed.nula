@@ -1,0 +1,26 @@
+// stdlib::json — stringify of hand-constructed JsonValue values (the
+// reverse direction of parse): JsonObject/JsonArray built from tuples,
+// JsonString escaping of quote/backslash/tab/control char, JsonNumber
+// formatting (0, -0, 0.1), JsonNull. SPEC2.md 14.7 line 2937 shows
+// `Json.stringify(user)` on a plain record; the real stringify takes a
+// JsonValue and cannot serialize records directly.
+import stdlib::json
+
+fn main() {
+    let built = JsonObject([
+        ("name", JsonString("Alice")),
+        ("age", JsonNumber(30.0)),
+        ("active", JsonBool(true)),
+        ("empty", JsonNull),
+        ("tags", JsonArray([JsonString("x"), JsonNumber(1.0)])),
+    ])
+    perform IO.print("built=" + stringify(built))
+    perform IO.print("quoted=" + stringify(JsonString("say \"hi\"")))
+    perform IO.print("tabbed=" + stringify(JsonString("a\tb")))
+    perform IO.print("back=" + stringify(JsonString("c\\d")))
+    perform IO.print("ctrl=" + stringify(JsonString(perform String.from_char(1))))
+    perform IO.print("num0=" + stringify(JsonNumber(0.0)))
+    perform IO.print("numneg0=" + stringify(JsonNumber(-0.0)))
+    perform IO.print("numfrac=" + stringify(JsonNumber(0.1)))
+    perform IO.print("null=" + stringify(JsonNull))
+}

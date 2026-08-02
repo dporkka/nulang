@@ -1,0 +1,17 @@
+// stdlib::json — \uXXXX escape decoding: a single \uXXXX escape decodes to
+// its code point (BMP). A lone ASCII result round-trips through stringify;
+// multi-byte results are read back via pattern match + IO.print because
+// stringify panics on multi-byte strings (see findings). Multiple \uXXXX
+// escapes in one string are corrupted (see findings).
+import stdlib::json
+
+fn main() {
+    let a = parse("\"\\u0041\"")
+    perform IO.print("u41=" + stringify(a))
+    let e = parse("\"\\u00e9\"")
+    let es = match e { JsonString(v) => v, _ => "?" }
+    perform IO.print("ue9=" + es)
+    let z = parse("\"\\u4e2d\"")
+    let zs = match z { JsonString(v) => v, _ => "?" }
+    perform IO.print("u4e2d=" + zs)
+}

@@ -1,0 +1,19 @@
+// stdlib::json — documented lenient behavior (doc comment in
+// src/stdlib/json.nula): empty/whitespace-only input returns JsonNull,
+// trailing whitespace and extra content after the first value are ignored,
+// and truncated structures yield whatever parsed so far. There is no
+// error/Result path — parse never fails. SPEC2.md 14.7 lines 2944-2952 show
+// `Json.parse` returning `Result[..., String]` with Ok/Error handling;
+// the real parse returns a JsonValue directly.
+import stdlib::json
+
+fn main() {
+    perform IO.print("ws=" + stringify(parse("  {\"a\": 1}  ")))
+    perform IO.print("empty=" + stringify(parse("")))
+    perform IO.print("ws_only=" + stringify(parse("   ")))
+    perform IO.print("trailing=" + stringify(parse("12garbage")))
+    perform IO.print("trunc_obj=" + stringify(parse("{\"a\":1")))
+    perform IO.print("trunc_brace=" + stringify(parse("{")))
+    perform IO.print("trunc_arr=" + stringify(parse("[1,2")))
+    perform IO.print("extra=" + stringify(parse("{\"a\":1} {\"b\":2}")))
+}
