@@ -89,6 +89,12 @@ pub fn fresh_actor_id() -> u64 {
     ACTOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Sentinel actor id for `Runtime::main_heap`/`main_gc`, the fallback used
+/// for allocation outside any real actor's behavior. Below
+/// `ACTOR_ID_COUNTER`'s start value of 1, so it can never collide with a
+/// real `fresh_actor_id()` result.
+const MAIN_HEAP_ACTOR_ID: u64 = 0;
+
 /// Maximum number of membership entries carried by a single gossip packet.
 const GOSSIP_PAYLOAD_MAX_ENTRIES: usize = 256;
 
@@ -199,6 +205,12 @@ pub struct Runtime {
     pub supervisors: HashMap<u64, Supervisor>,
     pub scheduler: Scheduler,
     pub current_actor: Option<u64>,
+    // Fallback heap/GC for allocation performed OUTSIDE any actor's
+    // behavior (e.g. `main()`'s own top-level bytecode: string
+    // concatenation, `Int.to_string`, and similar). See
+    // `RuntimeVmCallbacks::alloc`'s doc comment for why this exists.
+    pub main_heap: ActorHeap,
+    pub main_gc: OrcaGc,
     pub next_reductions: u32,
     pub coordinator: OrcaCoordinator,
     pub cycle_detector: CycleDetector,
@@ -352,6 +364,12 @@ impl Runtime {
             supervisors: HashMap::new(),
             scheduler: Scheduler::new(4),
             current_actor: None,
+            main_heap: {
+                let mut heap = ActorHeap::new(64 * 1024);
+                heap.set_actor_id(MAIN_HEAP_ACTOR_ID);
+                heap
+            },
+            main_gc: OrcaGc::new(MAIN_HEAP_ACTOR_ID),
             next_reductions: 1000,
             coordinator: OrcaCoordinator::new(),
             cycle_detector: CycleDetector::new(),
@@ -4699,6 +4717,37 @@ impl RuntimeVmCallbacks {
     pub fn new(runtime: Rc<RefCell<Runtime>>) -> Self {
         RuntimeVmCallbacks { runtime }
     }
+
+    /// Allocate a fresh heap string via `self.alloc` (the current actor's
+    /// heap, or `Runtime::main_heap` outside any actor context) and copy
+    /// `s`'s bytes into it, null-terminated. Mirrors `VM::allocate_string`,
+    /// but through THIS callback's own (now-correct) allocator rather than
+    /// reaching into `Runtime.vm` — a separate, lazily-created VM instance
+    /// used only to run actor bytecode, whose heap is not the heap this
+    /// callback's caller (e.g. `main()`'s own top-level VM) can read back
+    /// from. Builtin effects that produce a NEW string (`Int.to_string`,
+    /// `Float.to_string`, JSON/LLM results, ...) must allocate through this
+    /// helper, not `rt.vm.allocate_string`.
+    fn alloc_string(&mut self, s: &str) -> crate::vm::Value {
+        let bytes = s.as_bytes();
+        match crate::vm::ActorVmCallbacks::alloc(
+            self,
+            bytes.len() + 1,
+            crate::runtime::heap::TypeTag::String,
+        ) {
+            Some(ptr) => {
+                // SAFETY: `alloc` just returned a fresh allocation of
+                // exactly `bytes.len() + 1` bytes; writing `bytes.len()`
+                // payload bytes plus a trailing NUL fits exactly.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                    *ptr.add(bytes.len()) = 0;
+                }
+                crate::vm::Value::ptr(ptr)
+            }
+            None => crate::vm::Value::nil(),
+        }
+    }
 }
 
 impl std::fmt::Debug for RuntimeVmCallbacks {
@@ -4719,11 +4768,15 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 return actor.heap.alloc(size, type_tag);
             }
         }
-        None
+        // No actor context (e.g. `main()`'s own top-level bytecode): fall
+        // back to the runtime's dedicated main heap rather than silently
+        // failing every allocation. See `Runtime::main_heap`'s doc comment.
+        rt.main_heap.alloc(size, type_tag)
     }
 
     // SAFETY: trait-impl signature is fixed; `ptr` always comes from the
-    // VM's own heap allocations (the current actor's ActorHeap).
+    // VM's own heap allocations (the current actor's ActorHeap, or the
+    // runtime's main heap when there is no current actor).
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn drop_ref(&mut self, ptr: *mut u8) {
         let mut rt = self.runtime.borrow_mut();
@@ -4735,12 +4788,18 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 unsafe {
                     actor.orca_gc.drop_local_ref(&mut actor.heap, ptr);
                 }
+                return;
             }
+        }
+        unsafe {
+            let rt = &mut *rt;
+            rt.main_gc.drop_local_ref(&mut rt.main_heap, ptr);
         }
     }
 
     // SAFETY: trait-impl signature is fixed; `ptr` always comes from the
-    // VM's own heap allocations (the current actor's ActorHeap).
+    // VM's own heap allocations (the current actor's ActorHeap, or the
+    // runtime's main heap when there is no current actor).
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn retain_ref(&mut self, ptr: *mut u8) {
         let mut rt = self.runtime.borrow_mut();
@@ -4749,33 +4808,33 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 unsafe {
                     actor.orca_gc.local_ref(&actor.heap, ptr);
                 }
+                return;
             }
+        }
+        unsafe {
+            let rt = &mut *rt;
+            rt.main_gc.local_ref(&rt.main_heap, ptr);
         }
     }
 
     // SAFETY: trait-impl signature is fixed; `ptr` always comes from the
-    // VM's own heap allocations (the current actor's ActorHeap).
+    // VM's own heap allocations (the current actor's ActorHeap, or the
+    // runtime's main heap when there is no current actor). `header_of` is a
+    // pure pointer-arithmetic read relative to `ptr` itself, so it needs no
+    // actor/heap lookup at all beyond confirming there's a valid execution
+    // context to be reading from.
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn array_len(&self, ptr: *mut u8) -> Option<usize> {
-        let rt = self.runtime.borrow();
-        if let Some(actor_id) = rt.current_actor {
-            if rt.actors.get(&actor_id).is_some() {
-                unsafe {
-                    let header = &*crate::runtime::heap::ActorHeap::header_of(ptr);
-                    if header.type_tag == crate::runtime::heap::TypeTag::Array {
-                        let payload_size = header
-                            .size
-                            .saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);
-                        Some(payload_size / std::mem::size_of::<crate::vm::Value>())
-                    } else {
-                        None
-                    }
-                }
+        unsafe {
+            let header = &*crate::runtime::heap::ActorHeap::header_of(ptr);
+            if header.type_tag == crate::runtime::heap::TypeTag::Array {
+                let payload_size = header
+                    .size
+                    .saturating_sub(crate::runtime::heap::ActorHeap::HEADER_SIZE);
+                Some(payload_size / std::mem::size_of::<crate::vm::Value>())
             } else {
                 None
             }
-        } else {
-            None
         }
     }
 
@@ -4898,15 +4957,13 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 None => return Some(crate::vm::Value::nil()),
             };
             let params: Vec<crate::vm::Value> = regs.iter().skip(1).copied().collect();
-            let mut rt = self.runtime.borrow_mut();
-            let result = match rt.persistence.query(&sql, &params) {
+            let rt = self.runtime.borrow_mut();
+            let query_result = rt.persistence.query(&sql, &params);
+            drop(rt);
+            let result = match query_result {
                 Ok(rows) => {
                     let json = serde_json::to_string(&rows).unwrap_or_default();
-                    if let Some(vm) = &mut rt.vm {
-                        vm.allocate_string(&json)
-                    } else {
-                        crate::vm::Value::nil()
-                    }
+                    self.alloc_string(&json)
                 }
                 Err(_) => crate::vm::Value::nil(),
             };
@@ -4941,11 +4998,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         if effect_name == "Int" && op_name == Some("to_string") {
             let n = regs.first().and_then(|v| v.as_int()).unwrap_or(0);
             let s = format!("{}", n);
-            let mut rt = self.runtime.borrow_mut();
-            return Some(match &mut rt.vm {
-                Some(vm) => vm.allocate_string(&s),
-                None => crate::vm::Value::nil(),
-            });
+            return Some(self.alloc_string(&s));
         }
 
         if effect_name == "Int" && op_name == Some("to_float") {
@@ -4959,11 +5012,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         if effect_name == "Float" && op_name == Some("to_string") {
             let x = regs.first().and_then(|v| v.as_float()).unwrap_or(0.0);
             let s = format!("{}", x);
-            let mut rt = self.runtime.borrow_mut();
-            return Some(match &mut rt.vm {
-                Some(vm) => vm.allocate_string(&s),
-                None => crate::vm::Value::nil(),
-            });
+            return Some(self.alloc_string(&s));
         }
         if effect_name == "String" && op_name == Some("to_int") {
             let s = crate::vm::resolve_value_string(
@@ -5032,7 +5081,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             if provider == "llm" {
                 #[cfg(feature = "ai-runtime")]
                 {
-                    let mut rt = self.runtime.borrow_mut();
+                    let rt = self.runtime.borrow_mut();
                     if rt.llm.client.is_none() {
                         return Some(crate::vm::Value::nil());
                     }
@@ -5048,12 +5097,10 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                         response_format: None,
                     };
                     let result = rt.complete_llm_request(request, Vec::new());
+                    drop(rt);
                     return Some(match result {
                         Ok(resp) => match resp.content {
-                            Some(c) => match &mut rt.vm {
-                                Some(vm) => vm.allocate_string(&c),
-                                None => crate::vm::Value::nil(),
-                            },
+                            Some(c) => self.alloc_string(&c),
                             None => crate::vm::Value::nil(),
                         },
                         Err(_) => crate::vm::Value::nil(),
