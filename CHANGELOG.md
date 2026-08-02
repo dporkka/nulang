@@ -56,8 +56,16 @@ in this version; they are recorded here to establish their tier.
   and subtyping (`src/effect_checker.rs`).
 - The actor surface: `spawn`, `send`, `receive`, supervision
   (`src/runtime/`, `src/vm.rs`).
-- CRDT operations and merge semantics (`src/runtime/crdt.rs`,
-  `src/runtime/crdt_reg.rs`).
+- ~~CRDT operations and merge semantics~~ — **correction (2026-08-02):**
+  this was misclassified. `src/runtime/crdt.rs`/`crdt_reg.rs` implement a
+  real, Rust-level-tested delta-sync CRDT protocol (`CrdtManager`, 8
+  types), but it has no `.nula`-observable surface: no type-selector
+  syntax, no `Crdt.*` effect module, and the `state crdt` field tag
+  (`SPEC2.md` §9.10/§12.5) does not route through it — see those sections'
+  implementation-status notes. Nothing Stable-tier is broken by this
+  correction because there was never a language-level contract to keep;
+  the Rust API itself remains internally stable, it just isn't a
+  GOVERNANCE.md-tiered *language* surface until an RFC wires it up.
 
 ### Added since 1.0.0-frozen — 2026-07-29
 

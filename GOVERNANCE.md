@@ -45,7 +45,17 @@ warning, and is removed only in the version after next).
 - The effect-row system (closed/open, regions).
 - The capability lattice (`iso/trn/ref/val/box/tag/lineariso`) and subtyping.
 - The actor surface (`spawn`, `send`, `receive`, supervision).
-- CRDT operations and their merge semantics.
+- ~~CRDT operations and their merge semantics~~ — **erratum (2026-08-02):**
+  removed. This was never an accurate claim: there is no `.nula`-level
+  syntax to construct or operate on any CRDT type today (no type
+  selector, no `Crdt.*` effect module — `state crdt` fields behave
+  identically to `state durable`; see `SPEC2.md` §9.10/§12.5). Since no
+  conforming program could ever have relied on this surface, its removal
+  is a documentation correction, not a stability-tier deprecation — there
+  is nothing to deprecate. The Rust-level `CrdtManager` delta-sync
+  protocol (`src/runtime/crdt.rs`, `crdt_reg.rs`) is real and tested, but
+  is an embedder API, not a tiered language surface, until an RFC wires
+  it to `state crdt` fields.
 
 ### Experimental
 No stability promise. May change or be removed in any release. Lives behind a

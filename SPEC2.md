@@ -387,7 +387,7 @@ Every state variable in an actor has an associated *state model* that determines
 | `local` | None | None | Reset to initial value | Ephemeral caches, temporary buffers |
 | `durable` | Snapshot + journal | None | Replay from journal | Single-node persistent state |
 | `event_sourced` | Event journal | Event stream | Full event replay | Audit trails, temporal queries |
-| `crdt` | Delta log | Automatic merge | CRDT merge | Shared distributed state |
+| `crdt` | Delta log | Not yet wired (accepted syntax; behaves as `durable` today — see §9.10) | CRDT merge (planned) | Shared distributed state (planned) |
 
 The state model is declared alongside the variable:
 
@@ -407,13 +407,19 @@ persistent actor ShoppingCart {
   }
 
   behavior track_viewer(node: Int) {
-    // CRDT state is merged automatically across the cluster
+    // NOTE: `crdt` fields do not yet merge automatically -- this behaves
+    // as an ordinary durable field today. See §9.10.
     self.viewers = self.viewers + 1
   }
 }
 ```
 
-The runtime enforces the semantics of each model: `durable` fields are checkpointed and journaled, `event_sourced` state is rebuilt by replaying emitted events (see `emit`, §6.14), and `crdt` state uses one of the eight built-in CRDT data types (Appendix B.4) so concurrent updates merge deterministically.
+The runtime enforces the semantics of `durable` (checkpointed and
+journaled) and `event_sourced` (rebuilt by replaying emitted events, see
+`emit`, §6.14). `crdt` is accepted syntax tracked as a state-model tag,
+but is not yet wired to the eight built-in CRDT data types (Appendix
+B.4) or their merge semantics -- see §9.10 and §12.5 for the precise
+implementation-status note and what remains to close that gap.
 
 ## 1.5 Capability Security Overview
 
@@ -2148,9 +2154,20 @@ Runtime recovery process:
 
 ## 9.10 CRDT State
 
-- Automatic replication across cluster nodes
-- Built-in CRDT types with merge semantics
-- Delta synchronization for efficient updates
+**Implementation status: Rust-embedder API only, no `.nula`-level surface
+yet.** `state crdt <name>: Type = expr` parses and is tracked internally as
+a `StateModel::Crdt` persistence-model tag, but today it behaves
+identically to `state durable` — no CRDT type selection, no operation-set
+enforcement (e.g. a `crdt`-tagged field still accepts unrestricted
+decrement), and no merge-on-conflict semantics are applied to it. The
+eight CRDT types described in Appendix B.4 (`GCounter`, `PNCounter`,
+`GSet`, `ORSet`, `AWORSet`, `LWWRegister`, `MVRegister`, `RGA`) exist and
+are tested at the Rust level (`src/runtime/crdt.rs`, `crdt_reg.rs`,
+`CrdtManager`), but are not constructible or nameable from `.nula` source:
+there is no type-selector syntax and no `Crdt.*` effect module. A future
+RFC is required to wire a concrete-type selector and enforced operation
+sets to `state crdt` fields before the syntax above is a conforming
+implementation surface.
 
 ---
 
@@ -2441,9 +2458,20 @@ migrate cart to target_node
 
 ## 12.5 CRDT Replication
 
-- CRDT state automatically replicated across hosting nodes
-- Periodic delta synchronization
-- Automatic conflict resolution via CRDT merge
+**Implementation status: the delta-sync replication protocol is real and
+tested at the Rust level; `.nula`-level `state crdt` fields are not yet
+wired to it.** `CrdtManager` and its eight backing types (`GCounter`,
+`PNCounter`, `GSet`, `ORSet`, `AWORSet`, `LWWRegister`, `MVRegister`,
+`RGA`; see Appendix B.4) implement genuine delta-state replication —
+`delta_since`/`generate_delta_sync_ops`/`apply_delta_op` ship real diffs
+over the wire (`Packet::CrdtDeltaSync`) and merge them idempotently. That
+machinery is exercised by `src/runtime/tests.rs` and `stress_tests.rs`,
+not by any `.nula` program: there is no syntax to construct a specific
+CRDT type, no `Crdt.*` effect module, and the `state crdt` field tag
+below does not route through `CrdtManager` at all today — it behaves like
+`state durable`, with no operation-set restriction and no CRDT merge on
+concurrent writes. The example is the language's *planned* surface for
+this feature, not a currently conforming one:
 
 ```nulang
 persistent actor GlobalCounter {
@@ -2459,13 +2487,19 @@ persistent actor GlobalCounter {
 }
 ```
 
-Eight CRDT types are built into the runtime (`GCounter`, `PNCounter`, `GSet`, `ORSet`, `AWORSet`, `LWWRegister`, `MVRegister`, `RGA`; see Appendix B.4) and back `crdt` state fields.
+This parses and runs today (as an ordinary durable counter — concurrent
+`increment`s across replicas are NOT guaranteed to converge via a
+`GCounter`-style max-of-per-replica-counts merge), but does not yet get
+the described replication/merge behavior. Wiring `state crdt` fields to
+`CrdtManager` — a concrete-type selector, an enforced operation set per
+type, and merge-on-sync — is tracked as a real implementation gap, not a
+documentation gap only; see `RFC/` for the tracking item once filed.
 
 ## 12.6 Fault Tolerance
 
 - Actor migration on node failure
 - Message buffering for failed-node actors
-- CRDT healing on node rejoin
+- CRDT healing on node rejoin (Rust-embedder `CrdtManager` API only — see §12.5's implementation-status note; not yet reachable from `state crdt` fields)
 - Supervision-based recovery (§8.8)
 
 In-language failover constructs (`with_failover` / `on_failure`) are planned; today recovery is driven by the supervision and migration mechanisms above.
@@ -3415,6 +3449,11 @@ Only the built-in fixed-size array `[T]` exists today (indexed load/store, `arr[
 | `Mailbox[T]` | *Planned* — an actor's message queue as a first-class type |
 
 ## B.4 CRDT Types
+
+*Planned* — these 8 types exist and are tested at the Rust level
+(`src/runtime/crdt.rs`, `crdt_reg.rs`), but none is yet constructible or
+nameable from `.nula` source (no type-selector syntax, no `Crdt.*` effect
+module). See §9.10 and §12.5 for the full implementation-status note.
 
 | Type | Description | Merge Strategy |
 |------|-------------|----------------|
