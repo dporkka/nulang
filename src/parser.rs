@@ -2055,6 +2055,14 @@ impl Parser {
         let saved_pos = self.pos;
         self.advance(); // consume 'let'
         self.skip_newlines();
+        // `rec` is accepted for backward compatibility but is a no-op:
+        // self-recursion is inferred automatically for any lambda-valued
+        // `let` binding (see infer_letrec / the Expr::Lambda check in
+        // typechecker.rs), matching the same acceptance already present
+        // for expression-position `let` (see the TokenKind::Let arm in
+        // parse_primary's `let` handling).
+        self.consume_if(&TokenKind::Rec);
+        self.skip_newlines();
         let mutable = self.consume_if(&TokenKind::Var);
         self.skip_newlines();
         let name = self.expect_ident("binding name")?;

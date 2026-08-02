@@ -2,7 +2,6 @@
 
 use criterion::{black_box, criterion_group, Criterion};
 use nulang::runtime::Runtime;
-use nulang::types::ExitReason;
 use nulang::vm::Value;
 
 fn bench_spawn_send_receive(c: &mut Criterion) {

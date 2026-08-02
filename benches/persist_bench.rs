@@ -5,13 +5,14 @@ use criterion::{black_box, criterion_group, Criterion};
 fn bench_memory_store(c: &mut Criterion) {
     c.bench_function("persist/memory_store", |b| {
         b.iter(|| {
-            use nulang::runtime::persistence::{MemoryStore, PersistenceStore};
+            use nulang::runtime::{ActorSnapshot, MemoryStore, PersistenceStore};
             let mut store = MemoryStore::new();
-            let snapshot = nulang::runtime::persistence::ActorSnapshot {
+            let snapshot = ActorSnapshot {
                 actor_id: 1,
                 sequence: 0,
                 state: std::collections::HashMap::new(),
-                mailbox: vec![],
+                waiting_signal: None,
+                crdt_snapshot: None,
             };
             store.save_snapshot(snapshot).ok();
             let _loaded = store.load_snapshot(1);

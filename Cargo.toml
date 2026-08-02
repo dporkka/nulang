@@ -13,6 +13,12 @@ repository = "https://github.com/dporkka/nulang"
 documentation = "https://nulang.org"
 keywords = ["actor", "distributed", "programming-language", "ai", "compiler"]
 categories = ["development-tools", "programming-languages"]
+# benches/actor_bench.rs etc. are `mod`-included submodules of bench_main
+# (see benches/bench_main.rs), not standalone bench targets. Without this,
+# Cargo auto-discovers every top-level benches/*.rs as its own bench binary,
+# compiling each submodule twice (once alone, once via bench_main) and
+# breaking on the criterion harness conflict.
+autobenches = false
 
 [package.metadata]
 # The Nulang *language* version, distinct from the crate `version` above.
@@ -120,3 +126,9 @@ opt-level = 1
 lto = false
 codegen-units = 16
 
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "bench_main"
+harness = false

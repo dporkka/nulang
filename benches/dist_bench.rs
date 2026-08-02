@@ -5,7 +5,7 @@ use criterion::{black_box, criterion_group, Criterion};
 fn bench_dist_crdt_delta_sync(c: &mut Criterion) {
     c.bench_function("dist/crdt_delta_sync", |b| {
         b.iter(|| {
-            use nulang::runtime::crdt::GCounter;
+            use nulang::runtime::GCounter;
             let mut counter = GCounter::new(1);
             counter.increment();
             counter.increment();
@@ -19,7 +19,7 @@ fn bench_dist_crdt_delta_sync(c: &mut Criterion) {
 fn bench_dist_gossip_convergence(c: &mut Criterion) {
     c.bench_function("dist/gossip_convergence", |b| {
         b.iter(|| {
-            use nulang::runtime::cluster::{ClusterState, NodeGossip, NodeId, NodeStatus};
+            use nulang::runtime::{ClusterState, NodeGossip, NodeId, NodeStatus};
             use std::net::SocketAddr;
             let addr: SocketAddr = "127.0.0.1:9001".parse().unwrap();
             let node_id = NodeId::new(&addr);
@@ -29,7 +29,7 @@ fn bench_dist_gossip_convergence(c: &mut Criterion) {
                     let a: SocketAddr = format!("127.0.0.1:900{}", n).parse().unwrap();
                     NodeGossip {
                         node_id: NodeId::new(&a),
-                        address: a.to_string(),
+                        address: a,
                         status: NodeStatus::Healthy,
                         incarnation: 1,
                     }
