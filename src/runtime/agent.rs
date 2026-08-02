@@ -352,6 +352,297 @@ pub(crate) fn actor_state_string(rt: &Runtime, actor_id: u64, field: &str) -> Op
     vm_value_to_string(&value, actor.bytecode_module.as_ref())
 }
 
+// ---------------------------------------------------------------------------
+// Tool-calling: LLM chat completion + agent tool invocation
+// ---------------------------------------------------------------------------
+
+/// Execute a chat-completion request using the configured LLM client.
+///
+/// The provided `memory` messages are stored on the request before it is
+/// sent to the provider.
+pub(crate) fn complete_llm_request(
+    rt: &Runtime,
+    mut request: LlmRequest,
+    memory: Vec<LlmMessage>,
+) -> Result<LlmResponse, nulang_ai::LlmError> {
+    // Check token budget before calling the provider.
+    if let Some(budget) = &rt.llm.token_budget {
+        if budget.is_exhausted() {
+            return Err(nulang_ai::LlmError::new(
+                nulang_ai::LlmErrorKind::BudgetExceeded,
+                format!("Token budget exhausted (limit: {})", budget.limit()),
+            ));
+        }
+    }
+    request.memory = memory;
+    let client = rt
+        .llm
+        .client
+        .as_ref()
+        .ok_or_else(|| nulang_ai::LlmError::from_string("No LLM client configured"))?;
+    let response = nulang_ai::complete_sync(client.as_ref(), request)?;
+    // Charge the budget for actual tokens consumed.
+    if let Some(budget) = &rt.llm.token_budget {
+        budget.charge(response.usage.total as u64);
+    }
+    Ok(response)
+}
+
+/// Execute an LLM request, optionally running tool calls from the response.
+///
+/// The request's `tools` list is populated from `module.tools`. If the
+/// response contains tool calls, the named functions are looked up in the
+/// module exports, invoked with the provided JSON arguments, and the results
+/// are sent back to the model for a final response. The supplied `memory`
+/// messages are preserved across tool-call rounds.
+pub(crate) fn complete_llm_with_tools(
+    rt: &mut Runtime,
+    mut request: LlmRequest,
+    memory: Vec<LlmMessage>,
+    module: &crate::bytecode::CodeModule,
+) -> Result<LlmResponse, nulang_ai::LlmError> {
+    request.tools = module.tools.iter().map(to_provider_tool_schema).collect();
+    request.memory = memory.clone();
+    let response = complete_llm_request(rt, request.clone(), memory.clone())?;
+    finish_tool_calls(rt, module, response)
+}
+
+/// Post-process an LLM response on the scheduler thread: invoke any tool
+/// calls named in the response against `module` and synthesize the
+/// response content from their results. Must run on the scheduler thread
+/// because tool invocation executes module functions against runtime
+/// state.
+pub(crate) fn finish_tool_calls(
+    rt: &mut Runtime,
+    module: &crate::bytecode::CodeModule,
+    mut response: LlmResponse,
+) -> Result<LlmResponse, nulang_ai::LlmError> {
+    if !response.tool_calls.is_empty() {
+        let mut results = Vec::new();
+        for call in &response.tool_calls {
+            let result = invoke_agent_tool_function(rt, module, &call.name, &call.arguments)?;
+            results.push((call.name.clone(), result));
+        }
+
+        // For agent workflows, return the tool results directly so the
+        // caller can decide whether to continue the conversation. Preserve
+        // the original tool_calls and usage while surfacing a synthesized
+        // content string for memory/logging.
+        let result_content = results
+            .iter()
+            .map(|(name, result)| format!("{}: {}", name, result))
+            .collect::<Vec<_>>()
+            .join("\n");
+        response.content = Some(result_content);
+    }
+
+    Ok(response)
+}
+
+/// Invoke a tool for an agent, routing memory behaviors to the agent's
+/// durable state and falling back to the module's exported function for
+/// other tools.
+pub(crate) fn invoke_agent_tool_function(
+    rt: &mut Runtime,
+    module: &crate::bytecode::CodeModule,
+    name: &str,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> Result<String, String> {
+    if let Some(actor_id) = rt.current_actor {
+        if rt.actor_is_agent(actor_id) && rt.is_semantic_memory_behavior(name) {
+            return invoke_semantic_memory_tool(rt, actor_id, name, arguments);
+        }
+        if rt.actor_is_agent(actor_id) && rt.is_procedural_memory_behavior(name) {
+            return invoke_procedural_memory_tool(rt, actor_id, name, arguments);
+        }
+    }
+    invoke_tool_function(rt, module, name, arguments)
+}
+
+/// Execute a semantic-memory tool call against the current agent.
+pub(crate) fn invoke_semantic_memory_tool(
+    rt: &mut Runtime,
+    actor_id: u64,
+    name: &str,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> Result<String, String> {
+    if name == "store_fact" {
+        let content = arguments
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(topic) = arguments.get("topic").and_then(|v| v.as_str()) {
+            metadata.insert("topic".to_string(), topic.to_string());
+        }
+        let id = rt.semantic_memory_store_with_metadata(actor_id, &content, metadata);
+        Ok(format!(
+            "stored: {}",
+            vm_value_to_string_or_default(rt, actor_id, &id)
+        ))
+    } else if name == "recall" {
+        let query = arguments
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let top_k = arguments.get("top_k").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+        let value = rt.semantic_memory_recall(actor_id, &query, top_k);
+        Ok(vm_value_to_string_or_default(rt, actor_id, &value))
+    } else {
+        Err(format!("Unknown semantic-memory tool '{}'", name))
+    }
+}
+
+/// Execute a procedural-memory tool call against the current agent.
+pub(crate) fn invoke_procedural_memory_tool(
+    rt: &mut Runtime,
+    actor_id: u64,
+    name: &str,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> Result<String, String> {
+    match name {
+        "store_pattern" => {
+            let key = arguments
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let input_pattern = arguments
+                .get("input_pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let output_template = arguments
+                .get("output_template")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let value = rt.procedural_memory_store_pattern(
+                actor_id,
+                &key,
+                &input_pattern,
+                &output_template,
+            );
+            Ok(vm_value_to_string_or_default(rt, actor_id, &value))
+        }
+        "get_pattern" => {
+            let key = arguments
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let value = rt.procedural_memory_get_pattern(actor_id, &key);
+            Ok(vm_value_to_string_or_default(rt, actor_id, &value))
+        }
+        "add_example" => {
+            let task = arguments
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let input = arguments
+                .get("input")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let output = arguments
+                .get("output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            rt.procedural_memory_add_example(actor_id, &task, &input, &output);
+            Ok("ok".to_string())
+        }
+        "get_examples" => {
+            let task = arguments
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let query = arguments
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let top_k = arguments.get("top_k").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+            let value = rt.procedural_memory_get_examples(actor_id, &task, &query, top_k);
+            Ok(vm_value_to_string_or_default(rt, actor_id, &value))
+        }
+        _ => Err(format!("Unknown procedural-memory tool '{}'", name)),
+    }
+}
+
+/// Convert a VM value into a Rust string, returning a default for missing actors.
+pub(crate) fn vm_value_to_string_or_default(
+    rt: &Runtime,
+    actor_id: u64,
+    value: &crate::vm::Value,
+) -> String {
+    rt.actors
+        .get(&actor_id)
+        .and_then(|actor| rt.vm_value_to_string_in_actor(value, actor))
+        .unwrap_or_default()
+}
+
+/// Look up a tool by name and invoke the corresponding exported function.
+pub(crate) fn invoke_tool_function(
+    _rt: &Runtime,
+    module: &crate::bytecode::CodeModule,
+    name: &str,
+    arguments: &serde_json::Map<String, serde_json::Value>,
+) -> Result<String, String> {
+    let tool = module
+        .tools
+        .iter()
+        .find(|t| t.name == name)
+        .ok_or_else(|| format!("Tool '{}' not found", name))?;
+
+    let export_idx = module
+        .exports
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, idx)| *idx)
+        .ok_or_else(|| format!("Tool function '{}' is not exported", name))?;
+
+    let func_idx = match module.constants.get(export_idx) {
+        Some(crate::bytecode::Constant::FunctionRef(idx)) => *idx,
+        _ => return Err(format!("Export '{}' is not a function reference", name)),
+    };
+
+    let offset = *module
+        .function_table
+        .get(func_idx)
+        .ok_or_else(|| format!("Function table missing entry for '{}'", name))?;
+
+    let properties = tool
+        .parameters
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| format!("Tool '{}' has no parameter schema", name))?;
+
+    let mut vm = crate::vm::VM::new();
+    vm.load_module(module.clone());
+    let module_idx = 0;
+    let mut frame = crate::vm::Frame::new(None, module_idx);
+    frame.pc = offset;
+
+    for (i, (param_name, _)) in properties.iter().enumerate().take(256) {
+        let json_val = arguments
+            .get(param_name)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        frame.regs[i] = crate::runtime::json_to_vm_value(&mut vm, json_val)?;
+    }
+
+    vm.set_current_frame(frame);
+    let result = vm
+        .run_from(module_idx, offset)
+        .map_err(|e| format!("Tool '{}' execution failed: {}", name, e))?;
+    Ok(vm.value_to_string(module_idx, result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
