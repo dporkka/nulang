@@ -55,8 +55,8 @@ first external user. Nothing on the critical path is a research problem.
 | Rust source | ~89k lines, single crate + `nulang-ai` workspace crate |
 | Tests | 1490+ (`cargo test`), 1541+ target per `RELEASE_CHECKLIST.md` |
 | CI matrix | build/test/release/wasm/minimal/lint/lean/package-smoke |
-| Direct deps | 65 |
-| Transitive deps | 483 |
+| Direct deps | 72 |
+| Transitive deps | 468 (was 504 before a 2026-08-02 libsql feature trim dropped the unused tonic/axum gRPC stack; was documented as 483, already stale before that) |
 | Formal proofs (Lean 4) | Core type soundness NOT proved (`progress`/`preservation`/`type_soundness` all `sorry`, regressed 2026-07-26, undocumented until 2026-08-02); capability lattice genuinely proved (5/6 theorems); effects are vacuous `True` stubs, not proofs |
 | Conformance suite | 52 behavior cases + grammar cases |
 | Bootstrap self-hosting | Stage 13; not yet self-compiling |
@@ -633,12 +633,16 @@ runtime withstands adversarial operational review. Both hold up as
    tests via `tower-lsp`'s test harness. `cargo run -- --lsp` runs
    for 24 hours against a large `.nula` corpus without leaking
    memory (checked with `heaptrack`).
-8. **Dep audit and reduction.** 483 transitive deps → target ≤300.
-   Candidates for removal or replacement: `httparse` + `ureq`
-   (unify), `libsql` (evaluate against a bytecode-only journal
-   format), `rustyline`'s feature surface, `tracing-subscriber`
-   heavy features. Every dep gets a "why we depend on this" line in
-   `SPEC2.md` §Implementation Status.
+8. **Dep audit and reduction.** 468 transitive deps (down from 504; see
+   2026-08-02 `libsql` feature trim below) → target ≤300.
+   Candidates for removal or replacement: `httparse` + `ureq` (unify),
+   `rustyline`'s feature surface, `tracing-subscriber` heavy features.
+   `libsql` itself is now feature-trimmed to `core`+`remote`+`tls`
+   (dropped `replication`/`sync`, -36 crates including all of tonic/
+   axum) but its `core`/FFI/bindgen layer remains — full replacement
+   with a bytecode-only journal format is still a candidate if further
+   reduction is needed. Every dep gets a "why we depend on this" line
+   in `SPEC2.md` §Implementation Status.
 
 **Acceptance.**
 - All Frozen and Stable theorems proved in Lean, 0 sorries.
