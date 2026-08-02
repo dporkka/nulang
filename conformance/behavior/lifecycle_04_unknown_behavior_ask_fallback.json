@@ -1,0 +1,1 @@
+{"exit_code": 0, "stdout": "1", "proves": "FINDING (undefined behavior dispatch, ask variant): ask for an undeclared behavior name also compiles and executes behavior 0, returning its value -- 'ask c nosuch()' runs bump (n: 0 -> 1) and yields 1. Same unwrap_or(0) fallback as the send path, but here the result is observable as the ask's return value."}

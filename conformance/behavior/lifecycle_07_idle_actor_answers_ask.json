@@ -1,0 +1,1 @@
+{"exit_code": 0, "stdout": "0", "proves": "Normal idle actor: an actor spawned and left with an EMPTY mailbox is alive and immediately serves asks -- ask i get() flushes nothing and returns the initial state 0; the program then exits cleanly with code 0. This is the observable contrast with an exited actor (see lifecycle_06): idle = answers asks, exited = every ask returns nil."}

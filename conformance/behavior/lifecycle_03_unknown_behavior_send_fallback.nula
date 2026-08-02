@@ -1,0 +1,11 @@
+actor Counter {
+    state n: Int = 0
+    behavior bump() { self.n = self.n + 1 }
+    behavior get() { self.n }
+}
+fn main() {
+    let c = spawn Counter {}
+    send c nosuch()
+    let r = ask c get()
+    perform IO.print(r)
+}

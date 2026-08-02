@@ -1,0 +1,13 @@
+actor W {
+    state n: Int = 0
+    behavior work() { self.n = self.n + 1 }
+    behavior die() { perform Actor.exit(0) }
+    behavior get() { self.n }
+}
+fn main() {
+    let w = spawn W {}
+    send w work()
+    send w die()
+    let r = ask w get()
+    perform IO.print(r)
+}

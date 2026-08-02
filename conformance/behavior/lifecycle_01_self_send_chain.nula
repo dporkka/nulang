@@ -1,0 +1,20 @@
+actor Counter {
+    state hops: Int = 0
+    behavior tick() {
+        self.hops = self.hops + 1
+        if self.hops < 5 then {
+            send self tick()
+        }
+    }
+    behavior hops() { self.hops }
+}
+fn main() {
+    let c = spawn Counter {}
+    send c tick()
+    let _ = ask c hops()
+    let _ = ask c hops()
+    let _ = ask c hops()
+    let _ = ask c hops()
+    let v = ask c hops()
+    perform IO.print(v)
+}

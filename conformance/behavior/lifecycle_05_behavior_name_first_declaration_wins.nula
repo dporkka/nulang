@@ -1,0 +1,16 @@
+actor First {
+    state n: Int = 0
+    behavior hit() { self.n = self.n + 100 }
+    behavior get() { self.n }
+}
+actor Second {
+    state n: Int = 0
+    behavior get() { self.n }
+    behavior hit() { self.n = self.n + 1 }
+}
+fn main() {
+    let s = spawn Second {}
+    send s hit()
+    let r = ask s get()
+    perform IO.print(r)
+}

@@ -456,10 +456,24 @@ SPEC2.md/GOVERNANCE.md/CHANGELOG.md truth-in-advertising corrections.
   3 new tests verify same-seed same-sequence selection, real
   quiescence with correct final actor state, and step-limit-exceeded
   reporting for a run that hasn't settled.
-- **[ ] Bullet 4 (chaos suite) — not started.** Needs cluster topologies
-  (3-node, 5-node, split-brain, asymmetric partition, rolling restart)
-  layered on top of bullet 2's single-node wiring; genuinely separate
-  work, not attempted here.
+- **[~] Bullet 4 (chaos suite) — one real test landed, not the full
+  target.** `test_three_node_cluster_survives_hard_node_failure_and_rejoin`
+  (`src/runtime/tests.rs`, extended session) drives 3 real `Runtime`
+  instances over real loopback TCP: kills a node's transport hard (no
+  graceful leave), confirms the survivors detect the failure via the
+  real heartbeat-timeout/suspicion state machine, confirms they keep
+  doing real cross-node work together (not just membership-table
+  bookkeeping), then confirms a fresh node can rejoin. Investigated
+  wiring `Runtime::install_virtual_clock`/`advance_time` to avoid the
+  ~9s of real wall-clock waiting this needs, but found `ClusterState`
+  keeps its own, separate `clock` field, unlinked from
+  `Runtime.virtual_clock` — genuine determinism needs per-node
+  `VirtualClock` instances kept in manual sync, left as follow-up.
+  Not done: 5-node topologies, split-brain (mutually-invisible healthy
+  sub-clusters, not one node dying), asymmetric partition, rolling
+  restart of every node, and running any of this across many seeds in
+  CI — the 10³-seeds-per-commit target needs the above determinism
+  work first (a real-TCP, real-wall-clock test can't scale to that).
 - **[~] Bullet 8 (persistence recovery correctness) — one real bug
   found and fixed, one real gap found and documented, not the full
   "repeat for every StateModel" sweep.** `Runtime::recover_actor` never

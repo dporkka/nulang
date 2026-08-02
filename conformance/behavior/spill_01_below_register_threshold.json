@@ -1,0 +1,1 @@
+{"exit_code": 0, "stdout": "120", "proves": "A function with 120 sequential let statements compiles to exactly 239 MIR locals -- the full register file (r15..r253 = 239 registers). Decoding the --emit-nbc instruction stream shows ZERO SpillLoad/SpillStore opcodes: the function fits entirely in registers. Output 120 is the last binding's value."}

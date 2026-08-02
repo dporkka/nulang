@@ -1857,6 +1857,16 @@ impl Runtime {
         self.requeue_if_mail_pending(actor_id);
     }
 
+    /// Send a message to `target_id`'s `behavior` mailbox by name.
+    ///
+    /// KNOWN SURPRISING BEHAVIOR (verified 2026-08-02, not fixed --
+    /// see the comment in `flush_actor_mailbox` for why): a `behavior`
+    /// name that doesn't match any of the target's registered
+    /// behaviors resolves to behavior id 0 via `unwrap_or(0)` below,
+    /// NOT a dropped/no-op message -- a typo'd or undeclared behavior
+    /// name silently runs the actor's FIRST declared behavior instead
+    /// of erroring or being ignored. See SPEC2.md Chapter 8 (message
+    /// passing) and `conformance/behavior/lifecycle_03/04_*.nula`.
     pub fn send_message(&mut self, target_id: u64, behavior: &str, args: &[Value]) {
         let behavior_id = self.behavior_id_for(target_id, behavior).unwrap_or(0);
         self.send_message_by_id(target_id, behavior_id, args);
@@ -2118,8 +2128,22 @@ impl Runtime {
                 self.checkpoint_actor(actor_id);
                 self.current_actor = prev;
             }
-            // Unknown behavior id — skip the message (shouldn't happen for
-            // well-formed programs, but be defensive).
+            // A behavior_idx with neither a bytecode nor native handler
+            // falls through here silently. In practice this branch is
+            // unreachable for messages sent via `send_message`/
+            // `send_message_by_id` today: `send_message` resolves an
+            // unknown behavior NAME to id 0 via
+            // `behavior_id_for(..).unwrap_or(0)` (see its doc comment) --
+            // NOT a genuinely unknown numeric id -- so a typo'd or
+            // undeclared behavior name silently runs behavior 0 well
+            // before reaching this point, rather than being skipped as
+            // this comment used to claim. Tracked as a known surprising
+            // behavior in SPEC2.md (Chapter 8, message passing), not
+            // fixed here -- `send_message` is called pervasively and
+            // AGENTS.md documents the remote-message path as
+            // deliberately mirroring this same fallback, so correcting
+            // it needs a wider, carefully-audited change, not a
+            // single-site patch.
 
             depth += 1;
             if depth >= MAX_FLUSH_DEPTH {

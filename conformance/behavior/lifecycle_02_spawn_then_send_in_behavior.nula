@@ -1,0 +1,21 @@
+actor Child {
+    state v: Int = 0
+    behavior put(d: Int) { self.v = self.v * 10 + d }
+    behavior get() { self.v }
+}
+actor Parent {
+    state child: Address = nil
+    behavior make() {
+        let ch = spawn Child {}
+        send ch put(7)
+        self.child = ch
+    }
+    behavior childid() { self.child }
+}
+fn main() {
+    let p = spawn Parent {}
+    send p make()
+    let addr = ask p childid()
+    let v = ask addr get()
+    perform IO.print(v)
+}

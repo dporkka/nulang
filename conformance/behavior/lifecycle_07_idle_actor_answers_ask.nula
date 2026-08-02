@@ -1,0 +1,10 @@
+actor Idle {
+    state n: Int = 0
+    behavior bump(d: Int) { self.n = self.n + d }
+    behavior get() { self.n }
+}
+fn main() {
+    let i = spawn Idle {}
+    let v = ask i get()
+    perform IO.print(v)
+}
