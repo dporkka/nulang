@@ -422,15 +422,27 @@ SPEC2.md/GOVERNANCE.md/CHANGELOG.md truth-in-advertising corrections.
   `unbound_variable`, `missing_effects`, `parse_unexpected` each got a
   unit test asserting the field population, plus 3 conformance cases
   proving the same fields reach real compiled-binary stderr output,
-  where previously ZERO tests exercised these fields at all — the one
-  prior test only checked `is_err()`). Not done: `LexError`/
-  `FFIError`/`RuntimeError`/`VMError`/`PythonError`/`PackageError`
-  still carry only `{msg, span}` — extending structured fields to
-  these is lower-value (they're inherently dynamic/message-driven,
-  without a natural "expected vs found" shape) but still unaddressed;
-  no variant has a field literally named `suggestion` (the closest
-  equivalents are `similar_names`/`explanation`, which already do the
-  job under a different name).
+  prior test only checked `is_err()`). Also converted two hollow
+  construction sites (`typechecker.rs`'s function-call and
+  emit-event arity-mismatch errors, both previously built via the
+  hollow `type_error(msg, span)` helper despite having the exact
+  counts on hand) to populate `expected_type`/`found_type` with
+  correctly-pluralized descriptions ("2 arguments" / "1 argument") —
+  2 more conformance cases plus a Rust integration test lock this in,
+  and 3 pre-existing conformance cases whose stderr assertions
+  depended on the old bare-number wording were updated after verifying
+  the new wording against the real compiled binary. Not done:
+  `LexError`/`FFIError`/`RuntimeError`/`VMError`/`PythonError`/
+  `PackageError` still carry only `{msg, span}` — extending structured
+  fields to these is lower-value (they're inherently dynamic/
+  message-driven, without a natural "expected vs found" shape) but
+  still unaddressed; no variant has a field literally named
+  `suggestion` (the closest equivalents are `similar_names`/
+  `explanation`, which already do the job under a different name); and
+  the remaining `type_error`/`cap_error`/`effect_error`/`parse_error`
+  hollow-helper call sites throughout the rest of the codebase are
+  still hollow — this session fixed the two highest-traffic ones
+  (general call arity, event arity), not an exhaustive sweep.
 - **[~] Bullet 2 (DST) — single-node message-passing wired, cluster/timer
   determinism not started.** `src/dst.rs` was not even part of the
   compiled crate (`mod dst;` was missing from `src/lib.rs` — its 4
