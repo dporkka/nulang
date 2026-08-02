@@ -210,10 +210,13 @@ the restoration. This phase must complete on schedule.
 
 ## Phase 1 — Correctness Floor (weeks 4–12)
 
-**Current state (in progress, verified 2026-08-02):** 2/8 deliverables
-substantially done, 1/8 partially done (informational half only), 4 real
-bugs found and fixed along the way, 4 more found and documented but not
-fixed.
+**Current state (in progress, verified 2026-08-02):** 3/8 deliverables
+substantially done (fuzzer maturation, benchmark harness informational
+half, doc-example verification extended), bullet 5 at 175/300, bullet 7
+partially addressed (phrase cleanup, not the full structured-error
+pass). 5 real runtime/tooling bugs found and fixed, 4 more found and
+documented for follow-up, plus a dozen SPEC2.md/GOVERNANCE.md/
+CHANGELOG.md truth-in-advertising corrections. 20 commits this session.
 - **[X] Bullet 1 (fuzzer maturation) — interp/JIT/AOT leg done.**
   `src/fuzz.rs` grew from panic-avoidance to real differential execution
   fuzzing (`differential_fuzz_one`): compiles a mutant, runs it
@@ -251,10 +254,10 @@ fixed.
   than no gate. See `benchmarks/README.md` for what closing this
   properly needs (dedicated runner, or a noise-aware statistical
   comparison against a rolling window).
-- **[~] Bullet 5 (conformance suite expansion) — 26 → 158 of 300
+- **[~] Bullet 5 (conformance suite expansion) — 26 → 175 of 300
   target.** Corrected from this doc's original "52" (that was a file
   count — `.nula`+`.json` pairs — not a case count; the actual starting
-  case count was 26). Two waves of parallel agents:
+  case count was 26). Three waves of parallel agents:
   - Wave 1 (7 agents): capabilities, effect-handler resume, effect rows,
     actor messaging/supervision, CRDT merge laws, pattern
     matching/error handling, persistence/event sourcing → +87 cases.
@@ -262,11 +265,19 @@ fixed.
     single-node behavior, stdlib collections/string (the real, working
     subset — see the bug list below), workflow steps/conditionals/
     parallel/sagas → +43 cases, +2 direct regression cases.
+  - Wave 3 (3 agents): JSON serialization (the real stdlib/json.nula
+    API, quite different from SPEC2.md's description — corrected),
+    HTTP client/server (proved client+server can't coexist in one
+    process rather than asserting it; corrected SPEC2.md's API
+    description too), concurrency primitives (scheduler FIFO/priority
+    ordering, IEEE-754 float determinism including exact tie-break
+    cases, and the real nil-collapse/epsilon-equality boundary
+    semantics) → +17 cases.
   Every value captured from the real compiled binary, never guessed.
-  Still short of 300 — the remaining ~140 need the same treatment
-  across whatever surfaces these ten agents didn't reach (concurrency
-  primitives, HTTP client/server, JSON serialization, AI runtime,
-  operational-model surfaces).
+  Still short of 300 — the remaining ~125 need the same treatment
+  across whatever surfaces these thirteen agents didn't reach (AI
+  runtime, operational-model surfaces, remaining grammar/syntax edge
+  cases).
 - **Real bugs found and FIXED this session (not from a numbered
   bullet, but squarely "correctness floor" — every one of these was
   found by an agent whose actual assignment was writing conformance
@@ -324,9 +335,33 @@ fixed.
   order/naming mismatches found by the `StdlibCollectionsString` wave;
   Chapter 14 was already headed "— Planned" so this didn't need the
   same "Stable-tier false claim" severity of fix CRDT got).
-- **[ ] Bullets 2, 4, 6, 7, 8 — not started.** Bullets 2/4 (DST, chaos
-  suite) need `src/dst.rs` wired into the real actor runtime —
-  currently a standalone, unwired module. Bullets 6/7/8 untouched.
+- **[~] Bullet 6 (doc-example verification) — extended, not fully
+  closed.** `scripts/verify_doc_examples.sh` only ever scanned the Astro
+  docs site; now also scans `SPEC2.md`/`README.md`/
+  `docs/GETTING_STARTED.md`/`docs/TUTORIAL.md`, gated behind
+  `NULANG_DOC_VERIFY_INCLUDE_ROOT=1` rather than the default (and
+  therefore CI-blocking) invocation — turning it on by default today
+  would fail CI on 58 pre-existing SPEC2.md example fragments that
+  reference prose context rather than being self-contained, a separate,
+  larger gap (smarter fragment heuristic, or rewriting the examples)
+  left for follow-up. Not done: the `///` doc-comment coverage this
+  bullet also calls for (needs a Rust-source-aware extractor, not a
+  markdown-fence scanner).
+- **[~] Bullet 7 (structured error quality) — phrase cleanup done, the
+  larger structural ask isn't.** Removed the "not yet supported" phrase
+  from the two places it appeared in user-facing errors (`resolver.rs`'s
+  new duplicate-import error, and 17 uniformly-templated messages in
+  `aot/codegen.rs`) — same actionable content, different wording. The
+  fuller ask (every `NuError` variant carrying `expected`/`found`/
+  `suggestion`, verified by test) is partially already in place
+  (`ParseError` has `expected`/`found`; there's a `suggestion` parameter
+  in the error-formatting helper) but extending that to every variant
+  touches error-construction call sites throughout the codebase — a
+  separate, larger pass not attempted here.
+- **[ ] Bullets 2, 4, 8 — not started.** Bullets 2/4 (DST, chaos suite)
+  need `src/dst.rs` wired into the real actor runtime — currently a
+  standalone, unwired module. Bullet 8 (persistence recovery
+  correctness) also needs DST.
 
 **Goal.** The language does what it says, provably, on the paths users
 actually take. This is what makes 0.1.0 → 0.2.0 justifiable.
