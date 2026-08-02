@@ -588,6 +588,77 @@ whole point of the Frozen tier.
 
 ## Phase 2 — Prove It Works (weeks 12–24)
 
+**Current state (in progress, verified 2026-08-02):** 8/8 scoping areas
+investigated this session; 3 concrete deliverables landed, 5 scoped and
+deferred (all multi-day/infrastructure-gated, not something a single
+session can responsibly rush). 5 commits this session.
+- **Bullet 1 (formal semantics) — documentation corrected, real proof
+  work still open.** Discovered `types.lean`'s three headline theorems
+  (`progress`, `preservation`, `type_soundness`) were silently regressed
+  to `sorry` by a Lean 4.16.0 compatibility-fix commit (`ac9ef5d`,
+  2026-07-26) three weeks before this session — that commit's own
+  message honestly disclosed "12 sorry warnings", but no downstream doc
+  (`spec/formal/README.md`, `SPEC2.md`, `CHANGELOG.md`, `PLAN.md`) was
+  ever updated to match; all four falsely claimed "0 sorries"/"proved"
+  until corrected this session. Root cause identified and documented: a
+  concrete variable-capture/context-ordering subtlety in the `weakening`
+  lemma's naive-induction proof strategy (see
+  `spec/formal/README.md`'s regression note). Added a CI sorry-count
+  ratchet (`.github/workflows/ci.yml`) so this exact silent-regression
+  pattern can't recur — previously CI only ran `lake build`, which
+  passes even with sorries. Actually re-proving the theorems is
+  specialist Lean work or a fresh independent implementation; not
+  attempted this session — genuinely hard, not "follow-up" spin.
+- **Bullet 2 (LinearIso must-use) — partially landed.** Exactly-once
+  (must-use) is now enforced for `let`-bound linear values, with a
+  transparent-rebind exemption (`let a = x` doesn't carry a second
+  obligation) verified against all 6 existing lineariso conformance
+  cases plus 8 new unit tests. Parameter-level must-use (a linear value
+  already in scope, e.g. a function argument) remains open.
+- **Bullet 3 (backend traits) — verified already done, not a gap.**
+  `src/backends/mod.rs`'s own header claims every trait
+  (`JitBackend`/`WasmBackend`/`Transport`/`CryptoProvider`/
+  `HttpProvider`/`ForeignInterop`) is "Wired"; spot-verified `VM` does
+  genuinely hold `Option<Box<dyn JitBackend>>` and construct it through
+  the trait. No work needed here.
+- **Bullet 6 (release binaries) — verified already mostly done.**
+  `.github/workflows/release.yml` builds 4 targets (Linux x86_64/
+  aarch64, macOS x86_64/aarch64), strips binaries, SHA256-checksums,
+  and publishes to GitHub Releases on tag push; `v0.1.0` is tagged.
+  Gaps: no cryptographic code signing (checksums only), and a 5th
+  target (Windows) is blocked on Windows support itself (bullet 5).
+- **Bullet 7 (LSP hardening) — assessed, partial.** 38 unit tests give
+  decent coverage of individual feature logic (inlay hints, completion,
+  hover, workspace symbols, diagnostics). No protocol-level
+  (`tower-lsp` test-harness) integration tests and no 24-hour soak test
+  against a large corpus — both remain open, not attempted (the soak
+  test specifically needs wall-clock time no single session has).
+- **Bullet 8 (dependency audit) — real, verified progress.** Found
+  `libsql`'s `default-features` pulled in `replication`+`sync`, which
+  drag in the entire `tonic`/`axum`/`tower-http` gRPC stack for
+  embedded-replica sync — a feature nothing in this codebase calls
+  (verified: only `Builder::new_local`/`new_remote` are used, both
+  covered by the much lighter `remote`/`core`/`tls` features). Trimmed
+  accordingly: 504 → 468 transitive deps (-36 crates, tonic and axum
+  now fully absent from `Cargo.lock`; incidentally also dropped 3
+  windows-* crates that were only pulled in by the gRPC stack, despite
+  Windows not being a supported target). Target is still ≤300; the
+  remaining ~168 are mostly legitimate (Cranelift, Wasmtime, PyO3,
+  libsql-core, tokio, tower-lsp) or ordinary cross-ecosystem version
+  skew (34 duplicate package names at different major versions pinned
+  by unrelated upstream crates — not fixable without replacing those
+  upstream deps entirely, a much larger and riskier undertaking for
+  marginal benefit).
+- **Bullets 4 (runtime god-object) and 5 (Windows support) — scoped,
+  deferred.** `src/runtime/mod.rs` confirmed at 6447 lines (a real
+  god-object); decomposing it safely is a multi-day, high-blast-radius
+  refactor of a file full of `unsafe` ORCA GC pointer manipulation and
+  cross-shard concurrency invariants — not something to rush in a
+  single session. Windows support confirmed at effectively 0% (2
+  mentions of "windows" in all of `src/`) — needs a transport-layer
+  port, path-handling audit, and a second CI runner at minimum; a
+  multi-week effort, not started.
+
 **Goal.** The language withstands adversarial correctness review. The
 runtime withstands adversarial operational review. Both hold up as
 "actually production-grade" not "compiled and ran."
