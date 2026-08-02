@@ -506,7 +506,7 @@ impl std::fmt::Display for Type {
 ///
 /// Record row polymorphism is encoded without changing the shape of
 /// `Type::Record(Vec<(String, Type)>)` — exhaustive matches on `Type` exist
-/// across the crate (`main.rs`, `repl.rs`, `mir_codegen.rs`, `ai/schema.rs`),
+/// across the crate (`main.rs`, `repl.rs`, `mir_codegen.rs`, `tool_schema.rs`),
 /// so the representation stays additive. An open record `{ x: a | rho }` is
 /// represented as `Record([("x", a), ("..", Var(rho))])`. The name `".."`
 /// can never collide with a user field: record field names are parsed with

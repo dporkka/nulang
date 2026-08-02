@@ -2415,11 +2415,17 @@ The runtime-backed `Signal.wait(name)` operation (performed as `perform Signal.w
 - **Crate separation:** all pure AI types (clients, providers, memory,
   pipelines, debates, supervisor teams, usage tracking, tool schemas) live in
   the standalone `nulang-ai` workspace crate (`crates/nulang-ai/`) with **zero
-  dependencies on the core language crate**. The core crate re-exports them
-  behind the `ai-runtime` feature flag (`src/ai/mod.rs`).
-- **Runtime integration:** the `src/runtime/agent.rs`, `src/runtime/llm.rs`,
-  and `src/runtime/ai_registry.rs` modules implement the AI subsystem of the
-  actor runtime. These modules access `Runtime` internals and stay in core;
+  dependencies on the core language crate**. Core imports them directly
+  through `use nulang_ai::…;` — there is no `src/ai/` façade module. The
+  crate is optional, pulled in by the `ai-runtime` cargo feature.
+- **Runtime integration:** `src/runtime/ai_impls.rs` provides the trait
+  impls (`PipelineRuntime`, `DebateRuntime`, `SupervisorRuntime` for
+  `Runtime`) that the orphan rule requires to live in core;
+  `src/runtime/agent.rs` runs the agent LLM completion pipeline
+  (`build_agent_llm_request`, `finish_agent_llm`, `complete_agent_llm`)
+  against actor durable state; `src/runtime/llm.rs` owns the persistent
+  `nulang-llm` worker thread and completion channels polled by the
+  scheduler. These modules access `Runtime` internals and stay in core;
   they are the bridge between the pure AI types and the actor model.
 - **No AI-specific opcodes.** The single `PerformAsync` opcode (`0xC6`)
   dispatches all AI effects (`Inference.ask`, `Pipeline.run`, etc.) through

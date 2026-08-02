@@ -134,32 +134,50 @@ in this version; they are recorded here to establish their tier.
   - **Keyword inventory documented** in `SPEC2.md` §Implementation Status
     and verified against the implementation.
 
+- **AI façade removal (2026-08-02).** Deleted the `src/ai/` façade module
+  (`mod.rs` re-exports + `runtime_impls.rs`) so the crate boundary is
+  visible at every callsite. Core now imports directly through
+  `use nulang_ai::…;`, never through `crate::ai::`. `AiRuntimeRegistry`
+  (pipelines + debates) and `SupervisorTeamRegistry` moved from
+  `src/runtime/{ai_registry,supervisor_registry}.rs` to
+  `crates/nulang-ai/src/registry.rs`; `SupervisorTeamRegistry::run` gains
+  a trait-generic signature (`R: SupervisorRuntime`) matching
+  `AiRuntimeRegistry::run_pipeline`. Trait impls for `Runtime` move to
+  `src/runtime/ai_impls.rs` where the orphan rule requires them. `LlmState`
+  stays in `src/runtime/llm.rs` because it is executor infrastructure
+  (persistent worker thread + channels polled by the scheduler), not a
+  library type. Net effect: `src/ai/` no longer exists; core imports
+  `nulang_ai::` directly; the two-crate split is explicit at every
+  callsite. No behavior change.
+
 - `ai-runtime` feature: the AI runtime — **pure types live in the `nulang-ai`
   workspace crate** (`crates/nulang-ai/`) with zero dependencies on the core
-  language crate. The core crate (`src/ai/mod.rs`) provides a thin re-export
-  facade behind `#[cfg(feature = "ai-runtime")]`. All AI effects dispatch
-  through the generic `PerformAsync` opcode (`0xC6`) with `effect_op` strings
-  (`"Inference.ask"`, `"Pipeline.run"`, etc.). The monolithic AI opcode range
-  (0x9D–0xC5: `LlmAsk`, `PipelineNew`…`DebateRun`) has been removed.
-  Runtime integration (`src/runtime/agent.rs`, `llm.rs`, `ai_registry.rs`)
-  bridges the pure AI types to the actor model. Behind `--features ai-runtime`
-  (enabled by default). `LLM.ask` is a deprecated alias for `Inference.ask`
-  and emits a compiler warning (RFC 0010).
+  language crate. Core imports them directly via `use nulang_ai::…;` behind
+  `#[cfg(feature = "ai-runtime")]` — there is no façade module. All AI
+  effects dispatch through the generic `PerformAsync` opcode (`0xC6`) with
+  `effect_op` strings (`"Inference.ask"`, `"Pipeline.run"`, etc.). The
+  monolithic AI opcode range (0x9D–0xC5: `LlmAsk`, `PipelineNew`…`DebateRun`)
+  has been removed. Runtime integration lives in `src/runtime/ai_impls.rs`
+  (trait impls for `Runtime`), `src/runtime/agent.rs` (agent LLM completion
+  pipeline), and `src/runtime/llm.rs` (`LlmState` worker thread). Behind
+  `--features ai-runtime` (enabled by default). `LLM.ask` is a deprecated
+  alias for `Inference.ask` and emits a compiler warning (RFC 0010).
 - `python` feature: PyO3 interop (`src/python/`). Behind `--features python`.
 - `sqlite` feature: libsql/Turso persistence. Behind `--features sqlite`.
 - `lsp` feature: the tower-lsp language server (`src/lsp/`). Behind
   `--features lsp`.
 - `ai-runtime` feature: the AI runtime (`crates/nulang-ai/` workspace crate,
-  re-exported through `src/ai/`) — LLM providers (OpenAI, Ollama), pipelines,
-  debates, supervisor teams, memory subsystems, and usage tracking. Behind
-  `--features ai-runtime` (enabled by default). **Changed in 1.0.0-frozen:**
-  all AI effects now dispatch through the generic `PerformAsync` opcode
-  (`0xC6`) with `effect_op` strings (`"Inference.ask"`, `"Pipeline.run"`,
-  etc.). The dedicated `LlmAsk` opcode and the `PipelineNew`…`DebateRun`
-  opcode range (0x9D–0xC5) have been removed. AI types live in the
-  `nulang-ai` crate with zero core dependencies; the core `ActorVmCallbacks`
-  trait no longer carries AI-specific methods. The `LLM` effect redirects to
-  `Provider.ask` under the hood.
+  imported directly through `use nulang_ai::…;` — no façade module) — LLM
+  providers (OpenAI, Ollama), pipelines, debates, supervisor teams, memory
+  subsystems, and usage tracking. Behind `--features ai-runtime` (enabled by
+  default). **Changed in 1.0.0-frozen:** all AI effects now dispatch through
+  the generic `PerformAsync` opcode (`0xC6`) with `effect_op` strings
+  (`"Inference.ask"`, `"Pipeline.run"`, etc.). The dedicated `LlmAsk` opcode
+  and the `PipelineNew`…`DebateRun` opcode range (0x9D–0xC5) have been
+  removed. AI types live in the `nulang-ai` crate with zero core
+  dependencies; the core `ActorVmCallbacks` trait no longer carries
+  AI-specific methods. The `LLM` effect redirects to `Provider.ask` under
+  the hood.
 - AOT native backend (`src/aot/`), JIT tiering (`src/jit/`).
 
 - **Stdlib modules.** Standard library modules provide reusable generic

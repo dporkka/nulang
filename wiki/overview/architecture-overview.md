@@ -10,7 +10,7 @@ tags: [overview, architecture]
 
 # Architecture Overview
 
-Nulang is a distributed, actor-based programming language written in Rust (edition 2021, single crate `nulang`). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system, algebraic effects, a register-based bytecode VM, a Cranelift JIT, WASM/AOT backends, and a v0.9 AI runtime.
+Nulang is a distributed, actor-based programming language written in Rust (edition 2021, Cargo workspace with a primary `nulang` crate and a `nulang-ai` support crate). It fuses Erlang-style fault-tolerant actors with a Rust/Pony-inspired type system, algebraic effects, a register-based bytecode VM, a Cranelift JIT, WASM/AOT backends, and a v0.9 AI runtime.
 
 ## Subsystem map
 
@@ -27,7 +27,8 @@ Nulang is a distributed, actor-based programming language written in Rust (editi
 | CRDTs | `src/runtime/crdt.rs`, `crdt_reg.rs`, `crdt_manager.rs` | 8 CRDT types with delta-state replication. |
 | WASM backend | `src/mir_wasm.rs`, `src/wasm_runtime.rs` | MIR → WASM via `wasm-encoder`; Wasmtime host runtime. |
 | AOT backend | `src/aot/` | MIR → Cranelift CLIF → native object code. |
-| AI runtime | `src/ai/` | LLM providers, memory, pipelines, debates, supervisors. |
+| AI runtime (pure) | `crates/nulang-ai/` | LLM providers, memory, pipelines, debates, supervisors — zero core deps. |
+| AI runtime (integration) | `src/runtime/ai_impls.rs`, `agent.rs`, `llm.rs` | Trait impls, agent completion pipeline, LLM worker thread. |
 | LSP | `src/lsp/` | 12-feature `tower-lsp` server. |
 | Python interop | `src/python/` | PyO3 abi3 bridge. |
 | C FFI | `src/ffi/` | Stable C embedder API. |

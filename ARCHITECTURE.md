@@ -1221,8 +1221,13 @@ MAC: Poly1305 message authentication code
 
 ## 6. Layer 5: AI Runtime
 
-The AI Runtime (v0.9) ships as a library tree (`src/ai/`) plus language-level
-wiring for `agent` declarations and orchestration builtins. It is not a
+The AI Runtime (v0.9) is split across two crates. Pure types live in the
+standalone `nulang-ai` workspace crate (`crates/nulang-ai/`, published as
+`nulang_ai`) with **zero dependency on the core `nulang` crate**. The core
+crate imports them directly (`use nulang_ai::…;`, no façade module) behind
+the `ai-runtime` cargo feature and adds the language-level wiring for
+`agent` declarations and orchestration builtins plus the actor-runtime
+integration that legitimately needs `Runtime` internals. It is not a
 separate interpreter: agents compile to ordinary persistent actors, and LLM
 calls flow through the same register VM and callback traits as every other
 effect. There is no WIT layer, no capability-injected provider, and no
@@ -1233,25 +1238,29 @@ Rust-level decision (`Runtime::set_llm_client`).
 
 | File | Contents |
 |------|----------|
-| `src/ai/mod.rs` | Re-exports the public surface |
-| `src/ai/client.rs` | `LlmClient` async trait + `complete_sync` bridge |
-| `src/ai/request.rs` | `LlmRequest`, `LlmMessage`, `ToolSchema`, `ModelPricing` |
-| `src/ai/response.rs` | `LlmResponse`, `ToolCall`, `TokenUsage` |
-| `src/ai/providers/openai.rs` | `OpenAiClient` (OpenAI + compatible endpoints) |
-| `src/ai/providers/ollama.rs` | `OllamaClient` (local Ollama) |
-| `src/ai/mock.rs` | `MockLlmClient` (canned/sequenced responses, records requests) |
-| `src/ai/memory.rs` | `EpisodicMemory` — bounded conversation buffer |
-| `src/ai/semantic_memory.rs` | `SemanticMemory` — cosine-similarity fact store |
-| `src/ai/procedural_memory.rs` | `ProceduralMemory` — patterns + few-shot examples |
-| `src/ai/schema.rs` | Nulang `Type` → JSON Schema, `function_to_tool_schema` |
-| `src/ai/usage.rs` | `estimated_cost`, `UsageSummary` accumulation |
-| `src/ai/pipeline.rs` | `Pipeline` / `PipelineStage` + `PipelineRuntime` |
-| `src/ai/supervisor.rs` | `SupervisorTeam` / `Worker` + `SupervisorRuntime` |
-| `src/ai/debate.rs` | `Debate` / `Participant` / `Stance` + `DebateRuntime` |
+| `crates/nulang-ai/src/mod.rs` | Crate root; declares modules and re-exports the public surface |
+| `crates/nulang-ai/src/client.rs` | `LlmClient` async trait + `complete_sync` bridge |
+| `crates/nulang-ai/src/request.rs` | `LlmRequest`, `LlmMessage`, `ToolSchema`, `ModelPricing` |
+| `crates/nulang-ai/src/response.rs` | `LlmResponse`, `ToolCall`, `TokenUsage`, `LlmError` |
+| `crates/nulang-ai/src/providers/openai.rs` | `OpenAiClient` (OpenAI + compatible endpoints) |
+| `crates/nulang-ai/src/providers/ollama.rs` | `OllamaClient` (local Ollama) |
+| `crates/nulang-ai/src/mock.rs` | `MockLlmClient` (canned/sequenced responses, records requests) |
+| `crates/nulang-ai/src/memory.rs` | `EpisodicMemory` — bounded conversation buffer |
+| `crates/nulang-ai/src/semantic_memory.rs` | `SemanticMemory` — cosine-similarity fact store |
+| `crates/nulang-ai/src/procedural_memory.rs` | `ProceduralMemory` — patterns + few-shot examples |
+| `crates/nulang-ai/src/usage.rs` | `estimated_cost`, `TokenBudget`, `UsageSummary` accumulation |
+| `crates/nulang-ai/src/pipeline.rs` | `Pipeline` / `PipelineStage` + `PipelineRuntime` trait |
+| `crates/nulang-ai/src/supervisor.rs` | `SupervisorTeam` / `Worker` + `SupervisorRuntime` trait |
+| `crates/nulang-ai/src/debate.rs` | `Debate` / `Participant` / `Stance` + `DebateRuntime` trait |
+| `crates/nulang-ai/src/registry.rs` | `AiRuntimeRegistry` (pipelines + debates) and `SupervisorTeamRegistry`, both generic over the runtime traits |
+| `src/runtime/ai_impls.rs` | Core-side `impl PipelineRuntime for Runtime`, `impl DebateRuntime for Runtime`, `impl SupervisorRuntime for Runtime`. Kept in core by the orphan rule |
+| `src/runtime/agent.rs` | Agent LLM completion pipeline (`build_agent_llm_request`, `finish_agent_llm`, `complete_agent_llm`) — reads actor durable state, allocates strings into actor heaps |
+| `src/runtime/llm.rs` | `LlmState` — persistent `nulang-llm` worker thread + completion channels polled by the scheduler |
+| `src/tool_schema.rs` | Nulang `Type` → JSON Schema, `function_to_tool_schema` — kept in core (unconditional) because `bytecode::ActorMeta.tools` and HIR both embed it |
 
 ### 6.2 Provider Abstraction: Async Trait, Sync Bridge
 
-All providers implement one trait (`src/ai/client.rs`):
+All providers implement one trait (`crates/nulang-ai/src/client.rs`):
 
 ```rust
 #[async_trait]
@@ -1354,9 +1363,9 @@ serde-serializable so they can live in durable actor state:
 
 | Kind | Type | Scope | Mechanism |
 |------|------|-------|-----------|
-| Episodic | `EpisodicMemory` (`src/ai/memory.rs`) | Conversation | `VecDeque<Turn>` bounded by `max_turns` (default 50); oldest evicted first; `to_messages()` materializes provider-agnostic `LlmMessage`s |
-| Semantic | `SemanticMemory` (`src/ai/semantic_memory.rs`) | Long-term facts | `store` / `search(query, top_k)` / `delete`; cosine similarity over embeddings — a deterministic built-in FNV-based embedder by default, or a caller-supplied `fn(&str) -> Vec<f32>`; brute-force scan |
-| Procedural | `ProceduralMemory` (`src/ai/procedural_memory.rs`) | Learned patterns | Namespaced `Pattern`s (`input_pattern` → `output_template`) plus few-shot `Example`s per task; `get_examples` ranks by keyword overlap, falling back to most-recent |
+| Episodic | `EpisodicMemory` (`crates/nulang-ai/src/memory.rs`) | Conversation | `VecDeque<Turn>` bounded by `max_turns` (default 50); oldest evicted first; `to_messages()` materializes provider-agnostic `LlmMessage`s |
+| Semantic | `SemanticMemory` (`crates/nulang-ai/src/semantic_memory.rs`) | Long-term facts | `store` / `search(query, top_k)` / `delete`; cosine similarity over embeddings — a deterministic built-in FNV-based embedder by default, or a caller-supplied `fn(&str) -> Vec<f32>`; brute-force scan |
+| Procedural | `ProceduralMemory` (`crates/nulang-ai/src/procedural_memory.rs`) | Learned patterns | Namespaced `Pattern`s (`input_pattern` → `output_template`) plus few-shot `Example`s per task; `get_examples` ranks by keyword overlap, falling back to most-recent |
 
 Agent declarations opt into semantic/procedural memory via
 `semantic_memory: { dimensions }` and `procedural_memory: { namespace }`;
@@ -1424,7 +1433,7 @@ workflow mechanism today.
 ### 6.7 Usage Tracking and Cost
 
 `TokenUsage` (per response) feeds `estimated_cost(usage, pricing)`
-(`src/ai/usage.rs`) with per-1k-token USD rates from `ModelPricing` (or the
+(`crates/nulang-ai/src/usage.rs`) with per-1k-token USD rates from `ModelPricing` (or the
 agent's `pricing` block). `UsageSummary` accumulates prompt/completion/total
 tokens (saturating adds) and cost (plain `f64` sum).
 
