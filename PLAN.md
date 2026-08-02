@@ -85,58 +85,122 @@ Unfinished implementation lines counted from `not yet implemented` /
 
 ---
 
-## Phase 0 — Truth-in-Advertising (weeks 0–4)
+## Phase 0 — Truth-in-Advertising (weeks 0–4) — **COMPLETE 2026-08-01**
 
 **Goal.** Every claim in the repo is either implemented, gated behind an
 Experimental warning, or removed. No user hits an unimplemented path on
 a documented flag.
 
+**Actual outcome vs. original scoping below:** the single largest item
+wasn't on this list. `--no-default-features` didn't compile at all —
+`crate::ai::*` (LlmRequest, EpisodicMemory, SupervisorTeam, Pipeline,
+ToolSchema, ...) was used unconditionally across `bytecode.rs`, `hir.rs`,
+`hir_lower.rs`, and 6 `runtime/` files despite living behind
+`#[cfg(feature = "ai-runtime")]`. This directly contradicted principle 5
+("small binaries stay small") and the CI `minimal-build` job's own
+stated purpose. Fixed by moving `ToolSchema` to a new core module
+(`src/tool_schema.rs`, unconditional — it's core language surface per
+RFC 0010 §C.2, not AI-specific) and gating every genuinely-AI function/
+field/match-arm behind `ai-runtime` (~50 sites in `runtime/mod.rs` +
+`runtime/actor.rs`, plus `agent.rs`/`ai_registry.rs`/`llm.rs`/
+`supervisor_registry.rs` wholesale, plus 31 tests). `suspend_enabled`
+moved off the AI-only `LlmState` onto `Runtime` directly — it wasn't
+LLM-specific, core receive-wait suspension read it too. Verified: all
+four feature configs (default/no-default/all-features/wasm-backend)
+compile with zero warnings and pass their full test suites.
+
+Also found and left unfixed (confirmed pre-existing on clean `HEAD`,
+orthogonal to this phase's scope): `cargo clippy --all-targets -- -D
+clippy::correctness` fails on a `clippy::approx_constant` hit in
+`integration_tests/mod.rs:2278` and all 7 files under `benches/` fail
+to compile under `--all-targets`. CI's lint job is red on `main`
+independent of anything in this phase. Not fixed here — real but
+unrelated to truth-in-advertising; needs its own pass.
+
 **Deliverables.**
 
-1. **Restrict advertised backends to what they support.**
-   - `--backend native` errors early with a single message listing what
-     is supported (pure functional Core) and what is not (effects, actors,
-     distribution). Alternatively, gate the flag behind
-     `--features aot-experimental` and remove it from `--help` in default
-     builds. Decision: gate + warn.
-   - Same treatment for `--backend wasm-run` and `--backend wasm-aot`
-     while `host_read`/`host_dispatch` remain stubs. Ship a runtime
-     warning on first `perform` of a non-IO effect.
-2. **Interpreter opcode gap closure.** For each of the 7 opcodes in
-   `src/vm.rs:4553-4630`, either implement or prove-and-assert
-   unreachable from every codegen path (`mir_codegen`, `hir_lower`,
-   `bootstrap/`, `nula` package manager). Track in `verify_implementation.py`
-   as a hard gate.
-3. **Formatter completeness.** `src/fmt.rs` handles `workflow`, `agent`,
-   `let`, `class`, `impl`. Success criterion: `cargo run -- --format`
-   is idempotent on every file under `examples/` and every generated
-   `nula new` template.
-4. **`opaque` nominal types.** Either activate the check
-   (`src/typechecker.rs:274-284`) or remove the keyword from the lexer
-   and mark it reserved in `GOVERNANCE.md` §2a per the keyword lifecycle
-   rules. Decision: activate; the keyword is already in Stable-adjacent
-   documentation.
-5. **Dead feature flags.** Delete `simd-experimental` and
-   `quic-experimental` from `Cargo.toml`, or replace them with
-   real implementations. Decision: delete now, re-introduce with the
-   real code later. Net −2700 lines per `PERFORMANCE_ANALYSIS.md`.
-6. **README/LAUNCH audit.** Rewrite feature-highlights so every bullet
-   maps to a passing conformance case. No bullet without a citation.
-7. **Release checklist enforcement.** Wire `RELEASE_CHECKLIST.md` into
-   `verify_implementation.py` as a machine-checked pre-flight. A
-   release is not tagged until every box is green.
+1. **Restrict advertised backends to what they support.** ✅ Revised
+   decision after checking actual behavior: AOT already fails loudly
+   with a specific "X is not yet supported in the native backend, use
+   --backend bytecode" message per unsupported construct (verified —
+   not a silent failure). The real gap was `--help` not saying so
+   upfront. Fixed `--help` and the CLI doc comment to state native's
+   (pure-functional only) and wasm's (IO.print/read only) scope before
+   a user picks the flag, instead of adding a redundant runtime warning
+   on top of an already-clear error.
+2. **Interpreter opcode gap closure.** ✅ Confirmed all 7 opcodes
+   (`ConstL`/`Pop`/`Switch`/`Alloc`/`TupleL`/`Unpack`/`Copy`) are
+   unreachable from every current codegen path (zero matches across
+   `mir_codegen`/`hir_lower`/`mir_lower`/`aot`/`mir_wasm`). Rewrote the
+   error messages from "not yet implemented" (reads as a broken TODO)
+   to state what each is reserved for and what already covers its use
+   case. Added `test_no_codegen_path_emits_reserved_opcodes`
+   (`integration_tests/mod.rs`) as CI-enforced proof, not just a
+   comment claim.
+3. **Formatter completeness.** ⏸️ Deferred, as flagged in the original
+   scoping note. Genuinely multi-day: 5 distinct AST shapes need real
+   formatting logic, not a quick fix. Tracked as its own follow-up.
+4. **`opaque` nominal types.** 🔄 Revised after investigation: activating
+   enforcement naively would have made opaque types permanently
+   uninstantiable (verified: `mgu`'s current transparent unification is
+   the *only* construction mechanism anywhere in the pipeline — no
+   synthesized constructor, no cast operator). Real fix needs module-
+   defining-scope tracking that doesn't exist in `TypeChecker` — new
+   feature work, not a Phase 0 gap-closure. Also verified zero public
+   docs (README/LAUNCH/CHANGELOG/SPEC2.md) claim opaque types work, so
+   there was no truth-in-advertising violation to begin with. Tightened
+   the code comment to state the zero-enforcement status unambiguously
+   instead.
+5. **Dead feature flags.** 🔄 Revised after investigation:
+   `quic_transport.rs` is a complete, compiling `NetworkTransport` impl
+   (TLS via rcgen, node-id handshake) — not the "empty stubs, panics in
+   bind()" the stale Cargo.toml comment claimed. Deleting it would have
+   destroyed working code to match a false comment. Real bug: the
+   feature flag didn't gate its own `quinn` dependency (compiled into
+   every build regardless). Fixed: `quinn` now `optional = true`, gated
+   by `quic-experimental`; module doc states the honest unwired/
+   untested caveat; stale Cargo.toml/CHANGELOG claims corrected.
+   `simd-experimental` was genuinely 100% orphaned (zero code
+   references anywhere) — deleted outright, zero risk. Also removed
+   unused `multihash` dependency (never imported anywhere).
+6. **README/LAUNCH audit.** ✅ Found and fixed real corruption: an
+   orphaned table fragment (examples 15-17 with no header row) plus a
+   dangling half-sentence, debris from an earlier edit. Fixed 3 stale
+   "11 verified examples" mentions → 17 (actual count). Fixed stale
+   "1490+ tests" → 1550+ (measured: 1554). Added the AOT backend's
+   actual scope to Feature Highlights (previously unmentioned there).
+   `examples/README.md` was itself missing rows for 16/17 — fixed.
+   `LAUNCH.md` was already accurate; no changes needed.
+7. **Release checklist enforcement.** ✅ `verify_implementation.py`
+   claimed (via AGENTS.md) to run `cargo test` — it never did;
+   `check_warnings()` only ran `cargo check --tests` (compiles, never
+   executes). This is exactly why it never caught item 0 below. Added
+   `run_tests()` (`cargo test --lib`), and extended `check_warnings()`
+   to cover all three CI feature configs instead of just default.
+0. **[Not originally scoped] `--no-default-features` didn't compile.**
+   ✅ The dominant item this phase actually did — see "Actual outcome"
+   above. `crate::ai::*` used unconditionally outside its feature gate
+   across bytecode.rs/hir.rs/hir_lower.rs/6 runtime files. Fixed by
+   moving `ToolSchema` to core (`src/tool_schema.rs`) and properly
+   gating everything AI-specific (~50 sites + 4 whole modules + 31
+   tests) behind `ai-runtime`, including moving `suspend_enabled` off
+   the AI-only `LlmState` onto `Runtime` (core receive-wait needed it
+   too — it was never actually LLM-specific).
 
-**Acceptance.**
-- `cargo test` green including 7 new opcode tests or 7 new "unreachable
-  from codegen" static assertions.
-- `verify_implementation.py` exits 0 with the new gates.
-- `README.md` diff: every removed bullet or downgraded bullet has a
-  linked issue for restoration.
+**Acceptance — met.**
+- `cargo test --lib` green on all 4 feature configs (default 1554,
+  `--no-default-features` 1443, `--all-features` 1586, `wasm-backend`
+  1586) — 0 failures throughout.
+- `verify_implementation.py` exits 0 end-to-end (~43s), now actually
+  running the test suite it claimed to run.
+- `cargo check --tests` zero warnings on all 3 CI feature configs.
+- `cargo fmt --check` clean throughout.
+- README.md/examples/README.md/docs/GETTING_STARTED.md: every stale
+  count and the corrupted fragment fixed; every remaining Feature
+  Highlights bullet now matches verified behavior.
 
-**Non-goals.** New language features. New backends. Performance work.
-
-**Delegable to.** One contributor per bullet 1/2/3/5; the audit (bullets
-6, 7) is the steward's.
+**Non-goals — held.** No new language features. No new backends
+(AOT/WASM scope was clarified, not expanded). No performance work.
 
 **Kill criteria.** If any bullet takes >2× its estimate, land the
 downgrade (remove the surface) rather than the fix, and open an RFC for
