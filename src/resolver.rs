@@ -75,9 +75,9 @@ pub fn resolve_imports(
                     return Err(NuError::RuntimeError {
                         msg: format!(
                             "import conflict: '{}' from '{}' collides with an already-imported \
-                             or locally-declared name of the same name. Qualified/aliased \
-                             imports are not yet supported — rename one of the conflicting \
-                             declarations, or import only the names you need with \
+                             or locally-declared name of the same name (qualified/aliased \
+                             imports aren't available). Fix by renaming one of the conflicting \
+                             declarations, or importing only the names you need with \
                              `import {} {{ specific_name }}`.",
                             name, import_path, import_path
                         ),

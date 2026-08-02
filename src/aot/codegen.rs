@@ -795,10 +795,10 @@ fn compile_stmt(
             Ok(())
         }
         mir::Stmt::Emit { .. } => Err(AotCompileError::Unsupported(
-            "Emit: effect emission is not yet supported in the native backend".into(),
+            "Emit: effect emission requires the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::Stmt::StateSet { .. } => Err(AotCompileError::Unsupported(
-            "StateSet: actor state mutation is not yet supported in the native backend".into(),
+            "StateSet: actor state mutation requires the bytecode backend (unavailable with --backend native)".into(),
         )),
     }
 }
@@ -890,7 +890,7 @@ fn compile_rvalue(
             // for effectful code, or the JIT which yields to the
             // interpreter for PerformDirect.
             Err(AotCompileError::Unsupported(
-                "PerformDirect: effectful code is not yet supported in the native backend. \
+                "PerformDirect: effectful code requires the bytecode backend (unavailable with --backend native). \
                  Use --backend bytecode instead."
                     .into(),
             ))
@@ -1062,48 +1062,48 @@ fn compile_rvalue(
             Ok(copy)
         }
         mir::RValue::PerformAsync { .. } => Err(AotCompileError::Unsupported(
-            "PerformAsync: async effect dispatch is not yet supported in the native backend".into(),
+            "PerformAsync: async effect dispatch requires the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::SignalWait { .. } => Err(AotCompileError::Unsupported(
-            "SignalWait: workflow signals are not yet supported in the native backend".into(),
+            "SignalWait: workflow signals require the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::Receive => Err(AotCompileError::Unsupported(
-            "Receive: mailbox receive is not yet supported in the native backend".into(),
+            "Receive: mailbox receive requires the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::ReceiveMatch { .. } => Err(AotCompileError::Unsupported(
-            "ReceiveMatch: selective receive is not yet supported in the native backend".into(),
+            "ReceiveMatch: selective receive requires the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::ReceiveWait { .. } => Err(AotCompileError::Unsupported(
-            "ReceiveWait: timed selective receive is not yet supported in the native backend"
+            "ReceiveWait: timed selective receive requires the bytecode backend (unavailable with --backend native)"
                 .into(),
         )),
         mir::RValue::ReceiveCommit => Err(AotCompileError::Unsupported(
-            "ReceiveCommit: receive commit is not yet supported in the native backend".into(),
+            "ReceiveCommit: receive commit requires the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::FFICall { .. } => Err(AotCompileError::Unsupported(
-            "FFICall: foreign function calls are not yet supported in the native backend".into(),
+            "FFICall: foreign function calls require the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::Migrate { .. } => Err(AotCompileError::Unsupported(
-            "Migrate: actor migration is not yet supported in the native backend".into(),
+            "Migrate: actor migration requires the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::SelfRef => Err(AotCompileError::Unsupported(
-            "SelfRef: actor self-reference is not yet supported in the native backend".into(),
+            "SelfRef: actor self-reference requires the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::CapabilityCheck { .. } => Err(AotCompileError::Unsupported(
-            "CapabilityCheck: capability checking is not yet supported in the native backend"
+            "CapabilityCheck: capability checking requires the bytecode backend (unavailable with --backend native)"
                 .into(),
         )),
         mir::RValue::StateGet { .. } => Err(AotCompileError::Unsupported(
-            "StateGet: actor state access is not yet supported in the native backend".into(),
+            "StateGet: actor state access requires the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::Spawn { .. } => Err(AotCompileError::Unsupported(
-            "Spawn: actor spawning is not yet supported in the native backend".into(),
+            "Spawn: actor spawning requires the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::Send { .. } => Err(AotCompileError::Unsupported(
-            "Send: fire-and-forget message send is not yet supported in the native backend".into(),
+            "Send: fire-and-forget message send requires the bytecode backend (unavailable with --backend native)".into(),
         )),
         mir::RValue::Ask { .. } => Err(AotCompileError::Unsupported(
-            "Ask: request-response is not yet supported in the native backend".into(),
+            "Ask: request-response requires the bytecode backend (unavailable with --backend native)".into(),
         )),
     }
 }
