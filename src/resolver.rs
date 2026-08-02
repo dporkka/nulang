@@ -57,6 +57,36 @@ pub fn resolve_imports(
         } else {
             filter_decls(imported.decls, items)
         };
+
+        // Reject name collisions between what THIS import brings in and
+        // what's already present (from an earlier import or the importing
+        // file itself) up front, with a clear diagnostic pointing at the
+        // conflicting import path. Without this check, two stdlib modules
+        // that both define e.g. `empty`/`contains`/`remove` (map.nula and
+        // set.nula both do) silently produce two top-level `Decl::Function`
+        // entries with the same name; MIR's function-slot allocator isn't
+        // built to handle that and fails much later with an opaque
+        // "internal: MIR function slot 0 left unfilled" — a compiler crash
+        // for user-visible input, not a real internal invariant violation.
+        let existing_names: HashSet<&str> = module.decls.iter().filter_map(decl_name).collect();
+        for decl in &imported_decls {
+            if let Some(name) = decl_name(decl) {
+                if existing_names.contains(name) {
+                    return Err(NuError::RuntimeError {
+                        msg: format!(
+                            "import conflict: '{}' from '{}' collides with an already-imported \
+                             or locally-declared name of the same name. Qualified/aliased \
+                             imports are not yet supported — rename one of the conflicting \
+                             declarations, or import only the names you need with \
+                             `import {} {{ specific_name }}`.",
+                            name, import_path, import_path
+                        ),
+                        span: Span::default(),
+                    });
+                }
+            }
+        }
+
         let mut merged = imported_decls;
         merged.append(&mut module.decls);
         module.decls = merged;
