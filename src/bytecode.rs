@@ -1,6 +1,6 @@
 //! Bytecode ISA, instruction encoding, and module format for the Nulang VM.
 
-use crate::ai::ToolSchema;
+use crate::tool_schema::ToolSchema;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------

@@ -11,11 +11,10 @@
 //! flow expression — the old design stored `if` as a *body terminator*,
 //! which reordered any code lowered after it.
 
-use crate::ai::schema::function_to_tool_schema;
-use crate::ai::ToolSchema;
 use crate::ast;
 use crate::ast::{BinOp, Decl, Expr, FunctionAnnotation, Literal};
 use crate::hir;
+use crate::tool_schema::{function_to_tool_schema, ToolSchema};
 use crate::types::{Capability, EffectRow, Span, Type};
 
 type FxHashMap<K, V> =
@@ -466,6 +465,7 @@ fn placeholder_behavior(name: &str, params: Vec<(&str, Type)>, span: Span) -> as
 /// source-level shape — synthesized `ast::Behavior` bodies are lowered
 /// through the ordinary `lower_behavior`/`lower_expr` path.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "ai-runtime"), allow(unused_variables))]
 fn desugar_agent(
     name: &str,
     model: &str,
@@ -496,20 +496,40 @@ fn desugar_agent(
         input: 0.0,
         output: 0.0,
     });
+    #[cfg(feature = "ai-runtime")]
     let max_turns = memory.as_ref().map(|m| m.max_turns).unwrap_or(50);
+    #[cfg(feature = "ai-runtime")]
     let initial_memory = serde_json::to_string(&crate::ai::EpisodicMemory::new(max_turns))
         .unwrap_or_else(|_| "{}".to_string());
+    #[cfg(not(feature = "ai-runtime"))]
+    let initial_memory = "{}".to_string();
 
     let semantic_memory_dimensions = semantic_memory.as_ref().map(|m| m.dimensions);
     let initial_semantic_memory = semantic_memory_dimensions.map(|dimensions| {
-        serde_json::to_string(&crate::ai::SemanticMemory::new(dimensions, None))
-            .unwrap_or_else(|_| "{}".to_string())
+        #[cfg(feature = "ai-runtime")]
+        {
+            serde_json::to_string(&crate::ai::SemanticMemory::new(dimensions, None))
+                .unwrap_or_else(|_| "{}".to_string())
+        }
+        #[cfg(not(feature = "ai-runtime"))]
+        {
+            let _ = dimensions;
+            "{}".to_string()
+        }
     });
 
     let procedural_memory_namespace = procedural_memory.as_ref().map(|m| m.namespace.clone());
     let initial_procedural_memory = procedural_memory_namespace.as_ref().map(|namespace| {
-        serde_json::to_string(&crate::ai::ProceduralMemory::new(namespace.clone()))
-            .unwrap_or_else(|_| "{}".to_string())
+        #[cfg(feature = "ai-runtime")]
+        {
+            serde_json::to_string(&crate::ai::ProceduralMemory::new(namespace.clone()))
+                .unwrap_or_else(|_| "{}".to_string())
+        }
+        #[cfg(not(feature = "ai-runtime"))]
+        {
+            let _ = namespace;
+            "{}".to_string()
+        }
     });
 
     let str_ty = Type::string();

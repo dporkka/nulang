@@ -25,9 +25,12 @@ mod orca_cycle;
 #[cfg(feature = "quic-experimental")]
 pub mod quic_transport;
 mod supervisor;
+#[cfg(feature = "ai-runtime")]
 mod supervisor_registry;
 use distributed_context::DistributedContext;
+#[cfg(feature = "ai-runtime")]
 mod agent;
+#[cfg(feature = "ai-runtime")]
 mod ai_registry;
 mod crdt;
 mod crdt_manager;
@@ -35,6 +38,7 @@ mod crdt_reg;
 mod distribution;
 mod exit;
 mod http_server;
+#[cfg(feature = "ai-runtime")]
 mod llm;
 mod persistence;
 mod process_groups;
@@ -63,9 +67,11 @@ pub use process_groups::*;
 pub use registry::*;
 pub use scheduler::*;
 pub use supervisor::*;
+#[cfg(feature = "ai-runtime")]
 pub use supervisor_registry::*;
 pub use timer::*;
 
+#[cfg(feature = "ai-runtime")]
 use crate::ai::{
     complete_sync, LlmClient, LlmError, LlmErrorKind, LlmMessage, LlmRequest, LlmResponse,
 };
@@ -223,6 +229,7 @@ pub struct Runtime {
     pub virtual_clock: Option<VirtualClock>,
     // LLM subsystem (v0.9 AI Runtime): client, worker thread, token budget,
     // completion channel, and non-blocking suspension state.
+    #[cfg(feature = "ai-runtime")]
     pub llm: llm::LlmState,
 
     // Actor name registry (v0.7)
@@ -244,6 +251,15 @@ pub struct Runtime {
     // nest a second `vm.resume()`/`run_from` inside the running one and
     // clobber the shared frames.
     vm_execution_depth: u32,
+
+    /// True while executing a scheduler-driven bytecode behavior, enabling
+    /// non-blocking suspension on `perform LLM.ask` and on `receive ...
+    /// after ms =>` timed waits. Nested synchronous entry points
+    /// (`ask_actor_sync`: pipelines, supervisors, debates) force it back
+    /// to false so they keep blocking behavior. Not LLM-specific — lives
+    /// on `Runtime` directly (not `LlmState`) because core receive-wait
+    /// suspension depends on it regardless of the `ai-runtime` feature.
+    pub(crate) suspend_enabled: bool,
 
     // Actors whose receive-wait wake was deferred while the shared VM was
     // executing (deduplicated). Drained by `vm_exec_end` once the
@@ -273,9 +289,11 @@ pub struct Runtime {
         HashMap<[u8; 32], Vec<(u64, String, Message, Vec<String>)>>,
     // Pipelines and debates (v0.9 AI Runtime) — extracted into a registry so
     // the god-object shrinks and the subsystems can evolve independently.
+    #[cfg(feature = "ai-runtime")]
     pub ai: ai_registry::AiRuntimeRegistry,
     // Supervisor teams (v0.9 AI Runtime) — extracted into a registry so the
     // god-object shrinks and the subsystem can evolve independently.
+    #[cfg(feature = "ai-runtime")]
     pub supervisor_teams: SupervisorTeamRegistry,
 
     // Remote spawn support (v0.5+): behaviors a remote node may spawn here
@@ -338,6 +356,7 @@ impl Runtime {
             coordinator: OrcaCoordinator::new(),
             cycle_detector: CycleDetector::new(),
             vm_execution_depth: 0,
+            suspend_enabled: false,
             retired_heaps: Vec::new(),
             distributed: DistributedContext::new(),
             acked_packets: HashSet::new(),
@@ -350,17 +369,20 @@ impl Runtime {
             pending_fetched_messages: HashMap::new(),
             persistence: Box::new(MemoryStore::new()),
             vm: None,
+            #[cfg(feature = "ai-runtime")]
             llm: llm::LlmState::new(),
             behavior_cache: HashMap::new(),
             pending_receive_wakes: Vec::new(),
             draining_receive_wakes: false,
             idle_callback: None,
             recovery_modules: HashMap::new(),
+            #[cfg(feature = "ai-runtime")]
             ai: ai_registry::AiRuntimeRegistry::new(),
+            #[cfg(feature = "ai-runtime")]
             supervisor_teams: SupervisorTeamRegistry::new(),
             crypto: Box::new(crate::backends::DefaultCryptoProvider::new()),
-            #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
             spawnable_behaviors: HashMap::new(),
+            #[cfg(any(feature = "ai-runtime", feature = "http-client"))]
             http: Box::new(crate::backends::ReqwestHttpProvider::new()),
             pending_spawn_responses: HashMap::new(),
             dlq_actor_id: None,
@@ -534,16 +556,19 @@ impl Runtime {
     }
 
     /// Install an LLM client for `perform LLM.ask(...)` calls.
+    #[cfg(feature = "ai-runtime")]
     pub fn set_llm_client(&mut self, client: Box<dyn LlmClient>) {
         agent::set_llm_client(self, client)
     }
 
     /// Create a new empty pipeline and return its ID.
+    #[cfg(feature = "ai-runtime")]
     pub fn pipeline_new(&mut self) -> u64 {
         agent::pipeline_new(self)
     }
     /// Add a stage to an existing pipeline. Returns the same pipeline ID on
     /// success so fluent construction can continue.
+    #[cfg(feature = "ai-runtime")]
     pub fn pipeline_stage(
         &mut self,
         id: u64,
@@ -554,13 +579,16 @@ impl Runtime {
         agent::pipeline_stage(self, id, name, agent_id, template)
     }
     /// Run a pipeline, returning the output of the final stage.
+    #[cfg(feature = "ai-runtime")]
     pub fn pipeline_run(&mut self, id: u64, input: &str) -> Result<String, String> {
         agent::pipeline_run(self, id, input)
     }
+    #[cfg(feature = "ai-runtime")]
     pub fn supervisor_new(&mut self) -> u64 {
         agent::supervisor_new(self)
     }
 
+    #[cfg(feature = "ai-runtime")]
     pub fn supervisor_worker(
         &mut self,
         id: u64,
@@ -571,16 +599,19 @@ impl Runtime {
         agent::supervisor_worker(self, id, name, agent_id, description)
     }
 
+    #[cfg(feature = "ai-runtime")]
     pub fn supervisor_run(&mut self, id: u64, task: &str) -> Result<String, String> {
         agent::supervisor_run(self, id, task)
     }
 
     /// Create a new debate and return its ID.
+    #[cfg(feature = "ai-runtime")]
     pub fn debate_new(&mut self, topic: &str, rounds: i64, threshold: f64) -> u64 {
         agent::debate_new(self, topic, rounds, threshold)
     }
     /// Add a participant to an existing debate. Returns the same debate ID on
     /// success so fluent construction can continue.
+    #[cfg(feature = "ai-runtime")]
     pub fn debate_participant(
         &mut self,
         id: u64,
@@ -591,6 +622,7 @@ impl Runtime {
         agent::debate_participant(self, id, name, stance, agent_id)
     }
     /// Run a debate and return the moderator's synthesis.
+    #[cfg(feature = "ai-runtime")]
     pub fn debate_run(&mut self, id: u64) -> Result<String, String> {
         agent::debate_run(self, id)
     }
@@ -598,6 +630,7 @@ impl Runtime {
     /// Convert a VM value to a Rust string using the actor's bytecode module
     /// constant pool for string-id values and reading pointer payloads as
     /// null-terminated UTF-8.
+    #[cfg(feature = "ai-runtime")]
     fn vm_value_to_string(
         value: &crate::vm::Value,
         module: Option<&crate::bytecode::CodeModule>,
@@ -609,6 +642,7 @@ impl Runtime {
     /// system prompt, and episodic memory from durable state. The memory is
     /// updated with the user prompt and assistant response before being saved
     /// back to state.
+    #[cfg(feature = "ai-runtime")]
     pub fn complete_agent_llm(&mut self, actor_id: u64, prompt: &str) -> Option<String> {
         agent::complete_agent_llm(self, actor_id, prompt)
     }
@@ -617,6 +651,7 @@ impl Runtime {
     /// with `tools` filled from the actor's bytecode module. Pure
     /// read/build: safe to run before handing the request to a background
     /// worker thread.
+    #[cfg(feature = "ai-runtime")]
     fn build_actor_llm_request(
         &self,
         actor_id: u64,
@@ -630,6 +665,7 @@ impl Runtime {
     /// values through the runtime VM's constant pools (heap pointer values
     /// are read directly). Useful for tests and tooling that inspect actor
     /// state produced by bytecode behaviors.
+    #[cfg(feature = "ai-runtime")]
     pub fn actor_state_string(&self, actor_id: u64, field: &str) -> Option<String> {
         agent::actor_state_string(self, actor_id, field)
     }
@@ -640,11 +676,13 @@ impl Runtime {
     /// `LlmError::BudgetExceeded`.  Charges are applied after each
     /// successful response based on the actual token count returned
     /// by the provider.
+    #[cfg(feature = "ai-runtime")]
     pub fn set_token_budget(&mut self, limit: u64) {
         agent::set_token_budget(self, limit)
     }
 
     /// Remove any configured token budget.
+    #[cfg(feature = "ai-runtime")]
     pub fn clear_token_budget(&mut self) {
         agent::clear_token_budget(self)
     }
@@ -652,6 +690,7 @@ impl Runtime {
     ///
     /// The provided `memory` messages are stored on the request before it is
     /// sent to the provider.
+    #[cfg(feature = "ai-runtime")]
     pub fn complete_llm_request(
         &self,
         mut request: LlmRequest,
@@ -693,13 +732,22 @@ impl Runtime {
     /// module exports, invoked with the provided JSON arguments, and the results
     /// are sent back to the model for a final response. The supplied `memory`
     /// messages are preserved across tool-call rounds.
+    #[cfg(feature = "ai-runtime")]
     pub fn complete_llm_with_tools(
         &mut self,
         mut request: LlmRequest,
         memory: Vec<LlmMessage>,
         module: &crate::bytecode::CodeModule,
     ) -> Result<LlmResponse, LlmError> {
-        request.tools = module.tools.clone();
+        request.tools = module
+            .tools
+            .iter()
+            .map(|t| crate::ai::ToolSchema {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: t.parameters.clone(),
+            })
+            .collect();
         request.memory = memory.clone();
         let response = self.complete_llm_request(request.clone(), memory.clone())?;
         self.finish_tool_calls(module, response)
@@ -710,6 +758,7 @@ impl Runtime {
     /// response content from their results. Must run on the scheduler thread
     /// because tool invocation executes module functions against runtime
     /// state.
+    #[cfg(feature = "ai-runtime")]
     fn finish_tool_calls(
         &mut self,
         module: &crate::bytecode::CodeModule,
@@ -741,6 +790,7 @@ impl Runtime {
     /// Invoke a tool for an agent, routing memory behaviors to the agent's
     /// durable state and falling back to the module's exported function for
     /// other tools.
+    #[cfg(feature = "ai-runtime")]
     fn invoke_agent_tool_function(
         &mut self,
         module: &crate::bytecode::CodeModule,
@@ -759,6 +809,7 @@ impl Runtime {
     }
 
     /// Execute a semantic-memory tool call against the current agent.
+    #[cfg(feature = "ai-runtime")]
     fn invoke_semantic_memory_tool(
         &mut self,
         actor_id: u64,
@@ -795,6 +846,7 @@ impl Runtime {
     }
 
     /// Execute a procedural-memory tool call against the current agent.
+    #[cfg(feature = "ai-runtime")]
     fn invoke_procedural_memory_tool(
         &mut self,
         actor_id: u64,
@@ -874,6 +926,7 @@ impl Runtime {
     }
 
     /// Convert a VM value into a Rust string, returning a default for missing actors.
+    #[cfg(feature = "ai-runtime")]
     fn vm_value_to_string_or_default(&self, actor_id: u64, value: &crate::vm::Value) -> String {
         self.actors
             .get(&actor_id)
@@ -882,6 +935,7 @@ impl Runtime {
     }
 
     /// Look up a tool by name and invoke the corresponding exported function.
+    #[cfg(feature = "ai-runtime")]
     fn invoke_tool_function(
         &self,
         module: &crate::bytecode::CodeModule,
@@ -1017,6 +1071,7 @@ impl Runtime {
 
     /// Drain completed background LLM calls and resume the suspended actors
     /// waiting for them.
+    #[cfg(feature = "ai-runtime")]
     fn poll_llm_completions(&mut self) {
         while let Ok((actor_id, result)) = self.llm.rx.try_recv() {
             self.store_llm_completion(actor_id, result);
@@ -1026,6 +1081,7 @@ impl Runtime {
     /// Record a completed background LLM call on its actor and resume the
     /// actor's suspended behavior, if any. Errors trigger the retry/fallback
     /// pipeline when the actor has a configured agent retry or fallback.
+    #[cfg(feature = "ai-runtime")]
     fn store_llm_completion(&mut self, actor_id: u64, result: Result<LlmResponse, LlmError>) {
         self.llm.inflight_count = self.llm.inflight_count.saturating_sub(1);
         match result {
@@ -1051,6 +1107,7 @@ impl Runtime {
     }
 
     /// Process an LLM error: decide whether to retry, fall back, or fail.
+    #[cfg(feature = "ai-runtime")]
     fn handle_llm_error(&mut self, actor_id: u64, error: LlmError) {
         // Only agent actors have retry/fallback config.
         let is_agent = self
@@ -1159,6 +1216,7 @@ impl Runtime {
     }
 
     /// Re-dispatch an in-flight LLM request on retry timer fire.
+    #[cfg(feature = "ai-runtime")]
     fn handle_llm_retry_timer(&mut self, actor_id: u64) {
         let prompt = self
             .actors
@@ -1173,6 +1231,7 @@ impl Runtime {
     }
 
     /// Build and dispatch an LLM request for the actor, marking it in-flight.
+    #[cfg(feature = "ai-runtime")]
     fn redispatch_llm_request(&mut self, actor_id: u64, prompt: &str) {
         let is_agent = self
             .actors
@@ -1229,6 +1288,7 @@ impl Runtime {
     /// Send an LLM request to the persistent worker thread for execution.
     /// Returns true if the request was dispatched, false if the worker
     /// channel is unavailable (caller should roll back in-flight state).
+    #[cfg(feature = "ai-runtime")]
     fn dispatch_llm_request(&mut self, actor_id: u64, request: LlmRequest, prompt: &str) -> bool {
         let Some(client) = self.llm.client.clone() else {
             return false;
@@ -1252,6 +1312,7 @@ impl Runtime {
     /// Prune an agent's episodic memory to fit within `max_tokens`, using a
     /// character-count heuristic (chars / 4). Always preserves the system
     /// prompt (which lives in its own state field).
+    #[cfg(feature = "ai-runtime")]
     fn prune_episodic_memory(&mut self, actor_id: u64, max_tokens: usize) {
         let memory_json = {
             let actor = match self.actors.get(&actor_id) {
@@ -1295,6 +1356,7 @@ impl Runtime {
     /// `perform LLM.ask` once the background worker has delivered the
     /// response. The re-executed `LlmAsk` picks the response up from
     /// `actor.llm_completed` via the VM callback.
+    #[cfg(feature = "ai-runtime")]
     fn resume_suspended_llm_step(&mut self, actor_id: u64) {
         let suspended = match self.actors.get_mut(&actor_id) {
             Some(actor) => actor.suspended_execution.take(),
@@ -1321,11 +1383,11 @@ impl Runtime {
                 runtime: self_ptr,
             }));
             vm.restore_suspended_state(suspended.vm_state);
-            let saved_suspend = (*self_ptr).llm.suspend_enabled;
-            (*self_ptr).llm.suspend_enabled = true;
+            let saved_suspend = (*self_ptr).suspend_enabled;
+            (*self_ptr).suspend_enabled = true;
             (*self_ptr).vm_exec_begin();
             let result = vm.resume();
-            (*self_ptr).llm.suspend_enabled = saved_suspend;
+            (*self_ptr).suspend_enabled = saved_suspend;
             match result {
                 Ok(_) => {
                     // The suspended step ran to completion. For workflow
@@ -1680,11 +1742,11 @@ impl Runtime {
             // A signal-resumed step is still scheduler-context execution: a
             // `perform LLM.ask` after the wait must suspend (non-blocking)
             // instead of blocking the caller thread on the HTTP call.
-            let saved_suspend = (*self_ptr).llm.suspend_enabled;
-            (*self_ptr).llm.suspend_enabled = true;
+            let saved_suspend = (*self_ptr).suspend_enabled;
+            (*self_ptr).suspend_enabled = true;
             (*self_ptr).vm_exec_begin();
             let result = vm.resume();
-            (*self_ptr).llm.suspend_enabled = saved_suspend;
+            (*self_ptr).suspend_enabled = saved_suspend;
             result
         };
 
@@ -1784,10 +1846,10 @@ impl Runtime {
         // Synchronous asks (pipelines, supervisors, debates, nested `Ask`)
         // always block on LLM calls; only scheduler-driven behaviors
         // suspend. Force suspension off for the whole body.
-        let saved_suspend = self.llm.suspend_enabled;
-        self.llm.suspend_enabled = false;
+        let saved_suspend = self.suspend_enabled;
+        self.suspend_enabled = false;
         let result = self.ask_actor_sync_inner(actor_id, behavior_id, args);
-        self.llm.suspend_enabled = saved_suspend;
+        self.suspend_enabled = saved_suspend;
         result
     }
 
@@ -1803,7 +1865,9 @@ impl Runtime {
         // are bytecode behaviors at compile time, but their semantics are
         // implemented directly by the runtime so they can mutate and read the
         // durable `semantic_memory` JSON field.
+        #[cfg(feature = "ai-runtime")]
         let behavior_name = self.step_name_for(actor_id, behavior_idx);
+        #[cfg(feature = "ai-runtime")]
         if self.actor_is_agent(actor_id) && self.is_semantic_memory_behavior(&behavior_name) {
             self.current_actor = Some(actor_id);
             let result = if behavior_name == "store_fact" {
@@ -1834,6 +1898,7 @@ impl Runtime {
         }
 
         // Intercept procedural-memory behaviors generated by compile_agent.
+        #[cfg(feature = "ai-runtime")]
         if self.actor_is_agent(actor_id) && self.is_procedural_memory_behavior(&behavior_name) {
             self.current_actor = Some(actor_id);
             let result = match behavior_name.as_str() {
@@ -2356,6 +2421,16 @@ impl Runtime {
         self.scheduler.processed_count()
     }
 
+    /// Number of LLM calls currently in flight; always 0 without `ai-runtime`.
+    #[cfg(feature = "ai-runtime")]
+    fn llm_inflight_count(&self) -> usize {
+        self.llm.inflight_count
+    }
+    #[cfg(not(feature = "ai-runtime"))]
+    fn llm_inflight_count(&self) -> usize {
+        0
+    }
+
     #[tracing::instrument(level = "trace", skip(self))]
     pub fn run_scheduler(&mut self) {
         // How often (in scheduler ticks) deferred local decrements are
@@ -2370,7 +2445,7 @@ impl Runtime {
             let actor_id = match self.scheduler.dequeue() {
                 Some(actor_id) => actor_id,
                 None => {
-                    if self.llm.inflight_count == 0 && self.timer_wheel.is_empty() {
+                    if self.llm_inflight_count() == 0 && self.timer_wheel.is_empty() {
                         if let Some(ref mut cb) = self.idle_callback {
                             cb();
                         }
@@ -2388,6 +2463,7 @@ impl Runtime {
                             .min(std::time::Duration::from_millis(10)),
                         None => std::time::Duration::from_millis(10),
                     };
+                    #[cfg(feature = "ai-runtime")]
                     match self.llm.rx.recv_timeout(wait) {
                         Ok((actor_id, result)) => {
                             self.store_llm_completion(actor_id, result);
@@ -2395,6 +2471,8 @@ impl Runtime {
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
+                    #[cfg(not(feature = "ai-runtime"))]
+                    std::thread::sleep(wait);
                     // Deliver any timers that matured while waiting; fired
                     // messages re-enqueue their target actors, so the next
                     // dequeue resumes work.
@@ -2402,6 +2480,7 @@ impl Runtime {
                     continue;
                 }
             };
+            #[cfg(feature = "ai-runtime")]
             self.poll_llm_completions();
             self.tick_timers();
             self.step_actor(actor_id);
@@ -2602,7 +2681,9 @@ impl Runtime {
             // Intercept semantic-memory behaviors generated by compile_agent.
             // They are bytecode behaviors but are implemented directly by the
             // runtime against the durable `semantic_memory` state field.
+            #[cfg(feature = "ai-runtime")]
             let behavior_name = self.step_name_for(actor_id, behavior_idx);
+            #[cfg(feature = "ai-runtime")]
             if self.actor_is_agent(actor_id) && self.is_semantic_memory_behavior(&behavior_name) {
                 if self.actor_is_persistent(actor_id) {
                     let seq = self.next_sequence(actor_id);
@@ -2638,6 +2719,7 @@ impl Runtime {
             }
 
             // Intercept procedural-memory behaviors generated by compile_agent.
+            #[cfg(feature = "ai-runtime")]
             if self.actor_is_agent(actor_id) && self.is_procedural_memory_behavior(&behavior_name) {
                 if self.actor_is_persistent(actor_id) {
                     let seq = self.next_sequence(actor_id);
@@ -2842,10 +2924,10 @@ impl Runtime {
                 // Enable non-blocking LLM suspension for this
                 // scheduler-driven behavior invocation. Nested synchronous
                 // entry points (ask_actor_sync) force it back off.
-                let saved_suspend = self.llm.suspend_enabled;
-                self.llm.suspend_enabled = true;
+                let saved_suspend = self.suspend_enabled;
+                self.suspend_enabled = true;
                 let result = self.run_bytecode_behavior(actor_id, behavior_idx, &payload);
-                self.llm.suspend_enabled = saved_suspend;
+                self.suspend_enabled = saved_suspend;
                 match result {
                     Ok(_) => {
                         self.checkpoint_actor(actor_id);
@@ -2951,6 +3033,7 @@ impl Runtime {
         workflow::actor_is_workflow(self, actor_id)
     }
 
+    #[cfg(feature = "ai-runtime")]
     fn actor_is_agent(&self, actor_id: u64) -> bool {
         self.actors
             .get(&actor_id)
@@ -2960,11 +3043,13 @@ impl Runtime {
 
     /// Return true if the behavior name is a semantic-memory behavior generated
     /// by `compile_agent` for agents configured with `semantic_memory`.
+    #[cfg(feature = "ai-runtime")]
     fn is_semantic_memory_behavior(&self, name: &str) -> bool {
         name == "store_fact" || name == "recall"
     }
 
     /// Read an agent's durable `semantic_memory` state field as a `SemanticMemory`.
+    #[cfg(feature = "ai-runtime")]
     fn read_semantic_memory(&self, actor: &Actor) -> Option<crate::ai::SemanticMemory> {
         let value = actor.get_state_field("semantic_memory")?;
         let ptr = value.as_ptr()?;
@@ -2980,6 +3065,7 @@ impl Runtime {
     }
 
     /// Write a `SemanticMemory` back to an agent's durable `semantic_memory` state field.
+    #[cfg(feature = "ai-runtime")]
     fn write_semantic_memory(actor: &mut Actor, memory: &crate::ai::SemanticMemory) {
         if let Ok(json) = serde_json::to_string(memory) {
             let ptr = actor.allocate_string(&json);
@@ -2989,6 +3075,7 @@ impl Runtime {
 
     /// Convert a VM value into a Rust string, reading pointer payloads as
     /// null-terminated UTF-8 and string-id values via the actor's bytecode module.
+    #[cfg(feature = "ai-runtime")]
     fn vm_value_to_string_in_actor(
         &self,
         value: &crate::vm::Value,
@@ -3019,6 +3106,7 @@ impl Runtime {
     }
 
     /// Store a fact in an agent's semantic memory and return the document id.
+    #[cfg(feature = "ai-runtime")]
     fn semantic_memory_store(&mut self, actor_id: u64, content: &str) -> crate::vm::Value {
         self.semantic_memory_store_with_metadata(
             actor_id,
@@ -3028,6 +3116,7 @@ impl Runtime {
     }
 
     /// Store a fact with metadata in an agent's semantic memory and return the document id.
+    #[cfg(feature = "ai-runtime")]
     fn semantic_memory_store_with_metadata(
         &mut self,
         actor_id: u64,
@@ -3049,6 +3138,7 @@ impl Runtime {
     }
 
     /// Search an agent's semantic memory and return the top result's content.
+    #[cfg(feature = "ai-runtime")]
     fn semantic_memory_recall(
         &mut self,
         actor_id: u64,
@@ -3077,6 +3167,7 @@ impl Runtime {
 
     /// Return true if the behavior name is a procedural-memory behavior generated
     /// by `compile_agent` for agents configured with `procedural_memory`.
+    #[cfg(feature = "ai-runtime")]
     fn is_procedural_memory_behavior(&self, name: &str) -> bool {
         matches!(
             name,
@@ -3085,6 +3176,7 @@ impl Runtime {
     }
 
     /// Read an agent's durable `procedural_memory` state field as a `ProceduralMemory`.
+    #[cfg(feature = "ai-runtime")]
     fn read_procedural_memory(&self, actor: &Actor) -> Option<crate::ai::ProceduralMemory> {
         let value = actor.get_state_field("procedural_memory")?;
         let ptr = value.as_ptr()?;
@@ -3100,6 +3192,7 @@ impl Runtime {
     }
 
     /// Write a `ProceduralMemory` back to an agent's durable `procedural_memory` state field.
+    #[cfg(feature = "ai-runtime")]
     fn write_procedural_memory(actor: &mut Actor, memory: &crate::ai::ProceduralMemory) {
         if let Ok(json) = serde_json::to_string(memory) {
             let ptr = actor.allocate_string(&json);
@@ -3108,6 +3201,7 @@ impl Runtime {
     }
 
     /// Store a pattern in an agent's procedural memory and return the key.
+    #[cfg(feature = "ai-runtime")]
     fn procedural_memory_store_pattern(
         &mut self,
         actor_id: u64,
@@ -3129,6 +3223,7 @@ impl Runtime {
     }
 
     /// Retrieve a pattern by key from an agent's procedural memory.
+    #[cfg(feature = "ai-runtime")]
     fn procedural_memory_get_pattern(&mut self, actor_id: u64, key: &str) -> crate::vm::Value {
         let content = self
             .actors
@@ -3144,6 +3239,7 @@ impl Runtime {
     }
 
     /// Add a few-shot example to an agent's procedural memory.
+    #[cfg(feature = "ai-runtime")]
     fn procedural_memory_add_example(
         &mut self,
         actor_id: u64,
@@ -3164,6 +3260,7 @@ impl Runtime {
     }
 
     /// Retrieve the top-k examples for a task/query from an agent's procedural memory.
+    #[cfg(feature = "ai-runtime")]
     fn procedural_memory_get_examples(
         &mut self,
         actor_id: u64,
@@ -3375,11 +3472,11 @@ impl Runtime {
             vm.restore_suspended_state(suspended.vm_state);
             // A resumed behavior is still scheduler-context execution: a
             // `perform LLM.ask` after the wait must suspend (non-blocking).
-            let saved_suspend = (*self_ptr).llm.suspend_enabled;
-            (*self_ptr).llm.suspend_enabled = true;
+            let saved_suspend = (*self_ptr).suspend_enabled;
+            (*self_ptr).suspend_enabled = true;
             (*self_ptr).vm_exec_begin();
             let result = vm.resume();
-            (*self_ptr).llm.suspend_enabled = saved_suspend;
+            (*self_ptr).suspend_enabled = saved_suspend;
             match result {
                 Ok(_) => {
                     // The wait resolved (match or timeout) and the behavior
@@ -3495,6 +3592,7 @@ impl Runtime {
                     self.fire_timer_sleep_wake(target_actor);
                 }
                 TimerMessage::LlmRetry => {
+                    #[cfg(feature = "ai-runtime")]
                     self.handle_llm_retry_timer(target_actor);
                 }
             }
@@ -4772,6 +4870,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         Some(crate::vm::Value::unit())
     }
 
+    #[cfg_attr(not(feature = "ai-runtime"), allow(unused_variables))]
     fn perform_builtin_effect(
         &mut self,
         effect_name: &str,
@@ -4931,32 +5030,39 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 None => return None,
             };
             if provider == "llm" {
-                let mut rt = self.runtime.borrow_mut();
-                if rt.llm.client.is_none() {
-                    return Some(crate::vm::Value::nil());
-                }
-                let request = crate::ai::LlmRequest {
-                    model: String::new(),
-                    messages: vec![crate::ai::LlmMessage {
-                        role: "user".to_string(),
-                        content: prompt,
-                    }],
-                    tools: Vec::new(),
-                    memory: Vec::new(),
-                    pricing: None,
-                    response_format: None,
-                };
-                let result = rt.complete_llm_request(request, Vec::new());
-                return Some(match result {
-                    Ok(resp) => match resp.content {
-                        Some(c) => match &mut rt.vm {
-                            Some(vm) => vm.allocate_string(&c),
+                #[cfg(feature = "ai-runtime")]
+                {
+                    let mut rt = self.runtime.borrow_mut();
+                    if rt.llm.client.is_none() {
+                        return Some(crate::vm::Value::nil());
+                    }
+                    let request = crate::ai::LlmRequest {
+                        model: String::new(),
+                        messages: vec![crate::ai::LlmMessage {
+                            role: "user".to_string(),
+                            content: prompt,
+                        }],
+                        tools: Vec::new(),
+                        memory: Vec::new(),
+                        pricing: None,
+                        response_format: None,
+                    };
+                    let result = rt.complete_llm_request(request, Vec::new());
+                    return Some(match result {
+                        Ok(resp) => match resp.content {
+                            Some(c) => match &mut rt.vm {
+                                Some(vm) => vm.allocate_string(&c),
+                                None => crate::vm::Value::nil(),
+                            },
                             None => crate::vm::Value::nil(),
                         },
-                        None => crate::vm::Value::nil(),
-                    },
-                    Err(_) => crate::vm::Value::nil(),
-                });
+                        Err(_) => crate::vm::Value::nil(),
+                    });
+                }
+                #[cfg(not(feature = "ai-runtime"))]
+                {
+                    return Some(crate::vm::Value::nil());
+                }
             }
             return None;
         }
@@ -5026,6 +5132,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         self.perform_builtin_effect(effect_name, op_name, &module.constants, regs)
     }
 
+    #[cfg_attr(not(feature = "ai-runtime"), allow(unused_variables))]
     fn perform_async(
         &mut self,
         effect_op: &str,
@@ -5033,6 +5140,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         args: &[crate::vm::Value],
     ) -> crate::vm::PerformAsyncResult {
         match effect_op {
+            #[cfg(feature = "ai-runtime")]
             "Inference.ask" | "LLM.ask" => {
                 let prompt = resolve_first_string(constants, args);
                 let result = self.complete_llm("", &prompt);
@@ -5054,10 +5162,12 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 }
                 crate::vm::PerformAsyncResult::Pending
             }
+            #[cfg(feature = "ai-runtime")]
             "Pipeline.new" => {
                 let id = self.runtime.borrow_mut().pipeline_new();
                 crate::vm::PerformAsyncResult::Ready(Some(id.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Pipeline.stage" => {
                 let id = id_arg(constants, args, 0);
                 let name = string_arg(constants, args, 1);
@@ -5070,16 +5180,19 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 let r = result.map(|id| id as i64).unwrap_or(-1);
                 crate::vm::PerformAsyncResult::Ready(Some(r.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Pipeline.run" => {
                 let id = id_arg(constants, args, 0);
                 let input = string_arg(constants, args, 1);
                 let result = self.runtime.borrow_mut().pipeline_run(id, &input).ok();
                 crate::vm::PerformAsyncResult::Ready(result)
             }
+            #[cfg(feature = "ai-runtime")]
             "Supervisor.new" => {
                 let id = self.runtime.borrow_mut().supervisor_new();
                 crate::vm::PerformAsyncResult::Ready(Some(id.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Supervisor.worker" => {
                 let id = id_arg(constants, args, 0);
                 let name = string_arg(constants, args, 1);
@@ -5092,12 +5205,14 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 let r = result.map(|id| id as i64).unwrap_or(-1);
                 crate::vm::PerformAsyncResult::Ready(Some(r.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Supervisor.run" => {
                 let id = id_arg(constants, args, 0);
                 let task = string_arg(constants, args, 1);
                 let result = self.runtime.borrow_mut().supervisor_run(id, &task).ok();
                 crate::vm::PerformAsyncResult::Ready(result)
             }
+            #[cfg(feature = "ai-runtime")]
             "Debate.new" => {
                 let topic = string_arg(constants, args, 0);
                 let rounds = int_arg(args, 1);
@@ -5108,6 +5223,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                     .debate_new(&topic, rounds, threshold);
                 crate::vm::PerformAsyncResult::Ready(Some(id.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Debate.participant" => {
                 let id = id_arg(constants, args, 0);
                 let name = string_arg(constants, args, 1);
@@ -5120,6 +5236,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                 let r = result.map(|id| id as i64).unwrap_or(-1);
                 crate::vm::PerformAsyncResult::Ready(Some(r.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Debate.run" => {
                 let id = id_arg(constants, args, 0);
                 let result = self.runtime.borrow_mut().debate_run(id).ok();
@@ -5129,6 +5246,7 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
         }
     }
 
+    #[cfg(feature = "ai-runtime")]
     fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
         let mut rt = self.runtime.borrow_mut();
         if let Some(actor_id) = rt.current_actor {
@@ -5210,18 +5328,22 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
 }
 
 // Helpers for extracting typed arguments from PerformAsync register values.
+#[cfg(feature = "ai-runtime")]
 fn int_arg(args: &[crate::vm::Value], idx: usize) -> i64 {
     args.get(idx).and_then(|v| v.as_int()).unwrap_or(0)
 }
 
+#[cfg(feature = "ai-runtime")]
 fn actor_arg(args: &[crate::vm::Value], idx: usize) -> u64 {
     args.get(idx).and_then(|v| v.as_actor_id()).unwrap_or(0)
 }
 
+#[cfg(feature = "ai-runtime")]
 fn float_arg(args: &[crate::vm::Value], idx: usize) -> f64 {
     args.get(idx).and_then(|v| v.as_float()).unwrap_or(0.0)
 }
 
+#[cfg(feature = "ai-runtime")]
 fn string_arg(
     constants: &[crate::bytecode::Constant],
     args: &[crate::vm::Value],
@@ -5242,6 +5364,7 @@ fn string_arg(
     })
 }
 
+#[cfg(feature = "ai-runtime")]
 fn resolve_first_string(
     constants: &[crate::bytecode::Constant],
     args: &[crate::vm::Value],
@@ -5249,6 +5372,7 @@ fn resolve_first_string(
     string_arg(constants, args, 0)
 }
 
+#[cfg(feature = "ai-runtime")]
 fn id_arg(constants: &[crate::bytecode::Constant], args: &[crate::vm::Value], idx: usize) -> u64 {
     // Try int first (legacy path), then parse string-id from constants as u64.
     if let Some(v) = args.get(idx) {
@@ -5419,6 +5543,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         }
     }
 
+    #[cfg_attr(not(feature = "ai-runtime"), allow(unused_variables))]
     fn perform_builtin_effect(
         &mut self,
         effect_name: &str,
@@ -5580,17 +5705,23 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                     None => return None,
                 };
                 if provider == "llm" {
-                    let content = self.complete_llm("", &prompt);
-                    let rt = &mut *self.runtime;
-                    return Some(match content {
-                        Some(c) => match &mut rt.vm {
-                            Some(vm) => vm.allocate_string(&c),
+                    #[cfg(feature = "ai-runtime")]
+                    {
+                        let content = self.complete_llm("", &prompt);
+                        let rt = &mut *self.runtime;
+                        return Some(match content {
+                            Some(c) => match &mut rt.vm {
+                                Some(vm) => vm.allocate_string(&c),
+                                None => crate::vm::Value::nil(),
+                            },
                             None => crate::vm::Value::nil(),
-                        },
-                        None => crate::vm::Value::nil(),
-                    });
+                        });
+                    }
+                    #[cfg(not(feature = "ai-runtime"))]
+                    {
+                        return Some(crate::vm::Value::nil());
+                    }
                 }
-                return None;
             }
             if effect_name == "IO" {
                 if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {
@@ -5648,6 +5779,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         }
     }
 
+    #[cfg(feature = "ai-runtime")]
     fn complete_llm(&mut self, model: &str, prompt: &str) -> Option<String> {
         unsafe {
             let rt = &mut *self.runtime;
@@ -5667,6 +5799,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         }
     }
 
+    #[cfg(feature = "ai-runtime")]
     fn llm_ask(&mut self, model: &str, prompt: &str) -> crate::vm::PerformAsyncResult {
         use crate::vm::PerformAsyncResult;
         unsafe {
@@ -5675,7 +5808,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
 
             // Nested synchronous paths (pipelines, ask_actor_sync) keep the
             // blocking behavior.
-            if !rt.llm.suspend_enabled {
+            if !rt.suspend_enabled {
                 return PerformAsyncResult::Ready(self.complete_llm(model, prompt));
             }
 
@@ -5768,6 +5901,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
         }
     }
 
+    #[cfg_attr(not(feature = "ai-runtime"), allow(unused_variables))]
     fn perform_async(
         &mut self,
         effect_op: &str,
@@ -5776,6 +5910,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
     ) -> crate::vm::PerformAsyncResult {
         use crate::vm::PerformAsyncResult;
         match effect_op {
+            #[cfg(feature = "ai-runtime")]
             "Inference.ask" | "LLM.ask" => {
                 let prompt = resolve_first_string(constants, args);
                 self.llm_ask("", &prompt)
@@ -5797,10 +5932,12 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 }
                 PerformAsyncResult::Pending
             }
+            #[cfg(feature = "ai-runtime")]
             "Pipeline.new" => {
                 let id = unsafe { (*self.runtime).pipeline_new() };
                 PerformAsyncResult::Ready(Some(id.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Pipeline.stage" => {
                 let id = id_arg(constants, args, 0);
                 let name = string_arg(constants, args, 1);
@@ -5810,16 +5947,19 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 let r = result.map(|id| id as i64).unwrap_or(-1);
                 PerformAsyncResult::Ready(Some(r.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Pipeline.run" => {
                 let id = id_arg(constants, args, 0);
                 let input = string_arg(constants, args, 1);
                 let result = unsafe { (*self.runtime).pipeline_run(id, &input).ok() };
                 PerformAsyncResult::Ready(result)
             }
+            #[cfg(feature = "ai-runtime")]
             "Supervisor.new" => {
                 let id = unsafe { (*self.runtime).supervisor_new() };
                 PerformAsyncResult::Ready(Some(id.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Supervisor.worker" => {
                 let id = id_arg(constants, args, 0);
                 let name = string_arg(constants, args, 1);
@@ -5830,12 +5970,14 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 let r = result.map(|id| id as i64).unwrap_or(-1);
                 PerformAsyncResult::Ready(Some(r.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Supervisor.run" => {
                 let id = id_arg(constants, args, 0);
                 let task = string_arg(constants, args, 1);
                 let result = unsafe { (*self.runtime).supervisor_run(id, &task).ok() };
                 PerformAsyncResult::Ready(result)
             }
+            #[cfg(feature = "ai-runtime")]
             "Debate.new" => {
                 let topic = string_arg(constants, args, 0);
                 let rounds = int_arg(args, 1);
@@ -5843,6 +5985,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 let id = unsafe { (*self.runtime).debate_new(&topic, rounds, threshold) };
                 PerformAsyncResult::Ready(Some(id.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Debate.participant" => {
                 let id = id_arg(constants, args, 0);
                 let name = string_arg(constants, args, 1);
@@ -5853,6 +5996,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                 let r = result.map(|id| id as i64).unwrap_or(-1);
                 PerformAsyncResult::Ready(Some(r.to_string()))
             }
+            #[cfg(feature = "ai-runtime")]
             "Debate.run" => {
                 let id = id_arg(constants, args, 0);
                 let result = unsafe { (*self.runtime).debate_run(id).ok() };
@@ -5914,7 +6058,7 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
             // receive). Synchronous entry points (ask_actor_sync: pipelines,
             // supervisors, debates, `Ask`) never suspend — same gating as
             // the non-blocking LLM path.
-            if timeout_ms <= 0 || !rt.llm.suspend_enabled {
+            if timeout_ms <= 0 || !rt.suspend_enabled {
                 return false;
             }
             true
@@ -6048,6 +6192,7 @@ fn map_ast_state_model(model: crate::ast::StateModel) -> crate::runtime::persist
 }
 
 /// Convert a JSON value into a Nulang VM value for tool-call arguments.
+#[cfg(feature = "ai-runtime")]
 fn json_to_vm_value(
     vm: &mut crate::vm::VM,
     value: serde_json::Value,
@@ -6070,6 +6215,7 @@ fn json_to_vm_value(
 /// Compute the backoff delay in milliseconds for the given retry attempt
 /// (0-indexed). Uses actor_id as a seed for ±25% jitter to avoid
 /// deterministic thundering-herd on clusters.
+#[cfg(feature = "ai-runtime")]
 fn compute_backoff(config: &crate::ast::AgentRetryConfig, attempt: u32, actor_id: u64) -> u64 {
     let base_ms = match &config.backoff {
         crate::ast::AgentBackoff::Exponential {

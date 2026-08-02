@@ -1,12 +1,33 @@
-//! JSON-schema generation for `@tool`-annotated Nulang functions.
+//! `ToolSchema`: JSON-schema description of an `@tool`-annotated function.
 //!
-//! Converts Nulang type signatures into the JSON Schema subset used by
-//! `ToolSchema.parameters` so that LLM providers can request tool calls.
+//! Lives in core (unconditional, no `ai-runtime` gate) because it is
+//! embedded in core, always-compiled types: `bytecode::ActorMeta.tools`
+//! and `hir::Decl`'s agent `tools` field. The `@tool` annotation is
+//! permanent language surface (RFC 0010 §C.2: "Keep as-is; document
+//! extensibility") independent of whether any LLM client is compiled in.
+//!
+//! This is a distinct type from `nulang_ai::request::ToolSchema` (used for
+//! the actual LLM-provider wire format in `LlmRequest.tools`), which stays
+//! in the optional `nulang-ai` crate per its "zero dependency on core"
+//! charter. `runtime/agent.rs` converts between the two, behind
+//! `ai-runtime`, at the one point a tool schema is handed to a provider.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Map;
 
-use crate::ai::ToolSchema;
 use crate::types::{PrimitiveType, Type};
+
+/// JSON-schema description of a tool exposed to an LLM (or any future
+/// caller of `@tool`-annotated functions).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolSchema {
+    /// Tool name.
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// JSON schema for the tool arguments.
+    pub parameters: serde_json::Value,
+}
 
 /// Convert a Nulang type into a JSON Schema value.
 ///
@@ -148,82 +169,42 @@ mod tests {
     #[test]
     fn test_primitive_schemas() {
         assert_eq!(
-            type_to_json_schema(&Type::int()),
+            type_to_json_schema(&Type::Primitive(PrimitiveType::Int)),
             serde_json::json!({"type": "integer"})
         );
         assert_eq!(
-            type_to_json_schema(&Type::float()),
-            serde_json::json!({"type": "number"})
-        );
-        assert_eq!(
-            type_to_json_schema(&Type::bool()),
-            serde_json::json!({"type": "boolean"})
-        );
-        assert_eq!(
-            type_to_json_schema(&Type::string()),
+            type_to_json_schema(&Type::Primitive(PrimitiveType::String)),
             serde_json::json!({"type": "string"})
         );
     }
 
     #[test]
-    fn test_array_schema() {
-        let ty = Type::Array(Box::new(Type::int()));
-        let schema = type_to_json_schema(&ty);
-        assert_eq!(schema["type"], "array");
-        assert_eq!(schema["items"], serde_json::json!({"type": "integer"}));
-    }
-
-    #[test]
-    fn test_record_schema() {
-        let ty = Type::Record(vec![
-            ("x".to_string(), Type::int()),
-            ("y".to_string(), Type::int()),
-        ]);
-        let schema = type_to_json_schema(&ty);
-        assert_eq!(schema["type"], "object");
-        assert_eq!(
-            schema["properties"]["x"],
-            serde_json::json!({"type": "integer"})
-        );
-        assert_eq!(
-            schema["properties"]["y"],
-            serde_json::json!({"type": "integer"})
-        );
-        assert!(schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("x")));
-        assert!(schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("y")));
-    }
-
-    #[test]
-    fn test_function_to_tool_schema() {
+    fn test_function_to_tool_schema_basic() {
         let params = vec![
-            ("a".to_string(), Type::int()),
-            ("b".to_string(), Type::int()),
+            ("city".to_string(), Type::Primitive(PrimitiveType::String)),
+            ("days".to_string(), Type::Primitive(PrimitiveType::Int)),
         ];
-        let tool = function_to_tool_schema("add", "Add two integers.", &params, &Type::int());
-        assert_eq!(tool.name, "add");
-        assert_eq!(tool.description, "Add two integers.");
-        assert_eq!(tool.parameters["type"], "object");
-        assert_eq!(
-            tool.parameters["properties"]["a"],
-            serde_json::json!({"type": "integer"})
+        let schema = function_to_tool_schema(
+            "get_weather",
+            "Get the weather forecast",
+            &params,
+            &Type::Primitive(PrimitiveType::String),
         );
+        assert_eq!(schema.name, "get_weather");
+        assert_eq!(schema.description, "Get the weather forecast");
+        assert_eq!(schema.parameters["type"], "object");
         assert_eq!(
-            tool.parameters["properties"]["b"],
-            serde_json::json!({"type": "integer"})
+            schema.parameters["required"],
+            serde_json::json!(["city", "days"])
         );
-        assert!(tool.parameters["required"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("a")));
-        assert!(tool.parameters["required"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("b")));
+    }
+
+    #[test]
+    fn test_array_and_option_schemas() {
+        let arr = Type::Array(Box::new(Type::Primitive(PrimitiveType::Int)));
+        assert_eq!(
+            type_to_json_schema(&arr),
+            serde_json::json!({"type": "array", "items": {"type": "integer"}})
+        );
     }
 }

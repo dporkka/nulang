@@ -128,7 +128,7 @@ pub struct ActorDef {
     /// memory-behavior names and implement them directly instead of running
     /// their placeholder bytecode bodies.
     pub is_agent: bool,
-    pub tools: Vec<crate::ai::ToolSchema>,
+    pub tools: Vec<crate::tool_schema::ToolSchema>,
     pub semantic_memory_dimensions: Option<usize>,
     pub procedural_memory_namespace: Option<String>,
     /// Serialized fallback configuration (JSON `Vec<AgentFallbackEntry>`).

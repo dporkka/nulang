@@ -4319,6 +4319,7 @@ match { a: 2, b: 9 } with {
 
     // -- Token budget ---------------------------------------------------
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_token_budget_exhausted_rejects_llm_request() {
         use crate::ai::{LlmErrorKind, LlmRequest, LlmResponse, MockLlmClient, TokenUsage};
@@ -4349,6 +4350,7 @@ match { a: 2, b: 9 } with {
         assert_eq!(result.unwrap_err().kind, LlmErrorKind::BudgetExceeded);
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_token_budget_deducts_after_successful_call() {
         use crate::ai::{LlmRequest, LlmResponse, MockLlmClient, TokenUsage};
@@ -4539,6 +4541,7 @@ match { a: 2, b: 9 } with {
 
     /// Same source and assertions as test_agent_ask_uses_memory (legacy
     /// pipeline), run through the HIR/MIR pipeline instead.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_mir_agent_ask_uses_memory() {
         let source = r#"
@@ -4587,6 +4590,7 @@ match { a: 2, b: 9 } with {
     /// hir::ActorDef, this interception would silently stop firing and the
     /// placeholder `Unit` body would run instead — same source and
     /// assertions as test_agent_semantic_memory_store_and_recall.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_mir_agent_semantic_memory_store_and_recall() {
         let source = r#"
@@ -4623,6 +4627,7 @@ match { a: 2, b: 9 } with {
 
     /// The legacy compiler and the HIR/MIR pipeline must agree on
     /// workflow/agent semantics too.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_mir_and_legacy_workflow_agent_semantics_agree() {
         let corpus: &[&str] = &[
@@ -4837,6 +4842,7 @@ match { a: 2, b: 9 } with {
     }
 
     /// MIR + Runtime + fn main() with LLM.ask.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_mir_fn_main_with_runtime() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
@@ -4849,6 +4855,7 @@ match { a: 2, b: 9 } with {
 
     /// MIR + Runtime + fn main() with Inference.ask (canonical name).
     /// Regression: Inference.ask must work identically to the deprecated LLM.ask.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_mir_fn_main_with_runtime_inference_ask() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
@@ -5900,6 +5907,7 @@ match { a: 2, b: 9 } with {
         assert_eq!(value.as_int(), Some(42));
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_llm_ask_mock_client() {
         let source = r#"perform LLM.ask("hello")"#;
@@ -5925,6 +5933,7 @@ match { a: 2, b: 9 } with {
     // -----------------------------------------------------------------------
 
     /// Native counter handler for the non-blocking LLM ordering test.
+    #[cfg(feature = "ai-runtime")]
     fn llm_test_counter_inc(actor: &mut crate::runtime::Actor, _args: &[Value]) {
         let n = actor
             .get_state_field("count")
@@ -5936,6 +5945,7 @@ match { a: 2, b: 9 } with {
 
     /// `perform Inference.ask` with a mock LLM client must return the response
     /// identically to the deprecated `perform LLM.ask` (RFC 0010 synonym).
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_inference_ask_mock_client() {
         let source = r#"perform Inference.ask("hello")"#;
@@ -5959,6 +5969,7 @@ match { a: 2, b: 9 } with {
     /// A bytecode behavior that performs `LLM.ask` suspends on the scheduler
     /// thread, a background worker completes the HTTP call, and the behavior
     /// resumes with the response written back into the prompt register.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_llm_ask_actor_behavior_suspends_and_resumes() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
@@ -6008,6 +6019,7 @@ match { a: 2, b: 9 } with {
     /// keep running other actors: all counter work completes before the LLM
     /// response is even pumped. Deterministic because completions are only
     /// pumped by run_scheduler, never by manual stepping.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_llm_ask_nonblocking_other_actors_run_first() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
@@ -6105,6 +6117,7 @@ match { a: 2, b: 9 } with {
     /// Two sequential `perform LLM.ask` calls in one behavior: the behavior
     /// suspends and resumes twice, re-capturing VM state on the second
     /// suspend, and observes both responses in order.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_llm_ask_chained_suspensions_resume_in_order() {
         let text_response = |content: &str| crate::ai::LlmResponse {
@@ -6165,6 +6178,7 @@ match { a: 2, b: 9 } with {
     /// flag, returned Pending, and overwrote `suspended_execution`, so the
     /// first completion resumed the SECOND behavior with the FIRST call's
     /// response and the first behavior was lost forever.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_llm_ask_queued_messages_wait_for_suspended_behavior() {
         let text_response = |content: &str| crate::ai::LlmResponse {
@@ -6244,6 +6258,7 @@ match { a: 2, b: 9 } with {
     /// event is appended, and the actor checkpoints.  Previously
     /// resume_suspended_llm_step did none of the workflow bookkeeping, so
     /// the step never advanced from the journal's perspective.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_workflow_llm_ask_step_records_completion() {
         let source = r#"
@@ -6302,6 +6317,7 @@ match { a: 2, b: 9 } with {
     /// step in the journal.  Previously the snapshot carried no marker
     /// (waiting_signal is None for LLM suspends), so recover_actor did not
     /// re-trigger the step and it was silently lost on restart.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_workflow_llm_ask_step_redriven_after_restart() {
         let source = r#"
@@ -6419,6 +6435,7 @@ match { a: 2, b: 9 } with {
     /// the generic error arm and compensated the saga, and with suspension
     /// not enabled for the resume at all, the LLM call blocked the caller
     /// thread instead of suspending.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_workflow_step_signal_wait_then_llm_ask() {
         let source = r#"
@@ -6537,6 +6554,7 @@ match { a: 2, b: 9 } with {
     /// resume_suspended_llm_step, whose chained-suspend arm re-captures the
     /// signal wait with the signal name as marker; the signal then completes
     /// the step through resume_suspended_workflow_step.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_workflow_step_llm_ask_then_signal_wait() {
         let source = r#"
@@ -6619,6 +6637,7 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_agent_ask_uses_memory() {
         let source = r#"
@@ -6669,6 +6688,7 @@ match { a: 2, b: 9 } with {
         assert_eq!(calls[1].messages[3].content, "world");
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_agent_ask_tracks_usage_and_cost() {
         let source = r#"
@@ -6722,6 +6742,7 @@ match { a: 2, b: 9 } with {
         assert_eq!(calls[0].pricing.as_ref().unwrap().output_cost_per_1k, 0.02);
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_agent_usage_behavior() {
         let source = r#"
@@ -6761,6 +6782,7 @@ match { a: 2, b: 9 } with {
         assert!((cost - 0.02).abs() < 1e-9, "cost: {}", cost);
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_agent_semantic_memory_store_and_recall() {
         let source = r#"
@@ -6796,6 +6818,7 @@ match { a: 2, b: 9 } with {
         assert_eq!(memory.documents[0].content, "hello world");
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_agent_workflow_researches_and_reports() {
         // v0.9 milestone: agent researches a topic, uses a tool, stores the
@@ -6896,6 +6919,7 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_agent_workflow_recovers_semantic_memory_after_restart() {
         // v0.9 milestone: after a research agent stores a fact, simulating a
@@ -7006,6 +7030,7 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_agent_procedural_memory_store_and_get_pattern() {
         let source = r#"
@@ -7044,6 +7069,7 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_agent_procedural_memory_add_and_get_examples() {
         let source = r#"
@@ -7082,6 +7108,7 @@ match { a: 2, b: 9 } with {
         assert_eq!(memory.len(), 2);
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_agent_procedural_memory_recovers_after_restart() {
         let source = r#"
@@ -7155,6 +7182,7 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_pipeline_source_end_to_end() {
         let source = r#"
@@ -7210,6 +7238,7 @@ match { a: 2, b: 9 } with {
         assert_eq!(result, "final article");
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_supervisor_source_end_to_end() {
         let source = r#"
@@ -7265,6 +7294,7 @@ match { a: 2, b: 9 } with {
         assert_eq!(result, "final article");
     }
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_debate_source_end_to_end() {
         let source = r#"
@@ -7723,6 +7753,7 @@ match { a: 2, b: 9 } with {
     // LLM fallback & retry pipeline
     // -----------------------------------------------------------------------
 
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_agent_retry_and_fallback_pipeline() {
         use std::cell::RefCell;
@@ -7868,6 +7899,7 @@ match { a: 2, b: 9 } with {
     /// `perform LLM.ask(prompt)` when an LLM client is registered. This is
     /// the longevity path: the language vocabulary references an eternal
     /// "provider" abstraction, not a transient technology.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_provider_ask_llm_equivalent_to_llm_ask() {
         let rt = Rc::new(RefCell::new(Runtime::new()));
@@ -7889,6 +7921,7 @@ match { a: 2, b: 9 } with {
     /// `perform Provider.ask("unknown", ...)` with no matching provider
     /// registration must fall through to an unhandled-effect error (not a
     /// crash, not a silent nil). User-installed handlers can still catch it.
+    #[cfg(feature = "ai-runtime")]
     #[test]
     fn test_provider_ask_unknown_provider_is_unhandled() {
         let rt = Rc::new(RefCell::new(Runtime::new()));

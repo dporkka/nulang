@@ -17,6 +17,19 @@ use crate::ai::{
 };
 use crate::runtime::Runtime;
 
+/// Convert core `ToolSchema` (bytecode/HIR, unconditional) into the
+/// `nulang-ai` wire-format `ToolSchema` used by `LlmRequest.tools`. The two
+/// types are structurally identical but independently defined: `nulang-ai`
+/// has zero dependency on core `nulang`, so core cannot hand it its own
+/// type directly.
+fn to_provider_tool_schema(t: &crate::tool_schema::ToolSchema) -> crate::ai::ToolSchema {
+    crate::ai::ToolSchema {
+        name: t.name.clone(),
+        description: t.description.clone(),
+        parameters: t.parameters.clone(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // LLM client + token budget
 // ---------------------------------------------------------------------------
@@ -237,7 +250,7 @@ pub(crate) fn build_agent_llm_request(
     Some(LlmRequest {
         model,
         messages,
-        tools: module.tools.clone(),
+        tools: module.tools.iter().map(to_provider_tool_schema).collect(),
         memory: Vec::new(),
         pricing: Some(pricing),
         response_format: None,
@@ -317,7 +330,7 @@ pub(crate) fn build_actor_llm_request(
             role: "user".to_string(),
             content: prompt.to_string(),
         }],
-        tools: module.tools.clone(),
+        tools: module.tools.iter().map(to_provider_tool_schema).collect(),
         memory: Vec::new(),
         pricing: None,
         response_format: None,

@@ -226,12 +226,15 @@ pub struct Actor {
     pub backend: ActorBackend,
     /// True while a background worker thread holds an in-flight LLM request
     /// issued by this actor's suspended bytecode behavior.
+    #[cfg(feature = "ai-runtime")]
     pub llm_inflight: bool,
     /// Prompt of the in-flight LLM request, if any (kept for resume
     /// bookkeeping; cleared when the completion is pumped).
+    #[cfg(feature = "ai-runtime")]
     pub llm_pending_prompt: Option<String>,
     /// Completed background LLM result waiting to be consumed when the
     /// suspended behavior re-executes its `LlmAsk` instruction.
+    #[cfg(feature = "ai-runtime")]
     pub llm_completed: Option<Result<crate::ai::LlmResponse, crate::ai::LlmError>>,
     /// State of an in-flight timed selective receive (`receive ... after
     /// ms =>`), from the first suspension until the wait resolves (match,
@@ -327,9 +330,12 @@ impl Actor {
             query_handlers: HashMap::new(),
             is_agent: false,
             backend: ActorBackend::default(),
+            #[cfg(feature = "ai-runtime")]
             llm_inflight: false,
+            #[cfg(feature = "ai-runtime")]
             llm_pending_prompt: None,
             dirty_fields: HashSet::new(),
+            #[cfg(feature = "ai-runtime")]
             llm_completed: None,
             receive_wait: None,
             timer_sleep_fired: false,

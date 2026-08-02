@@ -44,11 +44,6 @@ pub struct LlmState {
     /// `None` after the runtime is dropped (sender half is owned by the
     /// worker thread, which outlives the runtime).
     pub(crate) request_tx: Option<crossbeam::channel::Sender<LlmWorkItem>>,
-
-    /// True while executing a scheduler-driven bytecode behavior, enabling
-    /// non-blocking suspension on `perform LLM.ask`. Nested synchronous entry
-    /// points force it back to false so they keep blocking behavior.
-    pub suspend_enabled: bool,
 }
 
 impl LlmState {
@@ -88,7 +83,6 @@ impl LlmState {
             rx: llm_rx,
             inflight_count: 0,
             request_tx: Some(llm_request_tx),
-            suspend_enabled: false,
         }
     }
 

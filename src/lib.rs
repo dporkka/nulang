@@ -40,6 +40,7 @@ pub mod runtime;
 pub mod stdlib;
 #[cfg(test)]
 pub mod stress_tests;
+pub mod tool_schema;
 pub mod type_ir;
 pub mod type_metadata;
 pub mod typechecker;

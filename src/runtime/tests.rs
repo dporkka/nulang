@@ -2913,6 +2913,7 @@ fn test_workflow_recovery_handles_new_event_variants() {
 // Pipeline Tests
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "ai-runtime")]
 #[test]
 fn test_pipeline_runtime_api() {
     use crate::ai::PipelineRuntime;
