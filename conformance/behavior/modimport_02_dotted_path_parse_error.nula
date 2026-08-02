@@ -1,0 +1,5 @@
+import stdlib.math
+
+fn main() {
+    perform IO.print("hi")
+}

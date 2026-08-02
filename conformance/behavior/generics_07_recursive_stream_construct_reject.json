@@ -1,0 +1,1 @@
+{"exit_code":4,"stdout":"","stderr":"Error: Type error at 9:33: Type mismatch: expected '_[Int], found Nil | Cons (Int, '_[Int])\n  expected type: '_[Int]\n  found type: Nil | Cons (Int, '_[Int])"}

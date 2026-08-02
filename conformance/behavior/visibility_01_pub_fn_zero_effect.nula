@@ -1,0 +1,2 @@
+pub fn exported(x: Int) -> Int { x + 1 }
+perform IO.print(exported(41))

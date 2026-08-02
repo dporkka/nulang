@@ -1,0 +1,8 @@
+class Eq[T] { fn eq(self: T, other: T) -> Bool }
+class Ord[T]: Eq {
+    fn cmp(self: T, other: T) -> Int
+}
+impl Ord Int {
+    fn cmp(self: Int, other: Int) = self - other
+}
+perform IO.print(5.cmp(3))

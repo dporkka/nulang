@@ -1,0 +1,8 @@
+pub type Color = Red | Green
+fn describe(c: Color) -> String {
+    match c {
+        | Red => "red"
+        | Green => "green"
+    }
+}
+perform IO.print(describe(Red))

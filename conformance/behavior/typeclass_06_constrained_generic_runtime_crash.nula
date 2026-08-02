@@ -1,0 +1,9 @@
+class Eq[T] {
+    fn eq(self: T, other: T) -> Bool
+}
+impl Eq Int {
+    fn eq(self: Int, other: Int) = self == other
+}
+fn eq_check[T: Eq](a: T, b: T) -> Bool { a.eq(b) }
+perform IO.print(eq_check(1, 1))
+perform IO.print(eq_check(1, 2))

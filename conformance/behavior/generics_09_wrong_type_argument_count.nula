@@ -1,0 +1,8 @@
+// generics_09 — wrong number of type arguments at a use site is a parse-time
+// error. Real behavior: "Type 'Box' expects 1 type argument(s), got 2".
+type Box[T] = Empty | Full(T)
+
+fn main() {
+    let b: Box[Int, Int] = Full(1)
+    perform IO.print("unreachable")
+}

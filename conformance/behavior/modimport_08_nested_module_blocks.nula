@@ -1,0 +1,12 @@
+// modimport — SPEC2.md §7.7: nested `module` blocks compile. Flattening is
+// recursive: a function inside module Outer { module Inner { ... } } is
+// still reachable unqualified from main, exactly like a top-level fn.
+module Outer {
+    module Inner {
+        fn deep() -> Int { 7 }
+    }
+}
+
+fn main() {
+    perform IO.print("deep=" + perform Int.to_string(deep()))
+}

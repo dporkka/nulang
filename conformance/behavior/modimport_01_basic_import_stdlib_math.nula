@@ -1,0 +1,11 @@
+// modimport — SPEC2.md §7.6 "Imports": plain path import.
+// Real syntax is `import stdlib::math` (path segments joined with `::`),
+// not the SPEC's `import Math`. Imported functions are called unqualified
+// after import.
+import stdlib::math
+
+fn main() {
+    perform IO.print("abs=" + perform Int.to_string(abs(-5)))
+    perform IO.print("fac=" + perform Int.to_string(factorial(5)))
+    perform IO.print("min=" + perform Int.to_string(min(3, 7)))
+}

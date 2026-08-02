@@ -1,0 +1,1 @@
+{"exit_code": 3, "stdout": "", "stderr": "Expected 'state', 'behavior', 'initial', 'version', 'events', 'apply', or 'migration' in actor body, got pub"}

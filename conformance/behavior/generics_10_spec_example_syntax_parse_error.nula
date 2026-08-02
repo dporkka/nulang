@@ -1,0 +1,11 @@
+// generics_10 — the literal §7.8 example signature `fn map[A, B](list:
+// List[A], f: fn(A) -> B) -> List[B]` uses syntax the implementation does
+// not have: `List` is not a known type name (arrays are `[T]`) and function
+// types are written `A -> B`. Real behavior: parse error.
+fn map[A, B](list: List[A], f: fn(A) -> B) -> List[B] {
+    list
+}
+
+fn main() {
+    perform IO.print("unreachable")
+}

@@ -1,0 +1,7 @@
+module Math {
+    fn pi_val() -> Float { 3.14159 }
+}
+
+fn main() {
+    perform IO.print("pi=" + perform Float.to_string(Math.pi_val()))
+}

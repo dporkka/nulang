@@ -1,0 +1,11 @@
+actor Holder {
+    pub state n: Int = 0
+    behavior bump() { self.n = self.n + 1 }
+    behavior get() { self.n }
+}
+fn main() {
+    let h = spawn Holder {}
+    send h bump()
+    let v = ask h get()
+    perform IO.print(v)
+}

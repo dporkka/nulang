@@ -1,0 +1,10 @@
+class Describe[T] {
+    fn describe(self: T) -> String
+}
+impl Describe Int {
+    fn describe(self: Int) = "int"
+}
+impl Describe String {
+    fn describe(self: String) = "str"
+}
+perform IO.print(1.describe())

@@ -1,0 +1,10 @@
+// generics_11 — a generic variant whose payload is a tuple: the typechecker's
+// constructor arity check counts tuple ELEMENTS (expects 2), so passing the
+// single tuple argument `Make((1, 2))` is rejected. Real behavior: type
+// error at the call site.
+type Pair[T] = Make((T, T))
+
+fn main() {
+    let p = Make((1, 2))
+    perform IO.print("unreachable")
+}

@@ -1,0 +1,13 @@
+// generics_04 — a type parameter that appears ONLY in the return type is
+// inferred from the target annotation of the let-binding. A `fail` body
+// never constrains `T`, so both Int and String call sites check and run.
+fn absurd[T]() -> T {
+    fail "boom"
+}
+
+fn main() {
+    let x: Int = absurd()
+    perform IO.print(x)
+    let s: String = absurd()
+    perform IO.print(s)
+}

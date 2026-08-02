@@ -1,0 +1,20 @@
+// generics_02 — SPEC2 §7.8's own example: `fn map[A, B](...)` with two
+// independent type parameters, in the implemented syntax: arrays are
+// `[T]` and function types are `A -> B` (not `List[A]` / `fn(A) -> B`).
+fn map[A, B](xs: [A], f: A -> B) -> [B] {
+    var result: [B] = []
+    for x in xs {
+        result = perform Array.push(result, f(x))
+    }
+    result
+}
+
+fn main() {
+    let ints = map([1, 2, 3], fn(x) { x * 10 })
+    perform IO.print("int0=" + perform Int.to_string(ints[0]))
+    perform IO.print("int1=" + perform Int.to_string(ints[1]))
+    perform IO.print("int2=" + perform Int.to_string(ints[2]))
+    let strs = map([1, 2], fn(x) { "n" + perform Int.to_string(x) })
+    perform IO.print("str0=" + strs[0])
+    perform IO.print("str1=" + strs[1])
+}

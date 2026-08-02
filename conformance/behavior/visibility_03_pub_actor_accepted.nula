@@ -1,0 +1,12 @@
+pub actor Counter {
+    state n: Int = 0
+    behavior inc() { self.n = self.n + 1 }
+    behavior get() { self.n }
+}
+fn main() {
+    let c = spawn Counter {}
+    send c inc()
+    send c inc()
+    let v = ask c get()
+    perform IO.print(v)
+}

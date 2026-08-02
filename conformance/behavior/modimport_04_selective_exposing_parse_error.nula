@@ -1,0 +1,5 @@
+import stdlib::list exposing [map]
+
+fn main() {
+    perform IO.print("hi")
+}

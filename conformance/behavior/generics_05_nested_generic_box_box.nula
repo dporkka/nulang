@@ -1,0 +1,30 @@
+// generics_05 — nested generics: `Box[Box[Int]]` (a generic type applied to
+// another generic type application) and `Box[[Int]]` (generic over an array
+// type) both compile, construct, and pattern-match.
+type Box[T] = Empty | Full(T)
+
+fn unwrap_int(b: Box[Int]) -> Int {
+    match b {
+        | Empty => 0 - 1
+        | Full(x) => x
+    }
+}
+
+fn main() {
+    let nb: Box[Box[Int]] = Full(Full(42))
+    let v = match nb {
+        | Full(inner) => match inner {
+            | Full(x) => x
+            | Empty => 0 - 2
+        }
+        | Empty => 0 - 3
+    }
+    perform IO.print("nested=" + perform Int.to_string(v))
+    perform IO.print("plain=" + perform Int.to_string(unwrap_int(Full(9))))
+    let ab: Box[[Int]] = Full([1, 2, 3])
+    let av = match ab {
+        | Full(xs) => xs[1]
+        | Empty => 0 - 1
+    }
+    perform IO.print("arr=" + perform Int.to_string(av))
+}

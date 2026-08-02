@@ -1,0 +1,1 @@
+{"exit_code":3,"stdout":"","stderr":"Error: Parse error at 1:14: expected `::` in import path; use `::` to separate path segments (not `.`)"}

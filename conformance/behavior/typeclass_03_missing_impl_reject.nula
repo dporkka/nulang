@@ -1,0 +1,4 @@
+class Eq[T] {
+    fn eq(self: T, other: T) -> Bool
+}
+perform IO.print("hello".eq("world"))

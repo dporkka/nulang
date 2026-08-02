@@ -1,0 +1,16 @@
+// modimport — SPEC2.md §7.7 "Module Structure": `module Name { ... }`
+// prefixes its declarations into the flat namespace. Functions inside the
+// block are called UNQUALIFIED from outside (no `Math.` prefix needed);
+// this is the SPEC's own pi_val/circumference example, exercised from main.
+module Math {
+    fn pi_val() -> Float { 3.14159 }
+
+    fn circumference(radius: Float) -> Float {
+        2.0 * pi_val() * radius
+    }
+}
+
+fn main() {
+    perform IO.print("pi=" + perform Float.to_string(pi_val()))
+    perform IO.print("circ=" + perform Float.to_string(circumference(2.0)))
+}
