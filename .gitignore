@@ -1,7 +1,10 @@
 /target
 check_lib
 cargo_check.log
-.claude/
+# Claude Code: personal state is gitignored, but shipped skills/commands are not.
+.claude/*
+!.claude/skills/
+!.claude/commands/
 out.wasm
 
 # Python

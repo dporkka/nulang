@@ -15,6 +15,7 @@
   <a href="https://github.com/dporkka/nulang/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License Apache 2.0"></a>
   <a href="https://github.com/dporkka/nulang/actions"><img src="https://github.com/dporkka/nulang/workflows/CI/badge.svg" alt="CI"></a>
   <a href="https://codecov.io/github/dporkka/nulang"><img src="https://codecov.io/github/dporkka/nulang/graph/badge.svg" alt="Coverage"></a>
+  <a href="https://deepwiki.com/dporkka/nulang"><img src="https://img.shields.io/badge/DeepWiki-docs-blue.svg" alt="DeepWiki"></a>
 </p>
 
 ---
