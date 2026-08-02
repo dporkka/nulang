@@ -61,6 +61,18 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
 fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
     match decl {
         hir::Decl::Function(f) => {
+            if ctx.func_map.contains_key(&f.name) {
+                return Err(compile_err(
+                    format!(
+                        "duplicate function '{}': a function with this name is already \
+                         declared in this module (top-level and `module {{ .. }}` blocks \
+                         share one flat namespace, so nested modules can't disambiguate \
+                         same-named functions -- rename one of them)",
+                        f.name
+                    ),
+                    f.span,
+                ));
+            }
             let idx = ctx.reserve_function(&f.name);
             ctx.func_map.insert(f.name.clone(), idx);
         }

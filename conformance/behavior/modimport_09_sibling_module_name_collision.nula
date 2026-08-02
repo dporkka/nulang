@@ -1,0 +1,12 @@
+module Alpha {
+    fn value() -> Int { 1 }
+}
+
+module Beta {
+    fn value() -> Int { 2 }
+}
+
+fn main() {
+    perform IO.print("a=" + perform Int.to_string(value()))
+    perform IO.print("b=" + perform Int.to_string(value()))
+}
