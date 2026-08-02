@@ -642,18 +642,39 @@ mod tests {
     }
 
     /// Extended differential fuzz (ignored by default — run explicitly or
-    /// from a dedicated CI job): 30,000 iterations with a fixed seed.
+    /// from a dedicated CI job): 30,000 iterations with a fixed seed by
+    /// default. Shardable for a CI matrix via env vars so a scheduled
+    /// nightly job can approach PLAN.md Phase 1 bullet 1's 10^6/day
+    /// target through parallelism rather than one long-running process:
+    /// `NULANG_FUZZ_ITERATIONS` overrides the per-shard iteration count;
+    /// `NULANG_FUZZ_SHARD_ID` (default 0) perturbs the seed so shards
+    /// don't all fuzz the identical sequence. Both are no-ops for the
+    /// default local `cargo test -- --ignored` invocation.
     #[test]
     #[ignore]
     fn fuzz_differential_extended() {
+        let iterations: usize = std::env::var("NULANG_FUZZ_ITERATIONS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30_000);
+        let shard_id: u64 = std::env::var("NULANG_FUZZ_SHARD_ID")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
         let corpus = seed_corpus();
-        let mut rng = XorShift64(0xD1FF_5EED_0000_0002);
+        // Base seed XORed with the shard id (odd constant to avoid
+        // collapsing xorshift64's state to zero for shard 0 on some
+        // platforms — 0 XORs to the base seed unchanged, any other shard
+        // gets a distinctly different starting state).
+        let mut rng =
+            XorShift64(0xD1FF_5EED_0000_0002 ^ (shard_id.wrapping_mul(0x9E37_79B9_7F4A_7C15)));
         let mut divergence_count = 0usize;
         let mut compiled = 0usize;
         let mut aot_agreed = 0usize;
         let mut uncomparable = 0usize;
 
-        for _ in 0..30_000 {
+        for _ in 0..iterations {
             let seed = corpus[rng.index(&corpus)];
             let mutant = mutate(&mut rng, seed, &corpus);
             match differential_fuzz_one(&mutant) {

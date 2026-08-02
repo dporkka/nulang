@@ -1,0 +1,60 @@
+name: Fuzz (nightly)
+
+# PLAN.md Phase 1 bullet 1: differential fuzzing at 10^6 iterations/day in
+# CI nightly. A single sequential run of that scale doesn't fit a normal
+# job comfortably, so this shards across a matrix: 10 shards x 100,000
+# iterations = 1,000,000 total, each shard seeded distinctly (see
+# NULANG_FUZZ_SHARD_ID handling in src/fuzz.rs::fuzz_differential_extended)
+# so they cover different mutant sequences rather than duplicating work.
+#
+# Kill criteria (PLAN.md Phase 1): any divergence found here is a Sev-1 if
+# it touches Frozen-tier surface (bytecode/value-layout/wire-format
+# semantics) -- this job fails loudly (test panic -> non-zero exit) rather
+# than silently logging, precisely so that can't be missed.
+
+on:
+  schedule:
+    # 03:00 UTC daily -- off-peak, doesn't compete with interactive CI runs.
+    - cron: "0 3 * * *"
+  workflow_dispatch: {} # allow manual runs for investigation
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz-shard:
+    name: Differential fuzz shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # one shard's divergence shouldn't hide another's
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-shard-${{ matrix.shard }}
+
+      - name: Run differential fuzz shard
+        env:
+          NULANG_FUZZ_ITERATIONS: "100000"
+          NULANG_FUZZ_SHARD_ID: ${{ matrix.shard }}
+        run: cargo test --lib fuzz_differential_extended -- --ignored --nocapture
+
+      - name: Upload divergence log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-divergence-shard-${{ matrix.shard }}
+          path: |
+            /tmp/*.log
+          if-no-files-found: ignore
+          retention-days: 30
