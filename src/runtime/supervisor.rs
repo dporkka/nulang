@@ -379,6 +379,34 @@ impl Supervisor {
             let _ = runtime.persistence.clear(old_actor_id);
         }
 
+        // If the dead child was itself a supervisor, recreate its
+        // `Supervisor` struct under the new actor id. Without this, a
+        // supervised supervisor loses all supervision of its own children
+        // after one restart: its old struct stays keyed by a dead actor id
+        // and every `Otp.*` op on the new id silently no-ops.
+        if runtime.supervisors.contains_key(&old_actor_id) {
+            let old_sup = runtime
+                .supervisors
+                .remove(&old_actor_id)
+                .expect("supervisor presence checked above");
+            // Re-point surviving children's parent links at the new id so
+            // their exits keep routing to a live supervisor.
+            for (_, child_id) in &old_sup.children {
+                if let Some(child) = runtime.actors.get_mut(child_id) {
+                    if child.parent == Some(old_actor_id) {
+                        child.parent = Some(new_id);
+                    }
+                }
+            }
+            let mut new_sup = Supervisor::new(new_id, old_sup.name.clone(), old_sup.strategy);
+            new_sup.children = old_sup.children;
+            new_sup.restart_history = old_sup.restart_history;
+            new_sup.parent = old_sup.parent;
+            new_sup.template = old_sup.template;
+            new_sup.next_dynamic_id = old_sup.next_dynamic_id;
+            runtime.supervisors.insert(new_id, new_sup);
+        }
+
         runtime.scheduler.enqueue(new_id);
         Some(new_id)
     }
@@ -483,6 +511,16 @@ impl Supervisor {
                 Some(s) => s,
                 None => continue,
             };
+            // Only the triggering child's rate limit was checked by the
+            // caller (`handle_exit`). Each sibling must pass its own policy
+            // and rate limit before being rebuilt, or a OneForAll group can
+            // restart-loop forever even though every child's limits are
+            // individually exhausted.
+            if old_id != exited_id && !self.should_restart(old_id, spec.restart_policy, reason) {
+                runtime.reap_living_actor(old_id, reason.clone());
+                self.remove_child(old_id);
+                continue;
+            }
             if old_id == exited_id {
                 self.reap_exited_child(old_id, runtime);
             } else {
@@ -517,6 +555,14 @@ impl Supervisor {
             .map(|(spec, id)| (spec.clone(), *id))
             .collect();
         for (spec, old_id) in to_restart {
+            // Same per-sibling rate-limit discipline as `restart_all`: a
+            // sibling whose own policy forbids it or whose MaxR/MaxT is
+            // exhausted is stopped and dropped, not rebuilt.
+            if old_id != actor_id && !self.should_restart(old_id, spec.restart_policy, reason) {
+                runtime.reap_living_actor(old_id, reason.clone());
+                self.remove_child(old_id);
+                continue;
+            }
             if old_id == actor_id {
                 self.reap_exited_child(old_id, runtime);
             } else {

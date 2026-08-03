@@ -228,6 +228,168 @@ fn test_supervisor_escalate_to_parent() {
     rt.exit_actor(gc2, ExitReason::Error("boom2".to_string()));
 }
 
+/// Regression (Phase 5 deliverable 9): restarting a supervisor actor must
+/// recreate its `Supervisor` struct under the new actor id — a supervised
+/// supervisor that loses its struct stops supervising its own children.
+#[test]
+fn test_supervised_supervisor_keeps_supervising_after_restart() {
+    let mut rt = Runtime::new();
+    let parent = rt.create_supervisor("parent", RestartStrategy::OneForOne);
+    let child_sup = rt.create_supervisor("child", RestartStrategy::OneForOne);
+    rt.supervise_child(
+        parent,
+        ChildSpec::new("child_sup", RestartPolicy::Permanent),
+        child_sup,
+    );
+    let grandchild = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(
+        child_sup,
+        ChildSpec::new("gc", RestartPolicy::Permanent),
+        grandchild,
+    );
+    rt.supervisors.get_mut(&child_sup).unwrap().parent = Some(parent);
+
+    // Crash the child supervisor's actor: the parent restarts it under a
+    // fresh actor id.
+    rt.exit_actor(child_sup, ExitReason::Error("sup crashed".to_string()));
+    let new_sup_id = rt.supervisors[&parent].children[0].1;
+    assert_ne!(new_sup_id, child_sup, "supervisor actor must be rebuilt");
+
+    // The Supervisor struct must follow the actor to its new id, still
+    // supervising the grandchild.
+    assert!(
+        rt.supervisors.contains_key(&new_sup_id),
+        "restarted supervisor must have a live Supervisor struct"
+    );
+    assert!(
+        !rt.supervisors.contains_key(&child_sup),
+        "the old supervisor struct must not linger under a dead actor id"
+    );
+    let gc_id = rt.supervisors[&new_sup_id].children[0].1;
+    assert_eq!(
+        rt.actors.get(&gc_id).unwrap().parent,
+        Some(new_sup_id),
+        "grandchild must be re-pointed at the new supervisor id"
+    );
+
+    // Supervision must actually work through the recreated struct: a
+    // grandchild crash restarts it.
+    rt.exit_actor(gc_id, ExitReason::Error("boom".to_string()));
+    let new_gc = rt.supervisors[&new_sup_id].children[0].1;
+    assert_ne!(
+        new_gc, gc_id,
+        "grandchild must be restarted by the recreated supervisor"
+    );
+}
+
+/// Regression (Phase 5 deliverable 10): a OneForAll restart must respect
+/// each sibling's own restart intensity. A sibling whose MaxR is exhausted
+/// must be dropped, not rebuilt — otherwise the group can restart-loop
+/// forever even though every child's limits are individually respected.
+#[test]
+fn test_one_for_all_respects_sibling_rate_limit() {
+    let mut rt = Runtime::new();
+    let sup_id = rt.create_supervisor("sup", RestartStrategy::OneForAll);
+    let trigger = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(
+        sup_id,
+        ChildSpec::new("trigger", RestartPolicy::Permanent),
+        trigger,
+    );
+    let fragile = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(
+        sup_id,
+        ChildSpec::new("fragile", RestartPolicy::Permanent).with_limits(1, 60),
+        fragile,
+    );
+    let sibling = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(
+        sup_id,
+        ChildSpec::new("sibling", RestartPolicy::Permanent),
+        sibling,
+    );
+
+    // Crash 1: the OneForAll cascade rebuilds every child, recording
+    // fragile's first (and only permitted) restart.
+    rt.exit_actor(trigger, ExitReason::Error("crash1".to_string()));
+    assert_eq!(rt.supervisors[&sup_id].child_count(), 3);
+
+    // Crash 2: the cascade must NOT rebuild fragile again — its MaxR of 1
+    // is exhausted. It is stopped and dropped from supervision instead.
+    let trigger2 = rt.supervisors[&sup_id]
+        .children
+        .iter()
+        .find(|(s, _)| s.id == "trigger")
+        .unwrap()
+        .1;
+    rt.exit_actor(trigger2, ExitReason::Error("crash2".to_string()));
+    assert_eq!(
+        rt.supervisors[&sup_id].child_count(),
+        2,
+        "the rate-limited sibling must be dropped, not rebuilt"
+    );
+    assert!(
+        rt.supervisors[&sup_id]
+            .children
+            .iter()
+            .all(|(s, _)| s.id != "fragile"),
+        "the rate-limited sibling must be gone from supervision"
+    );
+}
+
+/// Regression (Phase 5 deliverable 10, RestForOne variant): same per-sibling
+/// rate-limit discipline in the restart-from cascade.
+#[test]
+fn test_rest_for_one_respects_sibling_rate_limit() {
+    let mut rt = Runtime::new();
+    let sup_id = rt.create_supervisor("sup", RestartStrategy::RestForOne);
+    let trigger = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(
+        sup_id,
+        ChildSpec::new("trigger", RestartPolicy::Permanent),
+        trigger,
+    );
+    let fragile = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(
+        sup_id,
+        ChildSpec::new("fragile", RestartPolicy::Permanent).with_limits(1, 60),
+        fragile,
+    );
+    let sibling = rt.spawn_actor(Box::new(|| vec![]));
+    rt.supervise_child(
+        sup_id,
+        ChildSpec::new("sibling", RestartPolicy::Permanent),
+        sibling,
+    );
+
+    // Crash fragile: RestForOne restarts fragile and everything after it,
+    // recording fragile's only permitted restart.
+    rt.exit_actor(fragile, ExitReason::Error("crash1".to_string()));
+    assert_eq!(rt.supervisors[&sup_id].child_count(), 3);
+
+    // Crash trigger: the cascade (trigger, fragile, sibling) must not
+    // rebuild fragile again.
+    let trigger2 = rt.supervisors[&sup_id]
+        .children
+        .iter()
+        .find(|(s, _)| s.id == "trigger")
+        .unwrap()
+        .1;
+    rt.exit_actor(trigger2, ExitReason::Error("crash2".to_string()));
+    assert_eq!(
+        rt.supervisors[&sup_id].child_count(),
+        2,
+        "the rate-limited sibling must be dropped, not rebuilt"
+    );
+    assert!(
+        rt.supervisors[&sup_id]
+            .children
+            .iter()
+            .all(|(s, _)| s.id != "fragile"),
+        "the rate-limited sibling must be gone from supervision"
+    );
+}
+
 #[test]
 fn test_temporary_child_not_restarted() {
     let mut rt = Runtime::new();
