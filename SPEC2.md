@@ -2638,6 +2638,24 @@ documentation gap only; see `RFC/` for the tracking item once filed.
 
 ## 12.6 Fault Tolerance
 
+**Implementation status: the first two bullets below do not exist.**
+"Actor migration on node failure" is aspirational on both halves: node
+failure triggers no migration (there is no node-death-triggered logic
+anywhere in the distributed runtime — `distribution.rs`/`distributed.rs`
+have zero failover/rehome logic), and actor migration itself is a complete
+no-op stub even when triggered manually (`OpCode::Migrate` records a
+pending migration that nothing ever drains, `src/vm.rs:4349-4360`;
+`DistributedVmCallbacks::migrate` is `fn migrate(&mut self, _actor_id:
+u64, _target_node_id: u64) {}`, `src/runtime/callbacks.rs:1526`). "Message
+buffering for failed-node actors" also does not exist: messages to an
+unhealthy or unknown node's actors are dropped with a failure
+notification, not buffered for later delivery. The third and fourth
+bullets are real: CRDT healing is accurate per §12.5's own caveat, and
+supervision-based recovery (§8.8) is real but node-local only — a
+supervisor cannot detect or react to the failure of a node hosting one of
+its remote children. Tracked as a real implementation gap in `PLAN.md`'s
+Phase 5 (Distributed Systems Excellence).
+
 - Actor migration on node failure
 - Message buffering for failed-node actors
 - CRDT healing on node rejoin (Rust-embedder `CrdtManager` API only — see §12.5's implementation-status note; not yet reachable from `state crdt` fields)
