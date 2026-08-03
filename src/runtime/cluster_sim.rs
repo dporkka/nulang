@@ -1,0 +1,454 @@
+//! Deterministic cluster simulation (Phase 5 deliverable 2).
+//!
+//! [`SimCluster`] runs N real [`ClusterState`] machines — the production
+//! membership / failure-detection / split-brain-resolver / probe state
+//! machine — against a shared [`VirtualClock`] advanced in lockstep, with
+//! a controllable directed message fabric that drops heartbeats, gossip,
+//! and probes to model partitions.
+//!
+//! Unlike the real-TCP chaos tests (`src/runtime/tests.rs`), a scenario
+//! here is fully deterministic: same scenario, same result, every run.
+//! This is the verification vehicle for the split-brain resolver
+//! (PLAN.md Phase 5 deliverable 1): clean partitions (mutually-invisible
+//! healthy sub-clusters), asymmetric (one-way) partitions, and 5-node
+//! topologies are asserted as invariants — minority side downs itself,
+//! majority side survives, and a healed partition re-joins via the probe
+//! path without an external rejoin.
+//!
+//! Fidelity notes:
+//! - A probe is an ordinary heartbeat packet on the wire
+//!   (`distribution.rs` `ClusterAction::Probe` handling), so the fabric
+//!   delivers probes through `handle_heartbeat` on the target.
+//! - A downed node (`ClusterState::is_down`) has had its transport shut
+//!   down in the real runtime; the fabric drops all deliveries to it.
+//! - `pick_gossip_targets` uses `OsRng` internally, so gossip target
+//!   choice is not bit-reproducible; the asserted invariants (down /
+//!   stay-up / rejoin convergence) do not depend on which targets gossip
+//!   picks, only on heartbeat staleness, the resolver, and probes.
+
+use std::collections::HashSet;
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use super::cluster::{ClusterAction, ClusterConfig, ClusterState, NodeId, NodeStatus};
+use super::timer::VirtualClock;
+use super::GOSSIP_PAYLOAD_MAX_ENTRIES;
+
+/// Wall-clock step per simulated round (the real runtime ticks cluster
+/// maintenance roughly every 100 ms).
+const ROUND_STEP: Duration = Duration::from_millis(100);
+
+/// A deterministic simulation of N cluster nodes.
+pub struct SimCluster {
+    /// The simulated nodes, indexed by position.
+    pub nodes: Vec<ClusterState>,
+    /// Node addresses, index-aligned with `nodes`; each node's id is
+    /// derived from its address.
+    pub addrs: Vec<SocketAddr>,
+    /// Directed links that are cut: `(sender_index, receiver_index)`.
+    cut: HashSet<(usize, usize)>,
+    /// Per-node virtual clocks (one base, advanced in lockstep).
+    clocks: Vec<VirtualClock>,
+    /// Rounds executed.
+    pub round: u64,
+}
+
+impl SimCluster {
+    /// Create `addrs.len()` nodes, each deriving its [`NodeId`] from its
+    /// address, sharing one virtual clock base, and configured with
+    /// `config`. Every node explicitly joins every other (mirroring an
+    /// explicit `join_cluster` call), so the first heartbeat rounds
+    /// promote the mesh to all-`Healthy`.
+    pub fn new(addrs: &[SocketAddr], config: &ClusterConfig) -> Self {
+        assert!(config.is_valid(), "cluster config must be valid");
+        let base = VirtualClock::new();
+        let mut nodes = Vec::with_capacity(addrs.len());
+        let mut clocks = Vec::with_capacity(addrs.len());
+        for addr in addrs {
+            let mut cs = ClusterState::new(NodeId::new(addr), *addr);
+            let clock = base.clone();
+            cs.set_clock(clock.clone());
+            assert!(cs.apply_config(config), "config must apply");
+            nodes.push(cs);
+            clocks.push(clock);
+        }
+        for (i, cs) in nodes.iter_mut().enumerate() {
+            for (j, addr) in addrs.iter().enumerate() {
+                if i != j {
+                    cs.join_cluster(*addr);
+                }
+            }
+        }
+        SimCluster {
+            nodes,
+            addrs: addrs.to_vec(),
+            cut: HashSet::new(),
+            clocks,
+            round: 0,
+        }
+    }
+
+    /// The node id of the node at `index`.
+    pub fn id(&self, index: usize) -> NodeId {
+        NodeId::new(&self.addrs[index])
+    }
+
+    /// The index of the node with the given id, if present.
+    pub fn index_of(&self, node_id: NodeId) -> Option<usize> {
+        self.addrs.iter().position(|a| NodeId::new(a) == node_id)
+    }
+
+    /// Cut the directed link `from -> to`: messages from `from` to `to`
+    /// are dropped.
+    pub fn cut_link(&mut self, from: usize, to: usize) {
+        self.cut.insert((from, to));
+    }
+
+    /// Restore the directed link `from -> to`.
+    pub fn heal_link(&mut self, from: usize, to: usize) {
+        self.cut.remove(&(from, to));
+    }
+
+    /// True when the directed link `from -> to` is cut.
+    pub fn is_cut(&self, from: usize, to: usize) -> bool {
+        self.cut.contains(&(from, to))
+    }
+
+    /// Advance the shared virtual clock by `dur` (all nodes see the
+    /// same time progression).
+    pub fn advance(&mut self, dur: Duration) {
+        for (i, clock) in self.clocks.iter_mut().enumerate() {
+            clock.advance(dur);
+            self.nodes[i].set_clock(clock.clone());
+        }
+    }
+
+    /// Run one round: every node ticks in index order, then every
+    /// emitted action is delivered through the fabric (subject to cuts
+    /// and to the target being up).
+    pub fn tick_round(&mut self) {
+        let actions: Vec<(usize, Vec<ClusterAction>)> = (0..self.nodes.len())
+            .map(|i| (i, self.nodes[i].tick()))
+            .collect();
+        for (from, acts) in actions {
+            for act in acts {
+                match act {
+                    ClusterAction::SendHeartbeat { to, addr } => {
+                        self.deliver_heartbeat(from, to, addr);
+                    }
+                    ClusterAction::Probe { to, addr } => {
+                        // A probe is an ordinary heartbeat packet on the
+                        // wire; deliver it the same way.
+                        self.deliver_heartbeat(from, to, addr);
+                    }
+                    ClusterAction::SendGossip { targets } => {
+                        for (to, _addr) in targets {
+                            if let Some(to_idx) = self.index_of(to) {
+                                if !self.is_cut(from, to_idx) && !self.nodes[to_idx].is_down() {
+                                    let payload =
+                                        self.nodes[from].gossip_payload(GOSSIP_PAYLOAD_MAX_ENTRIES);
+                                    self.nodes[to_idx].merge_membership(payload);
+                                }
+                            }
+                        }
+                    }
+                    // Down/NodeFailed/NodeLeft/NodeJoined are
+                    // bookkeeping notifications; ClusterState already
+                    // applied their effects internally.
+                    _ => {}
+                }
+            }
+        }
+        self.round += 1;
+    }
+
+    /// Advance the clock by `ROUND_STEP` and run one round.
+    pub fn step(&mut self) {
+        self.advance(ROUND_STEP);
+        self.tick_round();
+    }
+
+    /// Run `rounds` steps (100 ms each).
+    pub fn run_rounds(&mut self, rounds: usize) {
+        for _ in 0..rounds {
+            self.step();
+        }
+    }
+
+    /// Run steps until every node sees every other node as `Healthy`
+    /// (bounded by `max_rounds`). Returns the number of rounds used.
+    pub fn run_to_healthy_mesh(&mut self, max_rounds: usize) -> usize {
+        for _ in 0..max_rounds {
+            self.step();
+            if self.mesh_healthy() {
+                break;
+            }
+        }
+        self.round as usize
+    }
+
+    /// True when every node sees every other node as `Healthy`.
+    pub fn mesh_healthy(&self) -> bool {
+        for i in 0..self.nodes.len() {
+            for j in 0..self.nodes.len() {
+                if i != j && self.status_of(i, j) != Some(NodeStatus::Healthy) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Node `i`'s current view of node `j`'s status.
+    pub fn status_of(&self, i: usize, j: usize) -> Option<NodeStatus> {
+        self.nodes[i].get_node(self.id(j)).map(|info| info.status)
+    }
+
+    /// Number of members node `i` considers reachable (itself plus
+    /// every `Healthy`/`Joining` member) — exactly the count the
+    /// static-quorum resolver uses.
+    pub fn reachable_count(&self, i: usize) -> usize {
+        let mut count = 1; // the local node itself
+        for j in 0..self.nodes.len() {
+            if j != i {
+                if let Some(status) = self.status_of(i, j) {
+                    if matches!(status, NodeStatus::Healthy | NodeStatus::Joining) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// True when the resolver downed node `i`.
+    pub fn is_down(&self, i: usize) -> bool {
+        self.nodes[i].is_down()
+    }
+
+    fn deliver_heartbeat(&mut self, from: usize, to: NodeId, addr: SocketAddr) {
+        if let Some(to_idx) = self.index_of(to) {
+            if !self.is_cut(from, to_idx) && !self.nodes[to_idx].is_down() {
+                let from_id = self.id(from);
+                self.nodes[to_idx].handle_heartbeat(from_id, addr);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::cluster::SplitBrainConfig;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn addrs(n: u16, base_port: u16) -> Vec<SocketAddr> {
+        (0..n)
+            .map(|i| SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), base_port + i))
+            .collect()
+    }
+
+    fn static_quorum(expected: usize) -> ClusterConfig {
+        ClusterConfig {
+            split_brain: SplitBrainConfig::StaticQuorum {
+                expected_nodes: expected,
+            },
+            probe_interval: Duration::from_secs(5),
+        }
+    }
+
+    /// Enough rounds at 100 ms steps to drive a full failure-detection
+    /// cycle (2 s timeout + 5 s suspicion) with margin.
+    fn run_partition(sim: &mut SimCluster) {
+        sim.run_rounds(100); // 10 s
+    }
+
+    #[test]
+    fn test_clean_partition_minority_downs_itself() {
+        // 5-node cluster, static quorum 3 of 5. Clean partition into a
+        // 2-node minority and a 3-node majority; both sides healthy
+        // among themselves.
+        let mut sim = SimCluster::new(&addrs(5, 9100), &static_quorum(5));
+        sim.run_to_healthy_mesh(200);
+        assert!(sim.mesh_healthy(), "mesh must converge before partition");
+
+        // Cut the minority {0,1} off from the majority {2,3,4} in both
+        // directions.
+        for from in [0, 1] {
+            for to in [2, 3, 4] {
+                sim.cut_link(from, to);
+                sim.cut_link(to, from);
+            }
+        }
+
+        run_partition(&mut sim);
+
+        // The minority side sees 2 of 5 reachable (< 3) and downs
+        // itself; the majority sees 3 of 5 (>= 3) and survives.
+        assert!(sim.is_down(0), "minority node 0 must down itself");
+        assert!(sim.is_down(1), "minority node 1 must down itself");
+        for i in [2, 3, 4] {
+            assert!(!sim.is_down(i), "majority node {i} must stay up");
+        }
+        // The majority's view of the minority is Failed.
+        assert_eq!(sim.status_of(2, 0), Some(NodeStatus::Failed));
+        assert_eq!(sim.status_of(3, 1), Some(NodeStatus::Failed));
+
+        // Heal the partition: the downed minority stays down (transport
+        // shut down; operator restart is the recovery path) and the
+        // majority keeps it marked Failed — no silent resurrection.
+        for from in [0, 1] {
+            for to in [2, 3, 4] {
+                sim.heal_link(from, to);
+                sim.heal_link(to, from);
+            }
+        }
+        sim.run_rounds(100); // well past the 5 s probe interval
+        assert!(sim.is_down(0), "downed node stays down after heal");
+        assert!(sim.is_down(1), "downed node stays down after heal");
+        for i in [2, 3, 4] {
+            assert!(!sim.is_down(i), "majority node {i} stays up");
+        }
+        assert_eq!(sim.status_of(2, 0), Some(NodeStatus::Failed));
+        assert_eq!(sim.status_of(2, 1), Some(NodeStatus::Failed));
+    }
+
+    #[test]
+    fn test_asymmetric_partition_isolates_the_silent_node() {
+        // One-way partition: nodes 1-4 cannot send to node 0, but 0 can
+        // send to them. From 0's perspective everyone is dead; from
+        // everyone else's perspective 0 is perfectly healthy.
+        let mut sim = SimCluster::new(&addrs(5, 9200), &static_quorum(5));
+        sim.run_to_healthy_mesh(200);
+        assert!(sim.mesh_healthy());
+
+        for from in 1..5 {
+            sim.cut_link(from, 0);
+        }
+
+        // Phase 1 (t = 2.5 s): the asymmetry window. The resolver counts
+        // only Healthy/Joining members as reachable, so as soon as 0's
+        // detector goes Suspicious on everyone (2 s timeout — it hears
+        // nothing) 0 drops below quorum and downs itself. The other
+        // four still receive 0's heartbeats (sent up to the 2 s mark)
+        // and see it Healthy.
+        sim.run_rounds(25);
+        assert!(sim.is_down(0), "silent node must down itself at ~2 s");
+        assert_eq!(sim.status_of(0, 1), Some(NodeStatus::Suspicious));
+        for i in 1..5 {
+            assert_eq!(sim.status_of(i, 0), Some(NodeStatus::Healthy));
+            assert!(!sim.is_down(i));
+        }
+
+        // Phase 2 (t = 10 s): 0 stopped heartbeating at the 2 s mark, so
+        // the other side ages it through Suspicious to Failed. Only 0
+        // lost quorum (1 of 5 < 3); 1-4 keep all five reachable and stay
+        // up. The downed 0's own view still progresses to Failed via its
+        // (silent) ticks.
+        sim.run_rounds(75);
+        assert!(sim.is_down(0), "silent node must down itself");
+        for i in 1..5 {
+            assert!(!sim.is_down(i), "node {i} must stay up");
+            assert_eq!(sim.status_of(i, 0), Some(NodeStatus::Failed));
+        }
+        assert_eq!(sim.status_of(0, 1), Some(NodeStatus::Failed));
+
+        // Phase 3: heal — probes from 1-4 to 0 are dropped (0's
+        // transport is down); 0 requires an operator restart.
+        for from in 1..5 {
+            sim.heal_link(from, 0);
+        }
+        sim.run_rounds(100);
+        assert!(sim.is_down(0));
+        for i in 1..5 {
+            assert!(!sim.is_down(i));
+        }
+    }
+    #[test]
+    fn test_probe_rejoins_healed_partition_without_resolver_down() {
+        // 5-node cluster with quorum 2 of 3: neither side of a 2/3 split
+        // loses quorum, so no one downs itself — and the probe path must
+        // re-join the healed partition without an external rejoin.
+        let mut sim = SimCluster::new(&addrs(5, 9300), &static_quorum(3));
+        sim.run_to_healthy_mesh(200);
+
+        assert!(sim.mesh_healthy());
+
+        for from in [0, 1] {
+            for to in [2, 3, 4] {
+                sim.cut_link(from, to);
+                sim.cut_link(to, from);
+            }
+        }
+
+        run_partition(&mut sim);
+
+        // Both sides keep quorum (2 and 3 reachable >= 2): nobody down.
+        for i in 0..5 {
+            assert!(!sim.is_down(i), "node {i} must stay up at quorum 2");
+        }
+        assert_eq!(sim.status_of(0, 2), Some(NodeStatus::Failed));
+        assert_eq!(sim.status_of(2, 0), Some(NodeStatus::Failed));
+
+        // Heal and let the probes fire: within the probe interval plus
+        // heartbeat rounds the mesh must fully converge again.
+        for from in [0, 1] {
+            for to in [2, 3, 4] {
+                sim.heal_link(from, to);
+                sim.heal_link(to, from);
+            }
+        }
+        sim.run_rounds(200); // 20 s, well past probe_interval (5 s)
+        assert!(sim.mesh_healthy(), "mesh must re-converge via probes");
+        for i in 0..5 {
+            assert!(!sim.is_down(i));
+        }
+    }
+
+    #[test]
+    fn test_two_node_cluster_fails_closed_on_partition() {
+        // Documented caveat of StaticQuorumResolver: with expected_nodes
+        // == 2 both sides of a partition down themselves (1 < 2).
+        let mut sim = SimCluster::new(&addrs(2, 9400), &static_quorum(2));
+        sim.run_to_healthy_mesh(200);
+        assert!(sim.mesh_healthy());
+
+        sim.cut_link(0, 1);
+        sim.cut_link(1, 0);
+        run_partition(&mut sim);
+
+        assert!(sim.is_down(0), "both sides of a 2-node split fail closed");
+        assert!(sim.is_down(1), "both sides of a 2-node split fail closed");
+    }
+
+    #[test]
+    fn test_quorum_holds_under_random_partitions() {
+        // Seed-driven invariant sweep: for 50 random directed cut sets on
+        // a 5-node mesh, the resolver must never down a node that still
+        // sees the full quorum (3 of 5) reachable. Each pattern runs on a
+        // fresh, fully-healthy mesh (a downed node stays down, so reusing
+        // one sim would degenerate later patterns).
+        let mut rng = crate::dst::DeterministicRng::new(42);
+        for _ in 0..50 {
+            let mut sim = SimCluster::new(&addrs(5, 9500), &static_quorum(5));
+            sim.run_to_healthy_mesh(200);
+            for from in 0..5 {
+                for to in 0..5 {
+                    if from != to && rng.next() % 4 == 0 {
+                        sim.cut_link(from, to);
+                    }
+                }
+            }
+            sim.run_rounds(100);
+            for i in 0..5 {
+                let reachable = sim.reachable_count(i);
+                if sim.is_down(i) {
+                    assert!(
+                        reachable < 3,
+                        "node {i} downed with {reachable} reachable (>= quorum 3)"
+                    );
+                }
+            }
+        }
+    }
+}

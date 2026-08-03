@@ -47,6 +47,9 @@ mod timer;
 mod workflow;
 
 #[cfg(test)]
+mod cluster_sim;
+
+#[cfg(test)]
 mod tests;
 
 pub use actor::*;

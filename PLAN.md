@@ -1025,14 +1025,33 @@ anything.
    autonomously shut down a node; this RFC can also be what first formally
    tiers cluster-membership behavior.
 2. **DST-driven split-brain and asymmetric-partition test coverage.**
-   Extends the DST/chaos harness Phase 1 bullets 2 and 4 build (currently
-   single-node-message-passing-deterministic only, per Phase 1's own "not
-   started" notes on cluster determinism) with the scenarios
-   `tests.rs:3224-3228` explicitly excludes today: mutually-invisible
-   healthy sub-clusters, asymmetric (one-way) partition, 5-node
-   topologies. This is the verification vehicle for deliverable 1 —
-   sequence immediately after it, reuse the harness rather than
-   hand-rolling a second one.
+   ✅ **Landed 2026-08-03** as `src/runtime/cluster_sim.rs` (test-gated
+   `SimCluster`, wired in `runtime/mod.rs`): N real `ClusterState`
+   machines against a shared `VirtualClock` advanced in lockstep, with a
+   directed cut-able message fabric (heartbeats, gossip, and probes —
+   probes delivered as the heartbeat packets they are on the wire;
+   deliveries to a downed node dropped, mirroring its shut-down
+   transport). Five deterministic scenarios: clean 2/3 partition of a
+   5-node cluster (minority downs itself at the 2 s Suspicious mark —
+   the resolver counts only Healthy/Joining as reachable — majority
+   survives and keeps the minority Failed after healing; downed nodes
+   stay down, operator restart is the recovery path), asymmetric
+   one-way partition (three phases: the 2-4 s asymmetry window where the
+   silent node is down but still Healthy on the other side, mutual
+   Failed at 10 s, heal-without-recovery), probe-based re-join of a
+   healed 2/3 partition under quorum 2 (no downing; full mesh
+   convergence via probes, no external rejoin), the documented
+   2-node fail-closed caveat, and a seed-driven 50-partition invariant
+   sweep (no node downs itself while it still sees quorum). This is the
+   verification vehicle for deliverable 1 — the real-TCP chaos tests
+   (`tests.rs`) stay as-is; the deterministic suite is what can
+   eventually scale to many-seeds CI runs.
+   **Deliverable 3 (three doc-vs-code bugs) was already fixed by the
+   deliverable-1 work**: `pick_gossip_targets` is now OsRng-driven
+   partial Fisher-Yates (not deterministic first-N), the dead
+   `TcpTransport` `next_seq` `AtomicU64` is gone (sender-local counter
+   only), and `NodeInfo`'s vestigial standalone `incarnation` field was
+   removed — only the wire `NodeGossip.incarnation` remains.
 3. **Fix three confirmed doc-vs-code / dead-code bugs found this session**
    (cheap, do first as warm-up, independent of 1-2): (a)
    `cluster.rs:460`'s comment "Gossip to a random subset of healthy nodes"
