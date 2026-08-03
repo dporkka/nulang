@@ -1627,6 +1627,129 @@ fn test_libsql_store_persists_to_disk() {
 
 #[cfg(feature = "sqlite")]
 #[test]
+fn test_libsql_store_crdt_snapshot_roundtrip() {
+    let mut store = LibsqlStore::in_memory().unwrap();
+    store
+        .save_snapshot(ActorSnapshot {
+            actor_id: 1,
+            sequence: 3,
+            state: HashMap::new(),
+            waiting_signal: None,
+            crdt_snapshot: Some(vec![(7, 1, vec![1, 2, 3]), (8, 2, vec![])]),
+        })
+        .unwrap();
+
+    let loaded = store.load_snapshot(1).unwrap();
+    assert_eq!(
+        loaded.crdt_snapshot,
+        Some(vec![(7, 1, vec![1, 2, 3]), (8, 2, vec![])])
+    );
+
+    // Saving a snapshot without CRDT state must clear the stored column.
+    store
+        .save_snapshot(ActorSnapshot {
+            actor_id: 1,
+            sequence: 4,
+            state: HashMap::new(),
+            waiting_signal: None,
+            crdt_snapshot: None,
+        })
+        .unwrap();
+    let loaded = store.load_snapshot(1).unwrap();
+    assert!(loaded.crdt_snapshot.is_none());
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn test_libsql_store_migrates_old_schema_crdt_column() {
+    let path =
+        std::env::temp_dir().join(format!("nulang_libsql_migrate_{}.db", std::process::id()));
+    {
+        // Create a database with the pre-crdt_snapshot four-column schema.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let db = libsql::Builder::new_local(&path).build().await.unwrap();
+            let conn = db.connect().unwrap();
+            conn.execute(
+                "CREATE TABLE snapshots (
+                    actor_id INTEGER PRIMARY KEY,
+                    sequence INTEGER NOT NULL,
+                    state TEXT NOT NULL,
+                    waiting_signal TEXT
+                )",
+                (),
+            )
+            .await
+            .unwrap();
+        });
+    }
+
+    {
+        // LibsqlStore::new must ALTER the table to add crdt_snapshot.
+        let mut store = LibsqlStore::new(&path).unwrap();
+        store
+            .save_snapshot(ActorSnapshot {
+                actor_id: 1,
+                sequence: 3,
+                state: HashMap::new(),
+                waiting_signal: None,
+                crdt_snapshot: Some(vec![(7, 1, vec![1, 2, 3])]),
+            })
+            .unwrap();
+        let loaded = store.load_snapshot(1).unwrap();
+        assert_eq!(loaded.crdt_snapshot, Some(vec![(7, 1, vec![1, 2, 3])]));
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn test_libsql_store_wal_and_synchronous_pragmas() {
+    let path = std::env::temp_dir().join(format!("nulang_libsql_pragma_{}.db", std::process::id()));
+    {
+        // Default constructor: WAL journal + synchronous=FULL.
+        let store = LibsqlStore::new(&path).unwrap();
+        let journal_mode = store.query("PRAGMA journal_mode", &[]).unwrap();
+        assert_eq!(
+            journal_mode.first().map(|s| s.as_str()),
+            Some("[\"wal\"]"),
+            "journal_mode rows: {:?}",
+            journal_mode
+        );
+        let synchronous = store.query("PRAGMA synchronous", &[]).unwrap();
+        assert_eq!(
+            synchronous.first().map(|s| s.as_str()),
+            Some("[2]"),
+            "synchronous rows: {:?}",
+            synchronous
+        );
+    }
+    {
+        // synchronous is per-connection (WAL persists in the file); an
+        // explicit Normal mode must read back as 1.
+        let store = LibsqlStore::with_sync_mode(&path, SqliteSyncMode::Normal).unwrap();
+        let journal_mode = store.query("PRAGMA journal_mode", &[]).unwrap();
+        assert_eq!(
+            journal_mode.first().map(|s| s.as_str()),
+            Some("[\"wal\"]"),
+            "journal_mode rows after reopen: {:?}",
+            journal_mode
+        );
+        let synchronous = store.query("PRAGMA synchronous", &[]).unwrap();
+        assert_eq!(
+            synchronous.first().map(|s| s.as_str()),
+            Some("[1]"),
+            "synchronous rows after reopen: {:?}",
+            synchronous
+        );
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
 fn test_persistent_actor_with_libsql_store() {
     let mut rt = Runtime::new();
     rt.persistence = Box::new(LibsqlStore::in_memory().unwrap());

@@ -554,6 +554,9 @@ impl PersistenceStore for JsonFileStore {
         let json = serde_json::to_string(&entry)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         writeln!(file, "{}", json)?;
+        // fsync before returning so the append is durable, not just in
+        // the page cache (same discipline as save_snapshot's temp file).
+        file.sync_all()?;
         Ok(())
     }
 
@@ -579,6 +582,9 @@ impl PersistenceStore for JsonFileStore {
         let json = serde_json::to_string(&event)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         writeln!(file, "{}", json)?;
+        // fsync before returning so the append is durable, not just in
+        // the page cache (same discipline as save_snapshot's temp file).
+        file.sync_all()?;
         Ok(())
     }
 
@@ -665,6 +671,24 @@ impl PersistenceStore for JsonFileStore {
 ///
 /// The same store also serves `perform DB.query(sql, params)` from Nulang
 /// code via the `query()` method exposed through `PersistenceStore::query`.
+/// Explicit durability/speed tradeoff for the local SQLite journal.
+#[cfg(feature = "sqlite")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteSyncMode {
+    /// `synchronous=OFF`: fastest, weakest durability (no fsync before
+    /// commit reports success; a power loss can corrupt or lose the
+    /// database).  For scratch data only.
+    Off,
+    /// `synchronous=NORMAL`: durable across application crashes and OS
+    /// crashes, but a power loss can lose the most recent commits (WAL is
+    /// not fsynced before each commit).
+    Normal,
+    /// `synchronous=FULL`: every commit is fsynced to stable storage
+    /// before returning.  Strongest durability, slower commits.  This is
+    /// the SQLite default and the default here.
+    Full,
+}
+
 #[cfg(feature = "sqlite")]
 pub struct LibsqlStore {
     conn: std::sync::Mutex<libsql::Connection>,
@@ -674,9 +698,17 @@ pub struct LibsqlStore {
 
 #[cfg(feature = "sqlite")]
 impl LibsqlStore {
-    /// Open (or create) a local file database.  Pass `":memory:"` for an
+    /// Open (or create) a local file database with the default
+    /// `SqliteSyncMode::Full` durability.  Pass `":memory:"` for an
     /// ephemeral in-memory store.
     pub fn new<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        Self::with_sync_mode(path, SqliteSyncMode::Full)
+    }
+
+    /// Open (or create) a local file database with an explicit journal
+    /// durability mode.  Pass `":memory:"` for an ephemeral in-memory
+    /// store.
+    pub fn with_sync_mode<P: AsRef<Path>>(path: P, sync_mode: SqliteSyncMode) -> io::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let db_path = if path == Path::new(":memory:") {
             ":memory:".to_string()
@@ -699,6 +731,9 @@ impl LibsqlStore {
             rt,
             path,
         };
+        // Journal pragmas must be applied on the same connection that
+        // runs the table DDL, before any writes.
+        store.apply_pragmas(sync_mode)?;
         store.ensure_tables()?;
         Ok(store)
     }
@@ -707,6 +742,10 @@ impl LibsqlStore {
     }
 
     /// Connect to a remote Turso database.
+    ///
+    /// Journal pragmas (`journal_mode`, `synchronous`) are deliberately
+    /// skipped: a Turso server manages its own journal and durability
+    /// policy.
     pub fn new_remote(url: &str, auth_token: &str) -> io::Result<Self> {
         let rt =
             tokio::runtime::Runtime::new().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
@@ -735,6 +774,47 @@ impl LibsqlStore {
         self.conn.lock().unwrap()
     }
 
+    /// Apply the journal durability pragmas on the local connection.
+    /// `journal_mode=WAL` gives crash-safe concurrent readers/writers;
+    /// `synchronous` controls how much fsync happens per commit.  The
+    /// WAL setting persists in the database file, `synchronous` is
+    /// per-connection.
+    fn apply_pragmas(&self, sync_mode: SqliteSyncMode) -> io::Result<()> {
+        let conn = self.conn();
+        self.rt.block_on(async {
+            // Drain the result rows: `journal_mode` returns one,
+            // `synchronous` returns none.  libsql `query` handles both
+            // shapes.
+            let mut rows = conn
+                .query("PRAGMA journal_mode=WAL", ())
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            while rows
+                .next()
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+                .is_some()
+            {}
+            let level = match sync_mode {
+                SqliteSyncMode::Off => "OFF",
+                SqliteSyncMode::Normal => "NORMAL",
+                SqliteSyncMode::Full => "FULL",
+            };
+            let sql = format!("PRAGMA synchronous={level}");
+            let mut rows = conn
+                .query(&sql, ())
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            while rows
+                .next()
+                .await
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+                .is_some()
+            {}
+            Ok(())
+        })
+    }
+
     fn ensure_tables(&self) -> io::Result<()> {
         let conn = self.conn();
         self.rt.block_on(async {
@@ -743,7 +823,8 @@ impl LibsqlStore {
                     actor_id INTEGER PRIMARY KEY,
                     sequence INTEGER NOT NULL,
                     state TEXT NOT NULL,
-                    waiting_signal TEXT
+                    waiting_signal TEXT,
+                    crdt_snapshot TEXT
                 )",
                 (),
             )
@@ -752,6 +833,10 @@ impl LibsqlStore {
             // Migrate databases created before the waiting_signal column existed.
             let _ = conn
                 .execute("ALTER TABLE snapshots ADD COLUMN waiting_signal TEXT", ())
+                .await;
+            // Migrate databases created before the crdt_snapshot column existed.
+            let _ = conn
+                .execute("ALTER TABLE snapshots ADD COLUMN crdt_snapshot TEXT", ())
                 .await;
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS journal (
@@ -858,12 +943,14 @@ impl PersistenceStore for LibsqlStore {
     fn save_snapshot(&mut self, snapshot: ActorSnapshot) -> io::Result<()> {
         let state_json = serde_json::to_string(&snapshot.state)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let crdt_json = serde_json::to_string(&snapshot.crdt_snapshot)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let conn = self.conn();
         self.rt.block_on(async {
             conn.execute(
-                "INSERT INTO snapshots (actor_id, sequence, state, waiting_signal) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(actor_id) DO UPDATE SET sequence=excluded.sequence, state=excluded.state, waiting_signal=excluded.waiting_signal",
-                libsql::params![snapshot.actor_id as i64, snapshot.sequence as i64, state_json, snapshot.waiting_signal.as_deref()],
+                "INSERT INTO snapshots (actor_id, sequence, state, waiting_signal, crdt_snapshot) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(actor_id) DO UPDATE SET sequence=excluded.sequence, state=excluded.state, waiting_signal=excluded.waiting_signal, crdt_snapshot=excluded.crdt_snapshot",
+                libsql::params![snapshot.actor_id as i64, snapshot.sequence as i64, state_json, snapshot.waiting_signal.as_deref(), crdt_json.as_str()],
             ).await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
         })
     }
@@ -873,7 +960,7 @@ impl PersistenceStore for LibsqlStore {
         self.rt.block_on(async {
             let mut rows = conn
                 .query(
-                    "SELECT sequence, state, waiting_signal FROM snapshots WHERE actor_id = ?1",
+                    "SELECT sequence, state, waiting_signal, crdt_snapshot FROM snapshots WHERE actor_id = ?1",
                     libsql::params![actor_id as i64],
                 )
                 .await
@@ -882,13 +969,18 @@ impl PersistenceStore for LibsqlStore {
             let sequence: i64 = row.get(0).ok()?;
             let state_json: String = row.get(1).ok()?;
             let waiting_signal: Option<String> = row.get(2).ok()?;
+            let crdt_json: Option<String> = row.get(3).ok()?;
+            let crdt_snapshot: Option<Vec<(u64, u8, Vec<u8>)>> = match crdt_json {
+                Some(j) => serde_json::from_str(&j).ok()?,
+                None => None,
+            };
             let state: HashMap<String, PersistedValue> = serde_json::from_str(&state_json).ok()?;
             Some(ActorSnapshot {
                 actor_id,
                 sequence: sequence as u64,
                 state,
                 waiting_signal,
-                crdt_snapshot: None,
+                crdt_snapshot,
             })
         })
     }
