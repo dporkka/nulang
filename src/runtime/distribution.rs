@@ -8,6 +8,7 @@ use crate::runtime::GOSSIP_PAYLOAD_MAX_ENTRIES;
 use crate::runtime::{
     ActorAddress, AddressResolver, ClusterAction, ClusterState, CrdtManager, NodeId, Packet, Value,
 };
+use tracing::warn;
 
 /// Enable the distributed actor system, binding to `bind_addr` for incoming
 /// connections and advertising ourselves under this address.
@@ -22,6 +23,7 @@ pub(crate) fn enable_distribution(
     let listen_addr = transport.listen_addr();
     let node_id = NodeId(transport.node_id().0);
     let mut cluster = ClusterState::new(node_id, listen_addr);
+    let _ = cluster.apply_config(&rt.cluster_config);
     if let Some(clock) = &rt.virtual_clock {
         cluster.set_clock(clock.clone());
     }
@@ -199,6 +201,38 @@ pub(crate) fn process_network(rt: &mut Runtime) {
                             transport.send(NodeId(to.0), addr, packet.clone());
                         }
                     }
+                }
+            }
+            ClusterAction::Probe { to, addr } => {
+                // A minimal liveness probe to a Failed member: an ordinary
+                // Heartbeat packet (no new wire type). If the peer is alive
+                // again, its own heartbeat replies re-promote it via
+                // `handle_heartbeat` — the self-healing path for a healed
+                // partition, no external rejoin needed.
+                if let Some(transport) = &mut rt.distributed.transport {
+                    let local_id = rt.distributed.node_id.unwrap_or(NodeId::LOCAL);
+                    let packet = Packet::Heartbeat {
+                        node_id: local_id,
+                        timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    };
+                    transport.send(NodeId(to.0), addr, packet);
+                }
+            }
+            ClusterAction::Down { node } => {
+                // The split-brain resolver decided the local node should
+                // leave the cluster. The cluster's `local_down` flag already
+                // silences tick(); shut the transport down to end all
+                // network participation. Local actors keep running.
+                warn!(
+                    "nulang-net: split-brain resolver downed local node {:?}; \
+                     leaving the cluster",
+                    node
+                );
+                if let Some(transport) = &mut rt.distributed.transport {
+                    transport.shutdown();
                 }
             }
         }

@@ -224,6 +224,9 @@ pub struct Runtime {
 
     // Distributed actor system (v0.5)
     pub distributed: DistributedContext,
+    // Operator cluster configuration (split-brain resolver, probe interval),
+    // applied when distribution is enabled.
+    pub cluster_config: ClusterConfig,
     // Acknowledged packet sequence numbers (transport-level reliability).
     pub acked_packets: HashSet<u64>,
 
@@ -389,6 +392,7 @@ impl Runtime {
             suspend_enabled: false,
             retired_heaps: Vec::new(),
             distributed: DistributedContext::new(),
+            cluster_config: ClusterConfig::default(),
             acked_packets: HashSet::new(),
             crdt_manager: None,
             virtual_clock: None,
@@ -4126,6 +4130,27 @@ impl Runtime {
     /// `self.supervisors` before deciding to shut it down — looking it up in
     ///
     // -- Distributed Actor System --
+
+    /// Configure the cluster before (or after) `enable_distribution`:
+    /// split-brain resolver strategy and probe interval.
+    ///
+    /// Returns false (and keeps the previous configuration) when the
+    /// configuration is invalid, e.g. `static-quorum` with
+    /// `expected_nodes == 0`.
+    pub fn set_cluster_config(&mut self, config: ClusterConfig) -> bool {
+        if !config.is_valid() {
+            warn!(
+                "set_cluster_config: invalid cluster configuration \
+                 (static-quorum expected_nodes must be >= 1)"
+            );
+            return false;
+        }
+        if let Some(cluster) = &mut self.distributed.cluster {
+            return cluster.apply_config(&config);
+        }
+        self.cluster_config = config;
+        true
+    }
 
     pub fn enable_distribution(
         &mut self,

@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -1282,8 +1282,6 @@ pub struct TcpTransport {
     outgoing_tx: mpsc::SyncSender<OutgoingPacket>,
     /// Background thread handles.
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    /// Sequence number counter for packets.
-    next_seq: AtomicU64,
     /// Flag used to ask background threads to shut down.
     shutdown_flag: Arc<AtomicBool>,
     /// Optional TLS configuration. When `Some`, connections are upgraded
@@ -1357,7 +1355,6 @@ impl TcpTransport {
             incoming_tx,
             outgoing_tx,
             threads: Arc::new(Mutex::new(handles)),
-            next_seq: AtomicU64::new(1),
             shutdown_flag,
             tls_config,
         })
@@ -1445,7 +1442,6 @@ impl TcpTransport {
             );
             return;
         }
-        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
         let outgoing = OutgoingPacket {
             to_node,
             to_addr,
@@ -1460,19 +1456,6 @@ impl TcpTransport {
                 to_node, to_addr
             );
         }
-        // The sequence number is part of the packet on the wire, but we
-        // keep it in the transport for tracking.  For simplicity we
-        // embed it directly into the bytes when the sender thread
-        // serialises the packet, but we also store a "pending seq"
-        // inside the OutgoingPacket by abusing the fact that the
-        // Packet::to_bytes takes the seq.  The sender thread will
-        // call to_bytes with the seq stored separately.
-        //
-        // To keep the API clean we stash the seq into the packet
-        // by wrapping it in the channel as a tuple.
-        //
-        // Simpler approach: just resend with the seq baked in.
-        let _ = seq;
     }
 
     /// Receive incoming packets (non-blocking).
@@ -2509,20 +2492,31 @@ mod tests {
         transport_a.connect(node_b_id, addr_b_actual).unwrap();
         sleep(Duration::from_millis(100));
 
-        // Send several packets and capture their sequence numbers on the wire
-        // by serialising them locally with the transport's counter.
-        let seq1 = transport_a.next_seq.load(Ordering::SeqCst);
+        // The sender thread stamps each packet with a monotonic sequence
+        // number in the wire header. Observe it on the receiving side —
+        // there is no transport-level counter left to inspect.
         transport_a.send(node_b_id, addr_b_actual, Packet::Ack { packet_seq: 1 });
-
-        let seq2 = transport_a.next_seq.load(Ordering::SeqCst);
         transport_a.send(node_b_id, addr_b_actual, Packet::Ack { packet_seq: 2 });
-
-        let seq3 = transport_a.next_seq.load(Ordering::SeqCst);
         transport_a.send(node_b_id, addr_b_actual, Packet::Ack { packet_seq: 3 });
 
-        assert_eq!(seq2, seq1 + 1, "sequence numbers must be monotonic");
-        assert_eq!(seq3, seq2 + 1, "sequence numbers must be monotonic");
-        assert_eq!(seq3, seq1 + 2, "sequence numbers must increment by 1 each");
+        let mut seqs = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seqs.len() < 3 && Instant::now() < deadline {
+            for p in transport_b.receive() {
+                if matches!(p.packet, Packet::Ack { .. }) {
+                    seqs.push(p.seq);
+                }
+            }
+            if seqs.len() < 3 {
+                sleep(Duration::from_millis(20));
+            }
+        }
+
+        assert_eq!(
+            seqs,
+            vec![1, 2, 3],
+            "wire sequence numbers must be monotonic per packet"
+        );
 
         transport_a.shutdown();
         transport_b.shutdown();

@@ -3614,6 +3614,65 @@ fn test_three_node_cluster_survives_hard_node_failure_and_rejoin() {
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c2]);
 }
 
+/// The self-healing path (Phase 5 deliverable 2): when a node goes quiet,
+/// the survivor's failure detector marks it Failed and the cluster probe
+/// re-establishes contact — once the quiet node processes again, the probe
+/// heartbeat re-promotes it with no explicit `join_cluster` on its side.
+#[test]
+fn test_probe_rejoins_quiet_node_without_explicit_join() {
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_b = rt_b.distributed.node_id.unwrap();
+
+    rt_b.join_cluster(addr_a);
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
+
+    // Simulate B going quiet: stop pumping it. Its transport threads stay
+    // alive (it can still receive), but its cluster tick never runs, so it
+    // sends no heartbeats. Pump only A until its failure detector marks B
+    // Failed (real wall-clock suspicion window).
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        rt_a.process_network();
+        let status = rt_a
+            .distributed
+            .cluster
+            .as_ref()
+            .unwrap()
+            .get_node(node_b)
+            .map(|n| n.status);
+
+        if status == Some(NodeStatus::Failed) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "A did not mark the quiet node B failed (status: {:?})",
+            status
+        );
+        sleep(Duration::from_millis(50));
+    }
+
+    // Resume pumping B. A's probe (a Heartbeat packet to B's address) is
+    // already queued on B; B processes it, heartbeats back, and A promotes
+    // B to Healthy. B never calls join_cluster again.
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(45));
+    assert_eq!(
+        rt_a.distributed
+            .cluster
+            .as_ref()
+            .unwrap()
+            .get_node(node_b)
+            .unwrap()
+            .status,
+        NodeStatus::Healthy,
+        "the probed node must be re-promoted to Healthy without an explicit join"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
+}
+
 /// Content hash mismatch triggers bytecode fetch; the retry queue holds
 /// the message until the FetchBehaviorResponse arrives, then delivers it.
 #[test]

@@ -29,6 +29,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -48,6 +49,9 @@ const FAILED_NODE_RETENTION: Duration = Duration::from_secs(60);
 
 /// Number of random gossip targets selected each tick.
 const GOSSIP_FANOUT: usize = 2;
+
+/// Default interval between liveness probes to Failed members (5s).
+const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -161,6 +165,116 @@ pub enum ClusterAction {
     NodeLeft { node: NodeId },
     /// Send gossip to a random subset of nodes.
     SendGossip { targets: Vec<(NodeId, SocketAddr)> },
+    /// The split-brain resolver decided the local node should leave the
+    /// cluster (partition minority / below quorum).
+    Down { node: NodeId },
+    /// Minimal periodic liveness probe to a Failed member, so a healed
+    /// partition re-joins without an external rejoin.
+    Probe { to: NodeId, addr: SocketAddr },
+}
+
+// ---------------------------------------------------------------------------
+// Split-brain resolver
+// ---------------------------------------------------------------------------
+
+/// What the local node should do given its current membership view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolverDecision {
+    /// The local node keeps participating in the cluster.
+    StayUp,
+    /// The local node leaves the cluster (partition minority / below quorum).
+    DownSelf,
+}
+
+/// Snapshot of the membership view handed to a [`SplitBrainResolver`].
+///
+/// Built from the live membership table at tick time; the resolver must
+/// treat it as immutable.
+#[derive(Debug, Clone)]
+pub struct MembershipView {
+    /// The node asking for a decision.
+    pub local: NodeId,
+    /// All known members with their current statuses.
+    pub members: Vec<NodeInfo>,
+}
+
+/// Pluggable split-brain resolution (Akka-SBR style).
+///
+/// A resolver is a pure function of the local membership view: no I/O, no
+/// timers, so it is unit-testable and DST-drivable. `ClusterState::tick`
+/// consults it after failure detection; a `DownSelf` decision marks the
+/// local node down and emits [`ClusterAction::Down`].
+pub trait SplitBrainResolver: Send + Sync {
+    fn decide(&self, view: &MembershipView) -> ResolverDecision;
+}
+
+/// Static-quorum strategy: the node stays up iff it sees at least
+/// `floor(expected_nodes / 2) + 1` reachable members (itself plus every
+/// `Healthy`/`Joining` member). Needs only the operator-configured expected
+/// cluster size — no live count, no consensus, no leader.
+///
+/// With `expected_nodes == 2` both sides of a partition down themselves
+/// (`1 < 2`): fail-closed is the intended 2-node behavior, and the strategy
+/// is only useful for `expected_nodes >= 3`.
+pub struct StaticQuorumResolver {
+    pub expected_nodes: usize,
+}
+
+impl SplitBrainResolver for StaticQuorumResolver {
+    fn decide(&self, view: &MembershipView) -> ResolverDecision {
+        let reachable = view
+            .members
+            .iter()
+            .filter(|m| {
+                m.node_id == view.local
+                    || matches!(m.status, NodeStatus::Healthy | NodeStatus::Joining)
+            })
+            .count();
+        if reachable >= self.expected_nodes / 2 + 1 {
+            ResolverDecision::StayUp
+        } else {
+            ResolverDecision::DownSelf
+        }
+    }
+}
+
+/// Split-brain resolver configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitBrainConfig {
+    /// No resolver: current behavior — partitions never self-resolve.
+    Disabled,
+    /// Static-quorum with the given expected cluster size (see
+    /// [`StaticQuorumResolver`] for the 2-node caveat).
+    StaticQuorum { expected_nodes: usize },
+}
+
+/// Cluster configuration applied when distribution is enabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterConfig {
+    pub split_brain: SplitBrainConfig,
+    /// How often to probe `Failed` members for liveness (the self-healing
+    /// path: a probe that reaches a live node re-promotes it to `Healthy`).
+    pub probe_interval: Duration,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        ClusterConfig {
+            split_brain: SplitBrainConfig::Disabled,
+            probe_interval: DEFAULT_PROBE_INTERVAL,
+        }
+    }
+}
+
+impl ClusterConfig {
+    /// True when the configuration can be applied. `StaticQuorum` with
+    /// `expected_nodes == 0` is a configuration error, not "disabled".
+    pub fn is_valid(&self) -> bool {
+        match self.split_brain {
+            SplitBrainConfig::Disabled => true,
+            SplitBrainConfig::StaticQuorum { expected_nodes } => expected_nodes > 0,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,16 +332,21 @@ pub struct ClusterState {
     heartbeat_timeout: Duration,
     suspicion_duration: Duration,
 
-    /// Monotonically increasing incarnation number for this node.
-    /// Used to resolve conflicting membership updates.
-    incarnation: u64,
-
     /// Timestamp of last heartbeat we sent.
     last_heartbeat_sent: Instant,
 
     /// Optional virtual clock for deterministic testing.
     /// When set, all time queries use this clock instead of wall time.
     clock: Option<super::timer::VirtualClock>,
+
+    /// Optional split-brain resolver; `None` = resolver disabled.
+    split_brain: Option<Box<dyn SplitBrainResolver>>,
+    /// How often to probe Failed members (the self-healing path).
+    probe_interval: Duration,
+    /// When we last probed Failed members.
+    last_probe_sent: Option<Instant>,
+    /// True once the resolver decided the local node should leave.
+    local_down: bool,
 
     /// Callback for membership change notifications.
     on_member_joined: Option<Box<dyn Fn(NodeId, SocketAddr) + Send>>,
@@ -263,8 +382,11 @@ impl ClusterState {
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
             suspicion_duration: DEFAULT_SUSPICION_DURATION,
-            incarnation: 1,
             last_heartbeat_sent: now,
+            split_brain: None,
+            probe_interval: DEFAULT_PROBE_INTERVAL,
+            last_probe_sent: None,
+            local_down: false,
             on_member_left: None,
             on_member_failed: None,
         }
@@ -286,8 +408,8 @@ impl ClusterState {
 
     /// Join an existing cluster by contacting a seed node.
     ///
-    /// Records the seed node in the membership table (as Joining) and
-    /// bumps the incarnation so that the join propagates via gossip.
+    /// Records the seed node in the membership table (as Joining, with
+    /// baseline `_incarnation` metadata so the join propagates via gossip).
     /// The actual network request to the seed is the responsibility of
     /// the caller.
     pub fn join_cluster(&mut self, seed_addr: SocketAddr) {
@@ -310,8 +432,6 @@ impl ClusterState {
                 .insert("_incarnation".to_string(), "1".to_string());
             self.members.insert(seed_id, info);
         }
-
-        self.bump_incarnation();
     }
 
     /// Handle an incoming heartbeat from another node.
@@ -336,7 +456,6 @@ impl ClusterState {
                 if was_suspicious_or_failed {
                     info.status = NodeStatus::Healthy;
                     Self::bump_entry_incarnation(info);
-                    self.bump_incarnation();
                 } else if info.status == NodeStatus::Joining {
                     info.status = NodeStatus::Healthy;
                     // Bump the entry incarnation so the promotion wins
@@ -351,13 +470,40 @@ impl ClusterState {
                 info.last_heartbeat = now;
                 info.status = NodeStatus::Healthy;
                 self.members.insert(from, info);
-                self.bump_incarnation();
 
                 if let Some(ref cb) = self.on_member_joined {
                     cb(from, addr);
                 }
             }
         }
+    }
+
+    /// Apply operator cluster configuration.
+    ///
+    /// Returns false (and leaves the previous configuration in place) when
+    /// the configuration is invalid, e.g. `static-quorum` with
+    /// `expected_nodes == 0`.
+    pub fn apply_config(&mut self, config: &ClusterConfig) -> bool {
+        if !config.is_valid() {
+            warn!(
+                "cluster config: static-quorum expected_nodes must be >= 1; \
+                 keeping the previous configuration"
+            );
+            return false;
+        }
+        self.split_brain = match config.split_brain {
+            SplitBrainConfig::Disabled => None,
+            SplitBrainConfig::StaticQuorum { expected_nodes } => {
+                Some(Box::new(StaticQuorumResolver { expected_nodes }))
+            }
+        };
+        self.probe_interval = config.probe_interval;
+        true
+    }
+
+    /// True once the split-brain resolver downed this node.
+    pub fn is_down(&self) -> bool {
+        self.local_down
     }
 
     /// Run the periodic cluster maintenance.
@@ -367,7 +513,10 @@ impl ClusterState {
     /// 1. Checks for nodes that have missed heartbeats → marks Suspicious.
     /// 2. Promotes Suspicious nodes to Failed if past the suspicion window.
     /// 3. Cleans up old failed nodes.
-    /// 4. Returns a list of actions for the runtime to execute.
+    /// 4. Consults the split-brain resolver; a `DownSelf` decision marks
+    ///    the local node down and no further actions are emitted.
+    /// 5. Probes Failed members (throttled) so a healed partition re-joins.
+    /// 6. Returns a list of actions for the runtime to execute.
     pub fn tick(&mut self) -> Vec<ClusterAction> {
         let now = self.now();
         let mut actions = Vec::new();
@@ -430,6 +579,47 @@ impl ClusterState {
 
             if let Some(ref cb) = self.on_member_left {
                 cb(*node_id);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 3.5 Split-brain resolver: decide whether the local node stays up
+        // ------------------------------------------------------------------
+        if self.local_down {
+            // Already down: no heartbeats, gossip, or probes.
+            return actions;
+        }
+        if let Some(resolver) = &self.split_brain {
+            let view = MembershipView {
+                local: self.local_node,
+                members: self.members.values().cloned().collect(),
+            };
+            if matches!(resolver.decide(&view), ResolverDecision::DownSelf) {
+                self.local_down = true;
+                actions.push(ClusterAction::Down {
+                    node: self.local_node,
+                });
+                return actions;
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // 3.6 Probe Failed members (throttled) so a healed partition
+        //     re-joins without an external rejoin.
+        // ------------------------------------------------------------------
+        let probe_due = match self.last_probe_sent {
+            Some(last) => now.duration_since(last) >= self.probe_interval,
+            None => true,
+        };
+        if probe_due {
+            self.last_probe_sent = Some(now);
+            for info in self.members.values() {
+                if info.status == NodeStatus::Failed {
+                    actions.push(ClusterAction::Probe {
+                        to: info.node_id,
+                        addr: info.address,
+                    });
+                }
             }
         }
 
@@ -526,19 +716,6 @@ impl ClusterState {
         self.on_member_failed = Some(Box::new(callback));
     }
 
-    /// Get the local node's incarnation number.
-    pub fn incarnation(&self) -> u64 {
-        self.incarnation
-    }
-
-    /// Increment the incarnation number.
-    ///
-    /// Called whenever the local node's view of membership changes so
-    /// that gossip recipients prefer our version of the truth.
-    pub fn bump_incarnation(&mut self) {
-        self.incarnation = self.incarnation.wrapping_add(1);
-    }
-
     /// Merge a membership list received from another node (gossip).
     ///
     /// Uses incarnation numbers for conflict resolution: the entry with
@@ -598,10 +775,6 @@ impl ClusterState {
             }
         }
 
-        if changed {
-            self.bump_incarnation();
-        }
-
         changed
     }
 
@@ -645,21 +818,31 @@ impl ClusterState {
         info.metadata
             .insert("_incarnation".to_string(), (current + 1).to_string());
     }
-    /// Pick `n` random healthy targets for gossip.
+    /// Pick `n` distinct random healthy targets for gossip.
     ///
-    /// Uses a simple round-robin when the `getrandom` facility is not
-    /// available; in production this should use a proper RNG.
+    /// Selection is uniform over the healthy member set (partial
+    /// Fisher-Yates shuffle driven by `OsRng`), so no member is
+    /// systematically starved of gossip coverage.
     fn pick_gossip_targets(&self, n: usize) -> Vec<(NodeId, SocketAddr)> {
-        let healthy: Vec<&NodeInfo> = self.healthy_members();
+        let mut healthy: Vec<&NodeInfo> = self.healthy_members();
         if healthy.is_empty() {
             return Vec::new();
         }
 
-        // Simple deterministic selection: pick the first N.
-        // In a real deployment this would use `rand::seq::IteratorRandom`.
+        // Partial Fisher-Yates: swap a random remaining element into
+        // position i, then keep the first n — every healthy member has
+        // an equal chance of being selected each tick.
+        use rand_core::RngCore;
+        let mut buf = [0u8; 8];
+        let count = n.min(healthy.len());
+        for i in 0..count {
+            rand_core::OsRng.fill_bytes(&mut buf);
+            let j = (u64::from_le_bytes(buf) as usize) % (healthy.len() - i);
+            healthy.swap(i, i + j);
+        }
+        healthy.truncate(count);
         healthy
             .into_iter()
-            .take(n)
             .map(|info| (info.node_id, info.address))
             .collect()
     }
@@ -707,7 +890,6 @@ mod tests {
         assert_eq!(cs.local_node, local);
         assert_eq!(cs.healthy_node_count(), 1);
         assert!(cs.is_member(local));
-        assert_eq!(cs.incarnation(), 1);
 
         let info = cs.get_node(local).unwrap();
         assert_eq!(info.status, NodeStatus::Healthy);
@@ -1005,19 +1187,6 @@ mod tests {
         assert_eq!(cs.healthy_node_count(), 1);
     }
 
-    // -- 15. Bump incarnation ----------------------------------------------
-
-    #[test]
-    fn test_bump_incarnation() {
-        let a = addr(9000);
-        let local = NodeId::new(&a);
-        let mut cs = ClusterState::new(local, a);
-
-        let first = cs.incarnation();
-        cs.bump_incarnation();
-        assert_eq!(cs.incarnation(), first + 1);
-    }
-
     // -- 16. Gossip does not include local node overrides ------------------
 
     #[test]
@@ -1222,5 +1391,283 @@ mod tests {
         );
         // The surviving peer stays healthy throughout.
         assert_eq!(cs.get_node(surv_id).unwrap().status, NodeStatus::Healthy);
+    }
+    // -- 21. Split-brain resolver -------------------------------------------
+
+    #[test]
+    fn test_static_quorum_boundaries() {
+        // expected 5 → quorum is 3 reachable members (including self).
+        // Mirrors the real tick view: `members` includes the local node.
+        let resolver = StaticQuorumResolver { expected_nodes: 5 };
+        let local = NodeId(1);
+        let view = |reachable_peers: usize| MembershipView {
+            local,
+            members: std::iter::once({
+                let mut info = NodeInfo::new(local, addr(9000));
+                info.status = NodeStatus::Healthy;
+                info
+            })
+            .chain((0..reachable_peers).map(|i| {
+                let mut info = NodeInfo::new(NodeId(i as u64 + 2), addr(9100 + i as u16));
+                info.status = NodeStatus::Healthy;
+                info
+            }))
+            .collect(),
+        };
+        // 2 reachable (self + 1 peer) < 3 → down.
+        assert_eq!(resolver.decide(&view(1)), ResolverDecision::DownSelf);
+        // 3 reachable (self + 2 peers) → stay up.
+        assert_eq!(resolver.decide(&view(2)), ResolverDecision::StayUp);
+        // 4 reachable (self + 3 peers) → stay up.
+        assert_eq!(resolver.decide(&view(3)), ResolverDecision::StayUp);
+    }
+    #[test]
+    fn test_tick_downs_below_quorum() {
+        // Clean partition of a 3-node cluster: the local node sees only
+        // itself, so the static-quorum resolver downs it (1 < 2).
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+        let b = NodeId::new(&addr(9001));
+        let c = NodeId::new(&addr(9002));
+        cs.handle_heartbeat(b, addr(9001));
+        cs.handle_heartbeat(c, addr(9002));
+        assert!(cs.apply_config(&ClusterConfig {
+            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
+            probe_interval: Duration::from_secs(5),
+        }));
+
+        // Both peers stop heartbeating: age their timestamps past the full
+        // failure window so a single tick transitions them to Failed.
+        let stale = Instant::now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&b).unwrap().last_heartbeat = stale;
+        cs.members.get_mut(&c).unwrap().last_heartbeat = stale;
+
+        let actions = cs.tick();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ClusterAction::Down { node } if *node == local)),
+            "tick must down the local node below quorum, got {:?}",
+            actions
+        );
+        assert!(cs.is_down());
+    }
+
+    #[test]
+    fn test_tick_stays_up_above_quorum() {
+        // 3-node cluster where one peer is still reachable: 2 of 3 reachable
+        // meets the quorum of 2, so the local node stays up.
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+        let b = NodeId::new(&addr(9001));
+        let c = NodeId::new(&addr(9002));
+        cs.handle_heartbeat(b, addr(9001));
+        cs.handle_heartbeat(c, addr(9002));
+        cs.apply_config(&ClusterConfig {
+            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
+            probe_interval: Duration::from_secs(5),
+        });
+        let stale = Instant::now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&c).unwrap().last_heartbeat = stale;
+
+        let actions = cs.tick();
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, ClusterAction::Down { .. })),
+            "tick must NOT down the local node above quorum, got {:?}",
+            actions
+        );
+        assert!(!cs.is_down());
+        assert_eq!(cs.get_node(b).unwrap().status, NodeStatus::Healthy);
+    }
+
+    #[test]
+    fn test_asymmetric_partition_downs_smaller_side() {
+        // Asymmetric partition: A sees B as Healthy, but B cannot see A.
+        // A (2 of 3 reachable) stays up; B (1 of 3 reachable) downs itself.
+        let a_addr = addr(9000);
+        let a_id = NodeId::new(&a_addr);
+        let mut cs_a = ClusterState::new(a_id, a_addr);
+        let b_addr = addr(9001);
+        let b_id = NodeId::new(&b_addr);
+        cs_a.handle_heartbeat(b_id, b_addr);
+        cs_a.apply_config(&ClusterConfig {
+            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
+            probe_interval: Duration::from_secs(5),
+        });
+        assert!(!cs_a
+            .tick()
+            .iter()
+            .any(|a| matches!(a, ClusterAction::Down { .. })));
+
+        // B's view: A is unreachable; B sees only itself.
+        let mut cs_b = ClusterState::new(b_id, b_addr);
+        cs_b.handle_heartbeat(a_id, a_addr);
+        cs_b.apply_config(&ClusterConfig {
+            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
+            probe_interval: Duration::from_secs(5),
+        });
+        let stale = Instant::now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs_b.members.get_mut(&a_id).unwrap().last_heartbeat = stale;
+        let actions = cs_b.tick();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ClusterAction::Down { node } if *node == b_id)),
+            "the one-way side of an asymmetric partition must down itself"
+        );
+    }
+
+    #[test]
+    fn test_five_node_split_majority_survives() {
+        // 5-node cluster split 3v2: the side seeing 3 members stays up, the
+        // side seeing 2 downs itself (quorum for expected 5 is 3).
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let stale = Instant::now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        let config = ClusterConfig {
+            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 5 },
+            probe_interval: Duration::from_secs(5),
+        };
+
+        // Majority side: peers 9001, 9002 healthy; 9003, 9004 failed.
+        let mut cs = ClusterState::new(local, a);
+        cs.handle_heartbeat(NodeId::new(&addr(9001)), addr(9001));
+        cs.handle_heartbeat(NodeId::new(&addr(9002)), addr(9002));
+        for port in [9003u16, 9004] {
+            let peer = NodeId::new(&addr(port));
+            cs.handle_heartbeat(peer, addr(port));
+            cs.members.get_mut(&peer).unwrap().last_heartbeat = stale;
+        }
+        cs.apply_config(&config);
+        assert!(!cs
+            .tick()
+            .iter()
+            .any(|a| matches!(a, ClusterAction::Down { .. })));
+
+        // Minority side: only peer 9001 healthy; 9002-9004 failed.
+        let mut cs_minority = ClusterState::new(local, a);
+        cs_minority.handle_heartbeat(NodeId::new(&addr(9001)), addr(9001));
+        for port in [9002u16, 9003, 9004] {
+            let peer = NodeId::new(&addr(port));
+            cs_minority.handle_heartbeat(peer, addr(port));
+            cs_minority.members.get_mut(&peer).unwrap().last_heartbeat = stale;
+        }
+        cs_minority.apply_config(&config);
+        let actions = cs_minority.tick();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ClusterAction::Down { node } if *node == local)),
+            "the minority side of a 3v2 split must down itself"
+        );
+    }
+
+    #[test]
+    fn test_down_node_stays_quiet() {
+        // Once downed, tick returns no actions at all (no heartbeats,
+        // gossip, or probes).
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+        let b = NodeId::new(&addr(9001));
+        cs.handle_heartbeat(b, addr(9001));
+        cs.apply_config(&ClusterConfig {
+            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 3 },
+            probe_interval: Duration::from_secs(5),
+        });
+        let stale = Instant::now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&b).unwrap().last_heartbeat = stale;
+        cs.tick();
+        assert!(cs.is_down());
+        assert!(cs.tick().is_empty(), "a downed node must emit no actions");
+    }
+
+    #[test]
+    fn test_probe_emitted_for_failed_members_throttled() {
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+        let b = NodeId::new(&addr(9001));
+        cs.handle_heartbeat(b, addr(9001));
+        cs.apply_config(&ClusterConfig {
+            split_brain: SplitBrainConfig::Disabled,
+            probe_interval: Duration::from_secs(5),
+        });
+        let stale = Instant::now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&b).unwrap().last_heartbeat = stale;
+
+        let actions = cs.tick();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, ClusterAction::Probe { to, .. } if *to == b)),
+            "tick must probe the failed member"
+        );
+        // Throttled by probe_interval: an immediate second tick must not
+        // re-probe.
+        let actions2 = cs.tick();
+        assert!(
+            !actions2
+                .iter()
+                .any(|a| matches!(a, ClusterAction::Probe { .. })),
+            "probes must be throttled to probe_interval"
+        );
+    }
+
+    #[test]
+    fn test_heartbeat_promotes_failed() {
+        // The self-healing path: a probe that reaches a live (previously
+        // failed) node delivers a heartbeat, which promotes it back to
+        // Healthy.
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+        let b = NodeId::new(&addr(9001));
+        cs.handle_heartbeat(b, addr(9001));
+        let stale = Instant::now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&b).unwrap().last_heartbeat = stale;
+        cs.tick();
+        assert_eq!(cs.get_node(b).unwrap().status, NodeStatus::Failed);
+
+        cs.handle_heartbeat(b, addr(9001));
+        assert_eq!(cs.get_node(b).unwrap().status, NodeStatus::Healthy);
+    }
+
+    #[test]
+    fn test_static_quorum_zero_expected_rejected() {
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+        assert!(!cs.apply_config(&ClusterConfig {
+            split_brain: SplitBrainConfig::StaticQuorum { expected_nodes: 0 },
+            probe_interval: Duration::from_secs(5),
+        }));
+        // The invalid config leaves the previous (disabled) state in place.
+        assert!(cs.split_brain.is_none());
     }
 }
