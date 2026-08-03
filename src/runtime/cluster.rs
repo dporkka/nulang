@@ -53,6 +53,32 @@ const GOSSIP_FANOUT: usize = 2;
 /// Default interval between liveness probes to Failed members (5s).
 const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Default size of the active view: the maximum number of members a
+/// node heartbeats directly. Heartbeats are the O(N) data plane; the
+/// active view bounds them so cluster-wide heartbeat traffic stays
+/// O(N × active_view_size) instead of O(N²).
+const DEFAULT_ACTIVE_VIEW_SIZE: usize = 4;
+
+/// Default size of the passive view: the pool of known-but-not-
+/// heartbeated members used to repair the active view when a member
+/// fails.
+const DEFAULT_PASSIVE_VIEW_SIZE: usize = 20;
+
+/// How long a probationary (promoted) member has to reciprocate our
+/// heartbeats before it is demoted back to the passive view. Uses the
+/// heartbeat timeout: a live member's reply arrives within one
+/// heartbeat interval, so anything beyond the timeout is dead weight.
+const PROBATION_TIMEOUT: Duration = DEFAULT_HEARTBEAT_TIMEOUT;
+
+/// How many passive-view members that recently heartbeated us we reply
+/// to per heartbeat round. Without replies, a member whose active view
+/// filled up would stop heartbeating us and our detector would
+/// false-fail it; with `REPLY_SLOTS` slots rotated round-robin, every
+/// pinger is answered within the failure-detection window (4 slots ×
+/// 500 ms = 2 s = `DEFAULT_HEARTBEAT_TIMEOUT`) for clusters of up to
+/// ~80 nodes, keeping heartbeats O(active + probationary + replies).
+pub(crate) const REPLY_SLOTS: usize = 4;
+
 // ---------------------------------------------------------------------------
 // NodeId
 // ---------------------------------------------------------------------------
@@ -348,6 +374,29 @@ pub struct ClusterState {
     /// True once the resolver decided the local node should leave.
     local_down: bool,
 
+    /// Active view: members we heartbeat directly. A member joins the
+    /// active view by heartbeating us (symmetric by construction), so
+    /// the failure detector — which watches exactly this set — never
+    /// false-fails a node we cannot hear.
+    active_view: Vec<NodeId>,
+    /// Probationary members: Healthy passive members we promoted and now
+    /// heartbeat, waiting for their first reply to confirm them into the
+    /// active view. They are NOT watched by the failure detector, so a
+    /// member that never reciprocates is demoted, never falsely failed.
+    probationary: Vec<(NodeId, Instant)>,
+    /// Passive view: known members we do not heartbeat; the repair pool
+    /// for the active view. Their liveness comes from gossip.
+    passive_view: Vec<NodeId>,
+    /// Capacity of `active_view`.
+    active_view_size: usize,
+    /// Capacity of `passive_view`.
+    passive_view_size: usize,
+    /// Rotating index into `passive_view` for the bounded reply rule.
+    reply_cursor: usize,
+    /// When we last attempted an active-view repair (eventual-repair
+    /// throttle).
+    last_repair_attempt: Option<Instant>,
+
     /// Callback for membership change notifications.
     on_member_joined: Option<Box<dyn Fn(NodeId, SocketAddr) + Send>>,
     on_member_left: Option<Box<dyn Fn(NodeId) + Send>>,
@@ -387,6 +436,13 @@ impl ClusterState {
             probe_interval: DEFAULT_PROBE_INTERVAL,
             last_probe_sent: None,
             local_down: false,
+            active_view: Vec::new(),
+            probationary: Vec::new(),
+            passive_view: Vec::new(),
+            active_view_size: DEFAULT_ACTIVE_VIEW_SIZE,
+            passive_view_size: DEFAULT_PASSIVE_VIEW_SIZE,
+            last_repair_attempt: None,
+            reply_cursor: 0,
             on_member_left: None,
             on_member_failed: None,
         }
@@ -442,6 +498,12 @@ impl ClusterState {
     ///
     /// If the node was not previously known, it is added to the
     /// membership table.
+    ///
+    /// View maintenance: a node that heartbeats us is alive by
+    /// definition, so it is placed in the active view (symmetric link —
+    /// we will heartbeat it back) if there is room, else the passive
+    /// view. A probationary member's first heartbeat confirms it into
+    /// the active view.
     pub fn handle_heartbeat(&mut self, from: NodeId, addr: SocketAddr) {
         let now = self.now();
 
@@ -476,6 +538,59 @@ impl ClusterState {
                 }
             }
         }
+
+        self.observe_heartbeat(from);
+    }
+
+    /// Record that `from` heartbeated us: confirm a probationary member
+    /// into the active view, or place a new member into the active view
+    /// (room permitting) / passive view.
+    fn observe_heartbeat(&mut self, from: NodeId) {
+        if from == self.local_node {
+            return;
+        }
+        if let Some(pos) = self.probationary.iter().position(|(id, _)| *id == from) {
+            // First reply: the promoted member reciprocates, so the
+            // link is symmetric — confirm it into the active view.
+            self.probationary.remove(pos);
+            self.push_active(from);
+            return;
+        }
+        if self.active_view.contains(&from) {
+            return;
+        }
+        if let Some(pos) = self.passive_view.iter().position(|id| *id == from) {
+            self.passive_view.remove(pos);
+        }
+        self.push_active(from);
+    }
+
+    /// Add `node` to the active view if it has room, else the passive
+    /// view (bounded).
+    fn push_active(&mut self, node: NodeId) {
+        if self.active_view.len() < self.active_view_size {
+            self.active_view.push(node);
+        } else if !self.passive_view.contains(&node)
+            && self.passive_view.len() < self.passive_view_size
+        {
+            self.passive_view.push(node);
+        }
+    }
+
+    /// The members we currently heartbeat directly.
+    pub fn active_view(&self) -> &[NodeId] {
+        &self.active_view
+    }
+
+    /// The members in the passive repair pool.
+    pub fn passive_view(&self) -> &[NodeId] {
+        &self.passive_view
+    }
+
+    /// The members currently on probation (promoted, awaiting their
+    /// first reply).
+    pub fn probationary(&self) -> &[(NodeId, Instant)] {
+        &self.probationary
     }
 
     /// Apply operator cluster configuration.
@@ -510,8 +625,14 @@ impl ClusterState {
     ///
     /// Should be called regularly (e.g., every 100 ms). Performs:
     ///
-    /// 1. Checks for nodes that have missed heartbeats → marks Suspicious.
-    /// 2. Promotes Suspicious nodes to Failed if past the suspicion window.
+    /// 1. Checks active-view members that have missed heartbeats →
+    ///    marks Suspicious. Only the active view is watched: passive
+    ///    members' liveness comes from gossip, and watching a node we
+    ///    do not heartbeat would false-fail it.
+    /// 2. Promotes Suspicious active-view members to Failed past the
+    ///    suspicion window, repairs the active view (promoting a
+    ///    Healthy passive member to probation), and demotes
+    ///    probationary members that never reciprocated.
     /// 3. Cleans up old failed nodes.
     /// 4. Consults the split-brain resolver; a `DownSelf` decision marks
     ///    the local node down and no further actions are emitted.
@@ -522,10 +643,10 @@ impl ClusterState {
         let mut actions = Vec::new();
 
         // ------------------------------------------------------------------
-        // 1. Heartbeat timeout → Suspicious
+        // 1. Heartbeat timeout → Suspicious (active view only)
         // ------------------------------------------------------------------
         for info in self.members.values_mut() {
-            if info.node_id == self.local_node {
+            if info.node_id == self.local_node || !self.active_view.contains(&info.node_id) {
                 continue;
             }
             if info.status == NodeStatus::Healthy {
@@ -536,11 +657,12 @@ impl ClusterState {
         }
 
         // ------------------------------------------------------------------
-        // 2. Suspicion timeout → Failed
+        // 2. Suspicion timeout → Failed (active view only) + active-view
+        //    repair
         // ------------------------------------------------------------------
         let mut newly_failed = Vec::new();
         for info in self.members.values_mut() {
-            if info.node_id == self.local_node {
+            if info.node_id == self.local_node || !self.active_view.contains(&info.node_id) {
                 continue;
             }
             if info.status == NodeStatus::Suspicious {
@@ -551,6 +673,11 @@ impl ClusterState {
                     > self.heartbeat_timeout + self.suspicion_duration
                 {
                     info.status = NodeStatus::Failed;
+                    // Bump the entry incarnation so the Failed status
+                    // propagates via gossip: under partial-view
+                    // membership most nodes never watch a given member
+                    // directly and learn its failure only from gossip.
+                    Self::bump_entry_incarnation(info);
                     newly_failed.push(info.node_id);
                     self.failed_nodes.insert(info.node_id, now);
 
@@ -561,6 +688,54 @@ impl ClusterState {
                     actions.push(ClusterAction::NodeFailed { node: info.node_id });
                 }
             }
+        }
+        for node_id in &newly_failed {
+            self.active_view.retain(|id| id != node_id);
+            self.probationary.retain(|(id, _)| id != node_id);
+            self.repair_active_view(now);
+        }
+
+        // ------------------------------------------------------------------
+        // 2.5 Demote probationary members that never reciprocated. They
+        //     were never watched, so this is churn, not false failure:
+        //     a live member with no room in its own view just gets
+        //     another chance later.
+        // ------------------------------------------------------------------
+        self.probationary
+            .retain(|(_, solicited_at)| now.duration_since(*solicited_at) <= PROBATION_TIMEOUT);
+
+        // Every known non-failed member lives in exactly one view:
+        // active, probationary, or passive. Anything else (a Joining
+        // seed awaiting its first heartbeat, a demoted probationary)
+        // goes to the passive pool so the repair path can find it.
+        let homeless: Vec<NodeId> = self
+            .members
+            .values()
+            .filter(|info| {
+                info.node_id != self.local_node
+                    && info.status != NodeStatus::Failed
+                    && !self.active_view.contains(&info.node_id)
+                    && !self.probationary.iter().any(|(id, _)| *id == info.node_id)
+                    && !self.passive_view.contains(&info.node_id)
+            })
+            .map(|info| info.node_id)
+            .collect();
+        for node_id in homeless {
+            if self.passive_view.len() < self.passive_view_size {
+                self.passive_view.push(node_id);
+            }
+        }
+
+        // Repair is eventual: a demoted probationary leaves the active
+        // view underfull, and a later promotion attempt (gated at the
+        // probe interval, so this is at most one retry per 5 s) may
+        // find a member with room to reciprocate.
+        let repair_due = match self.last_repair_attempt {
+            Some(last) => now.duration_since(last) >= DEFAULT_PROBE_INTERVAL,
+            None => true,
+        };
+        if self.active_view.len() < self.active_view_size && repair_due {
+            self.repair_active_view(now);
         }
 
         // ------------------------------------------------------------------
@@ -575,6 +750,7 @@ impl ClusterState {
         for node_id in &to_remove {
             self.members.remove(node_id);
             self.failed_nodes.remove(node_id);
+            self.passive_view.retain(|id| id != node_id);
             actions.push(ClusterAction::NodeLeft { node: *node_id });
 
             if let Some(ref cb) = self.on_member_left {
@@ -590,9 +766,30 @@ impl ClusterState {
             return actions;
         }
         if let Some(resolver) = &self.split_brain {
+            // Passive members' liveness is gossip-derived, and their
+            // table status can be a frozen snapshot of the last gossip
+            // we received. The resolver must not count them as
+            // reachable once that evidence is stale: demote
+            // stale-status passives to Suspicious in the view only
+            // (the table is untouched).
+            let view_members: Vec<NodeInfo> = self
+                .members
+                .values()
+                .map(|info| {
+                    let mut info = info.clone();
+                    if info.node_id != self.local_node
+                        && !self.active_view.contains(&info.node_id)
+                        && now.duration_since(info.last_heartbeat) > self.heartbeat_timeout
+                        && matches!(info.status, NodeStatus::Healthy | NodeStatus::Joining)
+                    {
+                        info.status = NodeStatus::Suspicious;
+                    }
+                    info
+                })
+                .collect();
             let view = MembershipView {
                 local: self.local_node,
-                members: self.members.values().cloned().collect(),
+                members: view_members,
             };
             if matches!(resolver.decide(&view), ResolverDecision::DownSelf) {
                 self.local_down = true;
@@ -624,7 +821,10 @@ impl ClusterState {
         }
 
         // ------------------------------------------------------------------
-        // 4. Send heartbeats to healthy members (throttled)
+        // 4. Send heartbeats (throttled) to the active view, probationary
+        //    members, and Joining seeds. This is the bounded data plane:
+        //    heartbeat traffic is O(active_view + probationary + joins),
+        //    not O(every member).
         // ------------------------------------------------------------------
         if now.duration_since(self.last_heartbeat_sent) >= self.heartbeat_interval {
             self.last_heartbeat_sent = now;
@@ -633,11 +833,15 @@ impl ClusterState {
                 if info.node_id == self.local_node {
                     continue;
                 }
-                // Heartbeats go to Joining members as well as Healthy
-                // ones: the first heartbeat to a seed is what initiates
-                // the join — the seed discovers us from it and heartbeats
+                // Joining members get heartbeats as the join bootstrap:
+                // the first heartbeat to a seed is what initiates the
+                // join — the seed discovers us from it and heartbeats
                 // back, which promotes the seed to Healthy on our side.
-                if matches!(info.status, NodeStatus::Healthy | NodeStatus::Joining) {
+                let in_active = self.active_view.contains(&info.node_id);
+                let on_probation = self.probationary.iter().any(|(id, _)| *id == info.node_id);
+                if matches!(info.status, NodeStatus::Healthy | NodeStatus::Joining)
+                    && (in_active || on_probation || info.status == NodeStatus::Joining)
+                {
                     actions.push(ClusterAction::SendHeartbeat {
                         to: info.node_id,
                         addr: info.address,
@@ -645,6 +849,35 @@ impl ClusterState {
                 }
             }
         }
+
+        // Bounded reply rule: answer up to REPLY_SLOTS passive-view
+        // members that recently heartbeated us (rotated round-robin
+        // for fairness). Without this, a member whose active view
+        // filled up would stop heartbeating us and our detector —
+        // which watches exactly the active view — would false-fail
+        // it. The rotation bounds how long a pinger waits for a
+        // reply: with 4 slots × 500 ms it stays inside the 2 s
+        // failure-detection window for clusters up to ~80 nodes.
+        let mut replied = 0;
+        let n = self.passive_view.len();
+        for k in 0..n {
+            if replied >= REPLY_SLOTS {
+                break;
+            }
+            let id = self.passive_view[(self.reply_cursor + k) % n];
+            if let Some(info) = self.members.get(&id) {
+                if matches!(info.status, NodeStatus::Healthy | NodeStatus::Joining)
+                    && now.duration_since(info.last_heartbeat) <= self.heartbeat_timeout
+                {
+                    actions.push(ClusterAction::SendHeartbeat {
+                        to: id,
+                        addr: info.address,
+                    });
+                    replied += 1;
+                }
+            }
+        }
+        self.reply_cursor = (self.reply_cursor + 1) % n.max(1);
 
         // ------------------------------------------------------------------
         // 5. Gossip to a random subset of healthy nodes
@@ -657,6 +890,67 @@ impl ClusterState {
         }
 
         actions
+    }
+
+    /// Repair the active view after a failure: promote a random Healthy
+    /// passive member to probation (we start heartbeating it; its first
+    /// reply confirms it into the active view). If nothing suitable is
+    /// available the view stays underfull until gossip brings new
+    /// candidates.
+    fn repair_active_view(&mut self, now: Instant) {
+        self.last_repair_attempt = Some(now);
+        if self.active_view.len() >= self.active_view_size {
+            return;
+        }
+        let candidates: Vec<NodeId> = self
+            .passive_view
+            .iter()
+            .copied()
+            .filter(|id| {
+                *id != self.local_node
+                    && !self.active_view.contains(id)
+                    && !self.probationary.iter().any(|(pid, _)| pid == id)
+                    && matches!(
+                        self.members.get(id).map(|info| info.status),
+                        Some(NodeStatus::Healthy | NodeStatus::Joining)
+                    )
+            })
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        use rand_core::RngCore;
+        let mut buf = [0u8; 8];
+        rand_core::OsRng.fill_bytes(&mut buf);
+        let pick = candidates[(u64::from_le_bytes(buf) as usize) % candidates.len()];
+        self.passive_view.retain(|id| *id != pick);
+        self.probationary.push((pick, now));
+    }
+
+    /// Number of members currently reachable per the resolver's view:
+    /// the local node plus every `Healthy`/`Joining` member with fresh
+    /// liveness evidence (watched, or its gossip-refreshed timestamp
+    /// within the heartbeat timeout). Mirrors the staleness override
+    /// `tick` applies when building the resolver view. Used by the
+    /// DST cluster harness to assert the resolver's exact semantics.
+    #[cfg(test)]
+    pub(crate) fn reachable_count(&self) -> usize {
+        let now = self.now();
+        let mut count = 1;
+        for info in self.members.values() {
+            if info.node_id == self.local_node {
+                continue;
+            }
+            if !matches!(info.status, NodeStatus::Healthy | NodeStatus::Joining) {
+                continue;
+            }
+            let fresh = self.active_view.contains(&info.node_id)
+                || now.duration_since(info.last_heartbeat) <= self.heartbeat_timeout;
+            if fresh {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Get the list of all healthy members **excluding** the local node.
@@ -716,11 +1010,11 @@ impl ClusterState {
         self.on_member_failed = Some(Box::new(callback));
     }
 
-    /// Merge a membership list received from another node (gossip).
-    ///
-    /// Uses incarnation numbers for conflict resolution: the entry with
-    /// the higher incarnation is considered authoritative.  Returns
-    /// `true` if any changes were made to our membership table.
+    /// Merge incoming gossip into the membership table. Higher
+    /// incarnation numbers win; an equal-incarnation re-broadcast of a
+    /// passive live member refreshes its liveness timestamp (see the
+    /// partial-view notes in the merge body). Returns `true` if any
+    /// changes were made to our membership table.
     pub fn merge_membership(&mut self, gossip: Vec<NodeGossip>) -> bool {
         let mut changed = false;
 
@@ -738,13 +1032,17 @@ impl ClusterState {
                         .get("_incarnation")
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
-                    // Higher incarnation wins. Only a strictly-newer entry
-                    // refreshes `last_heartbeat`: an equal-incarnation entry
-                    // is just a re-broadcast of state we already hold, so
-                    // treating it as a liveness hint would let surviving
-                    // nodes refresh a dead peer's timestamp forever and
-                    // defeat the failure detector. (Direct heartbeats refresh
-                    // the timestamp via `handle_heartbeat`.)
+                    // Higher incarnation wins. A strictly-newer entry
+                    // refreshes `last_heartbeat` and applies the new
+                    // status. An equal-incarnation re-broadcast of a
+                    // LIVE entry also refreshes the timestamp: under
+                    // partial-view membership most members are never
+                    // heartbeated directly, so gossip is their only
+                    // liveness evidence. Failed entries are never
+                    // refreshed — that would let surviving nodes keep a
+                    // dead peer fresh forever and defeat the failure
+                    // detector. (Direct heartbeats refresh via
+                    // `handle_heartbeat`.)
                     if entry.incarnation > stored_incarnation {
                         let old_status = existing.status;
                         existing.last_heartbeat = now;
@@ -760,6 +1058,15 @@ impl ClusterState {
                                 self.failed_nodes.insert(entry.node_id, now);
                             }
                         }
+                    } else if !self.active_view.contains(&entry.node_id)
+                        && matches!(existing.status, NodeStatus::Healthy | NodeStatus::Joining)
+                        && matches!(entry.status, NodeStatus::Healthy | NodeStatus::Joining)
+                    {
+                        // Liveness via gossip for passive members only:
+                        // watched members are kept fresh by direct
+                        // heartbeats alone, or the detector could never
+                        // fail them.
+                        existing.last_heartbeat = now;
                     }
                 }
                 None => {
@@ -1669,5 +1976,255 @@ mod tests {
         }));
         // The invalid config leaves the previous (disabled) state in place.
         assert!(cs.split_brain.is_none());
+    }
+
+    // -- Partial-view membership (Phase 5 deliverable 6) ------------------
+
+    #[test]
+    fn test_active_view_fills_from_incoming_heartbeats() {
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+
+        // Five distinct heartbeaters: the first four fill the active
+        // view, the fifth lands in the passive repair pool. Each id is
+        // derived from, and heartbeats from, the same address.
+        let peers: Vec<(NodeId, SocketAddr)> = (1..=5)
+            .map(|i| (NodeId::new(&addr(9000 + i)), addr(9000 + i)))
+            .collect();
+        for (id, peer_addr) in &peers {
+            cs.handle_heartbeat(*id, *peer_addr);
+        }
+        assert_eq!(cs.active_view().len(), 4, "active view is bounded");
+        assert!(cs.active_view().contains(&peers[0].0));
+        assert!(cs.active_view().contains(&peers[3].0));
+        assert!(
+            !cs.active_view().contains(&peers[4].0),
+            "5th heartbeater is not active"
+        );
+        assert_eq!(cs.passive_view().len(), 1);
+        assert_eq!(cs.passive_view()[0], peers[4].0);
+    }
+
+    /// A cluster whose active view is full (four incoming heartbeaters)
+    /// plus one extra member `c` that joined but never replied; the
+    /// first tick sweeps `c` into the passive pool (the view is full,
+    /// so the repair path does not promote it).
+    fn setup_full_active_view(
+        vc: &mut super::super::timer::VirtualClock,
+        base_port: u16,
+    ) -> (ClusterState, NodeId, SocketAddr) {
+        let a = addr(base_port);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+        cs.set_clock(vc.clone());
+        for i in 1..=4u16 {
+            let id = NodeId::new(&addr(base_port + i));
+            cs.handle_heartbeat(id, addr(base_port + i));
+        }
+        let c_addr = addr(base_port + 5);
+        let c = NodeId::new(&c_addr);
+        cs.join_cluster(c_addr);
+        cs.tick();
+        (cs, c, c_addr)
+    }
+
+    #[test]
+    fn test_failure_detector_watches_active_view_only() {
+        let mut vc = super::super::timer::VirtualClock::new();
+        let (mut cs, c, _c_addr) = setup_full_active_view(&mut vc, 9100);
+        let b = NodeId::new(&addr(9101)); // first active member
+        assert!(cs.active_view().contains(&b));
+        assert!(!cs.active_view().contains(&c), "c is not watched");
+
+        // Age BOTH entries past the full failure window.
+        let stale = vc.now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&b).unwrap().last_heartbeat = stale;
+        cs.members.get_mut(&c).unwrap().last_heartbeat = stale;
+        vc.advance(Duration::from_secs(9));
+        cs.set_clock(vc.clone());
+
+        let actions = cs.tick();
+        assert_eq!(
+            cs.get_node(b).unwrap().status,
+            NodeStatus::Failed,
+            "watched (active) member is failed by our detector"
+        );
+        assert_eq!(
+            cs.get_node(c).unwrap().status,
+            NodeStatus::Joining,
+            "unwatched member's status is untouched by our detector"
+        );
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, ClusterAction::NodeFailed { node } if *node == b)));
+    }
+
+    #[test]
+    fn test_repair_promotes_passive_to_probation_and_confirms_on_reply() {
+        let mut vc = super::super::timer::VirtualClock::new();
+        let (mut cs, c, c_addr) = setup_full_active_view(&mut vc, 9200);
+        let b = NodeId::new(&addr(9201));
+        assert!(cs.passive_view().contains(&c));
+
+        // Fail b: repair must promote c to probationary (heartbeated,
+        // not watched).
+        let stale = vc.now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&b).unwrap().last_heartbeat = stale;
+        vc.advance(Duration::from_secs(9));
+        cs.set_clock(vc.clone());
+        cs.tick();
+
+        assert!(
+            !cs.active_view().contains(&b),
+            "failed member leaves the active view"
+        );
+        assert_eq!(
+            cs.probationary().len(),
+            1,
+            "a passive member is promoted to probation"
+        );
+        assert_eq!(cs.probationary()[0].0, c);
+        assert!(
+            !cs.active_view().contains(&c),
+            "probationary is not yet active"
+        );
+
+        // c's first reply confirms it into the active view and promotes
+        // it to Healthy.
+        cs.handle_heartbeat(c, c_addr);
+        assert!(
+            cs.active_view().contains(&c),
+            "reply confirms the probationary member"
+        );
+        assert!(cs.probationary().is_empty());
+        assert_eq!(cs.get_node(c).unwrap().status, NodeStatus::Healthy);
+    }
+
+    #[test]
+    fn test_probationary_member_demoted_when_no_reply() {
+        let mut vc = super::super::timer::VirtualClock::new();
+        let (mut cs, c, _c_addr) = setup_full_active_view(&mut vc, 9300);
+        let b = NodeId::new(&addr(9301));
+        let stale = vc.now()
+            - DEFAULT_HEARTBEAT_TIMEOUT
+            - DEFAULT_SUSPICION_DURATION
+            - Duration::from_secs(1);
+        cs.members.get_mut(&b).unwrap().last_heartbeat = stale;
+        vc.advance(Duration::from_secs(9));
+        cs.set_clock(vc.clone());
+        cs.tick();
+        assert_eq!(cs.probationary().len(), 1);
+
+        // c never replies; after the probation timeout it is demoted
+        // back to the passive pool — churn, not false failure.
+        vc.advance(PROBATION_TIMEOUT + Duration::from_secs(1));
+        cs.set_clock(vc.clone());
+        cs.tick();
+        assert!(
+            cs.probationary().is_empty(),
+            "silent probationary is demoted"
+        );
+        assert!(cs.passive_view().contains(&c), "demoted back to passive");
+        assert_eq!(cs.get_node(c).unwrap().status, NodeStatus::Joining);
+    }
+
+    #[test]
+    fn test_heartbeats_bounded_by_views_and_replies() {
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+
+        // Nine healthy members: four fill the active view, five go
+        // passive. Heartbeats reach the active view plus up to
+        // REPLY_SLOTS replies to recent passive pingers — bounded,
+        // not O(every member).
+        for i in 1..=9 {
+            let id = NodeId::new(&addr(9000 + i));
+            cs.handle_heartbeat(id, addr(9000 + i));
+        }
+        assert_eq!(cs.active_view().len(), 4);
+        assert_eq!(cs.passive_view().len(), 5);
+
+        // Backdate the heartbeat throttle so this tick actually sends.
+        cs.last_heartbeat_sent = Instant::now() - Duration::from_secs(1);
+
+        let actions = cs.tick();
+        let heartbeats: Vec<NodeId> = actions
+            .iter()
+            .filter_map(|act| match act {
+                ClusterAction::SendHeartbeat { to, .. } => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            heartbeats.len() >= cs.active_view().len(),
+            "every active member is heartbeated, got {heartbeats:?}"
+        );
+        assert!(
+            heartbeats.len() <= cs.active_view().len() + REPLY_SLOTS,
+            "heartbeat fanout is bounded by active view + reply slots, got {heartbeats:?}"
+        );
+        for hb in &heartbeats {
+            assert!(
+                cs.active_view().contains(hb) || cs.passive_view().contains(hb),
+                "heartbeat to {hb:?} is outside the views"
+            );
+        }
+        // A passive member that did not recently ping us is never
+        // answered.
+        let stale = Instant::now() - Duration::from_secs(60);
+        cs.members
+            .get_mut(&NodeId::new(&addr(9009)))
+            .unwrap()
+            .last_heartbeat = stale;
+        cs.last_heartbeat_sent = Instant::now() - Duration::from_secs(1);
+        let actions = cs.tick();
+        let heartbeats: Vec<NodeId> = actions
+            .iter()
+            .filter_map(|act| match act {
+                ClusterAction::SendHeartbeat { to, .. } => Some(*to),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !heartbeats.contains(&NodeId::new(&addr(9009))),
+            "a silent passive member is not replied to"
+        );
+    }
+
+    #[test]
+    fn test_join_bootstrap_heartbeats_seed_then_promotes_it() {
+        let a = addr(9000);
+        let local = NodeId::new(&a);
+        let mut cs = ClusterState::new(local, a);
+        let seed_addr = addr(9001);
+        let seed = NodeId::new(&seed_addr);
+
+        cs.join_cluster(seed_addr);
+        assert_eq!(cs.get_node(seed).unwrap().status, NodeStatus::Joining);
+
+        // The joiner heartbeats the seed even though it is not in any
+        // view: the first heartbeat initiates the join.
+        // Backdate the heartbeat throttle so this tick actually sends.
+        cs.last_heartbeat_sent = Instant::now() - Duration::from_secs(1);
+
+        let actions = cs.tick();
+        assert!(actions.iter().any(|act| matches!(
+            act,
+            ClusterAction::SendHeartbeat { to, .. } if *to == seed
+        )));
+
+        // The seed's reply promotes it to Healthy and places it in the
+        // active view (symmetric link established).
+        cs.handle_heartbeat(seed, seed_addr);
+        assert_eq!(cs.get_node(seed).unwrap().status, NodeStatus::Healthy);
+        assert!(cs.active_view().contains(&seed));
     }
 }

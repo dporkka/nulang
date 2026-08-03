@@ -256,6 +256,78 @@ though the surface is formally untiered.
    Non-blocking: the failure mode is already conservative (config error is
    loud at startup, and the strategy is opt-in).
 
+## 6. Partial-View Membership (Phase 5 deliverable 6)
+
+This section extends the same Experimental-tier surface with partial-view
+membership: the heartbeat data plane becomes O(active view) instead of
+O(every member), while the membership table and gossip stay full-view.
+No wire change — heartbeats, gossip, and probes are unchanged packet
+types; the views are purely local state.
+
+### 6.1 Active view, passive view, probation
+
+- **Active view** (default 4): the members we heartbeat directly. A
+  member is admitted by heartbeating us (with room in the view), so
+  admission is evidence of reciprocity; the failure detector watches
+  exactly this set.
+- **Passive view** (default 20): known members we do not heartbeat;
+  the repair pool. Their liveness comes from gossip.
+- **Probation**: when an active member fails, a random Healthy passive
+  member is promoted to probation — we heartbeat it, awaiting its first
+  reply — and confirmed into the active view on the reply. Probationary
+  members are not watched, so a member that never reciprocates is
+  demoted back to passive (churn), never falsely failed. Repair retries
+  every 5 s while the view is underfull.
+- **Bounded reply rule**: each node replies per heartbeat round to up
+  to `REPLY_SLOTS` (4) passive members that recently heartbeated it
+  (rotated round-robin). Without replies, a member whose active view
+  filled up would stop heartbeating us and the detector would
+  false-fail it; with 4 slots × 500 ms, every pinger is answered within
+  the 2 s detection window for clusters up to ~80 nodes.
+
+Consequences for the failure detector:
+
+- Only active-view members are watched, so no false failure can come
+  from a member we do not heartbeat (including members whose views
+  filled up). A dead member is always watched by its own active
+  partners (heartbeat links are symmetric by construction: admission
+  requires the partner's heartbeats, which continue until death).
+- The detector now **bumps the entry incarnation on a `Failed`
+  transition**, so the Failed status propagates via gossip to
+  non-watchers (previously the Failed transition never bumped, which
+  was invisible under full-mesh detection but fatal under partial
+  view).
+
+### 6.2 Liveness via gossip
+
+`merge_membership` refreshes a member's `last_heartbeat` on an
+equal-incarnation re-broadcast when the member is **passive** (not
+watched) and live (`Healthy`/`Joining`). Watched members are refreshed
+only by direct heartbeats, so the failure detector still works. Failed
+entries are never refreshed — the dead-peer protection from the
+original RFC 0011 work is preserved (regression-tested).
+
+### 6.3 Resolver view is freshness-aware
+
+The membership view handed to the resolver marks stale-status passive
+members as `Suspicious` (view only, table untouched): a member whose
+gossip-derived status is a frozen `Healthy` snapshot is not reachable
+evidence. This keeps `static-quorum` correct under partial view — an
+isolated node's stale gossip does not keep it above quorum. A
+`reachable_count` mirroring the resolver view is exposed for the DST
+harness so invariant tests assert the resolver's exact semantics.
+
+### 6.4 Verification
+
+The `SimCluster` DST harness (Phase 5 deliverable 2) gained four
+10/30-node scenarios: bounded fanout (heartbeats ≤ active + probation +
+replies, never full-mesh at 30 nodes), mesh convergence, node-death
+detection with no false failures (survivors keep mutual-Healthy
+statuses; the dead node is Failed everywhere), and heal/rejoin with
+active-view repair. Six unit tests cover the view mechanics
+(admission, detector scoping, probation confirm/demote, bounded
+heartbeats, join bootstrap).
+
 ## Resolution
 
 (To be filled on accept/reject.)

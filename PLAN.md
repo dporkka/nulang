@@ -1115,26 +1115,42 @@ anything.
    (`distributed_context.rs:13`) is already the seam. Only remove it if
    that unification surfaces unexpected scope beyond deliverable 4's own
    work.
-6. **Partial-view membership beyond full-mesh.** Confirmed: O(N) TCP
-   connections per node, O(N²) cluster-wide heartbeat traffic, gossip
-   payload capped at 256 entries (`GOSSIP_PAYLOAD_MAX_ENTRIES`,
-   `mod.rs:99`) — the same practical ceiling (tens to ~200 nodes) that
-   Erlang's default full-mesh distribution hits before requiring the
-   third-party Partisan library's pluggable topologies (verified via web
-   research: Partisan's own docs cite 60-200 nodes as the classic Erlang
-   ceiling). Replace full-mesh heartbeating with a partial-view protocol
-   (HyParView-style: bounded active view for heartbeats + larger passive
-   view for repair, symmetric peer sampling) — gossip already has a
-   partial-fanout mechanism (fanout 2) that generalizes; only the
-   heartbeat data-plane needs to change from "every healthy member" to
-   "the active view." Sequence after deliverable 1: `static-quorum` needs
-   a configured expected size (works fine under partial-view), but if
-   `keep-majority`/`keep-oldest` are attempted they need a reasonably
-   accurate live member count, which partial-view membership makes harder
-   to guarantee — if this deliverable can't preserve that accuracy, ship
-   deliverable 1 with `static-quorum` only and defer
-   `keep-majority`/`keep-oldest` rather than shipping a resolver that
-   silently miscounts (see Kill criteria).
+6. **Partial-view membership beyond full-mesh.**
+   ✅ **Landed 2026-08-03** — the heartbeat data plane is now
+   O(active view) instead of O(every member), with the membership table
+   and gossip unchanged (no wire change; views are local state, same
+   Experimental tier as RFC 0011, which this work amends with §6):
+   - **Active view (4) / passive view (20) / probation**: admission by
+     incoming heartbeat (reciprocity evidence); the failure detector
+     watches exactly the active view, so no member we do not heartbeat
+     can be false-failed. A failed active member is repaired by
+     promoting a Healthy passive to probation (heartbeated, not
+     watched); first reply confirms, silence demotes (churn, not false
+     failure), retry every 5 s.
+   - **Bounded reply rule**: up to `REPLY_SLOTS` (4) replies per round
+     to recent passive pingers (rotated) — a member whose view filled
+     up still gets answered within the 2 s detection window (~80-node
+     ceiling at these constants).
+   - **Detector bumps incarnation on `Failed`** so the status
+     propagates via gossip to non-watchers (invisible under full-mesh,
+     fatal under partial view — this was a real gap found by the DST
+     harness).
+   - **Gossip liveness refresh** for passive live members
+     (equal-incarnation re-broadcast refreshes `last_heartbeat`;
+     watched members and Failed entries are never refreshed — the
+     dead-peer protection regression-tested).
+   - **Freshness-aware resolver view**: stale-status passives count as
+     Suspicious in the view handed to the resolver, so an isolated
+     node's frozen gossip cannot keep it above quorum; `static-quorum`
+     stays correct under partial view. `keep-majority`/`keep-oldest`
+     remain deferred (live-count accuracy not yet proven — unchanged
+     from the RFC).
+   - **Verification**: 4 new `SimCluster` scenarios (30-node bounded
+     fanout, 10-node convergence, death with zero false failures +
+     gossip failure propagation, heal/rejoin with view repair) + 6 unit
+     tests for the view mechanics. The DST harness is what surfaced
+     both real gaps (incarnation bump, stale-gossip quorum) — the
+     plan's "verification vehicle" reasoning paid off.
 7. **Node-death detection triggers real recovery, not silent orphaning.**
    Confirmed: zero grep hits for `failover`/`rehome`/`migrat` logic across
    `distribution.rs`/`distributed.rs`. `ClusterState` already detects
