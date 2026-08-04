@@ -662,6 +662,16 @@ pub fn compile_bytecode_region(
                 // handler dispatch.  Store the relative PC offset
                 // so try_jit_execute re-enters the interpreter at
                 // the PerformDirect instruction.
+                //
+                // OPTIMIZATION (future): when the handler binding is
+                // single-shot (see `HandlerBinding::single_shot`),
+                // the handler body can be compiled inline — the
+                // continuation is just the next PC and no heap
+                // allocation is needed.  This requires (a) the JIT
+                // compiler to access `CodeModule::handler_tables` to
+                // look up the binding, and (b) support for compiling
+                // non-contiguous handler bodies (different PC offset)
+                // as callable subroutines within the JIT region.
                 let yield_pc_addr = JitSession::yield_pc_addr();
                 let yield_pc_ptr = builder.ins().iconst(types::I64, yield_pc_addr);
                 let rel_offset = builder.ins().iconst(types::I64, (pc - start_offset) as i64);

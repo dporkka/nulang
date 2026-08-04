@@ -368,10 +368,12 @@ impl JitSession {
     /// type-directed scalar compiler if SIMD emission fails. Returns `None`
     /// when the region has no vectorizable pattern at all.
     ///
-    /// Currently **not wired into tiering**: `simd_analyzer` finds no
-    /// trip-count hints in production and the emitter is unsound as-is (no
-    /// register write-back, baked trip count), so the scalar/typed
-    /// compilation paths are used until SIMD is reworked.
+    /// Wired into tier-2 promotion: when a typed region exceeds
+    /// `TIER2_THRESHOLD` executions, SIMD compilation is attempted.
+    /// Falls back to typed/scalar on any failure.  Element-wise array
+    /// ops store results to memory (no register write-back needed);
+    /// trip count must be a runtime `ArrLen` register (baked hints
+    /// are unsafe and rejected by the analyzer).
     ///
     /// # Safety
     /// Same safety requirements as `compile_region`.

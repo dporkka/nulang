@@ -332,18 +332,26 @@ impl ActorHeap {
     /// Panics if `total_size` is zero or the layout is invalid.
     pub fn new(total_size: usize) -> Self {
         assert!(total_size > 0, "ActorHeap size must be > 0");
-        let layout = std::alloc::Layout::from_size_align(total_size, ALIGN)
-            .expect("invalid ActorHeap layout");
-        let base = unsafe { std::alloc::alloc(layout) };
-        if base.is_null() {
-            std::alloc::handle_alloc_error(layout);
-        }
+
+        // Try the thread-local heap pool before the global allocator.
+        let (base, actual_size) = HEAP_POOL
+            .with(|pool| pool.borrow_mut().acquire(total_size))
+            .unwrap_or_else(|| {
+                let layout = std::alloc::Layout::from_size_align(total_size, ALIGN)
+                    .expect("invalid ActorHeap layout");
+                let base = unsafe { std::alloc::alloc(layout) };
+                if base.is_null() {
+                    std::alloc::handle_alloc_error(layout);
+                }
+                (base, total_size)
+            });
+
         ActorHeap {
             actor_id: 0,
             base,
             current: base,
-            limit: unsafe { base.add(total_size) },
-            total_size,
+            limit: unsafe { base.add(actual_size) },
+            total_size: actual_size,
             used_bytes: 0,
             prior_used: 0,
             retired_blocks: Vec::new(),
@@ -712,14 +720,10 @@ impl ActorHeap {
     /// abandoned — the caller must ensure no outstanding pointers exist.
     fn release_retired_blocks(&mut self) {
         for &(base, size) in &self.retired_blocks {
-            let layout =
-                std::alloc::Layout::from_size_align(size, ALIGN).expect("invalid block layout");
-            // SAFETY: `base` was allocated with this exact layout in
-            // `grow_bump_block` (or `ActorHeap::new` for the first block) and
-            // is deallocated exactly once here.
-            unsafe {
-                std::alloc::dealloc(base, layout);
-            }
+            // Return to the thread-local pool instead of deallocating.
+            HEAP_POOL.with(|pool| {
+                pool.borrow_mut().release(base, size);
+            });
         }
         self.retired_blocks.clear();
     }
@@ -994,23 +998,35 @@ impl Drop for HeapPool {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Thread-local heap pool — recycled across actor generations
+// ---------------------------------------------------------------------------
+
+// Per-shard-thread pool of deallocated bump-allocator blocks.
+// Since each shard runs on exactly one scheduler thread and heaps never
+// cross threads, a `thread_local!` is safe and avoids plumbing a pool
+// reference through every `ActorHeap::new` call site.
+//
+// Default: retain up to 8 blocks of ≤ 128 KiB each.
+thread_local! {
+    static HEAP_POOL: std::cell::RefCell<HeapPool> =
+        std::cell::RefCell::new(HeapPool::new(8, 128 * 1024));
+}
 // ---------------------------------------------------------------------------
 // Drop
 // ---------------------------------------------------------------------------
 
 impl Drop for ActorHeap {
     fn drop(&mut self) {
-        // Deallocate individually malloc'd large-object-space blocks and
-        // retired bump blocks first.
+        // Deallocate individually malloc'd large-object-space blocks.
         self.release_los_blocks();
+        // Return retired bump blocks to the pool.
         self.release_retired_blocks();
-        let layout = std::alloc::Layout::from_size_align(self.total_size, ALIGN).unwrap();
-        // SAFETY: `self.base` was allocated with the exact same layout in
-        // `ActorHeap::new`.  After dealloc the pointer must not be used,
-        // which is fine because the heap is being dropped.
-        unsafe {
-            std::alloc::dealloc(self.base, layout);
-        }
+        // Return the primary bump block to the pool.
+        HEAP_POOL.with(|pool| {
+            pool.borrow_mut().release(self.base, self.total_size);
+        });
     }
 }
 
@@ -1786,4 +1802,44 @@ fn test_zero_payload_free_preserves_neighbor() {
     }
     assert_eq!(heap.live_count(), 1);
     assert_eq!(heap.free_list_count(), 2);
+}
+
+#[test]
+fn test_heap_pool_reuse_across_heaps() {
+    // Create and drop several heaps; the pool should reuse blocks.
+    let ptrs: Vec<*mut u8> = (0..4)
+        .map(|_| {
+            let heap = ActorHeap::new(64 * 1024);
+            let base = heap.base;
+            std::mem::forget(heap); // don't drop — we'll check the pool
+            base
+        })
+        .collect();
+
+    // Drop the heaps to return blocks to the pool.
+    for &base in &ptrs {
+        HEAP_POOL.with(|pool| {
+            pool.borrow_mut().release(base, 64 * 1024);
+        });
+    }
+
+    // Now allocate new heaps — they should get pooled blocks.
+    let mut reused = 0;
+    for _ in 0..4 {
+        let heap = ActorHeap::new(64 * 1024);
+        if ptrs.contains(&heap.base) {
+            reused += 1;
+        }
+        // Don't return to pool during test cleanup.
+        let base = heap.base;
+        let size = heap.total_size;
+        std::mem::forget(heap);
+        // Deallocate manually so we don't pollute the pool for other tests.
+        let layout =
+            std::alloc::Layout::from_size_align(size, crate::runtime::heap::ALIGN).unwrap();
+        unsafe {
+            std::alloc::dealloc(base, layout);
+        }
+    }
+    assert!(reused > 0, "pool should have reused at least one block");
 }
