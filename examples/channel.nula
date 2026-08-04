@@ -1,0 +1,35 @@
+// Channel.nula — a single-value channel actor (stdlib pattern)
+// Provides put(value) and take() behaviors.
+// Multiple puts before a take overwrite the stored value.
+//
+// This is the simplest channel pattern, modelled on Erlang's
+// "process as mailbox" idiom.  A multi-value buffered channel
+// would use an array buffer with the same put/take interface;
+// bounded backpressure (sender suspension on full) requires
+// VM-level mailbox capacity support.
+
+actor Channel {
+    state value = nil
+    state has_value = false
+
+    // Put a value into the channel.  Overwrites any unread value.
+    behavior put(v) {
+        self.value = v
+        self.has_value = true
+    }
+
+    // Take the stored value.  Returns nil if nothing was put.
+    behavior take() {
+        if self.has_value then {
+            self.has_value = false
+            self.value
+        } else {
+            nil
+        }
+    }
+
+    // True when a value is waiting to be taken.
+    behavior is_full() {
+        self.has_value
+    }
+}

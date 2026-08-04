@@ -2566,12 +2566,46 @@ impl Parser {
                 // Check for prefix operators
                 if let Some((prec, _)) = prefix_precedence(&kind) {
                     self.advance(); // consume operator
+                                    // For `&`, check for an optional capability keyword
+                                    // immediately after: &val, &ref, &iso, etc.
+                                    // Bare `&` defaults to `&ref` (backward compatible).
+                    let ref_cap = if matches!(kind, TokenKind::Ampersand) {
+                        match self.peek_kind() {
+                            TokenKind::Val => {
+                                self.advance();
+                                Capability::Val
+                            }
+                            TokenKind::Ref => {
+                                self.advance();
+                                Capability::Ref
+                            }
+                            TokenKind::Iso => {
+                                self.advance();
+                                Capability::Iso
+                            }
+                            TokenKind::Trn => {
+                                self.advance();
+                                Capability::Trn
+                            }
+                            TokenKind::Box => {
+                                self.advance();
+                                Capability::Box
+                            }
+                            TokenKind::Tag => {
+                                self.advance();
+                                Capability::Tag
+                            }
+                            _ => Capability::Ref,
+                        }
+                    } else {
+                        Capability::Ref // unused for -, !, *
+                    };
                     let operand = self.parse_expr_with_prec(prec)?;
                     let span = self.current_span();
                     let un_op = match kind {
                         TokenKind::Minus => UnOp::Neg,
                         TokenKind::Not | TokenKind::Bang => UnOp::Not,
-                        TokenKind::Ampersand => UnOp::Ref(Capability::Ref),
+                        TokenKind::Ampersand => UnOp::Ref(ref_cap),
                         TokenKind::Star => UnOp::Deref,
                         _ => unreachable!(),
                     };

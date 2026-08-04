@@ -97,7 +97,7 @@ pub struct GcStats {
     pub foreign_refs_sent: u64,
     /// Foreign reference receives.
     pub foreign_refs_received: u64,
-    /// Cycles detected (placeholder for future cycle collector).
+    /// Cycles detected by the ORCA cycle detector (`orca_cycle::CycleDetector`).
     pub cycles_detected: u64,
     /// Total bytes allocated.
     pub bytes_allocated: u64,
@@ -666,7 +666,7 @@ impl OrcaGc {
 /// * Collecting [`ForeignRefOp`]s from all actor GCs.
 /// * Delivering them to the correct target actors between scheduling rounds.
 /// * Tracking global GC statistics.
-/// * Deciding when to trigger cycle detection (placeholder for Phase B).
+/// * Deciding when to trigger cycle detection (via `orca_cycle::CycleDetector`).
 pub struct OrcaCoordinator {
     /// Queue of foreign-ref operations waiting to be delivered.
     ///
@@ -707,8 +707,8 @@ impl OrcaCoordinator {
 
     /// Check if cycle detection should be triggered.
     ///
-    /// Cycle detection is a placeholder for Phase B; this method simply
-    /// checks whether the delivered-op threshold has been exceeded.
+    /// Delegates to `orca_cycle::CycleDetector::incremental_detect` via
+    /// the runtime's `process_gc_ops` pipeline.
     pub fn should_trigger_cycle_detection(&self) -> bool {
         self.delivered_count >= self.cycle_detect_threshold
     }

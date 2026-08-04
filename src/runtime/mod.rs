@@ -1934,6 +1934,27 @@ impl Runtime {
             self.poll_llm_completions();
             self.tick_timers();
             self.step_actor(actor_id);
+            // Micro-batch: continue processing the same actor for a few more
+            // messages to maximize L1 instruction-cache retention.  The
+            // per-turn reduction budget (checked by should_yield) acts as
+            // the safety limit — a hot actor that exhausts its budget will
+            // be requeued behind other actors.
+            const BATCH_SIZE: usize = 16;
+            for _ in 1..BATCH_SIZE {
+                let should_continue = self
+                    .actors
+                    .get(&actor_id)
+                    .map(|a| {
+                        !a.mailbox.is_empty()
+                            && !a.should_yield()
+                            && a.suspended_execution.is_none()
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+                self.step_actor(actor_id);
+            }
             ticks += 1;
             if ticks % GC_PUMP_INTERVAL == 0 {
                 // Safe at any cadence: process_deferred only frees objects

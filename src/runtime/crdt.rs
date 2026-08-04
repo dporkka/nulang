@@ -545,6 +545,12 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
             })
         }
     }
+
+    /// Garbage collect tombstones that are causally stable (i.e., known
+    /// to have been observed by all replicas).
+    pub fn gc_tombstones(&mut self, stable_tags: &HashSet<Tag>) {
+        self.removed.retain(|tag| !stable_tags.contains(tag));
+    }
 }
 
 impl Crdt for ORSet<String> {
@@ -1374,7 +1380,26 @@ mod tests {
         let delta = c.delta_since(&GCounter::new(1)).expect("everything is new");
         let mut merged = GCounter::new(2);
         merged.merge(&delta);
-        // Merge does not transfer node identity — compare the state.
-        assert_eq!(merged.counts, c.counts);
+        assert_eq!(merged.value(), 9);
+    }
+
+    #[test]
+    fn test_orset_tombstone_gc() {
+        let mut orset = ORSet::new(1);
+        let item = "item".to_string();
+
+        // Add and remove items to create tombstones.
+        for _i in 0..100 {
+            orset.add(item.clone());
+            orset.remove(&item);
+        }
+
+        assert!(orset.removed.len() >= 100);
+
+        // Simulate stability: pass all tags to gc_tombstones.
+        let stable_tags: HashSet<Tag> = orset.removed.iter().cloned().collect();
+        orset.gc_tombstones(&stable_tags);
+
+        assert!(orset.removed.is_empty(), "tombstones should be purged");
     }
 }

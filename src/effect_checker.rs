@@ -1219,6 +1219,39 @@ impl CapabilityAnalyzer {
         Ok(())
     }
 
+    /// Mark an `Iso` binding as consumed after a move operation (send,
+    /// ask, closure capture), erroring if it was already moved along this
+    /// path.
+    ///
+    /// Unlike `LinearIso`/`Linear` (which are consumed on every variable
+    /// reference via `Expr::Var`), plain `Iso` is consumed only at explicit
+    /// ownership-transfer points.  The same `consumed` set is used so that
+    /// branch merge, loop rejection, and shadowing work identically.
+    fn consume_if_iso(
+        &mut self,
+        name: &str,
+        span: Span,
+        consumed: &mut FxHashSet<String>,
+    ) -> NuResult<()> {
+        self.consumed_spans.push(span);
+        if !consumed.insert(name.to_string()) {
+            let first_span = self.first_consumed.get(name);
+            let mut msg = format!("iso value `{}` used after being moved", name);
+            if let Some(fs) = first_span {
+                msg.push_str(&format!(" (first moved at line {}:{})", fs.start, fs.end));
+            }
+            msg.push_str("\nhelp: iso bindings transfer ownership on send/ask");
+            msg.push_str(&format!(
+                "\nhelp: use `consume {}` to explicitly discharge the iso before the move, or restructure to avoid the second use",
+                name
+            ));
+            self.diagnostics.push(msg.clone());
+            return Err(NuError::cap_error(msg, span));
+        }
+        self.first_consumed.insert(name.to_string(), span);
+        Ok(())
+    }
+
     /// Recursive worker for [`infer_cap`] that tracks which `LinearIso`
     /// bindings have already been consumed along the current path.
     ///
@@ -1242,12 +1275,19 @@ impl CapabilityAnalyzer {
             // Literals are immutable values.
             Expr::Literal(_, _) => Ok(Capability::Val),
 
-            // Variable: look up in the capability context. Referencing a
-            // linear binding consumes it.
             Expr::Var(name, span) => {
                 let cap = ctx.lookup(name);
                 if cap.is_linear() {
                     self.consume_linear(name, *span, consumed)?;
+                } else if cap == Capability::Iso && consumed.contains(name) {
+                    let first_span = self.first_consumed.get(name);
+                    let mut msg = format!("iso value `{}` used after being moved", name);
+                    if let Some(fs) = first_span {
+                        msg.push_str(&format!(" (first moved at line {}:{})", fs.start, fs.end));
+                    }
+                    msg.push_str("\nhelp: iso bindings transfer ownership on send/ask and may be used at most once thereafter");
+                    self.diagnostics.push(msg.clone());
+                    return Err(NuError::cap_error(msg, *span));
                 }
                 Ok(cap)
             }
@@ -1273,6 +1313,13 @@ impl CapabilityAnalyzer {
                     for name in &free {
                         if ctx.lookup(name).is_linear() {
                             self.consume_linear(name, *span, consumed)?;
+                        }
+                    }
+                    // Capturing an iso binding in a closure also transfers
+                    // ownership, same as send.
+                    for name in &free {
+                        if ctx.lookup(name) == Capability::Iso {
+                            self.consume_if_iso(name, *span, consumed)?;
                         }
                     }
                     Ok(cap)
@@ -1590,6 +1637,14 @@ impl CapabilityAnalyzer {
                                 ), span));
                         }
                     }
+                    // Consume Iso bindings on send: passing an iso value
+                    // transfers ownership.  LinearIso/Linear are already
+                    // consumed by Expr::Var via consume_linear.
+                    if let Expr::Var(name, span) = arg {
+                        if arg_cap == Capability::Iso {
+                            self.consume_if_iso(name, *span, consumed)?;
+                        }
+                    }
                 }
                 Ok(Capability::Val)
             }
@@ -1601,6 +1656,13 @@ impl CapabilityAnalyzer {
                 let mut cap = self.infer_cap_tracked(ctx, actor, consumed)?;
                 for arg in args {
                     cap = cap.join(self.infer_cap_tracked(ctx, arg, consumed)?);
+                    // Consume Iso bindings on ask, same as send.
+                    if let Expr::Var(name, span) = arg {
+                        let arg_cap = ctx.lookup(name);
+                        if arg_cap == Capability::Iso {
+                            self.consume_if_iso(name, *span, consumed)?;
+                        }
+                    }
                 }
                 Ok(cap)
             }
@@ -3264,6 +3326,85 @@ mod tests {
             span: s(),
         };
         assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+    }
+
+    #[test]
+    fn test_iso_sent_twice_errors() {
+        // Sending an iso value transfers ownership; a second send must error.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new()
+            .with_binding("a", Capability::Iso)
+            .with_binding("x", Capability::Iso);
+        // send a, m(x); send a, n(x) — second send uses moved iso
+        let expr = Expr::Block {
+            exprs: vec![send_m(lvar("x")), send_m(lvar("x"))],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
+        assert!(
+            analyzer
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("used after being moved")),
+            "expected 'used after being moved' diagnostic, got: {:?}",
+            analyzer.diagnostics
+        );
+    }
+
+    #[test]
+    fn test_iso_sent_once_ok() {
+        // Sending an iso value once is fine; no second use follows.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new()
+            .with_binding("a", Capability::Iso)
+            .with_binding("x", Capability::Iso);
+        let expr = send_m(lvar("x"));
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+        assert!(analyzer.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn test_iso_captured_by_closure_then_used_errors() {
+        // Capturing an iso value in a closure transfers ownership;
+        // subsequent use must error.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::Iso);
+        // { || send a, m(x); f(x) } — closure captures x (consumed), then
+        // f(x) tries to use it again.
+        let lam = Expr::Lambda {
+            params: vec![],
+            ret_type: None,
+            body: Box::new(send_m(lvar("x"))),
+            effect: None,
+            span: s(),
+        };
+        let expr = Expr::Block {
+            exprs: vec![lam, call1("f", lvar("x"))],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
+        assert!(
+            analyzer
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("used after being moved")),
+            "expected 'used after being moved' diagnostic, got: {:?}",
+            analyzer.diagnostics
+        );
+    }
+
+    #[test]
+    fn test_iso_app_twice_ok() {
+        // App (function call) with iso is NOT a move — the binding
+        // remains usable.  Only send/ask/closure-capture consume iso.
+        let mut analyzer = CapabilityAnalyzer::new();
+        let ctx = CapContext::new().with_binding("x", Capability::Iso);
+        let expr = Expr::Block {
+            exprs: vec![call1("f", lvar("x")), call1("g", lvar("x"))],
+            span: s(),
+        };
+        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+        assert!(analyzer.diagnostics.is_empty());
     }
 
     // -----------------------------------------------------------------------

@@ -497,8 +497,10 @@ pub struct HandlerBinding {
     pub arg_count: u8,
     /// Register to place the effect operation result into (for resume).
     pub result_reg: u8,
-    /// Whether the continuation is consumed at most once.  When `true` the
-    /// VM may skip heap-allocating the `Continuation`.  Analysis deferred.
+    /// Whether the continuation is consumed at most once (linear use of
+    /// `resume`).  When `true` the VM may skip heap-allocating the
+    /// `Continuation`.  Determined at compile time by
+    /// `effect_checker::is_single_shot`.
     pub single_shot: bool,
 }
 

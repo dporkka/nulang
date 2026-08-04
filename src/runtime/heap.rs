@@ -894,6 +894,107 @@ impl OrcaHeap for ActorHeap {
 }
 
 // ---------------------------------------------------------------------------
+// HeapPool — recycled bump-allocator blocks across actor generations
+// ---------------------------------------------------------------------------
+
+/// A pool of deallocated bump-allocator blocks that can be reused for new
+/// actors.  When an actor exits and its heap is below the pooling threshold,
+/// the blocks are returned here instead of being freed.  The next actor
+/// spawn draws from the pool before calling the global allocator.
+///
+/// This is safe because:
+/// - Blocks are only returned to the pool after the owning actor has exited,
+///   all live objects have been reclaimed, and no foreign references remain.
+/// - The runtime is single-threaded per shard, so no synchronization is needed.
+pub struct HeapPool {
+    /// Recycled blocks: `(base_ptr, size_bytes)`.
+    blocks: Vec<(*mut u8, usize)>,
+    /// Maximum number of blocks to hold.  When exceeded, the oldest block is
+    /// deallocated.
+    max_blocks: usize,
+    /// Only pool blocks whose size is ≤ this threshold.  Oversized heaps
+    /// (actors that grew via chaining) are deallocated directly.
+    size_threshold: usize,
+}
+
+impl HeapPool {
+    /// Create a new pool.
+    ///
+    /// `max_blocks`: maximum number of recycled blocks to retain.
+    /// `size_threshold`: only blocks ≤ this size (bytes) are pooled.
+    pub fn new(max_blocks: usize, size_threshold: usize) -> Self {
+        HeapPool {
+            blocks: Vec::new(),
+            max_blocks,
+            size_threshold,
+        }
+    }
+
+    /// Try to acquire a recycled block of at least `min_size` bytes.
+    /// Returns `None` when the pool is empty or no block is large enough.
+    pub fn acquire(&mut self, min_size: usize) -> Option<(*mut u8, usize)> {
+        // Best-fit: find the smallest block that satisfies the request.
+        let mut best_idx = None;
+        let mut best_size = usize::MAX;
+        for (i, &(_base, size)) in self.blocks.iter().enumerate() {
+            if size >= min_size && size < best_size {
+                best_idx = Some(i);
+                best_size = size;
+            }
+        }
+        best_idx.map(|i| self.blocks.swap_remove(i))
+    }
+
+    /// Return a block to the pool for reuse.
+    ///
+    /// The block will only be retained if its size is ≤ `size_threshold`.
+    /// Blocks above the threshold, and excess blocks when `max_blocks` is
+    /// exceeded, are deallocated immediately.
+    pub fn release(&mut self, base: *mut u8, size: usize) {
+        if size > self.size_threshold {
+            // Oversized block: deallocate immediately.
+            let layout = std::alloc::Layout::from_size_align(size, ALIGN)
+                .expect("invalid pooled block layout");
+            unsafe {
+                std::alloc::dealloc(base, layout);
+            }
+            return;
+        }
+        self.blocks.push((base, size));
+        // Evict oldest block if over limit.
+        while self.blocks.len() > self.max_blocks {
+            let (base, size) = self.blocks.remove(0);
+            let layout = std::alloc::Layout::from_size_align(size, ALIGN)
+                .expect("invalid pooled block layout");
+            unsafe {
+                std::alloc::dealloc(base, layout);
+            }
+        }
+    }
+
+    /// Number of blocks currently in the pool.
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Whether the pool is empty.
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+}
+
+impl Drop for HeapPool {
+    fn drop(&mut self) {
+        for (base, size) in self.blocks.drain(..) {
+            let layout = std::alloc::Layout::from_size_align(size, ALIGN)
+                .expect("invalid pooled block layout");
+            unsafe {
+                std::alloc::dealloc(base, layout);
+            }
+        }
+    }
+}
+// ---------------------------------------------------------------------------
 // Drop
 // ---------------------------------------------------------------------------
 

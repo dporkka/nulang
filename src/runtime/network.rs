@@ -919,7 +919,55 @@ const VAL_BOOL: u8 = 2;
 const VAL_STRING: u8 = 3;
 const VAL_UNIT: u8 = 4;
 const VAL_NIL: u8 = 5;
+/// Varint-encoded i64 (future wire format). Tag byte followed by
+/// 1–9 bytes of unsigned LEB128 encoding a zigzag-mapped i64.
+/// Not yet used on the wire — reserved for version-bumped connections.
+const VAL_INT_VARINT: u8 = 6;
 
+// ---------------------------------------------------------------------------
+// Varint (unsigned LEB128) encoding — for future compact wire format
+// ---------------------------------------------------------------------------
+
+/// Write varint — used by tests via VAL_INT_VARINT roundtrip.
+#[allow(dead_code)]
+fn write_varint(buf: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let mut byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v != 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if v == 0 {
+            break;
+        }
+    }
+}
+
+fn read_varint(bytes: &[u8], offset: usize) -> Option<(u64, usize)> {
+    let mut result: u64 = 0;
+    let mut consumed = 0;
+    loop {
+        let byte = *bytes.get(offset + consumed)?;
+        consumed += 1;
+        result |= ((byte & 0x7F) as u64) << ((consumed - 1) * 7);
+        if byte & 0x80 == 0 {
+            return Some((result, consumed));
+        }
+        if consumed >= 10 {
+            return None; // overflow
+        }
+    }
+}
+
+/// Zigzag encode — used by tests via VAL_INT_VARINT roundtrip.
+#[allow(dead_code)]
+fn zigzag_encode(v: i64) -> u64 {
+    ((v << 1) ^ (v >> 63)) as u64
+}
+fn zigzag_decode(v: u64) -> i64 {
+    ((v >> 1) as i64) ^ (-((v & 1) as i64))
+}
 /// Write a [`Value`] into `buf`.
 fn write_value(buf: &mut Vec<u8>, v: &Value) {
     if let Some(i) = v.as_int() {
@@ -1006,6 +1054,10 @@ fn read_value(bytes: &[u8], offset: usize) -> Option<(Value, usize)> {
         }
         VAL_UNIT => Some((Value::unit(), 1)),
         VAL_NIL => Some((Value::nil(), 1)),
+        VAL_INT_VARINT => {
+            let (encoded, varint_len) = read_varint(bytes, offset + 1)?;
+            Some((Value::int(zigzag_decode(encoded)), 1 + varint_len))
+        }
         _ => None,
     }
 }
@@ -2152,6 +2204,46 @@ mod tests {
                 _ => assert_eq!(decoded, *v, "roundtrip failed for {:?}", v),
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 6b. Varint encoding roundtrip (VAL_INT_VARINT)
+    // ------------------------------------------------------------------
+    #[test]
+    fn test_varint_roundtrip_edge_cases() {
+        let cases: &[i64] = &[
+            0,
+            1,
+            -1,
+            63,
+            -64,
+            127,
+            -128,
+            8191,
+            -8192,
+            i64::MAX,
+            i64::MIN,
+        ];
+        for &val in cases {
+            let v = Value::int(val);
+            let mut buf = Vec::new();
+            buf.push(VAL_INT_VARINT);
+            write_varint(&mut buf, zigzag_encode(val));
+            let (decoded, _) = read_value(&buf, 0).unwrap();
+            assert_eq!(decoded, v, "varint roundtrip failed for {}", val);
+        }
+    }
+
+    #[test]
+    fn test_varint_small_int_is_compact() {
+        // Values in [-64, 63] encode as 2 bytes (tag + 1 data byte).
+        let v = Value::int(42);
+        let mut buf = Vec::new();
+        buf.push(VAL_INT_VARINT);
+        write_varint(&mut buf, zigzag_encode(42));
+        assert_eq!(buf.len(), 2);
+        let (decoded, _) = read_value(&buf, 0).unwrap();
+        assert_eq!(decoded, v);
     }
 
     // ------------------------------------------------------------------

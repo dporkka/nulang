@@ -2183,19 +2183,37 @@ impl TypeChecker {
                 let final_subst = compose_subst(&s2, &s);
                 Ok((final_subst, Type::bool()))
             }
-            // Dereference: &cap T -> T
+            // Dereference: *e where e : &cap T  =>  T
+            // Works for any reference capability (ref, val, iso, etc.).
             Deref => {
-                let inner_var = Type::Var(TypeVar::fresh());
-                let s2 = mgu(
-                    &apply_subst(&ty, &s),
-                    &Type::Reference {
-                        cap: Capability::Ref,
-                        inner: Box::new(inner_var.clone()),
-                    },
-                    span,
-                )?;
-                let final_subst = compose_subst(&s2, &s);
-                Ok((final_subst.clone(), apply_subst(&inner_var, &final_subst)))
+                let resolved = apply_subst(&ty, &s);
+                match resolved {
+                    Type::Reference { inner, .. } => {
+                        // Already resolved to a reference: peel it.
+                        Ok((s, *inner))
+                    }
+                    Type::Var(_) => {
+                        // Still a type variable: constrain it to be a
+                        // reference.  Default to Ref for bare *x without
+                        // context; the outer mgu will refine as needed.
+                        let inner_var = Type::Var(TypeVar::fresh());
+                        let s2 = mgu(
+                            &resolved,
+                            &Type::Reference {
+                                cap: Capability::Ref,
+                                inner: Box::new(inner_var.clone()),
+                            },
+                            span,
+                        )?;
+                        let final_subst = compose_subst(&s2, &s);
+                        Ok((final_subst.clone(), apply_subst(&inner_var, &final_subst)))
+                    }
+                    other => Err(NuError::type_mismatch(
+                        format!("cannot dereference type `{}`", other),
+                        "reference type".to_string(),
+                        span,
+                    )),
+                }
             }
             // Reference: T -> &cap T
             Ref(cap) => {
@@ -2441,9 +2459,20 @@ impl TypeChecker {
         }
 
         let (s1, record_ty) = self.infer_expr(ctx, expr)?;
-        let record_ty_resolved = apply_subst(&record_ty, &s1);
+        let mut current_ty = apply_subst(&record_ty, &s1);
 
-        match record_ty_resolved {
+        // Peel reference wrappers so field access works through
+        // &ref / &val / &iso etc.  x.field where x : &ref {field: T} => T.
+        loop {
+            match current_ty {
+                Type::Reference { inner, .. } => {
+                    current_ty = apply_subst(&inner, &s1);
+                }
+                _ => break,
+            }
+        }
+
+        match current_ty {
             Type::Record(ref fs) => {
                 let (fields, tail) = split_record(fs);
                 if let Some((_, field_ty)) = fields.iter().find(|(name, _)| name == field) {
@@ -2497,9 +2526,9 @@ impl TypeChecker {
                 // that defines `field`, resolve through the instance
                 // dictionary. The returned type drops the `self` parameter
                 // so `App` can apply the remaining arguments naturally.
-                let concrete = !matches!(&record_ty_resolved, Type::Var(_));
+                let concrete = !matches!(&current_ty, Type::Var(_));
                 if concrete {
-                    let type_key = format!("{}", record_ty_resolved);
+                    let type_key = format!("{}", current_ty);
                     let class_table = self.class_table.clone();
                     let instance_table = self.instance_table.clone();
                     for (class_name, class_info) in &class_table {
@@ -2544,7 +2573,7 @@ impl TypeChecker {
                                 });
                             }
                             return Err(NuError::TypeError {
-                                msg: format!("no impl {}[{}]", class_name, record_ty_resolved),
+                                msg: format!("no impl {}[{}]", class_name, current_ty),
                                 span,
                                 expected_type: None,
                                 found_type: None,
@@ -2556,7 +2585,7 @@ impl TypeChecker {
 
                 // If the receiver is a type variable with class constraints,
                 // resolve the method through the constrained class's declaration.
-                if let Type::Var(tv) = &record_ty_resolved {
+                if let Type::Var(tv) = &current_ty {
                     if let Some(class_names) = ctx.get_constraints(tv) {
                         for class_name in class_names {
                             if let Some(class_info) = self.class_table.get(class_name) {
@@ -2594,11 +2623,11 @@ impl TypeChecker {
                 // likely trying method-call syntax on a built-in type.
                 // Produce a clear error instead of the confusing
                 // record-field unification failure.
-                if !matches!(&record_ty_resolved, Type::Var(_)) {
+                if !matches!(&current_ty, Type::Var(_)) {
                     return Err(NuError::parse_error(
                         format!(
                             "method-call syntax (`.{}()`) is not supported for type `{}`; use `perform <Effect>.op(args)` for built-in operations",
-                            field, record_ty_resolved
+                            field, current_ty
                         ),
                         span,
                     ));
@@ -2612,7 +2641,7 @@ impl TypeChecker {
                     vec![(field.to_string(), field_var.clone())],
                     TypeVar::fresh(),
                 );
-                let s2 = mgu(&record_ty_resolved, &expected, span)?;
+                let s2 = mgu(&current_ty, &expected, span)?;
                 let final_subst = compose_subst(&s2, &s1);
                 Ok((final_subst.clone(), apply_subst(&field_var, &final_subst)))
             }

@@ -1081,3 +1081,49 @@ fn test_absent_metadata_uses_scalar_path() {
         "only the prologue may use typed path; loop body must stay scalar"
     );
 }
+
+#[test]
+fn test_tier2_counter_increments() {
+    let mut jit = make_jit();
+    let dummy_ptr: *const u8 = std::ptr::null();
+    jit.compiled.insert((0, 100), (dummy_ptr, 5));
+
+    // Counter starts at 0 (not yet in map), increments each call.
+    for i in 0..TIER2_THRESHOLD - 1 {
+        jit.record_tier2_and_maybe_promote(0, 100, &[]);
+        assert_eq!(
+            jit.tier2_counters.get(&(0, 100)).copied(),
+            Some(i + 1),
+            "counter should be {} after {} calls",
+            i + 1,
+            i + 1
+        );
+    }
+    // Crossing threshold resets counter to 0.
+    jit.record_tier2_and_maybe_promote(0, 100, &[]);
+    assert_eq!(jit.tier2_counters.get(&(0, 100)).copied(), Some(0));
+
+    // Reset clears all.
+    jit.reset_tier2_counters();
+    assert!(jit.tier2_counters.is_empty());
+}
+
+#[test]
+fn test_tier2_counters_are_per_session() {
+    let mut jit_a = make_jit();
+    let mut jit_b = make_jit();
+    let dummy_ptr: *const u8 = std::ptr::null();
+    jit_a.compiled.insert((0, 200), (dummy_ptr, 3));
+    jit_b.compiled.insert((0, 200), (dummy_ptr, 3));
+
+    // Heat session A to threshold.
+    for _ in 0..TIER2_THRESHOLD {
+        jit_a.record_tier2_and_maybe_promote(0, 200, &[]);
+    }
+    assert_eq!(jit_a.tier2_counters.get(&(0, 200)).copied(), Some(0));
+    // Session B is untouched — no counter entry.
+    assert!(
+        jit_b.tier2_counters.get(&(0, 200)).is_none(),
+        "session B should have no counter since we never called record_tier2 on it"
+    );
+}

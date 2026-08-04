@@ -103,7 +103,7 @@ pub struct HandlerBindingDef {
     /// Whether the continuation is consumed at most once (linear use of
     /// `resume`).  When `true` the VM can skip heap-allocating the
     /// `Continuation` struct and use the existing frame chain instead.
-    /// Analysis is deferred — currently always `false`.
+    /// Determined at compile time by `effect_checker::is_single_shot`.
     pub single_shot: bool,
     /// Block containing the handler body; ends in `Terminator::Resume` for
     /// resuming handlers, in a `PopHandler` + `Terminator::Jump` to the

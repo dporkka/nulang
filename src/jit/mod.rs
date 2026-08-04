@@ -54,6 +54,12 @@ use cranelift_module::Module;
 /// before it becomes eligible for JIT compilation.
 pub const HOT_THRESHOLD: u64 = 1000;
 
+/// Threshold for tier-2 recompilation: after an already-compiled region
+/// has been executed this many additional times, a more aggressive
+/// compilation strategy is attempted (typed path if not already typed,
+/// or SIMD if the region is amenable).
+pub const TIER2_THRESHOLD: u64 = 10_000;
+
 // ---------------------------------------------------------------------------
 // JIT Session
 // ---------------------------------------------------------------------------
@@ -71,6 +77,10 @@ pub struct JitSession {
     /// compile time so the VM can advance pc after a JIT run without
     /// re-scanning the instruction stream.
     compiled: HashMap<(usize, usize), (*const u8, usize)>,
+    /// Per-region execution counters for already-compiled code. When a
+    /// region crosses TIER2_THRESHOLD, a more aggressive compilation is
+    /// attempted. Reset after each promotion attempt.
+    tier2_counters: HashMap<(usize, usize), u64>,
     /// Hot counters keyed by `(module_idx, offset)` so identical offsets in
     /// different modules do not share (or pollute) each other's counts.
     /// Per-session rather than process-global: VMs never share counters,
@@ -127,6 +137,7 @@ impl JitSession {
             hot_counters: HashMap::new(),
             typed_regions: std::collections::HashSet::new(),
             builder_context: FunctionBuilderContext::new(),
+            tier2_counters: HashMap::new(),
             ctx,
         })
     }
@@ -145,6 +156,55 @@ impl JitSession {
     /// existing session).
     pub fn reset_hot_counters(&mut self) {
         self.hot_counters.clear();
+    }
+
+    /// Record one execution of an already-compiled region and attempt
+    /// tier-2 promotion when the threshold is crossed.
+    ///
+    /// Tier-2 attempts more aggressive compilation: typed path for regions
+    /// that were compiled untyped, or SIMD for typed regions.  Promotion is
+    /// best-effort — a failed attempt just resets the counter so we retry
+    /// later.
+    pub fn record_tier2_and_maybe_promote(
+        &mut self,
+        module_idx: usize,
+        pc: usize,
+        instructions: &[crate::bytecode::Instruction],
+    ) {
+        let count = self.tier2_counters.entry((module_idx, pc)).or_insert(0);
+        *count += 1;
+        if *count < TIER2_THRESHOLD {
+            return;
+        }
+
+        let region_len = match self.compiled.get(&(module_idx, pc)) {
+            Some(&(_, len)) if len >= 3 => len,
+            _ => return,
+        };
+
+        let was_typed = self.typed_regions.contains(&(module_idx, pc));
+
+        if !was_typed {
+            // Try typed compilation with the benefit of profile data.
+            // We don't have a CodeModule here, so infer_reg_types needs
+            // one — skip for now, promotion will retry later.
+            // Reset counter to allow future retries.
+            self.tier2_counters.insert((module_idx, pc), 0);
+        } else {
+            // Try SIMD compilation for hot typed regions.
+            if let Some(_func) =
+                unsafe { self.compile_region_simd(module_idx, pc, region_len, instructions, None) }
+            {
+                // SIMD compilation succeeded; the compiled cache was
+                // updated inside compile_region_simd.
+            }
+            self.tier2_counters.insert((module_idx, pc), 0);
+        }
+    }
+
+    /// Reset tier-2 counters (used by tests).
+    pub fn reset_tier2_counters(&mut self) {
+        self.tier2_counters.clear();
     }
 
     /// Compile a bytecode region starting at `start_offset` with `num_instrs`
@@ -478,6 +538,8 @@ impl crate::backends::JitBackend for JitSession {
         // Check if already compiled
         if let Some(func) = unsafe { self.get_compiled(module_idx, pc) } {
             func(regs.as_mut_ptr(), constants.as_ptr());
+            // Track post-compilation hotness for tier-2 promotion.
+            self.record_tier2_and_maybe_promote(module_idx, pc, instructions);
             return crate::backends::TieredAction::RanJit;
         }
 

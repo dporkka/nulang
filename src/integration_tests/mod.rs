@@ -5978,6 +5978,113 @@ match { a: 2, b: 9 } with {
         );
     }
 
+    /// Channel actor pattern: spawn a Channel, put a value, take it.
+    /// Demonstrates the stdlib channel pattern (actor-as-mailbox idiom).
+    #[test]
+    fn test_channel_send_receive_roundtrip() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = "\
+            actor Channel {\n\
+                state value = nil\n\
+                state has_value = false\n\
+                behavior put(v) {\n\
+                    self.value = v\n\
+                    self.has_value = true\n\
+                }\n\
+                behavior take() {\n\
+                    if self.has_value then {\n\
+                        self.has_value = false\n\
+                        self.value\n\
+                    } else {\n\
+                        nil\n\
+                    }\n\
+                }\n\
+            }\n\
+            let ch = spawn Channel {} in {\n\
+                send ch put(42)\n\
+                ch\n\
+            }\n\
+        ";
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let ch_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        // Verify the put landed: has_value should be true.
+        {
+            let rt_ref = rt.borrow();
+            let ch = rt_ref.actors.get(&ch_id).unwrap();
+            assert_eq!(
+                ch.get_state_field("has_value").and_then(|v| v.as_bool()),
+                Some(true),
+                "put should set has_value to true"
+            );
+        }
+
+        // Now take the value back.
+        rt.borrow_mut().send_message_by_id(ch_id, 1, &[]); // behavior 1 = take
+        rt.borrow_mut().run_scheduler();
+
+        // After take, has_value should be false.
+        {
+            let rt_ref = rt.borrow();
+            let ch = rt_ref.actors.get(&ch_id).unwrap();
+            assert_eq!(
+                ch.get_state_field("has_value").and_then(|v| v.as_bool()),
+                Some(false),
+                "take should clear has_value"
+            );
+        }
+    }
+
+    /// Channel: multiple puts overwrite; take gets the latest.
+    #[test]
+    fn test_channel_overwrite_semantics() {
+        let rt = Rc::new(RefCell::new(Runtime::new()));
+        let source = "\
+            actor Channel {\n\
+                state value = nil\n\
+                state has_value = false\n\
+                behavior put(v) {\n\
+                    self.value = v\n\
+                    self.has_value = true\n\
+                }\n\
+                behavior take() {\n\
+                    if self.has_value then {\n\
+                        self.has_value = false\n\
+                        self.value\n\
+                    } else {\n\
+                        nil\n\
+                    }\n\
+                }\n\
+            }\n\
+            let ch = spawn Channel {} in {\n\
+                send ch put(1)\n\
+                send ch put(99)\n\
+                ch\n\
+            }\n\
+        ";
+        let value = run_source_new_with_runtime(source, rt.clone()).unwrap();
+        let ch_id = value
+            .as_actor_id()
+            .expect("spawn should return an actor reference");
+
+        rt.borrow_mut().run_scheduler();
+
+        // The last put (99) should have overwritten the first (1).
+        {
+            let rt_ref = rt.borrow();
+            let ch = rt_ref.actors.get(&ch_id).unwrap();
+            let v = ch.get_state_field("value");
+            assert_eq!(
+                v.and_then(|val| val.as_int()),
+                Some(99),
+                "last put should overwrite previous value"
+            );
+        }
+    }
     /// Regression for the deferred receive-wait wake: a behavior that sends
     /// to an actor suspended in `receive ... after` must wake it via the
     /// match — but the resume cannot run inside the sender's VM execution
@@ -6295,6 +6402,12 @@ match { a: 2, b: 9 } with {
             // Ref cells: `&` creates a cell, `*` dereferences, assignment
             // mutates and yields the assigned value.
             "let x = &10 in { x = 3; *x }",
+            // Val references: &val creates an immutable-shared reference;
+            // &ref is the default (mutable). Both dereference with *.
+            "let x = &val 10 in *x",
+            "let x = &ref 10 in { x = 3; *x }",
+            // Field access through &val reference
+            "let r = { x: 1, y: 2 } in let p = &val r in p.x + p.y",
             // Effect handlers, with and without a resumed value
             "handle perform Math.getAnswer() { | Math.getAnswer() => 42 }",
             "handle perform IO.print(\"hello\") { | IO.print(msg) => 7 }",
