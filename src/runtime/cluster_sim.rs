@@ -327,6 +327,9 @@ mod tests {
         // everyone else's perspective 0 is perfectly healthy.
         let mut sim = SimCluster::new(&addrs(5, 9200), &static_quorum(5));
         sim.run_to_healthy_mesh(200);
+        // Run long enough for active views to fully populate via repair_active_view
+        // (1 node per 2s heartbeat_timeout = 8s for 4 nodes).
+        sim.run_rounds(100);
         assert!(sim.mesh_healthy());
 
         for from in 1..5 {
