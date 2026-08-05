@@ -42,6 +42,10 @@ pub struct PackageSection {
     /// Entry point relative to the package root; `src/main.nula` when omitted.
     #[serde(default = "default_entry")]
     pub entry: String,
+    /// Registry URL for publishing and fetching dependencies.
+    /// When set, `nula publish` uploads here and bare version deps resolve from here.
+    #[serde(default)]
+    pub registry: Option<String>,
 }
 
 fn default_entry() -> String {
@@ -52,8 +56,8 @@ fn default_entry() -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Dependency {
-    /// `foo = "0.1.0"` — a bare version requirement. The MVP has no network
-    /// registry, so these parse but fail at resolution time.
+    /// `foo = "0.1.0"` — a bare version requirement. Resolved from the
+    /// package's configured registry (`[package] registry`) at build time.
     Version(String),
     /// `foo = { path = "../foo" }` or `foo = { git = "...", ... }`.
     Detailed(DependencyDetail),

@@ -1,10 +1,5 @@
 //! `nula` CLI subcommands: `new`, `init`, `build`, `build-wasm`, `test`, `run`,
-//! `list`, `clean`, `add`, `remove`, `watch`.
-//!
-//! All commands operate on the package rooted at the current directory
-//! (except `new` and `init`, which create one). Compiling and running is
-//! delegated to the current `nulang` executable — the package manager only
-//! resolves dependencies and picks the entry point.
+//! `list`, `clean`, `add`, `remove`, `watch`, `publish`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,6 +8,8 @@ use crate::package::lockfile::{Lockfile, LOCKFILE_FILE};
 use crate::package::manifest::{Dependency, DependencyDetail, Manifest, MANIFEST_FILE};
 use crate::package::resolver::resolve;
 use crate::types::{NuError, NuResult, Span};
+
+use crate::registry::RegistryClient;
 
 /// Dispatch a `nula` invocation (`args` excludes the leading `nula`).
 pub fn run(args: &[String]) -> NuResult<()> {
@@ -128,13 +125,35 @@ pub fn run(args: &[String]) -> NuResult<()> {
             let open = args.get(1).map(String::as_str) == Some("--open");
             cmd_doc(open)
         }
-        Some("--help") | Some("-h") => {
-            print_usage();
-            Ok(())
+        Some("publish") => {
+            let mut registry_url: Option<String> = None;
+            let mut token: Option<String> = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--registry" => {
+                        i += 1;
+                        if i < args.len() { registry_url = Some(args[i].clone()); }
+                    }
+                    "--token" => {
+                        i += 1;
+                        if i < args.len() { token = Some(args[i].clone()); }
+                    }
+                    other => {
+                        return Err(NuError::PackageError {
+                            msg: format!("unknown flag '{}' for nula publish", other),
+                            span: Span::default(),
+                        });
+                    }
+                }
+                i += 1;
+            }
+            cmd_publish(registry_url, token)
         }
+
         Some(other) => Err(NuError::PackageError {
             msg: format!(
-                "unknown nula subcommand '{}' (expected new, init, build, build-wasm, test, run, add, remove, watch, doc, list, or clean)",
+                "unknown nula subcommand '{}' (expected new, init, build, build-wasm, test, run, add, remove, publish, watch, doc, list, or clean)",
                 other
             ),
             span: Span::default(),
@@ -164,6 +183,9 @@ fn print_usage() {
     println!("  watch         Alias for 'run --watch'");
     println!("  add   <name>  Add a dependency to Nulang.toml");
     println!("  remove <name> Remove a dependency from Nulang.toml");
+    println!("  publish       Publish the package to a registry");
+    println!("                --registry <url>  Registry URL (or set in Nulang.toml)");
+    println!("                --token <token>   Auth token (or set NULA_TOKEN)");
     println!("  list          List resolved dependencies from Nulang.lock");
     println!("  clean         Remove build artifacts (.nbc files)");
     println!("  doc [--open]  Generate Markdown API docs (docs/api.md)");
@@ -866,6 +888,120 @@ fn remove_nbc_files(dir: &Path, count: &mut u64) {
             }
         }
     }
+}
+
+/// `nula publish [--registry <url>] [--token <token>]` — package and upload
+/// the current package to a registry.
+fn cmd_publish(registry_url: Option<String>, token: Option<String>) -> NuResult<()> {
+    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })?;
+    let manifest_path = root.join(MANIFEST_FILE);
+    if !manifest_path.exists() {
+        return Err(NuError::PackageError {
+            msg: format!(
+                "no {} found in {} — run 'nulang nula init' first",
+                MANIFEST_FILE,
+                root.display()
+            ),
+            span: Span::default(),
+        });
+    }
+    let manifest = Manifest::load(&root).map_err(|e| NuError::PackageError {
+        msg: format!("failed to load {}: {}", manifest_path.display(), e),
+        span: Span::default(),
+    })?;
+
+    let registry_url = registry_url
+        .or(manifest.package.registry.clone())
+        .or_else(|| std::env::var("NULA_REGISTRY").ok())
+        .ok_or_else(|| NuError::PackageError {
+            msg: "No registry URL — set `registry` in [package] of Nulang.toml, pass --registry, or set NULA_REGISTRY env var".to_string(),
+            span: Span::default(),
+        })?;
+
+    let token = token
+        .or_else(|| std::env::var("NULA_TOKEN").ok())
+        .ok_or_else(|| NuError::PackageError {
+            msg: "No auth token — pass --token or set NULA_TOKEN env var".to_string(),
+            span: Span::default(),
+        })?;
+
+    // Build tarball of the package (Nulang.toml + src/ tree).
+    let mut tarball = Vec::new();
+    {
+        let gz = flate2::write::GzEncoder::new(&mut tarball, flate2::Compression::default());
+        let mut ar = tar::Builder::new(gz);
+
+        // Add Nulang.toml
+        ar.append_path_with_name(&manifest_path, "Nulang.toml")
+            .map_err(|e| NuError::PackageError {
+                msg: format!("cannot package {}: {}", MANIFEST_FILE, e),
+                span: Span::default(),
+            })?;
+
+        // Add src/ tree
+        let src_dir = root.join("src");
+        if src_dir.is_dir() {
+            add_dir_to_tar(&mut ar, &src_dir, "src").map_err(|e| NuError::PackageError {
+                msg: format!("cannot package src/: {}", e),
+                span: Span::default(),
+            })?;
+        }
+
+        // Add tests/ if present
+        let tests_dir = root.join("tests");
+        if tests_dir.is_dir() {
+            add_dir_to_tar(&mut ar, &tests_dir, "tests").map_err(|e| NuError::PackageError {
+                msg: format!("cannot package tests/: {}", e),
+                span: Span::default(),
+            })?;
+        }
+
+        let gz = ar.into_inner().map_err(|e| NuError::PackageError {
+            msg: format!("cannot finish tarball: {}", e),
+            span: Span::default(),
+        })?;
+        gz.finish().map_err(|e| NuError::PackageError {
+            msg: format!("cannot compress tarball: {}", e),
+            span: Span::default(),
+        })?;
+    }
+
+    let name = &manifest.package.name;
+    let version = &manifest.package.version;
+    eprintln!("Publishing {}-{} to {} ...", name, version, registry_url);
+
+    let client = RegistryClient::new(registry_url, Some(token));
+    client
+        .publish(name, version, &tarball)
+        .map_err(|e| NuError::PackageError {
+            msg: format!("publish failed: {}", e),
+            span: Span::default(),
+        })?;
+
+    println!("Published {}-{} successfully.", name, version);
+    Ok(())
+}
+
+/// Recursively add a directory tree to a tar builder.
+fn add_dir_to_tar<W: std::io::Write>(
+    ar: &mut tar::Builder<W>,
+    dir: &Path,
+    prefix: &str,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = format!("{}/{}", prefix, entry.file_name().to_string_lossy());
+        if path.is_dir() {
+            add_dir_to_tar(ar, &path, &rel)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("nula") {
+            ar.append_path_with_name(&path, &rel)?;
+        }
+    }
+    Ok(())
 }
 
 /// `nula add <name> [--path <p>] [--git <url>] [--version <v>]` — add or

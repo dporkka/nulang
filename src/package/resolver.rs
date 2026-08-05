@@ -27,8 +27,9 @@ pub enum PackageSource {
     Root,
     /// A local directory (canonicalized).
     Path(PathBuf),
+    /// Downloaded from a registry at the given URL.
+    Registry(String),
     /// A git clone cached under `<root>/.nula/git/`, with the requested
-    /// rev/branch/tag if any and the commit the checkout was fetched at.
     Git {
         url: String,
         rev: Option<String>,
@@ -39,11 +40,12 @@ pub enum PackageSource {
 }
 
 impl PackageSource {
-    /// Lockfile string form: `path+<dir>` or `git+<url>#<rev>`.
+    /// Lockfile string form: `path+<dir>`, `git+<url>#<rev>`, or `reg+<url>`.
     fn lockfile_source(&self) -> String {
         match self {
             PackageSource::Root => "root".to_string(),
             PackageSource::Path(dir) => format!("path+{}", dir.display()),
+            PackageSource::Registry(url) => format!("reg+{}", url),
             PackageSource::Git { url, rev, .. } => match rev {
                 Some(rev) => format!("git+{}#{}", url, rev),
                 None => format!("git+{}", url),
@@ -60,7 +62,36 @@ impl PackageSource {
             // `commit` at fetch time, see `fetch_git`), not by content hash.
             PackageSource::Git { .. } => None,
             PackageSource::Root => None,
+            PackageSource::Registry(_) => None,
         }
+    }
+
+    /// Parse a lockfile source string back into a `PackageSource`.
+    pub fn parse_source(s: &str) -> Option<PackageSource> {
+        if s == "root" {
+            return Some(PackageSource::Root);
+        }
+        if let Some(dir) = s.strip_prefix("path+") {
+            return Some(PackageSource::Path(PathBuf::from(dir)));
+        }
+        if let Some(rest) = s.strip_prefix("reg+") {
+            return Some(PackageSource::Registry(rest.to_string()));
+        }
+        if let Some(rest) = s.strip_prefix("git+") {
+            if let Some((url, rev)) = rest.split_once('#') {
+                return Some(PackageSource::Git {
+                    url: url.to_string(),
+                    rev: Some(rev.to_string()),
+                    commit: None,
+                });
+            }
+            return Some(PackageSource::Git {
+                url: rest.to_string(),
+                rev: None,
+                commit: None,
+            });
+        }
+        None
     }
 }
 
@@ -146,7 +177,8 @@ pub fn resolve(root_dir: &Path, manifest: &Manifest) -> NuResult<Resolution> {
         msg: format!("cannot resolve {}: {}", root_dir.display(), e),
         span: Span::default(),
     })?;
-    let mut resolver = Resolver::new(root_dir.clone());
+    let registry = manifest.package.registry.clone();
+    let mut resolver = Resolver::new(root_dir.clone(), registry);
     resolver.resolve_package(&root_dir, manifest, PackageSource::Root)?;
     Ok(Resolution {
         packages: resolver.order,
@@ -205,6 +237,8 @@ pub fn version_satisfies(requirement: &str, version: &str) -> NuResult<bool> {
 
 struct Resolver {
     root_dir: PathBuf,
+    /// Default registry URL (from root manifest's `[package] registry`).
+    default_registry: Option<String>,
     /// Canonical package dir -> name, to deduplicate shared dependencies.
     by_dir: BTreeMap<PathBuf, String>,
     /// Name -> source, to detect conflicting sources for one package.
@@ -216,9 +250,10 @@ struct Resolver {
 }
 
 impl Resolver {
-    fn new(root_dir: PathBuf) -> Self {
+    fn new(root_dir: PathBuf, default_registry: Option<String>) -> Self {
         Resolver {
             root_dir,
+            default_registry,
             by_dir: BTreeMap::new(),
             by_name: BTreeMap::new(),
             in_progress: Vec::new(),
@@ -259,38 +294,29 @@ impl Resolver {
         dep_name: &str,
         dep: &Dependency,
     ) -> NuResult<()> {
-        let detail = match dep {
+        let (dep_dir, source) = match dep {
             Dependency::Version(req) => {
-                return Err(NuError::PackageError { msg: format!(
-                    "dependency '{}' = \"{}\" needs a registry, which is not supported yet; use a path or git dependency",
-                    dep_name, req
-                ), span: Span::default() });
+                let registry_url = self.resolve_dependency_registry(parent_dir)?;
+                let (dir, _ver) = self.fetch_registry(dep_name, req, &registry_url)?;
+                (dir, PackageSource::Registry(registry_url))
             }
-            Dependency::Detailed(detail) => detail,
-        };
-
-        let (dep_dir, git_commit) = if let Some(path) = &detail.path {
-            let dir = parent_dir.join(path);
-            (
-                std::fs::canonicalize(&dir).map_err(|e| NuError::PackageError {
-                    msg: format!(
-                        "cannot resolve path dependency '{}' at {}: {}",
-                        dep_name,
-                        dir.display(),
-                        e
-                    ),
-                    span: Span::default(),
-                })?,
-                None,
-            )
-        } else if detail.git.is_some() {
-            let (dir, commit) = self.fetch_git(dep_name, detail)?;
-            (dir, Some(commit))
-        } else {
-            return Err(NuError::PackageError {
-                msg: format!("dependency '{}' must specify a path or git URL", dep_name),
-                span: Span::default(),
-            });
+            Dependency::Detailed(detail) => {
+                let (dir, commit) = self.resolve_detailed(parent_dir, dep_name, detail)?;
+                let source = if detail.path.is_some() {
+                    PackageSource::Path(dir.clone())
+                } else {
+                    PackageSource::Git {
+                        url: detail.git.clone().unwrap_or_default(),
+                        rev: detail
+                            .rev
+                            .clone()
+                            .or_else(|| detail.branch.clone())
+                            .or_else(|| detail.tag.clone()),
+                        commit,
+                    }
+                };
+                (dir, source)
+            }
         };
 
         // Shared dependency already resolved: nothing more to do. A dir
@@ -310,7 +336,7 @@ impl Resolver {
                     "conflicting sources for dependency '{}': {} and {}",
                     dep_name,
                     existing.lockfile_source(),
-                    PackageSource::Path(dep_dir).lockfile_source()
+                    source.lockfile_source()
                 ),
                 span: Span::default(),
             });
@@ -328,32 +354,22 @@ impl Resolver {
                 span: Span::default(),
             });
         }
-        if let Some(requirement) = &detail.version {
-            if !version_satisfies(requirement, &manifest.package.version)? {
-                return Err(NuError::PackageError {
-                    msg: format!(
-                        "dependency '{}' requires version {} but {} provides {}",
-                        dep_name, requirement, dep_name, manifest.package.version
-                    ),
-                    span: Span::default(),
-                });
+
+        // Version check for Detailed deps; registry resolution already picked
+        // a satisfying version.
+        if let Dependency::Detailed(d) = dep {
+            if let Some(requirement) = &d.version {
+                if !version_satisfies(requirement, &manifest.package.version)? {
+                    return Err(NuError::PackageError {
+                        msg: format!(
+                            "dependency '{}' requires version {} but {} provides {}",
+                            dep_name, requirement, dep_name, manifest.package.version
+                        ),
+                        span: Span::default(),
+                    });
+                }
             }
         }
-
-        let source = if let Some(path) = &detail.path {
-            let _ = path;
-            PackageSource::Path(dep_dir.clone())
-        } else {
-            PackageSource::Git {
-                url: detail.git.clone().unwrap_or_default(),
-                rev: detail
-                    .rev
-                    .clone()
-                    .or_else(|| detail.branch.clone())
-                    .or_else(|| detail.tag.clone()),
-                commit: git_commit,
-            }
-        };
 
         // Recurse before pushing so dependencies land before dependents in
         // `order`; revisiting a dir still on the stack is a cycle (caught
@@ -468,6 +484,126 @@ impl Resolver {
             span: Span::default(),
         })?;
         Ok((dir, commit.expect("both branches record a commit")))
+    }
+
+    /// Resolve a path or git dependency. Returns the directory and optional git commit.
+    fn resolve_detailed(
+        &self,
+        parent_dir: &Path,
+        dep_name: &str,
+        detail: &DependencyDetail,
+    ) -> NuResult<(PathBuf, Option<String>)> {
+        if let Some(path) = &detail.path {
+            let dir = parent_dir.join(path);
+            let dir = std::fs::canonicalize(&dir).map_err(|e| NuError::PackageError {
+                msg: format!(
+                    "cannot resolve path dependency '{}' at {}: {}",
+                    dep_name,
+                    dir.display(),
+                    e
+                ),
+                span: Span::default(),
+            })?;
+            Ok((dir, None))
+        } else if detail.git.is_some() {
+            let (dir, commit) = self.fetch_git(dep_name, detail)?;
+            Ok((dir, Some(commit)))
+        } else {
+            Err(NuError::PackageError {
+                msg: format!("dependency '{}' must specify a path or git URL", dep_name),
+                span: Span::default(),
+            })
+        }
+    }
+
+    /// Determine the registry URL for resolving version dependencies.
+    /// Uses the parent package's `[package] registry`, falling back to the
+    /// root manifest's default.
+    fn resolve_dependency_registry(&self, parent_dir: &Path) -> NuResult<String> {
+        if let Ok(manifest) = Manifest::load(parent_dir) {
+            if let Some(url) = &manifest.package.registry {
+                return Ok(url.clone());
+            }
+        }
+        self.default_registry.clone().ok_or_else(|| NuError::PackageError {
+            msg: "No registry configured — set `registry` in `[package]` of Nulang.toml, or use path/git dependencies".to_string(),
+            span: Span::default(),
+        })
+    }
+
+    /// Fetch a package from the registry, extract it to
+    /// `<root>/.nula/registry/<name>-<version>/`, and return its directory.
+    fn fetch_registry(
+        &self,
+        dep_name: &str,
+        requirement: &str,
+        registry_url: &str,
+    ) -> NuResult<(PathBuf, String)> {
+        let client = crate::registry::RegistryClient::new(registry_url.to_string(), None);
+        let versions = client
+            .list_versions(dep_name)
+            .map_err(|e| NuError::PackageError {
+                msg: format!(
+                    "failed to list versions for '{}' from {}: {}",
+                    dep_name, registry_url, e
+                ),
+                span: Span::default(),
+            })?;
+
+        // Pick the best satisfying version (latest wins when multiple satisfy).
+        let best = versions
+            .iter()
+            .filter(|v| version_satisfies(requirement, v).unwrap_or(false))
+            .max_by(|a, b| compare_semver(a, b).unwrap_or(std::cmp::Ordering::Less))
+            .ok_or_else(|| NuError::PackageError {
+                msg: format!(
+                    "no version of '{}' satisfies requirement {} (available: {:?})",
+                    dep_name, requirement, versions
+                ),
+                span: Span::default(),
+            })?;
+
+        let cache = self.root_dir.join(".nula").join("registry");
+        let dest = cache.join(format!("{}-{}", dep_name, best));
+
+        // Reuse cached extraction.
+        if dest.join(MANIFEST_FILE).exists() {
+            let dir = std::fs::canonicalize(&dest).map_err(|e| NuError::PackageError {
+                msg: format!("cannot resolve {}: {}", dest.display(), e),
+                span: Span::default(),
+            })?;
+            return Ok((dir, best.clone()));
+        }
+
+        // Download and extract.
+        let tarball = client
+            .fetch(dep_name, best)
+            .map_err(|e| NuError::PackageError {
+                msg: format!(
+                    "failed to fetch '{}-{}' from {}: {}",
+                    dep_name, best, registry_url, e
+                ),
+                span: Span::default(),
+            })?;
+
+        std::fs::create_dir_all(&dest).map_err(|e| NuError::PackageError {
+            msg: format!("cannot create {}: {}", dest.display(), e),
+            span: Span::default(),
+        })?;
+
+        let cursor = std::io::Cursor::new(tarball);
+        let gz = flate2::read::GzDecoder::new(cursor);
+        let mut archive = tar::Archive::new(gz);
+        archive.unpack(&dest).map_err(|e| NuError::PackageError {
+            msg: format!("cannot extract '{}' to {}: {}", dep_name, dest.display(), e),
+            span: Span::default(),
+        })?;
+
+        let dir = std::fs::canonicalize(&dest).map_err(|e| NuError::PackageError {
+            msg: format!("cannot resolve {}: {}", dest.display(), e),
+            span: Span::default(),
+        })?;
+        Ok((dir, best.clone()))
     }
 }
 

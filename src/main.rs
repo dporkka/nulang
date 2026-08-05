@@ -92,6 +92,52 @@ fn main() {
         return;
     }
 
+    // `nulang registry serve` — start a package registry server.
+    if args.len() >= 3 && args[1] == "registry" && args[2] == "serve" {
+        let mut bind = "127.0.0.1:8087".to_string();
+        let mut data_dir = ".nula-registry".to_string();
+        let mut auth_token: Option<String> = None;
+        let mut i = 3;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--bind" => {
+                    i += 1;
+                    if i < args.len() {
+                        bind = args[i].clone();
+                    }
+                }
+                "--dir" => {
+                    i += 1;
+                    if i < args.len() {
+                        data_dir = args[i].clone();
+                    }
+                }
+                "--token" => {
+                    i += 1;
+                    if i < args.len() {
+                        auth_token = Some(args[i].clone());
+                    }
+                }
+                other => {
+                    eprintln!("Unknown registry serve option: {}", other);
+                    std::process::exit(1);
+                }
+            }
+            i += 1;
+        }
+        let server =
+            nulang::registry::RegistryServer::new(std::path::PathBuf::from(&data_dir), auth_token);
+        eprintln!("Registry listening on {} (data: {})", bind, data_dir);
+        if let Err(e) = server.start(&bind) {
+            eprintln!("Registry server error: {}", e);
+            std::process::exit(1);
+        }
+        // Run until interrupted
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
     // `nulang nula <cmd>` dispatches to the package manager.
     if args[1] == "fmt" {
         let mut check_mode = false;
