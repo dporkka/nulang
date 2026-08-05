@@ -22,8 +22,7 @@ mod distributed;
 mod distributed_context;
 mod network;
 mod orca_cycle;
-#[cfg(feature = "quic-experimental")]
-pub mod quic_transport;
+mod supervision;
 mod supervisor;
 use distributed_context::DistributedContext;
 #[cfg(feature = "ai-runtime")]
@@ -233,6 +232,10 @@ pub struct Runtime {
     // Acknowledged packet sequence numbers (transport-level reliability).
     pub acked_packets: HashSet<u64>,
 
+    // Cross-node supervision (RFC 0012)
+    pub remote_links: supervision::RemoteLinkRegistry,
+    pub remote_monitors: supervision::RemoteMonitorRegistry,
+
     // CRDT manager (v0.6)
     pub crdt_manager: Option<CrdtManager>,
 
@@ -397,6 +400,8 @@ impl Runtime {
             distributed: DistributedContext::new(),
             cluster_config: ClusterConfig::default(),
             acked_packets: HashSet::new(),
+            remote_links: supervision::RemoteLinkRegistry::new(),
+            remote_monitors: supervision::RemoteMonitorRegistry::new(),
             crdt_manager: None,
             virtual_clock: None,
             crdt_sync_rounds: 0,
@@ -4179,7 +4184,7 @@ impl Runtime {
     pub fn enable_distribution(
         &mut self,
         bind_addr: std::net::SocketAddr,
-        tls_config: Option<crate::runtime::network::TlsConfig>,
+        tls_config: crate::runtime::network::TlsConfig,
     ) -> std::io::Result<()> {
         distribution::enable_distribution(self, bind_addr, tls_config)
     }
@@ -4304,7 +4309,7 @@ fn map_ast_state_model(model: crate::ast::StateModel) -> crate::runtime::persist
         AstModel::Local => RuntimeModel::Local,
         AstModel::Durable => RuntimeModel::Durable,
         AstModel::EventSourced => RuntimeModel::EventSourced,
-        AstModel::Crdt => RuntimeModel::Crdt,
+        AstModel::Crdt(t) => RuntimeModel::Crdt(t),
     }
 }
 

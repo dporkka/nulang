@@ -557,7 +557,7 @@ impl AddressResolver {
 /// use nulang_runtime::distributed::{ActorAddress, DistributedRuntimeImpl};
 ///
 /// let mut runtime = Runtime::new();
-/// let mut transport = crate::runtime::network::TcpTransport::bind(addr, None).unwrap();
+/// let mut transport = crate::runtime::network::TcpTransport::bind(addr, crate::runtime::network::TlsConfig::PlaintextInsecure).unwrap();
 /// let mut cluster = ClusterState::new(local_node, addr);
 /// let mut resolver = AddressResolver::new(local_node);
 ///
@@ -1777,7 +1777,10 @@ mod tests {
         let mut resolver = AddressResolver::new(local_node);
 
         // Create a transport — bind to port 0 to get an ephemeral port.
-        let transport = crate::runtime::network::TcpTransport::bind(addr(0), None);
+        let transport = crate::runtime::network::TcpTransport::bind(
+            addr(0),
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        );
         if let Ok(mut transport) = transport {
             let mut dist = DistributedRuntimeImpl::new(&mut runtime);
 
@@ -1913,8 +1916,16 @@ mod tests {
             });
         }
 
-        let mut transport_a = crate::runtime::network::TcpTransport::bind(addr(0), None).unwrap();
-        let mut transport_b = crate::runtime::network::TcpTransport::bind(addr(0), None).unwrap();
+        let mut transport_a = crate::runtime::network::TcpTransport::bind(
+            addr(0),
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
+        let mut transport_b = crate::runtime::network::TcpTransport::bind(
+            addr(0),
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
         let node_b = transport_b.node_id();
         let addr_b = transport_b.listen_addr();
 
@@ -2175,8 +2186,16 @@ mod tests {
             });
         }
 
-        let mut transport_a = crate::runtime::network::TcpTransport::bind(addr(0), None).unwrap();
-        let mut transport_b = crate::runtime::network::TcpTransport::bind(addr(0), None).unwrap();
+        let mut transport_a = crate::runtime::network::TcpTransport::bind(
+            addr(0),
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
+        let mut transport_b = crate::runtime::network::TcpTransport::bind(
+            addr(0),
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
         let node_b = transport_b.node_id();
         let addr_b = transport_b.listen_addr();
 

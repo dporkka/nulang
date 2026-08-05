@@ -344,9 +344,7 @@ fn walk_value(
                     walk_value(ctx, *slot, vm, module_idx)?;
                 }
             }
-            TypeTag::String | TypeTag::ActorRef | TypeTag::Raw => {
-                // These have no heap references in their payload.
-            }
+            TypeTag::String | TypeTag::ActorRef | TypeTag::RemoteActor | TypeTag::Raw => {}
         }
     }
 
@@ -422,7 +420,12 @@ fn write_objects(buf: &mut Vec<u8>, ctx: &SerializeCtx) {
         buf.extend_from_slice(&obj.payload_size.to_be_bytes());
 
         match obj.type_tag {
-            TypeTag::Array | TypeTag::Record | TypeTag::Tuple | TypeTag::Closure | TypeTag::Map => {
+            TypeTag::Array
+            | TypeTag::Record
+            | TypeTag::Tuple
+            | TypeTag::Closure
+            | TypeTag::Map
+            | TypeTag::RemoteActor => {
                 // Container: rewrite TAG_PTR and TAG_STRING in Value slots.
                 let slot_count = obj.payload_size as usize / std::mem::size_of::<Value>();
                 let slots = unsafe {
@@ -677,7 +680,12 @@ fn read_objects(
         let ptr = obj_table[&_id];
 
         match tag {
-            TypeTag::Array | TypeTag::Record | TypeTag::Tuple | TypeTag::Closure | TypeTag::Map => {
+            TypeTag::Array
+            | TypeTag::Record
+            | TypeTag::Tuple
+            | TypeTag::Closure
+            | TypeTag::Map
+            | TypeTag::RemoteActor => {
                 // Container: copy Values, remapping TAG_PTR and TAG_STRING.
                 let slot_count = *payload_size as usize / std::mem::size_of::<Value>();
                 let dst_slots =
@@ -921,6 +929,7 @@ impl TypeTag {
             5 => Some(TypeTag::Map),
             6 => Some(TypeTag::Tuple),
             7 => Some(TypeTag::Raw),
+            8 => Some(TypeTag::RemoteActor),
             _ => None,
         }
     }
@@ -952,6 +961,7 @@ mod tests {
             TypeTag::Map,
             TypeTag::Tuple,
             TypeTag::Raw,
+            TypeTag::RemoteActor,
         ];
         for tag in tags {
             let v = tag as u8;

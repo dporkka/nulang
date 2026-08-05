@@ -4,10 +4,10 @@
 //! synchronization. Actors interact with CRDTs through `CrdtHandle`s, which
 //! are lightweight references to the actual CRDT stored in the manager.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::crdt::{AWORSet, Crdt, GCounter, GSet, ORSet, PNCounter};
+use super::crdt::{AWORSet, Crdt, GCounter, GSet, ORSet, PNCounter, Tag};
 use super::crdt_reg::{LWWRegister, MVRegister, RGA};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -26,46 +26,11 @@ impl CrdtId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CrdtType {
-    GCounter,
-    PNCounter,
-    GSet,
-    ORSet,
-    AWORSet,
-    LWWRegister,
-    MVRegister,
-    RGA,
-}
+// Re-export the canonical CrdtType from ast.
+pub use crate::ast::CrdtType;
 
-impl CrdtType {
-    pub fn to_u8(self) -> u8 {
-        match self {
-            CrdtType::GCounter => 0,
-            CrdtType::PNCounter => 1,
-            CrdtType::GSet => 2,
-            CrdtType::ORSet => 3,
-            CrdtType::AWORSet => 4,
-            CrdtType::LWWRegister => 5,
-            CrdtType::MVRegister => 6,
-            CrdtType::RGA => 7,
-        }
-    }
-
-    pub fn from_u8(v: u8) -> Option<CrdtType> {
-        match v {
-            0 => Some(CrdtType::GCounter),
-            1 => Some(CrdtType::PNCounter),
-            2 => Some(CrdtType::GSet),
-            3 => Some(CrdtType::ORSet),
-            4 => Some(CrdtType::AWORSet),
-            5 => Some(CrdtType::LWWRegister),
-            6 => Some(CrdtType::MVRegister),
-            7 => Some(CrdtType::RGA),
-            _ => None,
-        }
-    }
-}
+// Legacy to_u8/from_u8 are now on ast::CrdtType.
+// The CrdtType import above provides them.
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CrdtOp {
@@ -352,12 +317,12 @@ pub struct CrdtManager {
     node_id: u64,
     entries: HashMap<CrdtId, CrdtEntry>,
     ops_synced: u64,
-    /// Per-entry snapshot of the state last shipped by
-    /// [`generate_delta_sync_ops`](CrdtManager::generate_delta_sync_ops).
-    /// Deltas are computed against this base; entries without a base (freshly
-    /// created or just learned from a peer) ship as full-state ops — the
-    /// join fallback.
+    /// Per-entry snapshot for delta computation.
     sync_base: HashMap<CrdtId, CrdtEntry>,
+    /// Maps (actor_id, field_name) → CrdtId for CRDT-backed state fields.
+    field_map: HashMap<(u64, String), CrdtId>,
+    /// Reverse map: CrdtId → (actor_id, field_name) for pushing merges.
+    field_reverse: HashMap<CrdtId, (u64, String)>,
 }
 
 /// Merge a serialized CRDT state (full state or delta — both are valid
@@ -415,6 +380,8 @@ impl CrdtManager {
             entries: HashMap::new(),
             ops_synced: 0,
             sync_base: HashMap::new(),
+            field_map: HashMap::new(),
+            field_reverse: HashMap::new(),
         }
     }
 
@@ -694,6 +661,91 @@ impl CrdtManager {
     }
     pub fn ops_synced(&self) -> u64 {
         self.ops_synced
+    }
+
+    /// Register a CRDT-backed state field for an actor.
+    ///
+    /// Creates a CRDT entry of the given type initialized from `initial_value`,
+    /// and records the mapping so merges can be pushed back to the actor.
+    pub fn register_actor_field(
+        &mut self,
+        actor_id: u64,
+        field_name: &str,
+        crdt_type: CrdtType,
+        initial_value: crate::vm::Value,
+    ) {
+        let id = CrdtId::new(self.node_id);
+        let initial_i64 = initial_value.as_int().unwrap_or(0);
+        let entry = match crdt_type {
+            CrdtType::GCounter => {
+                let mut c = GCounter::new(self.node_id);
+                for _ in 0..initial_i64 {
+                    c.increment();
+                }
+                CrdtEntry::GCounter(c)
+            }
+            CrdtType::PNCounter => {
+                let mut c = PNCounter::new(self.node_id);
+                for _ in 0..initial_i64 {
+                    c.increment();
+                }
+                CrdtEntry::PNCounter(c)
+            }
+            CrdtType::GSet => CrdtEntry::GSet(GSet::new()),
+            CrdtType::ORSet => CrdtEntry::ORSet(ORSet::new(self.node_id)),
+            CrdtType::AWORSet => CrdtEntry::AWORSet(AWORSet::new(self.node_id)),
+            CrdtType::LWWRegister => {
+                CrdtEntry::LWWRegister(LWWRegister::new(self.node_id, String::new()))
+            }
+            CrdtType::MVRegister => CrdtEntry::MVRegister(MVRegister::new(self.node_id)),
+            CrdtType::RGA => CrdtEntry::RGA(RGA::new(self.node_id)),
+        };
+        let key = (actor_id, field_name.to_string());
+        self.entries.insert(id, entry);
+        self.field_map.insert(key.clone(), id);
+        self.field_reverse.insert(id, key);
+    }
+
+    /// Garbage-collect tombstones that are causally stable.
+    ///
+    /// After a full sync round, the `sync_base` represents the state shipped
+    /// to every healthy peer. Tombstones present in the sync base are known to
+    /// all peers and can be safely dropped.
+    pub fn gc_stable_tombstones(&mut self) {
+        for (id, entry) in self.entries.iter_mut() {
+            if let Some(base) = self.sync_base.get(id) {
+                match (entry, base) {
+                    (CrdtEntry::ORSet(current), CrdtEntry::ORSet(base)) => {
+                        let stable_tags: HashSet<Tag> = base.removed.clone();
+                        if !stable_tags.is_empty() {
+                            current.gc_tombstones(&stable_tags);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.sync_base = self.entries.clone();
+    }
+
+    /// Push merged CRDT values back to actor state fields.
+    ///
+    /// After a sync round, call this to update actor state with the
+    /// latest merged CRDT values. Only fields whose CRDT entry has
+    /// changed (differs from the sync base) are updated.
+    pub fn push_to_actors(&self, runtime: &mut crate::runtime::Runtime) {
+        for (id, entry) in &self.entries {
+            if let Some(&(actor_id, ref field_name)) = self.field_reverse.get(id) {
+                let value = match entry {
+                    CrdtEntry::GCounter(c) => crate::vm::Value::int(c.value() as i64),
+                    CrdtEntry::PNCounter(c) => crate::vm::Value::int(c.value() as i64),
+                    _ => crate::vm::Value::int(0), // Other types: placeholder
+                };
+                if let Some(actor) = runtime.actors.get_mut(&actor_id) {
+                    actor.set_state_field(field_name.clone(), value);
+                }
+            }
+        }
     }
 }
 

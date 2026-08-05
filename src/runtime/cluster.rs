@@ -85,8 +85,11 @@ pub(crate) const REPLY_SLOTS: usize = 4;
 
 /// Unique identifier for a node in the cluster.
 ///
-/// Derived from a hash of the node's socket address so that the same
-/// physical node (restarting with the same address) receives a stable id.
+/// When TLS is active, derived from the BLAKE3 hash of the node's
+/// X.509 certificate DER encoding — a cryptographic identity that
+/// cannot be spoofed by an attacker who controls a socket address.
+/// When plaintext is in use, derived from a hash of the node's
+/// socket address for backward compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u64);
 
@@ -101,6 +104,20 @@ impl NodeId {
         let mut hasher = DefaultHasher::new();
         addr.hash(&mut hasher);
         NodeId(hasher.finish())
+    }
+
+    /// Create a `NodeId` from a certificate's DER encoding.
+    ///
+    /// Uses BLAKE3 (truncated to 64 bits) for a collision-resistant,
+    /// cryptographically-secure identity bound to the certificate.
+    /// Two nodes presenting the same certificate receive the same id;
+    /// two nodes with different certificates are guaranteed distinct ids
+    /// (modulo the 64-bit truncation, whose collision probability is
+    /// negligible at any realistic cluster size).
+    pub fn from_cert_der(cert_der: &[u8]) -> Self {
+        let hash = ::blake3::hash(cert_der);
+        let bytes: [u8; 8] = hash.as_bytes()[..8].try_into().unwrap();
+        NodeId(u64::from_le_bytes(bytes))
     }
 
     /// Create a `NodeId` from a transport address (TCP or Unix).

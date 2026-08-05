@@ -15,7 +15,7 @@ use tracing::warn;
 pub(crate) fn enable_distribution(
     rt: &mut Runtime,
     bind_addr: std::net::SocketAddr,
-    tls_config: Option<crate::runtime::network::TlsConfig>,
+    tls_config: crate::runtime::network::TlsConfig,
 ) -> std::io::Result<()> {
     let transport = Box::new(crate::runtime::network::TcpTransport::bind(
         bind_addr, tls_config,

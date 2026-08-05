@@ -23,15 +23,18 @@ pub enum StateModel {
     /// Event journal with deterministic replay.
     EventSourced,
     /// CRDT, merged across the cluster.
-    Crdt,
+    Crdt(crate::ast::CrdtType),
 }
 
 impl StateModel {
     pub fn is_persistent(self) -> bool {
         matches!(
             self,
-            StateModel::Durable | StateModel::EventSourced | StateModel::Crdt
+            StateModel::Durable | StateModel::EventSourced | StateModel::Crdt(_)
         )
+    }
+    pub fn is_crdt(self) -> bool {
+        matches!(self, StateModel::Crdt(_))
     }
 }
 

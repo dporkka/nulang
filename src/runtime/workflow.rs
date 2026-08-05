@@ -47,7 +47,7 @@ pub(crate) fn checkpoint_actor(rt: &mut Runtime, actor_id: u64) {
             .get(name)
             .copied()
             .unwrap_or(StateModel::Local);
-        if model == StateModel::Durable || model == StateModel::Crdt {
+        if model == StateModel::Durable || model.is_crdt() {
             let persisted = if name == "semantic_memory" || name == "procedural_memory" {
                 vm_value_to_string_in_actor(value, actor)
                     .map(PersistedValue::String)

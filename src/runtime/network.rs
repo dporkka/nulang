@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 
 use super::cluster::{NodeGossip, NodeStatus};
 use super::crdt_manager::{CrdtDeltaOp, CrdtOp};
+use super::supervision::RemoteLink;
 use super::MessagePriority;
 use super::NodeId;
 use crate::vm::Value;
@@ -55,82 +56,242 @@ use tracing::warn;
 
 /// TLS configuration for the NUL0 wire protocol.
 ///
-/// When `Some`, every TCP connection is upgraded to TLS immediately after
-/// the TCP connect/accept but *before* the NUL0 versioned handshake.
+/// When `MutualTls` is active, every TCP connection is upgraded to TLS
+/// immediately after TCP connect/accept but *before* the NUL0 versioned
+/// handshake. Both sides present certificates signed by the same cluster
+/// CA; each side verifies the peer's certificate against that CA, and node
+/// identity is derived from the certificate fingerprint (BLAKE3) rather
+/// than the spoofable socket-address hash.
 ///
-/// `SelfSigned` uses `rcgen` to generate a self-signed certificate;
-/// this is suitable for development and testing.
+/// `PlaintextInsecure` is the explicit opt-out for development and testing.
+/// `SelfSigned` auto-generates certificates for development clusters.
 #[derive(Clone)]
 pub enum TlsConfig {
-    /// Use a self-signed certificate generated via rcgen.
+    /// Mutual TLS with a cluster CA.
+    ///
+    /// Both server and client present certificates signed by the same CA.
+    /// The CA certificate is used to verify the peer; the server certificate
+    /// and key are presented to peers. Node identity is derived from the
+    /// server certificate's DER fingerprint via BLAKE3.
+    MutualTls {
+        /// PEM-encoded CA certificate that signed both server and client certs.
+        ca_cert_pem: Vec<u8>,
+        /// PEM-encoded server certificate (presented to connecting peers).
+        server_cert_pem: Vec<u8>,
+        /// PEM-encoded server private key (RSA or ECDSA, PKCS#8 format).
+        server_key_pem: Vec<u8>,
+    },
+    /// Self-signed certificate auto-generated via `rcgen`.
+    ///
+    /// Convenience for development clusters. Encryption without a PKI.
+    /// The client accepts any certificate — not for production.
     SelfSigned,
+    /// Plaintext with no encryption or authentication.
+    ///
+    /// Explicit opt-out. Node identity is derived from a hash of the bind
+    /// address. Insecure; not recommended for production deployments.
+    PlaintextInsecure,
 }
 
 impl TlsConfig {
+    /// Returns `true` when plaintext (insecure) transport is configured.
+    pub fn is_plaintext(&self) -> bool {
+        matches!(self, TlsConfig::PlaintextInsecure)
+    }
+
+    /// Build a `rustls::ServerConfig` for accepting TLS connections.
+    ///
+    /// For `MutualTls`: configures the server certificate + key, requires
+    /// client authentication, and verifies client certificates against the
+    /// configured CA.
     fn server_config(&self) -> io::Result<rustls::ServerConfig> {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-        let cert_der =
-            rustls::pki_types::CertificateDer::from(cert.cert.der().clone().into_owned());
-        let key_der = rustls::pki_types::PrivateKeyDer::from(
-            rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
-        );
-        rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key_der)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        match self {
+            TlsConfig::MutualTls { .. } => {
+                let (ca, cert, key) = self.mutual_tls_material()?;
+                let ca_cert = parse_pem_cert(ca)?;
+                let server_cert = parse_pem_cert_chain(cert)?;
+                let server_key = parse_pem_key(key)?;
+                let mut client_auth_roots = rustls::RootCertStore::empty();
+                client_auth_roots.add(ca_cert).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("bad CA cert: {e}"))
+                })?;
+                let client_verifier = rustls::server::WebPkiClientVerifier::builder(
+                    std::sync::Arc::new(client_auth_roots),
+                )
+                .build()
+                .map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("client verifier: {e}"))
+                })?;
+                rustls::ServerConfig::builder()
+                    .with_client_cert_verifier(client_verifier)
+                    .with_single_cert(server_cert, server_key)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            }
+            TlsConfig::SelfSigned => {
+                let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                let cert_der =
+                    rustls::pki_types::CertificateDer::from(cert.cert.der().clone().into_owned());
+                let key_der = rustls::pki_types::PrivateKeyDer::from(
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
+                );
+                rustls::ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(vec![cert_der], key_der)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            }
+            TlsConfig::PlaintextInsecure => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TlsConfig::PlaintextInsecure has no server config",
+            )),
+        }
     }
 
     fn client_config(&self) -> io::Result<rustls::ClientConfig> {
-        use rustls::client::danger::{
-            HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-        };
-        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-        use rustls::{DigitallySignedStruct, SignatureScheme};
-
-        #[derive(Debug)]
-        struct NoVerification;
-        impl ServerCertVerifier for NoVerification {
-            fn verify_server_cert(
-                &self,
-                _end_entity: &CertificateDer<'_>,
-                _intermediates: &[CertificateDer<'_>],
-                _server_name: &ServerName<'_>,
-                _ocsp_response: &[u8],
-                _now: UnixTime,
-            ) -> Result<ServerCertVerified, rustls::Error> {
-                Ok(ServerCertVerified::assertion())
+        match self {
+            TlsConfig::MutualTls { .. } => {
+                let (ca, cert, key) = self.mutual_tls_material()?;
+                let ca_cert = parse_pem_cert(ca)?;
+                let client_cert = parse_pem_cert_chain(cert)?;
+                let client_key = parse_pem_key(key)?;
+                let mut roots = rustls::RootCertStore::empty();
+                roots.add(ca_cert).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("bad CA cert: {e}"))
+                })?;
+                rustls::ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_client_auth_cert(client_cert, client_key)
+                    .map_err(|e| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("client config: {e}"))
+                    })
             }
-            fn verify_tls12_signature(
-                &self,
-                _message: &[u8],
-                _cert: &CertificateDer<'_>,
-                _dss: &DigitallySignedStruct,
-            ) -> Result<HandshakeSignatureValid, rustls::Error> {
-                Ok(HandshakeSignatureValid::assertion())
+            TlsConfig::SelfSigned => {
+                use rustls::client::danger::{
+                    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+                };
+                use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+                use rustls::{DigitallySignedStruct, SignatureScheme};
+                #[derive(Debug)]
+                struct AcceptAny;
+                impl ServerCertVerifier for AcceptAny {
+                    fn verify_server_cert(
+                        &self,
+                        _: &CertificateDer<'_>,
+                        _: &[CertificateDer<'_>],
+                        _: &ServerName<'_>,
+                        _: &[u8],
+                        _: UnixTime,
+                    ) -> Result<ServerCertVerified, rustls::Error> {
+                        Ok(ServerCertVerified::assertion())
+                    }
+                    fn verify_tls12_signature(
+                        &self,
+                        _: &[u8],
+                        _: &CertificateDer<'_>,
+                        _: &DigitallySignedStruct,
+                    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                        Ok(HandshakeSignatureValid::assertion())
+                    }
+                    fn verify_tls13_signature(
+                        &self,
+                        _: &[u8],
+                        _: &CertificateDer<'_>,
+                        _: &DigitallySignedStruct,
+                    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                        Ok(HandshakeSignatureValid::assertion())
+                    }
+                    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                        vec![
+                            SignatureScheme::RSA_PKCS1_SHA256,
+                            SignatureScheme::ECDSA_NISTP256_SHA256,
+                            SignatureScheme::ED25519,
+                        ]
+                    }
+                }
+                Ok(rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAny))
+                    .with_no_client_auth())
             }
-            fn verify_tls13_signature(
-                &self,
-                _message: &[u8],
-                _cert: &CertificateDer<'_>,
-                _dss: &DigitallySignedStruct,
-            ) -> Result<HandshakeSignatureValid, rustls::Error> {
-                Ok(HandshakeSignatureValid::assertion())
-            }
-            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-                vec![
-                    SignatureScheme::RSA_PKCS1_SHA256,
-                    SignatureScheme::ECDSA_NISTP256_SHA256,
-                    SignatureScheme::ED25519,
-                ]
-            }
+            TlsConfig::PlaintextInsecure => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TlsConfig::PlaintextInsecure has no client config",
+            )),
         }
-
-        Ok(rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(std::sync::Arc::new(NoVerification))
-            .with_no_client_auth())
     }
+
+    /// Extract the (ca_cert_pem, server_cert_pem, server_key_pem) triple
+    /// for `MutualTls`, or return an error for other variants.
+    fn mutual_tls_material(&self) -> io::Result<(&[u8], &[u8], &[u8])> {
+        match self {
+            TlsConfig::MutualTls {
+                ca_cert_pem,
+                server_cert_pem,
+                server_key_pem,
+            } => Ok((ca_cert_pem, server_cert_pem, server_key_pem)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a MutualTls config",
+            )),
+        }
+    }
+
+    /// The DER-encoded server certificate, for NodeId derivation.
+    /// Returns `None` for `PlaintextInsecure`.
+    pub fn server_cert_der(&self) -> Option<Vec<u8>> {
+        match self {
+            TlsConfig::MutualTls {
+                server_cert_pem, ..
+            } => {
+                let certs = rustls_pemfile::certs(&mut server_cert_pem.as_slice())
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                certs.first().map(|c| c.clone().to_vec())
+            }
+            TlsConfig::SelfSigned => {
+                let cert =
+                    rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).ok()?;
+                Some(cert.cert.der().clone().to_vec())
+            }
+            TlsConfig::PlaintextInsecure => None,
+        }
+    }
+}
+
+/// Parse a single PEM-encoded X.509 certificate.
+fn parse_pem_cert(pem: &[u8]) -> io::Result<rustls::pki_types::CertificateDer<'static>> {
+    let certs: Vec<rustls::pki_types::CertificateDer> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(pem))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("PEM cert: {e}")))?;
+    certs
+        .into_iter()
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty PEM cert"))
+}
+
+/// Parse a chain of PEM-encoded X.509 certificates (at least one).
+fn parse_pem_cert_chain(pem: &[u8]) -> io::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let certs: Vec<rustls::pki_types::CertificateDer> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(pem))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("PEM cert chain: {e}"))
+            })?;
+    if certs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "empty PEM cert chain",
+        ));
+    }
+    Ok(certs)
+}
+/// Parse a PEM-encoded private key (PKCS#8 or RSA).
+fn parse_pem_key(pem: &[u8]) -> io::Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(pem))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("PEM key: {e}")))?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty PEM key"))?;
+    Ok(key)
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +337,34 @@ impl TransportStream {
                 locked.get_ref().shutdown(std::net::Shutdown::Both)
             }
         }
+    }
+
+    /// Return the peer's certificate fingerprint as a `NodeId`, if TLS is
+    /// active and the peer presented a certificate.
+    ///
+    /// Used to verify that the NUL0 handshake's claimed `node_id` matches
+    /// the cryptographic identity established by the TLS session.
+    fn peer_cert_node_id(&self) -> Option<NodeId> {
+        let certs: Option<Vec<rustls::pki_types::CertificateDer>> = match self {
+            TransportStream::TlsServer(s) => {
+                let locked = s.lock().unwrap();
+                locked.conn.peer_certificates().map(|c| c.to_vec())
+            }
+            TransportStream::TlsClient(s) => {
+                let locked = s.lock().unwrap();
+                locked.conn.peer_certificates().map(|c| c.to_vec())
+            }
+            TransportStream::Raw(_) => return None,
+        };
+        certs
+            .and_then(|mut c| {
+                if c.is_empty() {
+                    None
+                } else {
+                    Some(c.swap_remove(0))
+                }
+            })
+            .map(|cert| NodeId::from_cert_der(&cert))
     }
 }
 
@@ -340,6 +529,9 @@ const TYPE_GOSSIP: u8 = 6;
 const TYPE_CRDT_DELTA_SYNC: u8 = 7;
 const TYPE_FETCH_BEHAVIOR_REQUEST: u8 = 8;
 const TYPE_FETCH_BEHAVIOR_RESPONSE: u8 = 9;
+const TYPE_LINK: u8 = 10;
+const TYPE_MONITOR: u8 = 11;
+const TYPE_DOWN: u8 = 12;
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -451,6 +643,18 @@ pub enum Packet {
         /// is not known to the responding node.
         nbc_bytes: Option<Vec<u8>>,
     },
+    /// Register a link between a local watcher and a remote target.
+    Link {
+        watcher: RemoteLink,
+        target: RemoteLink,
+    },
+    /// Register a monitor between a local watcher and a remote target.
+    Monitor {
+        watcher: RemoteLink,
+        target: RemoteLink,
+    },
+    /// Notify that an actor has exited (propagation of `DOWN`).
+    Down { target: RemoteLink, reason: String },
 }
 
 impl Packet {
@@ -484,6 +688,10 @@ impl Packet {
     ///
     /// Returns `None` if the bytes are malformed or the discriminant is
     /// unknown.
+    /// Deserialize a packet from bytes (starting at the magic bytes).
+    ///
+    /// Returns `None` if the bytes are malformed or the discriminant is
+    /// unknown.
     pub fn from_bytes(bytes: &[u8]) -> Option<(u64, Self)> {
         if bytes.len() < PACKET_HEADER_LEN {
             return None;
@@ -508,10 +716,59 @@ impl Packet {
             TYPE_GOSSIP => Self::read_gossip(payload)?,
             TYPE_FETCH_BEHAVIOR_REQUEST => Self::read_fetch_behavior_request(payload)?,
             TYPE_FETCH_BEHAVIOR_RESPONSE => Self::read_fetch_behavior_response(payload)?,
+            TYPE_LINK => Self::read_link(payload)?,
+            TYPE_MONITOR => Self::read_monitor(payload)?,
+            TYPE_DOWN => Self::read_down(payload)?,
             _ => return None,
         };
-
         Some((seq, packet))
+    }
+
+    fn read_link(payload: &[u8]) -> Option<Self> {
+        let watcher_node = NodeId(u64::from_be_bytes(payload.get(0..8)?.try_into().ok()?));
+        let watcher_actor = u64::from_be_bytes(payload.get(8..16)?.try_into().ok()?);
+        let target_node = NodeId(u64::from_be_bytes(payload.get(16..24)?.try_into().ok()?));
+        let target_actor = u64::from_be_bytes(payload.get(24..32)?.try_into().ok()?);
+        Some(Packet::Link {
+            watcher: RemoteLink {
+                node_id: watcher_node,
+                actor_id: watcher_actor,
+            },
+            target: RemoteLink {
+                node_id: target_node,
+                actor_id: target_actor,
+            },
+        })
+    }
+
+    fn read_monitor(payload: &[u8]) -> Option<Self> {
+        let watcher_node = NodeId(u64::from_be_bytes(payload.get(0..8)?.try_into().ok()?));
+        let watcher_actor = u64::from_be_bytes(payload.get(8..16)?.try_into().ok()?);
+        let target_node = NodeId(u64::from_be_bytes(payload.get(16..24)?.try_into().ok()?));
+        let target_actor = u64::from_be_bytes(payload.get(24..32)?.try_into().ok()?);
+        Some(Packet::Monitor {
+            watcher: RemoteLink {
+                node_id: watcher_node,
+                actor_id: watcher_actor,
+            },
+            target: RemoteLink {
+                node_id: target_node,
+                actor_id: target_actor,
+            },
+        })
+    }
+
+    fn read_down(payload: &[u8]) -> Option<Self> {
+        let target_node = NodeId(u64::from_be_bytes(payload.get(0..8)?.try_into().ok()?));
+        let target_actor = u64::from_be_bytes(payload.get(8..16)?.try_into().ok()?);
+        let (reason, _) = read_string(payload, 16)?;
+        Some(Packet::Down {
+            target: RemoteLink {
+                node_id: target_node,
+                actor_id: target_actor,
+            },
+            reason,
+        })
     }
 
     // ------------------------------------------------------------------
@@ -528,6 +785,9 @@ impl Packet {
             Packet::Gossip { .. } => TYPE_GOSSIP,
             Packet::FetchBehaviorRequest { .. } => TYPE_FETCH_BEHAVIOR_REQUEST,
             Packet::FetchBehaviorResponse { .. } => TYPE_FETCH_BEHAVIOR_RESPONSE,
+            Packet::Link { .. } => TYPE_LINK,
+            Packet::Monitor { .. } => TYPE_MONITOR,
+            Packet::Down { .. } => TYPE_DOWN,
         }
     }
 
@@ -577,14 +837,12 @@ impl Packet {
             } => {
                 buf.extend_from_slice(&request_id.to_be_bytes());
                 write_string(buf, behavior_name);
-                // content_hash: 1 byte flag + optional 32 bytes
                 write_optional_hash(buf, content_hash);
                 buf.extend_from_slice(&(initial_state.len() as u32).to_be_bytes());
-                for (key, value) in initial_state {
-                    write_string(buf, key);
-                    write_value(buf, value);
+                for (k, v) in initial_state {
+                    write_string(buf, k);
+                    write_value(buf, v);
                 }
-                // Serialize optional bytecode: 0 length = None.
                 match bytecode {
                     Some(bytes) => {
                         buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
@@ -644,6 +902,23 @@ impl Packet {
                         buf.extend_from_slice(&0u32.to_be_bytes());
                     }
                 }
+            }
+            Packet::Link { watcher, target } => {
+                buf.extend_from_slice(&watcher.node_id.0.to_be_bytes());
+                buf.extend_from_slice(&watcher.actor_id.to_be_bytes());
+                buf.extend_from_slice(&target.node_id.0.to_be_bytes());
+                buf.extend_from_slice(&target.actor_id.to_be_bytes());
+            }
+            Packet::Monitor { watcher, target } => {
+                buf.extend_from_slice(&watcher.node_id.0.to_be_bytes());
+                buf.extend_from_slice(&watcher.actor_id.to_be_bytes());
+                buf.extend_from_slice(&target.node_id.0.to_be_bytes());
+                buf.extend_from_slice(&target.actor_id.to_be_bytes());
+            }
+            Packet::Down { target, reason } => {
+                buf.extend_from_slice(&target.node_id.0.to_be_bytes());
+                buf.extend_from_slice(&target.actor_id.to_be_bytes());
+                write_string(buf, reason);
             }
         }
     }
@@ -1118,6 +1393,11 @@ fn read_optional_hash(bytes: &[u8], offset: usize) -> Option<(Option<[u8; 32]>, 
     }
 }
 
+/// Write optional byte blob: 1-byte flag (0=None, 1=Some) followed by
+/// 4-byte length (u32, big-endian) and the bytes when present.
+
+/// Read optional byte blob. Returns `(Option<Vec<u8>>, bytes_consumed)`.
+
 // ---------------------------------------------------------------------------
 // SocketAddr / NodeStatus (de)serialization helpers
 // ---------------------------------------------------------------------------
@@ -1336,9 +1616,8 @@ pub struct TcpTransport {
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
     /// Flag used to ask background threads to shut down.
     shutdown_flag: Arc<AtomicBool>,
-    /// Optional TLS configuration. When `Some`, connections are upgraded
-    /// to TLS after TCP connect/accept and before the NUL0 handshake.
-    tls_config: Option<TlsConfig>,
+    /// TLS configuration. `PlaintextInsecure` means no encryption.
+    tls_config: TlsConfig,
 }
 
 impl TcpTransport {
@@ -1348,13 +1627,22 @@ impl TcpTransport {
     /// ephemeral port is chosen by the OS and can be queried later via
     /// [`listen_addr`][NetworkTransport::listen_addr].
     ///
+    /// When `tls_config` is `MutualTls`, the node's identity is derived
+    /// from the server certificate fingerprint (BLAKE3), not the socket
+    /// address — this prevents identity spoofing. When `PlaintextInsecure`,
+    /// identity falls back to the address hash (backward compatible).
+    ///
     /// Two background threads are started:
     /// 1. **Listener** – accepts incoming TCP connections.
     /// 2. **Sender** – drains the outgoing queue and writes to TCP streams.
-    pub fn bind(addr: SocketAddr, tls_config: Option<TlsConfig>) -> io::Result<Self> {
+    pub fn bind(addr: SocketAddr, tls_config: TlsConfig) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let listen_addr = listener.local_addr()?;
-        let node_id = NodeId::new(&listen_addr);
+        let node_id = if let Some(cert_der) = tls_config.server_cert_der() {
+            NodeId::from_cert_der(&cert_der)
+        } else {
+            NodeId::new(&listen_addr)
+        };
 
         // Bounded channels.
         let (incoming_tx, incoming_rx) = mpsc::sync_channel(CHANNEL_CAPACITY);
@@ -1414,8 +1702,13 @@ impl TcpTransport {
 
     /// Connect to a remote node.
     ///
-    /// Establishes a TCP connection, performs the 8-byte node-id handshake,
+    /// Establishes a TCP connection, performs the NUL0 versioned handshake,
     /// and registers the connection in the connection pool.
+    ///
+    /// When TLS is active, the peer's certificate fingerprint is verified
+    /// against the expected `node_id` — a mismatch means the peer is
+    /// presenting a different certificate than expected (spoofing or
+    /// misconfiguration) and the connection is refused.
     pub fn connect(&mut self, node_id: NodeId, addr: SocketAddr) -> io::Result<()> {
         {
             let conns = lock_ignore_poison(&self.connections);
@@ -1429,11 +1722,27 @@ impl TcpTransport {
         tcp.set_write_timeout(Some(IO_TIMEOUT))?;
         tcp.set_nodelay(true)?;
 
-        let mut stream = if let Some(ref tls) = self.tls_config {
-            tls_wrap_client(tcp, tls)?
-        } else {
+        let mut stream = if self.tls_config.is_plaintext() {
             TransportStream::Raw(tcp)
+        } else {
+            tls_wrap_client(tcp, &self.tls_config)?
         };
+
+        // When TLS is active, verify the peer's certificate matches the
+        // expected node identity *before* accepting the NUL0 handshake.
+        if !self.tls_config.is_plaintext() {
+            if let Some(cert_id) = stream.peer_cert_node_id() {
+                if cert_id != node_id {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "TLS cert identity mismatch: expected {:?}, cert fingerprint {:?}",
+                            node_id, cert_id
+                        ),
+                    ));
+                }
+            }
+        }
 
         write_handshake(&mut stream, self.node_id)?;
         let peer_id = read_handshake(&mut stream)?;
@@ -1608,7 +1917,7 @@ fn listener_thread(
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
     shutdown_flag: Arc<AtomicBool>,
     local_node_id: NodeId,
-    tls_config: Option<TlsConfig>,
+    tls_config: TlsConfig,
 ) {
     // Set a small accept timeout so we periodically check the shutdown flag.
     let _ = listener.set_nonblocking(true);
@@ -1654,22 +1963,22 @@ fn connection_reader(
     connections: Arc<Mutex<HashMap<NodeId, TcpConnection>>>,
     shutdown_flag: Arc<AtomicBool>,
     local_node_id: NodeId,
-    tls_config: Option<TlsConfig>,
+    tls_config: TlsConfig,
 ) {
     let _ = tcp.set_read_timeout(Some(IO_TIMEOUT));
     let _ = tcp.set_write_timeout(Some(IO_TIMEOUT));
     let _ = tcp.set_nodelay(true);
 
-    let mut stream = if let Some(ref tls) = tls_config {
-        match tls_wrap_server(tcp, tls) {
+    let mut stream = if tls_config.is_plaintext() {
+        TransportStream::Raw(tcp)
+    } else {
+        match tls_wrap_server(tcp, &tls_config) {
             Ok(s) => s,
             Err(e) => {
                 warn!("TLS accept failed for {}: {}", addr, e);
                 return;
             }
         }
-    } else {
-        TransportStream::Raw(tcp)
     };
 
     if write_handshake(&mut stream, local_node_id).is_err() {
@@ -1680,6 +1989,20 @@ fn connection_reader(
         Ok(id) => id,
         Err(_) => return,
     };
+
+    // When TLS is active, verify the peer's certificate fingerprint
+    // matches the node_id claimed in the NUL0 handshake.
+    if !tls_config.is_plaintext() {
+        if let Some(cert_id) = stream.peer_cert_node_id() {
+            if cert_id != peer_id {
+                warn!(
+                    "TLS cert identity mismatch for {}: handshake claims {:?}, cert fingerprint {:?}",
+                    addr, peer_id, cert_id
+                );
+                return;
+            }
+        }
+    }
 
     {
         let mut conns = lock_ignore_poison(&connections);
@@ -1772,7 +2095,7 @@ fn sender_thread(
     shutdown_flag: Arc<AtomicBool>,
     local_node_id: NodeId,
     incoming_tx: mpsc::SyncSender<IncomingPacket>,
-    tls_config: Option<TlsConfig>,
+    tls_config: TlsConfig,
 ) {
     // We keep a local sequence counter so we can embed it into the bytes.
     let mut next_seq: u64 = 1;
@@ -1859,18 +2182,31 @@ fn connect_in_sender(
     local_node_id: NodeId,
     node_id: NodeId,
     addr: SocketAddr,
-    tls_config: &Option<TlsConfig>,
+    tls_config: &TlsConfig,
 ) -> io::Result<()> {
     let tcp = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
     tcp.set_read_timeout(Some(IO_TIMEOUT))?;
     tcp.set_write_timeout(Some(IO_TIMEOUT))?;
     tcp.set_nodelay(true)?;
 
-    let mut stream = if let Some(ref tls) = tls_config {
-        tls_wrap_client(tcp, tls)?
-    } else {
+    let mut stream = if tls_config.is_plaintext() {
         TransportStream::Raw(tcp)
+    } else {
+        tls_wrap_client(tcp, tls_config)?
     };
+
+    // When TLS is active, verify the peer's certificate matches the
+    // expected node identity.
+    if !tls_config.is_plaintext() {
+        if let Some(cert_id) = stream.peer_cert_node_id() {
+            if cert_id != node_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "TLS cert identity mismatch in sender connect",
+                ));
+            }
+        }
+    }
 
     write_handshake(&mut stream, local_node_id)?;
     let peer_id = read_handshake(&mut stream)?;
@@ -2252,7 +2588,9 @@ mod tests {
     #[test]
     fn test_transport_bind() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport = TcpTransport::bind(addr, None).expect("bind failed");
+        let mut transport =
+            TcpTransport::bind(addr, crate::runtime::network::TlsConfig::PlaintextInsecure)
+                .expect("bind failed");
 
         assert_eq!(
             transport.listen_addr().ip(),
@@ -2275,10 +2613,18 @@ mod tests {
     #[test]
     fn test_transport_connect() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
+        let mut transport_a = TcpTransport::bind(
+            addr_a,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
+        let mut transport_b = TcpTransport::bind(
+            addr_b,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2311,10 +2657,18 @@ mod tests {
     #[test]
     fn test_transport_send_receive() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
+        let mut transport_a = TcpTransport::bind(
+            addr_a,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
+        let mut transport_b = TcpTransport::bind(
+            addr_b,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2436,9 +2790,17 @@ mod tests {
     #[test]
     fn test_transport_send_rejects_dangling_string_payload() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
+        let mut transport_a = TcpTransport::bind(
+            addr_a,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
+        let mut transport_b = TcpTransport::bind(
+            addr_b,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2480,9 +2842,17 @@ mod tests {
     #[test]
     fn test_transport_send_delivers_string_payload_with_table() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
+        let mut transport_a = TcpTransport::bind(
+            addr_a,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
+        let mut transport_b = TcpTransport::bind(
+            addr_b,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2525,9 +2895,17 @@ mod tests {
     #[test]
     fn test_transport_send_delivers_scalar_payload() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
+        let mut transport_a = TcpTransport::bind(
+            addr_a,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
+        let mut transport_b = TcpTransport::bind(
+            addr_b,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2573,10 +2951,18 @@ mod tests {
     #[test]
     fn test_transport_sequence_numbers() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
+        let mut transport_a = TcpTransport::bind(
+            addr_a,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
+        let mut transport_b = TcpTransport::bind(
+            addr_b,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let addr_b_actual = transport_b.listen_addr();
         let node_b_id = transport_b.node_id();
@@ -2676,10 +3062,18 @@ mod tests {
     #[test]
     fn test_transport_disconnect() {
         let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_a = TcpTransport::bind(addr_a, None).unwrap();
+        let mut transport_a = TcpTransport::bind(
+            addr_a,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
-        let mut transport_b = TcpTransport::bind(addr_b, None).unwrap();
+        let mut transport_b = TcpTransport::bind(
+            addr_b,
+            crate::runtime::network::TlsConfig::PlaintextInsecure,
+        )
+        .unwrap();
 
         let node_b_id = transport_b.node_id();
 

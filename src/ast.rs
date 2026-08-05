@@ -325,12 +325,90 @@ pub struct Behavior {
 // State models for actor fields
 // ---------------------------------------------------------------------------
 
+/// The specific CRDT algorithm backing a `state crdt` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CrdtType {
+    /// Grow-only counter: only increment.
+    GCounter,
+    /// Positive-negative counter: increment and decrement.
+    PNCounter,
+    /// Grow-only set: only add.
+    GSet,
+    /// Observed-remove set: add and remove with causal tombstones.
+    ORSet,
+    /// Add-wins observed-remove set: concurrent add wins over remove.
+    AWORSet,
+    /// Last-writer-wins register: set with timestamp.
+    LWWRegister,
+    /// Multi-value register: set adds concurrent values.
+    MVRegister,
+    /// Replicated growable array: insert and remove by position.
+    RGA,
+}
+
+impl Default for CrdtType {
+    fn default() -> Self {
+        CrdtType::GCounter
+    }
+}
+
+impl CrdtType {
+    /// Parse from the keyword string used in source (`gcounter`, `pncounter`, etc.).
+    pub fn from_keyword(kw: &str) -> Option<Self> {
+        match kw {
+            "gcounter" => Some(CrdtType::GCounter),
+            "pncounter" => Some(CrdtType::PNCounter),
+            "gset" => Some(CrdtType::GSet),
+            "orset" => Some(CrdtType::ORSet),
+            "aworset" => Some(CrdtType::AWORSet),
+            "lwwregister" => Some(CrdtType::LWWRegister),
+            "mvregister" => Some(CrdtType::MVRegister),
+            "rga" => Some(CrdtType::RGA),
+            _ => None,
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            CrdtType::GCounter => 0,
+            CrdtType::PNCounter => 1,
+            CrdtType::GSet => 2,
+            CrdtType::ORSet => 3,
+            CrdtType::AWORSet => 4,
+            CrdtType::LWWRegister => 5,
+            CrdtType::MVRegister => 6,
+            CrdtType::RGA => 7,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Option<CrdtType> {
+        match v {
+            0 => Some(CrdtType::GCounter),
+            1 => Some(CrdtType::PNCounter),
+            2 => Some(CrdtType::GSet),
+            3 => Some(CrdtType::ORSet),
+            4 => Some(CrdtType::AWORSet),
+            5 => Some(CrdtType::LWWRegister),
+            6 => Some(CrdtType::MVRegister),
+            7 => Some(CrdtType::RGA),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StateModel {
     Local,
     Durable,
     EventSourced,
-    Crdt,
+    /// CRDT-backed state field. The `CrdtType` selects the concrete algorithm.
+    Crdt(CrdtType),
+}
+
+impl StateModel {
+    pub fn is_crdt(&self) -> bool {
+        matches!(self, StateModel::Crdt(_))
+    }
 }
 
 impl Default for StateModel {

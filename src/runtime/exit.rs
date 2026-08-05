@@ -2,6 +2,9 @@
 //! the supervision tree, and retire heaps.
 //!
 //! All functions in this module take `&mut Runtime` to access the runtime's
+use crate::runtime::network::Packet;
+use crate::runtime::supervision::RemoteLink;
+use crate::runtime::NodeId;
 use crate::runtime::{
     ActorState, ExitReason, Message, MessagePriority, Runtime, Supervisor, SupervisorAction,
 };
@@ -94,6 +97,61 @@ pub(crate) fn reap_living_actor(rt: &mut Runtime, actor_id: u64, reason: ExitRea
         send_down_message(rt, watcher_id, actor_id, &reason);
     }
 
+    // Notify remote watchers (cross-node links and monitors).
+    let local_node = rt.distributed.node_id.unwrap_or(NodeId::LOCAL);
+    let target = RemoteLink {
+        node_id: local_node,
+        actor_id,
+    };
+    if let Some(watchers) = rt.remote_links.get_watchers(target) {
+        let remote_nodes: Vec<(NodeId, String)> = watchers
+            .iter()
+            .filter(|w| w.node_id != local_node)
+            .map(|w| (w.node_id, reason.tag().to_string()))
+            .collect();
+        for (node_id, reason_str) in remote_nodes {
+            if let (Some(ref mut transport), Some(ref cluster)) =
+                (&mut rt.distributed.transport, &rt.distributed.cluster)
+            {
+                if let Some(info) = cluster.get_node(node_id) {
+                    transport.send(
+                        NodeId(node_id.0),
+                        info.address,
+                        Packet::Down {
+                            target,
+                            reason: reason_str.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        rt.remote_links.clear_target(target);
+    }
+    if let Some(watchers) = rt.remote_monitors.get_watchers(target) {
+        let remote_nodes: Vec<(NodeId, String)> = watchers
+            .iter()
+            .filter(|w| w.node_id != local_node)
+            .map(|w| (w.node_id, reason.tag().to_string()))
+            .collect();
+        for (node_id, reason_str) in remote_nodes {
+            if let (Some(ref mut transport), Some(ref cluster)) =
+                (&mut rt.distributed.transport, &rt.distributed.cluster)
+            {
+                if let Some(info) = cluster.get_node(node_id) {
+                    transport.send(
+                        NodeId(node_id.0),
+                        info.address,
+                        Packet::Down {
+                            target,
+                            reason: reason_str,
+                        },
+                    );
+                }
+            }
+        }
+        rt.remote_monitors.clear_target(target);
+    }
+
     let is_abnormal = !matches!(reason, ExitReason::Normal);
     for linked_id in links {
         if linked_id == actor_id {
@@ -149,6 +207,60 @@ pub(crate) fn reap_living_actor(rt: &mut Runtime, actor_id: u64, reason: ExitRea
         }
     }
 
+    // Notify remote watchers (cross-node links and monitors).
+    let local_node = rt.distributed.node_id.unwrap_or(NodeId::LOCAL);
+    let target = RemoteLink {
+        node_id: local_node,
+        actor_id,
+    };
+    if let Some(watchers) = rt.remote_links.get_watchers(target) {
+        let remote_nodes: Vec<(NodeId, String)> = watchers
+            .iter()
+            .filter(|w| w.node_id != local_node)
+            .map(|w| (w.node_id, reason.tag().to_string()))
+            .collect();
+        for (node_id, reason_str) in remote_nodes {
+            if let (Some(ref mut transport), Some(ref cluster)) =
+                (&mut rt.distributed.transport, &rt.distributed.cluster)
+            {
+                if let Some(info) = cluster.get_node(node_id) {
+                    transport.send(
+                        NodeId(node_id.0),
+                        info.address,
+                        Packet::Down {
+                            target,
+                            reason: reason_str.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        rt.remote_links.clear_target(target);
+    }
+    if let Some(watchers) = rt.remote_monitors.get_watchers(target) {
+        let remote_nodes: Vec<(NodeId, String)> = watchers
+            .iter()
+            .filter(|w| w.node_id != local_node)
+            .map(|w| (w.node_id, reason.tag().to_string()))
+            .collect();
+        for (node_id, reason_str) in remote_nodes {
+            if let (Some(ref mut transport), Some(ref cluster)) =
+                (&mut rt.distributed.transport, &rt.distributed.cluster)
+            {
+                if let Some(info) = cluster.get_node(node_id) {
+                    transport.send(
+                        NodeId(node_id.0),
+                        info.address,
+                        Packet::Down {
+                            target,
+                            reason: reason_str,
+                        },
+                    );
+                }
+            }
+        }
+        rt.remote_monitors.clear_target(target);
+    }
     rt.remove_actor_reaping(actor_id);
 }
 

@@ -1666,8 +1666,20 @@ impl Parser {
                 StateModel::EventSourced
             }
             TokenKind::Crdt => {
-                self.advance();
-                StateModel::Crdt
+                self.advance(); // consume 'crdt'
+                                // Optional CRDT type: gcounter, pncounter, gset, orset, etc.
+                let crdt_type = match self.peek_kind() {
+                    TokenKind::Ident(name) => {
+                        if let Some(ct) = CrdtType::from_keyword(name) {
+                            self.advance(); // consume the type keyword
+                            ct
+                        } else {
+                            CrdtType::default() // not a CRDT type, probably field name
+                        }
+                    }
+                    _ => CrdtType::default(),
+                };
+                StateModel::Crdt(crdt_type)
             }
             _ => default_model,
         }
@@ -5879,7 +5891,7 @@ mod tests {
                 name,
                 persistent,
                 state_fields,
-                behaviors,
+                ref behaviors,
                 ..
             } => {
                 assert_eq!(name, "BankAccount");
@@ -5890,9 +5902,52 @@ mod tests {
                 assert_eq!(state_fields[0].2, Type::int());
                 assert_eq!(state_fields[1].1, StateModel::Local);
                 assert_eq!(state_fields[2].1, StateModel::EventSourced);
-                assert_eq!(state_fields[3].1, StateModel::Crdt);
+                assert!(matches!(state_fields[3].1, StateModel::Crdt(_)));
                 assert_eq!(behaviors.len(), 1);
                 assert_eq!(behaviors[0].name, "get");
+            }
+            _ => panic!("Expected actor declaration"),
+        }
+    }
+
+    #[test]
+    fn test_parse_crdt_state_with_type_selector() {
+        let source = r#"
+            persistent actor Metrics {
+                state crdt gcounter hits: Int = 0
+                state crdt pncounter balance: Int = 0
+                state crdt orset tags: String = ""
+                state crdt lwwregister name: String = ""
+                behavior get() { self.hits }
+            }
+        "#;
+        let ast = parse(source).unwrap();
+        match &ast.decls[0] {
+            Decl::Actor {
+                name, state_fields, ..
+            } => {
+                assert_eq!(name, "Metrics");
+                assert_eq!(state_fields.len(), 4);
+                assert_eq!(state_fields[0].0, "hits");
+                assert!(matches!(
+                    state_fields[0].1,
+                    StateModel::Crdt(CrdtType::GCounter)
+                ));
+                assert_eq!(state_fields[1].0, "balance");
+                assert!(matches!(
+                    state_fields[1].1,
+                    StateModel::Crdt(CrdtType::PNCounter)
+                ));
+                assert_eq!(state_fields[2].0, "tags");
+                assert!(matches!(
+                    state_fields[2].1,
+                    StateModel::Crdt(CrdtType::ORSet)
+                ));
+                assert_eq!(state_fields[3].0, "name");
+                assert!(matches!(
+                    state_fields[3].1,
+                    StateModel::Crdt(CrdtType::LWWRegister)
+                ));
             }
             _ => panic!("Expected actor declaration"),
         }

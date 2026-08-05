@@ -129,6 +129,8 @@ pub enum TypeTag {
     Tuple = 6,
     /// Raw untyped data (FFI boundaries).
     Raw = 7,
+    /// Remote actor reference (node_id + actor_id).
+    RemoteActor = 8,
 }
 
 // ---------------------------------------------------------------------------
