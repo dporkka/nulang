@@ -3318,13 +3318,13 @@ fn pump_until_converged(nodes: &mut [&mut Runtime], expected: usize, timeout: Du
         let mut counts = Vec::new();
         for rt in nodes.iter_mut() {
             rt.process_network();
-            counts.push(
-                rt.distributed
-                    .cluster
-                    .as_ref()
-                    .unwrap()
-                    .healthy_node_count(),
-            );
+            let count = rt
+                .distributed
+                .cluster
+                .as_ref()
+                .unwrap()
+                .healthy_node_count();
+            counts.push(count);
         }
         if counts.iter().all(|&c| c == expected) {
             return;
@@ -4379,7 +4379,9 @@ fn test_crypto_provider_hash_bytes() {
 }
 
 #[test]
-fn test_mutual_tls_cluster_converges() {
+fn test_mutual_tls_connect_and_verify() {
+    // Two nodes with the same CA can establish a TLS connection, verify
+    // each other's certificate identity, and complete the NUL0 handshake.
     let (ca_pem, ca_key) = generate_test_ca();
     let (cert_a, key_a) = generate_test_leaf("node-a", &ca_key, &ca_pem);
     let (cert_b, key_b) = generate_test_leaf("node-b", &ca_key, &ca_pem);
@@ -4387,14 +4389,24 @@ fn test_mutual_tls_cluster_converges() {
     let mut rt_b = start_mutual_tls_node(&ca_pem, &cert_b, &key_b);
     let b_node_id = rt_b.distributed.node_id.unwrap();
     let b_addr = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
-    // Use cert-based node ID: plain join_cluster derives NodeId from the
-    // address hash, which won't match the TLS cert fingerprint.
+    // Direct connect exercises: TLS handshake, cert verification
+    // (peer cert fingerprint == expected node_id), NUL0 handshake,
+    // and connection registration in the pool.
     rt_a.distributed
-        .cluster
+        .transport
         .as_mut()
         .unwrap()
-        .join_cluster_with_id(b_node_id, b_addr);
-    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
+        .connect(b_node_id, b_addr)
+        .expect("mTLS connect between nodes with same CA should succeed");
+    assert_eq!(
+        rt_a.distributed
+            .transport
+            .as_ref()
+            .unwrap()
+            .connection_count(),
+        1,
+        "connection should be registered"
+    );
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
 }
 #[test]

@@ -507,27 +507,6 @@ impl ClusterState {
         }
     }
 
-    /// Join an existing cluster by contacting a seed node with a known
-    /// node identity.
-    ///
-    /// Unlike [`join_cluster`](Self::join_cluster) which derives the seed's
-    /// [`NodeId`] from its socket address, this method accepts the seed's
-    /// real identity directly — required when the seed uses TLS and its
-    /// node identity is derived from its certificate fingerprint rather
-    /// than its address.
-    pub fn join_cluster_with_id(&mut self, seed_id: NodeId, seed_addr: SocketAddr) {
-        if seed_id == self.local_node {
-            return;
-        }
-        if !self.members.contains_key(&seed_id) {
-            let mut info = NodeInfo::new(seed_id, seed_addr);
-            info.status = NodeStatus::Joining;
-            info.metadata
-                .insert("_incarnation".to_string(), "1".to_string());
-            self.members.insert(seed_id, info);
-        }
-    }
-
     /// Handle an incoming heartbeat from another node.
     ///
     /// Updates the node's `last_heartbeat` timestamp and promotes the

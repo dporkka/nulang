@@ -4363,15 +4363,24 @@ impl VM {
                 let target_actor = self.frames[frame_idx].regs[instr.op1 as usize]
                     .as_int()
                     .unwrap_or(0) as u64;
-                let behavior_const_idx = instr.op2 as usize;
-                let behavior = self.module_const_string(module_idx, behavior_const_idx);
+                // behavior_idx is a 16-bit behavior table index split across
+                // op2 (high) + op3 (low), same encoding as OpCode::Ask.
+                let behavior_idx = (((instr.op2 as u16) << 8) | (instr.op3 as u16)) as usize;
+                let behavior_name = self
+                    .modules
+                    .get(module_idx)
+                    .and_then(|m| m.behaviors.get(behavior_idx))
+                    .map(|b| b.name.clone())
+                    .unwrap_or_default();
                 let timeout_ms = self.frames[frame_idx].regs[12].as_int().unwrap_or(5_000) as u64;
                 let result = if let Some(ref mut cb) = self.distributed_callbacks {
-                    cb.remote_ask(target_actor, &behavior, &[], timeout_ms)
+                    cb.remote_ask(target_actor, &behavior_name, &[], timeout_ms)
                 } else {
                     Value::nil()
                 };
-                self.frames[frame_idx].regs[instr.op3 as usize] = result;
+                // Write result to op1 (matching local Ask's convention) so the
+                // codegen's `Move FUNC_VALUE_REG -> dst` picks it up correctly.
+                self.frames[frame_idx].regs[instr.op1 as usize] = result;
             }
             OpCode::Gossip => {
                 let message_const_idx = instr.op1 as usize;
@@ -4779,7 +4788,7 @@ fn module_with_handler_table(bindings: Vec<crate::bytecode::HandlerBinding>) -> 
 #[cfg(test)]
 mod vm_tests {
     use super::*;
-    use crate::bytecode::{HandlerBinding, HandlerTable, Instruction};
+    use crate::bytecode::{BehaviorTableEntry, HandlerBinding, HandlerTable, Instruction};
 
     /// A NULL C string return (nil from cstr_to_value) must pass through
     /// instead of erroring on the missing pointer.
@@ -5832,8 +5841,21 @@ mod vm_tests {
         let mut module = CodeModule::new("test_callbacks");
         let actor_const = module.add_constant(Constant::Int(5));
         let node_const = module.add_constant(Constant::Int(11));
-        let behavior_const = module.add_constant(Constant::String("echo".to_string()));
         let msg_const = module.add_constant(Constant::String("sync".to_string()));
+
+        // Add a behavior so RAsk can look up the name from the behavior table.
+        module.add_behavior(BehaviorTableEntry {
+            name: "echo".to_string(),
+            param_count: 0,
+            code_offset: 0,
+            local_count: 0,
+            effect_mask: 0,
+            compensate_offset: None,
+            content_hash: None,
+            source_location: None,
+            parallel_branches: None,
+        });
+        let behavior_idx: usize = 0; // first (and only) behavior
 
         module.emit(Instruction::new1(OpCode::NodeId, 0)); // r0 = node_id
         module.emit(Instruction::new3(
@@ -5849,7 +5871,16 @@ mod vm_tests {
             2,
         )); // r2 = 11
         module.emit(Instruction::new3(OpCode::Migrate, 1, 2, 3)); // r3 = migrate
-        module.emit(Instruction::new3(OpCode::RAsk, 1, behavior_const as u8, 4)); // r4 = rask
+                                                                  // RAsk: op1=actor_reg, op2+op3=16-bit behavior table index (same as Ask).
+                                                                  // Result written to op1; codegen follows with Move op1→dst.
+        module.emit(Instruction::new3(
+            OpCode::RAsk,
+            1,
+            ((behavior_idx >> 8) & 0xFF) as u8,
+            (behavior_idx & 0xFF) as u8,
+        ));
+        // Move the RAsk result from r1 (actor reg, now overwritten with result) to r4.
+        module.emit(Instruction::new2(OpCode::Move, 1, 4));
         module.emit(Instruction::new3(OpCode::Gossip, msg_const as u8, 0, 5)); // r5 = gossip
         module.emit(Instruction::new0(OpCode::Halt));
         module.entry_point = Some(0);

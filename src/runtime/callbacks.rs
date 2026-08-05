@@ -1546,6 +1546,18 @@ impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
     ) {
         unsafe {
             let rt = &mut *self.runtime;
+            let node_id = rt.distributed.node_id.map(|n| n.0).unwrap_or(0);
+            // If the target is the local node, or distributed transport is
+            // not available, fall back to local delivery instead of silently
+            // dropping the message.
+            if target_node == node_id
+                || rt.distributed.transport.is_none()
+                || rt.distributed.cluster.is_none()
+                || rt.distributed.resolver.is_none()
+            {
+                rt.send_message(target_actor, behavior, args);
+                return;
+            }
             // Take distributed fields out so send_distributed can borrow
             // them independently of rt itself.
             let mut transport = rt.distributed.transport.take();

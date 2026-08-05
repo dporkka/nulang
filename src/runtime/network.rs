@@ -323,18 +323,28 @@ impl TransportStream {
         }
     }
 
+    /// Attempt a graceful TLS close (send `close_notify` + shut down the
+    /// underlying TCP socket). If the TLS session lock is held by a reader
+    /// thread blocked on I/O, skip the graceful close to avoid deadlock —
+    /// the OS will clean up the socket when the process exits.
     fn shutdown(&self) -> io::Result<()> {
         match self {
             TransportStream::Raw(s) => s.shutdown(std::net::Shutdown::Both),
             TransportStream::TlsServer(s) => {
-                let mut locked = s.lock().unwrap();
-                let _ = locked.conn.send_close_notify();
-                locked.get_ref().shutdown(std::net::Shutdown::Both)
+                if let Ok(mut locked) = s.try_lock() {
+                    let _ = locked.conn.send_close_notify();
+                    locked.get_ref().shutdown(std::net::Shutdown::Both)
+                } else {
+                    Ok(())
+                }
             }
             TransportStream::TlsClient(s) => {
-                let mut locked = s.lock().unwrap();
-                let _ = locked.conn.send_close_notify();
-                locked.get_ref().shutdown(std::net::Shutdown::Both)
+                if let Ok(mut locked) = s.try_lock() {
+                    let _ = locked.conn.send_close_notify();
+                    locked.get_ref().shutdown(std::net::Shutdown::Both)
+                } else {
+                    Ok(())
+                }
             }
         }
     }

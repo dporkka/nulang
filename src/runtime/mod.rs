@@ -3012,15 +3012,74 @@ impl Runtime {
         self.resume_suspended_receive_wait(actor_id);
     }
 
-    /// A `Timer.sleep` timer fired: mark the actor and resume its
-    /// suspended PerformAsync behavior. On re-execution the callback
-    /// sees `timer_sleep_fired == true` and returns Ready.
+    /// A `Timer.sleep` timer fired: mark the actor's sleep flag and resume
+    /// its suspended PerformAsync behavior.  On re-execution the PerformAsync
+    /// callback sees `timer_sleep_fired == true` and returns Ready.
+    ///
+    /// This does a full VM resume (not just a flag + enqueue) so that
+    /// Timer.sleep works without the AI runtime feature.  Previously it only
+    /// set a flag and relied on `poll_llm_completions` (ai-runtime only) to
+    /// resume — the single-arg form permanently hung without that feature.
     fn fire_timer_sleep_wake(&mut self, actor_id: u64) {
         if let Some(actor) = self.actors.get_mut(&actor_id) {
             actor.timer_sleep_fired = true;
         }
-        // Enqueue the actor; the scheduler will see suspended_execution
-        // and call resume_suspended_llm_step which handles PerformAsync resume.
+        // Resume the suspended PerformAsync execution so the re-executed
+        // opcode sees the flag and completes the sleep.  Modeled on
+        // resume_suspended_jit_yield without the JIT safepoint logic.
+        let suspended = match self.actors.get_mut(&actor_id) {
+            Some(actor) => actor.suspended_execution.take(),
+            None => return,
+        };
+        let Some(suspended) = suspended else {
+            // Not currently suspended — nothing to resume.
+            return;
+        };
+        if self.vm.is_none() {
+            // VM not available; restore suspension and requeue.
+            if let Some(actor) = self.actors.get_mut(&actor_id) {
+                actor.suspended_execution = Some(suspended);
+            }
+            self.scheduler.enqueue(actor_id);
+            return;
+        }
+        let self_ptr: *mut Runtime = self;
+        unsafe {
+            let vm = (*self_ptr).vm.as_mut().unwrap();
+            vm.set_actor_callbacks(Box::new(BytecodeRuntimeCallbacks::new(self_ptr, actor_id)));
+            vm.set_distributed_callbacks(Box::new(BytecodeDistributedCallbacks {
+                runtime: self_ptr,
+            }));
+            vm.restore_suspended_state(suspended.vm_state);
+            (*self_ptr).vm_exec_begin();
+            let result = vm.resume();
+            // Re-capture if the behavior re-suspended (e.g. chained Timer.sleep).
+            match result {
+                Ok(_) => {
+                    // Behavior completed or re-suspended; if it re-suspended,
+                    // take_suspended_state captures the new state.
+                    if let Some(vm_state) = vm.take_suspended_state() {
+                        if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                            actor.suspended_execution =
+                                Some(crate::runtime::actor::SuspendedExecution {
+                                    vm_state,
+                                    behavior_idx: suspended.behavior_idx,
+                                    step_name: suspended.step_name.clone(),
+                                });
+                        }
+                    }
+                }
+                Err(e) => {
+                    // VM error during resume — log and clean up.
+                    tracing::warn!("Timer.sleep resume error for actor {}: {:?}", actor_id, e);
+                    if let Some(actor) = (*self_ptr).actors.get_mut(&actor_id) {
+                        actor.suspended_execution = None;
+                    }
+                }
+            }
+            (*self_ptr).vm_exec_end();
+        }
+        // Re-enqueue so the scheduler can continue processing the actor.
         self.scheduler.enqueue(actor_id);
     }
 
@@ -3561,6 +3620,11 @@ impl Runtime {
             }
         }
         // Replay event-sourced events to reconstruct EventSourced fields.
+        // Currently a bare +1 per event (consistent with emit_event's live
+        // path).  The event args are recorded but not yet used during replay —
+        // a known gap tracked in PLAN.md Phase 1 bug 5.  The emit and replay
+        // paths must stay consistent; changing one without the other would
+        // cause recovered state to diverge from live state.
         let events = self.persistence.read_events(actor_id);
         if !events.is_empty() {
             for entry in &events {
