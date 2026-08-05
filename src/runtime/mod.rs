@@ -3628,14 +3628,12 @@ impl Runtime {
         let events = self.persistence.read_events(actor_id);
         if !events.is_empty() {
             for entry in &events {
-                if let Some(current) = actor
-                    .get_state_field(&entry.field_name)
-                    .and_then(|v| v.as_int())
-                {
-                    actor.set_state_field(&entry.field_name, Value::int(current + 1));
-                } else {
-                    actor.set_state_field(&entry.field_name, Value::int(1));
-                }
+                // Use the stored snapshot value (captured after the
+                // apply handler ran during live execution) instead of
+                // a bare +1.  This correctly reconstructs fields with
+                // non-trivial apply handlers.
+                let v = entry.value.to_value_on_heap(&mut actor);
+                actor.set_state_field(&entry.field_name, v);
                 let current_seq = actor
                     .event_sourced_sequences
                     .get(&entry.field_name)

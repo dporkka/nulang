@@ -507,6 +507,21 @@ impl ClusterState {
         }
     }
 
+    /// Join a cluster by seed node ID and address, for cases where the
+    /// node ID is not derived from the address (e.g., TLS cert-based IDs).
+    pub fn join_cluster_with_id(&mut self, seed_id: NodeId, seed_addr: SocketAddr) {
+        if seed_id == self.local_node {
+            return;
+        }
+        if !self.members.contains_key(&seed_id) {
+            let mut info = NodeInfo::new(seed_id, seed_addr);
+            info.status = NodeStatus::Joining;
+            info.metadata
+                .insert("_incarnation".to_string(), "1".to_string());
+            self.members.insert(seed_id, info);
+        }
+    }
+
     /// Handle an incoming heartbeat from another node.
     ///
     /// Updates the node's `last_heartbeat` timestamp and promotes the

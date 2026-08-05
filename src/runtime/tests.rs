@@ -4410,6 +4410,32 @@ fn test_mutual_tls_connect_and_verify() {
     );
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
 }
+
+#[test]
+fn test_mutual_tls_cluster_converges() {
+    // Two mTLS nodes with the same CA converge via heartbeats.
+    let (ca_pem, ca_key) = generate_test_ca();
+    let (cert_a, key_a) = generate_test_leaf("node-a", &ca_key, &ca_pem);
+    let (cert_b, key_b) = generate_test_leaf("node-b", &ca_key, &ca_pem);
+    let mut rt_a = start_mutual_tls_node(&ca_pem, &cert_a, &key_a);
+    let mut rt_b = start_mutual_tls_node(&ca_pem, &cert_b, &key_b);
+    let b_node_id = rt_b.distributed.node_id.unwrap();
+    let b_addr = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    // Pre-connect so the sender thread finds an existing connection.
+    rt_a.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .connect(b_node_id, b_addr)
+        .expect("connect");
+    // Register B with cert-based node ID so tick() heartbeats to the
+    // correct ID, matching the pre-established connection.
+    if let Some(ref mut cluster) = rt_a.distributed.cluster {
+        cluster.join_cluster_with_id(b_node_id, b_addr);
+    }
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(15));
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
+}
 #[test]
 fn test_mutual_tls_rejects_cert_identity_mismatch() {
     let (ca_pem, ca_key) = generate_test_ca();

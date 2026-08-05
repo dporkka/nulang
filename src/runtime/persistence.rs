@@ -161,6 +161,15 @@ pub struct EventEntry {
     pub event_name: String,
     /// Event arguments.
     pub args: Vec<PersistedValue>,
+    /// Computed field value after the apply handler ran.
+    /// Stored as a snapshot so recovery can reconstruct the exact
+    /// post-apply value without re-executing inlined bytecode.
+    #[serde(default = "default_event_value")]
+    pub value: PersistedValue,
+}
+
+fn default_event_value() -> PersistedValue {
+    PersistedValue::Int(1)
 }
 
 /// A workflow event records a durable, replayable step in a workflow actor.
@@ -871,6 +880,7 @@ impl LibsqlStore {
                     field_name TEXT NOT NULL,
                     event_name TEXT NOT NULL,
                     args TEXT NOT NULL,
+                    value TEXT NOT NULL DEFAULT '1',
                     PRIMARY KEY (actor_id, sequence)
                 )",
                 (),
@@ -1103,9 +1113,11 @@ impl PersistenceStore for LibsqlStore {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let conn = self.conn();
         self.rt.block_on(async {
+            let value_json = serde_json::to_string(&entry.value)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             conn.execute(
-                "INSERT INTO events (actor_id, sequence, field_name, event_name, args) VALUES (?1, ?2, ?3, ?4, ?5)",
-                libsql::params![actor_id as i64, entry.sequence as i64, entry.field_name, entry.event_name, args_json],
+                "INSERT INTO events (actor_id, sequence, field_name, event_name, args, value) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                libsql::params![actor_id as i64, entry.sequence as i64, entry.field_name, entry.event_name, args_json, value_json],
             ).await.map(|_| ()).map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
         })
     }
@@ -1115,7 +1127,7 @@ impl PersistenceStore for LibsqlStore {
         self.rt.block_on(async {
             let mut rows = match conn
                 .query(
-                    "SELECT sequence, field_name, event_name, args FROM events
+                    "SELECT sequence, field_name, event_name, args, value FROM events
                  WHERE actor_id = ?1 ORDER BY sequence ASC",
                     libsql::params![actor_id as i64],
                 )
@@ -1148,11 +1160,20 @@ impl PersistenceStore for LibsqlStore {
                             Ok(p) => p,
                             Err(_) => continue,
                         };
+                        let value_json: String = match row.get(4) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let value: PersistedValue = match serde_json::from_str(&value_json) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
                         entries.push(EventEntry {
                             sequence: seq as u64,
                             field_name,
                             event_name,
                             args,
+                            value,
                         });
                     }
                     Ok(None) => break,

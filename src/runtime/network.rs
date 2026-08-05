@@ -422,6 +422,9 @@ fn tls_wrap_server(tcp: TcpStream, config: &TlsConfig) -> io::Result<TransportSt
     let cfg = config.server_config()?;
     let conn = rustls::ServerConnection::new(std::sync::Arc::new(cfg))
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    // Short read timeout so the reader periodically releases the Mutex,
+    // giving the sender thread windows to interleave writes.
+    tcp.set_read_timeout(Some(Duration::from_millis(50)))?;
     Ok(TransportStream::TlsServer(std::sync::Arc::new(
         std::sync::Mutex::new(rustls::StreamOwned::new(conn, tcp)),
     )))
@@ -434,6 +437,7 @@ fn tls_wrap_client(tcp: TcpStream, config: &TlsConfig) -> io::Result<TransportSt
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let conn = rustls::ClientConnection::new(std::sync::Arc::new(cfg), name)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    tcp.set_read_timeout(Some(Duration::from_millis(50)))?;
     Ok(TransportStream::TlsClient(std::sync::Arc::new(
         std::sync::Mutex::new(rustls::StreamOwned::new(conn, tcp)),
     )))

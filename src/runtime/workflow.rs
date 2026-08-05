@@ -132,11 +132,17 @@ pub(crate) fn emit_event(rt: &mut Runtime, actor_id: u64, event: &str, args: &[V
                 .map(|v| PersistedValue::from_value_resolved(v, module))
                 .collect();
             for name in &event_sourced_names {
+                // Capture the field's current value AFTER the apply
+                // handler has run and the +1 has been applied.  This
+                // snapshot lets recovery reconstruct the exact post-
+                // apply value without re-executing bytecode.
+                let current_val = actor.get_state_field(name).unwrap_or(Value::nil());
                 let entry = EventEntry {
                     sequence: seq,
                     field_name: name.clone(),
                     event_name: event.to_string(),
                     args: persisted_args.clone(),
+                    value: PersistedValue::from_value_resolved(&current_val, module),
                 };
                 let _ = rt.persistence.append_event(actor_id, entry);
             }
