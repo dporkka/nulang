@@ -1523,7 +1523,156 @@ impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
         }
     }
 
-    fn migrate(&mut self, _actor_id: u64, _target_node_id: u64) {}
+    fn migrate(&mut self, actor_id: u64, target_node_id: u64) {
+        unsafe {
+            let rt = &mut *self.runtime;
+            let target = NodeId(target_node_id);
+
+            // Extract all needed data from the actor in a tight scope so the
+            // immutable borrow on rt.actors is released before reap_living_actor
+            // takes a mutable borrow on rt.
+            let (snapshot_json, nbc_bytes) = {
+                let actor = match rt.actors.get(&actor_id) {
+                    Some(a) => a,
+                    None => {
+                        tracing::warn!(
+                            "nulang-migrate: actor {} not found for migration to {:?}",
+                            actor_id,
+                            target
+                        );
+                        return;
+                    }
+                };
+
+                // Build the durable-state snapshot.
+                let mut state = std::collections::HashMap::new();
+                for (name, value) in &actor.state_data {
+                    let model = actor
+                        .state_models
+                        .get(name)
+                        .copied()
+                        .unwrap_or(crate::runtime::persistence::StateModel::Local);
+                    if model == crate::runtime::persistence::StateModel::Durable || model.is_crdt()
+                    {
+                        let persisted = if name == "semantic_memory" || name == "procedural_memory"
+                        {
+                            crate::runtime::workflow::vm_value_to_string_in_actor(
+                                    value, actor,
+                                )
+                                .map(crate::runtime::persistence::PersistedValue::String)
+                                .unwrap_or_else(|| {
+                                    crate::runtime::persistence::PersistedValue::from_value_resolved(
+                                        value,
+                                        actor.bytecode_module.as_ref(),
+                                    )
+                                })
+                        } else {
+                            crate::runtime::persistence::PersistedValue::from_value_resolved(
+                                value,
+                                actor.bytecode_module.as_ref(),
+                            )
+                        };
+                        state.insert(name.clone(), persisted);
+                    }
+                }
+
+                // Snapshot global CRDT state.
+                let crdt_snapshot = rt.crdt_manager.as_ref().map(|m| {
+                    m.snapshot()
+                        .into_iter()
+                        .map(|(id, (ty, bytes))| (id.0, ty.to_u8(), bytes))
+                        .collect()
+                });
+
+                let snapshot = crate::runtime::persistence::ActorSnapshot {
+                    actor_id,
+                    sequence: actor.sequence,
+                    state,
+                    waiting_signal: actor.waiting_signal.clone(),
+                    crdt_snapshot,
+                };
+
+                let snapshot_json = match serde_json::to_vec(&snapshot) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        tracing::warn!(
+                            "nulang-migrate: failed to serialize snapshot for actor {}: {}",
+                            actor_id,
+                            e
+                        );
+                        return;
+                    }
+                };
+
+                // Get NBC-encoded bytecode module.
+                let module = match actor.bytecode_module.as_ref() {
+                    Some(m) => m.clone(),
+                    None => match rt.recovery_modules.get(&actor_id) {
+                        Some((m, _, _)) => m.clone(),
+                        None => {
+                            tracing::warn!(
+                                "nulang-migrate: no bytecode module for actor {}",
+                                actor_id
+                            );
+                            return;
+                        }
+                    },
+                };
+                let nbc = match module.to_nbc(None) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::warn!(
+                            "nulang-migrate: failed to encode NBC for actor {}: {}",
+                            actor_id,
+                            e
+                        );
+                        return;
+                    }
+                };
+
+                (snapshot_json, nbc)
+            }; // <- actor borrow released here
+
+            // Send the migration packet.
+            let target_addr = rt
+                .distributed
+                .cluster
+                .as_ref()
+                .and_then(|c| c.get_node(target))
+                .map(|info| info.address);
+
+            let packet = super::network::Packet::MigrateActor {
+                actor_id,
+                nbc_bytes,
+                snapshot_json,
+            };
+
+            if let (Some(transport), Some(addr)) = (&mut rt.distributed.transport, target_addr) {
+                transport.send(target, addr, packet);
+            } else {
+                tracing::warn!(
+                    "nulang-migrate: cannot reach target node {:?} for actor {}",
+                    target,
+                    actor_id
+                );
+                return;
+            }
+
+            // Register forwarding entry BEFORE reaping.
+            rt.migrated_actors
+                .insert(actor_id, (target, std::time::Instant::now()));
+
+            // Reap the actor cleanly (no supervisor restart — migration is
+            // intentional relocation, not a crash).
+            crate::runtime::exit::reap_living_actor(rt, actor_id, crate::types::ExitReason::Normal);
+
+            tracing::info!(
+                "nulang-migrate: actor {} migrated to node {:?}",
+                actor_id,
+                target
+            );
+        }
+    }
     fn remote_ask(
         &mut self,
         target_actor: u64,

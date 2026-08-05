@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
-
+use std::time::Instant;
 use tracing::warn;
 
 mod actor;
@@ -236,6 +236,13 @@ pub struct Runtime {
     pub remote_links: supervision::RemoteLinkRegistry,
     pub remote_monitors: supervision::RemoteMonitorRegistry,
 
+    /// Actors that have migrated to another node.  Key is the local
+    /// actor id (the id they had here before migrating); value is
+    /// `(target_node, migrated_at)`.  `send_message_by_id` checks this
+    /// table and forwards messages to the new location.  Entries are
+    /// garbage-collected after `MIGRATED_ACTOR_TTL` seconds.
+    pub migrated_actors: HashMap<u64, (NodeId, Instant)>,
+
     // CRDT manager (v0.6)
     pub crdt_manager: Option<CrdtManager>,
 
@@ -402,6 +409,7 @@ impl Runtime {
             acked_packets: HashSet::new(),
             remote_links: supervision::RemoteLinkRegistry::new(),
             remote_monitors: supervision::RemoteMonitorRegistry::new(),
+            migrated_actors: HashMap::new(),
             crdt_manager: None,
             virtual_clock: None,
             crdt_sync_rounds: 0,
@@ -1580,6 +1588,24 @@ impl Runtime {
             .map(|idx| idx as u16)
     }
     pub fn send_message_by_id(&mut self, target_id: u64, behavior_id: u16, args: &[Value]) {
+        // Forwarding for migrated actors: if this actor has been relocated
+        // to another node, route the message there instead of bouncing it.
+        if let Some(&(target_node, _migrated_at)) = self.migrated_actors.get(&target_id) {
+            // Look up the behavior name from the recovery module.
+            let behavior_name = self
+                .recovery_modules
+                .get(&target_id)
+                .and_then(|(module, _, _)| {
+                    module
+                        .behaviors
+                        .get(behavior_id as usize)
+                        .map(|b| b.name.clone())
+                })
+                .unwrap_or_else(|| format!("behavior_{}", behavior_id));
+            let target = ActorAddress::remote(target_node, target_id);
+            self.send_distributed(target, &behavior_name, args);
+            return;
+        }
         // Cross-shard routing: if the target actor lives on another shard,
         // validate the payload (no heap pointers — ORCA is per-shard) and
         // send via the cross-shard channel. The receiving shard delivers it
@@ -3711,6 +3737,163 @@ impl Runtime {
         Some(actor_id)
     }
 
+    /// Build an actor from a snapshot and bytecode module — the common core
+    /// shared by [`recover_actor`](Runtime::recover_actor) and
+    /// [`receive_migrated_actor`](Runtime::receive_migrated_actor).
+    ///
+    /// Restores persistent flags, state models, durable fields, and default
+    /// values.  Does NOT register the recovery module, restore CRDT state,
+    /// insert into `self.actors`, or enqueue — callers do those.
+    fn restore_actor_from_snapshot(
+        actor_id: u64,
+        module: &crate::bytecode::CodeModule,
+        snapshot: &ActorSnapshot,
+        is_workflow: bool,
+        is_agent: bool,
+    ) -> Actor {
+        let offsets: Vec<usize> = module
+            .behaviors
+            .iter()
+            .map(|b| b.code_offset as usize)
+            .collect();
+        let compensation_offsets: Vec<Option<usize>> = module
+            .behaviors
+            .iter()
+            .map(|b| b.compensate_offset.map(|o| o as usize))
+            .collect();
+
+        let mut actor = Actor::new(actor_id, format!("actor_{}", actor_id), 0);
+        actor.persistent = true;
+        actor.is_workflow = is_workflow;
+        actor.is_agent = is_agent;
+        actor.sequence = snapshot.sequence;
+        actor.waiting_signal = snapshot.waiting_signal.clone();
+        actor.bytecode_module = Some(module.clone());
+        actor.bytecode_offsets = offsets;
+        actor.compensation_offsets = compensation_offsets;
+
+        // Restore per-field state-model tracking.
+        actor.state_models = module
+            .actor_metadata
+            .iter()
+            .flat_map(|m| &m.state_models)
+            .map(|(name, model)| (name.clone(), map_ast_state_model(*model)))
+            .collect();
+
+        // Restore durable state fields from the snapshot.
+        for (name, value) in &snapshot.state {
+            if name == "semantic_memory" || name == "procedural_memory" {
+                if let PersistedValue::String(json) = value {
+                    let ptr = actor.allocate_string(json);
+                    actor.set_state_field(name, ptr);
+                    continue;
+                }
+            }
+            let v = value.to_value_on_heap(&mut actor);
+            actor.set_state_field(name, v);
+        }
+
+        // Fill in declared initial values for fields not touched above.
+        for (name, c) in module.actor_metadata.iter().flat_map(|m| &m.state_defaults) {
+            if actor.get_state_field(name).is_some() {
+                continue;
+            }
+            let v = match c {
+                crate::bytecode::Constant::String(s) => actor.allocate_string(s),
+                other => crate::vm::constant_to_value(other),
+            };
+            actor.set_state_field(name, v);
+        }
+
+        actor
+    }
+
+    /// Receive a migrated actor from another node.
+    ///
+    /// Deserializes the NBC bytecode module and durable state snapshot sent
+    /// by the source node, creates a local actor with the same id, restores
+    /// its state and behavior table, and enqueues it for scheduling.
+    ///
+    /// Returns `true` on success, `false` if the NBC module or snapshot is
+    /// malformed.
+    pub fn receive_migrated_actor(
+        &mut self,
+        actor_id: u64,
+        nbc_bytes: Vec<u8>,
+        snapshot_json: Vec<u8>,
+    ) -> bool {
+        use crate::bytecode::CodeModule;
+        use crate::runtime::persistence::ActorSnapshot;
+
+        // Parse the bytecode module.
+        let module = match CodeModule::from_nbc(&nbc_bytes) {
+            Ok(artifact) => artifact.module,
+            Err(e) => {
+                tracing::warn!(
+                    "nulang-migrate: bad NBC module for actor {}: {}",
+                    actor_id,
+                    e
+                );
+                return false;
+            }
+        };
+
+        // Parse the durable state snapshot.
+        let snapshot: ActorSnapshot = match serde_json::from_slice(&snapshot_json) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    "nulang-migrate: bad snapshot JSON for actor {}: {}",
+                    actor_id,
+                    e
+                );
+                return false;
+            }
+        };
+
+        let is_workflow = module.actor_metadata.iter().any(|m| m.is_workflow);
+        let is_agent = module.actor_metadata.iter().any(|m| m.is_agent);
+
+        let actor =
+            Self::restore_actor_from_snapshot(actor_id, &module, &snapshot, is_workflow, is_agent);
+
+        // Register the recovery module.
+        let offsets: Vec<usize> = module
+            .behaviors
+            .iter()
+            .map(|b| b.code_offset as usize)
+            .collect();
+        let compensation_offsets: Vec<Option<usize>> = module
+            .behaviors
+            .iter()
+            .map(|b| b.compensate_offset.map(|o| o as usize))
+            .collect();
+        self.recovery_modules
+            .insert(actor_id, (module, offsets, compensation_offsets));
+
+        // Restore CRDT state if present.
+        if let Some(crdt_snap) = &snapshot.crdt_snapshot {
+            if let Some(manager) = &mut self.crdt_manager {
+                let crdt_map: HashMap<CrdtId, (CrdtType, Vec<u8>)> = crdt_snap
+                    .iter()
+                    .filter_map(|(id, ty, bytes)| {
+                        CrdtType::from_u8(*ty).map(|t| (CrdtId(*id), (t, bytes.clone())))
+                    })
+                    .collect();
+                manager.restore(crdt_map);
+            }
+        }
+
+        if is_workflow {
+            self.layout_workflow_behavior_table(actor_id);
+        }
+        self.actors.insert(actor_id, actor);
+        self.enqueue_actor(actor_id);
+
+        tracing::info!("nulang-migrate: actor {} received and enqueued", actor_id);
+        true
+    }
+
     /// Apply a single workflow event to an actor's state.  Used during recovery
     /// replay to restore step index and accumulated event-sourced state.
     fn apply_workflow_event(actor: &mut Actor, event: &WorkflowEvent) {
@@ -4272,11 +4455,29 @@ impl Runtime {
             }
         }
     }
+
+    /// Garbage-collect forwarding entries for actors that migrated
+    /// longer ago than [`MIGRATED_ACTOR_TTL`].  Once the TTL expires
+    /// messages for the actor that still reach the old node bounce to
+    /// the DLQ instead of being forwarded.
+    pub(crate) fn sweep_migrated_actors(&mut self) {
+        let now = self.now();
+        self.migrated_actors
+            .retain(|_actor_id, (_target, migrated_at)| {
+                now.duration_since(*migrated_at) < MIGRATED_ACTOR_TTL
+            });
+    }
 }
 
 /// Interval (in `sync_crdts` rounds) between full-state repair syncs.
 /// Round 1 is full; rounds 2..=N are delta; round N+1 is full again.
 const CRDT_FULL_SYNC_INTERVAL: u64 = 16;
+
+/// How long (wall-clock) a migrated-actor forwarding entry is kept
+/// before it is garbage-collected.  After this TTL, messages for the
+/// actor that still reach the old node are bounced to the DLQ (target
+/// actor not found).  In-flight messages should arrive within seconds;
+const MIGRATED_ACTOR_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// True when the given 1-based sync round should ship full state.
 ///

@@ -533,6 +533,7 @@ const TYPE_LINK: u8 = 10;
 const TYPE_MONITOR: u8 = 11;
 const TYPE_DOWN: u8 = 12;
 const TYPE_CRDT_OP: u8 = 13;
+const TYPE_MIGRATE_ACTOR: u8 = 14;
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -661,6 +662,18 @@ pub enum Packet {
     },
     /// Notify that an actor has exited (propagation of `DOWN`).
     Down { target: RemoteLink, reason: String },
+    /// Migrate an actor to a different node.
+    ///
+    /// Carries the actor's durable state snapshot plus its NBC-encoded
+    /// bytecode module so the target node can reconstruct and resume the
+    /// actor without a shared persistence store.
+    MigrateActor {
+        actor_id: u64,
+        /// NBC-encoded bytecode module (behaviors, metadata, constants).
+        nbc_bytes: Vec<u8>,
+        /// JSON-serialized [`ActorSnapshot`](crate::runtime::persistence::ActorSnapshot).
+        snapshot_json: Vec<u8>,
+    },
 }
 
 impl Packet {
@@ -714,6 +727,7 @@ impl Packet {
         let packet = match discriminant {
             TYPE_ACTOR_MESSAGE => Self::read_actor_message(payload)?,
             TYPE_HEARTBEAT => Self::read_heartbeat(payload)?,
+            TYPE_MIGRATE_ACTOR => Self::read_migrate_actor(payload)?,
             TYPE_ACK => Self::read_ack(payload)?,
             TYPE_SPAWN_REQUEST => Self::read_spawn_request(payload)?,
             TYPE_SPAWN_RESPONSE => Self::read_spawn_response(payload)?,
@@ -778,6 +792,30 @@ impl Packet {
         })
     }
 
+    fn read_migrate_actor(payload: &[u8]) -> Option<Self> {
+        if payload.len() < 12 {
+            return None;
+        }
+        let actor_id = u64::from_be_bytes(payload[0..8].try_into().ok()?);
+        let nbc_len = u32::from_be_bytes(payload[8..12].try_into().ok()?) as usize;
+        if payload.len() < 12 + nbc_len + 4 {
+            return None;
+        }
+        let nbc_bytes = payload[12..12 + nbc_len].to_vec();
+        let json_off = 12 + nbc_len;
+        let json_len =
+            u32::from_be_bytes(payload[json_off..json_off + 4].try_into().ok()?) as usize;
+        if payload.len() < json_off + 4 + json_len {
+            return None;
+        }
+        let snapshot_json = payload[json_off + 4..json_off + 4 + json_len].to_vec();
+        Some(Packet::MigrateActor {
+            actor_id,
+            nbc_bytes,
+            snapshot_json,
+        })
+    }
+
     fn read_crdt_op(payload: &[u8]) -> Option<Self> {
         CrdtOp::from_bytes(payload).map(|op| Packet::CrdtOp { op })
     }
@@ -800,6 +838,7 @@ impl Packet {
             Packet::Link { .. } => TYPE_LINK,
             Packet::Monitor { .. } => TYPE_MONITOR,
             Packet::Down { .. } => TYPE_DOWN,
+            Packet::MigrateActor { .. } => TYPE_MIGRATE_ACTOR,
         }
     }
 
@@ -934,6 +973,17 @@ impl Packet {
                 buf.extend_from_slice(&target.node_id.0.to_be_bytes());
                 buf.extend_from_slice(&target.actor_id.to_be_bytes());
                 write_string(buf, reason);
+            }
+            Packet::MigrateActor {
+                actor_id,
+                nbc_bytes,
+                snapshot_json,
+            } => {
+                buf.extend_from_slice(&actor_id.to_be_bytes());
+                buf.extend_from_slice(&(nbc_bytes.len() as u32).to_be_bytes());
+                buf.extend_from_slice(nbc_bytes);
+                buf.extend_from_slice(&(snapshot_json.len() as u32).to_be_bytes());
+                buf.extend_from_slice(snapshot_json);
             }
         }
     }

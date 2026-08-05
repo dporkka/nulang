@@ -329,7 +329,7 @@ pub(crate) fn schedule_workflow_timer(
 
 /// Convert a VM value into a Rust string, reading pointer payloads as
 /// null-terminated UTF-8 and string-id values via the actor's bytecode module.
-fn vm_value_to_string_in_actor(value: &Value, actor: &Actor) -> Option<String> {
+pub(crate) fn vm_value_to_string_in_actor(value: &Value, actor: &Actor) -> Option<String> {
     if let Some(id) = value.as_string_id() {
         actor
             .bytecode_module

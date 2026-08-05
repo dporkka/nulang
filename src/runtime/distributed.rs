@@ -1153,6 +1153,14 @@ pub fn process_network_packets(
                 }
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
+            Packet::MigrateActor {
+                actor_id,
+                nbc_bytes,
+                snapshot_json,
+            } => {
+                let _ = runtime.receive_migrated_actor(actor_id, nbc_bytes, snapshot_json);
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+            }
             _ => {
                 if let Some((target_actor, behavior_name, mut msg, string_table, content_hash)) =
                     resolver.parse_packet(incoming.packet)

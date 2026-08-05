@@ -3454,6 +3454,213 @@ fn test_three_node_remote_actor_message_delivery() {
     shutdown_nodes(&mut [&mut rt_a, &mut rt_b, &mut rt_c]);
 }
 
+#[test]
+fn test_actor_migration_between_two_nodes() {
+    use crate::bytecode::{ActorMeta, BehaviorTableEntry, CodeModule, Constant};
+    use crate::runtime::persistence::ActorSnapshot;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    let mut rt_a = start_distributed_node();
+    let mut rt_b = start_distributed_node();
+
+    let addr_a = rt_a.distributed.transport.as_ref().unwrap().listen_addr();
+    let node_b = rt_b.distributed.node_id.unwrap();
+
+    rt_b.join_cluster(addr_a);
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
+
+    // Build a persistent actor module with a "store" behavior.
+    let mut module = CodeModule::new("test_migration");
+    module.add_actor_meta(ActorMeta {
+        name: "Counter".to_string(),
+        persistent: true,
+        state_models: vec![("count".to_string(), crate::ast::StateModel::Durable)],
+        state_defaults: vec![("count".to_string(), Constant::Int(0))],
+        behavior_indices: vec![0],
+        type_hash: None,
+        version: 1,
+        migrations: String::new(),
+        is_workflow: false,
+        is_agent: false,
+        is_organization: false,
+        tools: vec![],
+        semantic_memory_dimensions: None,
+        procedural_memory_namespace: None,
+        backend: crate::ast::ActorBackendKind::Native,
+        fallback_config: String::new(),
+        retry_config: String::new(),
+    });
+    module.add_behavior(BehaviorTableEntry {
+        name: "store".to_string(),
+        param_count: 1,
+        code_offset: 0,
+        local_count: 1,
+        effect_mask: 0,
+        compensate_offset: None,
+        content_hash: None,
+        source_location: None,
+        parallel_branches: None,
+    });
+
+    // Spawn the actor on node A.
+    let actor_id = rt_a.spawn_actor(Box::new(|| vec![("count".to_string(), Value::int(0))]));
+    {
+        let actor = rt_a.actors.get_mut(&actor_id).unwrap();
+        actor.persistent = true;
+        actor.register_behavior("store", |actor, args| {
+            let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+            actor.set_state_field("count", Value::int(n));
+        });
+    }
+    // Register the recovery module so migration can find the bytecode.
+    let offsets: Vec<usize> = module
+        .behaviors
+        .iter()
+        .map(|b| b.code_offset as usize)
+        .collect();
+    let comp_offsets: Vec<Option<usize>> = module
+        .behaviors
+        .iter()
+        .map(|b| b.compensate_offset.map(|o| o as usize))
+        .collect();
+    crate::runtime::spawn::register_recovery_module(
+        &mut rt_a,
+        actor_id,
+        module.clone(),
+        offsets.clone(),
+        comp_offsets.clone(),
+    );
+
+    // Build the migration payload manually (same logic as the callback).
+    let (snapshot_json, nbc_bytes) = {
+        let actor = rt_a.actors.get(&actor_id).unwrap();
+        let mut state = std::collections::HashMap::new();
+        for (name, value) in &actor.state_data {
+            let model = actor
+                .state_models
+                .get(name)
+                .copied()
+                .unwrap_or(crate::runtime::persistence::StateModel::Local);
+            if model == crate::runtime::persistence::StateModel::Durable || model.is_crdt() {
+                let persisted = crate::runtime::persistence::PersistedValue::from_value_resolved(
+                    value,
+                    actor.bytecode_module.as_ref(),
+                );
+                state.insert(name.clone(), persisted);
+            }
+        }
+        let crdt_snapshot = rt_a.crdt_manager.as_ref().map(|m| {
+            m.snapshot()
+                .into_iter()
+                .map(|(id, (ty, bytes))| (id.0, ty.to_u8(), bytes))
+                .collect()
+        });
+        let snapshot = ActorSnapshot {
+            actor_id,
+            sequence: actor.sequence,
+            state,
+            waiting_signal: actor.waiting_signal.clone(),
+            crdt_snapshot,
+        };
+        let json = serde_json::to_vec(&snapshot).unwrap();
+        let nbc = module.to_nbc(None).unwrap();
+        (json, nbc)
+    }; // actor borrow released
+
+    // Send the migration packet from A to B.
+    let packet = crate::runtime::network::Packet::MigrateActor {
+        actor_id,
+        nbc_bytes,
+        snapshot_json,
+    };
+    let addr_b = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    rt_a.distributed
+        .transport
+        .as_mut()
+        .unwrap()
+        .send(node_b, addr_b, packet);
+
+    // Pump network so B receives the MigrateActor packet.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let received = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        if rt_b.actors.contains_key(&actor_id) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(10));
+    };
+    assert!(received, "actor {} was not received on node B", actor_id);
+
+    // Register the native behavior handler on the target node (native
+    // handlers are not serialized in the migration payload — only the
+    // bytecode module and durable state are).
+    {
+        let actor = rt_b.actors.get_mut(&actor_id).unwrap();
+        assert!(actor.persistent);
+        assert_eq!(
+            actor.get_state_field("count"),
+            Some(Value::int(0)),
+            "migrated actor should have its durable state intact"
+        );
+        actor.register_behavior("store", |actor, args| {
+            let n = args.get(0).and_then(|v| v.as_int()).unwrap_or(-1);
+            actor.set_state_field("count", Value::int(n));
+        });
+    }
+
+    // Send a message to the actor on B and verify it processes.
+    rt_b.send_message(actor_id, "store", &[Value::int(99)]);
+    rt_b.run_scheduler();
+    assert_eq!(
+        rt_b.actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("count"))
+            .and_then(|v| v.as_int()),
+        Some(99),
+        "migrated actor should process messages on the target node"
+    );
+
+    // Register forwarding on A and verify messages are forwarded to B.
+    rt_a.migrated_actors
+        .insert(actor_id, (node_b, Instant::now()));
+    // The message should be forwarded from A to B via send_distributed.
+    // Send through send_message which calls send_message_by_id which
+    // checks migrated_actors. The behavior name is resolved from the
+    // recovery module.
+    rt_a.send_message(actor_id, "store", &[Value::int(42)]);
+
+    // Pump to deliver the forwarded message.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let forwarded = loop {
+        rt_a.process_network();
+        rt_b.process_network();
+        rt_b.run_scheduler();
+        let got = rt_b
+            .actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("count"))
+            .and_then(|v| v.as_int());
+        if got == Some(42) {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        sleep(Duration::from_millis(10));
+    };
+    assert!(
+        forwarded,
+        "forwarded message should arrive on the migrated actor on node B"
+    );
+
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
+}
+
 /// Pump network processing on the surviving `nodes` until `dead` is
 /// marked `NodeStatus::Failed` in every survivor's cluster view, or the
 /// deadline elapses. Mirrors `pump_until_converged`'s polling shape;
