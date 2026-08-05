@@ -80,6 +80,9 @@ pub enum TlsConfig {
         server_cert_pem: Vec<u8>,
         /// PEM-encoded server private key (RSA or ECDSA, PKCS#8 format).
         server_key_pem: Vec<u8>,
+        /// Expected server name for TLS certificate verification.
+        /// Defaults to `"localhost"` when `None`.
+        server_name: Option<String>,
     },
     /// Self-signed certificate auto-generated via `rcgen`.
     ///
@@ -97,6 +100,15 @@ impl TlsConfig {
     /// Returns `true` when plaintext (insecure) transport is configured.
     pub fn is_plaintext(&self) -> bool {
         matches!(self, TlsConfig::PlaintextInsecure)
+    }
+
+    /// Return the configured server name for TLS certificate verification.
+    /// Returns `None` for variants that don't use mutual TLS.
+    pub fn server_name(&self) -> Option<&str> {
+        match self {
+            TlsConfig::MutualTls { server_name, .. } => server_name.as_deref(),
+            _ => None,
+        }
     }
 
     /// Build a `rustls::ServerConfig` for accepting TLS connections.
@@ -228,6 +240,7 @@ impl TlsConfig {
                 ca_cert_pem,
                 server_cert_pem,
                 server_key_pem,
+                ..
             } => Ok((ca_cert_pem, server_cert_pem, server_key_pem)),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -416,7 +429,8 @@ fn tls_wrap_server(tcp: TcpStream, config: &TlsConfig) -> io::Result<TransportSt
 
 fn tls_wrap_client(tcp: TcpStream, config: &TlsConfig) -> io::Result<TransportStream> {
     let cfg = config.client_config()?;
-    let name = rustls::pki_types::ServerName::try_from("localhost")
+    let name_str: String = config.server_name().unwrap_or("localhost").to_owned();
+    let name = rustls::pki_types::ServerName::try_from(name_str)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let conn = rustls::ClientConnection::new(std::sync::Arc::new(cfg), name)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;

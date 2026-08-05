@@ -3285,6 +3285,7 @@ fn start_mutual_tls_node(ca_cert_pem: &[u8], cert_pem: &[u8], key_pem: &[u8]) ->
             ca_cert_pem: ca_cert_pem.to_vec(),
             server_cert_pem: cert_pem.to_vec(),
             server_key_pem: key_pem.to_vec(),
+            server_name: Some("localhost".to_string()),
         },
     )
     .expect("failed to enable distribution with MutualTls");
