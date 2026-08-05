@@ -1162,25 +1162,11 @@ fn run_source(
                 let (value, runtime) = run_with_runtime(m)?;
                 if verbose {
                     let rt = runtime.borrow();
-                    let s = rt.scheduler_stats();
-                    let g = rt.gc_stats();
-                    eprintln!(
-                        "[runtime] scheduler: {} total tasks ({} local, {} global, {} stolen, {} empty)",
-                        s.total_tasks_processed,
-                        s.tasks_from_local_queue,
-                        s.tasks_from_global_queue,
-                        s.tasks_from_steal,
-                        s.empty_polls
-                    );
-                    eprintln!(
-                        "[runtime] gc: {} allocs, {} frees, {} bytes alloc, {} freed, {} cycles detected",
-                        g.objects_allocated,
-                        g.objects_freed,
-                        g.bytes_allocated,
-                        g.bytes_freed,
-                        g.cycles_detected
-                    );
-                    eprintln!("[runtime] actors: {} live", rt.actor_count());
+                    let snap = rt.metrics_snapshot();
+                    match serde_json::to_string(&snap) {
+                        Ok(json) => eprintln!("[metrics] {}", json),
+                        Err(_) => eprintln!("[metrics] <serialization error>"),
+                    }
                 }
                 value
             } else {

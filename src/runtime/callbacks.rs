@@ -435,6 +435,25 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
             }
             return None;
         }
+        if effect_name == "Debug" && op_name == Some("inspect") {
+            let target_id = regs.first().and_then(|v| v.as_int()).unwrap_or(0) as u64;
+            let rt = self.runtime.borrow();
+            let info = serde_json::json!({
+                "state": rt.actors.get(&target_id).map(|a| {
+                    a.state_data.iter().map(|(k, v)| {
+                        (k.clone(), crate::vm::resolve_value_string(constants, *v))
+                    }).collect::<std::collections::HashMap<_, _>>()
+                }).unwrap_or_default(),
+                "mailbox_size": rt.actors.get(&target_id).map(|a| a.mailbox.len()).unwrap_or(0),
+                "behaviors": rt.actors.get(&target_id).map(|a| {
+                    a.behavior_table.iter().map(|b| b.name.clone()).collect::<Vec<_>>()
+                }).unwrap_or_default(),
+                "supervisor": rt.supervisors.get(&target_id).map(|_s| target_id),
+            });
+            drop(rt);
+            let json = serde_json::to_string(&info).unwrap_or_default();
+            return Some(self.alloc_string(&json));
+        }
         if effect_name == "Actor" {
             let mut rt = self.runtime.borrow_mut();
             let actor_id = rt.current_actor;
@@ -1091,6 +1110,27 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                         return Some(crate::vm::Value::nil());
                     }
                 }
+            }
+            if effect_name == "Debug" && op_name == Some("inspect") {
+                let target_id = regs.first().and_then(|v| v.as_int()).unwrap_or(0) as u64;
+                let rt = &mut *self.runtime;
+                let info = serde_json::json!({
+                    "state": rt.actors.get(&target_id).map(|a| {
+                        a.state_data.iter().map(|(k, v)| {
+                            (k.clone(), crate::vm::resolve_value_string(constants, *v))
+                        }).collect::<std::collections::HashMap<_, _>>()
+                    }).unwrap_or_default(),
+                    "mailbox_size": rt.actors.get(&target_id).map(|a| a.mailbox.len()).unwrap_or(0),
+                    "behaviors": rt.actors.get(&target_id).map(|a| {
+                        a.behavior_table.iter().map(|b| b.name.clone()).collect::<Vec<_>>()
+                    }).unwrap_or_default(),
+                    "supervisor": rt.supervisors.get(&target_id).map(|_s| target_id),
+                });
+                let json = serde_json::to_string(&info).unwrap_or_default();
+                if let Some(vm) = &mut rt.vm {
+                    return Some(vm.allocate_string(&json));
+                }
+                return Some(crate::vm::Value::nil());
             }
             if effect_name == "IO" {
                 if let (Some("print") | Some("println"), Some(first)) = (op_name, regs.first()) {

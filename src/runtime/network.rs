@@ -574,6 +574,9 @@ pub enum Packet {
         sender_actor: u64,
         sender_node: NodeId,
         priority: MessagePriority,
+        /// Optional trace-id carried across nodes so a span begun on the
+        /// sending node can continue on the receiving node (SPEC2 §15.3).
+        trace_id: Option<String>,
     },
 
     /// Heartbeat / ping between nodes.
@@ -853,6 +856,7 @@ impl Packet {
                 sender_actor,
                 sender_node,
                 priority,
+                trace_id,
             } => {
                 buf.extend_from_slice(&target_actor.to_be_bytes());
                 write_string(buf, behavior_name);
@@ -870,6 +874,14 @@ impl Packet {
                 buf.extend_from_slice(&(string_table.len() as u32).to_be_bytes());
                 for s in string_table {
                     write_string(buf, s);
+                }
+                // trace_id: 1-byte flag + optional content (string).
+                match trace_id {
+                    Some(tid) => {
+                        buf.push(1);
+                        write_string(buf, tid);
+                    }
+                    None => buf.push(0),
                 }
             }
             Packet::Heartbeat { node_id, timestamp } => {
@@ -1031,6 +1043,16 @@ impl Packet {
             string_table.push(s);
             offset = offset.checked_add(consumed)?;
         }
+        // trace_id: 1-byte flag + optional string content.
+        let trace_id = if offset < payload.len() && payload[offset] == 1 {
+            let _ = offset.checked_add(1)?;
+            let (tid, consumed) = read_string(payload, offset + 1)?;
+            let _ = offset.checked_add(consumed + 1)?;
+            Some(tid)
+        } else {
+            let _ = offset.checked_add(1)?;
+            None
+        };
         Some(Packet::ActorMessage {
             target_actor,
             behavior_name,
@@ -1040,6 +1062,7 @@ impl Packet {
             sender_actor,
             sender_node,
             priority,
+            trace_id,
         })
     }
 
@@ -2351,6 +2374,7 @@ mod tests {
             sender_actor: 99,
             sender_node: NodeId(0xDEAD_BEEF_CAFE_BABE),
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
 
         let bytes = packet.to_bytes(0x1234);
@@ -2374,6 +2398,7 @@ mod tests {
             sender_actor: 3,
             sender_node: NodeId(0x1111_2222_3333_4444),
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
 
         let bytes = packet.to_bytes(77);
@@ -2395,6 +2420,7 @@ mod tests {
             sender_actor: 3,
             sender_node: NodeId(1),
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
         let bytes = packet.to_bytes(1);
         // Chop the string table in half: the declared count/content no
@@ -2803,6 +2829,7 @@ mod tests {
             sender_actor: 0,
             sender_node: NodeId(5),
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
         assert!(packet_payload_wire_safe(&mk(vec![Value::int(1)], vec![])));
         assert!(packet_payload_wire_safe(&mk(
@@ -2886,6 +2913,7 @@ mod tests {
             sender_actor: 7,
             sender_node: transport_a.node_id(),
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
         transport_a.send(node_b_id, addr_b_actual, bad);
 
@@ -2935,6 +2963,7 @@ mod tests {
             sender_actor: 7,
             sender_node: transport_a.node_id(),
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
         transport_a.send(node_b_id, addr_b_actual, good.clone());
 
@@ -2988,6 +3017,7 @@ mod tests {
             sender_actor: 7,
             sender_node: transport_a.node_id(),
             priority: MessagePriority::Normal,
+            trace_id: None,
         };
         transport_a.send(node_b_id, addr_b_actual, good.clone());
 

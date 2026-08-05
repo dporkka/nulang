@@ -26,7 +26,7 @@ use std::thread;
 /// [`Scheduler::reset_stats`]. They are snapshots of the underlying
 /// atomic counters and are therefore not guaranteed to be mutually
 /// consistent in a concurrent execution.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct SchedulerStats {
     /// Total tasks successfully retrieved by any worker (local, global, or stolen).
     pub total_tasks_processed: u64,

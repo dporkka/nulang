@@ -312,7 +312,7 @@ pub enum ResolveResult {
 // ---------------------------------------------------------------------------
 
 /// Statistics for the address resolver.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
 pub struct ResolverStats {
     /// Number of addresses resolved to local actors.
     pub local_resolves: u64,
@@ -472,6 +472,7 @@ impl AddressResolver {
             sender_actor,
             sender_node: NodeId(self.local_node.0),
             priority,
+            trace_id: None,
         }
     }
     /// Parse a received network packet into a message for local delivery.
@@ -503,6 +504,7 @@ impl AddressResolver {
                 sender_actor,
                 sender_node,
                 priority,
+                ..
             } => {
                 // Record the sender in our cache so we can reply.
                 let sender_cluster_node = NodeId(sender_node.0);
@@ -541,7 +543,6 @@ impl AddressResolver {
         self.local_node
     }
 }
-
 // ---------------------------------------------------------------------------
 // DistributedRuntime trait
 // ---------------------------------------------------------------------------
@@ -1758,6 +1759,7 @@ mod tests {
                 sender_actor,
                 sender_node,
                 priority,
+                ..
             } => {
                 assert_eq!(target_actor, 42);
                 assert_eq!(behavior_name, "handle_msg");
@@ -1787,8 +1789,9 @@ mod tests {
             payload: vec![Value::int(123)],
             string_table: vec![],
             sender_actor: 88,
-            sender_node: NodeId(9), // Remote node 9
+            sender_node: NodeId(9),
             priority: MessagePriority::System,
+            trace_id: None,
         };
         let result = resolver.parse_packet(packet);
         assert!(result.is_some());

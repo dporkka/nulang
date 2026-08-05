@@ -83,7 +83,7 @@ pub trait OrcaHeap {
 /// coordinator, so the scheduler thread is the only reader and writer.
 /// Aggregation across actors (`Runtime::gc_stats`) also happens on that
 /// thread.
-#[derive(Debug)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct GcStats {
     /// Total objects allocated.
     pub objects_allocated: u64,

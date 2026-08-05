@@ -4364,6 +4364,39 @@ impl Runtime {
         true
     }
 
+    /// Snapshot all runtime metrics into a single serializable struct.
+    ///
+    /// Used by `--verbose` output and available for external monitoring
+    /// tooling.  All counters are lifetime totals; gauges reflect the
+    /// current point-in-time value.
+    pub fn metrics_snapshot(&self) -> MetricsSnapshot {
+        let scheduler = self.scheduler_stats();
+        let gc = self.gc_stats();
+        let resolver = self
+            .distributed
+            .resolver
+            .as_ref()
+            .map(|r| r.stats())
+            .unwrap_or_default();
+        let dlq = self.dlq_depth();
+        let mailboxes: Vec<ActorMailboxMetric> = self
+            .mailbox_depths()
+            .into_iter()
+            .map(|(id, depth)| ActorMailboxMetric {
+                actor_id: id,
+                depth,
+            })
+            .collect();
+
+        MetricsSnapshot {
+            actors_live: self.actor_count() as u64,
+            actors_mailboxes: mailboxes,
+            dlq_depth: dlq as u64,
+            scheduler,
+            gc,
+            resolver,
+        }
+    }
     pub fn enable_distribution(
         &mut self,
         bind_addr: std::net::SocketAddr,
@@ -4478,6 +4511,27 @@ const CRDT_FULL_SYNC_INTERVAL: u64 = 16;
 /// actor that still reach the old node are bounced to the DLQ (target
 /// actor not found).  In-flight messages should arrive within seconds;
 const MIGRATED_ACTOR_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Point-in-time snapshot of all runtime metrics (counters and gauges).
+///
+/// Serializable for JSON export; consumed by `--verbose` output and
+/// available for external monitoring tooling.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MetricsSnapshot {
+    pub actors_live: u64,
+    pub actors_mailboxes: Vec<ActorMailboxMetric>,
+    pub dlq_depth: u64,
+    pub scheduler: SchedulerStats,
+    pub gc: GcStats,
+    pub resolver: ResolverStats,
+}
+
+/// Per-actor mailbox depth for the metrics snapshot.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActorMailboxMetric {
+    pub actor_id: u64,
+    pub depth: usize,
+}
 
 /// True when the given 1-based sync round should ship full state.
 ///
