@@ -1147,6 +1147,12 @@ pub fn process_network_packets(
                 }
                 ack_packet(transport, cluster, incoming.from_node, incoming.seq);
             }
+            Packet::CrdtOp { op } => {
+                if let Some(manager) = &mut runtime.crdt_manager {
+                    manager.apply_op(op);
+                }
+                ack_packet(transport, cluster, incoming.from_node, incoming.seq);
+            }
             _ => {
                 if let Some((target_actor, behavior_name, mut msg, string_table, content_hash)) =
                     resolver.parse_packet(incoming.packet)
@@ -1297,6 +1303,34 @@ pub fn sync_crdts_delta(runtime: &mut Runtime) {
     if let Some(cluster) = &runtime.distributed.cluster {
         for member in cluster.healthy_members() {
             if let Some(transport) = &mut runtime.distributed.transport {
+                let net_node_id = NodeId(member.node_id.0);
+                transport.send(net_node_id, member.address, packet.clone());
+            }
+        }
+    }
+}
+
+/// Synchronize CRDT state via op-based replication.
+///
+/// Ships individual [`CrdtOp`](crate::runtime::crdt_manager::CrdtOp)s as
+/// `Packet::CrdtOp` — the lowest-bandwidth sync path. Each changed entry
+/// becomes one packet. The full-state `CrdtSync` and delta `CrdtDeltaSync`
+/// remain as the join/repair fallback.
+pub fn sync_crdts_op(runtime: &mut Runtime) {
+    let ops = match &mut runtime.crdt_manager {
+        Some(m) => m.generate_op_syncs(),
+        None => return,
+    };
+    if ops.is_empty() {
+        return;
+    }
+    let Some(cluster) = &runtime.distributed.cluster else {
+        return;
+    };
+    for op in ops {
+        let packet = Packet::CrdtOp { op };
+        if let Some(transport) = &mut runtime.distributed.transport {
+            for member in cluster.healthy_members() {
                 let net_node_id = NodeId(member.node_id.0);
                 transport.send(net_node_id, member.address, packet.clone());
             }

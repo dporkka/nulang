@@ -532,6 +532,7 @@ const TYPE_FETCH_BEHAVIOR_RESPONSE: u8 = 9;
 const TYPE_LINK: u8 = 10;
 const TYPE_MONITOR: u8 = 11;
 const TYPE_DOWN: u8 = 12;
+const TYPE_CRDT_OP: u8 = 13;
 
 // ---------------------------------------------------------------------------
 // NodeId
@@ -613,6 +614,11 @@ pub enum Packet {
     /// [`CrdtSync`](Packet::CrdtSync). The full-state `CrdtSync` packet
     /// remains available as the join/reset fallback.
     CrdtDeltaSync { ops: Arc<Vec<CrdtDeltaOp>> },
+    /// Low-bandwidth op-based CRDT replication: ships individual operations
+    /// (e.g. "increment GCounter #5 by 1") rather than full or delta state.
+    /// Full-state [`CrdtSync`](Packet::CrdtSync) and delta [`CrdtDeltaSync`](Packet::CrdtDeltaSync)
+    /// remain as the join/repair fallback.
+    CrdtOp { op: CrdtOp },
 
     /// Cluster membership gossip.
     ///
@@ -713,6 +719,7 @@ impl Packet {
             TYPE_SPAWN_RESPONSE => Self::read_spawn_response(payload)?,
             TYPE_CRDT_SYNC => Self::read_crdt_sync(payload)?,
             TYPE_CRDT_DELTA_SYNC => Self::read_crdt_delta_sync(payload)?,
+            TYPE_CRDT_OP => Self::read_crdt_op(payload)?,
             TYPE_GOSSIP => Self::read_gossip(payload)?,
             TYPE_FETCH_BEHAVIOR_REQUEST => Self::read_fetch_behavior_request(payload)?,
             TYPE_FETCH_BEHAVIOR_RESPONSE => Self::read_fetch_behavior_response(payload)?,
@@ -771,6 +778,10 @@ impl Packet {
         })
     }
 
+    fn read_crdt_op(payload: &[u8]) -> Option<Self> {
+        CrdtOp::from_bytes(payload).map(|op| Packet::CrdtOp { op })
+    }
+
     // ------------------------------------------------------------------
     // Internal helpers
     fn discriminant(&self) -> u8 {
@@ -782,6 +793,7 @@ impl Packet {
             Packet::SpawnResponse { .. } => TYPE_SPAWN_RESPONSE,
             Packet::CrdtSync { .. } => TYPE_CRDT_SYNC,
             Packet::CrdtDeltaSync { .. } => TYPE_CRDT_DELTA_SYNC,
+            Packet::CrdtOp { .. } => TYPE_CRDT_OP,
             Packet::Gossip { .. } => TYPE_GOSSIP,
             Packet::FetchBehaviorRequest { .. } => TYPE_FETCH_BEHAVIOR_REQUEST,
             Packet::FetchBehaviorResponse { .. } => TYPE_FETCH_BEHAVIOR_RESPONSE,
@@ -873,6 +885,9 @@ impl Packet {
                 for op in ops.iter() {
                     buf.extend_from_slice(&op.to_bytes());
                 }
+            }
+            Packet::CrdtOp { op } => {
+                buf.extend_from_slice(&op.to_bytes());
             }
             Packet::Gossip { members } => {
                 buf.extend_from_slice(&(members.len() as u32).to_be_bytes());

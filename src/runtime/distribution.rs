@@ -252,6 +252,7 @@ pub(crate) fn sync_crdts(rt: &mut Runtime) {
     } else {
         crate::runtime::distributed::sync_crdts_delta(rt);
     }
+    crate::runtime::distributed::sync_crdts_op(rt);
 }
 
 /// True when the given 1-based sync round should ship full state.

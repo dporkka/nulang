@@ -597,6 +597,44 @@ impl CrdtManager {
         ops
     }
 
+    /// Generate op-based sync ops for all entries.
+    ///
+    /// Mirrors [`generate_delta_sync_ops`](CrdtManager::generate_delta_sync_ops)
+    /// but returns individual [`CrdtOp`]s rather than delta-tagged ops —
+    /// each op is shipped as its own `Packet::CrdtOp` for the lowest-bandwidth
+    /// replication path. The sync base advances at generation, and the
+    /// periodic full-state syncs remain the repair mechanism after message
+    /// loss.
+    pub fn generate_op_syncs(&mut self) -> Vec<CrdtOp> {
+        let mut ops = Vec::new();
+        for (id, entry) in &self.entries {
+            match self.sync_base.get(id) {
+                None => {
+                    // Entry never synced: ship full state and record the base.
+                    self.sync_base.insert(*id, entry.clone());
+                    ops.push(CrdtOp {
+                        crdt_id: *id,
+                        crdt_type: entry.crdt_type(),
+                        payload: entry.payload_bytes(),
+                    });
+                }
+                Some(base) => {
+                    if let Some(delta) = entry.delta_since(base) {
+                        // Entry changed since last sync: ship delta and advance base.
+                        self.sync_base.insert(*id, entry.clone());
+                        ops.push(CrdtOp {
+                            crdt_id: *id,
+                            crdt_type: delta.crdt_type(),
+                            payload: delta.payload_bytes(),
+                        });
+                    }
+                    // Unchanged: no op.
+                }
+            }
+        }
+        ops
+    }
+
     /// Serialize all entries into a snapshot suitable for persistence.
     pub fn snapshot(&self) -> HashMap<CrdtId, (CrdtType, Vec<u8>)> {
         self.entries
