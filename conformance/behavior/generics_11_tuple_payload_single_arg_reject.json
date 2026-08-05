@@ -1,1 +1,1 @@
-{"exit_code":4,"stdout":"","stderr":"Error: Type error at 8:25: wrong number of arguments: expected 2 arguments, got 1 argument"}
+{"exit_code":0,"stdout":"ok\n","stderr":""}

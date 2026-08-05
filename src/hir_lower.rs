@@ -1008,7 +1008,6 @@ pub fn lower_body(expr: &Expr) -> hir::Body {
 
 /// Lower an expression into a sequence of statements in `body`, returning an
 /// operand that represents the expression's value.
-
 /// Lower a single let-binding's value and emit the matching HIR `Stmt::Let`.
 /// For ordinary values this lowers the expression and stores the result via
 /// `RValue::Use`.  Self-referencing lambdas are NOT handled here — the
@@ -2232,34 +2231,30 @@ fn try_resolve_typeclass_dict(receiver: &Expr, method_name: &str) -> Option<Dict
     if let Expr::Var(name, _) = receiver {
         return CURRENT_FN_PARAMS.with(|cell| {
             let fn_params = cell.borrow();
-            if let Some(param_ty) = fn_params.get(name) {
-                if let Type::Var(tv) = param_ty {
-                    CURRENT_TYPE_PARAM_CONSTRAINTS.with(|cc| {
-                        let constraints = cc.borrow();
-                        for (tp_name, c_tv, class_names) in constraints.iter() {
-                            if c_tv == tv {
-                                for cn in class_names {
-                                    let found = CURRENT_CLASS_TABLES.with(|tc| {
-                                        tc.borrow().as_ref().map_or(false, |tables| {
-                                            tables.class_table.get(cn).map_or(false, |info| {
-                                                info.methods.iter().any(|m| m.name == method_name)
-                                            })
+            if let Some(Type::Var(tv)) = fn_params.get(name) {
+                CURRENT_TYPE_PARAM_CONSTRAINTS.with(|cc| {
+                    let constraints = cc.borrow();
+                    for (tp_name, c_tv, class_names) in constraints.iter() {
+                        if c_tv == tv {
+                            for cn in class_names {
+                                let found = CURRENT_CLASS_TABLES.with(|tc| {
+                                    tc.borrow().as_ref().is_some_and(|tables| {
+                                        tables.class_table.get(cn).is_some_and(|info| {
+                                            info.methods.iter().any(|m| m.name == method_name)
                                         })
-                                    });
-                                    if found {
-                                        return Some(DictKind::Param(format!(
-                                            "_dict_{}_{}",
-                                            cn, tp_name
-                                        )));
-                                    }
+                                    })
+                                });
+                                if found {
+                                    return Some(DictKind::Param(format!(
+                                        "_dict_{}_{}",
+                                        cn, tp_name
+                                    )));
                                 }
                             }
                         }
-                        None
-                    })
-                } else {
+                    }
                     None
-                }
+                })
             } else {
                 None
             }
@@ -2347,7 +2342,9 @@ thread_local! {
 
 // Thread-local: current function's type parameter constraints and params.
 thread_local! {
+    #[allow(clippy::missing_const_for_thread_local)]
     static CURRENT_TYPE_PARAM_CONSTRAINTS: RefCell<Vec<(String, TypeVar, Vec<String>)>> = RefCell::new(Vec::new());
+    #[allow(clippy::missing_const_for_thread_local)]
     static CURRENT_FN_PARAMS: RefCell<FxHashMap<String, Type>> = RefCell::new(FxHashMap::default());
 }
 
@@ -2732,11 +2729,10 @@ fn free_vars(
 ) {
     use crate::ast::Expr;
     match expr {
-        Expr::Var(name, _) => {
-            if !bound.contains(name) {
-                acc.insert(name.clone());
-            }
+        Expr::Var(name, _) if !bound.contains(name) => {
+            acc.insert(name.clone());
         }
+        Expr::Var(_, _) => {}
         Expr::Lambda { params, body, .. } => {
             let mut new_bound = bound.clone();
             for (p, _) in params {
@@ -2849,11 +2845,10 @@ fn free_vars(
             free_vars(cond, bound, acc);
             free_vars(body, bound, acc);
         }
-        Expr::Return(e, _) => {
-            if let Some(e) = e {
-                free_vars(e, bound, acc);
-            }
+        Expr::Return(Some(e), _) => {
+            free_vars(e, bound, acc);
         }
+        Expr::Return(None, _) => {}
         Expr::TypeAnnotate { expr, .. } | Expr::CapAnnotate { expr, .. } => {
             free_vars(expr, bound, acc)
         }

@@ -1,1 +1,1 @@
-{"exit_code":10,"stdout":"","stderr":"Error: VM error at 1:1: constructor 'Make' expects exactly one payload argument, got 2"}
+{"exit_code":0,"stdout":"","stderr":""}

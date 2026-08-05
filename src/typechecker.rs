@@ -716,7 +716,6 @@ fn unify_many(types1: &[Type], types2: &[Type], span: Span) -> NuResult<Substitu
 }
 
 /// Create a substitution for a single type variable, with occurs check.
-
 /// Collect every `App(Var(target), args)` from within variant payloads.
 fn find_recursive_apps(vs: &[(String, Option<Type>)], target: TypeVar, out: &mut Vec<Vec<Type>>) {
     for (_, payload) in vs {
