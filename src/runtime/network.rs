@@ -2155,24 +2155,37 @@ fn connection_read_loop(
         }
 
         // Read 4-byte length prefix.
-        let mut len_buf = [0u8; 4];
-        match stream.read_exact(&mut len_buf) {
-            Ok(()) => {}
-            Err(_) => break, // Disconnect or timeout.
-        }
-        let len = u32::from_be_bytes(len_buf);
+        let len = loop {
+            let mut len_buf = [0u8; 4];
+            match stream.read_exact(&mut len_buf) {
+                Ok(()) => break u32::from_be_bytes(len_buf),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // TLS read timeout: release lock briefly so the
+                    // sender thread can acquire it.
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                Err(_) => return, // Disconnect or timeout.
+            }
+        };
         if len == 0 || len > MAX_PACKET_LEN {
-            break; // Protocol error or DoS.
+            return; // Protocol error or DoS.
         }
 
         // Read payload.
         let mut payload = vec![0u8; len as usize];
-        match stream.read_exact(&mut payload) {
-            Ok(()) => {}
-            Err(_) => break,
+        loop {
+            match stream.read_exact(&mut payload) {
+                Ok(()) => break,
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                Err(_) => return,
+            }
         }
 
-        // Update activity timestamp.
+        // Update last-activity timestamp.
         {
             let mut conns = lock_ignore_poison(&connections);
             if let Some(conn) = conns.get_mut(&peer_id) {
@@ -2187,13 +2200,10 @@ fn connection_read_loop(
                 packet,
             };
             if incoming_tx.send(incoming).is_err() {
-                // Channel disconnected — the transport is shutting down.
                 break;
             }
         }
     }
-
-    // Clean up: remove connection from pool.
     {
         let mut conns = lock_ignore_poison(&connections);
         conns.remove(&peer_id);
