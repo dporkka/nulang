@@ -1077,12 +1077,52 @@ impl TypeChecker {
                 // `fn fresh[T]() -> T { 0 - 1 }` must be rejected at the
                 // definition, not at the call site).
                 let mut skolem_map: FxHashMap<TypeVar, Type> = FxHashMap::default();
+                // Collect type parameter variables from constrained params.
                 for (_, tv, _) in type_param_constraints {
-                    skolem_map.insert(*tv, Type::Skolem(TypeVar::fresh().0));
+                    skolem_map.entry(*tv).or_insert_with(|| Type::Skolem(tv.0));
+                }
+                // Also collect from return type and param annotations for
+                // unconstrained type params (e.g., plain `[T]`).
+                let mut collect_vars = |ty: &Type| {
+                    collect_type_vars(ty, &mut skolem_map);
+                };
+                if let Some(rt) = &ret_type {
+                    collect_vars(rt);
+                }
+                for (_, param_ty) in params {
+                    if let Some(t) = param_ty {
+                        collect_vars(t);
+                    }
                 }
                 let subst_skolem = |ty: &Type| -> Type {
                     subst_type_vars_with(ty, &skolem_map)
                 };
+
+/// Collect all type variables from a function signature type into the
+/// skolem map, creating fresh Skolem entries for each unique TypeVar.
+/// Only collects "standalone" type vars (type parameter usages), not
+/// recursive reference variables (TypeVars used as App constructors)
+/// or type vars buried inside type definitions (variant payloads, etc.).
+fn collect_type_vars(ty: &Type, map: &mut FxHashMap<TypeVar, Type>) {
+    match ty {
+        Type::Var(v) => {
+            map.entry(*v).or_insert_with(|| Type::Skolem(v.0));
+        }
+        Type::Tuple(ts) => for t in ts { collect_type_vars(t, map); },
+        Type::Array(t) => collect_type_vars(t, map),
+        Type::Function { param, ret, .. } => { collect_type_vars(param, map); collect_type_vars(ret, map); },
+        Type::App { constructor, args } => {
+            // Only collect from args — the constructor is a type name,
+            // not a type parameter usage.
+            for a in args { collect_type_vars(a, map); }
+        }
+        Type::Reference { inner, .. } => collect_type_vars(inner, map),
+        Type::Scheme { body, .. } => collect_type_vars(body, map),
+        // Don't recurse into type definitions (Variant, Record, Actor, Nominal)
+        // — those contain type-structure variables, not type-parameter usages.
+        _ => {}
+    }
+}
                 // Skolemize the declared return type (if any).
                 let ret_type: Option<Type> = ret_type.map(|rt| subst_skolem(&rt));
                 let mut param_types = vec![];
@@ -1139,6 +1179,11 @@ impl TypeChecker {
                 for (_, tv, class_names) in type_param_constraints {
                     for cn in class_names {
                         new_ctx.add_constraint(*tv, cn);
+                        // Also map the constraint by skolem ID so lookups
+                        // on the skolemized receiver resolve correctly.
+                        if let Some(Type::Skolem(sk_id)) = skolem_map.get(tv) {
+                            new_ctx.add_constraint(TypeVar(*sk_id), cn);
+                        }
                     }
                 }
 
@@ -2593,7 +2638,7 @@ impl TypeChecker {
                 // that defines `field`, resolve through the instance
                 // dictionary. The returned type drops the `self` parameter
                 // so `App` can apply the remaining arguments naturally.
-                let concrete = !matches!(&current_ty, Type::Var(_));
+                let concrete = !matches!(&current_ty, Type::Var(_) | Type::Skolem(_));
                 if concrete {
                     let type_key = format!("{}", current_ty);
                     let class_table = self.class_table.clone();
@@ -2652,16 +2697,21 @@ impl TypeChecker {
 
                 // If the receiver is a type variable with class constraints,
                 // resolve the method through the constrained class's declaration.
-                if let Type::Var(tv) = &current_ty {
-                    if let Some(class_names) = ctx.get_constraints(tv) {
+                // Also handles skolemized type parameters (their skolem ID is
+                // used as a TypeVar key in the constraint map).
+                let constraint_key = match &current_ty {
+                    Type::Var(tv) => Some(*tv),
+                    Type::Skolem(id) => Some(TypeVar(*id)),
+                    _ => None,
+                };
+                if let Some(tv) = constraint_key {
+                    if let Some(class_names) = ctx.get_constraints(&tv) {
                         for class_name in class_names {
                             if let Some(class_info) = self.class_table.get(class_name) {
                                 if let Some(method) =
                                     class_info.methods.iter().find(|m| m.name == field)
                                 {
                                     // Build method type from the class declaration.
-                                    // After stripping self, remaining params get
-                                    // fresh type vars that unify at the call site.
                                     let remaining_params: Vec<Type> = method.params[1..]
                                         .iter()
                                         .map(|_| Type::Var(TypeVar::fresh()))
@@ -2689,8 +2739,7 @@ impl TypeChecker {
                 // not a tuple, and no class method matched, the user is
                 // likely trying method-call syntax on a built-in type.
                 // Produce a clear error instead of the confusing
-                // record-field unification failure.
-                if !matches!(&current_ty, Type::Var(_)) {
+                if !matches!(&current_ty, Type::Var(_) | Type::Skolem(_)) {
                     return Err(NuError::parse_error(
                         format!(
                             "method-call syntax (`.{}()`) is not supported for type `{}`; use `perform <Effect>.op(args)` for built-in operations",
