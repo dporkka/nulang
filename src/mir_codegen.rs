@@ -341,16 +341,16 @@ impl MirCodegen {
                                 Span::default(),
                             )
                         })?;
-                    let entry = self
-                        .module
-                        .behaviors
-                        .get_mut(abs_behavior_idx)
-                        .ok_or_else(|| {
-                            compile_err(
-                                "internal: compensated behavior index out of range",
-                                Span::default(),
-                            )
-                        })?;
+                    let entry =
+                        self.module
+                            .behaviors
+                            .get_mut(abs_behavior_idx)
+                            .ok_or_else(|| {
+                                compile_err(
+                                    "internal: compensated behavior index out of range",
+                                    Span::default(),
+                                )
+                            })?;
                     entry.compensate_offset = Some(comp_offset);
                     comp_cursor += 1;
                 }

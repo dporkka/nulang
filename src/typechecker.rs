@@ -112,10 +112,23 @@ fn subst_type_vars_with(ty: &Type, map: &FxHashMap<TypeVar, Type>) -> Type {
         Type::Var(v) => map.get(v).cloned().unwrap_or_else(|| ty.clone()),
         Type::Primitive(_) => ty.clone(),
         Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| subst_type_vars_with(t, map)).collect()),
-        Type::Record(fs) => Type::Record(fs.iter().map(|(n, t)| (n.clone(), subst_type_vars_with(t, map))).collect()),
-        Type::Variant(vs) => Type::Variant(vs.iter().map(|(n, t)| (n.clone(), t.as_ref().map(|t| subst_type_vars_with(t, map)))).collect()),
+        Type::Record(fs) => Type::Record(
+            fs.iter()
+                .map(|(n, t)| (n.clone(), subst_type_vars_with(t, map)))
+                .collect(),
+        ),
+        Type::Variant(vs) => Type::Variant(
+            vs.iter()
+                .map(|(n, t)| (n.clone(), t.as_ref().map(|t| subst_type_vars_with(t, map))))
+                .collect(),
+        ),
         Type::Array(t) => Type::Array(Box::new(subst_type_vars_with(t, map))),
-        Type::Function { param, ret, effect, cap } => Type::Function {
+        Type::Function {
+            param,
+            ret,
+            effect,
+            cap,
+        } => Type::Function {
             param: Box::new(subst_type_vars_with(param, map)),
             ret: Box::new(subst_type_vars_with(ret, map)),
             effect: effect.clone(),
@@ -1094,35 +1107,42 @@ impl TypeChecker {
                         collect_vars(t);
                     }
                 }
-                let subst_skolem = |ty: &Type| -> Type {
-                    subst_type_vars_with(ty, &skolem_map)
-                };
+                let subst_skolem = |ty: &Type| -> Type { subst_type_vars_with(ty, &skolem_map) };
 
-/// Collect all type variables from a function signature type into the
-/// skolem map, creating fresh Skolem entries for each unique TypeVar.
-/// Only collects "standalone" type vars (type parameter usages), not
-/// recursive reference variables (TypeVars used as App constructors)
-/// or type vars buried inside type definitions (variant payloads, etc.).
-fn collect_type_vars(ty: &Type, map: &mut FxHashMap<TypeVar, Type>) {
-    match ty {
-        Type::Var(v) => {
-            map.entry(*v).or_insert_with(|| Type::Skolem(v.0));
-        }
-        Type::Tuple(ts) => for t in ts { collect_type_vars(t, map); },
-        Type::Array(t) => collect_type_vars(t, map),
-        Type::Nominal { .. } => {} // opaque — skip underlying to avoid cycles
-        Type::App { constructor: _, args } => {
-            // Only collect from args — the constructor is a type name,
-            // not a type parameter usage.
-            for a in args { collect_type_vars(a, map); }
-        }
-        Type::Reference { inner, .. } => collect_type_vars(inner, map),
-        Type::Scheme { body, .. } => collect_type_vars(body, map),
-        // Don't recurse into type definitions (Variant, Record, Actor, Nominal)
-        // — those contain type-structure variables, not type-parameter usages.
-        _ => {}
-    }
-}
+                /// Collect all type variables from a function signature type into the
+                /// skolem map, creating fresh Skolem entries for each unique TypeVar.
+                /// Only collects "standalone" type vars (type parameter usages), not
+                /// recursive reference variables (TypeVars used as App constructors)
+                /// or type vars buried inside type definitions (variant payloads, etc.).
+                fn collect_type_vars(ty: &Type, map: &mut FxHashMap<TypeVar, Type>) {
+                    match ty {
+                        Type::Var(v) => {
+                            map.entry(*v).or_insert_with(|| Type::Skolem(v.0));
+                        }
+                        Type::Tuple(ts) => {
+                            for t in ts {
+                                collect_type_vars(t, map);
+                            }
+                        }
+                        Type::Array(t) => collect_type_vars(t, map),
+                        Type::Nominal { .. } => {} // opaque — skip underlying to avoid cycles
+                        Type::App {
+                            constructor: _,
+                            args,
+                        } => {
+                            // Only collect from args — the constructor is a type name,
+                            // not a type parameter usage.
+                            for a in args {
+                                collect_type_vars(a, map);
+                            }
+                        }
+                        Type::Reference { inner, .. } => collect_type_vars(inner, map),
+                        Type::Scheme { body, .. } => collect_type_vars(body, map),
+                        // Don't recurse into type definitions (Variant, Record, Actor, Nominal)
+                        // — those contain type-structure variables, not type-parameter usages.
+                        _ => {}
+                    }
+                }
                 // Skolemize the declared return type (if any).
                 let ret_type: Option<Type> = ret_type.map(|rt| subst_skolem(&rt));
                 let mut param_types = vec![];
@@ -3314,13 +3334,38 @@ fn collect_skolems(ty: &Type, map: &mut FxHashMap<u64, TypeVar>, vars: &mut Vec<
                 vars.push(tv);
             }
         }
-        Type::Tuple(ts) => for t in ts { collect_skolems(t, map, vars); },
-        Type::Record(fs) => for (_, t) in fs { collect_skolems(t, map, vars); },
-        Type::Variant(vs) => for (_, t) in vs { if let Some(t) = t { collect_skolems(t, map, vars); } },
+        Type::Tuple(ts) => {
+            for t in ts {
+                collect_skolems(t, map, vars);
+            }
+        }
+        Type::Record(fs) => {
+            for (_, t) in fs {
+                collect_skolems(t, map, vars);
+            }
+        }
+        Type::Variant(vs) => {
+            for (_, t) in vs {
+                if let Some(t) = t {
+                    collect_skolems(t, map, vars);
+                }
+            }
+        }
         Type::Array(t) => collect_skolems(t, map, vars),
-        Type::Function { param, ret, .. } => { collect_skolems(param, map, vars); collect_skolems(ret, map, vars); },
-        Type::Actor { state, behavior } => { collect_skolems(state, map, vars); collect_skolems(behavior, map, vars); },
-        Type::App { constructor, args } => { collect_skolems(constructor, map, vars); for a in args { collect_skolems(a, map, vars); } },
+        Type::Function { param, ret, .. } => {
+            collect_skolems(param, map, vars);
+            collect_skolems(ret, map, vars);
+        }
+        Type::Actor { state, behavior } => {
+            collect_skolems(state, map, vars);
+            collect_skolems(behavior, map, vars);
+        }
+        Type::App { constructor, args } => {
+            collect_skolems(constructor, map, vars);
+            for a in args {
+                collect_skolems(a, map, vars);
+            }
+        }
         Type::Reference { inner, .. } => collect_skolems(inner, map, vars),
         Type::Scheme { body, .. } => collect_skolems(body, map, vars),
         Type::Nominal { underlying, .. } => collect_skolems(underlying, map, vars),
@@ -3334,11 +3379,31 @@ fn replace_skolems_in_type(ty: &Type, map: &FxHashMap<u64, TypeVar>) -> Type {
         Type::Var(v) => Type::Var(*v),
         Type::Primitive(_) => ty.clone(),
         Type::Skolem(id) => Type::Var(map.get(id).copied().unwrap_or_else(TypeVar::fresh)),
-        Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| replace_skolems_in_type(t, map)).collect()),
-        Type::Record(fs) => Type::Record(fs.iter().map(|(n, t)| (n.clone(), replace_skolems_in_type(t, map))).collect()),
-        Type::Variant(vs) => Type::Variant(vs.iter().map(|(n, t)| (n.clone(), t.as_ref().map(|t| replace_skolems_in_type(t, map)))).collect()),
+        Type::Tuple(ts) => {
+            Type::Tuple(ts.iter().map(|t| replace_skolems_in_type(t, map)).collect())
+        }
+        Type::Record(fs) => Type::Record(
+            fs.iter()
+                .map(|(n, t)| (n.clone(), replace_skolems_in_type(t, map)))
+                .collect(),
+        ),
+        Type::Variant(vs) => Type::Variant(
+            vs.iter()
+                .map(|(n, t)| {
+                    (
+                        n.clone(),
+                        t.as_ref().map(|t| replace_skolems_in_type(t, map)),
+                    )
+                })
+                .collect(),
+        ),
         Type::Array(t) => Type::Array(Box::new(replace_skolems_in_type(t, map))),
-        Type::Function { param, ret, effect, cap } => Type::Function {
+        Type::Function {
+            param,
+            ret,
+            effect,
+            cap,
+        } => Type::Function {
             param: Box::new(replace_skolems_in_type(param, map)),
             ret: Box::new(replace_skolems_in_type(ret, map)),
             effect: effect.clone(),
@@ -3350,7 +3415,10 @@ fn replace_skolems_in_type(ty: &Type, map: &FxHashMap<u64, TypeVar>) -> Type {
         },
         Type::App { constructor, args } => Type::App {
             constructor: Box::new(replace_skolems_in_type(constructor, map)),
-            args: args.iter().map(|a| replace_skolems_in_type(a, map)).collect(),
+            args: args
+                .iter()
+                .map(|a| replace_skolems_in_type(a, map))
+                .collect(),
         },
         Type::Reference { cap, inner } => Type::Reference {
             cap: *cap,

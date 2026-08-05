@@ -98,7 +98,9 @@ fn reserve_decl(ctx: &mut ModuleCtx, decl: &hir::Decl) -> NuResult<()> {
             // real behaviors, so they never fall inside behavior_indices
             // (compensations are invoked directly by offset, never
             // dispatched by name via send/ask).
-            for (step_idx, (b, _abs_idx)) in a.behaviors.iter().zip(behavior_indices.iter()).enumerate() {
+            for (step_idx, (b, _abs_idx)) in
+                a.behaviors.iter().zip(behavior_indices.iter()).enumerate()
+            {
                 if b.compensate.is_some() {
                     let comp_idx =
                         ctx.reserve_behavior(format!("{}.{}__compensate", a.name, b.name));

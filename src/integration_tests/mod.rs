@@ -2462,10 +2462,17 @@ match { a: 2, b: 9 } with {
             "recovered value: apply handler now runs before emit, snapshot captures post-apply value"
         );
 
-        rt2.borrow_mut().send_message(actor_id, "increment", &[Value::int(4)]);
+        rt2.borrow_mut()
+            .send_message(actor_id, "increment", &[Value::int(4)]);
         rt2.borrow_mut().run_scheduler();
-        let recovered_count = rt2.borrow().actors.get(&actor_id).unwrap()
-            .get_state_field("count").and_then(|v| v.as_int()).unwrap();
+        let recovered_count = rt2
+            .borrow()
+            .actors
+            .get(&actor_id)
+            .unwrap()
+            .get_state_field("count")
+            .and_then(|v| v.as_int())
+            .unwrap();
         assert_eq!(
             recovered_count, 9,
             "recovered and continued: reaches {baseline_count} like the never-crashed baseline"

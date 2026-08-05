@@ -3825,17 +3825,29 @@ impl Runtime {
             .map(|b| b.code_offset as usize)
             .collect();
         let compensation_offsets: Vec<Option<usize>> = if is_workflow {
-            module.actor_metadata.iter().find(|m| m.is_workflow)
+            module
+                .actor_metadata
+                .iter()
+                .find(|m| m.is_workflow)
                 .map(|meta| {
-                    meta.behavior_indices.iter()
+                    meta.behavior_indices
+                        .iter()
                         .map(|&i| module.behaviors[i].compensate_offset.map(|o| o as usize))
                         .collect()
                 })
                 .unwrap_or_else(|| {
-                    module.behaviors.iter().map(|b| b.compensate_offset.map(|o| o as usize)).collect()
+                    module
+                        .behaviors
+                        .iter()
+                        .map(|b| b.compensate_offset.map(|o| o as usize))
+                        .collect()
                 })
         } else {
-            module.behaviors.iter().map(|b| b.compensate_offset.map(|o| o as usize)).collect()
+            module
+                .behaviors
+                .iter()
+                .map(|b| b.compensate_offset.map(|o| o as usize))
+                .collect()
         };
 
         let mut actor = Actor::new(actor_id, format!("actor_{}", actor_id), 0);
@@ -3953,7 +3965,11 @@ impl Runtime {
                     .collect()
             })
             .unwrap_or_else(|| {
-                module.behaviors.iter().map(|b| b.compensate_offset.map(|o| o as usize)).collect()
+                module
+                    .behaviors
+                    .iter()
+                    .map(|b| b.compensate_offset.map(|o| o as usize))
+                    .collect()
             });
         self.recovery_modules
             .insert(actor_id, (module, offsets, compensation_offsets));

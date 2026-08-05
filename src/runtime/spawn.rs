@@ -127,9 +127,16 @@ pub(crate) fn spawn_from_module(
     // compensation_offsets filtered to this actor's own behaviors so
     // step-local indices in run_saga_compensation match.
     let compensation_offsets: Vec<Option<usize>> = if let Some(meta) = meta {
-        meta.behavior_indices.iter().map(|&i| module.behaviors[i].compensate_offset).collect()
+        meta.behavior_indices
+            .iter()
+            .map(|&i| module.behaviors[i].compensate_offset)
+            .collect()
     } else {
-        module.behaviors.iter().map(|b| b.compensate_offset).collect()
+        module
+            .behaviors
+            .iter()
+            .map(|b| b.compensate_offset)
+            .collect()
     };
     if let Some(actor) = rt.actors.get_mut(&id) {
         actor.bytecode_module = Some(module.clone());

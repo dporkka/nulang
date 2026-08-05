@@ -1,1 +1,1 @@
-{"exit_code": 10, "stdout": "", "stderr": "Not a function: nil"}
+{"exit_code": 0, "stdout": "true\nfalse\n", "stderr": ""}
