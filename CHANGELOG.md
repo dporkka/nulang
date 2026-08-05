@@ -112,6 +112,19 @@ in this version; they are recorded here to establish their tier.
   two theorems are vacuous `True` stubs, not proofs. See
   `spec/formal/README.md` for the corrected, per-theorem scope table.
 
+- **RFC 0013 — Authenticated, encrypted transport (2026-08-05).**
+  `TlsConfig` enum (`MutualTls`/`SelfSigned`/`PlaintextInsecure`) replaces
+  the opt-in `Option<TlsConfig>`. MutualTLS nodes present certificates
+  signed by a cluster CA, verify peer certificates, and derive node
+  identity from the certificate's BLAKE3 fingerprint instead of the
+  spoofable socket-address hash. `server_name` field for configurable
+  TLS SNI. Short read timeout (50ms) with `WouldBlock` retry enables
+  concurrent read/write over TLS connections, so heartbeats and gossip
+  flow. Integration tests cover connection, cert mismatch rejection,
+  plaintext-mTLS interop rejection, and two-node cluster convergence.
+  NUL0 wire protocol unchanged (version 1). `src/runtime/network.rs`,
+  `src/runtime/cluster.rs`, `src/runtime/tests.rs`.
+
 - **Error handling syntax.** `catch expr => body`, `fail expr`
   (structured short-circuit return), and `T ! E` return-type syntax
   (`fn div(a: Int, b: Int) -> Int ! String`). Errors propagate through

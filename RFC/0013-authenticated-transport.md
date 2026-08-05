@@ -1,6 +1,6 @@
 # RFC 0013: Authenticated, Encrypted Transport
 
-- **Status:** Draft
+- **Status:** Implemented
 - **Tier:** Stable (extends Stable-tier cluster surface)
 - **Author:** AI assistant
 - **Created:** 2026-08-04
