@@ -98,8 +98,7 @@ Unfinished implementation lines counted from `not yet implemented` /
 - `src/fmt.rs:31` — formatter refuses files with `workflow`, `agent`,
   `let`, `class`, or `impl`.
 - `src/typechecker.rs:274-284` — `opaque` nominal types are transparent.
-- `Cargo.toml:38-40` — `simd-experimental` and `quic-experimental`
-  features are documented as dead-code / panic-on-use.
+- `Cargo.toml` — `simd-experimental` feature removed (zero code references); `quic-experimental` removed 2026-08-05 (unwired, incompatible handshake, tokio runtime overhead).
 - `src/runtime/mod.rs:2773` — WASM component runtime path is a stub.
 
 ---
@@ -1101,20 +1100,15 @@ anything.
    required (Frozen-tier wire change), steward-authored or
    steward-reviewed per GOVERNANCE.md §3.
 5. **Decide QUIC's fate — finish or remove, not permanent dead weight.**
-   Confirmed unwired (nothing outside `quic_transport.rs` constructs a
-   `QuicTransport`; `quic-experimental` feature gate leaves `quinn`
-   uncompiled by default) and its own handshake is incompatible with the
-   rest of the system: a raw 8-byte node-id exchange with no NUL0
-   magic/version check (`quic_transport.rs:107-114,180-189`), and its
-   client uses default quinn crypto with no custom verifier, so it would
-   reject its own self-signed server cert. Attempt first: fold it in as
-   the second `Transport` trait implementation (the module's own doc
-   comment already names this as "RFC 0003 item 14"), giving it a
-   NUL0-versioned handshake and the same real cert verification built for
-   deliverable 4 — `Box<dyn NetworkTransport>`
-   (`distributed_context.rs:13`) is already the seam. Only remove it if
-   that unification surfaces unexpected scope beyond deliverable 4's own
-   work.
+   ✅ **Removed 2026-08-05.** Assessed for integration: requires a tokio
+   runtime (separate from the main sync runtime), has an incompatible raw
+   8-byte handshake with no NUL0 magic/version check, and zero test
+   coverage. The TCP transport with MutualTLS (deliverable 4) already
+   provides authenticated, encrypted transport. Removed
+   `src/runtime/quic_transport.rs`, `quic-experimental` feature, and
+   `quinn` dependency. `rcgen` is preserved (used by
+   `TlsConfig::SelfSigned`). QUIC can be revisited when users ask for
+   multiplexed transport; not needed for alpha.
 6. **Partial-view membership beyond full-mesh.**
    ✅ **Landed 2026-08-03** — the heartbeat data plane is now
    O(active view) instead of O(every member), with the membership table

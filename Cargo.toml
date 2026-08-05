@@ -39,12 +39,6 @@ ai-runtime = ["dep:nulang-ai", "dep:reqwest", "dep:tokio"]
 wasm-backend = ["dep:wasm-encoder", "dep:wasmtime"]
 http-client = ["dep:reqwest", "dep:tokio"]
 
-# QUIC transport (`src/runtime/quic_transport.rs`): implements the
-# `NetworkTransport` trait (TLS via rcgen, node-id handshake) but is not
-# wired into `Runtime`'s transport selection and has no test coverage.
-# Gates the `quinn` dependency so default and --no-default-features builds
-# never pay its compile cost.
-quic-experimental = ["dep:quinn"]
 
 [dependencies]
 # Memory & concurrency
@@ -97,7 +91,6 @@ wasm-encoder = { version = "0.220", optional = true }
 # WASM runtime using Wasmtime (optional, see [features])
 wasmtime = { version = "46", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "anyhow", "component-model", "wat"] }
 blake3 = "1.8"
-quinn = { version = "0.11", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
 rustls-pemfile = "2"
 rcgen = "0.14"
