@@ -952,6 +952,7 @@ fn extract_return_type(ty: &Type) -> &Type {
 pub fn type_to_string(ty: &Type) -> String {
     match ty {
         Type::Var(v) => format!("'t{}", v.0),
+        Type::Skolem(id) => format!("'sk{}", id),
         Type::Primitive(p) => match p {
             crate::types::PrimitiveType::Int => "Int".to_string(),
             crate::types::PrimitiveType::Float => "Float".to_string(),

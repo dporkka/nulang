@@ -40,6 +40,7 @@ pub struct ToolSchema {
 /// - References: unwrap to the inner type
 pub fn type_to_json_schema(ty: &Type) -> serde_json::Value {
     match ty {
+        Type::Var(_) => serde_json::json!({}),
         Type::Primitive(PrimitiveType::Int) => serde_json::json!({"type": "integer"}),
         Type::Primitive(PrimitiveType::Float) => serde_json::json!({"type": "number"}),
         Type::Primitive(PrimitiveType::Bool) => serde_json::json!({"type": "boolean"}),
@@ -118,7 +119,7 @@ pub fn type_to_json_schema(ty: &Type) -> serde_json::Value {
         Type::Actor { .. } => serde_json::json!({}),
         Type::Scheme { body, .. } => type_to_json_schema(body),
         Type::Nominal { underlying, .. } => type_to_json_schema(underlying),
-        Type::Var(_) => serde_json::json!({}),
+        Type::Skolem(_) => serde_json::json!({}),
     }
 }
 

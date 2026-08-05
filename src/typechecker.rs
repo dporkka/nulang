@@ -50,6 +50,7 @@ pub(crate) fn apply_subst(ty: &Type, subst: &Substitution) -> Type {
             Type::Var(*v)
         }
         Type::Primitive(_) => ty.clone(),
+        Type::Skolem(_) => ty.clone(),
         Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| apply_subst(t, subst)).collect()),
         Type::Record(fs) => Type::Record(
             fs.iter()
@@ -101,6 +102,46 @@ pub(crate) fn apply_subst(ty: &Type, subst: &Substitution) -> Type {
             name: name.clone(),
             underlying: Box::new(apply_subst(underlying, subst)),
         },
+    }
+}
+
+/// Substitute specific type variables with given types. Used for
+/// skolemization: replace each type-parameter variable with a Skolem.
+fn subst_type_vars_with(ty: &Type, map: &FxHashMap<TypeVar, Type>) -> Type {
+    match ty {
+        Type::Var(v) => map.get(v).cloned().unwrap_or_else(|| ty.clone()),
+        Type::Primitive(_) => ty.clone(),
+        Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| subst_type_vars_with(t, map)).collect()),
+        Type::Record(fs) => Type::Record(fs.iter().map(|(n, t)| (n.clone(), subst_type_vars_with(t, map))).collect()),
+        Type::Variant(vs) => Type::Variant(vs.iter().map(|(n, t)| (n.clone(), t.as_ref().map(|t| subst_type_vars_with(t, map)))).collect()),
+        Type::Array(t) => Type::Array(Box::new(subst_type_vars_with(t, map))),
+        Type::Function { param, ret, effect, cap } => Type::Function {
+            param: Box::new(subst_type_vars_with(param, map)),
+            ret: Box::new(subst_type_vars_with(ret, map)),
+            effect: effect.clone(),
+            cap: *cap,
+        },
+        Type::Actor { state, behavior } => Type::Actor {
+            state: Box::new(subst_type_vars_with(state, map)),
+            behavior: Box::new(subst_type_vars_with(behavior, map)),
+        },
+        Type::App { constructor, args } => Type::App {
+            constructor: Box::new(subst_type_vars_with(constructor, map)),
+            args: args.iter().map(|a| subst_type_vars_with(a, map)).collect(),
+        },
+        Type::Reference { cap, inner } => Type::Reference {
+            cap: *cap,
+            inner: Box::new(subst_type_vars_with(inner, map)),
+        },
+        Type::Scheme { vars, body } => Type::Scheme {
+            vars: vars.clone(),
+            body: Box::new(subst_type_vars_with(body, map)),
+        },
+        Type::Nominal { name, underlying } => Type::Nominal {
+            name: name.clone(),
+            underlying: Box::new(subst_type_vars_with(underlying, map)),
+        },
+        Type::Skolem(_) => ty.clone(),
     }
 }
 
@@ -232,6 +273,9 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
     match (t1, t2) {
         // Identical primitives unify trivially
         (Type::Primitive(a), Type::Primitive(b)) if a == b => Ok(vec![]),
+
+        // Skolem types unify only with the same skolem
+        (Type::Skolem(a), Type::Skolem(b)) if a == b => Ok(vec![]),
 
         // Type variable unification
         (Type::Var(v), t) | (t, Type::Var(v)) => var_subst(*v, t, span),
@@ -416,6 +460,13 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             }
             Ok(subst)
         }
+
+        // Skolem types don't unify with anything else
+        (Type::Skolem(_), _) | (_, Type::Skolem(_)) => Err(NuError::type_mismatch(
+            format!("{}", t1),
+            format!("{}", t2),
+            span,
+        )),
 
         // Anything else is a unification error
         _ => Err(NuError::type_mismatch(
@@ -633,6 +684,7 @@ fn unify_many(types1: &[Type], types2: &[Type], span: Span) -> NuResult<Substitu
 /// Create a substitution for a single type variable, with occurs check.
 fn var_subst(v: TypeVar, t: &Type, span: Span) -> NuResult<Substitution> {
     match t {
+        Type::Skolem(_) => Ok(vec![(v, t.clone())]),
         Type::Var(v2) if *v2 == v => Ok(vec![]), // t = t
         t => {
             if occurs_in(v, t) {
@@ -660,6 +712,7 @@ fn occurs_in(v: TypeVar, t: &Type) -> bool {
     match t {
         Type::Var(v2) => *v2 == v,
         Type::Primitive(_) => false,
+        Type::Skolem(_) => false,
         Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t)),
         Type::Record(fs) => fs.iter().any(|(_, t)| occurs_in(v, t)),
         Type::Variant(vs) => vs
@@ -1017,11 +1070,25 @@ impl TypeChecker {
                     ])),
                     _ => ret_type.clone(),
                 };
-                // Create fresh type variables for parameters
+
+                // Skolemize type parameters: replace each type parameter's
+                // variable with a rigid Skolem constant so the function body
+                // cannot pin a generic type to a concrete type (e.g.
+                // `fn fresh[T]() -> T { 0 - 1 }` must be rejected at the
+                // definition, not at the call site).
+                let mut skolem_map: FxHashMap<TypeVar, Type> = FxHashMap::default();
+                for (_, tv, _) in type_param_constraints {
+                    skolem_map.insert(*tv, Type::Skolem(TypeVar::fresh().0));
+                }
+                let subst_skolem = |ty: &Type| -> Type {
+                    subst_type_vars_with(ty, &skolem_map)
+                };
+                // Skolemize the declared return type (if any).
+                let ret_type: Option<Type> = ret_type.map(|rt| subst_skolem(&rt));
                 let mut param_types = vec![];
                 for (_param_name, param_ty) in params {
                     let pty = match param_ty {
-                        Some(t) => t.clone(),
+                        Some(t) => subst_skolem(t),
                         None => Type::Var(TypeVar::fresh()),
                     };
                     param_types.push(pty);
@@ -3146,21 +3213,36 @@ impl TypeChecker {
     /// same cell be used at incompatible types (e.g.
     /// `let r = &[] in { r = [1]; (*r)[0] == "s" }`).
     fn do_generalize(&self, ctx: &TypeContext, ty: &Type) -> Type {
-        let ty_fv: FxHashSet<TypeVar> = ty.free_vars().into_iter().collect();
+        // Replace any Skolem constants with fresh type variables so they
+        // become the function's polymorphic type parameters. Skolems are
+        // rigid during body checking; after the body succeeds, they become
+        // quantifiable.
+        let mut skolem_to_var: FxHashMap<u64, TypeVar> = FxHashMap::default();
+        let mut skolem_vars = Vec::new();
+        collect_skolems(ty, &mut skolem_to_var, &mut skolem_vars);
+        let body = if skolem_to_var.is_empty() {
+            ty.clone()
+        } else {
+            replace_skolems_in_type(ty, &skolem_to_var)
+        };
+
+        let ty_fv: FxHashSet<TypeVar> = body.free_vars().into_iter().collect();
         let ctx_fv = self.get_ctx_free_vars(ctx);
-        let ref_fv: FxHashSet<TypeVar> = ty.ref_free_vars().into_iter().collect();
-        let gen_vars: Vec<TypeVar> = ty_fv
+        let ref_fv: FxHashSet<TypeVar> = body.ref_free_vars().into_iter().collect();
+        let mut gen_vars: Vec<TypeVar> = ty_fv
             .difference(&ctx_fv)
             .copied()
             .filter(|v| !ref_fv.contains(v))
             .collect();
+        // Skolem vars are always generalized (they represent type params).
+        gen_vars.extend(skolem_vars);
 
         if gen_vars.is_empty() {
-            ty.clone()
+            body
         } else {
             Type::Scheme {
                 vars: gen_vars,
-                body: Box::new(ty.clone()),
+                body: Box::new(body),
             }
         }
     }
@@ -3168,6 +3250,71 @@ impl TypeChecker {
     /// Get free type variables from the context.
     fn get_ctx_free_vars(&self, ctx: &TypeContext) -> FxHashSet<TypeVar> {
         ctx.free_vars().into_iter().collect()
+    }
+}
+
+/// Collect all unique Skolem IDs from a type and create a fresh TypeVar
+/// mapping for each. Used by `do_generalize` to convert skolems back to
+/// quantifiable type variables.
+fn collect_skolems(ty: &Type, map: &mut FxHashMap<u64, TypeVar>, vars: &mut Vec<TypeVar>) {
+    match ty {
+        Type::Skolem(id) => {
+            if !map.contains_key(id) {
+                let tv = TypeVar::fresh();
+                map.insert(*id, tv);
+                vars.push(tv);
+            }
+        }
+        Type::Tuple(ts) => for t in ts { collect_skolems(t, map, vars); },
+        Type::Record(fs) => for (_, t) in fs { collect_skolems(t, map, vars); },
+        Type::Variant(vs) => for (_, t) in vs { if let Some(t) = t { collect_skolems(t, map, vars); } },
+        Type::Array(t) => collect_skolems(t, map, vars),
+        Type::Function { param, ret, .. } => { collect_skolems(param, map, vars); collect_skolems(ret, map, vars); },
+        Type::Actor { state, behavior } => { collect_skolems(state, map, vars); collect_skolems(behavior, map, vars); },
+        Type::App { constructor, args } => { collect_skolems(constructor, map, vars); for a in args { collect_skolems(a, map, vars); } },
+        Type::Reference { inner, .. } => collect_skolems(inner, map, vars),
+        Type::Scheme { body, .. } => collect_skolems(body, map, vars),
+        Type::Nominal { underlying, .. } => collect_skolems(underlying, map, vars),
+        _ => {}
+    }
+}
+
+/// Replace every Skolem with its mapped TypeVar.
+fn replace_skolems_in_type(ty: &Type, map: &FxHashMap<u64, TypeVar>) -> Type {
+    match ty {
+        Type::Var(v) => Type::Var(*v),
+        Type::Primitive(_) => ty.clone(),
+        Type::Skolem(id) => Type::Var(map.get(id).copied().unwrap_or_else(TypeVar::fresh)),
+        Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| replace_skolems_in_type(t, map)).collect()),
+        Type::Record(fs) => Type::Record(fs.iter().map(|(n, t)| (n.clone(), replace_skolems_in_type(t, map))).collect()),
+        Type::Variant(vs) => Type::Variant(vs.iter().map(|(n, t)| (n.clone(), t.as_ref().map(|t| replace_skolems_in_type(t, map)))).collect()),
+        Type::Array(t) => Type::Array(Box::new(replace_skolems_in_type(t, map))),
+        Type::Function { param, ret, effect, cap } => Type::Function {
+            param: Box::new(replace_skolems_in_type(param, map)),
+            ret: Box::new(replace_skolems_in_type(ret, map)),
+            effect: effect.clone(),
+            cap: *cap,
+        },
+        Type::Actor { state, behavior } => Type::Actor {
+            state: Box::new(replace_skolems_in_type(state, map)),
+            behavior: Box::new(replace_skolems_in_type(behavior, map)),
+        },
+        Type::App { constructor, args } => Type::App {
+            constructor: Box::new(replace_skolems_in_type(constructor, map)),
+            args: args.iter().map(|a| replace_skolems_in_type(a, map)).collect(),
+        },
+        Type::Reference { cap, inner } => Type::Reference {
+            cap: *cap,
+            inner: Box::new(replace_skolems_in_type(inner, map)),
+        },
+        Type::Scheme { vars, body } => Type::Scheme {
+            vars: vars.clone(),
+            body: Box::new(replace_skolems_in_type(body, map)),
+        },
+        Type::Nominal { name, underlying } => Type::Nominal {
+            name: name.clone(),
+            underlying: Box::new(replace_skolems_in_type(underlying, map)),
+        },
     }
 }
 impl Default for TypeChecker {
