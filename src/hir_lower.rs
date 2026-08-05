@@ -15,7 +15,7 @@ use crate::ast;
 use crate::ast::{BinOp, Decl, Expr, FunctionAnnotation, Literal};
 use crate::hir;
 use crate::tool_schema::{function_to_tool_schema, ToolSchema};
-use crate::types::{Capability, EffectRow, Span, Type};
+use crate::types::{Capability, EffectRow, Span, Type, TypeVar};
 
 type FxHashMap<K, V> =
     std::collections::HashMap<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
@@ -24,27 +24,29 @@ pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
     let mut module = hir::Module::new(&ast.name);
     let tools = collect_tool_schemas(&ast.decls);
 
-    // Scan for given declarations and using params.
+    // Scan for given declarations, using params, and dict params.
     let mut givens = FxHashMap::default();
     let mut fn_using = FxHashMap::default();
+    let mut fn_dict_params: FxHashMap<String, Vec<(String, TypeVar, Vec<String>)>> = FxHashMap::default();
     for decl in &ast.decls {
         if let Decl::Given { name, value, .. } = decl {
             givens.insert(name.clone(), value.clone());
         }
         if let Decl::Function {
-            name, using_params, ..
+            name, using_params, type_param_constraints, ..
         } = decl
         {
             if !using_params.is_empty() {
-                fn_using.insert(
-                    name.clone(),
-                    using_params.iter().map(|(n, _)| n.clone()).collect(),
-                );
+                fn_using.insert(name.clone(), using_params.iter().map(|(n, _)| n.clone()).collect());
+            }
+            if !type_param_constraints.is_empty() {
+                fn_dict_params.insert(name.clone(), type_param_constraints.clone());
             }
         }
     }
     GIVEN_BINDINGS.with(|c| *c.borrow_mut() = givens);
     FN_USING_PARAMS.with(|c| *c.borrow_mut() = fn_using);
+    FN_DICT_PARAMS.with(|c| *c.borrow_mut() = fn_dict_params);
 
     let class_tables = crate::typechecker::build_class_tables(ast);
     CURRENT_CLASS_TABLES.with(|cell| {
@@ -121,19 +123,10 @@ fn collect_tool_schemas_into(decls: &[Decl], tools: &mut Vec<ToolSchema>) {
 fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
     match decl {
         Decl::Function {
-            name,
-            type_params,
-            params,
-            using_params,
-            ret_type,
-            error_type: _,
-            effect,
-            cap,
-            body,
-            annotations: _,
-            public,
-            span,
-            ..
+            name, type_params, type_param_constraints,
+            params, using_params, ret_type,
+            error_type: _, effect, cap, body,
+            annotations: _, public, span, ..
         } => {
             let mut all_params: Vec<(String, Type)> = params
                 .iter()
@@ -142,16 +135,34 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             for (n, t) in using_params {
                 all_params.push((n.clone(), resolve_type(t)));
             }
+            // Build implicit dictionary parameters from typeclass constraints.
+            let dict_param_names: Vec<String> = type_param_constraints.iter()
+                .flat_map(|(tp, _, cs)| cs.iter().map(move |c| format!("_dict_{}_{}", c, tp)))
+                .collect();
+            for dn in &dict_param_names {
+                all_params.push((dn.clone(), Type::unit()));
+            }
+            // Build param map for typeclass resolution during body lowering.
+            let mut param_map: FxHashMap<String, Type> = FxHashMap::default();
+            for (n, t) in &all_params {
+                param_map.insert(n.clone(), t.clone());
+            }
             hir::Decl::Function(hir::FunctionDef {
-                name: name.clone(),
-                type_params: type_params.clone(),
+                name: name.clone(), type_params: type_params.clone(),
                 params: all_params,
+                dict_params: dict_param_names.into_iter().map(|n| (n, Type::unit())).collect(),
                 ret: resolve_type(ret_type),
                 effect: effect.clone().unwrap_or_else(EffectRow::empty),
                 cap: cap.unwrap_or(Capability::Ref),
-                body: with_fresh_defer_stack(|| lower_body(body)),
-                public: *public,
-                span: *span,
+                body: {
+                    CURRENT_TYPE_PARAM_CONSTRAINTS.with(|c| *c.borrow_mut() = type_param_constraints.clone());
+                    CURRENT_FN_PARAMS.with(|c| *c.borrow_mut() = param_map);
+                    let b = with_fresh_defer_stack(|| lower_body(body));
+                    CURRENT_TYPE_PARAM_CONSTRAINTS.with(|c| *c.borrow_mut() = Vec::new());
+                    CURRENT_FN_PARAMS.with(|c| *c.borrow_mut() = FxHashMap::default());
+                    b
+                },
+                public: *public, span: *span,
             })
         }
         Decl::Actor {
@@ -1153,55 +1164,50 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             }
 
             // Typeclass method resolution: FieldAccess on a concrete type
-            // with a matching impl → route through the instance dictionary.
+            // or a constrained type variable → route through the dictionary.
             if let Expr::FieldAccess {
-                expr: receiver_expr,
-                field: method_name,
-                ..
+                expr: receiver_expr, field: method_name, ..
             } = func.as_ref()
             {
-                if let Some(dict_name) = try_resolve_typeclass_dict(receiver_expr, method_name) {
+                if let Some(dict) = try_resolve_typeclass_dict(receiver_expr, method_name) {
                     let receiver = lower_expr(receiver_expr, body);
                     let mut aops = vec![receiver];
-                    for a in args {
-                        aops.push(lower_expr(a, body));
-                    }
+                    for a in args { aops.push(lower_expr(a, body)); }
                     let ty = Type::unit();
-                    // Step 1: call dict constant fn to get the record
                     let dict_temp = fresh_temp_name();
-                    body.push(hir::Stmt::Let {
-                        name: dict_temp.clone(),
-                        ty: ty.clone(),
-                        value: hir::RValue::Call {
-                            func: hir::Operand::Var(dict_name.clone(), ty.clone()),
-                            args: vec![],
-                            ty: ty.clone(),
-                        },
-                        span: *span,
-                    });
-                    // Step 2: access the method field on the dict record
+                    match dict {
+                        DictKind::Constant(dict_name) => {
+                            body.push(hir::Stmt::Let {
+                                name: dict_temp.clone(), ty: ty.clone(),
+                                value: hir::RValue::Call {
+                                    func: hir::Operand::Var(dict_name, ty.clone()),
+                                    args: vec![], ty: ty.clone(),
+                                }, span: *span,
+                            });
+                        }
+                        DictKind::Param(dict_name) => {
+                            body.push(hir::Stmt::Let {
+                                name: dict_temp.clone(), ty: ty.clone(),
+                                value: hir::RValue::Use(hir::Operand::Var(dict_name, ty.clone())),
+                                span: *span,
+                            });
+                        }
+                    }
                     let method_temp = fresh_temp_name();
                     body.push(hir::Stmt::Let {
-                        name: method_temp.clone(),
-                        ty: ty.clone(),
+                        name: method_temp.clone(), ty: ty.clone(),
                         value: hir::RValue::FieldAccess {
                             base: hir::Operand::Var(dict_temp, ty.clone()),
-                            field: method_name.clone(),
-                            ty: ty.clone(),
-                        },
-                        span: *span,
+                            field: method_name.clone(), ty: ty.clone(),
+                        }, span: *span,
                     });
-                    // Step 3: call the method with receiver + args
                     let call_temp = fresh_temp_name();
                     body.push(hir::Stmt::Let {
-                        name: call_temp.clone(),
-                        ty: ty.clone(),
+                        name: call_temp.clone(), ty: ty.clone(),
                         value: hir::RValue::Call {
                             func: hir::Operand::Var(method_temp, ty.clone()),
-                            args: aops,
-                            ty: ty.clone(),
-                        },
-                        span: *span,
+                            args: aops, ty: ty.clone(),
+                        }, span: *span,
                     });
                     return hir::Operand::Var(call_temp, ty);
                 }
@@ -1776,46 +1782,30 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         }
         Expr::Emit { event, args, span } => {
             let aops: Vec<_> = args.iter().map(|a| lower_expr(a, body)).collect();
-            body.push(hir::Stmt::Emit {
-                event: event.clone(),
-                args: aops.clone(),
-                span: *span,
-            });
-            // Inject apply handler code after emit if we're inside an entity
-            // that has matching apply handlers.
+            // Inject apply handler code BEFORE emit so the handler's
+            // state mutation is visible to the runtime's +1 snapshot.
             CURRENT_APPLY_HANDLERS.with(|cell| {
                 if let Some(ref handlers) = *cell.borrow() {
                     for handler in handlers {
                         if handler.event == *event {
-                            // Lower the apply handler body with params bound to emit args
                             let mut handler_body = hir::Body::new();
-                            // Create temp bindings: handler.params[i] = aops[i]
                             for (pi, param_name) in handler.params.iter().enumerate() {
-                                let arg_op = if pi < aops.len() {
-                                    aops[pi].clone()
-                                } else {
-                                    hir::Operand::Unit
-                                };
+                                let arg_op = if pi < aops.len() { aops[pi].clone() } else { hir::Operand::Unit };
                                 handler_body.push(hir::Stmt::Let {
-                                    name: param_name.clone(),
-                                    ty: Type::unit(),
-                                    value: hir::RValue::Use(arg_op),
-                                    span: handler.span,
+                                    name: param_name.clone(), ty: Type::unit(),
+                                    value: hir::RValue::Use(arg_op), span: handler.span,
                                 });
                             }
-                            // Lower the apply handler body expression
                             let result_op = lower_expr(&handler.body, &mut handler_body);
                             if !handler_body.is_terminated() {
                                 handler_body.set_terminator(hir::Terminator::Yield(result_op));
                             }
-                            // Merge handler body statements into the main body
-                            for stmt in handler_body.stmts {
-                                body.push(stmt);
-                            }
+                            for stmt in handler_body.stmts { body.push(stmt); }
                         }
                     }
                 }
             });
+            body.push(hir::Stmt::Emit { event: event.clone(), args: aops.clone(), span: *span });
             hir::Operand::Unit
         }
         Expr::For {
@@ -2161,13 +2151,43 @@ fn actor_name_from_expr(expr: &Expr) -> Option<String> {
     }
 }
 
-/// Try to resolve a typeclass method call through the instance dictionary.
-///
-/// Given `receiver.method_name(...)`, checks if the receiver is a literal
-/// with a concrete type that has a matching `impl` for any class defining
-/// `method_name`. Returns the synthetic dict constant name if found.
-fn try_resolve_typeclass_dict(receiver: &Expr, method_name: &str) -> Option<String> {
-    // Only resolve on literal receivers for now (concrete type is known).
+/// How a typeclass dictionary is resolved.
+enum DictKind {
+    Constant(String),
+    Param(String),
+}
+
+fn try_resolve_typeclass_dict(receiver: &Expr, method_name: &str) -> Option<DictKind> {
+    if let Expr::Var(name, _) = receiver {
+        return CURRENT_FN_PARAMS.with(|cell| {
+            let fn_params = cell.borrow();
+            if let Some(param_ty) = fn_params.get(name) {
+                if let Type::Var(tv) = param_ty {
+                    CURRENT_TYPE_PARAM_CONSTRAINTS.with(|cc| {
+                        let constraints = cc.borrow();
+                        for (tp_name, c_tv, class_names) in constraints.iter() {
+                            if c_tv == tv {
+                                for cn in class_names {
+                                    let found = CURRENT_CLASS_TABLES.with(|tc| {
+                                        tc.borrow().as_ref().map_or(false, |tables| {
+                                            tables.class_table.get(cn).map_or(false, |info| {
+                                                info.methods.iter().any(|m| m.name == method_name)
+                                            })
+                                        })
+                                    });
+                                    if found {
+                                        return Some(DictKind::Param(format!("_dict_{}_{}", cn, tp_name)));
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    })
+                } else { None }
+            } else { None }
+        });
+    }
+    // Literal receivers: concrete type is known, look up the impl constant.
     let type_name = match receiver {
         Expr::Literal(Literal::Int(_), _) => "Int",
         Expr::Literal(Literal::Float(_), _) => "Float",
@@ -2175,17 +2195,14 @@ fn try_resolve_typeclass_dict(receiver: &Expr, method_name: &str) -> Option<Stri
         Expr::Literal(Literal::String(_), _) => "String",
         _ => return None,
     };
-
     CURRENT_CLASS_TABLES.with(|cell| {
         let tables = cell.borrow();
         let tables = tables.as_ref()?;
-
         for (class_name, class_info) in &tables.class_table {
             if class_info.methods.iter().any(|m| m.name == method_name) {
                 let key = (class_name.clone(), type_name.to_string());
                 if tables.instance_table.contains_key(&key) {
-                    let dict_name = format!("_impl_{}_{}", class_name, type_name);
-                    return Some(dict_name);
+                    return Some(DictKind::Constant(format!("_impl_{}_{}", class_name, type_name)));
                 }
             }
         }
@@ -2231,6 +2248,13 @@ thread_local! {
 thread_local! {
     static GIVEN_BINDINGS: RefCell<FxHashMap<String, ast::Expr>> = RefCell::new(FxHashMap::default());
     static FN_USING_PARAMS: RefCell<FxHashMap<String, Vec<String>>> = RefCell::new(FxHashMap::default());
+    static FN_DICT_PARAMS: RefCell<FxHashMap<String, Vec<(String, TypeVar, Vec<String>)>>> = RefCell::new(FxHashMap::default());
+}
+
+// Thread-local: current function's type parameter constraints and params.
+thread_local! {
+    static CURRENT_TYPE_PARAM_CONSTRAINTS: RefCell<Vec<(String, TypeVar, Vec<String>)>> = RefCell::new(Vec::new());
+    static CURRENT_FN_PARAMS: RefCell<FxHashMap<String, Type>> = RefCell::new(FxHashMap::default());
 }
 
 /// Push a new defer scope (called when entering a block).

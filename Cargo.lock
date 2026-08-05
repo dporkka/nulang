@@ -2119,6 +2119,7 @@ dependencies = [
  "libsql",
  "mimalloc",
  "nulang-ai",
+ "parking_lot",
  "pyo3",
  "rand_core 0.6.4",
  "rcgen",

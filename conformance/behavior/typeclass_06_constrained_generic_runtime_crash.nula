@@ -1,3 +1,7 @@
+// typeclass_06 — method call on constrained type variable now resolves
+// at the HIR level (the dict param is referenced), but the caller must
+// pass the concrete dictionary argument.  Until call-site dict passing
+// is implemented, the dict param receives nil and the call crashes.
 class Eq[T] {
     fn eq(self: T, other: T) -> Bool
 }

@@ -2456,37 +2456,19 @@ match { a: 2, b: 9 } with {
         );
         rt2.borrow_mut().recover_actor(actor_id);
         assert_eq!(
-            rt2.borrow()
-                .actors
-                .get(&actor_id)
-                .unwrap()
-                .get_state_field("count")
-                .and_then(|v| v.as_int()),
-            Some(1),
-            "KNOWN GAP: should reconstruct to 4 (matching the live value \
-             above) but recovery's bare event-count heuristic ignores \
-             `by` and the apply handler entirely -- see SPEC2.md §9.6"
+            rt2.borrow().actors.get(&actor_id).unwrap()
+                .get_state_field("count").and_then(|v| v.as_int()),
+            Some(4),
+            "recovered value: apply handler now runs before emit, snapshot captures post-apply value"
         );
 
-        rt2.borrow_mut()
-            .send_message(actor_id, "increment", &[Value::int(4)]);
+        rt2.borrow_mut().send_message(actor_id, "increment", &[Value::int(4)]);
         rt2.borrow_mut().run_scheduler();
-        let recovered_count = rt2
-            .borrow()
-            .actors
-            .get(&actor_id)
-            .unwrap()
-            .get_state_field("count")
-            .and_then(|v| v.as_int())
-            .unwrap();
+        let recovered_count = rt2.borrow().actors.get(&actor_id).unwrap()
+            .get_state_field("count").and_then(|v| v.as_int()).unwrap();
         assert_eq!(
-            recovered_count, 6,
-            "KNOWN GAP (PLAN.md bullet 8, SPEC2.md §9.6): a from-scratch \
-             reconstruction would reach {baseline_count} like the \
-             never-crashed baseline above; recovery instead reaches 6. \
-             If this assertion starts failing, either a regression made \
-             it worse or a fix made it better -- update this test and \
-             SPEC2.md §9.6 together either way."
+            recovered_count, 9,
+            "recovered and continued: reaches {baseline_count} like the never-crashed baseline"
         );
     }
 

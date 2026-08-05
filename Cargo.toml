@@ -44,6 +44,7 @@ http-client = ["dep:reqwest", "dep:tokio"]
 # Memory & concurrency
 mimalloc = "0.1"
 crossbeam = "0.8"
+parking_lot = "0.12"
 httparse = "1"
 # HTTP client (synchronous, for standalone VM)
 ureq = "2"
