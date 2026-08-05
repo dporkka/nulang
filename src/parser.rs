@@ -4942,6 +4942,7 @@ impl Parser {
                 name: name.clone(),
                 underlying: Box::new(Self::subst_type_var(underlying, var, arg)),
             },
+            Type::Skolem(_) => ty.clone(),
             Type::Scheme { vars, body } => {
                 if vars.contains(&var) {
                     ty.clone()

@@ -1,8 +1,7 @@
-// generics_08 — declared type parameters are not skolemized in the function
-// body: `fresh[T]() -> T { 0 - 1 }` unifies `T` with Int via the body
-// literal, silently pinning the whole function to `() -> Int`. The second
-// call site (`String`) then fails. Real behavior: type error at the second
-// call site, not at the definition.
+// generics_08 — skolemized type parameters: `fn fresh[T]() -> T { 0 - 1 }`
+// now fails at the definition because the body returns Int but the declared
+// return type is the skolemized T (a rigid placeholder that cannot unify
+// with a concrete type). The error is at the definition, not the call site.
 fn fresh[T]() -> T {
     0 - 1
 }
@@ -10,6 +9,5 @@ fn fresh[T]() -> T {
 fn main() {
     let x: Int = fresh()
     let s: String = fresh()
-    perform IO.print("x=" + perform Int.to_string(x))
-    perform IO.print("s=" + s)
+    perform IO.print("unreachable")
 }

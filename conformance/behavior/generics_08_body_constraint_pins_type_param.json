@@ -1,1 +1,1 @@
-{"exit_code":4,"stdout":"","stderr":"Error: Type error at 1:1: Type mismatch: expected Int, found String\n  expected type: Int\n  found type: String"}
+{"exit_code":4,"stdout":"","stderr":"Error: Type error at 5:1: Type mismatch: expected Int, found 'sk4\n  expected type: Int\n  found type: 'sk4"}
