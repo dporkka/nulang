@@ -1110,8 +1110,8 @@ fn collect_type_vars(ty: &Type, map: &mut FxHashMap<TypeVar, Type>) {
         }
         Type::Tuple(ts) => for t in ts { collect_type_vars(t, map); },
         Type::Array(t) => collect_type_vars(t, map),
-        Type::Function { param, ret, .. } => { collect_type_vars(param, map); collect_type_vars(ret, map); },
-        Type::App { constructor, args } => {
+        Type::Nominal { .. } => {} // opaque — skip underlying to avoid cycles
+        Type::App { constructor: _, args } => {
             // Only collect from args — the constructor is a type name,
             // not a type parameter usage.
             for a in args { collect_type_vars(a, map); }
