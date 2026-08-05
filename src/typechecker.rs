@@ -431,6 +431,27 @@ fn mgu(t1: &Type, t2: &Type, span: Span) -> NuResult<Substitution> {
             Ok(compose_subst(&s2, &s1))
         }
 
+        // Recursive type reference: a variant unified with a self-
+        // referencing type variable applied to args (e.g. Tree[Int]).
+        // The variant contains `App(Var(v), inner_args)` for each
+        // recursive reference; unify inner_args with args.
+        (Type::Variant(vs), Type::App { constructor, args })
+        | (Type::App { constructor, args }, Type::Variant(vs))
+            if matches!(constructor.as_ref(), Type::Var(_)) =>
+        {
+            let Type::Var(v) = constructor.as_ref() else {
+                unreachable!()
+            };
+            let mut subst = vec![];
+            let mut inner = Vec::new();
+            find_recursive_apps(vs, *v, &mut inner);
+            for inner_args in &inner {
+                let s = unify_many_app(inner_args, args, span)?;
+                subst = compose_subst(&s, &subst);
+            }
+            Ok(subst)
+        }
+
         // Variants: same constructor set, payloads unify pairwise. Required
         // for declared variant types (SPEC2 §3.4.1), e.g. unifying the two
         // branches of `if b then Some(1) else None`.
@@ -695,6 +716,48 @@ fn unify_many(types1: &[Type], types2: &[Type], span: Span) -> NuResult<Substitu
 }
 
 /// Create a substitution for a single type variable, with occurs check.
+
+/// Collect every `App(Var(target), args)` from within variant payloads.
+fn find_recursive_apps(vs: &[(String, Option<Type>)], target: TypeVar, out: &mut Vec<Vec<Type>>) {
+    for (_, payload) in vs {
+        if let Some(p) = payload {
+            find_recursive_apps_in_type(p, target, out);
+        }
+    }
+}
+fn find_recursive_apps_in_type(ty: &Type, target: TypeVar, out: &mut Vec<Vec<Type>>) {
+    match ty {
+        Type::App { constructor, args } => {
+            if let Type::Var(v) = constructor.as_ref() {
+                if *v == target {
+                    out.push(args.clone());
+                }
+            }
+            find_recursive_apps_in_type(constructor, target, out);
+            for a in args {
+                find_recursive_apps_in_type(a, target, out);
+            }
+        }
+        Type::Tuple(ts) => {
+            for t in ts {
+                find_recursive_apps_in_type(t, target, out);
+            }
+        }
+        Type::Variant(vs) => {
+            for (_, p) in vs {
+                if let Some(p) = p {
+                    find_recursive_apps_in_type(p, target, out);
+                }
+            }
+        }
+        Type::Function { param, ret, .. } => {
+            find_recursive_apps_in_type(param, target, out);
+            find_recursive_apps_in_type(ret, target, out);
+        }
+        _ => {}
+    }
+}
+
 fn var_subst(v: TypeVar, t: &Type, span: Span) -> NuResult<Substitution> {
     match t {
         Type::Skolem(_) => Ok(vec![(v, t.clone())]),
@@ -788,6 +851,10 @@ pub struct TypeChecker {
     pub given_bindings: FxHashMap<String, (Option<Type>, Expr)>,
     /// Functions with `using` params: fn_name → using param names.
     pub fn_using_params: FxHashMap<String, Vec<String>>,
+    /// Self-referencing type variables from recursive ADT types.
+    /// Must not be generalized — they must stay identical across
+    /// constructor instantiations for structural unification.
+    pub rigid_vars: FxHashSet<TypeVar>,
 }
 
 /// Pre-computed class and instance tables extracted from an AST module.
@@ -866,6 +933,7 @@ impl TypeChecker {
             inferred_decl_types: FxHashMap::default(),
             given_bindings: FxHashMap::default(),
             fn_using_params: FxHashMap::default(),
+            rigid_vars: FxHashSet::default(),
         }
     }
 
@@ -940,6 +1008,7 @@ impl TypeChecker {
                     // the declaration and are generalized per constructor, so
                     // each use instantiates them fresh.
                     let variant_ty = Type::Variant(variants.clone());
+                    Self::collect_recursive_vars(&variant_ty, &mut self.rigid_vars);
                     for (ctor_name, payload) in variants {
                         let ctor_ty = match payload {
                             Some(payload_ty) => Type::Function {
@@ -1915,19 +1984,26 @@ impl TypeChecker {
                 _ => 1,
             };
             if arg_types.len() != expected_count {
-                let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
-                let expected_desc = format!("{} {}", expected_count, plural(expected_count));
-                let found_desc = format!("{} {}", arg_types.len(), plural(arg_types.len()));
-                return Err(NuError::TypeError {
-                    msg: format!(
-                        "wrong number of arguments: expected {}, got {}",
-                        expected_desc, found_desc
-                    ),
-                    span,
-                    expected_type: Some(expected_desc),
-                    found_type: Some(found_desc),
-                    similar_names: None,
-                });
+                // Allow a single tuple argument when the function expects
+                // a tuple param (e.g. Make((1, 2)) for Make((T, T))).
+                let single_tuple_ok = arg_types.len() == 1
+                    && matches!(fn_param.as_ref(), Type::Tuple(_))
+                    && matches!(&arg_types[0], Type::Tuple(_));
+                if !single_tuple_ok {
+                    let plural = |n: usize| if n == 1 { "argument" } else { "arguments" };
+                    let expected_desc = format!("{} {}", expected_count, plural(expected_count));
+                    let found_desc = format!("{} {}", arg_types.len(), plural(arg_types.len()));
+                    return Err(NuError::TypeError {
+                        msg: format!(
+                            "wrong number of arguments: expected {}, got {}",
+                            expected_desc, found_desc
+                        ),
+                        span,
+                        expected_type: Some(expected_desc),
+                        found_type: Some(found_desc),
+                        similar_names: None,
+                    });
+                }
             }
         }
 
@@ -3313,6 +3389,53 @@ impl TypeChecker {
                 vars: gen_vars,
                 body: Box::new(body),
             }
+        }
+    }
+
+    /// Collect self-referencing type variables from variant bodies.
+    /// These appear as `App(Var(v), …)` constructors and must not be
+    /// generalized — they're fixed points, not polymorphic variables.
+    fn collect_recursive_vars(ty: &Type, out: &mut FxHashSet<TypeVar>) {
+        match ty {
+            Type::App { constructor, args } => {
+                if let Type::Var(v) = constructor.as_ref() {
+                    out.insert(*v);
+                }
+                Self::collect_recursive_vars(constructor, out);
+                for a in args {
+                    Self::collect_recursive_vars(a, out);
+                }
+            }
+            Type::Variant(vs) => {
+                for (_, p) in vs {
+                    if let Some(p) = p {
+                        Self::collect_recursive_vars(p, out);
+                    }
+                }
+            }
+            Type::Tuple(ts) => {
+                for t in ts {
+                    Self::collect_recursive_vars(t, out);
+                }
+            }
+            Type::Record(fs) => {
+                for (_, t) in fs {
+                    Self::collect_recursive_vars(t, out);
+                }
+            }
+            Type::Array(t) => Self::collect_recursive_vars(t, out),
+            Type::Function { param, ret, .. } => {
+                Self::collect_recursive_vars(param, out);
+                Self::collect_recursive_vars(ret, out);
+            }
+            Type::Actor { state, behavior } => {
+                Self::collect_recursive_vars(state, out);
+                Self::collect_recursive_vars(behavior, out);
+            }
+            Type::Reference { inner, .. } => Self::collect_recursive_vars(inner, out),
+            Type::Scheme { body, .. } => Self::collect_recursive_vars(body, out),
+            Type::Nominal { underlying, .. } => Self::collect_recursive_vars(underlying, out),
+            _ => {}
         }
     }
 

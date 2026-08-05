@@ -1,11 +1,9 @@
-// generics_07 — a generic recursive type with a different shape than §7.8's
-// Tree (single recursive payload per branch) also cannot be constructed:
-// the inner `Cons(2, Nil)` has the plain variant type while the outer
-// `Cons` payload expects the opaque recursive `Stream[Int]` application.
-// Real behavior: type error.
+// generics_07 — recursive generic ADT with a different shape than Tree.
+// After the rigid_vars fix, `type Stream[T] = Nil | Cons((T, Stream[T]))`
+// type-checks and constructs correctly.
 type Stream[T] = Nil | Cons((T, Stream[T]))
 
 fn main() {
     let s = Cons(1, Cons(2, Nil))
-    perform IO.print("unreachable")
+    perform IO.print("ok")
 }
