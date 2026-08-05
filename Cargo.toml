@@ -86,7 +86,7 @@ libsql = { version = "0.10.0-pre.4", optional = true, default-features = false, 
 # Native library loading
 libloading = "0.8"
 # AI runtime crate (optional; enabled by the `ai-runtime` feature).
-nulang-ai = { path = "crates/nulang-ai", optional = true }
+nulang-ai = { path = "crates/nulang-ai", version = "0.1.0", optional = true }
 reqwest = { version = "0.12", features = ["json"], optional = true }
 wasm-encoder = { version = "0.220", optional = true }
 # WASM runtime using Wasmtime (optional, see [features])
