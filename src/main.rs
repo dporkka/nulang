@@ -1469,6 +1469,7 @@ fn type_to_string(ty: &Type) -> String {
             type_to_string(body)
         ),
         Type::Nominal { name, .. } => name.clone(),
+        Type::Skolem(id) => format!("'sk{}", id),
     }
 }
 

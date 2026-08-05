@@ -412,6 +412,11 @@ pub enum Type {
     /// Nominal (opaque) type: `opaque type UserId = Int`.
     /// Distinct from its underlying type at compile time, erases at runtime.
     Nominal { name: String, underlying: Box<Type> },
+    /// Skolem type constant: a rigid placeholder for a type parameter
+    /// during function body checking.  Skolems unify only with themselves
+    /// (never with concrete types), preventing the function body from
+    /// pinning a generic type parameter to a specific type.
+    Skolem(u64),
 }
 
 impl std::fmt::Display for Type {
@@ -498,6 +503,7 @@ impl std::fmt::Display for Type {
                 write!(f, ". {}", body)
             }
             Type::Nominal { name, .. } => write!(f, "{}", name),
+            Type::Skolem(id) => write!(f, "'t{}", id),
         }
     }
 }
@@ -593,6 +599,7 @@ impl Type {
             }
             Type::Scheme { body, .. } => body.to_ntir_with_stack(stack),
             Type::Nominal { underlying, .. } => underlying.to_ntir_with_stack(stack),
+            Type::Skolem(_) => NtirNode::Primitive(PrimitiveType::Unit),
         };
 
         if push_var {
@@ -692,7 +699,7 @@ impl Type {
             }
             Type::Scheme { body, .. } => body.collect_ref_free_vars(acc),
             Type::Nominal { underlying, .. } => underlying.collect_ref_free_vars(acc),
-            Type::Var(_) | Type::Primitive(_) => {}
+            Type::Var(_) | Type::Primitive(_) | Type::Skolem(_) => {}
         }
     }
 
@@ -727,6 +734,7 @@ impl Type {
                 acc.retain(|v| !vars.contains(v));
             }
             Type::Nominal { underlying, .. } => underlying.collect_free_vars(acc),
+            Type::Skolem(_) => {}
         }
     }
 }
