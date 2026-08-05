@@ -1,0 +1,9 @@
+// generics_03 — SPEC2 §7.8's exact `type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))`
+// example. After the occurs-check fix for variant constructors, recursive ADTs
+// type-check and construct correctly.
+type Tree[T] = Leaf | Node((Tree[T], T, Tree[T]))
+
+fn main() {
+    let t: Tree[Int] = Node(Leaf, 1, Leaf)
+    perform IO.print("ok")
+}

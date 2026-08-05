@@ -317,31 +317,44 @@ impl MirCodegen {
                 });
         }
         // Saga compensation: patch each step's compensate_offset from its
-        // already-compiled compensation function's code offset. Both
-        // indices are into module.behaviors (see mir::Module::compensation_of).
-        for (behavior_idx, comp_idx) in &mir.compensation_of {
-            let comp_offset = self
-                .module
-                .behaviors
-                .get(*comp_idx)
-                .map(|b| b.code_offset)
-                .ok_or_else(|| {
-                    compile_err(
-                        "internal: compensation behavior index out of range",
-                        Span::default(),
-                    )
-                })?;
-            let entry = self
-                .module
-                .behaviors
-                .get_mut(*behavior_idx)
-                .ok_or_else(|| {
-                    compile_err(
-                        "internal: compensated behavior index out of range",
-                        Span::default(),
-                    )
-                })?;
-            entry.compensate_offset = Some(comp_offset);
+        // already-compiled compensation function's code offset.
+        // compensation_of stores (step_relative_idx, comp_idx) where
+        // step_relative_idx is a 0-based index into the owning actor's
+        // behavior list. Resolve it to the absolute behavior index via
+        // ActorMeta::behavior_indices.
+        let mut comp_cursor = 0;
+        for meta in &mir.actor_metadata {
+            for step_idx in 0..meta.behavior_indices.len() {
+                if comp_cursor < mir.compensation_of.len()
+                    && mir.compensation_of[comp_cursor].0 == step_idx
+                {
+                    let comp_idx = mir.compensation_of[comp_cursor].1;
+                    let abs_behavior_idx = meta.behavior_indices[step_idx];
+                    let comp_offset = self
+                        .module
+                        .behaviors
+                        .get(comp_idx)
+                        .map(|b| b.code_offset)
+                        .ok_or_else(|| {
+                            compile_err(
+                                "internal: compensation behavior index out of range",
+                                Span::default(),
+                            )
+                        })?;
+                    let entry = self
+                        .module
+                        .behaviors
+                        .get_mut(abs_behavior_idx)
+                        .ok_or_else(|| {
+                            compile_err(
+                                "internal: compensated behavior index out of range",
+                                Span::default(),
+                            )
+                        })?;
+                    entry.compensate_offset = Some(comp_offset);
+                    comp_cursor += 1;
+                }
+            }
         }
         // Parallel-branch metadata: copy branch names onto the matching
         // synthesized step's BehaviorTableEntry (see mir::Module::parallel_branches_of).

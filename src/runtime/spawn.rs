@@ -124,11 +124,13 @@ pub(crate) fn spawn_from_module(
         spawn_actor_with_models(rt, Box::new(move || init), HashMap::new(), false, None)
     };
     let offsets: Vec<usize> = module.behaviors.iter().map(|b| b.code_offset).collect();
-    let compensation_offsets: Vec<Option<usize>> = module
-        .behaviors
-        .iter()
-        .map(|b| b.compensate_offset)
-        .collect();
+    // compensation_offsets filtered to this actor's own behaviors so
+    // step-local indices in run_saga_compensation match.
+    let compensation_offsets: Vec<Option<usize>> = if let Some(meta) = meta {
+        meta.behavior_indices.iter().map(|&i| module.behaviors[i].compensate_offset).collect()
+    } else {
+        module.behaviors.iter().map(|b| b.compensate_offset).collect()
+    };
     if let Some(actor) = rt.actors.get_mut(&id) {
         actor.bytecode_module = Some(module.clone());
         actor.bytecode_offsets = offsets.clone();

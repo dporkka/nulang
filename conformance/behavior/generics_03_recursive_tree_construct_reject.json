@@ -1,1 +1,0 @@
-{"exit_code":4,"stdout":"","stderr":"Error: Type error at 8:43: Type mismatch: expected '_['_], found Leaf | Node ('_['_], '_, '_['_])\n  expected type: '_['_]\n  found type: Leaf | Node ('_['_], '_, '_['_])"}

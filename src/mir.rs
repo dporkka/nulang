@@ -45,12 +45,14 @@ pub struct Module {
     /// indices into `behaviors` above; codegen copies this vector into
     /// `CodeModule.actor_metadata` unchanged.
     pub actor_metadata: Vec<ActorMeta>,
-    /// Saga compensation pairs: `(behavior_idx, compensation_behavior_idx)`,
-    /// both indices into `behaviors`. Compensation bodies compile through
-    /// the exact same machinery as ordinary behaviors, but are never
-    /// dispatched by name — codegen patches the owning behavior's
-    /// `BehaviorTableEntry::compensate_offset` from the compiled
-    /// compensation function's code offset instead.
+    /// Saga compensation pairs: `(step_index, compensation_behavior_idx)`,
+    /// where `step_index` is a 0-based index into the owning actor's
+    /// behavior list (NOT a module-global behavior index). Codegen resolves
+    /// it to the absolute behavior index via `ActorMeta::behavior_indices`.
+    /// `compensation_behavior_idx` is an absolute index into `behaviors`.
+    /// Compensation bodies are never dispatched by name — codegen patches
+    /// the owning behavior's `BehaviorTableEntry::compensate_offset` from
+    /// the compiled compensation function's code offset.
     pub compensation_of: Vec<(usize, usize)>,
     /// `(behavior_idx, branch_names)` pairs for steps synthesized from a
     /// `parallel { ... }` block; codegen copies `branch_names` into the
