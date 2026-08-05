@@ -64,7 +64,6 @@ use tracing::warn;
 /// than the spoofable socket-address hash.
 ///
 /// `PlaintextInsecure` is the explicit opt-out for development and testing.
-/// `SelfSigned` auto-generates certificates for development clusters.
 #[derive(Clone)]
 pub enum TlsConfig {
     /// Mutual TLS with a cluster CA.
@@ -84,11 +83,6 @@ pub enum TlsConfig {
         /// Defaults to `"localhost"` when `None`.
         server_name: Option<String>,
     },
-    /// Self-signed certificate auto-generated via `rcgen`.
-    ///
-    /// Convenience for development clusters. Encryption without a PKI.
-    /// The client accepts any certificate — not for production.
-    SelfSigned,
     /// Plaintext with no encryption or authentication.
     ///
     /// Explicit opt-out. Node identity is derived from a hash of the bind
@@ -139,19 +133,6 @@ impl TlsConfig {
                     .with_single_cert(server_cert, server_key)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
             }
-            TlsConfig::SelfSigned => {
-                let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
-                let cert_der =
-                    rustls::pki_types::CertificateDer::from(cert.cert.der().clone().into_owned());
-                let key_der = rustls::pki_types::PrivateKeyDer::from(
-                    rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()),
-                );
-                rustls::ServerConfig::builder()
-                    .with_no_client_auth()
-                    .with_single_cert(vec![cert_der], key_der)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-            }
             TlsConfig::PlaintextInsecure => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "TlsConfig::PlaintextInsecure has no server config",
@@ -176,54 +157,6 @@ impl TlsConfig {
                     .map_err(|e| {
                         io::Error::new(io::ErrorKind::InvalidData, format!("client config: {e}"))
                     })
-            }
-            TlsConfig::SelfSigned => {
-                use rustls::client::danger::{
-                    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-                };
-                use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-                use rustls::{DigitallySignedStruct, SignatureScheme};
-                #[derive(Debug)]
-                struct AcceptAny;
-                impl ServerCertVerifier for AcceptAny {
-                    fn verify_server_cert(
-                        &self,
-                        _: &CertificateDer<'_>,
-                        _: &[CertificateDer<'_>],
-                        _: &ServerName<'_>,
-                        _: &[u8],
-                        _: UnixTime,
-                    ) -> Result<ServerCertVerified, rustls::Error> {
-                        Ok(ServerCertVerified::assertion())
-                    }
-                    fn verify_tls12_signature(
-                        &self,
-                        _: &[u8],
-                        _: &CertificateDer<'_>,
-                        _: &DigitallySignedStruct,
-                    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-                        Ok(HandshakeSignatureValid::assertion())
-                    }
-                    fn verify_tls13_signature(
-                        &self,
-                        _: &[u8],
-                        _: &CertificateDer<'_>,
-                        _: &DigitallySignedStruct,
-                    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-                        Ok(HandshakeSignatureValid::assertion())
-                    }
-                    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-                        vec![
-                            SignatureScheme::RSA_PKCS1_SHA256,
-                            SignatureScheme::ECDSA_NISTP256_SHA256,
-                            SignatureScheme::ED25519,
-                        ]
-                    }
-                }
-                Ok(rustls::ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAny))
-                    .with_no_client_auth())
             }
             TlsConfig::PlaintextInsecure => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -260,11 +193,6 @@ impl TlsConfig {
                     .collect::<Result<Vec<_>, _>>()
                     .ok()?;
                 certs.first().map(|c| c.clone().to_vec())
-            }
-            TlsConfig::SelfSigned => {
-                let cert =
-                    rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).ok()?;
-                Some(cert.cert.der().clone().to_vec())
             }
             TlsConfig::PlaintextInsecure => None,
         }

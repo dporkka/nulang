@@ -94,7 +94,6 @@ wasmtime = { version = "46", optional = true, default-features = false, features
 blake3 = "1.8"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
 rustls-pemfile = "2"
-rcgen = "0.14"
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 hex = "0.4.3"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
@@ -128,6 +127,7 @@ codegen-units = 16
 
 [dev-dependencies]
 criterion = "0.5"
+rcgen = "0.14"
 
 [[bench]]
 name = "bench_main"
