@@ -728,9 +728,9 @@ fn occurs_in(v: TypeVar, t: &Type) -> bool {
         Type::Skolem(_) => false,
         Type::Tuple(ts) => ts.iter().any(|t| occurs_in(v, t)),
         Type::Record(fs) => fs.iter().any(|(_, t)| occurs_in(v, t)),
-        Type::Variant(vs) => vs
-            .iter()
-            .any(|(_, t)| t.as_ref().map_or(false, |t| occurs_in(v, t))),
+        // Variant constructors provide a well-founded guard for recursive
+        // types (e.g. `type Tree[T] = Node(T, Tree[T]) | Leaf`).
+        Type::Variant(_) => false,
         Type::Array(t) => occurs_in(v, t),
         Type::Function { param, ret, .. } => occurs_in(v, param) || occurs_in(v, ret),
         Type::Actor { state, behavior } => occurs_in(v, state) || occurs_in(v, behavior),

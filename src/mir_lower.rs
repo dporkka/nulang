@@ -806,16 +806,16 @@ impl<'c> FnLowerer<'c> {
                 Span::default(),
             ));
         }
-        if args.len() != 1 {
-            return Err(compile_err(
-                format!(
-                    "constructor '{}' expects exactly one payload argument, got {}",
-                    name,
-                    args.len()
-                ),
-                Span::default(),
-            ));
-        }
+        let payload = if args.len() == 1 {
+            args[0]
+        } else {
+            // Pack multiple args into a tuple to match the typechecker's
+            // convention: a constructor with payload (T, U) expects two
+            // separate arguments at the call site, not a single tuple.
+            let tup = self.b.add_temp(Type::unit());
+            self.b.assign(tup, mir::RValue::Tuple(args.to_vec()));
+            tup
+        };
         let tag = self.b.add_temp(Type::string());
         self.b.assign(
             tag,
@@ -825,7 +825,7 @@ impl<'c> FnLowerer<'c> {
             dst,
             mir::RValue::Record(vec![
                 ("ctor".to_string(), tag),
-                ("payload".to_string(), args[0]),
+                ("payload".to_string(), payload),
             ]),
         );
         Ok(())

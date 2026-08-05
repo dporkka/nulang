@@ -1,11 +1,9 @@
-// generics_12 — the other half of the tuple-payload contradiction: passing
-// the tuple elements SPLAT (`Make(1, 2)`) satisfies the typechecker's arity
-// check, but the VM rejects it because the payload is stored as one tuple
-// ("constructor 'Make' expects exactly one payload argument, got 2"). Real
-// behavior: a runtime VM error (exit code 10) after successful typechecking.
+// generics_12 — tuple payload splat now works: Make(1, 2) correctly
+// packs the two arguments into a single tuple payload, matching the
+// typechecker's splat convention. Previously the VM rejected this.
 type Pair[T] = Make((T, T))
 
 fn main() {
     let p = Make(1, 2)
-    perform IO.print("unreachable")
+    perform IO.print("ok")
 }
