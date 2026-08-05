@@ -38,6 +38,7 @@ mod exit;
 mod http_server;
 #[cfg(feature = "ai-runtime")]
 mod llm;
+mod metrics;
 mod persistence;
 mod process_groups;
 mod registry;
@@ -255,6 +256,10 @@ pub struct Runtime {
     // Virtual clock for deterministic testing (v0.14). When set, all timer
     // expiry and deadline calculations use this clock instead of wall time.
     pub virtual_clock: Option<VirtualClock>,
+    /// Prometheus-format metrics server (background TCP listener).
+    /// Started via [`Runtime::enable_metrics_server`]; periodically
+    /// updated via [`Runtime::publish_metrics`].
+    pub metrics: Option<metrics::MetricsServer>,
     // LLM subsystem (v0.9 AI Runtime): client, worker thread, token budget,
     // completion channel, and non-blocking suspension state.
     #[cfg(feature = "ai-runtime")]
@@ -412,6 +417,7 @@ impl Runtime {
             migrated_actors: HashMap::new(),
             crdt_manager: None,
             virtual_clock: None,
+            metrics: None,
             crdt_sync_rounds: 0,
             timer_wheel: TimerWheel::new(),
             registry: ActorRegistry::new(),
@@ -4395,6 +4401,29 @@ impl Runtime {
             scheduler,
             gc,
             resolver,
+        }
+    }
+
+    /// Start a Prometheus-format metrics server on the given port.
+    ///
+    /// Spawns a background TCP listener that serves `GET /metrics`.
+    /// Call [`publish_metrics`](Runtime::publish_metrics) periodically
+    /// (e.g. from the scheduler loop or `sync_crdts`) to push fresh
+    /// snapshots.
+    pub fn enable_metrics_server(&mut self, port: u16) -> std::io::Result<()> {
+        if self.metrics.is_some() {
+            return Ok(()); // already running
+        }
+        self.metrics = Some(metrics::MetricsServer::start(port)?);
+        Ok(())
+    }
+
+    /// Publish the latest metrics snapshot to the Prometheus server.
+    /// No-op if no server is running.
+    pub fn publish_metrics(&self) {
+        if let Some(server) = &self.metrics {
+            let snap = self.metrics_snapshot();
+            server.publish(snap.to_prometheus_text());
         }
     }
     pub fn enable_distribution(

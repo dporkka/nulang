@@ -80,6 +80,7 @@ fn main() {
                 opts.verbose,
                 &opts.backend,
                 opts.out_file.as_deref(),
+                opts.metrics_port,
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -257,6 +258,21 @@ fn main() {
                 }
             }
             "-v" | "--verbose" => opts.verbose = true,
+            "--metrics-port" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<u16>() {
+                        Ok(port) => opts.metrics_port = Some(port),
+                        Err(_) => {
+                            eprintln!("Error: --metrics-port requires a valid port number");
+                            std::process::exit(1);
+                        }
+                    }
+                    i += 1;
+                } else {
+                    eprintln!("Error: --metrics-port requires a port number");
+                    std::process::exit(1);
+                }
+            }
             "--color" => {
                 if i + 1 < args.len() {
                     let val = args[i + 1].clone();
@@ -442,7 +458,7 @@ fn main() {
                 lm = cm;
                 eprintln!("\n--- {} ---", p);
                 if let Ok(s) = std::fs::read_to_string(&p) {
-                    if let Err(e) = run_source(&s, Some(&p), v, &b, None) {
+                    if let Err(e) = run_source(&s, Some(&p), v, &b, None, None) {
                         print_error(&e, uc);
                     }
                 }
@@ -475,6 +491,7 @@ fn main() {
                         opts.verbose,
                         &opts.backend,
                         opts.out_file.as_deref(),
+                        opts.metrics_port,
                     )
                 },
                 n,
@@ -489,6 +506,7 @@ fn main() {
                 opts.verbose,
                 &opts.backend,
                 opts.out_file.as_deref(),
+                opts.metrics_port,
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -556,7 +574,16 @@ fn main() {
             let backend = &opts.backend;
             let out_file = opts.out_file.as_deref();
             if let Err(e) = run_bench(
-                || run_source(&source, Some(path), verbose, backend, out_file),
+                || {
+                    run_source(
+                        &source,
+                        Some(path),
+                        verbose,
+                        backend,
+                        out_file,
+                        opts.metrics_port,
+                    )
+                },
                 n,
             ) {
                 print_error(&e, use_color);
@@ -569,6 +596,7 @@ fn main() {
                 opts.verbose,
                 &opts.backend,
                 opts.out_file.as_deref(),
+                opts.metrics_port,
             ) {
                 print_error(&e, use_color);
                 std::process::exit(exit_code(&e));
@@ -588,6 +616,7 @@ fn main() {
             opts.verbose,
             &opts.backend,
             opts.out_file.as_deref(),
+            opts.metrics_port,
         ) {
             print_error(&e, use_color);
             std::process::exit(exit_code(&e));
@@ -619,8 +648,9 @@ struct Options {
     init: Option<String>,
     watch: Option<String>,
     explain: Option<String>,
-    /// Benchmark: run N times and print timing stats (None = no bench).
     bench_count: Option<usize>,
+    /// Start a Prometheus-format metrics server on this port.
+    metrics_port: Option<u16>,
 }
 
 impl Default for Options {
@@ -642,6 +672,7 @@ impl Default for Options {
             watch: None,
             explain: None,
             bench_count: None,
+            metrics_port: None,
         }
     }
 }
@@ -693,6 +724,7 @@ fn print_help() {
     println!("  --bench [N]      Benchmark: run N times (default 10), print timing stats");
     println!("  fmt [--check] [<file>]  Format file(s); no file → all src/**/*.nula");
     println!("  -v, --verbose    Show bytecode and AST");
+    println!("  --metrics-port <N>  Start Prometheus metrics server on port N");
     println!("  --color auto|always|never  Colorize error output (default: auto)");
     println!("  -h, --help       Show this help message");
 }
@@ -1042,6 +1074,7 @@ fn run_source(
     verbose: bool,
     backend: &str,
     out_file: Option<&str>,
+    metrics_port: Option<u16>,
 ) -> NuResult<()> {
     let ast = run_frontend(source, file_path, verbose)?;
 
@@ -1159,7 +1192,7 @@ fn run_source(
                 )
             });
             let value = if has_actors {
-                let (value, runtime) = run_with_runtime(m)?;
+                let (value, runtime) = run_with_runtime(m, metrics_port)?;
                 if verbose {
                     let rt = runtime.borrow();
                     let snap = rt.metrics_snapshot();
@@ -1208,6 +1241,7 @@ fn run_source(
 /// tests can inspect post-scheduling state.
 fn run_with_runtime(
     m: nulang::bytecode::CodeModule,
+    metrics_port: Option<u16>,
 ) -> NuResult<(
     nulang::vm::Value,
     std::rc::Rc<std::cell::RefCell<nulang::runtime::Runtime>>,
@@ -1240,6 +1274,9 @@ fn run_with_runtime(
         let mut shard_0 = std::rc::Rc::try_unwrap(runtime)
             .unwrap_or_else(|_| panic!("Rc has unexpected live clones"))
             .into_inner();
+        if let Some(port) = metrics_port {
+            let _ = shard_0.enable_metrics_server(port);
+        }
 
         // Spawn worker threads for shards 1..N, run shard 0 on the main
         // thread so the return value captures its post-scheduler state.
@@ -1259,6 +1296,9 @@ fn run_with_runtime(
         vm.set_actor_callbacks(Box::new(nulang::runtime::RuntimeVmCallbacks::new(
             runtime.clone(),
         )));
+        if let Some(port) = metrics_port {
+            let _ = runtime.borrow_mut().enable_metrics_server(port);
+        }
         let value = vm.run()?;
         runtime.borrow_mut().run_scheduler();
         Ok((value, runtime))
@@ -1525,7 +1565,7 @@ mod tests {
         let ast =
             run_frontend(source, None, false).expect("frontend should accept the actor program");
         let module = compile_with_new_pipeline(&ast, "test").expect("actor program should compile");
-        let (_value, runtime) = run_with_runtime(module).expect("actor program should run");
+        let (_value, runtime) = run_with_runtime(module, None).expect("actor program should run");
         let rt = runtime.borrow();
         let actor = rt.actors.values().next().expect("one actor should exist");
         assert_eq!(

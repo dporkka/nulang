@@ -254,6 +254,7 @@ pub(crate) fn sync_crdts(rt: &mut Runtime) {
     }
     crate::runtime::distributed::sync_crdts_op(rt);
     rt.sweep_migrated_actors();
+    rt.publish_metrics();
 }
 
 /// True when the given 1-based sync round should ship full state.

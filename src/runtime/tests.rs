@@ -3237,8 +3237,59 @@ fn test_pipeline_runtime_api() {
 // Multi-Node Distributed Tests
 // ---------------------------------------------------------------------------
 
+use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::thread::sleep;
+
+/// Shared CertificateParams for the test CA — used by both generate_test_ca
+/// and generate_test_leaf so leaf certificates are correctly signed without
+/// needing the `x509-parser` feature to re-parse PEM.
+fn ca_cert_params() -> CertificateParams {
+    let mut params = CertificateParams::new(vec![]).expect("ca params");
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params
+}
+
+/// Generate a self-signed CA certificate and key (PEM-encoded).
+fn generate_test_ca() -> (Vec<u8>, KeyPair) {
+    let params = ca_cert_params();
+    let key = KeyPair::generate().expect("key gen");
+    let cert = params.self_signed(&key).expect("ca gen");
+    (cert.pem().into_bytes(), key)
+}
+
+/// Generate a leaf certificate signed by the CA, for the given node name.
+/// Returns (cert_pem, key_pem).
+///
+/// The `ca_cert_pem` parameter is accepted for API clarity but not consumed —
+/// the CA params needed for signing are reconstructed from `ca_cert_params()`
+/// because rcgen's `Issuer::from_ca_cert_pem` requires the optional
+/// `x509-parser` feature.
+fn generate_test_leaf(name: &str, ca_key: &KeyPair, _ca_cert_pem: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let ca_params = ca_cert_params();
+    let params = CertificateParams::new(vec![name.to_string(), "localhost".to_string()])
+        .expect("leaf params");
+    let key = KeyPair::generate().expect("leaf key gen");
+    let issuer = Issuer::from_params(&ca_params, ca_key);
+    let cert = params.signed_by(&key, &issuer).expect("leaf gen");
+    (cert.pem().into_bytes(), key.serialize_pem().into_bytes())
+}
+
+/// Start a distributed runtime with MutualTLS enabled, bound to an ephemeral port.
+fn start_mutual_tls_node(ca_cert_pem: &[u8], cert_pem: &[u8], key_pem: &[u8]) -> Runtime {
+    let mut rt = Runtime::new();
+    rt.enable_distribution(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+        crate::runtime::network::TlsConfig::MutualTls {
+            ca_cert_pem: ca_cert_pem.to_vec(),
+            server_cert_pem: cert_pem.to_vec(),
+            server_key_pem: key_pem.to_vec(),
+        },
+    )
+    .expect("failed to enable distribution with MutualTls");
+    rt
+}
 
 /// Start a distributed-enabled runtime bound to an ephemeral loopback port.
 fn start_distributed_node() -> Runtime {
@@ -4325,4 +4376,114 @@ fn test_crypto_provider_hash_bytes() {
         rt.hash_bytes(b"world"),
         "different input, different hash"
     );
+}
+
+#[test]
+fn test_mutual_tls_cluster_converges() {
+    let (ca_pem, ca_key) = generate_test_ca();
+    let (cert_a, key_a) = generate_test_leaf("node-a", &ca_key, &ca_pem);
+    let (cert_b, key_b) = generate_test_leaf("node-b", &ca_key, &ca_pem);
+    let mut rt_a = start_mutual_tls_node(&ca_pem, &cert_a, &key_a);
+    let mut rt_b = start_mutual_tls_node(&ca_pem, &cert_b, &key_b);
+    let b_node_id = rt_b.distributed.node_id.unwrap();
+    let b_addr = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+    // Use cert-based node ID: plain join_cluster derives NodeId from the
+    // address hash, which won't match the TLS cert fingerprint.
+    rt_a.distributed
+        .cluster
+        .as_mut()
+        .unwrap()
+        .join_cluster_with_id(b_node_id, b_addr);
+    pump_until_converged(&mut [&mut rt_a, &mut rt_b], 2, Duration::from_secs(30));
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
+}
+#[test]
+fn test_mutual_tls_rejects_cert_identity_mismatch() {
+    let (ca_pem, ca_key) = generate_test_ca();
+    let (cert_a, key_a) = generate_test_leaf("node-a", &ca_key, &ca_pem);
+
+    // Different CA — node B's cert won't be trusted by node A.
+    let (ca2_pem, ca2_key) = generate_test_ca();
+    let (cert_b, key_b) = generate_test_leaf("node-b", &ca2_key, &ca2_pem);
+
+    let mut rt_a = start_mutual_tls_node(&ca_pem, &cert_a, &key_a);
+    let mut rt_b = start_mutual_tls_node(&ca2_pem, &cert_b, &key_b);
+    let b_addr = rt_b.distributed.transport.as_ref().unwrap().listen_addr();
+
+    // Connection should fail: node A's TLS client rejects node B's cert
+    // (cert signed by different CA). The handshake error is surfaced as
+    // connect failure which `join_cluster` swallows silently —
+    // verify the cluster never converges to 2 healthy nodes.
+    rt_a.join_cluster(b_addr);
+    sleep(Duration::from_secs(2)); // ample time for a connect attempt
+    rt_a.process_network();
+    rt_b.process_network();
+    let a_count = rt_a
+        .distributed
+        .cluster
+        .as_ref()
+        .unwrap()
+        .healthy_node_count();
+    let b_count = rt_b
+        .distributed
+        .cluster
+        .as_ref()
+        .unwrap()
+        .healthy_node_count();
+    assert_eq!(
+        a_count, 1,
+        "A should never accept B's cert from a different CA"
+    );
+    assert_eq!(b_count, 1, "B should never see A");
+    shutdown_nodes(&mut [&mut rt_a, &mut rt_b]);
+}
+
+#[test]
+fn test_mutual_tls_rejects_plaintext_peer() {
+    let (ca_pem, ca_key) = generate_test_ca();
+    let (cert_a, key_a) = generate_test_leaf("node-a", &ca_key, &ca_pem);
+
+    let mut rt_tls = start_mutual_tls_node(&ca_pem, &cert_a, &key_a);
+    let mut rt_plain = start_distributed_node();
+
+    let tls_addr = rt_tls.distributed.transport.as_ref().unwrap().listen_addr();
+    let plain_addr = rt_plain
+        .distributed
+        .transport
+        .as_ref()
+        .unwrap()
+        .listen_addr();
+
+    // Plaintext → mTLS: plaintext node's connection attempt reaches a TLS
+    // listener, which expects a TLS ClientHello — raw TCP bytes are not a
+    // valid TLS handshake, so the connection is dropped.
+    rt_plain.join_cluster(tls_addr);
+
+    // mTLS → plaintext: mTLS node's TLS ClientHello reaches a raw TCP
+    // listener — the plaintext listener reads it as garbage handshake bytes
+    // and drops the connection.
+    rt_tls.join_cluster(plain_addr);
+
+    sleep(Duration::from_secs(2));
+    rt_tls.process_network();
+    rt_plain.process_network();
+    assert_eq!(
+        rt_tls
+            .distributed
+            .cluster
+            .as_ref()
+            .unwrap()
+            .healthy_node_count(),
+        1
+    );
+    assert_eq!(
+        rt_plain
+            .distributed
+            .cluster
+            .as_ref()
+            .unwrap()
+            .healthy_node_count(),
+        1
+    );
+    shutdown_nodes(&mut [&mut rt_tls, &mut rt_plain]);
 }
