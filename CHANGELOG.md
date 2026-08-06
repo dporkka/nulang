@@ -387,6 +387,12 @@ in this version; they are recorded here to establish their tier.
 - **LSP: completion documentation** (Experimental, `src/lsp/mod.rs`):
   keyword and built-in effect completion items now carry markdown
   documentation strings with code examples in their `documentation` field.
+- **Bootstrap: curried closure capture** (Experimental, `bootstrap/compile_hex.nula`):
+  The bootstrap bytecode compiler now correctly compiles curried functions with
+  closure capture — `(fn(a) => fn(b) => a + b)(1)(2)` → 3. Fixed swapped
+  CapStore/CapLoad opcodes at body start and fn_end, added missing Move for
+  captured parameter at definition time, and corrected the environment register
+  mapping from the raw capture register to r11.
 
 ---
 

@@ -139,13 +139,17 @@ nulang bootstrap/compiler_core.nula < /dev/null
 
 ### Unnumbered — Formal semantics proofs
 - **`types.lean`:** `canonical_forms` proved (was `sorry`).
+
+### Stage 14 — Curried closure capture (2026-08-06)
+- **Closure capture for curried functions:** `(fn(a) => fn(b) => a + b)(1)(2)` → 3.
+- Fixed CapStore/CapLoad opcode swap at body start and fn_end in `compile_hex.nula`.
+- Environment capture at definition time now correctly copies the captured parameter to r11 and maps the env to r11.
 - **`capabilities.lean`:** `cap_sendable` and `discharge_sendable` proved; `is_sendable` fixed to include `Iso`.
 
 ## What remains
 
 
 - Module-level parsing (multiple `fn` definitions in one file)
-- Multi-binding closure capture via `CapStore`/`CapLoad` opcodes
 - HM type inference
 - Type ascription syntax (`x: Int`)
 - Self-compilation (`compiler_core.nula` → `compiler_core.nbc`)
