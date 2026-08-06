@@ -309,7 +309,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, env:
                                                 let b3 = perform String.charAt(env, cap_i + 3) - 1;
                                                 let cap_v = (b0 << 18) + (b1 << 12) + (b2 << 6) + b3;
                                                 let cap_h = low16((cap_v >> 8));
-                                                env_push(env_push(env, cap_h, cap_reg), low16(ph), param_save)
+                                                env_push(env_push(env, cap_h, 11), low16(ph), param_save)
                                             } else {
                                                 env_push(env, low16(ph), param_save)
                                             };
@@ -325,19 +325,9 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, env:
                                             remark("fn_end:");
                                             let closure_reg = nr;
                                             emit_hex(instr(0x60, 0xFF, 0xFF, closure_reg));
-                                            if elen >= 1 then {
-                                                let cap_i = (elen - 1) * 4;
-                                                let b0 = perform String.charAt(env, cap_i) - 1;
-                                                let b1 = perform String.charAt(env, cap_i + 1) - 1;
-                                                let b2 = perform String.charAt(env, cap_i + 2) - 1;
-                                                let b3 = perform String.charAt(env, cap_i + 3) - 1;
-                                                let cap_v = (b0 << 18) + (b1 << 12) + (b2 << 6) + b3;
-                                                let cap_reg2 = low8(cap_v);
-                                                // Capture if the last env entry is a parameter.
-                                                if cap_reg2 >= 100 and cap_reg2 < 128 then {
-                                                    emit_hex(instr(0x12, cap_reg2, 11, 0));
-                                                    emit_hex(instr(0x61, closure_reg, 0, 11))
-                                                } else { }
+                                            if has_capture then {
+                                                emit_hex(instr(0x12, cap_reg, 11, 0));
+                                                emit_hex(instr(0x61, closure_reg, 0, 11))
                                             } else { };
                                             (closure_reg << 18) + body_end
                                         } else (nr << 18) + p

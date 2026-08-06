@@ -183,20 +183,32 @@ def fixup(lines: list[str]) -> list[str]:
     for idx, li in enumerate(sorted(fn_start_markers)):
         fn_indices[li] = idx + 1  # 0 is entry point
     
-    # Re-initialize available fn_ends for closure patching
-    available_fn_ends_closure = sorted(fn_end_markers)
+    # Match fn_starts to fn_ends using nesting (stack-based).
+    # The first fn_start pairs with the LAST fn_end at the same nesting level.
+    all_markers = [(li, 'start') for li in fn_start_markers] + [(li, 'end') for li in fn_end_markers]
+    all_markers.sort()
+    stack = []  # pending fn_starts
+    fn_pairs = []  # (start_li, end_li)
+    for li, kind in all_markers:
+        if kind == 'start':
+            stack.append(li)
+        else:
+            if stack:
+                start = stack.pop()
+                fn_pairs.append((start, li))
+    # Build start_li -> end_li map
+    start_to_end = {s: e for s, e in fn_pairs}
+    
     for fn_li, fn_idx in sorted(fn_indices.items()):
-        for i, em in enumerate(available_fn_ends_closure):
-            if em > fn_li:
-                del available_fn_ends_closure[i]
-                for check_li in range(em + 1, len(lines)):
-                    if check_li in line_to_ic:
-                        word = [w for cli, w in instr_lines if cli == check_li][0]
-                        if ((word >> 24) & 0xFF) == 0x60:
-                            dst = word & 0xFF
-                            patched[check_li] = instr(0x60, (fn_idx >> 8) & 0xFF, fn_idx & 0xFF, dst)
-                        break
-                break
+        em = start_to_end.get(fn_li)
+        if em is not None:
+            for check_li in range(em + 1, len(lines)):
+                if check_li in line_to_ic:
+                    word = [w for cli, w in instr_lines if cli == check_li][0]
+                    if ((word >> 24) & 0xFF) == 0x60:
+                        dst = word & 0xFF
+                        patched[check_li] = instr(0x60, (fn_idx >> 8) & 0xFF, fn_idx & 0xFF, dst)
+                    break
 
     # Build constant pool from ; const N and ; const "str" markers
     const_markers = {}  # line_idx -> ("int", value) or ("str", value)
