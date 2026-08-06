@@ -25,7 +25,15 @@ def main():
         if s.startswith("; constant pool:"):
             try:
                 inside = s.split("[", 1)[1].rsplit("]", 1)[0]
-                pool = [int(x.strip()) for x in inside.split(",") if x.strip()]
+                pool = []
+                for x in inside.split(","):
+                    x = x.strip()
+                    if not x:
+                        continue
+                    if x.startswith('"') and x.endswith('"'):
+                        pool.append(("str", x[1:-1]))
+                    else:
+                        pool.append(("int", int(x)))
             except: pass
         elif s.startswith("; FN_START"):
             # Next non-comment line is the start of a function body
@@ -38,7 +46,12 @@ def main():
         sys.exit(1)
 
     # Build constant pool JSON
-    consts = [{"Int": v} for v in pool]
+    consts = []
+    for entry in pool:
+        if entry[0] == "int":
+            consts.append({"Int": entry[1]})
+        else:
+            consts.append({"String": entry[1]})
 
     # Build .nbc binary
     magic = b"NLBC"

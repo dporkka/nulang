@@ -41,6 +41,11 @@ def patch_constu(word: int, idx: int) -> int:
     return instr(0x07, (idx >> 8) & 0xFF, idx & 0xFF, dst)
 
 
+def patch_perform(word: int, idx: int) -> int:
+    dst = word & 0xFF
+    return instr(0x90, (idx >> 8) & 0xFF, idx & 0xFF, dst)
+
+
 def fixup(lines: list[str]) -> list[str]:
     # First pass: collect instructions and markers
     instr_lines = []  # (line_idx, word)
@@ -121,18 +126,27 @@ def fixup(lines: list[str]) -> list[str]:
             old_word = [w for li, w in instr_lines if li == jf_li][0]
             patched[jf_li] = patch_jmpf(old_word, offset)
     
+    # Track which fn_ends have been consumed to correctly match
+    # each function-body-skip Jmp with its corresponding fn_end.
+    # Inner fns consume their fn_end first (reversed iteration order).
+    available_fn_ends = sorted(fn_end_markers)
+    
+    def consume_next_fn_end_after(jp_li):
+        for i, em in enumerate(available_fn_ends):
+            if em > jp_li:
+                del available_fn_ends[i]
+                for check_li in range(em + 1, len(lines)):
+                    if check_li in line_to_ic:
+                        return line_to_ic[check_li]
+                break
+        return None
+
     # Patch Jmp offsets (check ; fn_end: then ; end: then ; or_end: then ; else: then end of list)
     for jp_li, jp_ic in reversed(jmp_info):
         target_ic = None
         marker_text = markers.get(jp_li - 1, "")
         if "fn_end" in marker_text:
-            for em in fn_end_markers:
-                if em > jp_li:
-                    for check_li in range(em + 1, len(lines)):
-                        if check_li in line_to_ic:
-                            target_ic = line_to_ic[check_li]
-                            break
-                    break
+            target_ic = consume_next_fn_end_after(jp_li)
         if target_ic is None:
             for em in end_markers:
                 if em > jp_li:
@@ -169,9 +183,12 @@ def fixup(lines: list[str]) -> list[str]:
     for idx, li in enumerate(sorted(fn_start_markers)):
         fn_indices[li] = idx + 1  # 0 is entry point
     
+    # Re-initialize available fn_ends for closure patching
+    available_fn_ends_closure = sorted(fn_end_markers)
     for fn_li, fn_idx in sorted(fn_indices.items()):
-        for em in fn_end_markers:
+        for i, em in enumerate(available_fn_ends_closure):
             if em > fn_li:
+                del available_fn_ends_closure[i]
                 for check_li in range(em + 1, len(lines)):
                     if check_li in line_to_ic:
                         word = [w for cli, w in instr_lines if cli == check_li][0]
@@ -181,37 +198,51 @@ def fixup(lines: list[str]) -> list[str]:
                         break
                 break
 
-    # Build constant pool from ; const N markers
-    const_markers = {}  # line_idx -> value
+    # Build constant pool from ; const N and ; const "str" markers
+    const_markers = {}  # line_idx -> ("int", value) or ("str", value)
     for li, marker in markers.items():
         if marker.startswith("; const "):
-            try:
-                val = int(marker.split("; const ")[1])
-                const_markers[li] = val
-            except ValueError:
-                pass
+            rest = marker[len("; const "):].strip()
+            if rest.startswith('"') and rest.endswith('"') and len(rest) >= 2:
+                sval = rest[1:-1]
+                const_markers[li] = ("str", sval)
+            else:
+                try:
+                    ival = int(rest)
+                    const_markers[li] = ("int", ival)
+                except ValueError:
+                    pass
     
     pool_lines = []
     if const_markers:
         seen = set()
-        pool = []
+        pool = []  # list of ("int", val) or ("str", val)
         for li in sorted(const_markers):
-            val = const_markers[li]
-            if val not in seen:
-                seen.add(val)
-                pool.append(val)
+            entry = const_markers[li]
+            if entry not in seen:
+                seen.add(entry)
+                pool.append(entry)
         
-        val_to_idx = {v: i for i, v in enumerate(pool)}
+        val_to_idx = {entry: i for i, entry in enumerate(pool)}
         
-        for li, val in sorted(const_markers.items()):
+        for li, entry in sorted(const_markers.items()):
             for check_li in range(li + 1, len(lines)):
                 if check_li in line_to_ic:
                     word = [w for cli, w in instr_lines if cli == check_li][0]
-                    if ((word >> 24) & 0xFF) == 0x07:
-                        patched[check_li] = patch_constu(word, val_to_idx[val])
+                    op = (word >> 24) & 0xFF
+                    if op == 0x07:  # ConstU
+                        patched[check_li] = patch_constu(word, val_to_idx[entry])
+                    elif op == 0x90:  # Perform
+                        patched[check_li] = patch_perform(word, val_to_idx[entry])
                     break
         
-        pool_lines = ["; constant pool: [" + ", ".join(str(v) for v in pool) + "]"]
+        def fmt_entry(e):
+            k, v = e
+            if k == "int":
+                return str(v)
+            return '"' + v + '"'
+        
+        pool_lines = ["; constant pool: [" + ", ".join(fmt_entry(e) for e in pool) + "]"]
     
     # Build output with pool header
     result = []
