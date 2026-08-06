@@ -5645,6 +5645,85 @@ mod vm_tests {
         assert_eq!(result.as_int(), Some(42), "captured 41 + 1 should be 42");
     }
 
+    #[test]
+    fn test_curried_bytecode_exact() {
+        let mut module = CodeModule::new("test_exact");
+        module.add_constant(Constant::Int(3));
+        module.add_constant(Constant::Int(5));
+        module.emit(Instruction::new3(OpCode::Jmp, 0, 13, 0));
+        module.emit(Instruction::new3(OpCode::Jmp, 0, 7, 0));
+        module.emit(Instruction::new3(OpCode::CapLoad, 0, 11, 0));
+        module.emit(Instruction::new2(OpCode::Move, 11, 8));
+        module.emit(Instruction::new2(OpCode::Move, 10, 9));
+        module.emit(Instruction::new3(OpCode::IAdd, 8, 9, 10));
+        module.emit(Instruction::new2(OpCode::Move, 10, 0));
+        module.emit(Instruction::new0(OpCode::RetVal));
+        module.emit(Instruction::new3(OpCode::Closure, 0, 1, 8)); // inner closure: index 1
+        module.emit(Instruction::new2(OpCode::Move, 10, 11));
+        module.emit(Instruction::new3(OpCode::CapStore, 8, 0, 11));
+        module.emit(Instruction::new2(OpCode::Move, 8, 0));
+        module.emit(Instruction::new0(OpCode::RetVal));
+        module.emit(Instruction::new3(OpCode::Closure, 0, 0, 8)); // outer closure: index 0
+        module.emit(Instruction::new2(OpCode::Move, 8, 9));
+        module.emit(Instruction::new2(OpCode::Move, 9, 29));
+        module.emit(Instruction::new3(OpCode::ConstU, 0, 0, 10));
+        module.emit(Instruction::new2(OpCode::Move, 10, 10));
+        module.emit(Instruction::new3(OpCode::ClosureCall, 29, 1, 9));
+        module.emit(Instruction::new2(OpCode::Move, 9, 30));
+        module.emit(Instruction::new3(OpCode::ConstU, 0, 1, 11));
+        module.emit(Instruction::new2(OpCode::Move, 11, 10));
+        module.emit(Instruction::new3(OpCode::ClosureCall, 30, 1, 10));
+        module.emit(Instruction::new2(OpCode::Move, 10, 0));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.function_table.push(1);
+        module.function_table.push(2);
+        module.entry_point = Some(0);
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run().unwrap();
+        eprintln!("Result: {:?}", result.as_int());
+        assert_eq!(result.as_int(), Some(8), "should be 8");
+    }
+
+    #[test]
+    fn test_curried_nbc_full() {
+        let mut module = CodeModule::new("test_nbc2");
+        module.add_constant(Constant::Int(3));
+        module.add_constant(Constant::Int(5));
+        module.emit(Instruction::new3(OpCode::Jmp, 0, 13, 0));
+        module.emit(Instruction::new3(OpCode::Jmp, 0, 7, 0));
+        module.emit(Instruction::new3(OpCode::CapLoad, 0, 11, 0));
+        module.emit(Instruction::new2(OpCode::Move, 11, 8));
+        module.emit(Instruction::new2(OpCode::Move, 10, 9));
+        module.emit(Instruction::new3(OpCode::IAdd, 8, 9, 10));
+        module.emit(Instruction::new2(OpCode::Move, 10, 0));
+        module.emit(Instruction::new0(OpCode::RetVal));
+        module.emit(Instruction::new3(OpCode::Closure, 0, 1, 8));
+        module.emit(Instruction::new2(OpCode::Move, 10, 11));
+        module.emit(Instruction::new3(OpCode::CapStore, 8, 0, 11));
+        module.emit(Instruction::new2(OpCode::Move, 8, 0));
+        module.emit(Instruction::new0(OpCode::RetVal));
+        module.emit(Instruction::new3(OpCode::Closure, 0, 0, 8)); // outer closure: index 0
+        module.emit(Instruction::new2(OpCode::Move, 8, 9));
+        module.emit(Instruction::new2(OpCode::Move, 9, 29));
+        module.emit(Instruction::new3(OpCode::ConstU, 0, 0, 10));
+        module.emit(Instruction::new2(OpCode::Move, 10, 10));
+        module.emit(Instruction::new3(OpCode::ClosureCall, 29, 1, 9));
+        module.emit(Instruction::new2(OpCode::Move, 9, 30));
+        module.emit(Instruction::new3(OpCode::ConstU, 0, 1, 11));
+        module.emit(Instruction::new2(OpCode::Move, 11, 10));
+        module.emit(Instruction::new3(OpCode::ClosureCall, 30, 1, 10));
+        module.emit(Instruction::new2(OpCode::Move, 10, 0));
+        module.emit(Instruction::new0(OpCode::Halt));
+        module.function_table.push(1);
+        module.function_table.push(2);
+        module.entry_point = Some(0);
+        let mut vm = VM::new();
+        vm.load_module(module);
+        let result = vm.run().unwrap();
+        eprintln!("Result: {:?}", result.as_int());
+        assert_eq!(result.as_int(), Some(8), "should be 8");
+    }
     /// CapLoad without a closure environment must error, not silently no-op.
     #[test]
     fn test_capload_outside_closure_errors() {
@@ -7097,5 +7176,16 @@ mod vm_tests {
             // slots[1] is a TAG_STRING — verify it's a valid string value
             assert!(slots[1].is_string(), "array[1] should be a string");
         }
+    }
+
+    #[test]
+    fn test_twofn_nbc_file() {
+        let mut vm = VM::new();
+        let bytes = std::fs::read("/tmp/twofn.nbc").unwrap();
+        let artifact = crate::bytecode::CodeModule::from_nbc(&bytes).unwrap();
+        vm.load_module(artifact.module);
+        let result = vm.run().unwrap();
+        eprintln!("twofn result: {:?} as_int={:?}", result, result.as_int());
+        assert_eq!(result.as_int(), Some(1));
     }
 }

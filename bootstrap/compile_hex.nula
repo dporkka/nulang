@@ -309,13 +309,14 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, env:
                                                 let b3 = perform String.charAt(env, cap_i + 3) - 1;
                                                 let cap_v = (b0 << 18) + (b1 << 12) + (b2 << 6) + b3;
                                                 let cap_h = low16((cap_v >> 8));
+                                                emit_hex(instr(0x12, cap_reg, 11, 0));
                                                 env_push(env_push(env, cap_h, 11), low16(ph), param_save)
                                             } else {
                                                 env_push(env, low16(ph), param_save)
                                             };
                                             let elen2 = if has_capture then elen + 2 else elen + 1;
                                             if has_capture then {
-                                                emit_hex(instr(0x62, 0, 11, 0))
+                                                emit_hex(instr(0x61, 0, 11, 0))
                                             } else { };
                                             let body = comp(src, q6 + 2, len, no_left, -1, 8, env2, elen2);
                                             let body_reg = body >> 18;
@@ -327,7 +328,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, env:
                                             emit_hex(instr(0x60, 0xFF, 0xFF, closure_reg));
                                             if has_capture then {
                                                 emit_hex(instr(0x12, cap_reg, 11, 0));
-                                                emit_hex(instr(0x61, closure_reg, 0, 11))
+                                                emit_hex(instr(0x62, closure_reg, 0, 11))
                                             } else { };
                                             (closure_reg << 18) + body_end
                                         } else (nr << 18) + p
