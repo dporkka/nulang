@@ -1184,7 +1184,21 @@ impl CapabilityAnalyzer {
     /// top-level calls (the frontend reuses one analyzer across declarations).
     pub fn infer_cap(&mut self, ctx: &CapContext, expr: &Expr) -> NuResult<Capability> {
         let mut consumed = FxHashSet::default();
-        self.infer_cap_tracked(ctx, expr, &mut consumed)
+        let cap = self.infer_cap_tracked(ctx, expr, &mut consumed)?;
+
+        // Ensure all linear bindings in the initial context were consumed.
+        for (name, binding_cap) in &ctx.bindings {
+            if binding_cap.is_linear() && !consumed.contains(name) {
+                let msg = format!(
+                    "linear value `{}` is never used ({} bindings must be consumed exactly once — pass it to a function, `send` it, or `consume {}` it explicitly)",
+                    name, binding_cap, name
+                );
+                self.diagnostics.push(msg.clone());
+                return Err(NuError::cap_error(msg, expr_span(expr)));
+            }
+        }
+
+        Ok(cap)
     }
 
     /// Mark a `LinearIso` binding as consumed, erroring if it already was.
@@ -2992,17 +3006,13 @@ mod tests {
     }
 
     #[test]
-    fn test_lineariso_never_used_ok() {
+    fn test_lineariso_never_used_errors() {
         // A LinearIso binding already present in the *initial* context
-        // (e.g. a function parameter) is not yet must-use checked — only
-        // `let`-introduced bindings are (see test_lineariso_let_bound_*
-        // below). Parameter-level must-use is a separate, still-open
-        // follow-up (see spec/formal/capabilities.lean's
-        // `linear_at_most_once`, which is `sorry` for the same reason).
+        // (e.g. a function parameter) must now be must-use checked.
         let mut analyzer = CapabilityAnalyzer::new();
         let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
         let expr = Expr::Literal(Literal::Int(1), s());
-        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
     }
 
     #[test]
@@ -3297,12 +3307,14 @@ mod tests {
     }
 
     #[test]
-    fn test_lineariso_shadowed_by_let_ok() {
+    fn test_lineariso_shadowed_by_let_errors() {
         let mut analyzer = CapabilityAnalyzer::new();
         let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
-        // let x = 1 in { f(x); g(x) } — the inner (Val) binding shadows the
-        // linear outer one, so both uses are fine and the outer binding is
-        // not consumed.
+
+        // The inner `x` is `Val` and used twice, which is fine for the inner `x`.
+        // But the outer `x` (which is LinearIso) is completely shadowed and
+        // thus never used. The block closes without discharging it, so it
+        // must produce an error.
         let expr = Expr::Let {
             name: "x".to_string(),
             ty: None,
@@ -3315,7 +3327,7 @@ mod tests {
             span: s(),
             let_in: false,
         };
-        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
     }
 
     #[test]
@@ -3434,12 +3446,12 @@ mod tests {
     }
 
     #[test]
-    fn test_linear_never_used_ok() {
-        // At-most-once MVP: unused binding is not an error.
+    fn test_linear_never_used_errors() {
+        // Same must-use discipline for plain `Linear` (not just LinearIso).
         let mut analyzer = CapabilityAnalyzer::new();
         let ctx = CapContext::new().with_binding("x", Capability::Linear);
-        let expr = Expr::Literal(Literal::Int(42), s());
-        assert!(analyzer.infer_cap(&ctx, &expr).is_ok());
+        let expr = Expr::Literal(Literal::Int(1), s());
+        assert!(analyzer.infer_cap(&ctx, &expr).is_err());
     }
 
     #[test]
