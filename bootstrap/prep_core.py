@@ -112,22 +112,30 @@ def transform_perform(source: str) -> str:
 
 def curry_call_sites(source: str) -> str:
     """Curry function calls with multiple arguments, but not `fn` definitions or nperform."""
+    KEYWORDS = {'then', 'else', 'if', 'let', 'in', 'fn', 'and', 'or', 'not'}
     def repl(match: re.Match) -> str:
         name = match.group(1)
         args_str = match.group(2)
         full = match.group(0)
         before = source[max(0, match.start() - 10):match.start()]
         after = source[match.end():match.end() + 20]
+        # Recursively curry all arguments so inner multi-arg calls
+        # (e.g. inside `then(...)`) are also curried.
+        args = balanced_split_args(args_str)
+        curried_args = [curry_call_sites(a) for a in args]
+        # Skip keywords.
+        if name in KEYWORDS:
+            return name + '(' + ', '.join(curried_args) + ')'
         # nperform effect calls are parsed specially by compile_hex, but their
         # arguments may still contain multi-arg function calls that need currying.
         if name == 'nperform':
-            args = balanced_split_args(args_str)
-            curried_args = [curry_call_sites(a) for a in args]
             return 'nperform(' + ', '.join(curried_args) + ')'
         # Skip qualified names (String.charAt) and function definitions.
         if match.start() > 0 and source[match.start() - 1] == '.':
             return full
         if re.search(r'\bfn\s+$', before) and re.match(r'\s*(?:=>|->|\{)', after):
+            return full
+        if len(args) <= 1:
             return full
         c = curry_call(name, args_str)
         return c if c else full
@@ -161,7 +169,7 @@ def curry_fn_definition(name: str, params: list[str], body: str) -> str:
     if not params:
         return f'{name} = fn() => {body}'
     result = body
-    for p in reversed(params[1:]):
+    for p in params[1:]:
         result = f'fn({p}) => {result}'
     result = f'{name} = fn({params[0]}) => {result}'
     return result

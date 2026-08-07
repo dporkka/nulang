@@ -111,6 +111,49 @@ fn env_lookup(env: String, elen: Int, h: Int) -> Int {
     }
 }
 
+// Count capture-worthy entries in the env (registers 100-127 or 11-19).
+fn count_captures(env: String, elen: Int) -> Int {
+    if elen <= 0 then 0
+    else {
+        let i = (elen - 1) * 4;
+        let b0 = perform String.charAt(env, i) - 1;
+        let b1 = perform String.charAt(env, i + 1) - 1;
+        let b2 = perform String.charAt(env, i + 2) - 1;
+        let b3 = perform String.charAt(env, i + 3) - 1;
+        let v = (b0 << 18) + (b1 << 12) + (b2 << 6) + b3;
+        let reg = low8(v);
+        let is_cap = reg >= 100 and reg < 128;
+        let rest = count_captures(env, elen - 1);
+        if is_cap then 1 + rest else rest
+    }
+}
+
+// Rebuild env by appending remapped entries for captured variables.
+// Processes entries oldest→newest (idx 0→elen-1).  For each captured
+// entry, appends an env_push mapping the same hash to r(11+slot).
+// Returns the augmented env; the capture count is in emit order.
+fn remap_captures(env: String, elen: Int, idx: Int, slot: Int) -> String {
+    if idx >= elen then env
+    else {
+        let i = idx * 4;
+        let b0 = perform String.charAt(env, i) - 1;
+        let b1 = perform String.charAt(env, i + 1) - 1;
+        let b2 = perform String.charAt(env, i + 2) - 1;
+        let b3 = perform String.charAt(env, i + 3) - 1;
+        let v = (b0 << 18) + (b1 << 12) + (b2 << 6) + b3;
+        let hh = low16((v >> 8));
+        let reg = low8(v);
+        let is_cap = reg >= 100 and reg < 128;
+        if is_cap then {
+            let tail = remap_captures(env, elen, idx + 1, slot + 1);
+            env_push(tail, hh, 11 + slot)
+        } else {
+            remap_captures(env, elen, idx + 1, slot)
+        }
+    }
+}
+
+
 fn prec_of(c: Int) -> Int {
     if c == 43 then 2 else if c == 45 then 2
     else if c == 42 then 3 else if c == 47 then 3
@@ -178,6 +221,44 @@ fn emit_hex(w: Int) {
 fn instr(opcode: Int, op1: Int, op2: Int, op3: Int) -> Int {
     (opcode << 24) + (op1 << 16) + (op2 << 8) + op3
 }
+// Recursively emit CapLoad (is_store=0) or CapStore (is_store!=0)
+// for capture slots [slot..count-1].
+fn emit_caps(closure_reg: Int, count: Int, slot: Int, is_store: Int) -> Int {
+    if slot >= count then 0
+    else {
+        let cap_reg = 11 + slot;
+        if is_store != 0 then {
+            emit_hex(instr(0x62, closure_reg, slot, cap_reg))
+        } else {
+            emit_hex(instr(0x61, slot, cap_reg, 0))
+        };
+        emit_caps(closure_reg, count, slot + 1, is_store)
+    }
+}
+
+// Scan env entries oldest→newest and emit Move+CapStore for each capture.
+// Returns the next slot index.
+fn emit_fnend_caps(env: String, elen: Int, idx: Int, slot: Int, closure_reg: Int) -> Int {
+    if idx >= elen then slot
+    else {
+        let i = idx * 4;
+        let b0 = perform String.charAt(env, i) - 1;
+        let b1 = perform String.charAt(env, i + 1) - 1;
+        let b2 = perform String.charAt(env, i + 2) - 1;
+        let b3 = perform String.charAt(env, i + 3) - 1;
+        let v = (b0 << 18) + (b1 << 12) + (b2 << 6) + b3;
+        let reg = low8(v);
+        let is_cap = reg >= 100 and reg < 128;
+        if is_cap then {
+            let cap_dst = 11 + slot;
+            emit_hex(instr(0x12, reg, cap_dst, 0));
+            emit_hex(instr(0x62, closure_reg, slot, cap_dst));
+            emit_fnend_caps(env, elen, idx + 1, slot + 1, closure_reg)
+        } else {
+            emit_fnend_caps(env, elen, idx + 1, slot, closure_reg)
+        }
+    }
+}
 
 // Returns (result_reg << 18) | pos.  The bool bit is (1<<17).
 fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, env: String, elen: Int) -> Int {
@@ -235,7 +316,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, env:
                             // bodies can refer to themselves without the placeholder being
                             // clobbered by temporaries during body compilation.
                             let vh16 = low16(vh);
-                            let save_reg = nr + 200 + elen;
+                            let save_reg = low8(200 + nr + elen);
                             let env_rec = env_push(env, vh16, save_reg);
                             let bound = comp(src, q4 + 1, len, no_left, -1, nr, env_rec, elen + 1);
                             let vr = bound >> 18;
@@ -288,36 +369,23 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, env:
                                             // losing the parameter value.
                                             let param_save = 100 + elen;
                                             emit_hex(instr(0x12, 10, param_save, 0));
-                                            let cap_reg = if elen >= 1 then {
-                                                let cap_i = (elen - 1) * 4;
-                                                let b0 = perform String.charAt(env, cap_i) - 1;
-                                                let b1 = perform String.charAt(env, cap_i + 1) - 1;
-                                                let b2 = perform String.charAt(env, cap_i + 2) - 1;
-                                                let b3 = perform String.charAt(env, cap_i + 3) - 1;
-                                                let cap_v = (b0 << 18) + (b1 << 12) + (b2 << 6) + b3;
-                                                low8(cap_v)
-                                            } else { 0 };
-                                            // Capture the last env entry if it references a
-                                            // param_save register (100..128).  This catches
-                                            // outer-closure parameters for curried functions.
-                                            let has_capture = cap_reg >= 100 and cap_reg < 128;
-                                            let env2 = if has_capture then {
-                                                let cap_i = (elen - 1) * 4;
-                                                let b0 = perform String.charAt(env, cap_i) - 1;
-                                                let b1 = perform String.charAt(env, cap_i + 1) - 1;
-                                                let b2 = perform String.charAt(env, cap_i + 2) - 1;
-                                                let b3 = perform String.charAt(env, cap_i + 3) - 1;
-                                                let cap_v = (b0 << 18) + (b1 << 12) + (b2 << 6) + b3;
-                                                let cap_h = low16((cap_v >> 8));
-                                                emit_hex(instr(0x12, cap_reg, 11, 0));
-                                                env_push(env_push(env, cap_h, 11), low16(ph), param_save)
+                                            // Multi-capture: scan all env entries for captured
+                                            // variables (registers 100-127 from outer params, or
+                                            // 11-19 from previous captures).  Each capture gets
+                                            // its own slot and register r(11+slot).
+                                            let capture_count = count_captures(env, elen);
+                                            let env_remapped = remap_captures(env, elen, 0, 0);
+                                            let env2 = if capture_count > 0 then {
+                                                env_push(env_remapped, low16(ph), param_save)
                                             } else {
                                                 env_push(env, low16(ph), param_save)
                                             };
-                                            let elen2 = if has_capture then elen + 2 else elen + 1;
-                                            if has_capture then {
-                                                emit_hex(instr(0x61, 0, 11, 0))
-                                            } else { };
+                                            let elen2 = elen + capture_count + 1;
+                                            let _ = emit_caps(0, capture_count, 0, 0);
+                                            // Forward the current parameter to the next
+                                            // capture register so nested closures can store
+                                            // it via CapStore without a separate Move.
+                                            emit_hex(instr(0x12, param_save, 11 + capture_count, 0));
                                             let body = comp(src, q6 + 2, len, no_left, -1, 8, env2, elen2);
                                             let body_reg = body >> 18;
                                             let body_end = low17(body);
@@ -326,10 +394,7 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, env:
                                             remark("fn_end:");
                                             let closure_reg = nr;
                                             emit_hex(instr(0x60, 0xFF, 0xFF, closure_reg));
-                                            if has_capture then {
-                                                emit_hex(instr(0x12, cap_reg, 11, 0));
-                                                emit_hex(instr(0x62, closure_reg, 0, 11))
-                                            } else { };
+                                            let _ = emit_caps(closure_reg, capture_count, 0, 1);
                                             (closure_reg << 18) + body_end
                                         } else (nr << 18) + p
                                     } else (nr << 18) + p
@@ -522,18 +587,24 @@ fn comp(src: String, pos: Int, len: Int, left: Int, min_prec: Int, nr: Int, env:
     else {
         let c = perform String.charAt(src, p);
         if c == 40 then {
-            let save_reg = nr + 150 + elen;
+            let save_reg = low8(150 + nr + elen);
             emit_hex(instr(0x12, lr, save_reg, 0));
             let arg = comp(src, p + 1, len, no_left, -1, nr + 1, env, elen);
-            let arg_reg = arg >> 18;
             let arg_end = low17(arg);
             let ap = skip_ws(src, arg_end, len);
             if ap < len then {
                 let c2 = perform String.charAt(src, ap);
                 if c2 == 41 then {
-                    emit_hex(instr(0x12, arg_reg, 10, 0));
+                    // Zero-arg call: comp consumed nothing (arg_end still
+                    // at the starting position, which was the close-paren).
+                    let has_arg = arg_end != p + 1;
+                    if has_arg then {
+                        let arg_reg = arg >> 18;
+                        emit_hex(instr(0x12, arg_reg, 10, 0))
+                    } else { };
                     let dst = nr;
-                    emit_hex(instr(0x64, save_reg, 1, dst));
+                    let argc = if has_arg then 1 else 0;
+                    emit_hex(instr(0x64, save_reg, argc, dst));
                     comp(src, ap + 1, len, dst, min_prec, dst + 1, env, elen)
                 } else pair
             } else pair
