@@ -1,0 +1,17 @@
+{
+  "name": "nula-registry",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-04-05",
+  "routes": [
+    {
+      "pattern": "nula.nulang.org",
+      "custom_domain": true
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "nula-registry"
+    }
+  ]
+}

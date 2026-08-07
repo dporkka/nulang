@@ -137,6 +137,8 @@ nulang nula build            # resolve dependencies + type-check
 nulang nula run              # build and run the entry point
 nulang nula test             # discover and run tests/ directory
 nulang nula add <name>       # add a dependency (--path, --git, --version)
+nulang nula publish          # publish the package to a registry
+nulang registry serve        # run a local package registry server
 nulang nula remove <name>    # remove a dependency
 nulang nula list             # list locked dependencies
 nulang nula clean            # remove build artifacts

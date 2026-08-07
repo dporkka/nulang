@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "es2021",
+    "lib": ["es2021"],
+    "alwaysStrict": true,
+    "strict": true,
+    "preserveConstEnums": true,
+    "module": "es2022",
+    "moduleResolution": "es2022",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "types": ["@cloudflare/workers-types"],
+    "skipLibCheck": true
+  }
+}
