@@ -1587,7 +1587,9 @@ impl CapabilityAnalyzer {
                 Ok(Capability::Val)
             }
 
-            // Spawn: newly created actors are unique (Iso).
+            // Spawn: actor references are shareable (Val).  All actor
+            // is accessed through the reference itself.
+            // interaction goes through message passing; nothing mutable
             Expr::Spawn {
                 actor_type, init, ..
             } => {
@@ -1595,7 +1597,7 @@ impl CapabilityAnalyzer {
                 for (_, e) in init {
                     let _ = self.infer_cap_tracked(ctx, e, consumed)?;
                 }
-                Ok(Capability::Iso)
+                Ok(Capability::Val)
             }
 
             // Send: returns Unit (Val).  The arguments must be sendable
@@ -2592,7 +2594,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cap_spawn_is_iso() {
+    fn test_cap_spawn_is_val() {
         let mut analyzer = CapabilityAnalyzer::new();
         let ctx = CapContext::new();
         let spawn = Expr::Spawn {
@@ -2603,7 +2605,7 @@ mod tests {
             span: s(),
         };
         let cap = analyzer.infer_cap(&ctx, &spawn).unwrap();
-        assert_eq!(cap, Capability::Iso);
+        assert_eq!(cap, Capability::Val);
     }
 
     #[test]

@@ -2687,6 +2687,7 @@ match { a: 2, b: 9 } with {
 
     #[test]
     fn test_string_to_float() {
+        #[allow(clippy::approx_constant)]
         assert_float(r#"perform String.to_float("3.14")"#, 3.14);
         // Invalid input returns 0.0
         assert_float(r#"perform String.to_float("hello")"#, 0.0);

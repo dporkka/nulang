@@ -956,7 +956,7 @@ impl HeapPool {
     /// The block will only be retained if its size is ≤ `size_threshold`.
     /// Blocks above the threshold, and excess blocks when `max_blocks` is
     /// exceeded, are deallocated immediately.
-    pub fn release(&mut self, base: *mut u8, size: usize) {
+    fn release(&mut self, base: *mut u8, size: usize) {
         if size > self.size_threshold {
             // Oversized block: deallocate immediately.
             let layout = std::alloc::Layout::from_size_align(size, ALIGN)

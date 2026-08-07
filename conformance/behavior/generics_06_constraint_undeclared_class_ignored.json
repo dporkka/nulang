@@ -1,1 +1,1 @@
-{"exit_code":0,"stdout":"false\nfalse\ntrue","stderr":""}
+{"exit_code": 10, "stdout": "", "stderr": "Error: VM error at 1:1: call to undefined function '_impl_Ord_Int'"}

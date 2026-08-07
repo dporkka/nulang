@@ -544,6 +544,9 @@ impl crate::vm::ActorVmCallbacks for RuntimeVmCallbacks {
                         return crate::vm::PerformAsyncResult::Ready(None);
                     }
                 }
+                if ms == 0 {
+                    return crate::vm::PerformAsyncResult::Ready(None);
+                }
                 if ms > 0 {
                     rt.timer_wheel
                         .timer_sleep_wake(std::time::Duration::from_millis(ms), actor_id);
@@ -1333,6 +1336,9 @@ impl crate::vm::ActorVmCallbacks for BytecodeRuntimeCallbacks {
                             actor.timer_sleep_fired = false;
                             return PerformAsyncResult::Ready(None);
                         }
+                    }
+                    if ms == 0 {
+                        return PerformAsyncResult::Ready(None);
                     }
                     if ms > 0 {
                         rt.timer_wheel

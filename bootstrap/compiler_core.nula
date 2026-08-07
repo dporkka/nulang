@@ -25,13 +25,13 @@ fn read_int(src: String, pos: Int, len: Int, acc: Int) -> Int {
 }
 
 fn read_ident(src: String, pos: Int, len: Int, h: Int) -> Int {
-    if pos >= len then (h << 16) + pos
+    if pos >= len then ((h & 0xFFFF) << 16) + pos
     else {
         let c = perform String.charAt(src, pos);
         if is_alphanum(c) then {
             let nh = h * 5 + c;
             read_ident(src, pos + 1, len, nh)
-        } else (h << 16) + pos
+        } else ((h & 0xFFFF) << 16) + pos
     }
 }
 
@@ -184,7 +184,15 @@ fn parse_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, e0: In
                             let param_id = read_ident(src, q3, len, 0);
                             let ph = param_id >> 16;
                             let q4 = param_id & 0xFFFF;
-                            let q5 = skip_ws(src, q4, len);
+                            let q5_raw = skip_ws(src, q4, len);
+                            let q5 = if q5_raw < len then {
+                                let c_colon = perform String.charAt(src, q5_raw);
+                                if c_colon == 58 then {
+                                    let after_colon = skip_ws(src, q5_raw + 1, len);
+                                    let type_id = read_ident(src, after_colon, len, 0);
+                                    type_id & 0xFFFF
+                                } else { q5_raw }
+                            } else { q5_raw };
                             if q5 < len then {
                                 let c2 = perform String.charAt(src, q5);
                                 if c2 == 41 then {
@@ -435,7 +443,15 @@ fn tc_pratt(src: String, pos: Int, len: Int, left: Int, min_prec: Int, t0: Int, 
                             let param_id = read_ident(src, q3, len, 0);
                             let ph = param_id >> 16;
                             let q4 = param_id & 0xFFFF;
-                            let q5 = skip_ws(src, q4, len);
+                            let q5_raw = skip_ws(src, q4, len);
+                            let q5 = if q5_raw < len then {
+                                let c_colon = perform String.charAt(src, q5_raw);
+                                if c_colon == 58 then {
+                                    let after_colon = skip_ws(src, q5_raw + 1, len);
+                                    let type_id = read_ident(src, after_colon, len, 0);
+                                    type_id & 0xFFFF
+                                } else { q5_raw }
+                            } else { q5_raw };
                             if q5 < len then {
                                 let c2 = perform String.charAt(src, q5);
                                 if c2 == 41 then {
