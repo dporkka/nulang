@@ -948,29 +948,6 @@ fn cmd_doc(open: bool) -> NuResult<()> {
 }
 
 /// Recursively remove .nbc files under `dir`.
-fn remove_nbc_files(dir: &Path, count: &mut u64) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            // Skip .git and .nula directories
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name == ".git" || name == ".nula" {
-                    continue;
-                }
-            }
-            remove_nbc_files(&path, count);
-        } else if path.extension().is_some_and(|ext| ext == "nbc") {
-            if std::fs::remove_file(&path).is_ok() {
-                eprintln!("  Removed {}", path.display());
-                *count += 1;
-            }
-        }
-    }
-}
 
 /// `nula publish [--registry <url>] [--token <token>]` — package and upload
 /// the current package to a registry.
