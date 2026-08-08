@@ -1284,9 +1284,10 @@ impl TypeChecker {
                         Some(t) => t.clone(),
                         None => Type::Var(TypeVar::fresh()),
                     };
-                    new_ctx.bind(up.name.clone(), uty, Capability::Ref, false);
-                }
+                    let upcap = up.cap.unwrap_or(Capability::Ref);
+                    new_ctx.bind(up.name.clone(), uty, upcap, false);
 
+                }
                 // Inject typeclass constraints from type parameter annotations
                 // so method calls on constrained type vars resolve (B.3).
                 for (_, tv, class_names) in type_param_constraints {
@@ -3139,7 +3140,7 @@ impl TypeChecker {
                     Some(t) => t.clone(),
                     None => Type::Var(TypeVar::fresh()),
                 };
-                behavior_ctx.bind(p.name.clone(), pty.clone(), behavior.cap, false);
+                behavior_ctx.bind(p.name.clone(), pty.clone(), p.cap.unwrap_or(Capability::Ref), false);
                 param_types.push(pty);
             }
             if !events.is_empty() {

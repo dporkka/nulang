@@ -340,10 +340,13 @@ impl WasmBackend {
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
                 body.instruction(&Instruction::Drop);
             }
+            Stmt::ArrayStore { arr, idx, src } => {
+                self.compile_array_store(body, arr, idx, src, func);
+            }
             Stmt::StoreFieldNamed { .. }
-            | Stmt::ArrayStore { .. }
             | Stmt::Emit { .. }
             | Stmt::StateSet { .. } => {
+                // records/effects/actor state are unsupported in the WASM backend
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
                 body.instruction(&Instruction::Drop);
             }
@@ -379,6 +382,15 @@ impl WasmBackend {
                 effect, op, args, ..
             } => {
                 self.compile_perform(body, effect, op, args, func);
+            }
+            RValue::ArrayLit(elems) => {
+                self.compile_array_lit(body, elems, func);
+            }
+            RValue::ArrayLoad { arr, idx } => {
+                self.compile_array_load(body, arr, idx, func);
+            }
+            RValue::ArrayLen(arr) => {
+                self.compile_array_len(body, arr, func);
             }
             _ => {
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
@@ -496,6 +508,13 @@ impl WasmBackend {
             }
             ("IO", "read") => {
                 body.instruction(&Instruction::Call(IMPORT_IO_READ));
+            }
+            ("Array", "length") => {
+                if let Some(arg) = args.first() {
+                    self.compile_array_len(body, arg, func);
+                } else {
+                    body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+                }
             }
             _ => {
                 // Unknown effect: return nil.
@@ -717,6 +736,150 @@ impl WasmBackend {
         self.emit_simd(body, simd_op, &[]);
     }
 
+    // ── Array helpers ──────────────────────────────────────────────
+
+    fn compile_array_lit(
+        &self,
+        body: &mut Function,
+        elems: &[LocalId],
+        func: &mir::Function,
+    ) {
+        let scratch = 255u32;
+        let size = ((elems.len() + 1) * 8) as i32;
+        let len = elems.len() as i64;
+
+        // Allocate: nulang_alloc(size) → i32 base
+        body.instruction(&Instruction::I32Const(size));
+        body.instruction(&Instruction::Call(IMPORT_ALLOC_IDX));
+        body.instruction(&Instruction::I64ExtendI32U);
+        body.instruction(&Instruction::LocalSet(scratch));
+
+        // Store length at offset 0
+        body.instruction(&Instruction::I64Const(len));
+        body.instruction(&Instruction::LocalGet(scratch));
+        body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
+
+        // Store each element
+        for (i, elem) in elems.iter().enumerate() {
+            let offset = ((i + 1) * 8) as i64;
+            body.instruction(&Instruction::LocalGet(self.mir_local(elem, func)));
+            body.instruction(&Instruction::LocalGet(scratch));
+            body.instruction(&Instruction::I64Const(offset));
+            body.instruction(&Instruction::I64Add);
+            body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::I64Store(MemArg {
+                offset: 0,
+                align: 3,
+                memory_index: 0,
+            }));
+        }
+
+        // Tag: TAG_PTR | base
+        body.instruction(&Instruction::LocalGet(scratch));
+        body.instruction(&Instruction::I64Const(value_layout::TAG_PTR as i64));
+        body.instruction(&Instruction::I64Or);
+    }
+
+    fn compile_array_load(
+        &self,
+        body: &mut Function,
+        arr: &LocalId,
+        idx: &LocalId,
+        func: &mir::Function,
+    ) {
+        let pm = value_layout::PAYLOAD_MASK as i64;
+        // base = arr & PAYLOAD_MASK
+        body.instruction(&Instruction::LocalGet(self.mir_local(arr, func)));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        // idx = idx & PAYLOAD_MASK
+        body.instruction(&Instruction::LocalGet(self.mir_local(idx, func)));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        // (idx + 1) * 8
+        body.instruction(&Instruction::I64Const(8));
+        body.instruction(&Instruction::I64Mul);
+        body.instruction(&Instruction::I64Const(8));
+        body.instruction(&Instruction::I64Add);
+        // base + (idx + 1) * 8
+        body.instruction(&Instruction::I64Add);
+        // i32 address
+        body.instruction(&Instruction::I32WrapI64);
+        // load
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
+    }
+
+    fn compile_array_len(
+        &self,
+        body: &mut Function,
+        arr: &LocalId,
+        func: &mir::Function,
+    ) {
+        let pm = value_layout::PAYLOAD_MASK as i64;
+        // base = arr & PAYLOAD_MASK
+        body.instruction(&Instruction::LocalGet(self.mir_local(arr, func)));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        // i32 address
+        body.instruction(&Instruction::I32WrapI64);
+        // load len
+        body.instruction(&Instruction::I64Load(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
+        // tag as TAG_INT
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        body.instruction(&Instruction::I64Const(value_layout::TAG_INT as i64));
+        body.instruction(&Instruction::I64Or);
+    }
+
+    fn compile_array_store(
+        &mut self,
+        body: &mut Function,
+        arr: &LocalId,
+        idx: &LocalId,
+        src: &LocalId,
+        func: &mir::Function,
+    ) {
+        let pm = value_layout::PAYLOAD_MASK as i64;
+        // value
+        body.instruction(&Instruction::LocalGet(self.mir_local(src, func)));
+        // base = arr & PAYLOAD_MASK
+        body.instruction(&Instruction::LocalGet(self.mir_local(arr, func)));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        // idx = idx & PAYLOAD_MASK
+        body.instruction(&Instruction::LocalGet(self.mir_local(idx, func)));
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
+        // (idx + 1) * 8
+        body.instruction(&Instruction::I64Const(8));
+        body.instruction(&Instruction::I64Mul);
+        body.instruction(&Instruction::I64Const(8));
+        body.instruction(&Instruction::I64Add);
+        // base + (idx + 1) * 8
+        body.instruction(&Instruction::I64Add);
+        // i32 address
+        body.instruction(&Instruction::I32WrapI64);
+        // store
+        body.instruction(&Instruction::I64Store(MemArg {
+            offset: 0,
+            align: 3,
+            memory_index: 0,
+        }));
+    }
+
     /// Detect and compile element-wise loops as SIMD operations.
     ///
     /// Scans the function's MIR blocks for sequential `ArrayStore` +
@@ -877,6 +1040,34 @@ mod tests {
     fn test_compile_arithmetic_mul() {
         let wasm = compile_source("4 * 5").expect("compile mul");
         assert_eq!(&wasm[0..4], b"\0asm");
+    }
+
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn run_source(source: &str) -> NuResult<crate::vm::Value> {
+        let wasm = compile_source(source)?;
+        let mut runtime = crate::wasm_runtime::WasmRuntime::new(&wasm, None)?;
+        runtime.run()
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_array_index() {
+        let value = run_source("let a = [10, 20, 30] in a[1]").expect("run");
+        assert_eq!(value.as_int(), Some(20), "a[1] should be 20");
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_array_store() {
+        let value = run_source("let a = [1, 2, 3] in { a[0] = 99; a[0] }").expect("run");
+        assert_eq!(value.as_int(), Some(99), "a[0] after store should be 99");
+    }
+
+    #[test]
+    #[cfg(all(test, feature = "wasm-backend"))]
+    fn test_wasm_array_length() {
+        let value = run_source("let a = [5, 6] in perform Array.length(a)").expect("run");
+        assert_eq!(value.as_int(), Some(2), "Array.length should be 2");
     }
 }
 
