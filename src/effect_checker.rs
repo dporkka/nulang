@@ -448,6 +448,11 @@ pub struct EffectChecker {
 }
 
 impl EffectChecker {
+    /// Look up the inferred effect row of a module-level function.
+    pub fn function_row(&self, name: &str) -> Option<&EffectRow> {
+        self.fn_rows.get(name)
+    }
+
     /// Create a new effect checker.
     pub fn new() -> Self {
         EffectChecker {

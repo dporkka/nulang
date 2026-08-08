@@ -2250,6 +2250,11 @@ impl<'a> InlayHintEngine<'a> {
         if tc.check_module(&ast).is_err() {
             return Vec::new();
         }
+        let mut ec = EffectChecker::new();
+        let decl_refs: Vec<&crate::ast::Decl> = ast.decls.iter().collect();
+        if ec.register_function_rows(&decl_refs).is_err() {
+            return Vec::new();
+        }
 
         let mut annotations = Vec::new();
 
@@ -2307,14 +2312,13 @@ impl<'a> InlayHintEngine<'a> {
                     }
                     // Show effect row hints on functions.
                     if effect.is_none() {
-                        if let crate::types::Type::Function { effect: func_effect, .. } = func_ty {
-                            let effect_ref: &crate::types::EffectRow = func_effect;
-                            let is_empty = match effect_ref {
+                        if let Some(row) = ec.function_row(name) {
+                            let is_empty = match row {
                                 crate::types::EffectRow::Closed(effects) => effects.is_empty(),
                                 crate::types::EffectRow::Open(effects, _) => effects.is_empty(),
                             };
                             if !is_empty {
-                                let effect_str = effect_ref.to_string();
+                                let effect_str = row.to_string();
                                 let pos = source_line.rfind(|c: char| c == ')' || c == '!').map_or(0, |p| p as u32 + 1);
                                 annotations.push(TypeAnnotation {
                                     line,

@@ -6,7 +6,7 @@
 //!   nulang --eval <CODE>
 //!   nulang --check <FILE>
 //!   nulang --lsp
-//!   nulang nula <new|build|build-wasm|test|run|add|remove|watch|doc>
+//!   nulang nula <new|build|build-wasm|test|run|add|remove|publish|deploy|watch|doc>
 //!   nulang fmt [--check] [<file>]
 //!
 //! Options:
@@ -25,7 +25,7 @@
 //!   --emit-nbc               Compile <FILE> to a .nbc artifact; don't run
 //!   <FILE>.nbc               Run a pre-compiled .nbc artifact directly
 //!   --verify <src>           Verify .nbc source hash against <src>
-//!   nula <cmd>               Package manager (new, init, build, build-wasm, test, run, list, clean)
+//!   nula <cmd>               Package manager (new, init, build, build-wasm, test, run, add, remove, publish, deploy, list, clean)
 //!   --version, -V            Print version and exit
 //!   -v, --verbose            Show bytecode and AST
 //!   --bench [N]             Benchmark: run N times (default 10), print min/mean/median/max
