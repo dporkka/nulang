@@ -1655,10 +1655,14 @@ impl NulangLanguageServer {
             }
         };
 
-        // Type check
-        if let Err(e) = TypeChecker::new().check_module(&ast) {
-            diagnostics.extend(nu_error_to_diagnostic(e));
-            return (diagnostics, HashMap::new());
+        // Type check — collect all errors so we surface every problem,
+        // not just the first. Downstream effect/capability checks still
+        // run on the successfully-typed subset.
+        let mut tc = TypeChecker::new();
+        tc.collect_errors = true;
+        let _ = tc.check_module(&ast);
+        for err in tc.collected_errors {
+            diagnostics.extend(nu_error_to_diagnostic(err));
         }
 
         // Effect check: same two-pass driver as the CLI frontend

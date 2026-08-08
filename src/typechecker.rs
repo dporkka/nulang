@@ -1066,9 +1066,14 @@ impl TypeChecker {
             }
             last_type = final_ty;
         }
-
         // Verify behavior contracts for actors with `implements` clauses.
-        self.verify_behavior_contracts(module)?;
+        if let Err(e) = self.verify_behavior_contracts(module) {
+            if self.collect_errors {
+                self.collected_errors.push(e);
+            } else {
+                return Err(e);
+            }
+        }
         Ok(last_type)
     }
 
