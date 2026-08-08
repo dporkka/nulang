@@ -496,6 +496,7 @@ fn placeholder_behavior(name: &str, params: Vec<(&str, Type)>, span: Span) -> as
         body: Expr::Literal(Literal::Unit, span),
         effect: None,
         cap: Capability::Ref,
+        ret_type: None,
         span,
     }
 }
@@ -719,6 +720,7 @@ fn desugar_agent(
         },
         effect: None,
         cap: Capability::Ref,
+        ret_type: None,
         span,
     };
 
@@ -749,6 +751,7 @@ fn desugar_agent(
         ),
         effect: None,
         cap: Capability::Ref,
+        ret_type: None,
         span,
     };
 
@@ -975,6 +978,7 @@ fn desugar_workflow(name: &str, items: &[ast::WorkflowItem], span: Span) -> hir:
                     body: s.body.clone(),
                     effect: None,
                     cap: Capability::Ref,
+                    ret_type: None,
                     span: s.span,
                 },
                 &[],

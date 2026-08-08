@@ -355,6 +355,7 @@ pub struct Behavior {
     pub body: Expr,
     pub effect: Option<EffectRow>,
     pub cap: Capability,
+    pub ret_type: Option<Type>,
     pub span: Span,
 }
 
@@ -960,6 +961,7 @@ pub fn desugar_state_machine(
                 },
                 effect: None,
                 cap: Capability::Ref,
+                ret_type: None,
                 span: event.span,
             }
         })
@@ -1119,6 +1121,7 @@ mod tests {
             body: Expr::Literal(Literal::Unit, Span::default()),
             effect: Some(EffectRow::empty()),
             cap: Capability::Val,
+            ret_type: None,
             span: Span::default(),
         };
         assert_eq!(b.name, "handle_msg");

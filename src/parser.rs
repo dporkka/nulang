@@ -2218,11 +2218,21 @@ impl Parser {
         self.expect(TokenKind::RParen)?;
 
         // Optional effect annotation
+        // Optional return type annotation
+        let ret_type = if self.consume_if(&TokenKind::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+
+        // Optional effect annotation
         let effect = if self.consume_if(&TokenKind::Bang) || self.consume_if(&TokenKind::Throws) {
             Some(self.parse_effect_row()?)
         } else {
             None
         };
+
 
         // Optional capability annotation
         let cap = if self.consume_if(&TokenKind::Colon) {
@@ -2238,6 +2248,7 @@ impl Parser {
             body,
             effect,
             cap,
+            ret_type,
             span,
         })
     }
