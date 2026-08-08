@@ -755,9 +755,9 @@ impl WasmBackend {
         body.instruction(&Instruction::LocalSet(scratch));
 
         // Store length at offset 0
-        body.instruction(&Instruction::I64Const(len));
         body.instruction(&Instruction::LocalGet(scratch));
         body.instruction(&Instruction::I32WrapI64);
+        body.instruction(&Instruction::I64Const(len));
         body.instruction(&Instruction::I64Store(MemArg {
             offset: 0,
             align: 3,
@@ -767,11 +767,11 @@ impl WasmBackend {
         // Store each element
         for (i, elem) in elems.iter().enumerate() {
             let offset = ((i + 1) * 8) as i64;
-            body.instruction(&Instruction::LocalGet(self.mir_local(elem, func)));
             body.instruction(&Instruction::LocalGet(scratch));
             body.instruction(&Instruction::I64Const(offset));
             body.instruction(&Instruction::I64Add);
             body.instruction(&Instruction::I32WrapI64);
+            body.instruction(&Instruction::LocalGet(self.mir_local(elem, func)));
             body.instruction(&Instruction::I64Store(MemArg {
                 offset: 0,
                 align: 3,
@@ -853,8 +853,6 @@ impl WasmBackend {
         func: &mir::Function,
     ) {
         let pm = value_layout::PAYLOAD_MASK as i64;
-        // value
-        body.instruction(&Instruction::LocalGet(self.mir_local(src, func)));
         // base = arr & PAYLOAD_MASK
         body.instruction(&Instruction::LocalGet(self.mir_local(arr, func)));
         body.instruction(&Instruction::I64Const(pm));
@@ -872,6 +870,8 @@ impl WasmBackend {
         body.instruction(&Instruction::I64Add);
         // i32 address
         body.instruction(&Instruction::I32WrapI64);
+        // value
+        body.instruction(&Instruction::LocalGet(self.mir_local(src, func)));
         // store
         body.instruction(&Instruction::I64Store(MemArg {
             offset: 0,
@@ -1052,21 +1052,21 @@ mod tests {
     #[test]
     #[cfg(all(test, feature = "wasm-backend"))]
     fn test_wasm_array_index() {
-        let value = run_source("let a = [10, 20, 30] in a[1]").expect("run");
+        let value = run_source("let a = [10, 20, 30]; a[1]").expect("run");
         assert_eq!(value.as_int(), Some(20), "a[1] should be 20");
     }
 
     #[test]
     #[cfg(all(test, feature = "wasm-backend"))]
     fn test_wasm_array_store() {
-        let value = run_source("let a = [1, 2, 3] in { a[0] = 99; a[0] }").expect("run");
+        let value = run_source("let a = [1, 2, 3]; a[0] = 99; a[0]").expect("run");
         assert_eq!(value.as_int(), Some(99), "a[0] after store should be 99");
     }
 
     #[test]
     #[cfg(all(test, feature = "wasm-backend"))]
     fn test_wasm_array_length() {
-        let value = run_source("let a = [5, 6] in perform Array.length(a)").expect("run");
+        let value = run_source("let a = [5, 6]; perform Array.length(a)").expect("run");
         assert_eq!(value.as_int(), Some(2), "Array.length should be 2");
     }
 }

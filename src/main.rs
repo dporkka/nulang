@@ -320,6 +320,15 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--profile" => {
+                if i + 1 < args.len() {
+                    opts.profile = Some(args[i + 1].clone());
+                    i += 1;
+                } else {
+                    eprintln!("Error: --profile requires a mode: flamegraph, heap, actor");
+                    std::process::exit(1);
+                }
+            }
             "--color" => {
                 if i + 1 < args.len() {
                     let val = args[i + 1].clone();
@@ -711,6 +720,7 @@ struct Options {
     bench_count: Option<usize>,
     /// Start a Prometheus-format metrics server on this port.
     metrics_port: Option<u16>,
+    profile: Option<String>,
 }
 
 impl Default for Options {
@@ -734,6 +744,7 @@ impl Default for Options {
             all_errors: false,
             bench_count: None,
             metrics_port: None,
+            profile: None,
         }
     }
 }
@@ -787,6 +798,7 @@ fn print_help() {
     println!("  fmt [--check] [<file>]  Format file(s); no file → all src/**/*.nula");
     println!("  -v, --verbose    Show bytecode and AST");
     println!("  --metrics-port <N>  Start Prometheus metrics server on port N");
+    println!("  --profile <MODE>       Run with profiling: flamegraph, heap, actor");
     println!("  --color auto|always|never  Colorize error output (default: auto)");
     println!("  -h, --help       Show this help message");
 }
