@@ -1299,6 +1299,11 @@ impl<'c> FnLowerer<'c> {
                 );
                 Ok(())
             }
+            hir::RValue::Resume { value, .. } => {
+                let val = self.lower_operand(value)?;
+                self.b.assign(dst, mir::RValue::Resume(val));
+                Ok(())
+            }
             hir::RValue::Handle { body, handlers, .. } => self.lower_handle(dst, body, handlers),
             hir::RValue::Migrate { actor, node, .. } => {
                 let a = self.lower_operand(actor)?;
@@ -1558,6 +1563,11 @@ impl<'c> FnLowerer<'c> {
                 Ok(())
             }
             hir::RValue::Receive { arms, after, .. } => self.lower_receive(dst, arms, after),
+            hir::RValue::Resume { value, .. } => {
+                let val = self.lower_operand(value)?;
+                self.b.assign(dst, mir::RValue::Resume(val));
+                Ok(())
+            }
         }
     }
 
@@ -2503,6 +2513,7 @@ fn rvalue_use_locals(op: &mir::RValue, out: &mut Vec<mir::LocalId>) {
         | Spawn { .. }
         | SelfRef
         | StateGet { .. } => {}
+        mir::RValue::Resume(x) => out.push(*x),
         ReceiveWait { timeout, .. } => out.push(*timeout),
         Load(x) | ArrayLen(x) | Unary(_, x) | CapabilityCheck { val: x } => out.push(*x),
         PerformAsync { args, .. } => out.extend(args.iter().copied()),

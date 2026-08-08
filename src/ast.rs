@@ -229,6 +229,11 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
+    /// Resume continuation: resume(value)
+    Resume {
+        value: Box<Expr>,
+        span: Span,
+    },
     /// Handle effect: handle expr { | op(x) => ... | return(x) => ... }
     Handle {
         body: Box<Expr>,

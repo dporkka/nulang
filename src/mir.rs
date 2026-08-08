@@ -309,6 +309,8 @@ pub enum RValue {
         args: Vec<LocalId>,
         remote: bool,
     },
+    /// `resume(value)` — resume an effect continuation with a value.
+    Resume(LocalId),
     /// `ask actor behavior(args...)`. Evaluates to the behavior's result.
     Ask {
         actor: LocalId,

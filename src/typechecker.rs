@@ -1862,6 +1862,7 @@ impl TypeChecker {
                 let _ = self.infer_expr(ctx, expr)?;
                 Ok((vec![], Type::unit()))
             }
+            Expr::Resume { .. } => Ok((vec![], Type::unit())),
         }
     }
 

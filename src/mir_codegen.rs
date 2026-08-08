@@ -869,6 +869,10 @@ impl MirCodegen {
                 }
                 self.restore_dst(dst, safe);
             }
+            mir::RValue::Resume(val) => {
+                let rid = self.local_reg(*val);
+                self.emit(Instruction::new1(OpCode::Resume, rid));
+            }
             mir::RValue::Perform {
                 effect,
                 op,
@@ -1476,7 +1480,7 @@ fn rvalue_uses(op: &mir::RValue) -> Vec<(usize, UseKind)> {
         | ReceiveCommit
         | Spawn { .. }
         | SelfRef
-        | StateGet { .. } => {}
+        | StateGet { .. } | mir::RValue::Resume(..) => {}
         // The timeout value is staged into r0 with a plain Move — an
         // uncounted copy channel like call/effect argument staging.
         ReceiveWait { timeout, .. } => cp(&mut out, *timeout),

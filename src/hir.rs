@@ -340,6 +340,11 @@ pub enum RValue {
         args: Vec<Operand>,
         ty: Type,
     },
+    /// Resume a suspended effect continuation with a value.
+    Resume {
+        value: Operand,
+        ty: Type,
+    },
     Handle {
         body: Box<Body>,
         handlers: Vec<EffectHandler>,
@@ -495,6 +500,7 @@ impl RValue {
             RValue::Ask { ty, .. } => ty.clone(),
             RValue::SelfRef(ty) => ty.clone(),
             RValue::Perform { ty, .. } => ty.clone(),
+            RValue::Resume { ty, .. } => ty.clone(),
             RValue::Handle { ty, .. } => ty.clone(),
             RValue::Receive { ty, .. } => ty.clone(),
             RValue::Migrate { ty, .. } => ty.clone(),

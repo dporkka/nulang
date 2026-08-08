@@ -1861,7 +1861,7 @@ impl Parser {
                 self.expect(TokenKind::RParen)?;
             } else if !self.match_token(&TokenKind::Arrow) {
                 // Single arg form: op: A -> B
-                arg_types.push(self.parse_type()?);
+                arg_types.push(self.parse_type_atomic()?);
             }
             // else: no-arg form op: -> B
 
@@ -2834,6 +2834,7 @@ impl Parser {
                     TokenKind::Ask => self.parse_ask(),
                     TokenKind::Catch => self.parse_catch_prefix(),
                     TokenKind::Perform => self.parse_perform(),
+                    TokenKind::Resume => self.parse_resume(),
                     TokenKind::Handle => self.parse_handle(),
                     TokenKind::Emit => self.parse_emit(),
                     TokenKind::Receive => self.parse_receive(),
@@ -3564,6 +3565,15 @@ impl Parser {
             timeout_ms,
             span,
         })
+    }
+
+    fn parse_resume(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.advance();
+        self.expect(TokenKind::LParen)?;
+        let value = self.parse_expr()?;
+        self.expect(TokenKind::RParen)?;
+        Ok(Expr::Resume { value: Box::new(value), span })
     }
 
     fn parse_perform(&mut self) -> NuResult<Expr> {

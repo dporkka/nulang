@@ -349,6 +349,9 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
         Expr::Defer { expr, .. } => {
             free_vars(expr, bound, acc);
         }
+        Expr::Resume { value, .. } => {
+            free_vars(value, bound, acc);
+        }
     }
 }
 
@@ -878,6 +881,7 @@ impl EffectChecker {
             Expr::Recover { body: b, .. } => self.infer_effects(ctx, b),
             // Defer: effects of the deferred expression.
             Expr::Defer { expr: e, .. } => self.infer_effects(ctx, e),
+            Expr::Resume { .. } => Ok(EffectRow::empty()),
         }
     }
 
@@ -1932,6 +1936,10 @@ impl CapabilityAnalyzer {
             }
             // Defer: capability of the deferred expression.
             Expr::Defer { expr, .. } => self.infer_cap_tracked(ctx, expr, consumed),
+            Expr::Resume { value, .. } => {
+                let _ = self.infer_cap_tracked(ctx, value, consumed)?;
+                Ok(Capability::Val)
+            }
         }
     }
 
@@ -2027,6 +2035,7 @@ fn expr_span(expr: &Expr) -> Span {
         Expr::Consume { span, .. } => *span,
         Expr::Recover { span, .. } => *span,
         Expr::Defer { span, .. } => *span,
+        Expr::Resume { span, .. } => *span,
     }
 }
 
@@ -2199,6 +2208,7 @@ fn rvalue_is_single_shot(rv: &crate::hir::RValue) -> bool {
         | crate::hir::RValue::DebateNew { .. }
         | crate::hir::RValue::DebateParticipant { .. }
         | crate::hir::RValue::DebateRun { .. } => true,
+        hir::RValue::Resume { .. } => Ok(EffectRow::empty()),
     }
 }
 

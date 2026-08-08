@@ -1105,6 +1105,9 @@ fn compile_rvalue(
         mir::RValue::Ask { .. } => Err(AotCompileError::Unsupported(
             "Ask: request-response requires the bytecode backend (unavailable with --backend native)".into(),
         )),
+        mir::RValue::Resume(..) => Err(AotCompileError::Unsupported(
+            "Resume: effect-continuation resume requires the bytecode backend (unavailable with --backend native)".into(),
+        )),
     }
 }
 // ---------------------------------------------------------------------------

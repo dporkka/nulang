@@ -1775,6 +1775,21 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
             });
             hir::Operand::Var(temp, ty)
         }
+        Expr::Resume { value, span } => {
+            let val_op = lower_expr(value, body);
+            let ty = Type::unit();
+            let temp = fresh_temp_name();
+            body.push(hir::Stmt::Let {
+                name: temp.clone(),
+                ty: ty.clone(),
+                value: hir::RValue::Resume {
+                    value: val_op,
+                    ty: ty.clone(),
+                },
+                span: *span,
+            });
+            hir::Operand::Var(temp, ty)
+        }
         Expr::Handle {
             body: hb,
             handlers,
@@ -2886,6 +2901,9 @@ fn free_vars(
             for a in args {
                 free_vars(a, bound, acc);
             }
+        }
+        Expr::Resume { value, .. } => {
+            free_vars(value, bound, acc);
         }
         Expr::Handle { body, handlers, .. } => {
             free_vars(body, bound, acc);

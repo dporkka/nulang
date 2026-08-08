@@ -1965,6 +1965,9 @@ impl NulangLanguageServer {
             Expr::Defer { expr, .. } => {
                 Self::extract_expr_types(expr, source, map);
             }
+            Expr::Resume { value, .. } => {
+                Self::extract_expr_types(value, source, map);
+            }
         }
     }
     /// Find the byte offset of an identifier within the source, searching
