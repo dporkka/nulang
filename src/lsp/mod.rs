@@ -16,8 +16,8 @@
 //! | `textDocument/formatting` | Indentation-based code formatting |
 //! | `textDocument/semanticTokens` | Syntax highlighting for editors |
 //! | `textDocument/codeAction` | Quick fixes (add type annotations) |
-//! | `textDocument/inlayHint` | Show inferred types after bindings |
-//! | `textDocument/completion` | Keyword/effect/function completion |
+//! | `textDocument/inlayHint` | Inferred types + effect rows + return types |
+//! | `textDocument/completion` | Keyword/effect/capability/function completion |
 //! | `textDocument/codeLens` | Reference counts on top-level declarations |
 //! | `textDocument/documentLink` | Clickable import paths to stdlib/files |
 use std::collections::HashMap;

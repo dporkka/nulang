@@ -202,8 +202,8 @@ fn print_usage() {
     println!("                Scaffold a new package directory");
     println!("                Templates: default, cli, lib, full");
     println!("  init          Scaffold a new package in the current directory");
-    println!("  build         Resolve dependencies and type-check the package");
-    println!("  build-wasm    Build package to .wasm + .cwasm (AOT, requires wasmtime)");
+    println!("  build         Build the package (type-check + .nbc artifact in .nula/dist/)");
+    println!("  build-wasm    Build package to .wasm + .cwasm in .nula/dist/");
     println!("  test [--filter <substr>] [--verbose|-v] [--watch|-w]  Run .nula test files");
     println!("  run           Build and run the package entry point");
     println!("  run --watch   Build and re-run on source changes");
@@ -218,7 +218,7 @@ fn print_usage() {
     println!("                --url <url>     Cloud API URL (or set NULANG_CLOUD_URL)");
     println!("                --token <token> Auth token (or set NULANG_CLOUD_TOKEN)");
     println!("  list          List resolved dependencies from Nulang.lock");
-    println!("  clean         Remove build artifacts (.nbc files)");
+    println!("  clean         Remove build artifacts (.nula/dist/)");
     println!("  doc [--open]  Generate Markdown API docs (docs/api.md)");
 }
 
@@ -479,23 +479,70 @@ fn nulang_exe(args: &[&str]) -> NuResult<()> {
 }
 
 /// `nula build`: resolve dependencies, write the lockfile, type-check entry.
+/// `nula build`: resolve dependencies, write the lockfile, type-check and
+/// compile to a .nbc artifact in .nula/dist/.
 fn cmd_build() -> NuResult<()> {
-    eprintln!("Building...");
+    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })?;
+    let manifest_path = root.join(MANIFEST_FILE);
+    let manifest = Manifest::load(&root).map_err(|e| NuError::PackageError {
+        msg: format!("failed to load {}: {}", manifest_path.display(), e),
+        span: Span::default(),
+    })?;
+    let name = manifest.package.name.clone();
+
     let entry = prepare_package()?;
     let entry_str = entry.to_string_lossy().into_owned();
+
+    let dist_dir = root.join(".nula").join("dist");
+    std::fs::create_dir_all(&dist_dir).map_err(|e| NuError::PackageError {
+        msg: format!("cannot create {}: {}", dist_dir.display(), e),
+        span: Span::default(),
+    })?;
+
+    let nbc_path = dist_dir.join(format!("{}.nbc", name));
+    let nbc_path_str = nbc_path.to_string_lossy().into_owned();
+
+    eprintln!("Building {}...", name);
     eprintln!("  Type-checking {}...", entry.display());
     nulang_exe(&["--check", &entry_str])?;
+    eprintln!("  Compiling {} to .nbc...", name);
+    nulang_exe(&["--emit-nbc", "--out", &nbc_path_str, &entry_str])?;
     println!("Build succeeded.");
     Ok(())
 }
 
 /// `nula build-wasm`: compile package to .wasm + AOT .cwasm.
+/// `nula build-wasm`: compile package to .wasm + AOT .cwasm in .nula/dist/.
 fn cmd_build_wasm() -> NuResult<()> {
-    eprintln!("Building (WASM AOT)...");
+    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })?;
+    let manifest_path = root.join(MANIFEST_FILE);
+    let manifest = Manifest::load(&root).map_err(|e| NuError::PackageError {
+        msg: format!("failed to load {}: {}", manifest_path.display(), e),
+        span: Span::default(),
+    })?;
+    let name = manifest.package.name.clone();
+
     let entry = prepare_package()?;
     let entry_str = entry.to_string_lossy().into_owned();
+
+    let dist_dir = root.join(".nula").join("dist");
+    std::fs::create_dir_all(&dist_dir).map_err(|e| NuError::PackageError {
+        msg: format!("cannot create {}: {}", dist_dir.display(), e),
+        span: Span::default(),
+    })?;
+
+    let wasm_path = dist_dir.join(format!("{}.wasm", name));
+    let wasm_path_str = wasm_path.to_string_lossy().into_owned();
+
+    eprintln!("Building {} (WASM AOT)...", name);
     eprintln!("  Compiling {} to WASM...", entry.display());
-    nulang_exe(&["--backend", "wasm-aot", &entry_str])?;
+    nulang_exe(&["--backend", "wasm-aot", "--out", &wasm_path_str, &entry_str])?;
     println!("WASM AOT build succeeded.");
     Ok(())
 }
@@ -848,18 +895,22 @@ fn cmd_list() -> NuResult<()> {
 }
 
 /// `nula clean`: remove build artifacts (.nbc files).
+/// `nula clean`: remove build artifacts (.nula/dist/ directory).
 fn cmd_clean() -> NuResult<()> {
     let root = std::env::current_dir().map_err(|e| NuError::PackageError {
         msg: format!("cannot read current directory: {}", e),
         span: Span::default(),
     })?;
-    eprintln!("Cleaning build artifacts...");
-    let mut removed = 0u64;
-    remove_nbc_files(&root, &mut removed);
-    if removed == 0 {
-        println!("No build artifacts found.");
+    let dist_dir = root.join(".nula").join("dist");
+    if dist_dir.exists() {
+        eprintln!("Cleaning build artifacts...");
+        std::fs::remove_dir_all(&dist_dir).map_err(|e| NuError::PackageError {
+            msg: format!("cannot remove {}: {}", dist_dir.display(), e),
+            span: Span::default(),
+        })?;
+        println!("Removed build artifacts.");
     } else {
-        println!("Removed {} build artifact(s).", removed);
+        println!("No build artifacts found.");
     }
     Ok(())
 }
