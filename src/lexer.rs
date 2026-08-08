@@ -287,6 +287,8 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Arrow => write!(f, "->"),
             TokenKind::FatArrow => write!(f, "=>"),
             TokenKind::ThinArrow => write!(f, "<-"),
+            TokenKind::ThinArrowQuestion => write!(f, "<-?"),
+            TokenKind::ThinArrowQuestion => write!(f, "<-?"),
             TokenKind::Dot => write!(f, "."),
             TokenKind::DotDot => write!(f, ".."),
             TokenKind::Colon => write!(f, ":"),
