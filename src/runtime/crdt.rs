@@ -453,20 +453,28 @@ pub struct Tag {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ORSet<T: Clone + Eq + std::hash::Hash> {
     pub entries: HashMap<T, HashSet<Tag>>,
-    /// Tags removed by `remove`; subtracted on merge so removals replicate
-    /// and removed elements never resurrect (same role as `AWORSet::removed`).
-    pub removed: HashSet<Tag>,
+    /// Tags removed by `remove`, each stamped with the removing node's
+    /// logical time (a `LamportTime{counter, node_id}` where `counter` comes
+    /// from the removing node's matrix clock). Subtracted on merge so
+    /// removals replicate and removed elements never resurrect (same role as
+    /// `AWORSet::removed`). The stamp is what lets the causal-stability
+    /// watermark decide when the tombstone may be garbage-collected.
+    pub removed: HashMap<Tag, LamportTime>,
     pub tag_counter: u64,
     pub node_id: u64,
+    /// Per-replica observation matrix used to compute the causal-stability
+    /// watermark for tombstone GC.
+    pub matrix: MatrixClock,
 }
 
 impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
     pub fn new(node_id: u64) -> Self {
         Self {
             entries: HashMap::new(),
-            removed: HashSet::new(),
+            removed: HashMap::new(),
             tag_counter: 0,
             node_id,
+            matrix: MatrixClock::new(node_id),
         }
     }
 
@@ -489,9 +497,21 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
 
     pub fn remove(&mut self, element: &T) {
         // Tombstone the observed tags instead of forgetting them: on merge,
-        // replicas that still hold these tags will subtract them.
+        // replicas that still hold these tags will subtract them. The removal
+        // is a distinct causal event, so every tombstoned tag is stamped with
+        // one fresh matrix tick — without this the removal would be invisible
+        // to observation vectors (the tags are reused, not re-created).
         if let Some(tags) = self.entries.remove(element) {
-            self.removed.extend(tags);
+            let rt = self.matrix.tick_local();
+            for tag in tags {
+                self.removed.insert(
+                    tag,
+                    LamportTime {
+                        counter: rt,
+                        node_id: self.node_id,
+                    },
+                );
+            }
         }
     }
 
@@ -533,7 +553,12 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
                 entries.insert(element.clone(), new_tags);
             }
         }
-        let removed: HashSet<Tag> = self.removed.difference(&base.removed).copied().collect();
+        let removed: HashMap<Tag, LamportTime> = self
+            .removed
+            .iter()
+            .filter(|(tag, _)| !base.removed.contains_key(tag))
+            .map(|(tag, rt)| (*tag, *rt))
+            .collect();
         if entries.is_empty() && removed.is_empty() {
             None
         } else {
@@ -542,14 +567,18 @@ impl<T: Clone + Eq + std::hash::Hash> ORSet<T> {
                 removed,
                 tag_counter: self.tag_counter,
                 node_id: self.node_id,
+                matrix: self.matrix.clone(),
             })
         }
     }
 
-    /// Garbage collect tombstones that are causally stable (i.e., known
-    /// to have been observed by all replicas).
-    pub fn gc_tombstones(&mut self, stable_tags: &HashSet<Tag>) {
-        self.removed.retain(|tag| !stable_tags.contains(tag));
+    /// Garbage collect tombstones that are causally stable: a tombstone
+    /// stamped `(counter: t, node_id: n)` is dropped once every healthy
+    /// replica has observed logical time `t` from `n` (i.e.
+    /// `watermark[n] >= t`).
+    pub fn gc_tombstones(&mut self, watermark: &HashMap<u64, u64>) {
+        self.removed
+            .retain(|_, rt| rt.counter > watermark.get(&rt.node_id).copied().unwrap_or(0));
     }
 }
 
@@ -559,21 +588,30 @@ impl Crdt for ORSet<String> {
     fn merge(&mut self, other: &Self) {
         // Tombstones first: a tag removed on either side must not survive.
         for tags in self.entries.values_mut() {
-            tags.retain(|t| !other.removed.contains(t));
+            tags.retain(|t| !other.removed.contains_key(t));
         }
-        self.removed.extend(&other.removed);
+        // Merge tombstones, keeping the latest removal stamp per tag.
+        for (tag, rt) in &other.removed {
+            match self.removed.get(tag) {
+                Some(existing) if *rt <= *existing => {}
+                _ => {
+                    self.removed.insert(*tag, *rt);
+                }
+            }
+        }
         for (element, tags) in &other.entries {
             let entry = self
                 .entries
                 .entry(element.clone())
                 .or_insert_with(HashSet::new);
             for tag in tags {
-                if !self.removed.contains(tag) {
+                if !self.removed.contains_key(tag) {
                     entry.insert(*tag);
                 }
             }
         }
         self.tag_counter = self.tag_counter.max(other.tag_counter);
+        self.matrix.merge(&other.matrix);
     }
 
     fn value(&self) -> Self::Value {
@@ -600,12 +638,15 @@ impl Crdt for ORSet<String> {
             }
         }
         push_u32(&mut buf, self.removed.len() as u32);
-        for tag in &self.removed {
+        for (tag, rt) in &self.removed {
             push_u64(
                 &mut buf,
                 ((tag.node_id as u64) << 32) | (tag.counter as u64),
             );
+            push_u64(&mut buf, rt.counter);
+            push_u64(&mut buf, rt.node_id);
         }
+        self.matrix.to_bytes(&mut buf);
         buf
     }
 
@@ -630,20 +671,32 @@ impl Crdt for ORSet<String> {
             pos = p;
         }
         let (num_removed, mut pos) = read_u32(bytes, pos)?;
-        let mut removed = HashSet::new();
+        let mut removed = HashMap::new();
         for _ in 0..num_removed {
             let (tag_val, p) = read_u64(bytes, pos)?;
-            removed.insert(Tag {
-                node_id: (tag_val >> 32) as u32,
-                counter: tag_val as u32,
-            });
             pos = p;
+            let (cnt, p) = read_u64(bytes, pos)?;
+            pos = p;
+            let (nid, p) = read_u64(bytes, pos)?;
+            pos = p;
+            removed.insert(
+                Tag {
+                    node_id: (tag_val >> 32) as u32,
+                    counter: tag_val as u32,
+                },
+                LamportTime {
+                    counter: cnt,
+                    node_id: nid,
+                },
+            );
         }
+        let matrix = MatrixClock::from_bytes(bytes, &mut pos)?;
         Some(Self {
             entries,
             removed,
             tag_counter,
             node_id,
+            matrix,
         })
     }
 }
@@ -693,6 +746,172 @@ impl LamportClock {
 }
 
 // =============================================================================
+// MatrixClock — causal-stability watermark for tombstone GC
+// =============================================================================
+
+/// A per-CRDT matrix clock used to compute a causal-stability watermark for
+/// tombstone garbage collection.
+///
+/// `matrix[P][N]` is the maximum logical time that node `P` has observed from
+/// source node `N`; its own entry `matrix[L][L]` advances on every **local
+/// mutation** — adds *and* removes — so removals are causally visible as
+/// distinct events (an ORSet removal reuses existing tags, so it must be
+/// timestamped or it is invisible to any observation vector).
+///
+/// The clock travels inside the CRDT state that is synced, so a replica that
+/// merges state from `P` both learns what `P` itself observed (the `matrix[P]`
+/// row) and absorbs `P`'s observations into its own row.
+///
+/// A tombstone created by node `N` at logical time `t` is **causally stable**
+/// once every healthy replica's row satisfies `matrix[R][N] >= t`; only then
+/// may it be dropped without risking element resurrection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatrixClock {
+    pub local_node: u64,
+    /// peer node -> (source node -> max logical time observed).
+    pub matrix: HashMap<u64, HashMap<u64, u64>>,
+}
+
+impl MatrixClock {
+    pub fn new(local_node: u64) -> Self {
+        Self {
+            local_node,
+            matrix: HashMap::new(),
+        }
+    }
+
+    /// Advance the local node's own counter (one tick per local mutation) and
+    /// return the new value.
+    pub fn tick_local(&mut self) -> u64 {
+        let row = self.matrix.entry(self.local_node).or_default();
+        let e = row.entry(self.local_node).or_insert(0);
+        *e = e.wrapping_add(1);
+        *e
+    }
+
+    /// Merge another replica's matrix clock into ours.
+    pub fn merge(&mut self, other: &Self) {
+        for (peer, row) in &other.matrix {
+            {
+                let local = self.matrix.entry(self.local_node).or_default();
+                for (src, t) in row {
+                    let e = local.entry(*src).or_insert(0);
+                    *e = (*e).max(*t);
+                }
+            }
+            {
+                let dest = self.matrix.entry(*peer).or_default();
+                for (src, t) in row {
+                    let e = dest.entry(*src).or_insert(0);
+                    *e = (*e).max(*t);
+                }
+            }
+        }
+    }
+
+    /// The causal-stability watermark: for each source node `N`, the maximum
+    /// logical time from `N` that **every** replica in `{local} ∪ healthy`
+    /// has observed. A healthy replica with no recorded row is treated as
+    /// having observed nothing (so a fresh/partitioned peer blocks GC), and
+    /// the local node is always considered.
+    pub fn watermark(&self, healthy: &[u64]) -> HashMap<u64, u64> {
+        let mut sources: Vec<u64> = Vec::new();
+        for row in self.matrix.values() {
+            for s in row.keys() {
+                if !sources.contains(s) {
+                    sources.push(*s);
+                }
+            }
+        }
+        let mut wm = HashMap::new();
+        for src in sources {
+            let local_t = self
+                .matrix
+                .get(&self.local_node)
+                .and_then(|r| r.get(&src))
+                .copied()
+                .unwrap_or(0);
+            let mut min = local_t;
+            for peer in healthy {
+                let t = self
+                    .matrix
+                    .get(peer)
+                    .and_then(|r| r.get(&src))
+                    .copied()
+                    .unwrap_or(0);
+                min = min.min(t);
+            }
+            wm.insert(src, min);
+        }
+        wm
+    }
+
+    /// Re-root this clock to a different local node id.
+    ///
+    /// Used when a replica is created from an incoming payload (or a persisted
+    /// snapshot): the parsed clock's `local_node` is the *sender's* id. After
+    /// re-rooting, the new node absorbs every observation the payload carried
+    /// into its own row and keeps each peer's row, so its view is attributed
+    /// to the correct node from then on.
+    pub fn reroot(&mut self, new_local: u64) {
+        if self.local_node == new_local {
+            return;
+        }
+        let old = std::mem::replace(self, MatrixClock::new(new_local));
+        self.merge(&old);
+    }
+
+    /// Drop rows for peers that are no longer healthy (keeps the clock from
+    /// growing without bound as nodes churn). The local row is always kept.
+    pub fn prune(&mut self, healthy: &[u64]) {
+        self.matrix
+            .retain(|peer, _| *peer == self.local_node || healthy.contains(peer));
+    }
+
+    pub(crate) fn to_bytes(&self, buf: &mut Vec<u8>) {
+        push_u64(buf, self.local_node);
+        let mut peers: Vec<u64> = self.matrix.keys().copied().collect();
+        peers.sort_unstable();
+        push_u32(buf, peers.len() as u32);
+        for peer in peers {
+            let row = &self.matrix[&peer];
+            push_u64(buf, peer);
+            let mut srcs: Vec<u64> = row.keys().copied().collect();
+            srcs.sort_unstable();
+            push_u32(buf, srcs.len() as u32);
+            for src in srcs {
+                push_u64(buf, src);
+                push_u64(buf, row[&src]);
+            }
+        }
+    }
+
+    pub(crate) fn from_bytes(bytes: &[u8], pos: &mut usize) -> Option<Self> {
+        let (local_node, p) = read_u64(bytes, *pos)?;
+        *pos = p;
+        let (num_peers, p) = read_u32(bytes, *pos)?;
+        *pos = p;
+        let mut matrix = HashMap::new();
+        for _ in 0..num_peers {
+            let (peer, p) = read_u64(bytes, *pos)?;
+            *pos = p;
+            let (num_srcs, p) = read_u32(bytes, *pos)?;
+            *pos = p;
+            let mut row = HashMap::new();
+            for _ in 0..num_srcs {
+                let (src, p) = read_u64(bytes, *pos)?;
+                *pos = p;
+                let (t, p) = read_u64(bytes, *pos)?;
+                *pos = p;
+                row.insert(src, t);
+            }
+            matrix.insert(peer, row);
+        }
+        Some(Self { local_node, matrix })
+    }
+}
+
+// =============================================================================
 // AWORSet
 // =============================================================================
 
@@ -701,6 +920,10 @@ pub struct AWORSet<T: Clone + Eq + std::hash::Hash> {
     pub entries: HashMap<T, LamportTime>,
     pub removed: HashMap<T, LamportTime>,
     pub clock: LamportClock,
+    /// Per-replica observation matrix used to compute the causal-stability
+    /// watermark for tombstone GC. Local add/remove timestamps are drawn
+    /// from it so removals are causally comparable to the watermark.
+    pub matrix: MatrixClock,
 }
 
 impl<T: Clone + Eq + std::hash::Hash> AWORSet<T> {
@@ -709,17 +932,32 @@ impl<T: Clone + Eq + std::hash::Hash> AWORSet<T> {
             entries: HashMap::new(),
             removed: HashMap::new(),
             clock: LamportClock::new(node_id),
+            matrix: MatrixClock::new(node_id),
         }
     }
 
     pub fn add(&mut self, element: T) {
-        let ts = self.clock.tick();
-        self.entries.insert(element, ts);
+        let ts = self.matrix.tick_local();
+        self.clock.counter = self.clock.counter.max(ts);
+        self.entries.insert(
+            element,
+            LamportTime {
+                counter: ts,
+                node_id: self.clock.node_id,
+            },
+        );
     }
 
     pub fn remove(&mut self, element: &T) {
-        let ts = self.clock.tick();
-        self.removed.insert(element.clone(), ts);
+        let ts = self.matrix.tick_local();
+        self.clock.counter = self.clock.counter.max(ts);
+        self.removed.insert(
+            element.clone(),
+            LamportTime {
+                counter: ts,
+                node_id: self.clock.node_id,
+            },
+        );
     }
 
     pub fn contains(&self, element: &T) -> bool {
@@ -769,8 +1007,17 @@ impl<T: Clone + Eq + std::hash::Hash> AWORSet<T> {
                 entries,
                 removed,
                 clock: self.clock,
+                matrix: self.matrix.clone(),
             })
         }
+    }
+
+    /// Garbage collect tombstones that are causally stable: a removal
+    /// stamped `(counter: t, node_id: n)` is dropped once every healthy
+    /// replica has observed logical time `t` from `n` (watermark[n] >= t).
+    pub fn gc_tombstones(&mut self, watermark: &HashMap<u64, u64>) {
+        self.removed
+            .retain(|_, ts| ts.counter > watermark.get(&ts.node_id).copied().unwrap_or(0));
     }
 }
 
@@ -795,6 +1042,7 @@ impl Crdt for AWORSet<String> {
             }
         }
         self.clock.counter = self.clock.counter.max(other.clock.counter);
+        self.matrix.merge(&other.matrix);
     }
 
     fn value(&self) -> Self::Value {
@@ -821,6 +1069,7 @@ impl Crdt for AWORSet<String> {
             push_u64(&mut buf, ts.counter);
             push_u64(&mut buf, ts.node_id);
         }
+        self.matrix.to_bytes(&mut buf);
         buf
     }
 
@@ -857,10 +1106,12 @@ impl Crdt for AWORSet<String> {
             );
             pos = p;
         }
+        let matrix = MatrixClock::from_bytes(bytes, &mut pos)?;
         Some(Self {
             entries,
             removed,
             clock: LamportClock { node_id, counter },
+            matrix,
         })
     }
 }
@@ -1384,22 +1635,30 @@ mod tests {
     }
 
     #[test]
-    fn test_orset_tombstone_gc() {
+    fn test_orset_tombstone_gc_respects_watermark() {
         let mut orset = ORSet::new(1);
         let item = "item".to_string();
 
-        // Add and remove items to create tombstones.
+        // Each add/remove cycle creates one tombstone stamped with an
+        // increasing local matrix tick (removal times 1, 2, 3, ...).
         for _i in 0..100 {
             orset.add(item.clone());
             orset.remove(&item);
         }
+        assert_eq!(orset.removed.len(), 100);
 
-        assert!(orset.removed.len() >= 100);
+        // A watermark covering only the first 50 removal stamps reclaims
+        // exactly those; the rest are not yet causally stable.
+        let mut partial = HashMap::new();
+        partial.insert(1u64, 50u64);
+        let mut copy = orset.clone();
+        copy.gc_tombstones(&partial);
+        assert_eq!(copy.removed.len(), 50, "only stable tombstones purged");
 
-        // Simulate stability: pass all tags to gc_tombstones.
-        let stable_tags: HashSet<Tag> = orset.removed.iter().cloned().collect();
-        orset.gc_tombstones(&stable_tags);
-
-        assert!(orset.removed.is_empty(), "tombstones should be purged");
+        // Full observation reclaims everything.
+        let mut full = HashMap::new();
+        full.insert(1u64, u64::MAX);
+        orset.gc_tombstones(&full);
+        assert!(orset.removed.is_empty(), "all tombstones should be purged");
     }
 }

@@ -272,7 +272,7 @@ impl WasmBackend {
         self.func_index_map.insert(mir_idx, wasm_idx);
         self.functions.function(self.func_type_idx(func));
 
-        let local_count = func.locals.len() + func.params.len() + func.captures.len();
+        let _local_count = func.locals.len() + func.params.len() + func.captures.len();
         let wasm_locals: Vec<_> = vec![(256u32, ValType::I64)];
         let mut body = Function::new(wasm_locals);
 

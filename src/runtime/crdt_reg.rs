@@ -8,7 +8,7 @@ use std::hash::Hash;
 
 // Lamport clock infrastructure is shared with the other CRDTs; the canonical
 // definitions live in `crdt` (and are re-exported from the runtime root).
-use super::crdt::{LamportClock, LamportTime};
+use super::crdt::{LamportClock, LamportTime, MatrixClock};
 
 // ---------------------------------------------------------------------------
 // 1. LWWRegister
@@ -254,6 +254,10 @@ impl<T: Clone + PartialEq> PartialEq for RGAElement<T> {
 pub struct RGA<T: Clone + PartialEq> {
     pub elements: Vec<RGAElement<T>>,
     pub clock: LamportClock,
+    /// Per-replica observation matrix used to compute the causal-stability
+    /// watermark for tombstone GC. Deletions are stamped from it so a
+    /// tombstoned element's timestamp reflects the delete event.
+    pub matrix: MatrixClock,
 }
 
 impl<T: Clone + PartialEq> RGA<T> {
@@ -261,10 +265,12 @@ impl<T: Clone + PartialEq> RGA<T> {
         Self {
             elements: Vec::new(),
             clock: LamportClock::new(node_id),
+            matrix: MatrixClock::new(node_id),
         }
     }
 
     pub fn insert_after(&mut self, parent: Option<LamportTime>, value: T) -> LamportTime {
+        self.matrix.tick_local();
         let id = LamportTime {
             node_id: self.clock.node_id,
             counter: self.clock.tick().counter,
@@ -299,6 +305,15 @@ impl<T: Clone + PartialEq> RGA<T> {
     pub fn delete(&mut self, id: LamportTime) {
         if let Some(elem) = self.elements.iter_mut().find(|e| e.id == id) {
             elem.value = None;
+            // Stamp the deletion as a distinct causal event so (a) the
+            // tombstone propagates via delta sync (delta_since compares
+            // timestamps) and (b) the causal-stability watermark can decide
+            // when this tombstone may be garbage-collected.
+            let c = self.matrix.tick_local();
+            elem.timestamp = LamportTime {
+                counter: c,
+                node_id: self.clock.node_id,
+            };
         }
     }
 
@@ -348,6 +363,7 @@ impl<T: Clone + PartialEq> RGA<T> {
             }
         }
         self.clock.counter = self.clock.counter.max(other.clock.counter);
+        self.matrix.merge(&other.matrix);
     }
 
     /// Delta relative to `base`: the elements whose id is unknown to `base`
@@ -373,8 +389,25 @@ impl<T: Clone + PartialEq> RGA<T> {
             Some(Self {
                 elements,
                 clock: self.clock,
+                matrix: self.matrix.clone(),
             })
         }
+    }
+
+    /// Garbage collect tombstones that are causally stable: a deleted element
+    /// stamped `(counter: t, node_id: n)` is dropped once every healthy
+    /// replica has observed logical time `t` from `n` (watermark[n] >= t).
+    ///
+    /// A dropped tombstone loses its id, so any element that referenced it as
+    /// a parent re-anchors to the end of the array on merge (the existing
+    /// `find_insert_position` fallback for a missing parent). This is the
+    /// standard RGA-with-GC tradeoff; concurrent inserts that explicitly
+    /// reference a *deleted* element as parent may reorder.
+    pub fn gc_tombstones(&mut self, watermark: &HashMap<u64, u64>) {
+        self.elements.retain(|e| {
+            e.value.is_some()
+                || e.timestamp.counter > watermark.get(&e.timestamp.node_id).copied().unwrap_or(0)
+        });
     }
 
     fn insert_element_sorted(&mut self, elem: RGAElement<T>) {
@@ -446,6 +479,11 @@ impl RGA<String> {
             buf.extend_from_slice(&elem.timestamp.counter.to_be_bytes());
             buf.extend_from_slice(&elem.timestamp.node_id.to_be_bytes());
         }
+        // Matrix clock (causal-stability watermark) rides the payload.
+        let mut mbuf = Vec::new();
+        self.matrix.to_bytes(&mut mbuf);
+        buf.extend_from_slice(&(mbuf.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&mbuf);
         buf
     }
 
@@ -529,7 +567,25 @@ impl RGA<String> {
                 },
             });
         }
-        Some(RGA { elements, clock })
+        // Matrix clock trailer (backward compatible: absent for old payloads,
+        // in which case the watermark collapses to local observation only).
+        let matrix = if offset + 4 <= bytes.len() {
+            let mlen = u32::from_be_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
+            let mut mstart = offset + 4;
+            if mstart + mlen <= bytes.len() {
+                MatrixClock::from_bytes(bytes, &mut (mstart))
+                    .unwrap_or_else(|| MatrixClock::new(node_id))
+            } else {
+                MatrixClock::new(node_id)
+            }
+        } else {
+            MatrixClock::new(node_id)
+        };
+        Some(RGA {
+            elements,
+            clock,
+            matrix,
+        })
     }
 }
 
@@ -691,6 +747,67 @@ mod tests {
         rga.delete(id);
         assert_eq!(rga.len(), 0);
         assert_eq!(rga.elements.len(), 1);
+    }
+
+    /// RGA tombstone GC is gated on the same causal-stability watermark as
+    /// the set CRDTs: a deleted element (tombstone) is dropped only once the
+    /// removing replica's logical time is covered by the watermark, and a
+    /// deletion not yet covered is retained.
+    #[test]
+    fn test_rga_tombstone_gc_respects_watermark() {
+        let mut rga = RGA::new(1);
+        let a = rga.insert_after(None, "a".to_string());
+        let b = rga.insert_after(None, "b".to_string());
+        rga.insert_after(None, "c".to_string());
+        // Delete "b" then "a": each delete stamps a fresh, strictly greater
+        // matrix tick.
+        rga.delete(b);
+        rga.delete(a);
+        assert_eq!(rga.elements.iter().filter(|e| e.value.is_none()).count(), 2);
+
+        // Two distinct deletion stamps; GC with a watermark covering only the
+        // earlier one reclaims exactly that tombstone, keeping the later one.
+        let stamps: Vec<u64> = rga
+            .elements
+            .iter()
+            .filter(|e| e.value.is_none())
+            .map(|e| e.timestamp.counter)
+            .collect();
+        assert_eq!(stamps.len(), 2);
+        assert_ne!(stamps[0], stamps[1], "each delete advances the clock");
+        let earlier = *stamps.iter().min().unwrap();
+        let later = *stamps.iter().max().unwrap();
+
+        let mut partial = HashMap::new();
+        partial.insert(1u64, earlier);
+        let mut copy = rga.clone();
+        copy.gc_tombstones(&partial);
+        assert_eq!(
+            copy.elements.iter().filter(|e| e.value.is_none()).count(),
+            1,
+            "only the tombstone whose deletion is stable is reclaimed"
+        );
+        // The later-deleted tombstone survives a watermark that stops short
+        // of its deletion time.
+        assert!(copy
+            .elements
+            .iter()
+            .any(|e| e.id == a && e.timestamp.counter == later));
+
+        // Full coverage reclaims all tombstones; live elements are untouched.
+        let mut full = HashMap::new();
+        full.insert(1u64, u64::MAX);
+        rga.gc_tombstones(&full);
+        assert_eq!(
+            rga.elements.iter().filter(|e| e.value.is_some()).count(),
+            1,
+            "live element survives GC"
+        );
+        assert_eq!(
+            rga.elements.iter().filter(|e| e.value.is_none()).count(),
+            0,
+            "all stable tombstones reclaimed"
+        );
     }
 
     #[test]

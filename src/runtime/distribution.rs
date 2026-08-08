@@ -243,6 +243,19 @@ pub(crate) fn process_network(rt: &mut Runtime) {
 /// replication, with a periodic full-state repair every
 /// `CRDT_FULL_SYNC_INTERVAL` rounds.
 pub(crate) fn sync_crdts(rt: &mut Runtime) {
+    // Causal-stability tombstone GC runs on every round, clustered or not:
+    // with no peers the watermark collapses to the local replica's own
+    // observation (everything it holds is trivially stable), which bounds
+    // tombstone growth for standalone use too.
+    if let Some(mgr) = &mut rt.crdt_manager {
+        let healthy: Vec<u64> = rt
+            .distributed
+            .cluster
+            .as_ref()
+            .map(|c| c.healthy_members().iter().map(|m| m.node_id.0).collect())
+            .unwrap_or_default();
+        mgr.gc_stable_tombstones(&healthy);
+    }
     if !rt.distributed.enabled {
         return;
     }

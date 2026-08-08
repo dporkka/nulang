@@ -4,10 +4,10 @@
 //! synchronization. Actors interact with CRDTs through `CrdtHandle`s, which
 //! are lightweight references to the actual CRDT stored in the manager.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::crdt::{AWORSet, Crdt, GCounter, GSet, ORSet, PNCounter, Tag};
+use super::crdt::{AWORSet, Crdt, GCounter, GSet, ORSet, PNCounter};
 use super::crdt_reg::{LWWRegister, MVRegister, RGA};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -303,11 +303,20 @@ impl CrdtEntry {
                 c.increments.node_id = node_id;
                 c.decrements.node_id = node_id;
             }
-            CrdtEntry::ORSet(c) => c.node_id = node_id,
-            CrdtEntry::AWORSet(c) => c.clock.node_id = node_id,
+            CrdtEntry::ORSet(c) => {
+                c.node_id = node_id;
+                c.matrix.reroot(node_id);
+            }
+            CrdtEntry::AWORSet(c) => {
+                c.clock.node_id = node_id;
+                c.matrix.reroot(node_id);
+            }
             CrdtEntry::LWWRegister(c) => c.clock.node_id = node_id,
             CrdtEntry::MVRegister(c) => c.clock.node_id = node_id,
-            CrdtEntry::RGA(c) => c.clock.node_id = node_id,
+            CrdtEntry::RGA(c) => {
+                c.clock.node_id = node_id;
+                c.matrix.reroot(node_id);
+            }
             CrdtEntry::GSet(_) => {}
         }
     }
@@ -746,24 +755,44 @@ impl CrdtManager {
 
     /// Garbage-collect tombstones that are causally stable.
     ///
-    /// After a full sync round, the `sync_base` represents the state shipped
-    /// to every healthy peer. Tombstones present in the sync base are known to
-    /// all peers and can be safely dropped.
-    pub fn gc_stable_tombstones(&mut self) {
-        for (id, entry) in self.entries.iter_mut() {
-            if let Some(base) = self.sync_base.get(id) {
-                match (entry, base) {
-                    (CrdtEntry::ORSet(current), CrdtEntry::ORSet(base)) => {
-                        let stable_tags: HashSet<Tag> = base.removed.clone();
-                        if !stable_tags.is_empty() {
-                            current.gc_tombstones(&stable_tags);
-                        }
-                    }
-                    _ => {}
+    /// A tombstone (ORSet/AWORSet removal, RGA deletion) is dropped once
+    /// every healthy replica — plus the local node — has observed it, as
+    /// established by the per-CRDT [`MatrixClock`](crate::runtime::crdt::MatrixClock)
+    /// embedded in each entry. `healthy` lists the peer node ids; the local
+    /// replica is always considered. A healthy peer that has not (yet)
+    /// acknowledged an entry's removals blocks GC, so no element can be
+    /// resurrected by a replica that never observed the removal. Rows for
+    /// departed peers are pruned so the clock does not grow unboundedly as
+    /// nodes churn.
+    ///
+    /// With no peers (`healthy` empty) the watermark collapses to the local
+    /// replica's own observation: everything it holds is trivially stable, so
+    /// tombstones are reclaimed for standalone use too.
+    pub fn gc_stable_tombstones(&mut self, healthy: &[u64]) {
+        let mut healthy = healthy.to_vec();
+        if !healthy.contains(&self.node_id) {
+            healthy.push(self.node_id);
+        }
+        for entry in self.entries.values_mut() {
+            match entry {
+                CrdtEntry::ORSet(s) => {
+                    s.matrix.prune(&healthy);
+                    let wm = s.matrix.watermark(&healthy);
+                    s.gc_tombstones(&wm);
                 }
+                CrdtEntry::AWORSet(s) => {
+                    s.matrix.prune(&healthy);
+                    let wm = s.matrix.watermark(&healthy);
+                    s.gc_tombstones(&wm);
+                }
+                CrdtEntry::RGA(s) => {
+                    s.matrix.prune(&healthy);
+                    let wm = s.matrix.watermark(&healthy);
+                    s.gc_tombstones(&wm);
+                }
+                _ => {}
             }
         }
-        self.sync_base = self.entries.clone();
     }
 
     /// Push merged CRDT values back to actor state fields.
@@ -1048,6 +1077,96 @@ mod tests {
         assert_eq!(va, vb);
         assert!(va.contains("left"));
         assert!(va.contains("right"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tombstone garbage collection (causal-stability watermark)
+    // -----------------------------------------------------------------------
+
+    /// A tombstone is reclaimed only once every considered replica has
+    /// observed the removal. A peer that never synced back (partitioned)
+    /// blocks GC, because dropping the tombstone would let it resurrect the
+    /// element on rejoin.
+    #[test]
+    fn test_tombstone_gc_requires_peer_observation() {
+        let mut a = CrdtManager::new(1);
+        let mut b = CrdtManager::new(2);
+        let mut c = CrdtManager::new(3);
+
+        // Node 1 adds then removes an element -> one tombstone. Mutations go
+        // through `get_orset_mut` so the manager's stored copy reflects them.
+        let id = {
+            let (id, _) = a.create_orset();
+            a.get_orset_mut(id).unwrap().add("x".to_string());
+            a.get_orset_mut(id).unwrap().remove(&"x".to_string());
+            id
+        };
+        // B and C learn the CRDT *and* confirm they observed the removal by
+        // syncing their state back to A.
+        sync_all(&mut a, &mut b);
+        sync_all(&mut b, &mut a);
+        sync_all(&mut a, &mut c);
+        sync_all(&mut c, &mut a);
+
+        // Both healthy peers observed the removal -> causally stable.
+        a.gc_stable_tombstones(&[2, 3]);
+        match &a.entries[&id] {
+            CrdtEntry::ORSet(s) => assert!(
+                s.removed.is_empty(),
+                "tombstone must be reclaimed once every peer observed it"
+            ),
+            _ => panic!("expected ORSet"),
+        }
+
+        // A second tombstone on the same manager, with an un-observing peer
+        // (node 4) that never syncs back: GC must retain it.
+        let id2 = {
+            let (id, _) = a.create_orset();
+            a.get_orset_mut(id).unwrap().add("y".to_string());
+            a.get_orset_mut(id).unwrap().remove(&"y".to_string());
+            id
+        };
+        a.gc_stable_tombstones(&[2, 3, 4]);
+        match &a.entries[&id2] {
+            CrdtEntry::ORSet(s) => assert_eq!(
+                s.removed.len(),
+                1,
+                "un-observing peer must block tombstone GC"
+            ),
+            _ => panic!("expected ORSet"),
+        }
+    }
+
+    /// Distribution-disabled path: with no peers, the watermark collapses to
+    /// the local replica's own observation, so a tombstone it created is
+    /// immediately causally stable and reclaimed.
+    #[test]
+    fn test_tombstone_gc_standalone_reclaims_locally() {
+        let mut a = CrdtManager::new(1);
+        let id = {
+            let (id, _) = a.create_orset();
+            a.get_orset_mut(id).unwrap().add("x".to_string());
+            a.get_orset_mut(id).unwrap().remove(&"x".to_string());
+            id
+        };
+        assert_eq!(
+            match &a.entries[&id] {
+                CrdtEntry::ORSet(s) => s.removed.len(),
+                _ => panic!("expected ORSet"),
+            },
+            1,
+            "sanity: a tombstone exists"
+        );
+        // No peers: the local replica is the only one that must have observed
+        // the removal (it created it), so GC reclaims it.
+        a.gc_stable_tombstones(&[]);
+        match &a.entries[&id] {
+            CrdtEntry::ORSet(s) => assert!(
+                s.removed.is_empty(),
+                "standalone tombstone must be reclaimed (no peers to miss it)"
+            ),
+            _ => panic!("expected ORSet"),
+        }
     }
 
     // -----------------------------------------------------------------------
