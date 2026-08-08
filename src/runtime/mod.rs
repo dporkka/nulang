@@ -3628,18 +3628,14 @@ impl Runtime {
             }
         }
         // Replay event-sourced events to reconstruct EventSourced fields.
-        // Currently a bare +1 per event (consistent with emit_event's live
-        // path).  The event args are recorded but not yet used during replay —
-        // a known gap tracked in PLAN.md Phase 1 bug 5.  The emit and replay
-        // paths must stay consistent; changing one without the other would
-        // cause recovered state to diverge from live state.
+        // The stored snapshot value (captured after the apply handler ran
+        // during live execution) correctly reconstructs fields with
+        // non-trivial apply handlers.  See
+        // `integration_tests::test_event_sourced_apply_handler_recovery_known_gap`
+        // which validates this behavior.
         let events = self.persistence.read_events(actor_id);
         if !events.is_empty() {
             for entry in &events {
-                // Use the stored snapshot value (captured after the
-                // apply handler ran during live execution) instead of
-                // a bare +1.  This correctly reconstructs fields with
-                // non-trivial apply handlers.
                 let v = entry.value.to_value_on_heap(&mut actor);
                 actor.set_state_field(&entry.field_name, v);
                 let current_seq = actor
