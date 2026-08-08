@@ -1886,6 +1886,7 @@ impl NulangLanguageServer {
                 actor_type,
                 init,
                 positional_args,
+                target_node,
                 ..
             } => {
                 Self::extract_expr_types(actor_type, source, map);
@@ -1896,6 +1897,9 @@ impl NulangLanguageServer {
                     for a in args {
                         Self::extract_expr_types(a, source, map);
                     }
+                }
+                if let Some(ref node) = target_node {
+                    Self::extract_expr_types(node, source, map);
                 }
             }
             Expr::Send { actor, args, .. } | Expr::Ask { actor, args, .. } => {

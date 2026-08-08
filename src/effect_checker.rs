@@ -240,11 +240,17 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             free_vars(value, bound, acc);
         }
         Expr::Spawn {
-            actor_type, init, ..
+            actor_type,
+            init,
+            target_node,
+            ..
         } => {
             free_vars(actor_type, bound, acc);
             for (_, e) in init {
                 free_vars(e, bound, acc);
+            }
+            if let Some(node) = target_node {
+                free_vars(node, bound, acc);
             }
         }
         Expr::Send { actor, args, .. } => {
@@ -650,14 +656,19 @@ impl EffectChecker {
                 Ok(effect_row_union(&r1, &r2))
             }
 
-            // Spawn: adds the Spawn effect + effects of actor type and init args.
             Expr::Spawn {
-                actor_type, init, ..
+                actor_type,
+                init,
+                target_node,
+                ..
             } => {
                 let mut row = EffectRow::singleton(Effect::Spawn);
                 row = effect_row_union(&row, &self.infer_effects(ctx, actor_type)?);
                 for (_, e) in init {
                     row = effect_row_union(&row, &self.infer_effects(ctx, e)?);
+                }
+                if let Some(node) = target_node {
+                    row = effect_row_union(&row, &self.infer_effects(ctx, node)?);
                 }
                 Ok(row)
             }
@@ -1605,11 +1616,17 @@ impl CapabilityAnalyzer {
             // is accessed through the reference itself.
             // interaction goes through message passing; nothing mutable
             Expr::Spawn {
-                actor_type, init, ..
+                actor_type,
+                init,
+                target_node,
+                ..
             } => {
                 let _ = self.infer_cap_tracked(ctx, actor_type, consumed)?;
                 for (_, e) in init {
                     let _ = self.infer_cap_tracked(ctx, e, consumed)?;
+                }
+                if let Some(node) = target_node {
+                    let _ = self.infer_cap_tracked(ctx, node, consumed)?;
                 }
                 Ok(Capability::Val)
             }
@@ -2372,6 +2389,7 @@ mod tests {
             init: vec![],
             positional_args: None,
             register_as: None,
+            target_node: None,
             span: s(),
         };
         let row = checker.infer_effects(&ctx, &spawn).unwrap();
@@ -2616,6 +2634,7 @@ mod tests {
             init: vec![],
             positional_args: None,
             register_as: None,
+            target_node: None,
             span: s(),
         };
         let cap = analyzer.infer_cap(&ctx, &spawn).unwrap();

@@ -1580,8 +1580,11 @@ impl TypeChecker {
 
             // Spawn actor
             Expr::Spawn {
-                actor_type, span, ..
-            } => self.infer_spawn(ctx, actor_type, *span),
+                actor_type,
+                target_node,
+                span,
+                ..
+            } => self.infer_spawn(ctx, actor_type, target_node.as_deref(), *span),
 
             // Send message
             Expr::Send {
@@ -3148,11 +3151,18 @@ impl TypeChecker {
         &mut self,
         ctx: &TypeContext,
         actor_type: &Expr,
+        target_node: Option<&Expr>,
         span: Span,
     ) -> NuResult<(Substitution, Type)> {
         let (s, actor_ty) = self.infer_expr(ctx, actor_type)?;
+        let mut subst = s;
+        if let Some(node) = target_node {
+            let ctx_sub = apply_subst_to_ctx(ctx, &subst);
+            let (s_node, _ty) = self.infer_expr(&ctx_sub, node)?;
+            subst = compose_subst(&s_node, &subst);
+        }
         match &actor_ty {
-            Type::Actor { .. } => Ok((s, actor_ty.clone())),
+            Type::Actor { .. } => Ok((subst, actor_ty.clone())),
             _ => {
                 // Try to unify with Actor type
                 let fresh_actor = Type::Actor {
@@ -3160,7 +3170,7 @@ impl TypeChecker {
                     behavior: Box::new(Type::Var(TypeVar::fresh())),
                 };
                 let s2 = mgu(&actor_ty, &fresh_actor, span)?;
-                let final_subst = compose_subst(&s2, &s);
+                let final_subst = compose_subst(&s2, &subst);
                 Ok((final_subst, fresh_actor))
             }
         }
