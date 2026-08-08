@@ -2208,7 +2208,7 @@ fn rvalue_is_single_shot(rv: &crate::hir::RValue) -> bool {
         | crate::hir::RValue::DebateNew { .. }
         | crate::hir::RValue::DebateParticipant { .. }
         | crate::hir::RValue::DebateRun { .. } => true,
-        hir::RValue::Resume { .. } => Ok(EffectRow::empty()),
+        crate::hir::RValue::Resume { .. } => false,
     }
 }
 

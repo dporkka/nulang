@@ -2706,6 +2706,9 @@ fn walk_hir_rvalue(rv: &hir::RValue, acc: &mut HashSet<String>) {
                 walk_hir_operand(a, acc);
             }
         }
+        hir::RValue::Resume { value, .. } => {
+            walk_hir_operand(value, acc);
+        }
         hir::RValue::Handle { body, handlers, .. } => {
             walk_hir_body(body, acc);
             for h in handlers {

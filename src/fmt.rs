@@ -295,8 +295,8 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bo
                 out.push('\n');
             }
             out.push_str(&format!("{}}}", sp));
-        Expr::Resume { .. } => { out.push_str("resume(_)"); }
         }
+        Expr::Resume { .. } => { out.push_str("resume(_)"); }
         Expr::Block { exprs, .. } => {
             out.push_str("{\n");
             for e in exprs {
