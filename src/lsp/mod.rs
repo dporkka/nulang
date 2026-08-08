@@ -2259,6 +2259,7 @@ impl<'a> InlayHintEngine<'a> {
                     name,
                     params,
                     ret_type,
+                    effect,
                     span,
                     ..
                 } => {
@@ -2300,6 +2301,26 @@ impl<'a> InlayHintEngine<'a> {
                                     character: rparen as u32 + 1,
                                     label: format!(" -> {}", type_to_string(ret)),
                                     kind: AnnotationKind::Type,
+                                });
+                            }
+                        }
+                    }
+                    // Show effect row hints on functions.
+                    if effect.is_none() {
+                        if let crate::types::Type::Function { effect: func_effect, .. } = func_ty {
+                            let effect_ref: &crate::types::EffectRow = func_effect;
+                            let is_empty = match effect_ref {
+                                crate::types::EffectRow::Closed(effects) => effects.is_empty(),
+                                crate::types::EffectRow::Open(effects, _) => effects.is_empty(),
+                            };
+                            if !is_empty {
+                                let effect_str = effect_ref.to_string();
+                                let pos = source_line.rfind(|c: char| c == ')' || c == '!').map_or(0, |p| p as u32 + 1);
+                                annotations.push(TypeAnnotation {
+                                    line,
+                                    character: pos,
+                                    label: format!(" ! {}", effect_str),
+                                    kind: AnnotationKind::Effect,
                                 });
                             }
                         }
@@ -2448,6 +2469,15 @@ impl<'a> CompletionEngine<'a> {
         ("false", "Boolean `false` literal."),
         ("nil", "Nil / null value."),
         ("unit", "Unit value (void)."),
+        ("behavior", "Define a behavior inside an actor.\n\n```nulang\nactor Foo {\n  behavior bar() { 42 }\n}\n```"),
+        ("state", "Define state fields inside an actor.\n\n```nulang\nactor Foo {\n  state count = 0\n}\n```"),
+        ("spawn", "Spawn a new actor.\n\n```nulang\nspawn Counter\nspawn@node Counter\n```"),
+        ("send", "Send a fire-and-forget message to an actor (Phase 1.1).\n\n```nulang\nworker <- Process(data)\n```"),
+        ("receive", "Block the current actor to receive a message.\n\n```nulang\nreceive { | Msg(payload) => payload }\n```"),
+        ("workflow", "Declare a durable workflow.\n\n```nulang\nworkflow Name {\n  step one { ... }\n}\n```"),
+        ("self", "Reference to the current actor or context.\n\n```nulang\nself.count\nself.field_name\n```"),
+        ("with", "Provide a handler for an effect block.\n\n```nulang\nhandle expr with handler_var\nhandle expr with { | op(x) => body }\n```"),
+        ("crdt", "Declare a CRDT-typed state field.\n\n```nulang\nactor Foo {\n  state crdt gcounter count = 0\n}\n```"),
     ];
 
     /// Built-in effect names with markdown documentation.
@@ -2462,6 +2492,18 @@ impl<'a> CompletionEngine<'a> {
         ("Provider", "Service provider discovery.\n\n```nulang\neffect Provider {\n  resolve(service: String) -> Url\n}\n```"),
         ("Env", "Environment variable access.\n\n```nulang\neffect Env {\n  get(name: String) -> String\n}\n```"),
         ("System", "System-level operations.\n\n```nulang\neffect System {\n  arg(n: Int) -> String\n}\n```"),
+    ];
+
+    /// Reference capability keywords with markdown documentation.
+    const CAPABILITIES: &'static [(&'static str, &'static str)] = &[
+        ("iso", "Isolated — unique, mutable reference. Cannot be shared or copied.\n\n```nulang\nlet iso x: iso X = X()\n```"),
+        ("ref", "Reference — shared, mutable reference. Multiple readers, one writer.\n\n```nulang\nlet ref x: ref X = X()\n```"),
+        ("val", "Value — immutable, shareable reference.\n\n```nulang\nlet val x: val X = X()\n```"),
+        ("box", "Box — opaque, read-only reference.\n\n```nulang\nlet box x: box X = X()\n```"),
+        ("tag", "Tag — opaque, shareable, usable only for identity comparison.\n\n```nulang\nlet tag x: tag X = X()\n```"),
+        ("trn", "Transition — write-unique reference that can become `val`.\n\n```nulang\nlet trn x: trn X = X()\n```"),
+        ("linear", "Linear — must be used exactly once.\n\n```nulang\nlet linear x: linear X = X()  // must consume x\n```"),
+        ("lineariso", "Linear + Isolated — combination of linear and iso.\n\n```nulang\nlet lineariso x: lineariso X = X()  // must consume, can't share\n```"),
     ];
 
     /// Known stdlib modules for import path completion.
@@ -2652,6 +2694,23 @@ impl<'a> CompletionEngine<'a> {
                         value: doc.to_string(),
                     })),
                     sort_text: Some(format!("5_{}", eff)),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // Capability keywords — with markdown documentation (sort "5b").
+        for &(cap, doc) in Self::CAPABILITIES {
+            if cap.to_lowercase().starts_with(&prefix_lower) {
+                items.push(CompletionItem {
+                    label: cap.to_string(),
+                    kind: Some(CompletionItemKind::KEYWORD),
+                    detail: Some("capability annotation".to_string()),
+                    documentation: Some(Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: doc.to_string(),
+                    })),
+                    sort_text: Some(format!("5b_{}", cap)),
                     ..CompletionItem::default()
                 });
             }
@@ -3082,6 +3141,42 @@ mod lsp_tests {
         assert_eq!(hints[0].position.line, 0);
     }
 
+    #[test]
+    fn test_effect_row_inlay_hint() {
+        // A function that performs an effect should get an effect-row hint.
+        let source = "fn greet(s: String) -> String {\n    perform IO.print(s)\n    s\n}";
+        let engine = InlayHintEngine::new(source);
+        let hints = engine.generate_inlay_hints();
+        assert!(
+            hints.iter().any(|h| match &h.label {
+                InlayHintLabel::String(l) => l.contains("!"),
+                _ => false,
+            }),
+            "expected an effect-row inlay hint on the effectful function, got {:?}",
+            hints
+                .iter()
+                .map(|h| match &h.label {
+                    InlayHintLabel::String(l) => l.clone(),
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_effect_hint_for_pure_fn() {
+        let source = "fn add(x: Int, y: Int) -> Int { x + y }";
+        let engine = InlayHintEngine::new(source);
+        let hints = engine.generate_inlay_hints();
+        assert!(
+            !hints.iter().any(|h| match &h.label {
+                InlayHintLabel::String(l) => l.contains("!"),
+                _ => false,
+            }),
+            "pure function should not get an effect-row hint"
+        );
+    }
+
     // -- Completion engine tests --
 
     fn labels(items: &[CompletionItem]) -> Vec<&str> {
@@ -3103,6 +3198,58 @@ mod lsp_tests {
         assert!(labels.contains(&"let"));
         assert!(labels.contains(&"fn"));
         assert!(labels.contains(&"match"));
+    }
+
+    #[test]
+    fn test_completion_capabilities() {
+        let source = "let x = 42";
+        let engine = CompletionEngine::new(source);
+        let items = engine.complete(
+            Position {
+                line: 0,
+                character: 0,
+            },
+            None,
+        );
+        let labels = labels(&items);
+        for cap in ["iso", "ref", "val", "box", "tag", "trn", "linear", "lineariso"] {
+            assert!(labels.contains(&cap), "missing capability completion: {}", cap);
+        }
+    }
+
+    #[test]
+    fn test_completion_behavior_keywords() {
+        let source = "actor A { }";
+        let engine = CompletionEngine::new(source);
+        let items = engine.complete(
+            Position {
+                line: 0,
+                character: 0,
+            },
+            None,
+        );
+        let labels = labels(&items);
+        assert!(labels.contains(&"behavior"));
+        assert!(labels.contains(&"state"));
+        assert!(labels.contains(&"spawn"));
+        assert!(labels.contains(&"receive"));
+        assert!(labels.contains(&"workflow"));
+    }
+
+    #[test]
+    fn test_completion_capability_prefix() {
+        let source = "li";
+        let engine = CompletionEngine::new(source);
+        let items = engine.complete(
+            Position {
+                line: 0,
+                character: 2,
+            },
+            None,
+        );
+        let labels = labels(&items);
+        assert!(labels.contains(&"linear"));
+        assert!(labels.contains(&"lineariso"));
     }
 
     #[test]

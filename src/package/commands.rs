@@ -1,5 +1,6 @@
 //! `nula` CLI subcommands: `new`, `init`, `build`, `build-wasm`, `test`, `run`,
-//! `list`, `clean`, `add`, `remove`, `watch`, `publish`.
+//! `list`, `clean`, `add`, `remove`, `watch`, `publish`, `deploy`.
+
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -151,9 +152,35 @@ pub fn run(args: &[String]) -> NuResult<()> {
             cmd_publish(registry_url, token)
         }
 
+        Some("deploy") => {
+            let mut token: Option<String> = None;
+            let mut url: Option<String> = None;
+            let mut wasm = false;
+            let mut i = 1;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--token" => {
+                        i += 1;
+                        if i < args.len() { token = Some(args[i].clone()); }
+                    }
+                    "--url" => {
+                        i += 1;
+                        if i < args.len() { url = Some(args[i].clone()); }
+                    }
+                    "--wasm" => wasm = true,
+                    other => return Err(NuError::PackageError {
+                        msg: format!("unknown flag '{}' for nula deploy", other),
+                        span: Span::default()
+                    })
+                }
+                i += 1;
+            }
+            cmd_deploy(wasm, url, token)
+        }
+
         Some(other) => Err(NuError::PackageError {
             msg: format!(
-                "unknown nula subcommand '{}' (expected new, init, build, build-wasm, test, run, add, remove, publish, watch, doc, list, or clean)",
+                "unknown nula subcommand '{}' (expected new, init, build, build-wasm, test, run, add, remove, publish, deploy, watch, doc, list, or clean)",
                 other
             ),
             span: Span::default(),
@@ -186,6 +213,10 @@ fn print_usage() {
     println!("  publish       Publish the package to a registry");
     println!("                --registry <url>  Registry URL (or set in Nulang.toml)");
     println!("                --token <token>   Auth token (or set NULA_TOKEN)");
+    println!("  deploy        Build and deploy the package to Nulang Cloud");
+    println!("                --wasm          Also bundle .wasm + .cwasm artifacts");
+    println!("                --url <url>     Cloud API URL (or set NULANG_CLOUD_URL)");
+    println!("                --token <token> Auth token (or set NULANG_CLOUD_TOKEN)");
     println!("  list          List resolved dependencies from Nulang.lock");
     println!("  clean         Remove build artifacts (.nbc files)");
     println!("  doc [--open]  Generate Markdown API docs (docs/api.md)");
@@ -984,6 +1015,191 @@ fn cmd_publish(registry_url: Option<String>, token: Option<String>) -> NuResult<
     println!("Published {}-{} successfully.", name, version);
     Ok(())
 }
+/// Response from POST /api/v1/deploy on Nulang Cloud.
+#[derive(serde::Deserialize)]
+struct DeployResponse {
+    #[allow(dead_code)]
+    deployment_id: String,
+    url: String,
+    status: String,
+}
+
+/// `nula deploy [--wasm] [--url <url>] [--token <token>]` — build and deploy
+/// the current package to Nulang Cloud.
+fn cmd_deploy(wasm: bool, cloud_url: Option<String>, token: Option<String>) -> NuResult<()> {
+    let root = std::env::current_dir().map_err(|e| NuError::PackageError {
+        msg: format!("cannot read current directory: {}", e),
+        span: Span::default(),
+    })?;
+    let manifest_path = root.join(MANIFEST_FILE);
+    if !manifest_path.exists() {
+        return Err(NuError::PackageError {
+            msg: format!(
+                "No {} found. Run `nulang nula init` first.",
+                MANIFEST_FILE
+            ),
+            span: Span::default(),
+        });
+    }
+    let manifest = Manifest::load(&root).map_err(|e| NuError::PackageError {
+        msg: format!("failed to load {}: {}", manifest_path.display(), e),
+        span: Span::default(),
+    })?;
+    let name = manifest.package.name.clone();
+
+    // Resolve dependencies, write lockfile, get entry point.
+    let entry = prepare_package()?;
+    let entry_str = entry.to_string_lossy().into_owned();
+
+    // Resolve auth token: --token flag > NULANG_CLOUD_TOKEN env var.
+    let token = token
+        .or_else(|| std::env::var("NULANG_CLOUD_TOKEN").ok())
+        .ok_or_else(|| NuError::PackageError {
+            msg: "Set NULANG_CLOUD_TOKEN or pass --token".to_string(),
+            span: Span::default(),
+        })?;
+
+    // Resolve cloud URL: --url flag > NULANG_CLOUD_URL env var > default.
+    let cloud_url = cloud_url
+        .or_else(|| std::env::var("NULANG_CLOUD_URL").ok())
+        .unwrap_or_else(|| "https://deploy.nulang.cloud".to_string());
+
+    // Build artifacts into .nula/dist/.
+    let dist_dir = root.join(".nula").join("dist");
+    std::fs::create_dir_all(&dist_dir).map_err(|e| NuError::PackageError {
+        msg: format!("cannot create {}: {}", dist_dir.display(), e),
+        span: Span::default(),
+    })?;
+
+    // Always build .nbc (native bytecode tier).
+    let nbc_path = dist_dir.join(format!("{}.nbc", name));
+    let nbc_path_str = nbc_path.to_string_lossy().into_owned();
+    eprintln!("Compiling {} to .nbc...", name);
+    nulang_exe(&[
+        "--emit-nbc",
+        "--out",
+        &nbc_path_str,
+        &entry_str,
+    ])?;
+
+    // Optionally build .wasm + .cwasm (WASM tier).
+    if wasm {
+        let wasm_path = dist_dir.join(format!("{}.wasm", name));
+        let wasm_path_str = wasm_path.to_string_lossy().into_owned();
+        eprintln!("Compiling {} to .wasm + .cwasm...", name);
+        nulang_exe(&[
+            "--backend",
+            "wasm-aot",
+            "--out",
+            &wasm_path_str,
+            &entry_str,
+        ])?;
+    }
+
+    // Bundle into .tar.gz: .nula/dist/ contents + Nulang.toml + Nulang.lock.
+    let mut tarball = Vec::new();
+    {
+        let gz = flate2::write::GzEncoder::new(&mut tarball, flate2::Compression::default());
+        let mut ar = tar::Builder::new(gz);
+
+        // Add Nulang.toml
+        ar.append_path_with_name(&manifest_path, "Nulang.toml")
+            .map_err(|e| NuError::PackageError {
+                msg: format!("cannot package {}: {}", MANIFEST_FILE, e),
+                span: Span::default(),
+            })?;
+
+        // Add Nulang.lock
+        let lock_path = root.join(LOCKFILE_FILE);
+        if lock_path.exists() {
+            ar.append_path_with_name(&lock_path, LOCKFILE_FILE)
+                .map_err(|e| NuError::PackageError {
+                    msg: format!("cannot package {}: {}", LOCKFILE_FILE, e),
+                    span: Span::default(),
+                })?;
+        }
+
+        // Add dist/ artifacts individually.
+        for artifact in &[&nbc_path] {
+            if artifact.exists() {
+                let archive_name = format!(
+                    ".nula/dist/{}",
+                    artifact.file_name().unwrap().to_string_lossy()
+                );
+                ar.append_path_with_name(artifact, &archive_name)
+                    .map_err(|e| NuError::PackageError {
+                        msg: format!("cannot package artifact: {}", e),
+                        span: Span::default(),
+                    })?;
+            }
+        }
+        if wasm {
+            let wasm_path = dist_dir.join(format!("{}.wasm", name));
+            let cwasm_path = dist_dir.join(format!("{}.cwasm", name));
+            for artifact in &[&wasm_path, &cwasm_path] {
+                if artifact.exists() {
+                    let archive_name = format!(
+                        ".nula/dist/{}",
+                        artifact.file_name().unwrap().to_string_lossy()
+                    );
+                    ar.append_path_with_name(artifact, &archive_name)
+                        .map_err(|e| NuError::PackageError {
+                            msg: format!("cannot package artifact: {}", e),
+                            span: Span::default(),
+                        })?;
+                }
+            }
+        }
+
+        let gz = ar.into_inner().map_err(|e| NuError::PackageError {
+            msg: format!("cannot finish tarball: {}", e),
+            span: Span::default(),
+        })?;
+        gz.finish().map_err(|e| NuError::PackageError {
+            msg: format!("cannot compress tarball: {}", e),
+            span: Span::default(),
+        })?;
+    }
+
+    eprintln!("Deploying {} to {} ...", name, cloud_url);
+
+    // POST /api/v1/deploy with Bearer token.
+    let url = format!("{}/api/v1/deploy", cloud_url.trim_end_matches('/'));
+    let response: ureq::Response = ureq::post(&url)
+        .set("Authorization", &format!("Bearer {}", token))
+        .set("Content-Type", "application/gzip")
+        .send_bytes(&tarball)
+        .map_err(|e| match e {
+            ureq::Error::Transport(inner) => NuError::PackageError {
+                msg: format!("Failed to connect to {}: {}", cloud_url, inner),
+                span: Span::default(),
+            },
+            ureq::Error::Status(code, resp) => {
+                let body = resp.into_string().unwrap_or_default();
+                NuError::PackageError {
+                    msg: if code == 401 {
+                        "Authentication failed. Check your NULANG_CLOUD_TOKEN.".to_string()
+                    } else {
+                        format!("Deploy failed: {} — {}", code, body)
+                    },
+                    span: Span::default(),
+                }
+            }
+        })?;
+
+    let body = response.into_string().map_err(|e| NuError::PackageError {
+        msg: format!("failed to read response: {}", e),
+        span: Span::default(),
+    })?;
+    let deploy: DeployResponse = serde_json::from_str(&body).map_err(|e| NuError::PackageError {
+        msg: format!("invalid response from cloud: {}", e),
+        span: Span::default(),
+    })?;
+
+    println!("Deployed! -> {} ({})", deploy.url, deploy.status);
+    Ok(())
+}
+
 
 /// Recursively add a directory tree to a tar builder.
 fn add_dir_to_tar<W: std::io::Write>(
@@ -1474,4 +1690,42 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn test_cmd_deploy_missing_token() {
+        let _cwd = cwd_guard();
+        let dir = std::env::temp_dir().join(format!("nulang_deploy_token_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = ChangeDir::new(&dir);
+
+        scaffold_package(&dir, "deploy-test", "default").expect("scaffold should succeed");
+
+        let result = cmd_deploy(false, None, None);
+        assert!(result.is_err(), "deploy without token should fail");
+        if let Err(NuError::PackageError { msg, .. }) = result {
+            assert!(msg.contains("NULANG_CLOUD_TOKEN") || msg.contains("--token"),
+                "error should mention token: {}", msg);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cmd_deploy_no_manifest() {
+        let _cwd = cwd_guard();
+        let dir = std::env::temp_dir().join(format!("nulang_deploy_nomanifest_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = ChangeDir::new(&dir);
+
+        let result = cmd_deploy(false, Some("http://127.0.0.1:9".to_string()), Some("t".to_string()));
+        assert!(result.is_err(), "deploy without manifest should fail");
+        if let Err(NuError::PackageError { msg, .. }) = result {
+            assert!(msg.contains("Nulang.toml"),
+                "error should mention Nulang.toml: {}", msg);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }
