@@ -1,0 +1,4 @@
+fn main() {
+    perform Test.assert_true(true)
+    perform IO.print("ok")
+}

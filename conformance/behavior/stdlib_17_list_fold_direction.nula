@@ -1,0 +1,13 @@
+// stdlib::list — fold direction is left-associative.
+// fold(f, init, [a, b, c]) = f(f(f(init, a), b), c).
+// Using subtraction makes the direction observable:
+//   left fold:  ((0 - 10) - 3) - 2 = -15
+//   right fold: 10 - (3 - (2 - 0)) = 9
+// The result -15 proves fold is LEFT fold.
+import stdlib::list
+
+fn main() {
+    let sub = fn(a, b) { a - b }
+    let result = fold(sub, 0, [10, 3, 2])
+    perform IO.print(perform Int.to_string(result))
+}

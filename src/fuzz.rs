@@ -553,13 +553,16 @@ fn differential_fuzz_one(source: &str) -> Result<DiffOutcome, String> {
         use crate::backends::WasmBackend;
         let mut wasm_backend = crate::backends::DefaultWasmBackend;
         match wasm_backend.compile(&mutant.mir_module, "main") {
-            Ok(wasm_bytes) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wasm_backend.run(&wasm_bytes))) {
+            Ok(wasm_bytes) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                wasm_backend.run(&wasm_bytes)
+            })) {
                 Err(_) => return Err(format!("WASM run panicked on {:?}", source)),
                 Ok(Err(e)) => {
                     let err_str = e.to_string();
-                    if err_str.contains("failed to compile") || 
-                       err_str.contains("failed to parse WebAssembly module") ||
-                       err_str.contains("failed to find function export `nulang_init`") {
+                    if err_str.contains("failed to compile")
+                        || err_str.contains("failed to parse WebAssembly module")
+                        || err_str.contains("failed to find function export `nulang_init`")
+                    {
                         false
                     } else {
                         let wasm_key: Result<String, String> =
@@ -653,8 +656,12 @@ mod tests {
                 Ok(DiffOutcome::Uncomparable) => uncomparable += 1,
                 Ok(DiffOutcome::Agreed { aot, wasm }) => {
                     compiled += 1;
-                    if aot { aot_agreed += 1; }
-                    if wasm { wasm_agreed += 1; }
+                    if aot {
+                        aot_agreed += 1;
+                    }
+                    if wasm {
+                        wasm_agreed += 1;
+                    }
                 }
                 Err(msg) => {
                     divergences.push(msg);
@@ -725,8 +732,12 @@ mod tests {
                 Ok(DiffOutcome::Uncomparable) => uncomparable += 1,
                 Ok(DiffOutcome::Agreed { aot, wasm }) => {
                     compiled += 1;
-                    if aot { aot_agreed += 1; }
-                    if wasm { wasm_agreed += 1; }
+                    if aot {
+                        aot_agreed += 1;
+                    }
+                    if wasm {
+                        wasm_agreed += 1;
+                    }
                 }
                 Err(msg) => {
                     divergence_count += 1;

@@ -1,0 +1,12 @@
+// typeclass_09 — nested typeclass method calls via constrained generics
+class Eq[T] {
+    fn eq(self: T, other: T) -> Bool
+}
+impl Eq Int {
+    fn eq(self: Int, other: Int) = self == other
+}
+fn check_nested[T: Eq](a: T, b: T, c: T) -> Bool {
+    a.eq(b) && b.eq(c)
+}
+perform IO.print(check_nested(1, 1, 1))
+perform IO.print(check_nested(1, 2, 3))

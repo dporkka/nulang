@@ -1,0 +1,7 @@
+// modimport — importing specific items via `exposing` is not supported.
+// Only the bare import path is recognized; `exposing [item]` is a parse error.
+import stdlib::list exposing [map]
+
+fn main() {
+    perform IO.print("hi")
+}

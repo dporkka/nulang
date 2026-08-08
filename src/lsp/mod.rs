@@ -1419,8 +1419,24 @@ impl NulangLanguageServer {
         let mut cap_analyzer = CapabilityAnalyzer::new();
         let cap_ctx = CapContext::new();
         for decl in &flat_decls {
-            if let Decl::Function { body, .. } = decl {
-                let _ = cap_analyzer.infer_cap(&cap_ctx, body);
+            if let Decl::Function { body, params, .. } = decl {
+                let mut ctx = cap_ctx.clone();
+                for p in params {
+                    if let Some(c) = p.cap {
+                        ctx = ctx.with_binding(&p.name, c);
+                    }
+                }
+                let _ = cap_analyzer.infer_cap(&ctx, body);
+            } else if let Decl::Actor { behaviors, .. } = decl {
+                for b in behaviors {
+                    let mut ctx = cap_ctx.clone();
+                    for p in &b.params {
+                        if let Some(c) = p.cap {
+                            ctx = ctx.with_binding(&p.name, c);
+                        }
+                    }
+                    let _ = cap_analyzer.infer_cap(&ctx, &b.body);
+                }
             }
         }
 

@@ -1,0 +1,8 @@
+type Result[T, E] = Ok(T) | Error(E)
+fn safe_div(a: Int, b: Int) -> Result[Int, String] {
+    if b == 0 then Error("div by zero") else Ok(a / b)
+}
+// prefix catch with block: catch explicitly matches error pattern
+perform IO.print(catch safe_div(10, 0) {
+    | Error(msg) => 0 - 1
+})

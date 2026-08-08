@@ -1,0 +1,16 @@
+fn main() {
+    let result = handle {
+        handle {
+            handle {
+                perform Value.get()
+            } {
+                | Value.get() resume => 1
+            }
+        } {
+            | Value.get() resume => 2
+        }
+    } {
+        | Value.get() resume => 3
+    }
+    perform IO.print(perform Int.to_string(result))
+}

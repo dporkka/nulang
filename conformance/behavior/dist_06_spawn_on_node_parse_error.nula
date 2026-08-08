@@ -1,0 +1,9 @@
+// dist — spawn on node syntax not supported in current parser.
+// The parser only accepts `spawn [link|monitor] ActorName { ... }`.
+// `spawn on <node>` is not a recognized syntax.
+spawn on 7 Greeter {
+    behavior hello() { 42 }
+}
+fn main() {
+    perform IO.print("hi")
+}

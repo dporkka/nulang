@@ -1,0 +1,6 @@
+let make_multiplier = fn(n) {
+    fn(x) { x * n }
+};
+let times3 = make_multiplier(3);
+let times5 = make_multiplier(5);
+perform IO.print(times3(10) + times5(2))

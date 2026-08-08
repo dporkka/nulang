@@ -1,0 +1,19 @@
+// lifecycle_13 — actor priority scheduling: `perform Actor.set_priority(0)`
+// sets the current actor to High priority.  The effect is a no-op outside
+// an actor context; inside a behavior it takes effect on the next
+// (re)queue.  This test verifies the effect runs without error and the
+// actor remains alive and responsive afterward.
+actor Worker {
+    behavior boost() {
+        perform Actor.set_priority(0)
+        0
+    }
+    behavior ping() { 99 }
+}
+
+fn main() {
+    let w = spawn Worker {}
+    let _ = ask w boost()
+    let v = ask w ping()
+    perform IO.print(perform Int.to_string(v))
+}

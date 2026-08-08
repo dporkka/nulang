@@ -1,0 +1,10 @@
+// generics_15 — generic record with two type parameters:
+// `type Pair[A, B] = { first: A, second: B }` constructed
+// and field-accessed at a concrete instantiation.
+type Pair[A, B] = { first: A, second: B }
+
+fn main() {
+    let p: Pair[Int, String] = { first: 10, second: "world" }
+    perform IO.print(perform Int.to_string(p.first))
+    perform IO.print(p.second)
+}

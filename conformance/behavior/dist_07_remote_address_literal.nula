@@ -1,0 +1,12 @@
+// dist — actor self-reference prints as actor address.
+// `self` inside an actor behavior yields the actor's own address.
+// When printed, it shows as `#Actor:N` (the actor reference format).
+actor Inspector {
+    behavior whoami() { self }
+}
+fn main() {
+    let i = spawn Inspector {} in {
+        let addr = ask i whoami()
+        perform IO.print(addr)
+    }
+}

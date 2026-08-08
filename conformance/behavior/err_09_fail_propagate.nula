@@ -1,0 +1,11 @@
+type Result[T, E] = Ok(T) | Error(E)
+fn f1() -> Result[Int, String] {
+    fail Error("fail in f1")
+}
+fn f2() -> Result[Int, String] {
+    f1()
+}
+fn f3() -> Result[Int, String] {
+    f2()
+}
+perform IO.print(f3() catch 0 - 1)

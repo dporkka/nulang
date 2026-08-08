@@ -1,0 +1,2 @@
+let arr = [10, 20, 30];
+perform IO.print(arr[5] == nil)

@@ -1,0 +1,12 @@
+// dist — send remote with ref argument must fail capability check.
+// `send remote` enforces val|tag|linear (network-sendable) capabilities.
+// A `ref` argument is not network-sendable, so this must error.
+actor Sink {
+    behavior recv(x: Int) { perform IO.print(x) }
+}
+fn main() {
+    let s = spawn Sink {}
+    let v = 42 :cap ref
+    send remote s recv(v)
+    unit
+}

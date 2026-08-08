@@ -1,0 +1,7 @@
+// modimport — import with `as` alias syntax is not yet supported.
+// `as` is not a keyword in the import grammar; it produces a parse error.
+import stdlib::list as L
+
+fn main() {
+    perform IO.print("hi")
+}

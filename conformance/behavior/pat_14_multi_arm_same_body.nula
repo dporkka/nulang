@@ -1,0 +1,11 @@
+type Color = Red | Green | Blue
+fn is_warm(c: Color) -> Int {
+    match c {
+        | Red => 1
+        | Green => 1
+        | Blue => 0
+    }
+}
+perform IO.print(is_warm(Red))
+perform IO.print(is_warm(Green))
+perform IO.print(is_warm(Blue))

@@ -1,0 +1,6 @@
+fn get_second(pair) -> Int {
+    match pair {
+        | (_, y) => y
+    }
+}
+perform IO.print(get_second((1, 2)))

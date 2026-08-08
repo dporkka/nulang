@@ -1,0 +1,15 @@
+// stdlib::string — split on empty delimiter.
+// When the delimiter is empty (""), String.charAt returns -1 (out of bounds).
+// Since no character code matches -1, the split loop never branches into
+// the push path, so the entire input string accumulates as a single element.
+// Result: split("abc", "") returns ["abc"] — one element.
+import stdlib::string
+
+fn main() {
+    let parts = split("abc", "")
+    // Use Array.length primitive directly (stdlib::list::length collides
+    // with stdlib::string::length, so we avoid importing both).
+    perform IO.print(perform Int.to_string(perform Array.length(parts)))
+    // The single element is the entire input string.
+    perform IO.print(parts[0])
+}

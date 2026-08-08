@@ -1,0 +1,19 @@
+// generics_14 — generic ADT with one type parameter:
+// `type Maybe[A] = Some(A) | None` constructed and
+// pattern-matched at two different concrete types.
+type Maybe[A] = Some(A) | None
+
+fn main() {
+    let m1: Maybe[Int] = Some(42)
+    let v1 = match m1 {
+        | Some(x) => x
+        | None => 0 - 1
+    }
+    perform IO.print(perform Int.to_string(v1))
+    let m2: Maybe[String] = None
+    let v2 = match m2 {
+        | Some(s) => s
+        | None => "default"
+    }
+    perform IO.print(v2)
+}

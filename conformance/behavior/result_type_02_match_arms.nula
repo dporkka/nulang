@@ -1,0 +1,12 @@
+type Result = Ok(Int) | Error(String)
+let r1 = Ok(42);
+let r2 = Error("fail");
+let d1 = match r1 {
+    | Ok(x) => x
+    | Error(_) => 0
+};
+let d2 = match r2 {
+    | Ok(_) => 0
+    | Error(_) => 1
+};
+perform IO.print(d1 + d2)

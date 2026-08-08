@@ -1,0 +1,5 @@
+let t = (1, (2, 3));
+let sum = match t {
+    | (a, (b, c)) => a + b + c
+};
+perform IO.print(sum)

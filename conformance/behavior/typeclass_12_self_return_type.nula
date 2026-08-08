@@ -1,0 +1,9 @@
+// typeclass_12 — method that returns Self type (type parameter T)
+class Clone[T] {
+    fn clone(self: T, dummy: Int) -> T
+}
+impl Clone Int {
+    fn clone(self: Int, dummy: Int) = self
+}
+perform IO.print(5.clone(0))
+perform IO.print(10.clone(0))

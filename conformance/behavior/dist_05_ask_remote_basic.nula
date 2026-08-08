@@ -1,0 +1,16 @@
+// dist — ask remote basic pattern, single-node behavior.
+// Single-node: `ask remote` message is silently dropped.
+// Returns nil (the message is never delivered).
+actor Greeter {
+    state got: Int = 0
+    behavior hello(x: Int) { self.got = x }
+    behavior get() { self.got }
+}
+fn main() {
+    let g = spawn Greeter {} in {
+        let r = ask remote g hello(42)
+        perform IO.print(r)
+        let s = ask g get()
+        perform IO.print(s)
+    }
+}

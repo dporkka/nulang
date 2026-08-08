@@ -1,0 +1,7 @@
+fn main() {
+    let x = 42 :cap trn
+    let _ = recover {
+        x
+    }
+    unit
+}

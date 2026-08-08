@@ -1,0 +1,11 @@
+fn main() {
+    let result = handle {
+        perform IO.print("before")
+        let x = perform Work.do()
+        perform IO.print("never reached")
+        x + 1
+    } {
+        | Work.do() => 0
+    }
+    perform IO.print(perform Int.to_string(result))
+}

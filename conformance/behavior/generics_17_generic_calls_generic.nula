@@ -1,0 +1,18 @@
+// generics_17 — one generic function calling another generic
+// function: `double_wrap[T]` calls `identity[T]` twice.
+fn identity[T](x: T) -> T {
+    x
+}
+
+fn double_wrap[T](x: T) -> (T, T) {
+    (identity(x), identity(x))
+}
+
+fn main() {
+    let p = double_wrap(42)
+    perform IO.print(perform Int.to_string(p.0))
+    perform IO.print(perform Int.to_string(p.1))
+    let s = double_wrap("hi")
+    perform IO.print(s.0)
+    perform IO.print(s.1)
+}

@@ -1,0 +1,22 @@
+// generics_16 — nested generics: a generic function `flatten[A]`
+// that takes an array-of-arrays `[[A]]` and returns a flat `[A]`,
+// instantiated at `Int`.
+fn flatten[A](xss: [[A]]) -> [A] {
+    var result: [A] = []
+    for xs in xss {
+        for x in xs {
+            result = perform Array.push(result, x)
+        }
+    }
+    result
+}
+
+fn main() {
+    let nested: [[Int]] = [[1, 2], [3], [4, 5]]
+    let flat = flatten(nested)
+    perform IO.print(perform Int.to_string(flat[0]))
+    perform IO.print(perform Int.to_string(flat[1]))
+    perform IO.print(perform Int.to_string(flat[2]))
+    perform IO.print(perform Int.to_string(flat[3]))
+    perform IO.print(perform Int.to_string(flat[4]))
+}

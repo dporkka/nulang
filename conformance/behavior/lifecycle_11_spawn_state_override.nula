@@ -1,0 +1,16 @@
+// lifecycle_11 — spawn with initial state override: `spawn Counter
+// { count: 42 }` overrides the declared default `0` at spawn time.
+// A second spawn with no overrides gets the declared default.
+actor Counter {
+    state count: Int = 0
+    behavior get() { self.count }
+}
+
+fn main() {
+    let c1 = spawn Counter { count: 42 }
+    let c2 = spawn Counter {}
+    let v1 = ask c1 get()
+    let v2 = ask c2 get()
+    perform IO.print(perform Int.to_string(v1))
+    perform IO.print(perform Int.to_string(v2))
+}

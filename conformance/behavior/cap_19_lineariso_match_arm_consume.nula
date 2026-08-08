@@ -1,0 +1,12 @@
+fn main() {
+    let x = 42 :cap lineariso
+    let r = match 1 {
+        | 1 => {
+            let a = x
+            10
+        }
+        | _ => 20
+    }
+    let b = x
+    perform IO.print(perform Int.to_string(r))
+}

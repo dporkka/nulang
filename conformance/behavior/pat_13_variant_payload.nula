@@ -1,0 +1,8 @@
+type Result[T, E] = Ok(T) | Error(E)
+fn describe(r: Result[Int, String]) -> String {
+    match r {
+        | Ok(x) => "ok: " + perform Int.to_string(x)
+        | Error(msg) => "err: " + msg
+    }
+}
+perform IO.print(describe(Ok(42)))

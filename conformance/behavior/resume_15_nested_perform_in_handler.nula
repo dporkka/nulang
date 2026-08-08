@@ -1,0 +1,15 @@
+fn main() {
+    let result = handle {
+        handle {
+            perform Outer.call()
+        } {
+            | Outer.call() resume => {
+                let inner = perform Inner.reply()
+                inner + 1
+            }
+        }
+    } {
+        | Inner.reply() resume => 42
+    }
+    perform IO.print(perform Int.to_string(result))
+}

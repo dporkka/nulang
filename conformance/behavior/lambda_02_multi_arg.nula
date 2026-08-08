@@ -1,0 +1,2 @@
+let multiply = fn(a, b, c) { a * b * c };
+perform IO.print(multiply(2, 3, 4))

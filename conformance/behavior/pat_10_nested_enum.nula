@@ -1,0 +1,9 @@
+type Option[T] = Some(T) | None
+fn unwrap_nested(o: Option[Option[Int]]) -> Int {
+    match o {
+        | Some(Some(x)) => x
+        | Some(None) => 0 - 1
+        | None => 0 - 2
+    }
+}
+perform IO.print(unwrap_nested(Some(Some(1))))

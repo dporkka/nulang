@@ -1,0 +1,14 @@
+// typeclass_11 — class with multiple methods
+class Math[T] {
+    fn add(self: T, other: T) -> T
+    fn mul(self: T, other: T) -> T
+    fn sub(self: T, other: T) -> T
+}
+impl Math Int {
+    fn add(self: Int, other: Int) = self + other
+    fn mul(self: Int, other: Int) = self * other
+    fn sub(self: Int, other: Int) = self - other
+}
+perform IO.print(3.add(2))
+perform IO.print(3.mul(2))
+perform IO.print(5.sub(3))

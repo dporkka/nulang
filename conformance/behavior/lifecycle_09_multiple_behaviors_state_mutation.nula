@@ -1,0 +1,20 @@
+// lifecycle_09 — actor with multiple behaviors mutating shared
+// state: `add` accumulates into `total`+`count`, `avg` computes
+// the running average.  Asks drive mailbox flush for ordering.
+actor Accum {
+    state total: Int = 0
+    state count: Int = 0
+    behavior add(x: Int) {
+        self.total = self.total + x
+        self.count = self.count + 1
+    }
+    behavior avg() { self.total / self.count }
+}
+
+fn main() {
+    let a = spawn Accum {}
+    send a add(10)
+    send a add(20)
+    let v = ask a avg()
+    perform IO.print(perform Int.to_string(v))
+}

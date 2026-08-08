@@ -135,9 +135,14 @@ impl WasmBackend {
             for block in &func.blocks {
                 for stmt in &block.stmts {
                     if let Stmt::Assign { op, .. } = stmt {
-                        if let RValue::Call { func: FuncRef::Local(_), .. } = op {
+                        if let RValue::Call {
+                            func: FuncRef::Local(_),
+                            ..
+                        } = op
+                        {
                             return Err(crate::types::NuError::VMError {
-                                msg: "WASM backend does not support closures (FuncRef::Local)".into(),
+                                msg: "WASM backend does not support closures (FuncRef::Local)"
+                                    .into(),
                                 span: crate::types::Span::default(),
                             });
                         }
@@ -169,7 +174,8 @@ impl WasmBackend {
 
         if !mir.functions.is_empty() {
             let main_idx = FUNC_IMPORT_COUNT + mir.functions.len() as u32 - 1;
-            self.exports.export("nulang_init", ExportKind::Func, main_idx);
+            self.exports
+                .export("nulang_init", ExportKind::Func, main_idx);
         }
 
         // Emit data segment.
@@ -389,7 +395,7 @@ impl WasmBackend {
     ) {
         use crate::ast::UnOp;
         let pm = value_layout::PAYLOAD_MASK as i64;
-        
+
         match op {
             UnOp::Neg => {
                 body.instruction(&Instruction::I64Const(0));

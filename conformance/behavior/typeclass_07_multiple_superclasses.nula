@@ -1,0 +1,14 @@
+// typeclass_07 — class with multiple superclass constraints (A + B)
+class A[T] {
+    fn foo(self: T, x: Int) -> Int
+}
+class B[T] {
+    fn bar(self: T, x: Int) -> Int
+}
+class C[T]: A + B {
+    fn baz(self: T, x: Int) -> Int
+}
+impl C Int {
+    fn baz(self: Int, x: Int) = self + x
+}
+perform IO.print(5.baz(3))

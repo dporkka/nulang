@@ -1,0 +1,8 @@
+// typeclass_14 — class method with multiple parameters (beyond self + 1)
+class Op[T] {
+    fn combine(self: T, a: T, b: T) -> T
+}
+impl Op Int {
+    fn combine(self: Int, a: Int, b: Int) = self + a * b
+}
+perform IO.print(2.combine(3, 4))

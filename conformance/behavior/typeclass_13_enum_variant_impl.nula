@@ -1,0 +1,9 @@
+// typeclass_13 — impl on enum variant type parses and typechecks
+type Color = Red | Green | Blue
+class Describe[T] {
+    fn describe(self: T, label: String) -> String
+}
+impl Describe Color {
+    fn describe(self: Color, label: String) = label + ":color"
+}
+perform IO.print("ok")

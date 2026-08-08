@@ -1,0 +1,7 @@
+type Result[T, E] = Ok(T) | Error(E)
+fn safe_div(a: Int, b: Int) -> Result[Int, String] {
+    if b == 0 then Error("div by zero") else Ok(a / b)
+}
+// catch on a nested expression: two catches in one expression
+let x = ((safe_div(10, 2) catch 0 - 1) * 100) + (safe_div(10, 0) catch 0 - 1)
+perform IO.print(x)

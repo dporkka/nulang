@@ -1,0 +1,4 @@
+fn main() {
+    let r = perform FS.read("/tmp/nulang_beffect_nonexistent_file_xyz.txt")
+    perform IO.print(r == nil)
+}

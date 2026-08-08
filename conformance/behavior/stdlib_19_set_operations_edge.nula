@@ -1,0 +1,25 @@
+// stdlib::set — edge cases for union, intersect, difference.
+// Tests operations with empty sets and overlapping elements.
+import stdlib::set
+
+fn main() {
+    let b2i = fn(b) { if b then 1 else 0 }
+    // Empty set union: union([], []) = [].
+    perform IO.print("empty_union=" + perform Int.to_string(size(union([], []))))
+    // Union with empty: union(xs, []) = xs.
+    let a = add(add([], 1), 2)
+    perform IO.print("union_empty_right=" + perform Int.to_string(size(union(a, []))))
+    // Intersect with empty: always empty.
+    perform IO.print("intersect_empty=" + perform Int.to_string(size(intersect(a, []))))
+    // Difference with empty: diff(xs, []) = xs.
+    perform IO.print("diff_empty=" + perform Int.to_string(size(difference(a, []))))
+    // Difference with self: diff(xs, xs) = [].
+    perform IO.print("diff_self=" + perform Int.to_string(size(difference(a, a))))
+    // Union with overlap: duplicates are deduplicated.
+    let b = add(add([], 2), 3)
+    let u = union(a, b)
+    perform IO.print("union_overlap_size=" + perform Int.to_string(size(u)))
+    perform IO.print("union_overlap_has1=" + perform Int.to_string(b2i(contains(u, 1))))
+    perform IO.print("union_overlap_has2=" + perform Int.to_string(b2i(contains(u, 2))))
+    perform IO.print("union_overlap_has3=" + perform Int.to_string(b2i(contains(u, 3))))
+}

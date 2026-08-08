@@ -1,0 +1,13 @@
+// modimport — transitive import name collision detection.
+// When a file imports a module that itself imports another module with
+// conflicting names, the resolver detects the collision at import time.
+// This is the closest proxy for circular import detection: the resolver
+// merges transitive imports and checks for duplicate declarations.
+import stdlib::list
+import stdlib::set
+
+fn main() {
+    // Both list.nula and set.nula define `empty`, `contains`, `remove`.
+    // The import conflict error fires before any code runs.
+    perform IO.print("never_reached")
+}

@@ -1,0 +1,18 @@
+// lifecycle_12 — actor name registry: `perform Actor.register` binds
+// a name to the current actor; `perform Actor.whereis` resolves it
+// back to an actor ref that can receive `ask` messages.
+actor Named {
+    behavior register_self() {
+        perform Actor.register("my_actor")
+        0
+    }
+    behavior ping() { 42 }
+}
+
+fn main() {
+    let a = spawn Named {}
+    let _ = ask a register_self()
+    let found = perform Actor.whereis("my_actor")
+    let v = ask found ping()
+    perform IO.print(perform Int.to_string(v))
+}

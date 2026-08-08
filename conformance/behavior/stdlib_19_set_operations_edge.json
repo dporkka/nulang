@@ -1,0 +1,1 @@
+{"exit_code": 0, "stdout": "empty_union=0\nunion_empty_right=2\nintersect_empty=0\ndiff_empty=2\ndiff_self=0\nunion_overlap_size=3\nunion_overlap_has1=1\nunion_overlap_has2=1\nunion_overlap_has3=1", "stderr": ""}

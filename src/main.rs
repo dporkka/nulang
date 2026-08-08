@@ -1062,14 +1062,23 @@ fn run_frontend(
 
     // 5. Capability analysis over the same body set.
     let mut cap_analyzer = CapabilityAnalyzer::new();
-    let cap_ctx = CapContext::new();
-    let cap_body = |analyzer: &mut CapabilityAnalyzer, body: &nulang::ast::Expr| -> NuResult<()> {
-        analyzer.infer_cap(&cap_ctx, body).map(|_| ())
+    let cap_body = |analyzer: &mut CapabilityAnalyzer,
+                    ctx: &CapContext,
+                    body: &nulang::ast::Expr|
+     -> NuResult<()> { analyzer.infer_cap(ctx, body).map(|_| ()) };
+    let seed_from_params = |ctx: &mut CapContext, params: &[nulang::ast::Param]| {
+        for p in params {
+            if let Some(c) = p.cap {
+                *ctx = ctx.clone().with_binding(&p.name, c);
+            }
+        }
     };
     for decl in flat_decls.iter().copied() {
         match decl {
-            nulang::ast::Decl::Function { body, .. } => {
-                cap_body(&mut cap_analyzer, body)?;
+            nulang::ast::Decl::Function { body, params, .. } => {
+                let mut ctx = CapContext::new();
+                seed_from_params(&mut ctx, params);
+                cap_body(&mut cap_analyzer, &ctx, body)?;
             }
             nulang::ast::Decl::Actor {
                 behaviors,
@@ -1078,13 +1087,17 @@ fn run_frontend(
                 ..
             } => {
                 for b in behaviors {
-                    cap_body(&mut cap_analyzer, &b.body)?;
+                    let mut ctx = CapContext::new();
+                    seed_from_params(&mut ctx, &b.params);
+                    cap_body(&mut cap_analyzer, &ctx, &b.body)?;
                 }
                 for (_, _, _, default) in state_fields {
-                    cap_body(&mut cap_analyzer, default)?;
+                    let ctx = CapContext::new();
+                    cap_body(&mut cap_analyzer, &ctx, default)?;
                 }
                 for (_, expr) in init {
-                    cap_body(&mut cap_analyzer, expr)?;
+                    let ctx = CapContext::new();
+                    cap_body(&mut cap_analyzer, &ctx, expr)?;
                 }
             }
             nulang::ast::Decl::Workflow {
@@ -1096,14 +1109,16 @@ fn run_frontend(
                         nulang::ast::WorkflowItem::Parallel(steps) => steps,
                     };
                     for step in steps {
-                        cap_body(&mut cap_analyzer, &step.body)?;
+                        let ctx = CapContext::new();
+                        cap_body(&mut cap_analyzer, &ctx, &step.body)?;
                         if let Some(comp) = &step.compensate {
-                            cap_body(&mut cap_analyzer, comp)?;
+                            cap_body(&mut cap_analyzer, &ctx, comp)?;
                         }
                     }
                 }
                 if let Some(comp) = compensate {
-                    cap_body(&mut cap_analyzer, comp)?;
+                    let ctx = CapContext::new();
+                    cap_body(&mut cap_analyzer, &ctx, comp)?;
                 }
             }
             _ => {}

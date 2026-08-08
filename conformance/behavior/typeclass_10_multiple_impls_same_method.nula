@@ -1,0 +1,12 @@
+// typeclass_10 — multiple impls for different types, same method name
+class Show[T] {
+    fn show(self: T, label: String) -> String
+}
+impl Show Int {
+    fn show(self: Int, label: String) = label + "=" + self
+}
+impl Show String {
+    fn show(self: String, label: String) = label + "=\"" + self + "\""
+}
+perform IO.print(42.show("n"))
+perform IO.print("hi".show("msg"))

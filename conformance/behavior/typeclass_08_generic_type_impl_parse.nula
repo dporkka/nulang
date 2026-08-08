@@ -1,0 +1,9 @@
+// typeclass_08 — impl with generic type parameter parses and typechecks
+type Vec[T] = Nil | Cons((T, Vec[T]))
+class Eq[T] {
+    fn eq(self: T, other: T) -> Bool
+}
+impl Eq Vec[Int] {
+    fn eq(self: Vec[Int], other: Vec[Int]) = true
+}
+perform IO.print("ok")

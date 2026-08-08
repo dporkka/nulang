@@ -1,0 +1,7 @@
+fn get_area(rect) -> Int {
+    match rect {
+        | { w: width, h: height } => width * height
+    }
+}
+let r = { w: 10, h: 5 }
+perform IO.print(get_area(r))

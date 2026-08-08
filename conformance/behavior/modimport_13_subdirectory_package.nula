@@ -1,0 +1,8 @@
+// modimport — import from a subdirectory package.
+// Imports are resolved relative to the importing file's directory.
+// A module in a subdirectory can be imported via its relative path.
+import subpkg::helper
+
+fn main() {
+    perform IO.print(perform Int.to_string(helper_value()))
+}

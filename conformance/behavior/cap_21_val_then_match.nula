@@ -1,0 +1,6 @@
+// cap_21 — val capability: record field access on sendable record
+fn main() {
+    let r = { x: 42 }
+    let y = r.x
+    perform IO.print(perform Int.to_string(r.x + y))
+}
