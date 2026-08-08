@@ -2581,6 +2581,7 @@ mod tests {
             init: vec![("count".to_string(), var("k"))],
             positional_args: None,
             register_as: None,
+            target_node: None,
             span,
         };
         assert!(used(&spawn).contains("k"), "spawn init must be free");

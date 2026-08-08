@@ -289,11 +289,6 @@ impl std::fmt::Display for TokenKind {
             TokenKind::FatArrow => write!(f, "=>"),
             TokenKind::ThinArrow => write!(f, "<-"),
             TokenKind::ThinArrowQuestion => write!(f, "<-?"),
-<<<<<<< Updated upstream
-            TokenKind::ThinArrowQuestion => write!(f, "<-?"),
-||||||| Stash base
-=======
->>>>>>> Stashed changes
             TokenKind::Dot => write!(f, "."),
             TokenKind::DotDot => write!(f, ".."),
             TokenKind::Colon => write!(f, ":"),
