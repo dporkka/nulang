@@ -129,11 +129,18 @@ impl WasmBackend {
     // ── Compile ───────────────────────────────────────────────────
 
     pub fn compile(&mut self, mir: &mir::Module, _module_name: &str) -> NuResult<Vec<u8>> {
-        // Intern strings from constants for data segment.
+        // Pre-scan: the WASM backend does not currently support closures (first-class functions).
+        // Return a compilation error so callers (like the differential fuzzer) know it's unsupported.
         for func in mir.functions.iter().chain(mir.behaviors.iter()) {
             for block in &func.blocks {
                 for stmt in &block.stmts {
                     if let Stmt::Assign { op, .. } = stmt {
+                        if let RValue::Call { func: FuncRef::Local(_), .. } = op {
+                            return Err(crate::types::NuError::VMError {
+                                msg: "WASM backend does not support closures (FuncRef::Local)".into(),
+                                span: crate::types::Span::default(),
+                            });
+                        }
                         self.intern_const_strings(op);
                     }
                 }
@@ -160,8 +167,10 @@ impl WasmBackend {
             self.compile_function(func, mir.functions.len() + idx);
         }
 
-        self.exports
-            .export("nulang_init", ExportKind::Func, FUNC_IMPORT_COUNT);
+        if !mir.functions.is_empty() {
+            let main_idx = FUNC_IMPORT_COUNT + mir.functions.len() as u32 - 1;
+            self.exports.export("nulang_init", ExportKind::Func, main_idx);
+        }
 
         // Emit data segment.
         if !self.string_data.is_empty() {
@@ -258,7 +267,7 @@ impl WasmBackend {
         self.functions.function(self.func_type_idx(func));
 
         let local_count = func.locals.len() + func.params.len() + func.captures.len();
-        let wasm_locals: Vec<_> = (0..local_count).map(|_| (1u32, ValType::I64)).collect();
+        let wasm_locals: Vec<_> = vec![(256u32, ValType::I64)];
         let mut body = Function::new(wasm_locals);
 
         let block_order = self.compute_block_order(func);
@@ -273,7 +282,7 @@ impl WasmBackend {
             for stmt in &block.stmts {
                 self.compile_stmt(&mut body, stmt, func);
             }
-            self.compile_terminator(&mut body, &block.terminator, &labels, li);
+            self.compile_terminator(&mut body, &block.terminator, &labels, li, func);
             body.instruction(&Instruction::End);
             body.instruction(&Instruction::Unreachable);
             li += 1;
@@ -354,8 +363,8 @@ impl WasmBackend {
                     self.emit_binop(body, *op);
                 }
             }
-            RValue::Unary(_, _) => {
-                body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+            RValue::Unary(op, a) => {
+                self.compile_unary(body, *op, a, func);
             }
             RValue::Call { func: fr, args } => {
                 self.compile_call(body, fr, args, func);
@@ -364,6 +373,46 @@ impl WasmBackend {
                 effect, op, args, ..
             } => {
                 self.compile_perform(body, effect, op, args, func);
+            }
+            _ => {
+                body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
+            }
+        }
+    }
+
+    fn compile_unary(
+        &self,
+        body: &mut Function,
+        op: crate::ast::UnOp,
+        a: &mir::LocalId,
+        func: &mir::Function,
+    ) {
+        use crate::ast::UnOp;
+        let pm = value_layout::PAYLOAD_MASK as i64;
+        
+        match op {
+            UnOp::Neg => {
+                body.instruction(&Instruction::I64Const(0));
+                body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
+                body.instruction(&Instruction::I64Const(pm));
+                body.instruction(&Instruction::I64And);
+                body.instruction(&Instruction::I64Sub);
+                body.instruction(&Instruction::I64Const(pm));
+                body.instruction(&Instruction::I64And);
+                body.instruction(&Instruction::I64Const(value_layout::TAG_INT as i64));
+                body.instruction(&Instruction::I64Or);
+            }
+            UnOp::Not => {
+                let tf = value_layout::tag_bool(false) as i64;
+                let tt = value_layout::tag_bool(true) as i64;
+                body.instruction(&Instruction::LocalGet(self.mir_local(a, func)));
+                body.instruction(&Instruction::I64Const(tt));
+                body.instruction(&Instruction::I64Eq);
+                body.instruction(&Instruction::I64ExtendI32S);
+                body.instruction(&Instruction::I64Const(tf - tt));
+                body.instruction(&Instruction::I64Mul);
+                body.instruction(&Instruction::I64Const(tt));
+                body.instruction(&Instruction::I64Add);
             }
             _ => {
                 body.instruction(&Instruction::I64Const(value_layout::TAG_NIL as i64));
@@ -468,7 +517,32 @@ impl WasmBackend {
         // Swap into correct order: a, b.
         body.instruction(&Instruction::LocalGet(254));
 
+        let sign_extend_both = |b: &mut Function| {
+            b.instruction(&Instruction::LocalSet(254));
+            b.instruction(&Instruction::I64Const(16));
+            b.instruction(&Instruction::I64Shl);
+            b.instruction(&Instruction::I64Const(16));
+            b.instruction(&Instruction::I64ShrS);
+            b.instruction(&Instruction::LocalGet(254));
+            b.instruction(&Instruction::I64Const(16));
+            b.instruction(&Instruction::I64Shl);
+            b.instruction(&Instruction::I64Const(16));
+            b.instruction(&Instruction::I64ShrS);
+        };
+
         match op {
+            BinOp::And => {
+                body.instruction(&Instruction::I64And);
+                body.instruction(&Instruction::I64Const(value_layout::TAG_BOOL as i64));
+                body.instruction(&Instruction::I64Or);
+                return;
+            }
+            BinOp::Or => {
+                body.instruction(&Instruction::I64Or);
+                body.instruction(&Instruction::I64Const(value_layout::TAG_BOOL as i64));
+                body.instruction(&Instruction::I64Or);
+                return;
+            }
             BinOp::Add => {
                 body.instruction(&Instruction::I64Add);
             }
@@ -479,12 +553,15 @@ impl WasmBackend {
                 body.instruction(&Instruction::I64Mul);
             }
             BinOp::Div => {
+                sign_extend_both(body);
                 body.instruction(&Instruction::I64DivS);
             }
             BinOp::Mod => {
+                sign_extend_both(body);
                 body.instruction(&Instruction::I64RemS);
             }
             cmp @ (BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) => {
+                sign_extend_both(body);
                 match cmp {
                     BinOp::Eq => body.instruction(&Instruction::I64Eq),
                     BinOp::Ne => body.instruction(&Instruction::I64Ne),
@@ -510,6 +587,8 @@ impl WasmBackend {
                 return;
             }
         }
+        body.instruction(&Instruction::I64Const(pm));
+        body.instruction(&Instruction::I64And);
         body.instruction(&Instruction::I64Const(ti));
         body.instruction(&Instruction::I64Or);
     }
@@ -522,6 +601,7 @@ impl WasmBackend {
         term: &Terminator,
         labels: &HashMap<BlockId, u32>,
         cur: u32,
+        func: &mir::Function,
     ) {
         match term {
             Terminator::Return(Some(l)) => {
@@ -537,9 +617,10 @@ impl WasmBackend {
                 body.instruction(&Instruction::Br(if tl <= cur { cur - tl + 1 } else { 1 }));
             }
             Terminator::Branch { cond, then_, else_ } => {
-                body.instruction(&Instruction::LocalGet(cond.0));
+                body.instruction(&Instruction::LocalGet(self.mir_local(cond, func)));
                 body.instruction(&Instruction::I64Const(1));
                 body.instruction(&Instruction::I64And);
+                body.instruction(&Instruction::I32WrapI64);
                 let tl = labels.get(then_).copied().unwrap_or(0);
                 let el = labels.get(else_).copied().unwrap_or(0);
                 body.instruction(&Instruction::BrIf(if tl <= cur { cur - tl + 1 } else { 1 }));

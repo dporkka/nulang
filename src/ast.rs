@@ -4,6 +4,34 @@ use crate::types::{Capability, EffectRow, Span, Type, TypeVar};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Parameters
+// ---------------------------------------------------------------------------
+
+/// A function/behavior/lambda parameter with an optional type annotation
+/// and an optional capability annotation (e.g. `lineariso`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Param {
+    pub name: String,
+    pub ty: Option<Type>,
+    pub cap: Option<Capability>,
+}
+
+impl Param {
+    pub fn new(name: impl Into<String>, ty: Option<Type>) -> Self {
+        Param {
+            name: name.into(),
+            ty,
+            cap: None,
+        }
+    }
+
+    pub fn with_cap(mut self, cap: Capability) -> Self {
+        self.cap = Some(cap);
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Literals
 // ---------------------------------------------------------------------------
 
@@ -44,7 +72,7 @@ pub enum Expr {
     Var(String, Span),
     /// Lambda: fn(x: T) -> e
     Lambda {
-        params: Vec<(String, Option<Type>)>,
+        params: Vec<Param>,
         ret_type: Option<Type>,
         body: Box<Expr>,
         effect: Option<EffectRow>,
@@ -72,7 +100,7 @@ pub enum Expr {
     /// Let-rec: let rec f = e1 in e2
     LetRec {
         name: String,
-        params: Vec<(String, Option<Type>)>,
+        params: Vec<Param>,
         value: Box<Expr>,
         body: Box<Expr>,
         span: Span,
@@ -314,7 +342,7 @@ pub struct EffectHandler {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Behavior {
     pub name: String,
-    pub params: Vec<(String, Option<Type>)>,
+    pub params: Vec<Param>,
     pub body: Expr,
     pub effect: Option<EffectRow>,
     pub cap: Capability,
@@ -426,7 +454,7 @@ impl Default for StateModel {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateMachineEvent {
     pub name: String,
-    pub params: Vec<(String, Option<Type>)>,
+    pub params: Vec<Param>,
     /// Target state name. Must be one of the states declared via `state`
     /// lines (enforced by the parser); handler-function targets like
     /// gen_statem's are not supported.
@@ -546,13 +574,13 @@ pub enum Decl {
         /// (param_name, type_var, [class_names]). e.g. `[T: Eq + Ord]` →
         /// [("T", tv, ["Eq", "Ord"])].  Empty when no constraints.
         type_param_constraints: Vec<(String, TypeVar, Vec<String>)>,
-        params: Vec<(String, Option<Type>)>,
+        params: Vec<Param>,
         /// Default values for parameters. Same length as `params`;
         /// `Some(expr)` when a default is declared (`name: Type = expr`),
         /// `None` when the parameter is required.
         default_values: Vec<Option<Expr>>,
         /// `using` parameters: filled from `given` bindings in the caller's scope.
-        using_params: Vec<(String, Option<Type>)>,
+        using_params: Vec<Param>,
         ret_type: Option<Type>,
         error_type: Option<Type>,
         effect: Option<EffectRow>,
@@ -573,7 +601,7 @@ pub enum Decl {
         /// Compile-time backend selection. `None` means use the CLI default.
         backend: Option<ActorBackendKind>,
         /// Optional initializer block: `initial name(params) { body }`.
-        initializer: Option<(String, Vec<(String, Option<Type>)>, Expr)>,
+        initializer: Option<(String, Vec<Param>, Expr)>,
         /// Entity schema version (defaults to 1).  Used by migration contracts
         /// (RFC 0008) to track schema evolution.
         version: u32,
@@ -1078,7 +1106,7 @@ mod tests {
     fn test_behavior_new() {
         let b = Behavior {
             name: "handle_msg".to_string(),
-            params: vec![("x".to_string(), Some(Type::int()))],
+            params: vec![Param::new("x", Some(Type::int()))],
             body: Expr::Literal(Literal::Unit, Span::default()),
             effect: Some(EffectRow::empty()),
             cap: Capability::Val,
@@ -1086,8 +1114,8 @@ mod tests {
         };
         assert_eq!(b.name, "handle_msg");
         assert_eq!(b.params.len(), 1);
-        assert_eq!(b.params[0].0, "x");
-        assert_eq!(b.params[0].1, Some(Type::int()));
+        assert_eq!(b.params[0].name, "x");
+        assert_eq!(b.params[0].ty, Some(Type::int()));
         assert_eq!(b.effect, Some(EffectRow::empty()));
         assert_eq!(b.cap, Capability::Val);
     }
@@ -1124,7 +1152,7 @@ mod tests {
         let events = vec![
             StateMachineEvent {
                 name: "connect".to_string(),
-                params: vec![("address".to_string(), None)],
+                params: vec![Param::new("address", None)],
                 target: "Connecting".to_string(),
                 span: sp,
             },
@@ -1167,7 +1195,7 @@ mod tests {
         // One behavior per event, preserving names and params.
         assert_eq!(behaviors.len(), 2);
         assert_eq!(behaviors[0].name, "connect");
-        assert_eq!(behaviors[0].params, vec![("address".to_string(), None)]);
+        assert_eq!(behaviors[0].params, vec![Param::new("address", None)]);
         assert_eq!(behaviors[1].name, "disconnect");
         // Behavior body: [exit-hook ifs.., assign target, entry hook?, nil].
         let Expr::Block { exprs, .. } = &behaviors[0].body else {

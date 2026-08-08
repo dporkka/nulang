@@ -127,9 +127,9 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
         }
         Expr::Lambda { params, body, .. } => {
             let mut new_bound = bound.clone();
-            for (p, _) in params {
-                if !new_bound.contains(p) {
-                    new_bound.push(p.clone());
+            for p in params {
+                if !new_bound.contains(&p.name) {
+                    new_bound.push(p.name.clone());
                 }
             }
             free_vars(body, &mut new_bound, acc);
@@ -161,9 +161,9 @@ fn free_vars(expr: &Expr, bound: &mut Vec<String>, acc: &mut Vec<String>) {
             if !new_bound.contains(name) {
                 new_bound.push(name.clone());
             }
-            for (p, _) in params {
-                if !new_bound.contains(p) {
-                    new_bound.push(p.clone());
+            for p in params {
+                if !new_bound.contains(&p.name) {
+                    new_bound.push(p.name.clone());
                 }
             }
             free_vars(value, &mut new_bound, acc);
@@ -485,7 +485,7 @@ impl EffectChecker {
                 ..
             } => {
                 let base = self.shadowed.len();
-                self.shadowed.extend(params.iter().map(|(n, _)| n.clone()));
+                self.shadowed.extend(params.iter().map(|p| p.name.clone()));
                 let result = if let Some(ann) = effect {
                     let lambda_ctx = EffectContext::with_allowed(ann.clone());
                     self.check_effects(&lambda_ctx, body, ann)
@@ -1313,7 +1313,7 @@ impl CapabilityAnalyzer {
                 params, body, span, ..
             } => {
                 let mut free = Vec::new();
-                let mut bound: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                let mut bound: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                 free_vars(body, &mut bound, &mut free);
                 if free.is_empty() {
                     Ok(Capability::Val)
@@ -1418,7 +1418,7 @@ impl CapabilityAnalyzer {
                 // Recursive binding: we approximate the binding capability as
                 // the join of param capabilities (or Val if no params).
                 let mut rec_cap = Capability::Val;
-                for (_, _) in params {
+                for _ in params {
                     rec_cap = rec_cap.join(Capability::Val);
                 }
                 // `name` is bound in both the value and the body; apply the
@@ -2320,7 +2320,7 @@ mod tests {
         let mut checker = EffectChecker::new();
         let ctx = EffectContext::empty();
         let lam = Expr::Lambda {
-            params: vec![("x".to_string(), None)],
+            params: vec![Param::new("x", None)],
             ret_type: None,
             body: Box::new(Expr::Var("x".to_string(), s())),
             effect: None,
@@ -2577,7 +2577,7 @@ mod tests {
         let mut analyzer = CapabilityAnalyzer::new();
         let ctx = CapContext::new();
         let lam = Expr::Lambda {
-            params: vec![("x".to_string(), None)],
+            params: vec![Param::new("x", None)],
             ret_type: None,
             body: Box::new(Expr::Var("x".to_string(), s())),
             effect: None,
@@ -2592,7 +2592,7 @@ mod tests {
         let mut analyzer = CapabilityAnalyzer::new();
         let ctx = CapContext::new().with_binding("y", Capability::Ref);
         let lam = Expr::Lambda {
-            params: vec![("x".to_string(), None)],
+            params: vec![Param::new("x", None)],
             ret_type: None,
             body: Box::new(Expr::Binary {
                 op: BinOp::Add,
@@ -2891,7 +2891,7 @@ mod tests {
         let mut checker = EffectChecker::new();
         let ctx = EffectContext::empty();
         let lam = Expr::Lambda {
-            params: vec![("x".to_string(), None)],
+            params: vec![Param::new("x", None)],
             ret_type: None,
             body: Box::new(Expr::Perform {
                 effect: "IO".to_string(),
@@ -2911,7 +2911,7 @@ mod tests {
         let mut checker = EffectChecker::new();
         let ctx = EffectContext::empty();
         let lam = Expr::Lambda {
-            params: vec![("x".to_string(), None)],
+            params: vec![Param::new("x", None)],
             ret_type: None,
             body: Box::new(Expr::Perform {
                 effect: "FS".to_string(),
@@ -3280,7 +3280,7 @@ mod tests {
         let mut analyzer = CapabilityAnalyzer::new();
         let ctx = CapContext::new().with_binding("x", Capability::LinearIso);
         let lam = Expr::Lambda {
-            params: vec![("y".to_string(), None)],
+            params: vec![Param::new("y", None)],
             ret_type: None,
             body: Box::new(lvar("x")),
             effect: None,

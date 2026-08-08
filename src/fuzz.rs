@@ -548,11 +548,55 @@ fn differential_fuzz_one(source: &str) -> Result<DiffOutcome, String> {
         },
         Err(_) => false,
     };
+    #[cfg(feature = "wasm-backend")]
+    let wasm_outcome = {
+        use crate::backends::WasmBackend;
+        let mut wasm_backend = crate::backends::DefaultWasmBackend;
+        match wasm_backend.compile(&mutant.mir_module, "main") {
+            Ok(wasm_bytes) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wasm_backend.run(&wasm_bytes))) {
+                Err(_) => return Err(format!("WASM run panicked on {:?}", source)),
+                Ok(Err(e)) => {
+                    let err_str = e.to_string();
+                    if err_str.contains("failed to compile") || 
+                       err_str.contains("failed to parse WebAssembly module") ||
+                       err_str.contains("failed to find function export `nulang_init`") {
+                        false
+                    } else {
+                        let wasm_key: Result<String, String> =
+                            Err(normalize_error(&format!("runtime error: {}", err_str)));
+                        if wasm_key != cold_key {
+                            return Err(format!(
+                                "interpreter/WASM divergence on {:?}: interp={:?} wasm={:?}",
+                                source, cold_key, wasm_key
+                            ));
+                        }
+                        true
+                    }
+                }
+                Ok(Ok(wasm_value)) => {
+                    if !is_safely_comparable(wasm_value) {
+                        false
+                    } else {
+                        let wasm_key: Result<String, String> = Ok(wasm_value.to_string_repr());
+                        if wasm_key != cold_key {
+                            return Err(format!(
+                                "interpreter/WASM divergence on {:?}: interp={:?} wasm={:?}",
+                                source, cold_key, wasm_key
+                            ));
+                        }
+                        true
+                    }
+                }
+            },
+            Err(_) => false,
+        }
+    };
+    #[cfg(not(feature = "wasm-backend"))]
+    let wasm_outcome = false;
 
-    Ok(if aot_outcome {
-        DiffOutcome::AllAgreed
-    } else {
-        DiffOutcome::InterpJitOnlyAgreed
+    Ok(DiffOutcome::Agreed {
+        aot: aot_outcome,
+        wasm: wasm_outcome,
     })
 }
 
@@ -561,11 +605,8 @@ fn differential_fuzz_one(source: &str) -> Result<DiffOutcome, String> {
 enum DiffOutcome {
     /// Mutant didn't compile to bytecode — nothing to differentially run.
     NothingToCompile,
-    /// Interpreter and JIT agreed; AOT rejected the program (expected for
-    /// effectful/actor programs) so wasn't compared.
-    InterpJitOnlyAgreed,
-    /// Interpreter, JIT, and AOT all agreed.
-    AllAgreed,
+    /// Interpreter, JIT, and optionally AOT/WASM agreed.
+    Agreed { aot: bool, wasm: bool },
     /// Result has no stable identity across independent runs (closure,
     /// actor ref, ...) — not compared, not counted as agreement.
     Uncomparable,
@@ -601,6 +642,7 @@ mod tests {
         let mut divergences: Vec<String> = Vec::new();
         let mut compiled = 0usize;
         let mut aot_agreed = 0usize;
+        let mut wasm_agreed = 0usize;
         let mut uncomparable = 0usize;
 
         for _ in 0..300 {
@@ -609,10 +651,10 @@ mod tests {
             match differential_fuzz_one(&mutant) {
                 Ok(DiffOutcome::NothingToCompile) => {}
                 Ok(DiffOutcome::Uncomparable) => uncomparable += 1,
-                Ok(DiffOutcome::InterpJitOnlyAgreed) => compiled += 1,
-                Ok(DiffOutcome::AllAgreed) => {
+                Ok(DiffOutcome::Agreed { aot, wasm }) => {
                     compiled += 1;
-                    aot_agreed += 1;
+                    if aot { aot_agreed += 1; }
+                    if wasm { wasm_agreed += 1; }
                 }
                 Err(msg) => {
                     divergences.push(msg);
@@ -625,8 +667,8 @@ mod tests {
 
         eprintln!(
             "differential fuzz: {} mutants compiled and ran (agreed), {} of those also agreed \
-             under AOT, {} uncomparable (closures/actor refs)",
-            compiled, aot_agreed, uncomparable
+             under AOT, {} agreed under WASM, {} uncomparable (closures/actor refs)",
+            compiled, aot_agreed, wasm_agreed, uncomparable
         );
 
         if !divergences.is_empty() {
@@ -672,6 +714,7 @@ mod tests {
         let mut divergence_count = 0usize;
         let mut compiled = 0usize;
         let mut aot_agreed = 0usize;
+        let mut wasm_agreed = 0usize;
         let mut uncomparable = 0usize;
 
         for _ in 0..iterations {
@@ -680,10 +723,10 @@ mod tests {
             match differential_fuzz_one(&mutant) {
                 Ok(DiffOutcome::NothingToCompile) => {}
                 Ok(DiffOutcome::Uncomparable) => uncomparable += 1,
-                Ok(DiffOutcome::InterpJitOnlyAgreed) => compiled += 1,
-                Ok(DiffOutcome::AllAgreed) => {
+                Ok(DiffOutcome::Agreed { aot, wasm }) => {
                     compiled += 1;
-                    aot_agreed += 1;
+                    if aot { aot_agreed += 1; }
+                    if wasm { wasm_agreed += 1; }
                 }
                 Err(msg) => {
                     divergence_count += 1;
@@ -697,8 +740,8 @@ mod tests {
 
         eprintln!(
             "differential fuzz (extended): {} mutants compiled and ran (agreed), {} of those \
-             also agreed under AOT, {} uncomparable (closures/actor refs)",
-            compiled, aot_agreed, uncomparable
+             also agreed under AOT, {} agreed under WASM, {} uncomparable (closures/actor refs)",
+            compiled, aot_agreed, wasm_agreed, uncomparable
         );
 
         if divergence_count > 0 {

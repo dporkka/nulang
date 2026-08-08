@@ -43,7 +43,7 @@ pub fn lower_module(ast: &ast::AstModule) -> hir::Module {
             if !using_params.is_empty() {
                 fn_using.insert(
                     name.clone(),
-                    using_params.iter().map(|(n, _)| n.clone()).collect(),
+                    using_params.iter().map(|p| p.name.clone()).collect(),
                 );
             }
             if !type_param_constraints.is_empty() {
@@ -100,9 +100,9 @@ fn collect_tool_schemas_into(decls: &[Decl], tools: &mut Vec<ToolSchema>) {
                 {
                     let mut typed_params = Vec::with_capacity(params.len());
                     let mut all_typed = true;
-                    for (param_name, param_ty) in params {
-                        if let Some(ty) = param_ty {
-                            typed_params.push((param_name.clone(), ty.clone()));
+                    for p in params {
+                        if let Some(ty) = &p.ty {
+                            typed_params.push((p.name.clone(), ty.clone()));
                         } else {
                             all_typed = false;
                             break;
@@ -147,10 +147,10 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
         } => {
             let mut all_params: Vec<(String, Type)> = params
                 .iter()
-                .map(|(n, t)| (n.clone(), resolve_type(t)))
+                .map(|p| (p.name.clone(), resolve_type(&p.ty)))
                 .collect();
-            for (n, t) in using_params {
-                all_params.push((n.clone(), resolve_type(t)));
+            for p in using_params {
+                all_params.push((p.name.clone(), resolve_type(&p.ty)));
             }
             // Build implicit dictionary parameters from typeclass constraints.
             let dict_param_names: Vec<String> = type_param_constraints
@@ -362,10 +362,14 @@ fn lower_decl(decl: &Decl, tools: &[ToolSchema]) -> hir::Decl {
             let mut body = hir::Body::new();
             let mut fields: Vec<(String, hir::Operand)> = Vec::new();
             for method in methods {
-                let lambda_params: Vec<(String, Option<Type>)> = method
+                let lambda_params: Vec<crate::ast::Param> = method
                     .params
                     .iter()
-                    .map(|(n, t)| (n.clone(), Some(t.clone())))
+                    .map(|(n, t)| crate::ast::Param {
+                        name: n.clone(),
+                        ty: Some(t.clone()),
+                        cap: None,
+                    })
                     .collect();
                 let lambda = Expr::Lambda {
                     params: lambda_params,
@@ -462,7 +466,7 @@ fn lower_behavior(b: &ast::Behavior, apply_handlers: &[ast::ApplyHandler]) -> hi
         params: b
             .params
             .iter()
-            .map(|(n, t)| (n.clone(), resolve_type(t)))
+            .map(|p| (p.name.clone(), resolve_type(&p.ty)))
             .collect(),
         ret: Type::unit(),
         effect: b.effect.clone().unwrap_or_else(EffectRow::empty),
@@ -483,7 +487,11 @@ fn placeholder_behavior(name: &str, params: Vec<(&str, Type)>, span: Span) -> as
         name: name.to_string(),
         params: params
             .into_iter()
-            .map(|(n, t)| (n.to_string(), Some(t)))
+            .map(|(n, t)| crate::ast::Param {
+                name: n.to_string(),
+                ty: Some(t),
+                cap: None,
+            })
             .collect(),
         body: Expr::Literal(Literal::Unit, span),
         effect: None,
@@ -678,7 +686,11 @@ fn desugar_agent(
     // Generated ask behavior reads agent state and performs the LLM ask.
     let ask_behavior = ast::Behavior {
         name: "ask".to_string(),
-        params: vec![("prompt".to_string(), Some(str_ty.clone()))],
+        params: vec![crate::ast::Param {
+            name: "prompt".to_string(),
+            ty: Some(str_ty.clone()),
+            cap: None,
+        }],
         body: Expr::Block {
             exprs: vec![
                 Expr::FieldAccess {
@@ -1056,7 +1068,7 @@ fn lower_let_chain(first_body: &Expr, body: &mut hir::Body) -> hir::Operand {
                                 name: name.clone(),
                                 params: params
                                     .iter()
-                                    .map(|(n, t)| (n.clone(), resolve_type(t)))
+                                    .map(|p| (p.name.clone(), resolve_type(&p.ty)))
                                     .collect(),
                                 body: Box::new(func_body),
                                 ty: Type::unit(),
@@ -1130,7 +1142,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                 value: hir::RValue::Closure {
                     params: params
                         .iter()
-                        .map(|(n, t)| (n.clone(), resolve_type(t)))
+                        .map(|p| (p.name.clone(), resolve_type(&p.ty)))
                         .collect(),
                     body: Box::new(lambda_body),
                     captures,
@@ -1323,7 +1335,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                                 name: name.clone(),
                                 params: params
                                     .iter()
-                                    .map(|(n, t)| (n.clone(), resolve_type(t)))
+                                    .map(|p| (p.name.clone(), resolve_type(&p.ty)))
                                     .collect(),
                                 body: Box::new(func_body),
                                 ty: Type::unit(),
@@ -1376,7 +1388,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                                 name: name.clone(),
                                 params: params
                                     .iter()
-                                    .map(|(n, t)| (n.clone(), resolve_type(t)))
+                                    .map(|p| (p.name.clone(), resolve_type(&p.ty)))
                                     .collect(),
                                 body: Box::new(func_body),
                                 ty: Type::unit(),
@@ -1409,7 +1421,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                     name: name.clone(),
                     params: params
                         .iter()
-                        .map(|(n, t)| (n.clone(), resolve_type(t)))
+                        .map(|p| (p.name.clone(), resolve_type(&p.ty)))
                         .collect(),
                     body: Box::new(func_body),
                     ty: Type::unit(),
@@ -2030,8 +2042,8 @@ fn lower_place(expr: &Expr, body: &mut hir::Body) -> hir::Place {
 
 /// Free variables of a lambda (candidates for capture). The MIR lowering
 /// filters this against what is actually in scope.
-fn lambda_captures(params: &[(String, Option<Type>)], body: &Expr) -> Vec<String> {
-    let bound: std::collections::HashSet<String> = params.iter().map(|(n, _)| n.clone()).collect();
+fn lambda_captures(params: &[crate::ast::Param], body: &Expr) -> Vec<String> {
+    let bound: std::collections::HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
     let mut free = std::collections::HashSet::new();
     free_vars(body, &bound, &mut free);
     let mut captures: Vec<String> = free.into_iter().collect();
@@ -2040,7 +2052,7 @@ fn lambda_captures(params: &[(String, Option<Type>)], body: &Expr) -> Vec<String
 }
 
 /// Does a let-bound lambda reference its own binding name?
-fn lambda_references(name: &str, params: &[(String, Option<Type>)], body: &Expr) -> bool {
+fn lambda_references(name: &str, params: &[crate::ast::Param], body: &Expr) -> bool {
     lambda_captures(params, body).iter().any(|c| c == name)
 }
 
@@ -2409,7 +2421,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Pattern;
+    use crate::ast::{Param, Pattern};
 
     #[test]
     fn test_lower_literal() {
@@ -2649,7 +2661,7 @@ mod tests {
                 events: vec![
                     ast::StateMachineEvent {
                         name: "connect".to_string(),
-                        params: vec![("address".to_string(), None)],
+                        params: vec![Param::new("address", None)],
                         target: "Connected".to_string(),
                         span: sp,
                     },
@@ -2735,8 +2747,8 @@ fn free_vars(
         Expr::Var(_, _) => {}
         Expr::Lambda { params, body, .. } => {
             let mut new_bound = bound.clone();
-            for (p, _) in params {
-                new_bound.insert(p.clone());
+            for p in params {
+                new_bound.insert(p.name.clone());
             }
             free_vars(body, &new_bound, acc);
         }
@@ -2763,8 +2775,8 @@ fn free_vars(
         } => {
             let mut value_bound = bound.clone();
             value_bound.insert(name.clone());
-            for (p, _) in params {
-                value_bound.insert(p.clone());
+            for p in params {
+                value_bound.insert(p.name.clone());
             }
             free_vars(value, &value_bound, acc);
             let mut body_bound = bound.clone();

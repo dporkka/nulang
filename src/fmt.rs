@@ -110,7 +110,9 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
             ..
         } => {
             out.push_str(&format!("{}fn {}(", sp, name));
-            for (i, (pn, pty)) in params.iter().enumerate() {
+            for (i, p) in params.iter().enumerate() {
+                let pn = &p.name;
+                let pty = &p.ty;
                 if i > 0 {
                     out.push_str(", ");
                 }
@@ -185,12 +187,12 @@ fn fmt_decl(out: &mut String, decl: &Decl, indent: usize, had_unhandled: &mut bo
                     out.push('\n');
                 }
                 out.push_str(&format!("{}    behavior {}(", sp, b.name));
-                for (j, (pn, pty)) in b.params.iter().enumerate() {
+                for (j, p) in b.params.iter().enumerate() {
                     if j > 0 {
                         out.push_str(", ");
                     }
-                    out.push_str(pn);
-                    if let Some(t) = pty {
+                    out.push_str(&p.name);
+                    if let Some(t) = &p.ty {
                         out.push_str(&format!(": {}", fmt_type(t)));
                     }
                 }
@@ -256,7 +258,9 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bo
         }
         Expr::Lambda { params, body, .. } => {
             out.push_str("fn(");
-            for (i, (pn, _)) in params.iter().enumerate() {
+            for (i, p) in params.iter().enumerate() {
+                let pn = &p.name;
+                let _ = &p.ty;
                 if i > 0 {
                     out.push_str(", ");
                 }
@@ -424,7 +428,9 @@ fn fmt_expr(out: &mut String, expr: &Expr, indent: usize, had_unhandled: &mut bo
             ..
         } => {
             out.push_str(&format!("let rec {}(", name));
-            for (i, (pn, _)) in params.iter().enumerate() {
+            for (i, p) in params.iter().enumerate() {
+                let pn = &p.name;
+                let _ = &p.ty;
                 if i > 0 {
                     out.push_str(", ");
                 }

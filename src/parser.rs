@@ -240,12 +240,12 @@ impl Parser {
                             if !additional_arms.is_empty() {
                                 // Build catch-all arm from first clause's params and body
                                 let catch_all_pat = if canonical_params.len() == 1 {
-                                    Pattern::Var(canonical_params[0].0.clone())
+                                    Pattern::Var(canonical_params[0].name.clone())
                                 } else {
                                     Pattern::Tuple(
                                         canonical_params
                                             .iter()
-                                            .map(|(pname, _)| Pattern::Var(pname.clone()))
+                                            .map(|p| Pattern::Var(p.name.clone()))
                                             .collect(),
                                     )
                                 };
@@ -254,14 +254,12 @@ impl Parser {
 
                                 // Build scrutinee
                                 let scrutinee = if canonical_params.len() == 1 {
-                                    Expr::Var(canonical_params[0].0.clone(), Span::default())
+                                    Expr::Var(canonical_params[0].name.clone(), Span::default())
                                 } else {
                                     Expr::Tuple(
                                         canonical_params
                                             .iter()
-                                            .map(|(pname, _)| {
-                                                Expr::Var(pname.clone(), Span::default())
-                                            })
+                                            .map(|p| Expr::Var(p.name.clone(), Span::default()))
                                             .collect(),
                                         Span::default(),
                                     )
@@ -665,7 +663,7 @@ impl Parser {
 
         let mut state_fields = Vec::new();
         let mut behaviors = Vec::new();
-        let mut initializer: Option<(String, Vec<(String, Option<Type>)>, Expr)> = None;
+        let mut initializer: Option<(String, Vec<crate::ast::Param>, Expr)> = None;
         let mut version: u32 = 1;
         let mut events: Vec<crate::ast::EventDecl> = Vec::new();
         let mut apply_handlers: Vec<crate::ast::ApplyHandler> = Vec::new();
@@ -1968,7 +1966,7 @@ impl Parser {
             };
             let typed_params: Vec<(String, Type)> = params
                 .iter()
-                .map(|(n, t)| (n.clone(), t.clone().unwrap_or(Type::unit())))
+                .map(|p| (p.name.clone(), p.ty.clone().unwrap_or(Type::unit())))
                 .collect();
             methods.push(ClassMethod {
                 name: method_name,
@@ -2019,7 +2017,7 @@ impl Parser {
             let body = self.parse_expr()?;
             let typed_params: Vec<(String, Type)> = params
                 .iter()
-                .map(|(n, t)| (n.clone(), t.clone().unwrap_or(Type::unit())))
+                .map(|p| (p.name.clone(), p.ty.clone().unwrap_or(Type::unit())))
                 .collect();
             methods.push(ImplMethod {
                 name: method_name,
@@ -2174,14 +2172,14 @@ impl Parser {
 
             // Extern parameters must have explicit types.
             let mut params = Vec::new();
-            for (param_name, param_ty) in raw_params {
-                match param_ty {
-                    Some(ty) => params.push((param_name, ty)),
+            for p in raw_params {
+                match p.ty {
+                    Some(ty) => params.push((p.name, ty)),
                     None => {
                         return Err(NuError::parse_error(
                             format!(
                                 "Extern function '{}' parameter '{}' requires an explicit type",
-                                name, param_name
+                                name, p.name
                             ),
                             func_span,
                         ))
@@ -5332,17 +5330,43 @@ impl Parser {
         Ok((names, constraints))
     }
 
-    fn parse_params(&mut self) -> NuResult<Vec<(String, Option<Type>)>> {
+    fn try_parse_param_capability(&mut self) -> NuResult<Option<Capability>> {
+        let kind = self.peek_kind().clone();
+        let cap = match &kind {
+            TokenKind::Iso => Some(Capability::Iso),
+            TokenKind::Trn => Some(Capability::Trn),
+            TokenKind::Ref => Some(Capability::Ref),
+            TokenKind::Val => Some(Capability::Val),
+            TokenKind::Box => Some(Capability::Box),
+            TokenKind::Tag => Some(Capability::Tag),
+            TokenKind::LinearIso => Some(Capability::LinearIso),
+            TokenKind::Linear => Some(Capability::Linear),
+            _ => None,
+        };
+        if cap.is_some() {
+            self.advance();
+            if !matches!(self.peek_kind(), TokenKind::Ident(_)) {
+                return Err(NuError::parse_error(
+                    "capability annotation must be followed by a parameter name".to_string(),
+                    self.current_span(),
+                ));
+            }
+        }
+        Ok(cap)
+    }
+
+    fn parse_params(&mut self) -> NuResult<Vec<crate::ast::Param>> {
         let mut params = Vec::new();
         self.skip_newlines();
         while self.peek_kind() != &TokenKind::RParen && !self.is_at_end() {
+            let cap = self.try_parse_param_capability().unwrap_or(None);
             let name = self.expect_ident("parameter name")?;
             let ty = if self.consume_if(&TokenKind::Colon) {
                 Some(self.parse_type()?)
             } else {
                 None
             };
-            params.push((name, ty));
+            params.push(crate::ast::Param { name, ty, cap });
             self.skip_newlines();
             if !self.consume_if(&TokenKind::Comma) {
                 break;
@@ -5356,11 +5380,12 @@ impl Parser {
     /// Returns params and a parallel vec of default expressions (None = required).
     fn parse_params_with_defaults(
         &mut self,
-    ) -> NuResult<(Vec<(String, Option<Type>)>, Vec<Option<Expr>>)> {
+    ) -> NuResult<(Vec<crate::ast::Param>, Vec<Option<Expr>>)> {
         let mut params = Vec::new();
         let mut defaults = Vec::new();
         self.skip_newlines();
         while self.peek_kind() != &TokenKind::RParen && !self.is_at_end() {
+            let cap = self.try_parse_param_capability().unwrap_or(None);
             let name = self.expect_ident("parameter name")?;
             let ty = if self.consume_if(&TokenKind::Colon) {
                 Some(self.parse_type()?)
@@ -5372,7 +5397,7 @@ impl Parser {
             } else {
                 None
             };
-            params.push((name, ty));
+            params.push(crate::ast::Param { name, ty, cap });
             defaults.push(default);
             self.skip_newlines();
             if !self.consume_if(&TokenKind::Comma) {
@@ -5385,10 +5410,11 @@ impl Parser {
 
     /// Parse method parameters for class/impl methods. Accepts `self` keyword
     /// as a parameter name in addition to regular identifiers.
-    fn parse_method_params(&mut self) -> NuResult<Vec<(String, Option<Type>)>> {
+    fn parse_method_params(&mut self) -> NuResult<Vec<crate::ast::Param>> {
         let mut params = Vec::new();
         self.skip_newlines();
         while self.peek_kind() != &TokenKind::RParen && !self.is_at_end() {
+            let cap = self.try_parse_param_capability().unwrap_or(None);
             let name = match self.peek_kind() {
                 TokenKind::SelfKw => {
                     self.advance();
@@ -5401,7 +5427,7 @@ impl Parser {
             } else {
                 None
             };
-            params.push((name, ty));
+            params.push(crate::ast::Param { name, ty, cap });
             self.skip_newlines();
             if !self.consume_if(&TokenKind::Comma) {
                 break;
@@ -5554,7 +5580,7 @@ mod tests {
         let ast = parse("fn f(x: Nil) x").unwrap();
         match &ast.decls[0] {
             Decl::Function { params, .. } => {
-                assert_eq!(params[0].1, Some(Type::Primitive(PrimitiveType::Nil)));
+                assert_eq!(params[0].ty, Some(Type::Primitive(PrimitiveType::Nil)));
             }
             _ => panic!("Expected function declaration"),
         }
@@ -5580,7 +5606,7 @@ mod tests {
         let ast = parse("type alias MyInt = Int\nfn f(x: MyInt) x").unwrap();
         match &ast.decls[1] {
             Decl::Function { params, .. } => {
-                assert_eq!(params[0].1, Some(Type::Primitive(PrimitiveType::Int)));
+                assert_eq!(params[0].ty, Some(Type::Primitive(PrimitiveType::Int)));
             }
             _ => panic!("Expected function declaration"),
         }
@@ -5591,7 +5617,7 @@ mod tests {
         // `Option[Int]` expands to the variant structure with `T := Int`.
         let ast = parse("type Option[T] = Some(T) | None\nfn f(x: Option[Int]) x").unwrap();
         match &ast.decls[1] {
-            Decl::Function { params, .. } => match &params[0].1 {
+            Decl::Function { params, .. } => match &params[0].ty {
                 Some(Type::Variant(variants)) => {
                     assert_eq!(variants.len(), 2);
                     assert_eq!(variants[0].0, "Some");
@@ -5629,7 +5655,7 @@ mod tests {
         )
         .unwrap();
         match &ast.decls[1] {
-            Decl::Function { params, .. } => match &params[0].1 {
+            Decl::Function { params, .. } => match &params[0].ty {
                 Some(Type::Variant(variants)) => {
                     assert_eq!(variants.len(), 2);
                     assert_eq!(variants[0].0, "Some");
@@ -5646,7 +5672,7 @@ mod tests {
             _ => panic!("Expected function declaration"),
         }
         match &ast.decls[2] {
-            Decl::Function { params, .. } => match &params[0].1 {
+            Decl::Function { params, .. } => match &params[0].ty {
                 Some(Type::Variant(variants)) => {
                     assert_eq!(
                         variants[0].1,
@@ -5973,7 +5999,7 @@ mod tests {
                     initializer.as_ref().expect("should have initializer");
                 assert_eq!(init_name, "init");
                 assert_eq!(params.len(), 1);
-                assert_eq!(params[0].0, "start_val");
+                assert_eq!(params[0].name, "start_val");
             }
             _ => panic!("Expected actor declaration"),
         }
@@ -6763,7 +6789,14 @@ mod tests {
                 assert_eq!(states, &["Closed", "Connecting", "Connected"]);
                 assert_eq!(events.len(), 3);
                 assert_eq!(events[0].name, "connect");
-                assert_eq!(events[0].params, vec![("address".to_string(), None)]);
+                assert_eq!(
+                    events[0].params,
+                    vec![Param {
+                        name: "address".to_string(),
+                        ty: None,
+                        cap: None
+                    }]
+                );
                 assert_eq!(events[0].target, "Connecting");
                 assert_eq!(events[1].name, "connection_established");
                 assert!(events[1].params.is_empty());
@@ -6795,8 +6828,8 @@ mod tests {
                 assert_eq!(
                     events[0].params,
                     vec![
-                        ("x".to_string(), Some(Type::int())),
-                        ("y".to_string(), Some(Type::string())),
+                        Param::new("x", Some(Type::int())),
+                        Param::new("y", Some(Type::string())),
                     ]
                 );
             }

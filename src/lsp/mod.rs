@@ -672,11 +672,11 @@ impl NulangLanguageServer {
                 if name == word {
                     let p = params
                         .iter()
-                        .map(|(n, t)| {
+                        .map(|p| {
                             format!(
                                 "{}: {}",
-                                n,
-                                t.as_ref()
+                                p.name,
+                                p.ty.as_ref()
                                     .map(|ty| format!("{:?}", ty))
                                     .unwrap_or_else(|| "?".into())
                             )
@@ -1146,10 +1146,10 @@ impl NulangLanguageServer {
                         name,
                         params
                             .iter()
-                            .map(|(n, t)| format!(
+                            .map(|p| format!(
                                 "{}: {}",
-                                n,
-                                t.as_ref()
+                                p.name,
+                                p.ty.as_ref()
                                     .map(|ty| format!("{:?}", ty))
                                     .unwrap_or_else(|| "?".into())
                             ))
@@ -2254,7 +2254,9 @@ impl<'a> InlayHintEngine<'a> {
                     let source_line = self.source.lines().nth(line as usize).unwrap_or("");
                     if let Some(lparen) = source_line.find('(') {
                         let mut col = (lparen + 1) as u32;
-                        for (i, (pname, ptype_ann)) in params.iter().enumerate() {
+                        for (i, p) in params.iter().enumerate() {
+                            let pname = &p.name;
+                            let ptype_ann = &p.ty;
                             let pname_len = pname.len() as u32;
                             if ptype_ann.is_none() && i < param_types.len() {
                                 annotations.push(TypeAnnotation {
@@ -2463,7 +2465,7 @@ impl<'a> CompletionEngine<'a> {
             match decl {
                 crate::ast::Decl::Function { name, params, .. } => {
                     self.function_names.push(name.clone());
-                    let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                    let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                     self.function_params.push((name.clone(), param_names));
                 }
                 crate::ast::Decl::Actor {
@@ -2479,7 +2481,7 @@ impl<'a> CompletionEngine<'a> {
                     for b in behaviors {
                         self.function_names.push(b.name.clone());
                         let bparams: Vec<String> =
-                            b.params.iter().map(|(n, _)| n.clone()).collect();
+                            b.params.iter().map(|p| p.name.clone()).collect();
                         self.behavior_params.push((b.name.clone(), bparams));
                     }
                 }

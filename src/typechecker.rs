@@ -54,7 +54,7 @@ pub(crate) fn apply_subst(ty: &Type, subst: &Substitution) -> Type {
         Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| apply_subst(t, subst)).collect()),
         Type::Record(fs) => Type::Record(
             fs.iter()
-                .map(|(name, t)| (name.clone(), apply_subst(t, subst)))
+                .map(|(n, t)| (n.clone(), apply_subst(t, subst)))
                 .collect(),
         ),
         Type::Variant(vs) => Type::Variant(
@@ -960,7 +960,7 @@ impl TypeChecker {
                     if !using_params.is_empty() {
                         self.fn_using_params.insert(
                             name.clone(),
-                            using_params.iter().map(|(n, _)| n.clone()).collect(),
+                            using_params.iter().map(|p| p.name.clone()).collect(),
                         );
                     }
                     self.inferred_decl_types
@@ -1170,11 +1170,12 @@ impl TypeChecker {
                 if let Some(rt) = &ret_type {
                     collect_vars(rt);
                 }
-                for (_, param_ty) in params {
-                    if let Some(t) = param_ty {
+                for p in params {
+                    if let Some(t) = &p.ty {
                         collect_vars(t);
                     }
                 }
+
                 let subst_skolem = |ty: &Type| -> Type { subst_type_vars_with(ty, &skolem_map) };
 
                 /// Collect all type variables from a function signature type into the
@@ -1214,14 +1215,16 @@ impl TypeChecker {
                 // Skolemize the declared return type (if any).
                 let ret_type: Option<Type> = ret_type.map(|rt| subst_skolem(&rt));
                 let mut param_types = vec![];
-                for (_param_name, param_ty) in params {
+                for p in params {
+                    let param_ty = &p.ty;
                     let pty = match param_ty {
                         Some(t) => subst_skolem(t),
                         None => Type::Var(TypeVar::fresh()),
                     };
                     param_types.push(pty);
                 }
-                for (_using_name, using_ty) in using_params {
+                for p in using_params {
+                    let using_ty = &p.ty;
                     let uty = match using_ty {
                         Some(t) => t.clone(),
                         None => Type::Var(TypeVar::fresh()),
@@ -1251,15 +1254,15 @@ impl TypeChecker {
                 // Bind the function name so recursive calls resolve.
                 new_ctx.bind(name.clone(), recursive_func_ty, Capability::Ref, false);
                 // Bind parameters
-                for (param_name, pty) in params.iter().zip(param_types.iter()) {
-                    new_ctx.bind(param_name.0.clone(), pty.clone(), Capability::Ref, false);
+                for (p, pty) in params.iter().zip(param_types.iter()) {
+                    new_ctx.bind(p.name.clone(), pty.clone(), Capability::Ref, false);
                 }
-                for (using_name, using_ty) in using_params {
-                    let uty = match using_ty {
+                for up in using_params {
+                    let uty = match &up.ty {
                         Some(t) => t.clone(),
                         None => Type::Var(TypeVar::fresh()),
                     };
-                    new_ctx.bind(using_name.clone(), uty, Capability::Ref, false);
+                    new_ctx.bind(up.name.clone(), uty, Capability::Ref, false);
                 }
 
                 // Inject typeclass constraints from type parameter annotations
@@ -1899,19 +1902,19 @@ impl TypeChecker {
     fn infer_lambda(
         &mut self,
         ctx: &TypeContext,
-        params: &[(String, Option<Type>)],
+        params: &[crate::ast::Param],
         body: &Expr,
         effect: Option<&EffectRow>,
         _span: Span,
     ) -> NuResult<(Substitution, Type)> {
         let mut new_ctx = ctx.clone();
         let mut param_types = vec![];
-        for (param_name, param_ty) in params {
-            let pty = match param_ty {
+        for p in params {
+            let pty = match &p.ty {
                 Some(t) => t.clone(),
                 None => Type::Var(TypeVar::fresh()),
             };
-            new_ctx.bind(param_name.clone(), pty.clone(), Capability::Ref, false);
+            new_ctx.bind(p.name.clone(), pty.clone(), Capability::Ref, false);
             param_types.push(pty);
         }
 
@@ -2105,7 +2108,7 @@ impl TypeChecker {
         &mut self,
         ctx: &TypeContext,
         name: &str,
-        params: &[(String, Option<Type>)],
+        params: &[crate::ast::Param],
         value: &Expr,
         body: &Expr,
         _span: Span,
@@ -2117,12 +2120,12 @@ impl TypeChecker {
         // Infer the value with the recursive binding in scope
         let mut new_ctx = ctx_with_rec.clone();
         let mut param_types = vec![];
-        for (param_name, param_ty) in params {
-            let pty = match param_ty {
+        for p in params {
+            let pty = match &p.ty {
                 Some(t) => t.clone(),
                 None => Type::Var(TypeVar::fresh()),
             };
-            new_ctx.bind(param_name.clone(), pty.clone(), Capability::Ref, false);
+            new_ctx.bind(p.name.clone(), pty.clone(), Capability::Ref, false);
             param_types.push(pty);
         }
 
@@ -3105,12 +3108,12 @@ impl TypeChecker {
         for behavior in behaviors {
             let mut behavior_ctx = ctx.clone();
             let mut param_types = vec![];
-            for (param_name, param_ty) in &behavior.params {
-                let pty = match param_ty {
+            for p in &behavior.params {
+                let pty = match &p.ty {
                     Some(t) => t.clone(),
                     None => Type::Var(TypeVar::fresh()),
                 };
-                behavior_ctx.bind(param_name.clone(), pty.clone(), behavior.cap, false);
+                behavior_ctx.bind(p.name.clone(), pty.clone(), behavior.cap, false);
                 param_types.push(pty);
             }
             if !events.is_empty() {
@@ -3599,7 +3602,7 @@ mod tests {
     fn lambda(param: &str, body: Expr) -> Expr {
         Expr::Lambda {
             ret_type: None,
-            params: vec![(param.to_string(), None)],
+            params: vec![Param::new(param, None)],
             body: Box::new(body),
             effect: None,
             span: sp(),
@@ -4091,7 +4094,7 @@ mod tests {
         let body = var("x");
         let rec_expr = Expr::LetRec {
             name: "f".to_string(),
-            params: vec![("x".to_string(), None)],
+            params: vec![Param::new("x", None)],
             value: Box::new(body),
             body: Box::new(app(var("f"), int_lit(42))),
             span: sp(),
@@ -4337,7 +4340,7 @@ mod tests {
                 name: "add1".to_string(),
                 type_params: vec![],
                 type_param_constraints: vec![],
-                params: vec![("x".to_string(), Some(Type::int()))],
+                params: vec![Param::new("x", Some(Type::int()))],
                 default_values: vec![None],
                 using_params: vec![],
                 ret_type: Some(Type::int()),
@@ -4561,7 +4564,7 @@ mod tests {
         let ctx = TypeContext::new();
         let lam = Expr::Lambda {
             ret_type: None,
-            params: vec![("x".to_string(), Some(Type::int()))],
+            params: vec![Param::new("x", Some(Type::int()))],
             body: Box::new(var("x")),
             effect: Some(EffectRow::Closed(vec![Effect::IO])),
             span: sp(),
@@ -4584,7 +4587,7 @@ mod tests {
                 name: "io_fn".to_string(),
                 type_params: vec![],
                 type_param_constraints: vec![],
-                params: vec![("x".to_string(), Some(Type::int()))],
+                params: vec![Param::new("x", Some(Type::int()))],
                 default_values: vec![None],
                 using_params: vec![],
                 ret_type: Some(Type::int()),
