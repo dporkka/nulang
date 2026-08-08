@@ -1675,6 +1675,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
         Expr::Spawn {
             actor_type,
             init,
+            target_node,
             span,
             ..
         } => {
@@ -1683,6 +1684,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                 .iter()
                 .map(|(n, e)| (n.clone(), lower_expr(e, body)))
                 .collect();
+            let target_operand = target_node.as_ref().map(|e| lower_expr(e, body));
             let ty = Type::unit();
             let temp = fresh_temp_name();
             body.push(hir::Stmt::Let {
@@ -1691,6 +1693,7 @@ pub fn lower_expr(expr: &Expr, body: &mut hir::Body) -> hir::Operand {
                 value: hir::RValue::Spawn {
                     actor_type: name,
                     init: init_ops,
+                    target_node: target_operand,
                     ty: ty.clone(),
                 },
                 span: *span,

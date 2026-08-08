@@ -1331,7 +1331,10 @@ impl<'c> FnLowerer<'c> {
                 Ok(())
             }
             hir::RValue::Spawn {
-                actor_type, init, ..
+                actor_type,
+                init,
+                target_node,
+                ..
             } => {
                 let idx = self.ctx.spawn_behavior_idx(actor_type);
                 let init_rvs: Vec<(String, mir::RValue)> = init
@@ -1346,11 +1349,16 @@ impl<'c> FnLowerer<'c> {
                         }
                     })
                     .collect();
+                let target_local = target_node
+                    .as_ref()
+                    .map(|op| self.lower_operand(op))
+                    .transpose()?;
                 self.b.assign(
                     dst,
                     mir::RValue::Spawn {
                         behavior_idx: idx,
                         init: init_rvs,
+                        target_node: target_local,
                     },
                 );
                 Ok(())
