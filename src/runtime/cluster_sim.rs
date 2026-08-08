@@ -599,4 +599,91 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn test_rolling_restart_rejoins_cluster() {
+        // 5-node cluster. One node gets isolated (partition), downs
+        // itself, then is "restarted" by replacing its ClusterState with
+        // a fresh one at the same address. The fresh node must rejoin
+        // via the probe path and the mesh must re-converge.
+        let mut sim = SimCluster::new(&addrs(5, 10000), &static_quorum(5));
+        sim.run_to_healthy_mesh(200);
+        assert!(sim.mesh_healthy(), "mesh must converge before partition");
+
+        // Isolate node 0 (minority of 1): it downs itself.
+        for from in 1..5 {
+            sim.cut_link(0, from);
+            sim.cut_link(from, 0);
+        }
+        sim.run_rounds(100); // well past failure window
+        assert!(sim.is_down(0), "isolated node must down itself");
+        for i in 1..5 {
+            assert!(!sim.is_down(i), "majority must stay up");
+        }
+
+        // "Restart" node 0: replace its ClusterState with a fresh one at
+        // the same address (same NodeId). The old state is dropped; the
+        // new one joins the cluster via the seed mechanism.
+        let addr0 = sim.addrs[0];
+        let clock0 = sim.clocks[0].clone();
+        let mut fresh = ClusterState::new(NodeId::new(&addr0), addr0);
+        fresh.set_clock(clock0.clone());
+        assert!(fresh.apply_config(&static_quorum(5)));
+        // Join using the existing majority as seeds. Use handle_heartbeat
+        // instead of join_cluster so last_heartbeat is set via the virtual
+        // clock (self.now()), not Instant::now(). This keeps the fresh
+        // node's view time-synced with the rest of the simulation.
+        for i in 1..5 {
+            let seed_id = sim.id(i);
+            let seed_addr = sim.addrs[i];
+            fresh.handle_heartbeat(seed_id, seed_addr);
+        }
+        sim.nodes[0] = fresh;
+        // Heal all links
+        for from in 1..5 {
+            sim.heal_link(0, from);
+            sim.heal_link(from, 0);
+        }
+
+        // Advance and let probes fire. The restarted node should rejoin.
+        sim.run_rounds(200); // well past probe interval
+
+        assert!(!sim.is_down(0), "restarted node must rejoin");
+        assert!(sim.mesh_healthy(), "mesh must fully converge after restart");
+        for i in 0..5 {
+            assert_eq!(sim.status_of(0, i), Some(NodeStatus::Healthy));
+            assert_eq!(sim.status_of(i, 0), Some(NodeStatus::Healthy));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_quorum_holds_under_random_partitions_1000_seeds() {
+        // Higher-seed invariant sweep for CI: 1000 random directed cut
+        // sets on a 5-node mesh. Same invariant as the 50-seed test:
+        // the resolver must never down a node that still sees >= quorum
+        // reachable. Marked `#[ignore]` by default; run with
+        // `-- --ignored` in CI to hit the 10³ seeds/commit target.
+        let mut rng = crate::dst::DeterministicRng::new(1337);
+        for seed in 0..1000 {
+            let mut sim = SimCluster::new(&addrs(5, 10100), &static_quorum(5));
+            sim.run_to_healthy_mesh(200);
+            for from in 0..5 {
+                for to in 0..5 {
+                    if from != to && rng.next() % 4 == 0 {
+                        sim.cut_link(from, to);
+                    }
+                }
+            }
+            sim.run_rounds(100);
+            for i in 0..5 {
+                let reachable = sim.reachable_count(i);
+                if sim.is_down(i) {
+                    assert!(
+                        reachable < 3,
+                        "seed {seed}: node {i} downed with {reachable} reachable (>= quorum 3)"
+                    );
+                }
+            }
+        }
+    }
 }
