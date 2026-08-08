@@ -854,6 +854,11 @@ pub struct TypeChecker {
     /// Must not be generalized — they must stay identical across
     /// constructor instantiations for structural unification.
     pub rigid_vars: FxHashSet<TypeVar>,
+    /// When true, `check_module` continues past per-declaration type errors,
+    /// collecting them in `collected_errors` instead of aborting at the first.
+    pub collect_errors: bool,
+    /// Errors collected when `collect_errors` is set (empty otherwise).
+    pub collected_errors: Vec<crate::types::NuError>,
 }
 
 /// Pre-computed class and instance tables extracted from an AST module.
@@ -933,6 +938,8 @@ impl TypeChecker {
             given_bindings: FxHashMap::default(),
             fn_using_params: FxHashMap::default(),
             rigid_vars: FxHashSet::default(),
+            collect_errors: false,
+            collected_errors: Vec::new(),
         }
     }
 
@@ -950,7 +957,16 @@ impl TypeChecker {
         let mut ctx = TypeContext::new();
         let mut last_type = Type::unit();
         for decl in flatten_decls(&module.decls) {
-            let (s, ty) = self.infer_decl(&ctx, decl)?;
+            let (s, ty) = match self.infer_decl(&ctx, decl) {
+                Ok(ok) => ok,
+                Err(e) => {
+                    if self.collect_errors {
+                        self.collected_errors.push(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
             ctx = apply_subst_to_ctx(&ctx, &s);
             let final_ty = apply_subst(&ty, &s);
             match decl {

@@ -304,6 +304,7 @@ fn main() {
                 }
             }
             "-v" | "--verbose" => opts.verbose = true,
+            "--all-errors" => opts.all_errors = true,
             "--metrics-port" => {
                 if i + 1 < args.len() {
                     match args[i + 1].parse::<u16>() {
@@ -568,9 +569,21 @@ fn main() {
                 std::process::exit(1);
             }
         };
-        if let Err(e) = check_source(&source, Some(&path), opts.verbose) {
-            print_error(&e, use_color);
-            std::process::exit(exit_code(&e));
+        if let Err(e) = check_source(&source, Some(&path), opts.verbose, opts.all_errors) {
+            let code = exit_code(&e);
+            if opts.all_errors {
+                let all = collect_all_frontend_errors(&source, Some(&path));
+                if all.is_empty() {
+                    print_error(&e, use_color);
+                } else {
+                    for err in &all {
+                        print_error(err, use_color);
+                    }
+                }
+            } else {
+                print_error(&e, use_color);
+            }
+            std::process::exit(code);
         }
         println!("Type check passed.");
         return;
@@ -694,6 +707,7 @@ struct Options {
     init: Option<String>,
     watch: Option<String>,
     explain: Option<String>,
+    all_errors: bool,
     bench_count: Option<usize>,
     /// Start a Prometheus-format metrics server on this port.
     metrics_port: Option<u16>,
@@ -717,6 +731,7 @@ impl Default for Options {
             init: None,
             watch: None,
             explain: None,
+            all_errors: false,
             bench_count: None,
             metrics_port: None,
         }
@@ -767,6 +782,7 @@ fn print_help() {
     println!("  init <name>      Scaffold experiment");
     println!("  --watch <file>   Re-run on changes");
     println!("  --explain <CODE> Error code help");
+    println!("  --all-errors     Report all type errors (not just the first)");
     println!("  --bench [N]      Benchmark: run N times (default 10), print timing stats");
     println!("  fmt [--check] [<file>]  Format file(s); no file → all src/**/*.nula");
     println!("  -v, --verbose    Show bytecode and AST");
@@ -1366,7 +1382,7 @@ fn run_with_runtime(
     }
 }
 
-fn check_source(source: &str, file_path: Option<&str>, verbose: bool) -> NuResult<()> {
+fn check_source(source: &str, file_path: Option<&str>, verbose: bool, _all_errors: bool) -> NuResult<()> {
     run_frontend(source, file_path, verbose)?;
 
     if verbose {
@@ -1375,6 +1391,59 @@ fn check_source(source: &str, file_path: Option<&str>, verbose: bool) -> NuResul
     }
 
     Ok(())
+}
+
+/// Run the full frontend in multi-error mode and return every collected
+/// per-declaration type error (empty when the module type-checks).
+///
+/// Drives `--check --all-errors`: the typechecker is configured with
+/// `collect_errors = true` so `check_module` continues past failed
+/// declarations instead of aborting at the first.
+fn collect_all_frontend_errors(source: &str, file_path: Option<&str>) -> Vec<NuError> {
+    use nulang::effect_checker::flatten_decls;
+    // Lex + parse (fail fast; we need a parseable module to collect type errors).
+    let (mut ast, base_dir) = match parse_frontend(source, file_path) {
+        Ok(pair) => pair,
+        Err(e) => return vec![e],
+    };
+    if let Err(e) = nulang::resolver::resolve_imports(&mut ast, &base_dir, &mut std::collections::HashSet::new())
+    {
+        return vec![e];
+    }
+    let mut tc = TypeChecker::new();
+    tc.collect_errors = true;
+    let _ = tc.check_module(&ast);
+    let mut errs = std::mem::take(&mut tc.collected_errors);
+    if errs.is_empty() {
+        return errs;
+    }
+    // Run the effect checker too so its accumulated diagnostics surface as errors.
+    let mut ec = EffectChecker::new();
+    if ec.check_module(&ast.decls).is_err() {
+        for d in &ec.diagnostics {
+            errs.push(NuError::effect_error(d.clone(), Span::default()));
+        }
+    }
+    let _ = flatten_decls; // ensure import is used
+    errs
+}
+
+/// Parse (lexer + parser) without the prelude/import machinery, returning the
+/// AST and the base directory for import resolution.
+fn parse_frontend(
+    source: &str,
+    file_path: Option<&str>,
+) -> NuResult<(nulang::ast::AstModule, std::path::PathBuf)> {
+    let mut lexer = Lexer::new(source);
+    nulang::types::set_source_map_with_file(source, file_path);
+    let tokens = lexer.lex()?;
+    let mut parser = Parser::new(tokens);
+    let ast = parser.parse_module()?;
+    let base_dir = std::path::Path::new(file_path.unwrap_or("."))
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    Ok((ast, base_dir))
 }
 
 fn compile_with_new_pipeline(
