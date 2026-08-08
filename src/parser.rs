@@ -3395,6 +3395,13 @@ impl Parser {
             }
             _ => None,
         };
+
+        // Optional remote target: `spawn@target_expr Foo(...)`.
+        let target_node = if self.consume_if(&TokenKind::At) {
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
         // Parse the actor name.  In a spawn expression the target is always a
         // simple name (like `Counter` or `DurableCounter`), never an arbitrary
         // expression.  We parse it as an identifier so `spawn Foo(args)` does
@@ -3413,12 +3420,6 @@ impl Parser {
         };
         let actor_type = Expr::Var(actor_name, span);
 
-        // Optional remote target: `spawn@target_expr Foo(...)`.
-        let target_node = if self.consume_if(&TokenKind::At) {
-            Some(Box::new(self.parse_expr()?))
-        } else {
-            None
-        };
 
         // Optional positional constructor args: `spawn Foo(a, b)`
         let positional_args = if self.peek_kind() == &TokenKind::LParen {
