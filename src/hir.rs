@@ -314,6 +314,8 @@ pub enum RValue {
     Spawn {
         actor_type: String,
         init: Vec<(String, Operand)>,
+        /// Remote spawn target (`spawn@node_expr Foo(...)`); `None` = local.
+        target_node: Option<Operand>,
         ty: Type,
     },
     Send {

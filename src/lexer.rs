@@ -136,6 +136,7 @@ pub enum TokenKind {
     Arrow,
     FatArrow,
     ThinArrow, // -> => <-
+    ThinArrowQuestion, // <-? (async ask)
     Dot,
     DotDot,
     Colon,
@@ -288,7 +289,11 @@ impl std::fmt::Display for TokenKind {
             TokenKind::FatArrow => write!(f, "=>"),
             TokenKind::ThinArrow => write!(f, "<-"),
             TokenKind::ThinArrowQuestion => write!(f, "<-?"),
+<<<<<<< Updated upstream
             TokenKind::ThinArrowQuestion => write!(f, "<-?"),
+||||||| Stash base
+=======
+>>>>>>> Stashed changes
             TokenKind::Dot => write!(f, "."),
             TokenKind::DotDot => write!(f, ".."),
             TokenKind::Colon => write!(f, ":"),
@@ -1061,7 +1066,11 @@ impl<'a> Lexer<'a> {
                 } else if self.match_char(b'<') {
                     TokenKind::Shl
                 } else if self.match_char(b'-') {
-                    TokenKind::ThinArrow
+                    if self.match_char(b'?') {
+                        TokenKind::ThinArrowQuestion
+                    } else {
+                        TokenKind::ThinArrow
+                    }
                 } else {
                     TokenKind::Lt
                 }

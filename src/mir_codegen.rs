@@ -1010,25 +1010,53 @@ impl MirCodegen {
                     dst,
                 ));
             }
-            mir::RValue::Spawn { behavior_idx, init } => {
-                let pc = self.current_offset();
-                self.emit(Instruction::new3(
-                    OpCode::Spawn,
-                    ((*behavior_idx >> 8) & 0xFF) as u8,
-                    (*behavior_idx & 0xFF) as u8,
-                    dst,
-                ));
-                // Encode spawn-site init overrides for the VM
-                if !init.is_empty() {
-                    let overrides: Vec<(String, crate::bytecode::Constant)> = init
-                        .iter()
-                        .filter_map(|(name, rv)| match rv {
-                            mir::RValue::Const(c) => Some((name.clone(), c.clone())),
-                            _ => None,
-                        })
-                        .collect();
-                    if !overrides.is_empty() {
-                        self.module.spawn_init_overrides.push((pc, overrides));
+            mir::RValue::Spawn {
+                behavior_idx,
+                init,
+                target_node,
+            } => {
+                if let Some(node) = target_node {
+                    let node_reg = self.local_reg(*node);
+                    if init.len() > MAX_STAGED_ARGS {
+                        return Err(compile_err(
+                            format!("spawn@node with {} init fields exceeds MIR staging limit of {}",
+                                init.len(), MAX_STAGED_ARGS),
+                            Span::default(),
+                        ));
+                    }
+                    let pc = self.current_offset();
+                    let names: Vec<String> = init.iter().map(|(n, _)| n.clone()).collect();
+                    for (i, (_, rv)) in init.iter().enumerate() {
+                        self.compile_rvalue(i as u8, rv)?;
+                    }
+                    if !names.is_empty() {
+                        self.module.remote_spawn_init_fields.push((pc, names));
+                    }
+                    self.emit(Instruction::new3(
+                        OpCode::RSpawn, node_reg,
+                        ((*behavior_idx >> 8) & 0xFF) as u8,
+                        (*behavior_idx & 0xFF) as u8,
+                    ));
+                    self.emit(Instruction::new2(OpCode::Move, node_reg, dst));
+                } else {
+                    let pc = self.current_offset();
+                    self.emit(Instruction::new3(
+                        OpCode::Spawn,
+                        ((*behavior_idx >> 8) & 0xFF) as u8,
+                        (*behavior_idx & 0xFF) as u8,
+                        dst,
+                    ));
+                    if !init.is_empty() {
+                        let overrides: Vec<(String, crate::bytecode::Constant)> = init
+                            .iter()
+                            .filter_map(|(name, rv)| match rv {
+                                mir::RValue::Const(c) => Some((name.clone(), c.clone())),
+                                _ => None,
+                            })
+                            .collect();
+                        if !overrides.is_empty() {
+                            self.module.spawn_init_overrides.push((pc, overrides));
+                        }
                     }
                 }
             }

@@ -86,6 +86,10 @@ pub trait DistributedVmCallbacks: std::any::Any + std::fmt::Debug {
     fn gossip(&mut self, _message: &str) -> Value {
         Value::unit()
     }
+
+    fn remote_spawn(&mut self, _target_node: u64, _behavior: &str, _init: &[(String, Value)]) -> Value {
+        Value::actor_ref(0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3277,6 +3281,32 @@ impl VM {
     }
 
     #[inline(never)]
+    fn step_rspawn(&mut self, frame_idx: usize, module_idx: usize, instr: Instruction) -> NuResult<()> {
+        let node_reg = instr.op1 as usize;
+        let behavior_idx = (((instr.op2 as u16) << 8) | (instr.op3 as u16)) as usize;
+        let node_id = self.frames[frame_idx].regs[node_reg].as_int().unwrap_or(0) as u64;
+        let spawn_pc = self.frames[frame_idx].pc.saturating_sub(1);
+        let names: Vec<String> = self.modules.get(module_idx)
+            .and_then(|m| m.remote_spawn_init_fields.iter().find(|(pc, _)| *pc == spawn_pc).map(|(_, n)| n.clone()))
+            .unwrap_or_default();
+        let init: Vec<(String, Value)> = names.iter().enumerate().map(|(i, n)| (n.clone(), self.frames[frame_idx].regs[i])).collect();
+        let result = if self.distributed_callbacks.is_some() && node_id != self.node_id {
+            let behavior_name = self.modules.get(module_idx)
+                .and_then(|m| m.behaviors.get(behavior_idx)).map(|b| b.name.clone()).unwrap_or_default();
+            if let Some(cb) = &mut self.distributed_callbacks {
+                cb.remote_spawn(node_id, &behavior_name, &init)
+            } else { Value::actor_ref(0) }
+        } else {
+            match self.modules.get(module_idx) {
+                Some(module) => self.actor_callbacks.spawn_actor(module, behavior_idx, init),
+                None => Value::actor_ref(0)
+            }
+        };
+        self.frames[frame_idx].regs[node_reg] = result;
+        Ok(())
+    }
+
+    #[inline(never)]
     fn step_capload(&mut self, frame_idx: usize, instr: Instruction) -> NuResult<()> {
         let slot = instr.op1 as usize;
         let dst = instr.op2 as usize;
@@ -3700,8 +3730,7 @@ impl VM {
                 self.step_rsend(frame_idx, module_idx, instr)?;
             }
             OpCode::RSpawn => {
-                self.frames[frame_idx].regs[instr.op3 as usize] = Value::actor_ref(0);
-                return Ok(());
+                self.step_rspawn(frame_idx, module_idx, instr)?;
             }
 
             // -- Constants --

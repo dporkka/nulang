@@ -18,7 +18,7 @@
 #[cfg(feature = "ai-runtime")]
 use super::agent;
 use super::cluster::NodeId;
-use super::distributed::{send_distributed, ActorAddress};
+use super::distributed::{send_distributed, spawn_on_node, ActorAddress};
 use super::http_server::HttpServerState;
 use super::Runtime;
 #[cfg(feature = "ai-runtime")]
@@ -1750,6 +1750,23 @@ impl crate::vm::DistributedVmCallbacks for BytecodeDistributedCallbacks {
             rt.send_distributed(target, behavior, args);
         }
         crate::vm::Value::nil()
+    }
+    fn remote_spawn(&mut self, target_node: u64, behavior: &str, init: &[(String, crate::vm::Value)]) -> crate::vm::Value {
+        unsafe {
+            let rt = &mut *self.runtime;
+            let node = NodeId(target_node);
+            let mut transport = rt.distributed.transport.take();
+            let mut resolver = rt.distributed.resolver.take();
+            let cluster = rt.distributed.cluster.take();
+            let result = if let (Some(ref mut t), Some(ref c), Some(ref mut r)) = (&mut transport, &cluster, &mut resolver) {
+                let addr = spawn_on_node(rt, t, c, r, node, behavior, init.to_vec());
+                crate::vm::Value::actor_ref(addr.actor_id())
+            } else { crate::vm::Value::actor_ref(0) };
+            rt.distributed.transport = transport;
+            rt.distributed.resolver = resolver;
+            rt.distributed.cluster = cluster;
+            result
+        }
     }
     fn gossip(&mut self, _message: &str) -> crate::vm::Value {
         crate::vm::Value::unit()

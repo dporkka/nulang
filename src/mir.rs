@@ -294,9 +294,13 @@ pub enum RValue {
     /// of the actor's behaviors and state defaults from there via
     /// `ActorMeta`. Spawn-site init overrides are carried in `init`; they
     /// override the declared state defaults at spawn time.
+    ///
+    /// `target_node` (`spawn@node Foo(...)`) spawns on a remote node; the
+    /// local id is a register holding the node id, `None` = local spawn.
     Spawn {
         behavior_idx: usize,
         init: Vec<(String, RValue)>,
+        target_node: Option<LocalId>,
     },
     /// `send actor behavior(args...)`. Fire-and-forget; evaluates to 0.
     Send {
@@ -600,6 +604,7 @@ mod tests {
         let _ = RValue::Spawn {
             behavior_idx: 0,
             init: vec![],
+            target_node: None,
         };
         let _ = RValue::Send {
             actor: LocalId(0),

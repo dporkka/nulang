@@ -659,6 +659,7 @@ pub struct CodeModule {
     /// Populated by MIR codegen; consumed by the VM's `step_spawn`.
     #[serde(default)]
     pub spawn_init_overrides: Vec<(usize, Vec<(String, Constant)>)>,
+    pub remote_spawn_init_fields: Vec<(usize, Vec<String>)>,
 }
 
 impl CodeModule {
@@ -672,6 +673,7 @@ impl CodeModule {
             exports: Vec::new(),
             entry_point: None,
             spawn_init_overrides: Vec::new(),
+            remote_spawn_init_fields: Vec::new(),
             handler_tables: Vec::new(),
             actor_metadata: Vec::new(),
             foreign_functions: Vec::new(),

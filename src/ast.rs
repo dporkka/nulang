@@ -169,7 +169,9 @@ pub enum Expr {
         value: Box<Expr>,
         span: Span,
     },
-    /// Actor spawn: spawn ActorName { init } or spawn ActorName(args)
+    /// Actor spawn: spawn ActorName { init } or spawn ActorName(args).
+    /// `spawn@target Node { ... }` spawns on a remote node (target is any
+    /// expression evaluating to a node id).
     Spawn {
         actor_type: Box<Expr>,
         init: Vec<(String, Expr)>,
@@ -177,6 +179,8 @@ pub enum Expr {
         positional_args: Option<Vec<Expr>>,
         /// Named registration: `spawn Foo() as "name"`.
         register_as: Option<String>,
+        /// Remote target: `spawn@node_expr Foo(...)`.
+        target_node: Option<Box<Expr>>,
         span: Span,
     },
     /// Message send: actor ! behavior(args)

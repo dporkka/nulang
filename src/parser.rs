@@ -2290,6 +2290,26 @@ impl Parser {
                 continue;
             }
 
+            // Async tell: actor <- behavior(args)  (same semantics as `!`)
+            if self.consume_if(&TokenKind::ThinArrow) {
+                let behavior = self.expect_ident("behavior name")?;
+                self.expect(TokenKind::LParen)?;
+                let args = self.parse_arg_list()?;
+                let span = self.current_span();
+                left = Expr::Send { actor: Box::new(left), behavior, args, remote: false, span };
+                continue;
+            }
+
+            // Async ask: actor <-? behavior(args)  (same semantics as `ask`)
+            if self.consume_if(&TokenKind::ThinArrowQuestion) {
+                let behavior = self.expect_ident("behavior name")?;
+                self.expect(TokenKind::LParen)?;
+                let args = self.parse_arg_list()?;
+                let span = self.current_span();
+                left = Expr::Ask { actor: Box::new(left), behavior, args, remote: false, timeout_ms: None, span };
+                continue;
+            }
+
             if self.consume_if(&TokenKind::Dot) {
                 // Field access: expr.field, expr.0, expr.0.1
                 let span_start = self.current_span();
@@ -3393,6 +3413,13 @@ impl Parser {
         };
         let actor_type = Expr::Var(actor_name, span);
 
+        // Optional remote target: `spawn@target_expr Foo(...)`.
+        let target_node = if self.consume_if(&TokenKind::At) {
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
+
         // Optional positional constructor args: `spawn Foo(a, b)`
         let positional_args = if self.peek_kind() == &TokenKind::LParen {
             self.advance(); // consume '('
@@ -3447,6 +3474,7 @@ impl Parser {
             init,
             positional_args,
             register_as,
+            target_node,
             span,
         };
         Ok(match link_op {
