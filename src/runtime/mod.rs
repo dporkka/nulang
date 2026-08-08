@@ -2079,6 +2079,8 @@ impl Runtime {
             if steps >= max_steps {
                 return DeterministicRunResult::StepLimitExceeded { steps };
             }
+            // Tick timers first (respects virtual clock via self.now())
+            self.tick_timers();
             match self.pick_ready_actor_deterministic(&mut rng) {
                 Some(actor_id) => {
                     self.step_actor(actor_id);
@@ -2926,7 +2928,13 @@ impl Runtime {
     /// iteration. Panics if no virtual clock is installed.
     pub fn advance_time(&mut self, duration: std::time::Duration) {
         match &mut self.virtual_clock {
-            Some(vc) => vc.advance(duration),
+            Some(vc) => {
+                vc.advance(duration);
+                // Also advance the cluster's clock for deterministic membership/gossip
+                if let Some(cluster) = &mut self.distributed.cluster {
+                    cluster.set_clock(vc.clone());
+                }
+            }
             None => warn!("advance_time called without a virtual clock installed; ignoring"),
         }
     }
