@@ -7177,15 +7177,4 @@ mod vm_tests {
             assert!(slots[1].is_string(), "array[1] should be a string");
         }
     }
-
-    #[test]
-    fn test_twofn_nbc_file() {
-        let mut vm = VM::new();
-        let bytes = std::fs::read("/tmp/twofn.nbc").unwrap();
-        let artifact = crate::bytecode::CodeModule::from_nbc(&bytes).unwrap();
-        vm.load_module(artifact.module);
-        let result = vm.run().unwrap();
-        eprintln!("twofn result: {:?} as_int={:?}", result, result.as_int());
-        assert_eq!(result.as_int(), Some(1));
-    }
 }
