@@ -1276,7 +1276,8 @@ impl TypeChecker {
                 new_ctx.bind(name.clone(), recursive_func_ty, Capability::Ref, false);
                 // Bind parameters
                 for (p, pty) in params.iter().zip(param_types.iter()) {
-                    new_ctx.bind(p.name.clone(), pty.clone(), Capability::Ref, false);
+                    let pcap = p.cap.unwrap_or(Capability::Ref);
+                    new_ctx.bind(p.name.clone(), pty.clone(), pcap, false);
                 }
                 for up in using_params {
                     let uty = match &up.ty {

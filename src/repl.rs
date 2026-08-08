@@ -8,6 +8,7 @@
 
 use crate::ast::{AstModule, Decl, Expr};
 use crate::effect_checker::{CapContext, CapabilityAnalyzer, EffectChecker};
+use crate::effect_checker::flatten_decls;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::typechecker::TypeChecker;
@@ -24,6 +25,8 @@ pub struct Repl {
     vm: VM,
     /// Accumulated declarations from previous inputs (functions, actors, etc.)
     accumulated_decls: Vec<Decl>,
+    /// Source text for session persistence.
+    session_source: String,
     /// Persistent type context across evaluations
     type_ctx: TypeContext,
     /// Fresh type checker (can be reused)
@@ -308,6 +311,7 @@ impl Repl {
         Repl {
             vm: VM::new(),
             accumulated_decls: Vec::new(),
+            session_source: String::new(),
             type_ctx: TypeContext::new(),
             type_checker: TypeChecker::new(),
             last_bytecode: None,
@@ -372,7 +376,7 @@ impl Repl {
             let trimmed = line.trim();
 
             // REPL commands (only when not in multi-line mode)
-            if brace_stack.is_empty() && trimmed.starts_with(':') {
+            if brace_stack.is_empty() && trimmed.starts_with('%') {
                 editor.add_history_entry(&line).ok();
                 let mut parts = trimmed[1..].splitn(2, ' ');
                 let cmd = parts.next().unwrap_or("");
@@ -392,21 +396,21 @@ impl Repl {
                     }
                     "type" => {
                         if rest.is_empty() {
-                            eprintln!("Usage: :type <expression>");
+                            eprintln!("Usage: %type <expression>");
                         } else if let Err(e) = self.show_type(rest) {
                             self.print_error(&e);
                         }
                     }
                     "load" => {
                         if rest.is_empty() {
-                            eprintln!("Usage: :load <file>");
+                            eprintln!("Usage: %load <file>");
                         } else if let Err(e) = self.load_file(rest) {
                             self.print_error(&e);
                         }
                     }
                     "ast" => {
                         if rest.is_empty() {
-                            eprintln!("Usage: :ast <expression>");
+                            eprintln!("Usage: %ast <expression>");
                         } else if let Err(e) = self.show_ast(rest) {
                             self.print_error(&e);
                         }
@@ -418,6 +422,7 @@ impl Repl {
                     }
                     "reset" => {
                         self.accumulated_decls.clear();
+                        self.session_source.clear();
                         self.type_ctx = TypeContext::new();
                         self.type_checker = TypeChecker::new();
                         self.last_bytecode = None;
@@ -428,12 +433,68 @@ impl Repl {
                     "version" | "ver" => {
                         println!("nulang v{}", env!("CARGO_PKG_VERSION"));
                     }
+                    "time" => {
+                        if rest.is_empty() {
+                            eprintln!("Usage: %time <expression>");
+                        } else {
+                            use std::time::Instant;
+                            let start = Instant::now();
+                            if let Err(e) = self.evaluate(rest) {
+                                self.print_error(&e);
+                            }
+                            let elapsed = start.elapsed();
+                            println!("Elapsed: {:.2?}", elapsed);
+                        }
+                    }
+                    "effect" => {
+                        if rest.is_empty() {
+                            eprintln!("Usage: %effect <expression>");
+                        } else {
+                            // Run typecheck to get effect row
+                            if let Err(e) = self.show_effect(rest) {
+                                self.print_error(&e);
+                            }
+                        }
+                    }
+                    "cap" => {
+                        if rest.is_empty() {
+                            eprintln!("Usage: %cap <expression>");
+                        } else {
+                            if let Err(e) = self.show_cap(rest) {
+                                self.print_error(&e);
+                            }
+                        }
+                    }
+                    "actors" => {
+                        println!("Actor inspection not available in REPL mode (no running runtime).");
+                    }
+                    "actor" => {
+                        if rest.is_empty() {
+                            eprintln!("Usage: %actor <id>");
+                        } else {
+                            println!("Actor inspection not available in REPL mode (no running runtime).");
+                        }
+                    }
+                    "save" => {
+                        if rest.is_empty() {
+                            eprintln!("Usage: %save <file>");
+                        } else {
+                            if let Err(e) = self.save_session(rest) { self.print_error(&e); }
+                        }
+                    }
+                    "load" => {
+                        if rest.is_empty() {
+                            eprintln!("Usage: %load <file>");
+                        } else {
+                            if let Err(e) = self.load_session(rest) { self.print_error(&e); }
+                        }
+                    }
                     "stats" => {
                         println!("Runtime stats not available in REPL mode.");
                         println!("(use a .nula file with actors and --verbose for runtime stats)");
                     }
                     unknown => {
-                        println!("Unknown command: :{}. Type :help for help.", unknown);
+                        println!("Unknown command: :{}. Type %help for help.", unknown);
                     }
                 }
             }
@@ -552,6 +613,32 @@ impl Repl {
             let expr_ty = extract_return_type(&module_type);
             let ty_str = type_to_string(expr_ty);
             println!("{} : {}", val_str, ty_str);
+        // Inline effect row and capability hints for the evaluated expression
+        if let Some(ref expr) = main_expr {
+            let effect_str = if let Type::Function { effect, .. } = &module_type {
+                let eff_str = if effect.effects().is_empty() {
+                    String::new()
+                } else {
+                    format!(" ! {}", effect)
+                };
+                eff_str
+            } else {
+                String::new()
+            };
+            let cap_str = if let Type::Function { cap, .. } = &module_type {
+                let cap_str = if *cap == Capability::Ref {
+                    String::new()
+                } else {
+                    format!(" :{}", cap)
+                };
+                cap_str
+            } else {
+                String::new()
+            };
+            if !effect_str.is_empty() || !cap_str.is_empty() {
+                println!("  (type: {}{})", effect_str, cap_str);
+            }
+        }
         } else if !new_decls.is_empty() {
             // Print declaration info. Each new declaration is re-checked in
             // the full session context (accumulated + earlier new decls, in
@@ -582,6 +669,8 @@ impl Repl {
 
         // Update accumulated state with new declarations
         self.accumulated_decls.extend(new_decls.clone());
+        self.session_source.push_str(source);
+        self.session_source.push_str("\n");
 
         // Collect user-defined identifiers for tab completion.
         for decl in &new_decls {
@@ -670,16 +759,23 @@ impl Repl {
 
     fn print_help(&self) {
         println!("Commands:");
-        println!("  :quit, :q        Exit the REPL");
-        println!("  :help, :h [t]    Show help (topics: syntax, types, actors, effects, commands)");
-        println!("  :type <expr>     Show the inferred type of an expression");
-        println!("  :load <file>     Load and run a .nula file");
-        println!("  :ast <expr>      Show the AST of an expression");
-        println!("  :bytecode, :bc   Show bytecode for the last expression");
-        println!("  :clear           Clear the screen");
-        println!("  :reset           Reset the environment");
-        println!("  :stats           Show runtime stats (--verbose mode only)");
-        println!("  :version, :ver   Print version and exit (repl keeps running)");
+        println!("  %quit, %q        Exit the REPL");
+        println!("  %help, %h [t]    Show help (topics: syntax, types, actors, effects, commands)");
+        println!("  %type <expr>     Show the inferred type of an expression");
+        println!("  %load <file>     Load and run a .nula file");
+        println!("  %ast <expr>      Show the AST of an expression");
+        println!("  %bytecode, %bc   Show bytecode for the last expression");
+        println!("  %time <expr>     Time the evaluation of an expression");
+        println!("  %effect <expr>   Show the effect row of an expression");
+        println!("  %cap <expr>      Show the capability of an expression");
+        println!("  %actors          List actors (stub)");
+        println!("  %actor <id>      Inspect actor (stub)");
+        println!("  %save <file>     Save session to file");
+        println!("  %load <file>     Load session from file");
+        println!("  %clear           Clear the screen");
+        println!("  %reset           Reset the environment");
+        println!("  %stats           Show runtime stats (--verbose mode only)");
+        println!("  %version, %ver   Print version and exit (repl keeps running)");
     }
 
     fn print_help_topic(&self, topic: &str) {
@@ -846,6 +942,79 @@ impl Repl {
     /// naturally skips strings and comments. Returns the stack of still-open
     /// delimiter characters (most recent last). Mismatched closers are
     /// dropped rather than tracked — the parser will report the error.
+    /// Show the effect row of an expression.
+    fn show_effect(&mut self, source: &str) -> NuResult<()> {
+        let wrapped = if !source.contains("let ") && !source.contains("fn ") {
+            format!("{}", source)
+        } else {
+            source.to_string()
+        };
+        let ast = parse_source(&wrapped)?;
+        let expr = extract_main_expr(&ast)?;
+        let mut combined_decls = self.accumulated_decls.clone();
+        combined_decls.push(Decl::Function {
+            name: "__main".to_string(),
+            type_params: vec![],
+            type_param_constraints: vec![],
+            params: vec![],
+            default_values: vec![],
+            using_params: vec![],
+            ret_type: None,
+            error_type: None,
+            effect: None,
+            cap: None,
+            body: expr,
+            annotations: vec![],
+            public: false,
+            span: Span::default(),
+        });
+        let module = AstModule {
+            name: "effectcheck".to_string(),
+            decls: combined_decls,
+        };
+        let ty = self.type_checker.check_module(&module)?;
+        let mut ec = EffectChecker::new();
+        ec.register_function_rows(&flatten_decls(&module.decls))?;
+        if let Some(row) = ec.function_row("__main") {
+            println!("Effect row: {}", row);
+        } else {
+            println!("No effects.");
+        }
+        Ok(())
+    }
+
+    /// Show the capability of an expression.
+    fn show_cap(&mut self, source: &str) -> NuResult<()> {
+        let wrapped = if !source.contains("let ") && !source.contains("fn ") {
+            format!("{}", source)
+        } else {
+            source.to_string()
+        };
+        let ast = parse_source(&wrapped)?;
+        let expr = extract_main_expr(&ast)?;
+        let mut cap_analyzer = CapabilityAnalyzer::new();
+        let cap_ctx = CapContext::new();
+        let cap = cap_analyzer.infer_cap(&cap_ctx, &expr)?;
+        println!("Capability: {:?}", cap);
+        Ok(())
+    }
+
+    /// Save REPL session to a file (declarations only).
+    fn save_session(&self, path: &str) -> NuResult<()> {
+        std::fs::write(path, &self.session_source)
+            .map_err(|e| NuError::runtime_error(format!("save session failed: {}", e), Span::default()))?;
+        println!("Session saved to {}", path);
+        Ok(())
+    }
+
+    /// Load REPL session from a file.
+    fn load_session(&mut self, path: &str) -> NuResult<()> {
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| NuError::runtime_error(format!("load session failed: {}", e), Span::default()))?;
+        self.evaluate(&source)?;
+        println!("Session loaded from {}", path);
+        Ok(())
+    }
     fn brace_stack(source: &str) -> Vec<char> {
         let mut lexer = Lexer::new(source);
         let tokens = match lexer.lex() {
