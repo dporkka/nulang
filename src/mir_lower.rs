@@ -1563,11 +1563,6 @@ impl<'c> FnLowerer<'c> {
                 Ok(())
             }
             hir::RValue::Receive { arms, after, .. } => self.lower_receive(dst, arms, after),
-            hir::RValue::Resume { value, .. } => {
-                let val = self.lower_operand(value)?;
-                self.b.assign(dst, mir::RValue::Resume(val));
-                Ok(())
-            }
         }
     }
 
