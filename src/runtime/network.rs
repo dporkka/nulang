@@ -3180,3 +3180,145 @@ impl NetworkTransport for TcpTransport {
         self.connection_addr(node_id)
     }
 }
+
+/// In-memory deterministic network transport for DST.
+/// Replaces TCP with channel-based message passing for reproducible testing.
+#[derive(Debug)]
+pub struct DeterministicNetworkTransport {
+    node_id: NodeId,
+    listen_addr: SocketAddr,
+    /// Channel for receiving packets.
+    incoming_rx: mpsc::Receiver<IncomingPacket>,
+    incoming_tx: mpsc::SyncSender<IncomingPacket>,
+    /// Shared bus for connecting to other nodes: node_id -> (incoming_tx, outgoing_tx)
+    shared_bus: Arc<
+        parking_lot::Mutex<
+            HashMap<
+                NodeId,
+                (
+                    mpsc::SyncSender<IncomingPacket>,
+                    mpsc::SyncSender<OutgoingPacket>,
+                ),
+            >,
+        >,
+    >,
+    shutdown_flag: Arc<AtomicBool>,
+}
+
+impl Clone for DeterministicNetworkTransport {
+    fn clone(&self) -> Self {
+        DeterministicNetworkTransport {
+            node_id: self.node_id,
+            listen_addr: self.listen_addr,
+            incoming_rx: mpsc::sync_channel(CHANNEL_CAPACITY).1,
+            incoming_tx: self.incoming_tx.clone(),
+            shared_bus: self.shared_bus.clone(),
+            shutdown_flag: self.shutdown_flag.clone(),
+        }
+    }
+}
+
+impl DeterministicNetworkTransport {
+    /// Create a new deterministic transport bound to the given address.
+    pub fn bind(addr: SocketAddr) -> io::Result<Self> {
+        let bus = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        Self::bind_with_bus(addr, bus)
+    }
+
+    /// Create a new deterministic transport sharing the given message bus.
+    /// All transports sharing the same bus can deliver packets to each other.
+    pub fn bind_with_bus(
+        addr: SocketAddr,
+        shared_bus: Arc<
+            parking_lot::Mutex<
+                HashMap<
+                    NodeId,
+                    (
+                        mpsc::SyncSender<IncomingPacket>,
+                        mpsc::SyncSender<OutgoingPacket>,
+                    ),
+                >,
+            >,
+        >,
+    ) -> io::Result<Self> {
+        let node_id = NodeId::new(&addr);
+        let (incoming_tx, incoming_rx) = mpsc::sync_channel(CHANNEL_CAPACITY);
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        Ok(DeterministicNetworkTransport {
+            node_id,
+            listen_addr: addr,
+            incoming_rx,
+            incoming_tx,
+            shared_bus,
+            shutdown_flag,
+        })
+    }
+
+    /// Register this transport on the shared bus so other transports can send to it.
+    pub fn register_on_bus(&self) {
+        let (outgoing_tx, _) = mpsc::sync_channel(CHANNEL_CAPACITY);
+        self.shared_bus
+            .lock()
+            .insert(self.node_id, (self.incoming_tx.clone(), outgoing_tx));
+    }
+
+    /// Get the incoming sender for a target node.
+    fn get_incoming_sender(&self, target: NodeId) -> Option<mpsc::SyncSender<IncomingPacket>> {
+        self.shared_bus
+            .lock()
+            .get(&target)
+            .map(|(tx, _)| tx.clone())
+    }
+}
+
+impl NetworkTransport for DeterministicNetworkTransport {
+    fn connect(&mut self, node_id: NodeId, _addr: SocketAddr) -> io::Result<()> {
+        let _ = self.get_incoming_sender(node_id);
+        Ok(())
+    }
+
+    fn send(&mut self, to_node: NodeId, _to_addr: SocketAddr, packet: Packet) {
+        if let Some(sender) = self.get_incoming_sender(to_node) {
+            let incoming = IncomingPacket {
+                from_node: self.node_id,
+                seq: 0,
+                packet,
+            };
+            let _ = sender.try_send(incoming);
+        }
+    }
+
+    fn receive(&self) -> Vec<IncomingPacket> {
+        let mut packets = Vec::new();
+        while let Ok(pkt) = self.incoming_rx.try_recv() {
+            packets.push(pkt);
+        }
+        packets
+    }
+
+    fn node_id(&self) -> NodeId {
+        self.node_id
+    }
+
+    fn listen_addr(&self) -> SocketAddr {
+        self.listen_addr
+    }
+
+    fn disconnect(&mut self, _node_id: NodeId) {}
+
+    fn shutdown(&mut self) {
+        self.shutdown_flag.store(true, Ordering::Relaxed);
+    }
+
+    fn connection_count(&self) -> usize {
+        self.shared_bus.lock().len()
+    }
+
+    fn connection_addr(&self, node_id: NodeId) -> Option<SocketAddr> {
+        if self.shared_bus.lock().contains_key(&node_id) {
+            Some(self.listen_addr)
+        } else {
+            None
+        }
+    }
+}

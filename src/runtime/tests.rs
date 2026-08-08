@@ -4526,3 +4526,85 @@ fn test_mutual_tls_rejects_plaintext_peer() {
     );
     shutdown_nodes(&mut [&mut rt_tls, &mut rt_plain]);
 }
+
+// -----------------------------------------------------------------------
+// DST (Deterministic Simulation Testing) integration tests
+// -----------------------------------------------------------------------
+
+/// Verify that `run_scheduler_deterministic` produces the same result
+/// across two runs with the same seed, confirming the deterministic
+/// scheduling path.
+#[test]
+fn test_dst_run_scheduler_deterministic_reproducible() {
+    let run_with_seed = |seed: u64| -> i64 {
+        let mut rt = Runtime::new();
+        rt.install_virtual_clock();
+        let actor_id = rt.spawn_actor(Box::new(|| vec![("counter".to_string(), Value::int(0))]));
+        {
+            let actor = rt.actors.get_mut(&actor_id).unwrap();
+            actor.register_behavior("inc", |actor, _args| {
+                let n = actor
+                    .get_state_field("counter")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(0);
+                actor.set_state_field("counter", Value::int(n + 1));
+            });
+        }
+        for _ in 0..5 {
+            rt.send_message(actor_id, "inc", &[]);
+        }
+        rt.run_scheduler_deterministic(seed, 1000);
+        rt.actors
+            .get(&actor_id)
+            .and_then(|a| a.get_state_field("counter"))
+            .and_then(|v| v.as_int())
+            .unwrap_or(-1)
+    };
+
+    let v1 = run_with_seed(42);
+    let v2 = run_with_seed(42);
+    assert_eq!(v1, v2, "same seed must produce same result");
+    assert_eq!(v1, 5, "all 5 inc messages must be processed");
+}
+
+/// Verify that `DeterministicNetworkTransport` correctly delivers
+/// messages between two runtimes connected in-memory (no real TCP).
+#[test]
+fn test_dst_deterministic_network_transport_delivers() {
+    use crate::runtime::network::{DeterministicNetworkTransport, Packet};
+    use crate::runtime::NetworkTransport;
+    use std::collections::HashMap;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+
+    let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10001);
+    let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10002);
+
+    // Share a bus so transports can route to each other
+    let bus = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+
+    let mut t_a = DeterministicNetworkTransport::bind_with_bus(addr_a, bus.clone()).unwrap();
+    let mut t_b = DeterministicNetworkTransport::bind_with_bus(addr_b, bus).unwrap();
+
+    let node_a = t_a.node_id();
+    let node_b = t_b.node_id();
+
+    t_a.register_on_bus();
+    t_b.register_on_bus();
+    t_b.connect(node_a, addr_a).unwrap();
+
+    let payload = Packet::Heartbeat {
+        node_id: node_b,
+        timestamp: 42,
+    };
+    t_b.send(node_a, addr_a, payload);
+
+    let received = t_a.receive();
+    assert_eq!(received.len(), 1, "a should receive b's heartbeat");
+    assert_eq!(received[0].from_node, node_b);
+
+    t_a.disconnect(node_b);
+    t_b.disconnect(node_a);
+    t_a.shutdown();
+    t_b.shutdown();
+}
