@@ -1204,4 +1204,44 @@ mod tests {
         vm.load_module(a.module);
         assert_eq!(vm.run().unwrap().as_int(), Some(42));
     }
+
+    #[test]
+    fn test_recursive_factorial() {
+        // fn fact(n) { if n<=1 then 1 else n*fact(n-1) }; main() { fact(3) }
+        // entry_point = offset of main (instruction 11)
+        let instrs = [
+            0x04010000, 0x43000102, 0x52020003,  // fact: r1=1; cmp; jmpf
+            0x04000000, 0x57000000,                // base: return 1
+            0x12000300, 0x21000100, 0x03040000,    // r3=n; r0=n-1; r4=0
+            0x54040100, 0x22030000, 0x57000000,    // call; mul; ret
+            0x07000000, 0x03010000, 0x54010100, 0x57000000,  // main
+        ];
+        let mut m = CodeModule::new("fact3");
+        m.constants.push(Constant::Int(3));
+        for &w in &instrs { m.instructions.push(Instruction::decode(w).unwrap()); }
+        m.function_table = vec![0, 11];
+        m.entry_point = Some(11);  // DIRECT OFFSET of main, not function table index!
+        let a = CodeModule::from_nbc(&m.to_nbc(None).unwrap()).unwrap();
+        let mut vm = crate::vm::VM::new();
+        vm.load_module(a.module);
+        assert_eq!(vm.run().unwrap().as_int(), Some(6));
+    }
+
+    #[test]
+    fn test_recursive_decrement() {
+        // fn dec(n) { if n==0 then 0 else dec(n-1) }; main() { dec(1) }
+        let instrs = [
+            0x03010000, 0x40000102, 0x52020003, 0x03000000, 0x57000000,
+            0x04030000, 0x21000300, 0x03040000, 0x54040100, 0x57000000,
+            0x04000000, 0x03010000, 0x54010100, 0x57000000,
+        ];
+        let mut m = CodeModule::new("dec");
+        for &w in &instrs { m.instructions.push(Instruction::decode(w).unwrap()); }
+        m.function_table = vec![0, 10];
+        m.entry_point = Some(10);  // direct offset of main
+        let a = CodeModule::from_nbc(&m.to_nbc(None).unwrap()).unwrap();
+        let mut vm = crate::vm::VM::new();
+        vm.load_module(a.module);
+        assert_eq!(vm.run().unwrap().as_int(), Some(0));
+    }
 }

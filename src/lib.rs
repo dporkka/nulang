@@ -57,3 +57,4 @@ pub mod wasm_runtime;
 #[cfg(feature = "otel")]
 pub mod observability;
 pub mod wasm_types;
+pub mod witgen;

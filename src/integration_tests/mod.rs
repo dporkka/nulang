@@ -10135,6 +10135,46 @@ match { a: 2, b: 9 } with {
         assert_eq!(value.as_int(), Some(42));
     }
 
+
+    #[test]
+    fn test_bootstrap_prog3_double() {
+        use crate::bytecode::{CodeModule, Constant, Instruction};
+        let instrs = [
+            0x07000001, 0x22000100, 0x57000000,
+            0x07000100, 0x03010000, 0x54010100, 0x57000000,
+        ];
+        let mut m = CodeModule::new("double21");
+        m.constants.push(Constant::Int(2));
+        m.constants.push(Constant::Int(21));
+        for &w in &instrs { m.instructions.push(Instruction::decode(w).unwrap()); }
+        m.function_table = vec![0, 3];
+        m.entry_point = Some(3);
+        let a = CodeModule::from_nbc(&m.to_nbc(None).unwrap()).unwrap();
+        let mut vm = crate::vm::VM::new();
+        vm.load_module(a.module);
+        assert_eq!(vm.run().unwrap().as_int(), Some(42));
+    }
+
+    #[test]
+    fn test_bootstrap_prog4_fact() {
+        use crate::bytecode::{CodeModule, Constant, Instruction};
+        let instrs = [
+            0x04010000, 0x43000102, 0x52020003,
+            0x04000000, 0x57000000,
+            0x12000300, 0x21000100, 0x03040000,
+            0x54040100, 0x22030000, 0x57000000,
+            0x07000000, 0x03010000, 0x54010100, 0x57000000,
+        ];
+        let mut m = CodeModule::new("fact6");
+        m.constants.push(Constant::Int(6));
+        for &w in &instrs { m.instructions.push(Instruction::decode(w).unwrap()); }
+        m.function_table = vec![0, 11];
+        m.entry_point = Some(11);
+        let a = CodeModule::from_nbc(&m.to_nbc(None).unwrap()).unwrap();
+        let mut vm = crate::vm::VM::new();
+        vm.load_module(a.module);
+        assert_eq!(vm.run().unwrap().as_int(), Some(720));
+    }
     /// End-to-end .nbc library distribution: compile math.nula,
     /// export to .nbc, load as artifact, and verify execution.
     #[test]

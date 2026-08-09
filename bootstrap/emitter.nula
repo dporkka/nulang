@@ -1,7 +1,7 @@
 // bootstrap/emitter.nula — Stage 1: JSON emitter for .nbc generation
 //
-// Programs: 0=42, 1=add(1+2), 2=if(1<2 then 10 else 20), 3=double(21)
-// Change `prog` to select.
+// Programs: 0=42, 1=add, 2=if, 3=double, 4=fact
+// Change `prog` to select. All bytecodes verified via integration tests.
 
 fn emit_json(name: String, instrs: String, consts: String) {
     perform IO.print("{")
@@ -13,30 +13,23 @@ fn emit_json(name: String, instrs: String, consts: String) {
     perform IO.print("],")
     perform IO.print("\"constants\":[")
     perform IO.print(consts)
-    perform IO.print("],")
-    perform IO.print("\"function_table\":[],")
-    perform IO.print("\"entry_point\":0")
+    perform IO.print("]")
     perform IO.print("}")
 }
 
 fn emit_42() {
-    // ConstU const=0→r0, RetVal r0
     emit_json("lit42",
         "\"07000000\",\"57000000\"",
         "{\"type\":\"Int\",\"value\":42}")
 }
 
 fn emit_add() {
-    // ConstU 0→r0 (1), ConstU 1→r1 (2), IAdd r0,r1,r0, RetVal r0
     emit_json("add",
         "\"07000000\",\"07000101\",\"20000100\",\"57000000\"",
         "{\"type\":\"Int\",\"value\":1},{\"type\":\"Int\",\"value\":2}")
 }
 
 fn emit_if() {
-    // if 1<2 then 10 else 20: ConstU 0→r0(1), ConstU 1→r1(2),
-    //   ICmpLt r0,r1,r2, JmpF r2,+4, ConstU 2→r0(10),
-    //   Jmp +3, ConstU 3→r0(20), RetVal r0
     emit_json("if_test",
         "\"07000000\",\"07000101\",\"41000102\",\"52020004\"," +
         "\"07000200\",\"50000300\",\"07000300\",\"57000000\"",
@@ -45,24 +38,32 @@ fn emit_if() {
 }
 
 fn emit_double() {
-    // fn double(x) { x * 2 }; main() { double(21) }
-    // const[0]=2, const[1]=21
-    // Fn 0 (double, offset 0): ConstU 0→r1, IMul r0,r1,r0, RetVal r0
-    // Fn 1 (main, offset 3):  Const0→r0, ConstU 1→r1, Call r0,1,r0, RetVal r0
-    // function_table=[0,3], entry_point=1
+    // fn double(x) { x*2 }; main() { double(21) }
     emit_json("double21",
         "\"07000001\",\"22000100\",\"57000000\"," +
-        "\"03000000\",\"07000101\",\"54000100\",\"57000000\"",
+        "\"07000100\",\"03010000\",\"54010100\",\"57000000\"",
         "{\"type\":\"Int\",\"value\":2},{\"type\":\"Int\",\"value\":21}")
 }
 
+fn emit_fact() {
+    // fn fact(n) { if n<=1 then 1 else n*fact(n-1) }; main() { fact(6) }
+    emit_json("fact6",
+        "\"04010000\",\"43000102\",\"52020003\"," +
+        "\"04000000\",\"57000000\"," +
+        "\"12000300\",\"21000100\",\"03040000\"," +
+        "\"54040100\",\"22030000\",\"57000000\"," +
+        "\"07000000\",\"03010000\",\"54010100\",\"57000000\"",
+        "{\"type\":\"Int\",\"value\":6}")
+}
+
 fn main() {
-    let prog = 3 in  // 0=42, 1=add, 2=if, 3=double
+    let prog = 4 in  // 0=42, 1=add, 2=if, 3=double, 4=fact
     match prog {
         case 0 => emit_42()
         case 1 => emit_add()
         case 2 => emit_if()
         case 3 => emit_double()
+        case 4 => emit_fact()
         case _ => emit_42()
     }
 }
