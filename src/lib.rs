@@ -27,6 +27,7 @@ pub mod lsp;
 pub mod mir;
 pub mod mir_codegen;
 pub mod mir_lower;
+pub mod mir_inline;
 #[cfg(feature = "wasm-backend")]
 pub mod mir_wasm;
 pub mod package;

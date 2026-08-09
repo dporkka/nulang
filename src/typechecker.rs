@@ -1516,6 +1516,7 @@ impl TypeChecker {
     /// Returns (substitution, inferred_type).
     pub fn infer_expr(&mut self, ctx: &TypeContext, expr: &Expr) -> NuResult<(Substitution, Type)> {
         match expr {
+            Expr::FString(parts, _) => { let mut subst = Substitution::new(); for part in parts { let (s, _) = self.infer_expr(ctx, part)?; subst = compose_subst(&subst, &s); } return Ok((subst, Type::string())); }
             // Literals: exact primitive type
             Expr::Literal(lit, span) => self.infer_literal(lit, *span),
 
@@ -1603,6 +1604,9 @@ impl TypeChecker {
 
             // Block: sequence of expressions
             Expr::Block { exprs, span } => self.infer_block(ctx, exprs, *span),
+
+            // Par: independence annotation, sequential block semantics.
+            Expr::Par { exprs, span } => self.infer_block(ctx, exprs, *span),
 
             // Spawn actor
             Expr::Spawn {
@@ -2260,7 +2264,7 @@ impl TypeChecker {
                 let s2s1 = compose_subst(&s2, &s1);
                 let lty = apply_subst(&left_ty, &s2s1);
                 let rty = apply_subst(&right_ty, &s2s1);
-                if lty == Type::string() && rty == Type::string() {
+                if lty == Type::string() || rty == Type::string() {
                     return Ok((s2s1, Type::string()));
                 }
 

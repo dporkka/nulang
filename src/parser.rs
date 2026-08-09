@@ -2715,6 +2715,7 @@ impl Parser {
                     TokenKind::IntLit(_)
                     | TokenKind::FloatLit(_)
                     | TokenKind::StringLit(_)
+                    | TokenKind::FStringLit(_)
                     | TokenKind::BoolLit(_)
                     | TokenKind::NilLit
                     | TokenKind::UnitLit => self.parse_literal(),
@@ -2891,6 +2892,7 @@ impl Parser {
                             self.parse_block()
                         }
                     }
+                    TokenKind::Par => self.parse_par(),
                     TokenKind::LParen => self.parse_tuple_or_paren(),
                     TokenKind::LBracket => self.parse_array(),
                     TokenKind::Spawn => self.parse_spawn(),
@@ -2952,7 +2954,7 @@ impl Parser {
 
     // === Expression Primitives ===
 
-    fn parse_literal(&mut self) -> NuResult<Expr> {
+        fn parse_literal(&mut self) -> NuResult<Expr> {
         let span = self.current_span();
         match self.peek_kind().clone() {
             TokenKind::IntLit(v) => {
@@ -2964,9 +2966,19 @@ impl Parser {
                 Ok(Expr::Literal(Literal::Float(v), span))
             }
             TokenKind::StringLit(s) => {
+                let s = s.clone();
                 self.advance();
                 if s.contains("#{") {
-                    self.parse_interpolated_string(&s, span)
+                    self.parse_interpolated_string(&s, "#{", span)
+                } else {
+                    Ok(Expr::Literal(Literal::String(s), span))
+                }
+            }
+            TokenKind::FStringLit(s) => {
+                let s = s.clone();
+                self.advance();
+                if s.contains("{") {
+                    self.parse_interpolated_string(&s, "{", span)
                 } else {
                     Ok(Expr::Literal(Literal::String(s), span))
                 }
@@ -3052,17 +3064,17 @@ impl Parser {
     }
 
     /// Parse a string containing `#{...}` interpolation markers.
-    fn parse_interpolated_string(&self, raw: &str, span: Span) -> NuResult<Expr> {
+    fn parse_interpolated_string(&self, raw: &str, marker: &str, span: Span) -> NuResult<Expr> {
         let mut parts: Vec<Expr> = Vec::new();
         let mut remaining = raw;
-        while let Some(hash_brace) = remaining.find("#{") {
+        while let Some(hash_brace) = remaining.find(marker) {
             if hash_brace > 0 {
                 parts.push(Expr::Literal(
                     Literal::String(remaining[..hash_brace].to_string()),
                     span,
                 ));
             }
-            let expr_start = hash_brace + 2;
+            let expr_start = hash_brace + marker.len();
             let expr_str = &remaining[expr_start..];
             let mut depth = 1u32;
             let mut expr_end = 0usize;
@@ -3096,16 +3108,10 @@ impl Parser {
         if parts.len() == 1 {
             return Ok(parts.into_iter().next().unwrap());
         }
-        let mut result = parts.remove(0);
-        for part in parts {
-            result = Expr::Binary {
-                op: BinOp::Add,
-                left: Box::new(result),
-                right: Box::new(part),
-                span,
-            };
+        if parts.len() == 1 {
+            return Ok(parts.into_iter().next().unwrap());
         }
-        Ok(result)
+        Ok(Expr::FString(parts, span))
     }
 
     fn parse_inline_expr(&self, source: &str, span: Span) -> NuResult<Expr> {
@@ -3286,6 +3292,26 @@ impl Parser {
             exprs,
             span: self.current_span(),
         })
+    }
+
+    /// Parse a `par { e1; e2; ... }` block — an independence annotation
+    /// (see `Expr::Par`). The sub-expressions are evaluated in order, just
+    /// like a `Block`; the distinct node lets later passes exploit the
+    /// declared independence. Mirrors `parse_block`.
+    fn parse_par(&mut self) -> NuResult<Expr> {
+        let span = self.current_span();
+        self.advance(); // consume 'par'
+        self.skip_newlines();
+        if !self.match_token(&TokenKind::LBrace) {
+            return Err(NuError::parse_error(
+                "expected '{' after 'par'".to_string(),
+                self.current_span(),
+            ));
+        }
+        self.advance(); // consume '{'
+        let exprs = self.collect_block_exprs(Some(TokenKind::RBrace))?;
+        self.expect(TokenKind::RBrace)?;
+        Ok(Expr::Par { exprs, span })
     }
 
     /// Collect expressions until `end_token` (or EOF), splicing incomplete
@@ -3900,6 +3926,7 @@ impl Parser {
             TokenKind::IntLit(_)
                 | TokenKind::FloatLit(_)
                 | TokenKind::StringLit(_)
+                | TokenKind::FStringLit(_)
                 | TokenKind::BoolLit(_)
                 | TokenKind::NilLit
                 | TokenKind::UnitLit
@@ -3931,6 +3958,7 @@ impl Parser {
                 | TokenKind::Return
                 | TokenKind::Break
                 | TokenKind::SelfKw
+                | TokenKind::Par
                 | TokenKind::Minus
                 | TokenKind::Not
                 | TokenKind::Bang
@@ -7343,5 +7371,24 @@ mod tests {
             }
             _ => panic!("Expected For with range, got {:?}", expr),
         }
+    }
+
+    #[test]
+    fn test_parse_par_block() {
+        let source = "par { a + 1; b * 2 }";
+        let expr = parse_expr(source).unwrap();
+        match expr {
+            Expr::Par { exprs, span } => {
+                assert_eq!(exprs.len(), 2);
+                assert!(span.start < span.end, "par should carry a source span");
+            }
+            other => panic!("Expected Par, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_par_requires_brace() {
+        let result = parse_expr("par");
+        assert!(result.is_err(), "bare 'par' must be a parse error");
     }
 }

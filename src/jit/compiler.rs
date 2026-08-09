@@ -241,6 +241,7 @@ pub fn compile_bytecode_region(
 
     // Yield block: store 0 to JIT_YIELD_PC, then return.
     builder.switch_to_block(yield_block);
+    builder.set_cold_block(yield_block);
     let yield_pc_addr = JitSession::yield_pc_addr();
     let yield_pc_ptr = builder.ins().iconst(types::I64, yield_pc_addr);
     let zero = builder.ins().iconst(types::I64, 0);
@@ -255,6 +256,12 @@ pub fn compile_bytecode_region(
             .get(&pc)
             .ok_or_else(|| CompileError::Internal("missing block in compiled region".into()))?;
         builder.switch_to_block(block);
+
+        // Mark interpreter-fallback blocks as cold so the hot path
+        // stays contiguous in the I-cache.
+        if matches!(instr.opcode, OpCode::PerformDirect) {
+            builder.set_cold_block(block);
+        }
 
         match instr.opcode {
             OpCode::Nop => {}

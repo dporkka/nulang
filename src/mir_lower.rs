@@ -52,7 +52,9 @@ pub fn lower_module(hir: &hir::Module) -> NuResult<mir::Module> {
         lower_decl_bodies(&mut ctx, decl)?;
     }
 
-    ctx.finish()
+    let mut module = ctx.finish()?;
+    crate::mir_inline::inline_local_closures(&mut module);
+    Ok(module)
 }
 
 /// Nested modules are purely a namespacing construct: the stable compiler's
@@ -627,6 +629,17 @@ impl<'c> FnLowerer<'c> {
         if self.b.is_terminated() {
             // Unreachable code after return/break: skip.
             return Ok(());
+        }
+        // Attach the HIR statement's source line to every MIR statement it
+        // emits (drives the debugger's PC<->line table).
+        let line = match stmt {
+            hir::Stmt::Let { span, .. }
+            | hir::Stmt::Assign { span, .. }
+            | hir::Stmt::StateSet { span, .. }
+            | hir::Stmt::Emit { span, .. } => span.line(),
+        } as u32;
+        if line != 0 {
+            self.b.set_line(line);
         }
         match stmt {
             hir::Stmt::Let {

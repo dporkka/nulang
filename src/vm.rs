@@ -1701,7 +1701,56 @@ pub struct VM {
     /// A field (not just the constant) so tests can shrink it instead of
     /// actually allocating millions of envs to exercise the limit.
     max_closure_envs: usize,
+    /// Debugger hook invoked before each interpreted instruction (drives the
+    /// DAP server's breakpoints/stepping). When present, the JIT path is
+    /// disabled so every instruction flows through the interpreter.
+    debug_hook: Option<Box<dyn DebugHook>>,
+    /// When set, `Print`/`SPrint`/`IO.print` output is captured here instead
+    /// of writing to stdout (so a debug session's program output can be
+    /// forwarded as DAP `output` events without corrupting the DAP stream).
+    capture_output: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>,
 }
+
+/// Immutable snapshot handed to the debug hook before each interpreted
+/// instruction executes. The hook must not mutate the VM; pauses are
+/// signalled by returning [`DebugAction::Pause`] and handled by the caller
+/// (which owns the VM) once `step` returns the `DEBUG_PAUSE_MSG` sentinel.
+pub struct DebugContext {
+    pub module_idx: usize,
+    /// PC of the instruction about to execute.
+    pub pc: usize,
+    /// Index of the current activation frame in `VM.frames`.
+    pub frame_idx: usize,
+    pub opcode: crate::bytecode::OpCode,
+    /// Number of activation frames on the stack (1 == top-level frame).
+    pub frame_depth: usize,
+    /// Source line of `pc` (via the module line table), if any.
+    pub line: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugAction {
+    /// Execute the current instruction normally.
+    Continue,
+    /// Stop execution; `step` returns the `DEBUG_PAUSE_MSG` sentinel error.
+    Pause,
+}
+
+/// Debugger hook installed via [`VM::set_debug_hook`]. Called before every
+/// interpreted instruction while the VM runs.
+pub trait DebugHook {
+    fn before_instruction(&mut self, ctx: &DebugContext) -> DebugAction;
+}
+
+/// Error message `step` returns when the debug hook requests a pause.
+pub const DEBUG_PAUSE_MSG: &str = "DebugPause";
+
+/// True when a `NuError` is the debug-pause sentinel (survives
+/// `enrich_error`, which appends a stack trace).
+pub fn is_debug_pause(err: &NuError) -> bool {
+    matches!(err, NuError::VMError { msg, .. } if msg.split('\n').next() == Some(DEBUG_PAUSE_MSG))
+}
+
 /// Captured environment of a closure: the lifted function it wraps plus the
 /// values captured at creation time.
 #[derive(Debug, Clone)]
@@ -1742,6 +1791,8 @@ impl VM {
             actor_callbacks: Box::new(StandaloneVmCallbacks::new()),
             closure_envs: Vec::new(),
             max_closure_envs: MAX_CLOSURE_ENVS,
+            debug_hook: None,
+            capture_output: None,
         }
     }
 
@@ -1769,6 +1820,79 @@ impl VM {
     #[cfg(test)]
     pub(crate) fn set_max_closure_envs_for_test(&mut self, n: usize) {
         self.max_closure_envs = n;
+    }
+
+    /// Install a debugger hook. When set, JIT execution is disabled and the
+    /// hook is invoked before every interpreted instruction; a `Pause` return
+    /// makes `step` return the `DEBUG_PAUSE_MSG` sentinel error.
+    pub fn set_debug_hook(&mut self, hook: Option<Box<dyn DebugHook>>) {
+        self.debug_hook = hook;
+    }
+
+    /// Route `Print`/`SPrint`/`IO.print` output into `buf` instead of stdout
+    /// (used by the DAP server to forward program output as `output` events
+    /// without corrupting the DAP stream). `None` restores normal printing.
+    pub fn set_output_capture(&mut self, buf: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>) {
+        self.capture_output = buf;
+    }
+
+    /// Print `s` to stdout, or capture it when `set_output_capture` is active.
+    fn emit_output(&self, s: &str) {
+        if let Some(buf) = &self.capture_output {
+            buf.borrow_mut().push(s.to_string());
+        } else {
+            print!("{}", s);
+        }
+    }
+
+    /// Capture `IO.print` effect output into `buf` (only effective when the
+    /// actor callbacks are the standalone VM callbacks, i.e. no runtime is
+    /// attached — the DAP debuggee's configuration). `None` restores printing.
+    pub fn set_io_output(&mut self, buf: Option<std::rc::Rc<std::cell::RefCell<Vec<String>>>>) {
+        if let Some(sb) = (&mut *self.actor_callbacks as &mut dyn std::any::Any)
+            .downcast_mut::<StandaloneVmCallbacks>()
+        {
+            sb.io_output = buf;
+        }
+    }
+
+    /// Number of activation frames between the given frame and the stack
+    /// bottom (1 for a frame with no caller).
+    fn frame_depth(&self, frame_idx: usize) -> usize {
+        let mut depth = 0;
+        let mut idx = Some(frame_idx);
+        while let Some(i) = idx {
+            depth += 1;
+            idx = self.frames.get(i).and_then(|f| f.caller_idx);
+        }
+        depth
+    }
+
+    /// Index of the currently executing frame, if any.
+    pub fn current_frame_index(&self) -> Option<usize> {
+        self.current_frame_idx
+    }
+
+    /// All activation frames (bottom-up order in the flat `frames` vector).
+    pub fn frames(&self) -> &[Frame] {
+        &self.frames
+    }
+
+    /// Loaded bytecode modules.
+    pub fn modules(&self) -> &[CodeModule] {
+        &self.modules
+    }
+
+    /// PC of the current frame (the next instruction to execute).
+    pub fn current_pc(&self) -> Option<usize> {
+        self.current_frame_idx.map(|i| self.frames[i].pc)
+    }
+
+    /// Source line of the current frame's pc, if the module has a line table.
+    pub fn current_line(&self) -> Option<u32> {
+        let idx = self.current_frame_idx?;
+        let f = self.frames.get(idx)?;
+        self.modules.get(f.module_idx).and_then(|m| m.line_at(f.pc))
     }
 
     /// Enable FFI sandboxing, restricting calls to the given library paths.
@@ -3525,7 +3649,9 @@ impl VM {
         })?;
 
         // Try JIT execution for hot bytecode regions before interpreting.
-        if self.try_jit_execute(frame_idx) {
+        // Disabled while a debugger is attached so every instruction flows
+        // through the interpreter (and the debug hook below).
+        if self.debug_hook.is_none() && self.try_jit_execute(frame_idx) {
             return Ok(());
         }
 
@@ -3548,6 +3674,38 @@ impl VM {
                     span: Span::default(),
                 })?
         };
+
+        // Debugger checkpoint: invoked before the instruction executes, so a
+        // pause leaves `pc` pointing at the current instruction (resume
+        // re-executes it). On pause, return the DEBUG_PAUSE_MSG sentinel.
+        if self.debug_hook.is_some() {
+            let line = self
+                .modules
+                .get(module_idx)
+                .and_then(|m| m.line_at(pc));
+            let frame_depth = self.frame_depth(frame_idx);
+            let action = self
+                .debug_hook
+                .as_mut()
+                .map(|hook| {
+                    hook.before_instruction(&DebugContext {
+                        module_idx,
+                        pc,
+                        frame_idx,
+                        opcode: instr.opcode,
+                        frame_depth,
+                        line,
+                    })
+                })
+                .unwrap_or(DebugAction::Continue);
+            if action == DebugAction::Pause {
+                return Err(NuError::VMError {
+                    msg: DEBUG_PAUSE_MSG.to_string(),
+                    span: Span::default(),
+                });
+            }
+        }
+
         self.frames[frame_idx].pc += 1;
 
         match instr.opcode {
@@ -4427,10 +4585,7 @@ impl VM {
                 self.step_sconcat(frame_idx, module_idx, instr)?;
             }
             OpCode::SPrint => {
-                print!(
-                    "{}",
-                    self.frames[frame_idx].regs[instr.op1 as usize].to_string_repr()
-                );
+                self.emit_output(&self.frames[frame_idx].regs[instr.op1 as usize].to_string_repr());
             }
             OpCode::SRead => {
                 self.step_sread(frame_idx, module_idx, instr)?;
@@ -4444,10 +4599,10 @@ impl VM {
             OpCode::FWrite => {}
             OpCode::FClose => {}
             OpCode::Print => {
-                println!(
-                    "{}",
+                self.emit_output(&format!(
+                    "{}\n",
                     self.frames[frame_idx].regs[instr.op1 as usize].to_string_repr()
-                );
+                ));
             }
 
             // -- Debug & Meta --

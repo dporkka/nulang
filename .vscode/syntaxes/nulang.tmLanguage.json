@@ -10,7 +10,9 @@
     { "include": "#operators" },
     { "include": "#numbers" },
     { "include": "#functions" },
-    { "include": "#actors" }
+    { "include": "#actors" },
+    { "include": "#effects" },
+    { "include": "#capabilities" }
   ],
   "repository": {
     "comments": {
@@ -28,13 +30,13 @@
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.nulang", "match": "\\b(if|then|else|match|with|case|handle|resume|receive|after|in|perform|spawn|send|ask|import|module|pub)\\b" },
-        { "name": "keyword.other.nulang", "match": "\\b(let|rec|fn|type|actor|behavior|state|effect|agent|workflow|entity|database|persistent|self|unit|nil|true|false|and|or)\\b" }
+        { "name": "keyword.control.nulang", "match": "\\b(if|then|else|match|with|case|handle|resume|receive|after|in|perform|spawn|send|ask|import|module|pub|let|rec|fn|type|actor|behavior|state|effect|agent|workflow|entity|database|persistent|return|break|continue|for|while|loop|defer|errdefer|recover|consume|pipe|as)\\b" },
+        { "name": "keyword.other.nulang", "match": "\\b(self|unit|nil|true|false|and|or|not)\\b" }
       ]
     },
     "types": {
       "patterns": [
-        { "name": "entity.name.type.nulang", "match": "\\b(Int|Float|Bool|String|Unit|Nil|Actor|Option|Result|Some|None|Ok|Error)\\b" }
+        { "name": "entity.name.type.nulang", "match": "\\b(Int|Float|Bool|String|Unit|Nil|Actor|Option|Result|Some|None|Ok|Error|Array|Record|Tuple|Channel|Signal|Timer|Future|Promise|Stream|Iterator|Map|Set)\\b" }
       ]
     },
     "operators": {
@@ -56,6 +58,16 @@
     "actors": {
       "patterns": [
         { "name": "entity.name.type.actor.nulang", "match": "\\b(actor)\\s+([A-Z][a-zA-Z0-9_]*)" }
+      ]
+    },
+    "effects": {
+      "patterns": [
+        { "name": "keyword.control.effect.nulang", "match": "\\b(IO|Timer|Signal|Actor|LLM|Provider|Workflow|Database|Crdt|Supervisor|Otp|Fs|Net|Http|Json|Yaml|Toml|Regex|Crypto|Random|Time|Date|Uuid|Env|Process|Thread|Mutex|Semaphore|Channel|Select|Try|Catch|Finally|Throw|Raise|Handle|Perform|Resume|Effect|Handler|With|Do|Run|Spawn|Link|Monitor|Trap|Exit|Whereis|Register|Unregister|SetPriority|GetPriority|Self|Parent|Children|Ancestors|Descendants|Tree|Graph|Walk|Map|Filter|Reduce|Fold|Scan|Iter|Collect|Partition|Group|Sort|Unique|Join|Split|Zip|Unzip|Enumerate|Rev|Skip|Take|Drop|Window|Chunk|Batch|Buffer|Throttle|Debounce|Sample|Distinct|Flatten|Concat|Merge|Race|Select|Switch|Case|Default|Guard|When|Unless|If|Then|Else|Match|With|Case|Default|Pattern|Guard|When|Unless|If|Then|Else)\\b" }
+      ]
+    },
+    "capabilities": {
+      "patterns": [
+        { "name": "keyword.other.capability.nulang", "match": "\\b(iso|trn|ref|val|box|tag|lineariso|linear|sendable|movable|copyable|droppable)\\b" }
       ]
     }
   }

@@ -4,17 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Nulang Playground</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/material-darker.min.css">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; display: flex; flex-direction: column; height: 100vh; }
-  header { background: #16213e; padding: 12px 20px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #0f3460; }
+  header { background: #16213e; padding: 12px 20px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #0f3460; flex-wrap: wrap; }
   header h1 { font-size: 20px; color: #e94560; margin-right: auto; }
   header select, header button { padding: 6px 12px; border-radius: 4px; border: 1px solid #0f3460; background: #0f3460; color: #e0e0e0; cursor: pointer; font-size: 13px; }
   header button:hover { background: #1a4a8a; }
   header button.run { background: #e94560; border-color: #e94560; font-weight: bold; }
   header button.run:hover { background: #ff6b81; }
+  header button.compile { background: #0f3460; border-color: #0f3460; }
+  header button.compile:hover { background: #1a4a8a; }
+  header button.check { background: #0f3460; border-color: #0f3460; }
+  header button.check:hover { background: #1a4a8a; }
   main { display: flex; flex: 1; overflow: hidden; }
   #editor { flex: 1; height: 100%; }
   #output { width: 380px; background: #0d1117; border-left: 1px solid #0f3460; padding: 16px; overflow-y: auto; font-family: 'Fira Code', 'Cascadia Code', monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
@@ -22,87 +24,120 @@
   #output .err { color: #f85149; }
   #output .info { color: #58a6ff; }
   #output .empty { color: #484f58; font-style: italic; }
-  .CodeMirror { height: 100% !important; font-size: 14px; }
   #status { font-size: 12px; color: #58a6ff; padding: 0 8px; }
-  .cm-s-material-darker .cm-keyword { color: #c792ea; }
-  .cm-s-material-darker .cm-string { color: #c3e88d; }
-  .cm-s-material-darker .cm-number { color: #f78c6c; }
-  .cm-s-material-darker .cm-comment { color: #546e7a; }
-  .cm-s-material-darker .cm-builtin { color: #82aaff; }
+  .cm-editor { height: 100%; font-size: 14px; }
+  .cm-focused { outline: none; }
 </style>
-</head>
-<body>
-<header>
-  <h1>Nulang Playground</h1>
-  <select id="examples">
-    <option value="">— Examples —</option>
-    <option value="perform IO.print(&quot;Hello, Nulang!&quot;)">Hello World</option>
-    <option value="let fib = fn(n) { if n &lt;= 1 then n else fib(n - 1) + fib(n - 2) } in fib(10)">Fibonacci</option>
-    <option value="type Option[T] = Some(T) | None&#10;let x = Some(42) in match x with { | Some(n) =&gt; n | None =&gt; 0 }">Option Match</option>
-    <option value="let add = fn(x, y) { x + y } in 5 |&gt; add(3)">Pipe Operator</option>
-    <option value="perform String.length(&quot;hello&quot;)">String Length</option>
-    <option value="perform String.concat(&quot;Hello&quot;, &quot; World&quot;)">String Concat</option>
-    <option value="perform Debug.inspect(&quot;x&quot;, 42 * 2)">Debug Inspect</option>
-    <option value="match 42 { case 1 =&gt; 10 case 42 =&gt; 100 case _ =&gt; 0 }">Match Expression</option>
-    <option value="let inc = fn(n) { n + 1 } in inc(41)">Closure</option>
-    <option value="perform IO.log(&quot;info&quot;, &quot;server started&quot;)">IO.log</option>
-  </select>
-  <button class="run" onclick="run()">▶ Run (Ctrl+Enter)</button>
-  <button onclick="share()">🔗 Share</button>
-  <span id="status"></span>
-</header>
-<main>
-  <div id="editor"></div>
-  <div id="output"><span class="empty">Output appears here — click ▶ Run</span></div>
-</main>
+<!-- CodeMirror 6 with Lezer -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@codemirror/theme-one-dark@6/themes/one-dark.css">
+<script type="module">
+import { EditorView, basicSetup } from "https://cdn.jsdelivr.net/npm/codemirror@6/view/+esm";
+import { EditorState } from "https://cdn.jsdelivr.net/npm/codemirror@6/state/+esm";
+import { keymap } from "https://cdn.jsdelivr.net/npm/@codemirror/view@6/+esm";
+import { indentWithTab } from "https://cdn.jsdelivr.net/npm/@codemirror/commands@6/+esm";
+import { defaultKeymap, history, historyKeymap } from "https://cdn.jsdelivr.net/npm/@codemirror/commands@6/+esm";
+import { bracketMatching } from "https://cdn.jsdelivr.net/npm/@codemirror/matchbrackets@6/+esm";
+import { closeBrackets, closeBracketsKeymap } from "https://cdn.jsdelivr.net/npm/@codemirror/autocomplete@6/+esm";
+import { syntaxHighlighting, defaultHighlightStyle, tags as t } from "https://cdn.jsdelivr.net/npm/@codemirror/language@6/+esm";
+import { LRLanguage, LanguageSupport } from "https://cdn.jsdelivr.net/npm/@codemirror/language@6/+esm";
+import { LezerHighlightStyle } from "https://cdn.jsdelivr.net/npm/@lezer/highlight@1/+esm";
+import { parser } from "./nulang-grammar.js";
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/clike/clike.min.js"></script>
-<script>
-// Nulang syntax mode for CodeMirror
-CodeMirror.defineSimpleMode('nulang', {
-  start: [
-    { regex: /\/\/.*/, token: 'comment' },
-    { regex: /"(?:[^\\]|\\.)*?"/, token: 'string' },
-    { regex: /\b(fn|let|rec|in|if|then|else|match|with|case|handle|resume|perform|spawn|send|ask|actor|behavior|state|type|effect|workflow|import|module|pub|self|unit|nil|true|false|and|or|receive|after)\b/, token: 'keyword' },
-    { regex: /\b(Int|Float|Bool|String|Unit|Nil|Actor|Option|Result|Some|None|Ok|Error|IO|Debug|Timer|Signal|Inference|LLM|Otp)\b/, token: 'builtin' },
-    { regex: /0[xX][0-9a-fA-F]+/, token: 'number' },
-    { regex: /[0-9]+\.[0-9]+/, token: 'number' },
-    { regex: /[0-9]+/, token: 'number' },
-    { regex: /[+\-*\/%<>=!|&^]+|->|=>|\|>/, token: 'operator' },
-    { regex: /[a-zA-Z_][a-zA-Z0-9_]*/, token: 'variable' },
-  ]
+// Syntax highlighting style for Nulang
+const nulangHighlightStyle = LezerHighlightStyle.define([
+  { tag: t.comment, color: "#546e7a" },
+  { tag: t.string, color: "#c3e88d" },
+  { tag: t.keyword, color: "#c792ea" },
+  { tag: t.builtin, color: "#82aaff" },
+  { tag: t.number, color: "#f78c6c" },
+  { tag: t.operator, color: "#89ddff" },
+  { tag: t.variableName, color: "#e0e0e0" },
+  { tag: t.function(t.variableName), color: "#82aaff" },
+  { tag: t.typeName, color: "#ffcb6b" },
+  { tag: t.modifier, color: "#c792ea" },
+  { tag: t.propertyName, color: "#80cbc4" },
+  { tag: t.definition(t.variableName), color: "#82aaff" },
+  { tag: t.labelName, color: "#89ddff" },
+]);
+
+// Create the language support
+const nulangLanguage = LRLanguage.define({
+  name: "nulang",
+  parser: parser.configure({
+    props: [
+      nulangLanguage.data.of({
+        closeBrackets: { brackets: ["(", "[", "{", "'", '"'] },
+        indentOnInput: /^\s*(?:case|default|else|catch|finally)\b/
+      })
+    ]
+  })
 });
 
-const editor = CodeMirror(document.getElementById('editor'), {
-  value: 'perform IO.print("Hello, Nulang!")',
-  mode: 'nulang',
-  theme: 'material-darker',
-  lineNumbers: true,
-  indentUnit: 4,
-  tabSize: 4,
-  matchBrackets: true,
-  autoCloseBrackets: true,
+const nulangSupport = new LanguageSupport(nulangLanguage, [
+  syntaxHighlighting(nulangHighlightStyle)
+]);
+
+// Configure editor
+const editor = new EditorView({
+  state: EditorState.create({
+    doc: 'perform IO.print("Hello, Nulang!")',
+    extensions: [
+      basicSetup,
+      keymap.of([...defaultKeymap, ...historyKeymap, ...closeBracketsKeymap, indentWithTab]),
+      nulangSupport,
+      EditorView.lineWrapping,
+      EditorState.tabSize.of(4)
+    ]
+  }),
+  parent: document.getElementById('editor')
 });
 
-// Load from URL hash
-if (location.hash) {
-  try {
-    const code = decodeURIComponent(location.hash.slice(1));
-    if (code) editor.setValue(code);
-  } catch(e) {}
+// Keyboard shortcut: Ctrl+Enter to run
+editor.dispatch({
+  effects: EditorView.addKeyMap.of([
+    { key: "Ctrl-Enter", run: () => { run(); return true; } },
+    { key: "Mod-Enter", run: () => { run(); return true; } } // macOS
+  ])
+});
+
+// Example code samples
+const examples = {
+  "": "— Examples —",
+  "hello": 'perform IO.print("Hello, Nulang!")',
+  "fib": "let fib = fn(n) { if n <= 1 then n else fib(n - 1) + fib(n - 2) } in fib(10)",
+  "option": "type Option[T] = Some(T) | None\nlet x = Some(42) in match x with { | Some(n) => n | None => 0 }",
+  "pipe": "let add = fn(x, y) { x + y } in 5 |> add(3)",
+  "strlen": 'perform String.length("hello")',
+  "strcat": 'perform String.concat("Hello", " World")',
+  "debug": 'perform Debug.inspect("x", 42 * 2)',
+  "match": "match 42 { case 1 => 10 case 42 => 100 case _ => 0 }",
+  "closure": "let inc = fn(n) { n + 1 } in inc(41)",
+  "log": 'perform IO.log("info", "server started")',
+  "actor": "actor Counter { state count = 0 behavior Inc { perform IO.print(count); count := count + 1 } }\nspawn Counter() as \"counter\"\nsend \"counter\" Inc()",
+  "effect": "effect Log { fn info(msg: String) }\nlet logHandler = handler { | Log.info(msg) => perform IO.print(msg) }\nhandle { perform Log.info(\"Hello from effect!\") } with logHandler",
+  "async": "perform LLM.ask({ model: \"llama3\", messages: [{ role: \"user\", content: \"Hello!\" }] })",
+  "crdt": "let counter = CRDT.GCounter()\ncounter.increment()\ncounter.increment()\nperform IO.print(counter.value())"
+};
+
+// Populate dropdown
+const select = document.getElementById('examples');
+for (const [key, value] of Object.entries(examples)) {
+  const option = document.createElement('option');
+  option.value = key;
+  option.textContent = key === "" ? "— Examples —" : key.charAt(0).toUpperCase() + key.slice(1);
+  select.appendChild(option);
 }
 
-// Example dropdown
-document.getElementById('examples').addEventListener('change', function() {
-  if (this.value) editor.setValue(this.value);
+// Example dropdown change handler
+select.addEventListener('change', function() {
+  if (this.value && examples[this.value]) {
+    editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: examples[this.value] } });
+  }
 });
 
-// Ctrl+Enter to run
-editor.addKeyMap({ 'Ctrl-Enter': run });
-
+// Run function
 async function run() {
-  const code = editor.getValue();
+  const code = editor.state.doc.toString();
   const out = document.getElementById('output');
   const status = document.getElementById('status');
   out.innerHTML = '<span class="info">Running...</span>';
@@ -129,15 +164,99 @@ async function run() {
   }
 }
 
+// Compile function
+async function compile() {
+  const code = editor.state.doc.toString();
+  const out = document.getElementById('output');
+  const status = document.getElementById('status');
+  out.innerHTML = '<span class="info">Compiling...</span>';
+  status.textContent = 'compiling...';
+
+  try {
+    const resp = await fetch('/compile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, target: 'native' }),
+    });
+    const data = await resp.json();
+    let html = '';
+    if (data.stdout) html += '<span class="out">' + escapeHtml(data.stdout) + '</span>';
+    if (data.stderr) html += '<span class="err">' + escapeHtml(data.stderr) + '</span>';
+    if (!data.stdout && !data.stderr) html = '<span class="empty">(no output)</span>';
+    out.innerHTML = html;
+    status.textContent = data.ok ? 'ok' : 'error';
+    status.style.color = data.ok ? '#3fb950' : '#f85149';
+  } catch(e) {
+    out.innerHTML = '<span class="err">Connection error: ' + escapeHtml(e.message) + '</span>';
+    status.textContent = 'offline';
+    status.style.color = '#f85149';
+  }
+}
+
+// Check function
+async function check() {
+  const code = editor.state.doc.toString();
+  const out = document.getElementById('output');
+  const status = document.getElementById('status');
+  out.innerHTML = '<span class="info">Type checking...</span>';
+  status.textContent = 'checking...';
+
+  try {
+    const resp = await fetch('/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    const data = await resp.json();
+    let html = '';
+    if (data.stdout) html += '<span class="out">' + escapeHtml(data.stdout) + '</span>';
+    if (data.stderr) html += '<span class="err">' + escapeHtml(data.stderr) + '</span>';
+    if (!data.stdout && !data.stderr) html = '<span class="empty">(no output)</span>';
+    out.innerHTML = html;
+    status.textContent = data.ok ? 'ok' : 'error';
+    status.style.color = data.ok ? '#3fb950' : '#f85149';
+  } catch(e) {
+    out.innerHTML = '<span class="err">Connection error: ' + escapeHtml(e.message) + '</span>';
+    status.textContent = 'offline';
+    status.style.color = '#f85149';
+  }
+}
+
+// Share function
 function share() {
-  const code = editor.getValue();
+  const code = editor.state.doc.toString();
   const url = location.origin + location.pathname + '#' + encodeURIComponent(code);
   navigator.clipboard.writeText(url).then(() => {
     document.getElementById('status').textContent = 'URL copied!';
   });
 }
 
-function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// Load from URL hash
+if (location.hash) {
+  try {
+    const code = decodeURIComponent(location.hash.slice(1));
+    if (code) {
+      editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: code } });
+    }
+  } catch(e) {}
+}
+
+function escapeHtml(s) { return s.replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>'); }
 </script>
+</head>
+<body>
+<header>
+  <h1>Nulang Playground</h1>
+  <select id="examples"></select>
+  <button class="run" onclick="run()">▶ Run (Ctrl+Enter)</button>
+  <button class="compile" onclick="compile()">⚙ Compile</button>
+  <button class="check" onclick="check()">✓ Check</button>
+  <button onclick="share()">🔗 Share</button>
+  <span id="status"></span>
+</header>
+<main>
+  <div id="editor"></div>
+  <div id="output"><span class="empty">Output appears here — click ▶ Run</span></div>
+</main>
 </body>
 </html>
